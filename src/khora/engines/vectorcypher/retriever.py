@@ -851,6 +851,12 @@ class VectorCypherRetriever:
 
                 chunk_results.sort(key=_ts, reverse=True)
 
+            # Normalize scores to [0,1] — matches complex path behavior
+            if chunk_results:
+                fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
+                fused = normalize_scores(fused)
+                chunk_results = [(r.item, r.rrf_score) for r in fused]
+
             span.set_attribute("chunk_count", len(chunk_results))
 
             # All chunks come from vector search in simple mode
@@ -1137,7 +1143,7 @@ class VectorCypherRetriever:
 
         filtered = [UUID(r["id"]) for r in records if r["id"]]
         logger.debug(
-            f"Version filter at {target_date.isoformat()}: " f"{len(entity_ids)} candidates -> {len(filtered)} valid"
+            f"Version filter at {target_date.isoformat()}: {len(entity_ids)} candidates -> {len(filtered)} valid"
         )
         return filtered
 

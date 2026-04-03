@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 
 from khora.core.models import Chunk, ChunkMetadata
+from khora.engines.vectorcypher.fusion import FusedResult, normalize_scores
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
     VectorCypherResult,
@@ -401,3 +402,184 @@ class TestRetrieverCaching:
 
         assert retriever._cache_ttl == 0
         assert retriever._cache == {}
+
+
+@pytest.mark.unit
+class TestSimpleRetrieveScoreNormalization:
+    """Regression tests for DYT-1733: simple path score normalization.
+
+    Before the fix, _simple_retrieve() returned raw RRF scores (~0.009-0.016)
+    while the complex path returned normalized [0,1] scores. This caused
+    downstream consumers to see artificially low confidence for simple queries.
+    """
+
+    def test_normalize_scores_with_rrf_like_inputs(self) -> None:
+        """normalize_scores maps tiny RRF scores to full [0,1] range."""
+        raw_rrf_scores = [0.016, 0.014, 0.012, 0.010, 0.009]
+        fused = [FusedResult(item_id=uuid4(), item=f"chunk_{i}", rrf_score=s) for i, s in enumerate(raw_rrf_scores)]
+
+        normalized = normalize_scores(fused)
+        scores = [r.rrf_score for r in normalized]
+
+        # Max must be 1.0, min must be 0.0 (min-max normalization with >1 distinct scores)
+        assert scores[0] == 1.0
+        assert scores[-1] == 0.0
+        # All in [0, 1]
+        assert all(0.0 <= s <= 1.0 for s in scores)
+        # Meaningful spread: not all clustered below 0.05
+        assert max(scores) - min(scores) == 1.0
+
+    def test_normalize_scores_all_identical(self) -> None:
+        """All identical scores normalize to 1.0 (no variance)."""
+        fused = [FusedResult(item_id=uuid4(), item=f"chunk_{i}", rrf_score=0.012) for i in range(5)]
+        normalized = normalize_scores(fused)
+        scores = [r.rrf_score for r in normalized]
+        assert all(s == 1.0 for s in scores)
+
+    def test_normalize_scores_two_results(self) -> None:
+        """Two distinct scores normalize to (1.0, 0.0)."""
+        fused = [
+            FusedResult(item_id=uuid4(), item="high", rrf_score=0.016),
+            FusedResult(item_id=uuid4(), item="low", rrf_score=0.009),
+        ]
+        normalized = normalize_scores(fused)
+        assert normalized[0].rrf_score == 1.0
+        assert normalized[1].rrf_score == 0.0
+
+    def test_normalize_scores_already_normalized_inputs(self) -> None:
+        """Scores already in [0,1] are re-normalized correctly."""
+        fused = [
+            FusedResult(item_id=uuid4(), item="a", rrf_score=0.9),
+            FusedResult(item_id=uuid4(), item="b", rrf_score=0.8),
+            FusedResult(item_id=uuid4(), item="c", rrf_score=0.7),
+        ]
+        normalized = normalize_scores(fused)
+        scores = [r.rrf_score for r in normalized]
+        assert scores[0] == 1.0
+        assert scores[-1] == 0.0
+        assert 0.4 < scores[1] < 0.6  # middle score ~0.5
+
+    def test_normalize_scores_empty(self) -> None:
+        """Empty input returns empty output."""
+        assert normalize_scores([]) == []
+
+    @pytest.fixture
+    def multi_result_retriever(self) -> VectorCypherRetriever:
+        """Create a retriever whose vector store returns multiple results with raw RRF-like scores.
+
+        The mock exercises the ``combined_score`` field on each result, which is the
+        primary path in ``r.combined_score or r.similarity`` inside _simple_retrieve().
+        """
+        vector_store = AsyncMock()
+        neo4j_driver = AsyncMock()
+        embedder = AsyncMock()
+        embedder.embed = AsyncMock(return_value=[0.1] * 1536)
+
+        ns_id = uuid4()
+        doc_id = uuid4()
+
+        # Simulate 5 results with small raw scores typical of RRF (the bug scenario)
+        # RRF scores with k=60: rank 1 = 1/61 ≈ 0.016, rank 5 ≈ 0.009.
+        # These reproduce the DYT-1733 bug where all scores cluster below 0.05.
+        raw_scores = [0.016, 0.014, 0.012, 0.010, 0.009]
+        mock_results = []
+        for score in raw_scores:
+            chunk_id = uuid4()
+            mock_result = MagicMock()
+            mock_result.chunk = MagicMock()
+            mock_result.chunk.id = chunk_id
+            mock_result.chunk.namespace_id = ns_id
+            mock_result.chunk.document_id = doc_id
+            mock_result.chunk.content = f"test content with score {score}"
+            mock_result.chunk.occurred_at = None
+            mock_result.chunk.created_at = None
+            mock_result.chunk.metadata = {}
+            mock_result.combined_score = score
+            mock_result.similarity = score
+            mock_results.append(mock_result)
+
+        vector_store.search = AsyncMock(return_value=mock_results)
+
+        config = RetrieverConfig(query_cache_ttl_seconds=0)
+        retriever = VectorCypherRetriever(
+            vector_store=vector_store,
+            neo4j_driver=neo4j_driver,
+            embedder=embedder,
+            config=config,
+        )
+
+        # Route to SIMPLE path
+        retriever._router = MagicMock()
+        retriever._router.route = AsyncMock(
+            return_value=RoutingDecision(
+                complexity=QueryComplexity.SIMPLE,
+                use_graph=False,
+                graph_depth=0,
+                confidence=0.9,
+                reasoning="simple query",
+            )
+        )
+
+        return retriever
+
+    @pytest.mark.asyncio
+    async def test_simple_retrieve_scores_normalized(self, multi_result_retriever: VectorCypherRetriever) -> None:
+        """_simple_retrieve() must return scores in [0,1], not raw RRF values."""
+        namespace_id = uuid4()
+        result = await multi_result_retriever.retrieve("test query", namespace_id)
+
+        scores = [score for _, score in result.chunks]
+
+        # Scores must be in [0, 1] range
+        assert all(0.0 <= s <= 1.0 for s in scores), f"Scores out of range: {scores}"
+        # Max score must be 1.0 (min-max normalization guarantees this)
+        assert max(scores) == 1.0, f"Max score should be 1.0, got {max(scores)}"
+        # Min score must be 0.0
+        assert min(scores) == 0.0, f"Min score should be 0.0, got {min(scores)}"
+        # Scores must NOT all be clustered below 0.05 (the original bug)
+        assert any(s > 0.05 for s in scores), f"All scores below 0.05: {scores}"
+
+    @pytest.mark.asyncio
+    async def test_simple_retrieve_single_result_normalized(self) -> None:
+        """A single result should get score 1.0 after normalization."""
+        vector_store = AsyncMock()
+        embedder = AsyncMock()
+        embedder.embed = AsyncMock(return_value=[0.1] * 1536)
+
+        mock_result = MagicMock()
+        mock_result.chunk = MagicMock()
+        mock_result.chunk.id = uuid4()
+        mock_result.chunk.namespace_id = uuid4()
+        mock_result.chunk.document_id = uuid4()
+        mock_result.chunk.content = "single result"
+        mock_result.chunk.occurred_at = None
+        mock_result.chunk.created_at = None
+        mock_result.chunk.metadata = {}
+        mock_result.combined_score = 0.013
+        mock_result.similarity = 0.013
+
+        vector_store.search = AsyncMock(return_value=[mock_result])
+
+        config = RetrieverConfig(query_cache_ttl_seconds=0)
+        retriever = VectorCypherRetriever(
+            vector_store=vector_store,
+            neo4j_driver=AsyncMock(),
+            embedder=embedder,
+            config=config,
+        )
+        retriever._router = MagicMock()
+        retriever._router.route = AsyncMock(
+            return_value=RoutingDecision(
+                complexity=QueryComplexity.SIMPLE,
+                use_graph=False,
+                graph_depth=0,
+                confidence=0.9,
+                reasoning="simple query",
+            )
+        )
+
+        result = await retriever.retrieve("test", uuid4())
+
+        assert len(result.chunks) == 1
+        # Single result: normalize_scores sets all-equal scores to 1.0
+        assert result.chunks[0][1] == 1.0

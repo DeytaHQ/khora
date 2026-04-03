@@ -603,6 +603,8 @@ This prevents two failure modes: (1) candidate explosion when many entities each
 
 The fusion function `weighted_rrf_normalized` normalizes vector and graph scores to [0, 1] via min-max normalization before computing Reciprocal Rank Fusion. This matters when the two sources produce scores on very different scales — for example, cosine similarity scores in [0.3, 0.9] vs graph proximity scores in [0.01, 0.5]. Without normalization, the source with larger absolute scores dominates the fusion.
 
+As of DYT-1733, both the SIMPLE and COMPLEX retrieval paths normalize final scores to [0,1] using min-max normalization. Previously, only the COMPLEX path applied normalization; SIMPLE path scores could exceed 1.0 when vector and graph contributions were summed.
+
 ```
 RRF score = vector_weight / (k + vector_rank) + graph_weight / (k + graph_rank)
 Tiebreaker = normalized_score from the dominant source
