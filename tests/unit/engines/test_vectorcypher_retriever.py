@@ -429,9 +429,47 @@ class TestSimpleRetrieveScoreNormalization:
         # Meaningful spread: not all clustered below 0.05
         assert max(scores) - min(scores) == 1.0
 
+    def test_normalize_scores_all_identical(self) -> None:
+        """All identical scores normalize to 1.0 (no variance)."""
+        fused = [FusedResult(item_id=uuid4(), item=f"chunk_{i}", rrf_score=0.012) for i in range(5)]
+        normalized = normalize_scores(fused)
+        scores = [r.rrf_score for r in normalized]
+        assert all(s == 1.0 for s in scores)
+
+    def test_normalize_scores_two_results(self) -> None:
+        """Two distinct scores normalize to (1.0, 0.0)."""
+        fused = [
+            FusedResult(item_id=uuid4(), item="high", rrf_score=0.016),
+            FusedResult(item_id=uuid4(), item="low", rrf_score=0.009),
+        ]
+        normalized = normalize_scores(fused)
+        assert normalized[0].rrf_score == 1.0
+        assert normalized[1].rrf_score == 0.0
+
+    def test_normalize_scores_already_normalized_inputs(self) -> None:
+        """Scores already in [0,1] are re-normalized correctly."""
+        fused = [
+            FusedResult(item_id=uuid4(), item="a", rrf_score=0.9),
+            FusedResult(item_id=uuid4(), item="b", rrf_score=0.8),
+            FusedResult(item_id=uuid4(), item="c", rrf_score=0.7),
+        ]
+        normalized = normalize_scores(fused)
+        scores = [r.rrf_score for r in normalized]
+        assert scores[0] == 1.0
+        assert scores[-1] == 0.0
+        assert 0.4 < scores[1] < 0.6  # middle score ~0.5
+
+    def test_normalize_scores_empty(self) -> None:
+        """Empty input returns empty output."""
+        assert normalize_scores([]) == []
+
     @pytest.fixture
     def multi_result_retriever(self) -> VectorCypherRetriever:
-        """Create a retriever whose vector store returns multiple results with raw RRF-like scores."""
+        """Create a retriever whose vector store returns multiple results with raw RRF-like scores.
+
+        The mock exercises the ``combined_score`` field on each result, which is the
+        primary path in ``r.combined_score or r.similarity`` inside _simple_retrieve().
+        """
         vector_store = AsyncMock()
         neo4j_driver = AsyncMock()
         embedder = AsyncMock()
@@ -441,6 +479,8 @@ class TestSimpleRetrieveScoreNormalization:
         doc_id = uuid4()
 
         # Simulate 5 results with small raw scores typical of RRF (the bug scenario)
+        # RRF scores with k=60: rank 1 = 1/61 ≈ 0.016, rank 5 ≈ 0.009.
+        # These reproduce the DYT-1733 bug where all scores cluster below 0.05.
         raw_scores = [0.016, 0.014, 0.012, 0.010, 0.009]
         mock_results = []
         for score in raw_scores:
