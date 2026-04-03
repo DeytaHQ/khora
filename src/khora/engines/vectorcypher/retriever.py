@@ -945,11 +945,23 @@ class VectorCypherRetriever:
                     prefer_current=prefer_current,
                 )
             elif self._storage and self._storage.graph:
-                neighborhoods = await self._storage.get_neighborhoods_batch(
+                raw_neighborhoods = await self._storage.get_neighborhoods_batch(
                     entry_entity_ids,
                     depth=depth,
                     limit_per_entity=20,
                 )
+                # Normalize: get_neighborhoods_batch returns
+                # {UUID: {"entities": [...], "relationships": [...]}}
+                # but the scoring loop expects {UUID: [{"id":..., "distance":..., ...}]}
+                neighborhoods = {}
+                for eid, data in raw_neighborhoods.items():
+                    entities_list = data.get("entities", []) if isinstance(data, dict) else data
+                    normalized = []
+                    for i, entity_data in enumerate(entities_list if isinstance(entities_list, list) else []):
+                        if isinstance(entity_data, dict):
+                            entity_data.setdefault("distance", i + 1)
+                            normalized.append(entity_data)
+                    neighborhoods[eid] = normalized
             else:
                 neighborhoods = {}
 
@@ -959,8 +971,17 @@ class VectorCypherRetriever:
 
             for source_id, related in neighborhoods.items():
                 for entity_info in related:
-                    entity_id = UUID(entity_info["id"])
-                    distance = entity_info["distance"]
+                    # Handle both bare UUIDs (Neo4j) and record IDs like "entity:⟨uuid⟩" (SurrealDB)
+                    raw_id = entity_info["id"]
+                    try:
+                        entity_id = UUID(str(raw_id)) if not isinstance(raw_id, UUID) else raw_id
+                    except ValueError:
+                        # SurrealDB record ID — extract UUID from "table:⟨uuid⟩"
+                        import re
+
+                        m = re.search(r"[0-9a-fA-F\-]{36}", str(raw_id))
+                        entity_id = UUID(m.group(0)) if m else UUID(int=0)
+                    distance = entity_info.get("distance", 1)
                     # Score decreases with distance
                     score = 1.0 / (1 + distance)
 
@@ -971,8 +992,9 @@ class VectorCypherRetriever:
                         entity_scores[entity_id] = score
 
                     # Capture name, type, description, source_tool (zero-cost, data already fetched)
-                    if entity_info["id"] not in entity_info_map:
-                        entity_info_map[entity_info["id"]] = {
+                    eid_str = str(entity_id)
+                    if eid_str not in entity_info_map:
+                        entity_info_map[eid_str] = {
                             "name": entity_info.get("name", ""),
                             "entity_type": entity_info.get("entity_type", ""),
                             "description": entity_info.get("description", ""),
