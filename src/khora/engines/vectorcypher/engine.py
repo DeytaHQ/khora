@@ -212,6 +212,12 @@ class VectorCypherConfig:
     fusion_hybrid_alpha: float = 0.7
     retriever_min_entity_similarity: float = 0.3
 
+    # Cross-encoder reranking
+    enable_reranking: bool = False
+    reranking_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranking_top_n: int = 50  # How many candidates to feed to the cross-encoder
+    reranking_blend_weight: float = 0.7  # Rerank vs original score blend (passed to reranker)
+
 
 class VectorCypherEngine:
     """VectorCypher engine - hybrid vector+graph retrieval with temporal support.
@@ -395,6 +401,10 @@ class VectorCypherEngine:
             query_cache_max_size=self._vc_config.query_cache_max_size,
             lazy_entity_expansion=self._vc_config.lazy_entity_expansion,
             skeleton_core_ratio=self._vc_config.skeleton_core_ratio,
+            enable_reranking=self._vc_config.enable_reranking,
+            reranking_model=self._vc_config.reranking_model,
+            reranking_top_n=self._vc_config.reranking_top_n,
+            reranking_blend_weight=self._vc_config.reranking_blend_weight,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,
@@ -1163,6 +1173,14 @@ class VectorCypherEngine:
                 # EXPLICIT category produces a date-range TemporalFilter for pushdown
                 if temporal_signal.temporal_filter is not None:
                     temporal_filter = temporal_signal.temporal_filter
+
+        # Respect SearchMode.ALL: lower hybrid_alpha to give BM25 equal weight
+        # with vector similarity, enabling keyword-based retrieval alongside
+        # semantic search.  An explicit hybrid_alpha kwarg takes precedence.
+        if hybrid_alpha is not None:
+            retriever._config.hybrid_alpha = hybrid_alpha
+        elif mode == SearchMode.ALL:
+            retriever._config.hybrid_alpha = 0.5
 
         # Use VectorCypher retriever
         result = await retriever.retrieve(
