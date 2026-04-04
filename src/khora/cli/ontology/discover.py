@@ -41,6 +41,7 @@ async def run_discovery_session(
     *,
     topic: str = "",
     resume_path: str | None = None,
+    litellm_config: str | None = None,
 ) -> list[str]:
     """Run the interactive discovery session and return local file paths.
 
@@ -51,6 +52,7 @@ async def run_discovery_session(
         output_dir: Where to save fetched data. If None, prompts the user.
         topic: Pre-fill the intent (skip first prompt).
         resume_path: Path to a saved session JSON to resume.
+        litellm_config: Path to LiteLLM YAML config for discovery models.
 
     Returns:
         List of local file/directory paths containing fetched data.
@@ -101,6 +103,14 @@ async def run_discovery_session(
     except Exception:
         discovery_settings = None
 
+    # Apply litellm config override
+    if discovery_settings and litellm_config:
+        discovery_settings.litellm_config = litellm_config
+    elif litellm_config:
+        from khora.config.schema import DiscoverySettings
+
+        discovery_settings = DiscoverySettings(litellm_config=litellm_config)
+
     # Run the agent
     agent = DiscoveryAgent(ui=ui, output_dir=output_dir, state=state, settings=discovery_settings)
     final_state = await agent.run()
@@ -139,7 +149,17 @@ async def run_discovery_session(
     default=None,
     help="Continue to ontology construction after discovery (default: ask).",
 )
-def discover(output_dir: Path | None, topic: str, resume: str | None, construct: bool | None) -> None:
+@click.option(
+    "--litellm",
+    "-l",
+    "litellm_config",
+    type=click.Path(exists=True),
+    default=None,
+    help="Path to LiteLLM YAML config for discovery models.",
+)
+def discover(
+    output_dir: Path | None, topic: str, resume: str | None, construct: bool | None, litellm_config: str | None
+) -> None:
     """Interactively discover and fetch datasources from the internet.
 
     Uses Perplexity for search and Firecrawl for web scraping.
@@ -157,7 +177,9 @@ def discover(output_dir: Path | None, topic: str, resume: str | None, construct:
 
     resolved_dir: Path | None = output_dir
     try:
-        paths = asyncio.run(run_discovery_session(resolved_dir, topic=topic, resume_path=resume))
+        paths = asyncio.run(
+            run_discovery_session(resolved_dir, topic=topic, resume_path=resume, litellm_config=litellm_config)
+        )
     except KeyboardInterrupt:
         console.print("\n[yellow]Discovery interrupted.[/]")
         paths = []
