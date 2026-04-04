@@ -246,7 +246,7 @@ class VectorCypherRetriever:
 
             # Step 1: Route query to determine strategy
             with trace_span("khora.vectorcypher.route") as route_span:
-                routing = await self._router.route(query)
+                routing = await self._router.route(query, temporal_signal=temporal_signal)
                 route_span.set_attribute("complexity", routing.complexity.value)
                 route_span.set_attribute("use_graph", routing.use_graph)
             logger.debug(f"Query routing: {routing.complexity.value} (use_graph={routing.use_graph})")

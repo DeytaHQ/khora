@@ -23,6 +23,7 @@ from loguru import logger
 
 if TYPE_CHECKING:
     from khora.config.llm import LiteLLMConfig
+    from khora.query.temporal_detection import TemporalSignal
 
 
 class QueryComplexity(Enum):
@@ -224,7 +225,12 @@ COMPLEX|Multi-hop query requiring graph traversal"""
             "llm_fallback": 0,
         }
 
-    async def route(self, query: str) -> RoutingDecision:
+    async def route(
+        self,
+        query: str,
+        *,
+        temporal_signal: TemporalSignal | None = None,
+    ) -> RoutingDecision:
         """Route a query to the appropriate search path.
 
         Uses a two-phase approach:
@@ -233,6 +239,9 @@ COMPLEX|Multi-hop query requiring graph traversal"""
 
         Args:
             query: The user's query
+            temporal_signal: Optional temporal detection signal; when present and
+                ``is_temporal`` is True the heuristic guarantees at least MODERATE
+                routing so the graph path is activated for cross-session entity linking.
 
         Returns:
             RoutingDecision with complexity level and parameters
@@ -251,7 +260,7 @@ COMPLEX|Multi-hop query requiring graph traversal"""
             return decision
 
         # Phase 1: Fast heuristic classification
-        heuristic_decision = self._heuristic_route(query)
+        heuristic_decision = self._heuristic_route(query, temporal_signal=temporal_signal)
 
         # Phase 2: LLM fallback if enabled and confidence is low
         if self._config.use_llm and heuristic_decision.confidence < self._config.llm_confidence_threshold:
@@ -300,7 +309,12 @@ COMPLEX|Multi-hop query requiring graph traversal"""
             f"reasoning={decision.reasoning}"
         )
 
-    def _heuristic_route(self, query: str) -> RoutingDecision:
+    def _heuristic_route(
+        self,
+        query: str,
+        *,
+        temporal_signal: TemporalSignal | None = None,
+    ) -> RoutingDecision:
         """Route query using pattern-based heuristics (fast, no LLM).
 
         The heuristic scoring system:
@@ -311,6 +325,8 @@ COMPLEX|Multi-hop query requiring graph traversal"""
 
         Args:
             query: The user's query
+            temporal_signal: Optional temporal detection signal; when present and
+                temporal the score is boosted to at least MODERATE.
 
         Returns:
             RoutingDecision based on pattern matching
@@ -412,6 +428,21 @@ COMPLEX|Multi-hop query requiring graph traversal"""
         if question_words > 1:
             complexity_score += 0.1 * (question_words - 1)
             reasons.append(f"multiple question words ({question_words})")
+
+        # Temporal signal override: if the upstream temporal detector flagged this
+        # query as temporal, ensure at least MODERATE routing so the graph path is
+        # activated for cross-session entity linking.  Without this, short temporal
+        # queries (e.g. "When did Alice move?") get penalized by short-query and
+        # simple-question deductions, land below 0.2, and route to vector-only
+        # search — which cannot resolve cross-session entity references.
+        if temporal_signal is not None and temporal_signal.is_temporal:
+            if complexity_score < 0.2:  # Would be classified as SIMPLE
+                original_score = complexity_score
+                complexity_score = max(complexity_score, 0.25)  # Bump into MODERATE band
+                reasons.append("temporal signal boosted to MODERATE")
+                logger.debug(
+                    f"Temporal signal boosted complexity from {original_score:.2f} to {complexity_score:.2f}"
+                )
 
         # Determine complexity level
         if complexity_score >= 0.5:
