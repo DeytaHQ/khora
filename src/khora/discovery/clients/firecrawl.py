@@ -184,18 +184,33 @@ class FirecrawlClient:
         if not job_id:
             raise ValueError("Firecrawl did not return a crawl job ID")
 
+        if not isinstance(job_id, str) or len(job_id) < 4:
+            logger.warning(f"Unexpected crawl job ID format: {job_id!r} — proceeding anyway")
+
         logger.debug(f"Firecrawl crawl job started: {job_id}")
 
         # Poll for completion, accumulating partial pages
         accumulated_pages: list[FirecrawlScrapeResult] = []
         seen_urls: set[str] = set()
+        consecutive_errors = 0
+        max_consecutive_errors = 3
 
         for attempt in range(max_poll_attempts):
             await asyncio.sleep(poll_interval)
 
-            status_resp = await client.get(f"/crawl/{job_id}")
-            status_resp.raise_for_status()
-            status_data = status_resp.json()
+            try:
+                status_resp = await client.get(f"/crawl/{job_id}")
+                status_resp.raise_for_status()
+                status_data = status_resp.json()
+                consecutive_errors = 0  # reset on success
+            except (httpx.ReadTimeout, httpx.ConnectError, httpx.HTTPStatusError) as e:
+                consecutive_errors += 1
+                logger.warning(f"Firecrawl poll error ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error("Too many consecutive poll errors, aborting crawl")
+                    break
+                continue
+
             status = status_data.get("status", "")
 
             # Accumulate pages from each poll response

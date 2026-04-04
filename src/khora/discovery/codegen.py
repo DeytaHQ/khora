@@ -142,6 +142,24 @@ BLOCKED_MODULES: frozenset[str] = frozenset(
 
 
 @dataclass(slots=True)
+class ErrorRecord:
+    """Structured record of a script generation/execution error."""
+
+    attempt: int
+    phase: str  # "generation", "validation", "execution", "exception"
+    error: str
+    script_hash: str = ""  # first 8 chars of sha256 for dedup
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "attempt": self.attempt,
+            "phase": self.phase,
+            "error": self.error,
+            "script_hash": self.script_hash,
+        }
+
+
+@dataclass(slots=True)
 class Violation:
     """A single AST validation violation."""
 

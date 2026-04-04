@@ -7,6 +7,7 @@ through the AgentPhase transitions.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Any
@@ -461,14 +462,36 @@ class DiscoveryAgent:
 
         Handles both text and binary content. For binary files (PDF, Excel),
         saves the raw file and attempts text extraction.
+        Retries up to 2 times on transient HTTP errors.
         """
         import httpx
 
+        retryable_errors = (httpx.ReadTimeout, httpx.ConnectError, httpx.ConnectTimeout)
+        retryable_status_codes = {429, 500, 502, 503}
+
         try:
-            with self._ui.show_fetching(src.url):
-                async with httpx.AsyncClient(timeout=60.0) as http:
-                    resp = await http.get(src.url, follow_redirects=True)
-                    resp.raise_for_status()
+            resp = None
+
+            for _attempt in range(3):
+                try:
+                    with self._ui.show_fetching(src.url):
+                        async with httpx.AsyncClient(timeout=60.0) as http:
+                            resp = await http.get(src.url, follow_redirects=True)
+                            if resp.status_code in retryable_status_codes and _attempt < 2:
+                                logger.warning(
+                                    f"HTTP {resp.status_code} fetching {src.url} "
+                                    f"(attempt {_attempt + 1}/3), retrying..."
+                                )
+                                await asyncio.sleep(2.0 * (_attempt + 1))
+                                continue
+                            resp.raise_for_status()
+                    break
+                except retryable_errors as e:
+                    if _attempt < 2:
+                        logger.warning(f"Transient error fetching {src.url} " f"(attempt {_attempt + 1}/3): {e}")
+                        await asyncio.sleep(2.0 * (_attempt + 1))
+                        continue
+                    raise
 
             content_type = resp.headers.get("content-type", "")
             url_path = src.url.split("?")[0]
