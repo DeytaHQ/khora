@@ -115,6 +115,12 @@ class RetrieverConfig:
     lazy_entity_expansion: bool = False
     skeleton_core_ratio: float = 0.70  # Skip lazy expansion when > 0.6
 
+    # Cross-encoder reranking
+    enable_reranking: bool = False
+    reranking_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranking_top_n: int = 50  # Candidates to feed to the cross-encoder
+    reranking_blend_weight: float = 0.7  # Rerank vs original score blend
+
     # Limits
     max_chunks: int = 50
     max_entities: int = 30
@@ -523,8 +529,10 @@ class VectorCypherRetriever:
                     coherence_weight=self._config.coherence_weight,
                 )
 
-        # Normalize scores
-        fused_results = normalize_scores(fused_results)
+        # Step 8c: Cross-encoder reranking (after boosts, before normalization)
+        if self._config.enable_reranking:
+            with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
+                fused_results = await self._apply_reranking(query, fused_results, limit)
 
         # Build result
         chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
@@ -769,6 +777,68 @@ class VectorCypherRetriever:
 
         return result
 
+    async def _apply_reranking(
+        self,
+        query: str,
+        fused_results: list[FusedResult],
+        limit: int,
+    ) -> list[FusedResult]:
+        """Apply cross-encoder reranking to fused results.
+
+        Takes the top-N candidates (configured via reranking_top_n), scores them
+        with the cross-encoder model, and returns re-ordered results. The reranker
+        blends cross-encoder scores with original RRF scores using
+        reranking_blend_weight.
+
+        Falls back to original ordering on any error.
+
+        Args:
+            query: Original query text
+            fused_results: Fused results after recency/coherence boosts
+            limit: Final number of results to return
+
+        Returns:
+            Re-ordered FusedResult list (may be shorter than input)
+        """
+        if not fused_results:
+            return fused_results
+
+        from khora.query.reranking import CrossEncoderReranker, RerankCandidate
+
+        top_n = min(self._config.reranking_top_n, len(fused_results))
+        candidates_to_rerank = fused_results[:top_n]
+        remainder = fused_results[top_n:]
+
+        # Build rerank candidates from FusedResult items (Chunk objects)
+        candidates = [
+            RerankCandidate(
+                item=r,
+                original_score=r.rrf_score,
+                content=r.item.content if hasattr(r.item, "content") else str(r.item),
+                metadata=r.item.metadata if hasattr(r.item, "metadata") else {},
+            )
+            for r in candidates_to_rerank
+        ]
+
+        try:
+            reranker = CrossEncoderReranker(model_name=self._config.reranking_model)
+            results = await reranker.rerank(query, candidates, top_k=top_n)
+
+            # Map reranked scores back onto FusedResult objects
+            reranked: list[FusedResult] = []
+            for rr in results:
+                fused = rr.item  # The original FusedResult
+                fused.rrf_score = rr.final_score
+                reranked.append(fused)
+
+            # Append any remainder that wasn't reranked (already sorted by original score)
+            reranked.extend(remainder)
+            logger.debug(f"Cross-encoder reranking applied: {top_n} candidates scored, " f"returning top {limit}")
+            return reranked[:limit]
+        except Exception as e:
+            logger.warning(f"Cross-encoder reranking failed, keeping original order: {e}")
+            return fused_results
+
     async def _simple_retrieve(
         self,
         query: str,
@@ -832,6 +902,13 @@ class VectorCypherRetriever:
                     fused = apply_recency_boost(
                         fused, recency_scores, recency_weight=effective_recency, recency_floor=recency_floor
                     )
+                chunk_results = [(r.item, r.rrf_score) for r in fused]
+
+            # Cross-encoder reranking (after recency boost, before temporal sort)
+            if self._config.enable_reranking and chunk_results:
+                fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
+                with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused)):
+                    fused = await self._apply_reranking(query, fused, limit)
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # Apply temporal sort: re-order by occurred_at DESC so the most
