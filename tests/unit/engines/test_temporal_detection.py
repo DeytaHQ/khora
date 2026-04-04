@@ -58,10 +58,11 @@ class TestTemporalDetector:
         assert signal.is_temporal is True
         assert signal.category == TemporalCategory.RECENCY
 
-    def test_change_still(self) -> None:
+    def test_still_is_state_query(self) -> None:
+        # "Does she still" matches STATE_QUERY, not CHANGE (still was removed from CHANGE)
         signal = self.detector.detect("Does she still work at Google?")
         assert signal.is_temporal is True
-        assert signal.category == TemporalCategory.CHANGE
+        assert signal.category == TemporalCategory.STATE_QUERY
 
     def test_change_used_to(self) -> None:
         signal = self.detector.detect("She used to live in Paris")
@@ -116,8 +117,8 @@ class TestTemporalDetector:
 
     def test_highest_category_wins(self) -> None:
         """When multiple categories match, the highest ID should win."""
-        # "still" (CHANGE=6) + "when" (EXPLICIT=1) → CHANGE wins
-        signal = self.detector.detect("Does she still work there when visiting?")
+        # "used to" (CHANGE=6) + "last year" (EXPLICIT=1) → CHANGE wins
+        signal = self.detector.detect("She used to work there last year")
         assert signal.category == TemporalCategory.CHANGE
 
 
