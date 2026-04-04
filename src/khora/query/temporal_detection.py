@@ -65,16 +65,16 @@ class RetrievalParams:
 RETRIEVAL_PARAMS: dict[TemporalCategory, RetrievalParams] = {
     TemporalCategory.NONE: RetrievalParams(recency_weight=0.0, temporal_sort=False, recency_floor=0.5),
     TemporalCategory.EXPLICIT: RetrievalParams(recency_weight=0.3, temporal_sort=False, recency_floor=0.5),
-    TemporalCategory.STATE_QUERY: RetrievalParams(recency_weight=0.5, temporal_sort=True, recency_floor=0.5),
+    TemporalCategory.STATE_QUERY: RetrievalParams(recency_weight=0.5, temporal_sort=True, recency_floor=0.3),
     TemporalCategory.ORDINAL: RetrievalParams(
         recency_weight=0.3, temporal_sort=True, decay_days_override=7, recency_floor=0.5
     ),
     TemporalCategory.AGGREGATE: RetrievalParams(recency_weight=0.0, temporal_sort=False, recency_floor=0.5),
     TemporalCategory.RECENCY: RetrievalParams(
-        recency_weight=0.5, temporal_sort=True, decay_days_override=3, recency_floor=0.5
+        recency_weight=0.5, temporal_sort=True, decay_days_override=3, recency_floor=0.3
     ),
     TemporalCategory.CHANGE: RetrievalParams(
-        recency_weight=0.4, temporal_sort=True, decay_days_override=14, recency_floor=0.5
+        recency_weight=0.4, temporal_sort=True, decay_days_override=14, recency_floor=0.3
     ),
 }
 
