@@ -62,14 +62,15 @@ class DiscoveryAgent:
         if planner:
             self._planner = planner
         elif settings:
-            self._planner = DiscoveryPlanner(
-                planning_model=settings.planning_model,
-                codegen_model=settings.codegen_model,
-                summarization_model=settings.summarization_model,
-                budget_usd=settings.max_cost_usd,
+            self._planner = DiscoveryPlanner.from_config(
+                litellm_config_path=getattr(settings, "litellm_config", None),
+                planning_model=getattr(settings, "planning_model", None),
+                codegen_model=getattr(settings, "codegen_model", None),
+                summarization_model=getattr(settings, "summarization_model", None),
+                budget_usd=getattr(settings, "max_cost_usd", 2.0),
             )
         else:
-            self._planner = DiscoveryPlanner()
+            self._planner = DiscoveryPlanner.from_config()
 
         # Detect available API keys
         self._has_perplexity = perplexity is not None or bool(os.environ.get("PERPLEXITY_API_KEY"))

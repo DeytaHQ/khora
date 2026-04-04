@@ -155,7 +155,9 @@ class DiscoveryPlanner:
 
     Usage::
 
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config(
+            litellm_config_path="./litellm.discovery.yaml",
+        )
         plan = await planner.formulate_queries("European wine datasets")
         ranked = await planner.classify_sources(plan.domain, citations)
     """
@@ -163,14 +165,73 @@ class DiscoveryPlanner:
     def __init__(
         self,
         *,
-        planning_model: str = "gpt-4o-mini",
-        codegen_model: str = "claude-sonnet-4-20250514",
-        summarization_model: str = "gpt-4o-mini",
+        planning_model: str,
+        codegen_model: str,
+        summarization_model: str,
         budget_usd: float = 0.50,
     ) -> None:
         self._planning_llm = OntologyLLM(model=planning_model, budget_usd=budget_usd, interactive=False)
         self._codegen_llm = OntologyLLM(model=codegen_model, budget_usd=budget_usd, interactive=False)
         self._summary_llm = OntologyLLM(model=summarization_model, budget_usd=budget_usd, interactive=False)
+
+    @classmethod
+    def from_config(
+        cls,
+        *,
+        litellm_config_path: str | None = None,
+        planning_model: str | None = None,
+        codegen_model: str | None = None,
+        summarization_model: str | None = None,
+        budget_usd: float = 2.0,
+    ) -> DiscoveryPlanner:
+        """Create a planner from litellm YAML config with env var overrides.
+
+        Resolution order for each model:
+        1. Explicit parameter (from CLI/env var)
+        2. LiteLLM YAML config file
+        3. KhoraConfig main LLM model as fallback
+        """
+        resolved: dict[str, str | None] = {"planning": None, "codegen": None, "summarization": None}
+
+        # Load from YAML if provided
+        if litellm_config_path:
+            from pathlib import Path
+
+            import yaml
+
+            path = Path(litellm_config_path)
+            if path.exists():
+                with path.open() as f:
+                    cfg = yaml.safe_load(f) or {}
+                resolved["planning"] = (cfg.get("planning") or {}).get("model")
+                resolved["codegen"] = (cfg.get("codegen") or {}).get("model")
+                resolved["summarization"] = (cfg.get("summarization") or {}).get("model")
+                if "budget_usd" in cfg:
+                    budget_usd = cfg["budget_usd"]
+
+        # Env var / explicit param overrides
+        final_planning = planning_model or resolved["planning"]
+        final_codegen = codegen_model or resolved["codegen"]
+        final_summarization = summarization_model or resolved["summarization"]
+
+        # Last resort: fall back to khora's main LLM model
+        if not final_planning or not final_codegen or not final_summarization:
+            try:
+                from khora.config.schema import KhoraConfig
+
+                main_model = KhoraConfig().llm.model
+            except Exception:
+                main_model = "gpt-4o-mini"
+            final_planning = final_planning or main_model
+            final_codegen = final_codegen or main_model
+            final_summarization = final_summarization or main_model
+
+        return cls(
+            planning_model=final_planning,
+            codegen_model=final_codegen,
+            summarization_model=final_summarization,
+            budget_usd=budget_usd,
+        )
 
     @property
     def usage_summary(self) -> dict[str, Any]:

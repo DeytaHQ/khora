@@ -627,18 +627,24 @@ class DiscoverySettings(BaseSettings):
         description="Max output size from generated scripts (bytes)",
     )
 
+    # LiteLLM config
+    litellm_config: str | None = Field(
+        default=None,
+        description="Path to LiteLLM YAML config for discovery models. Set via --litellm flag or KHORA_DISCOVERY_LITELLM_CONFIG.",
+    )
+
     # Model selection per task
-    planning_model: str = Field(
-        default="gpt-4o-mini",
-        description="Model for query formulation and source classification (fast, cheap)",
+    planning_model: str | None = Field(
+        default=None,
+        description="Model for query formulation and source classification. Set via litellm config or KHORA_DISCOVERY_PLANNING_MODEL.",
     )
-    codegen_model: str = Field(
-        default="claude-sonnet-4-20250514",
-        description="Model for generating fetch scripts (stronger model for better code)",
+    codegen_model: str | None = Field(
+        default=None,
+        description="Model for generating fetch scripts. Set via litellm config or KHORA_DISCOVERY_CODEGEN_MODEL.",
     )
-    summarization_model: str = Field(
-        default="gpt-4o-mini",
-        description="Model for content summarization (fast, cheap)",
+    summarization_model: str | None = Field(
+        default=None,
+        description="Model for content summarization. Set via litellm config or KHORA_DISCOVERY_SUMMARIZATION_MODEL.",
     )
 
     # Search result caching

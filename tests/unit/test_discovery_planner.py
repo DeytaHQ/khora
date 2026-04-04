@@ -54,7 +54,7 @@ class TestFetchStrategy:
 class TestFormulateQueries:
     @pytest.mark.asyncio
     async def test_returns_query_plan(self) -> None:
-        planner = DiscoveryPlanner(budget_usd=1.0)
+        planner = DiscoveryPlanner.from_config(budget_usd=1.0)
         mock_result = {
             "domain": "wine",
             "description": "European wine quality datasets",
@@ -74,7 +74,7 @@ class TestFormulateQueries:
 
     @pytest.mark.asyncio
     async def test_includes_previous_queries(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
         mock_result = {
             "domain": "wine",
             "description": "test",
@@ -89,7 +89,7 @@ class TestFormulateQueries:
 
     @pytest.mark.asyncio
     async def test_fallback_on_error(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
 
         with patch.object(
             planner._planning_llm, "complete", new_callable=AsyncMock, side_effect=Exception("API error")
@@ -108,7 +108,7 @@ class TestFormulateQueries:
 class TestClassifySources:
     @pytest.mark.asyncio
     async def test_classifies_and_ranks(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
         mock_result = {
             "sources": [
                 {
@@ -147,13 +147,13 @@ class TestClassifySources:
 
     @pytest.mark.asyncio
     async def test_empty_citations(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
         sources = await planner.classify_sources("wine", [])
         assert sources == []
 
     @pytest.mark.asyncio
     async def test_fallback_on_error(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
 
         with patch.object(
             planner._planning_llm, "complete", new_callable=AsyncMock, side_effect=Exception("API error")
@@ -166,7 +166,7 @@ class TestClassifySources:
 
     @pytest.mark.asyncio
     async def test_unknown_source_type(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
         mock_result = {
             "sources": [
                 {
@@ -191,7 +191,7 @@ class TestClassifySources:
 
 class TestPlanFetchStrategy:
     def test_csv_direct_download(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
         src = DiscoveredSource(
             url="https://example.com/data.csv",
             title="Test",
@@ -202,7 +202,7 @@ class TestPlanFetchStrategy:
         assert strategy.method == "direct_download"
 
     def test_api_generates_script(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
         src = DiscoveredSource(
             url="https://api.example.com/v1",
             title="Test",
@@ -212,7 +212,7 @@ class TestPlanFetchStrategy:
         assert strategy.method == "generated_script"
 
     def test_webpage_uses_firecrawl(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
         src = DiscoveredSource(
             url="https://example.com/page",
             title="Test",
@@ -222,7 +222,7 @@ class TestPlanFetchStrategy:
         assert strategy.method == "firecrawl_scrape"
 
     def test_webpage_fallback_without_firecrawl(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
         src = DiscoveredSource(
             url="https://example.com/page",
             title="Test",
@@ -232,7 +232,7 @@ class TestPlanFetchStrategy:
         assert strategy.method == "direct_download"
 
     def test_repo_generates_script(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
         src = DiscoveredSource(
             url="https://github.com/org/repo",
             title="Test",
@@ -250,7 +250,7 @@ class TestPlanFetchStrategy:
 class TestGenerateFetchScript:
     @pytest.mark.asyncio
     async def test_returns_script(self) -> None:
-        planner = DiscoveryPlanner()
+        planner = DiscoveryPlanner.from_config()
 
         with patch.object(
             planner._codegen_llm,
@@ -267,6 +267,6 @@ class TestGenerateFetchScript:
 
     @pytest.mark.asyncio
     async def test_usage_tracking(self) -> None:
-        planner = DiscoveryPlanner(budget_usd=1.0)
+        planner = DiscoveryPlanner.from_config(budget_usd=1.0)
         assert planner.cost_usd == 0.0
         assert planner.usage_summary["calls"] == 0
