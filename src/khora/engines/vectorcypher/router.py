@@ -440,9 +440,7 @@ COMPLEX|Multi-hop query requiring graph traversal"""
                 original_score = complexity_score
                 complexity_score = max(complexity_score, 0.25)  # Bump into MODERATE band
                 reasons.append("temporal signal boosted to MODERATE")
-                logger.debug(
-                    f"Temporal signal boosted complexity from {original_score:.2f} to {complexity_score:.2f}"
-                )
+                logger.debug(f"Temporal signal boosted complexity from {original_score:.2f} to {complexity_score:.2f}")
 
         # Determine complexity level
         if complexity_score >= 0.5:
