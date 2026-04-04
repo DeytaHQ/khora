@@ -229,8 +229,12 @@ pub fn detect_temporal_category(query: &str) -> u8 {
 
     let (ac, cats) = &*AC;
 
+    // Pad with a leading space so patterns like " does she still" can match
+    // at the start of the query (many patterns use leading spaces as word
+    // boundary anchors).
+    let padded = format!(" {}", query);
     let mut best_cat: u8 = 0;
-    for mat in ac.find_iter(query) {
+    for mat in ac.find_iter(&padded) {
         let cat = cats[mat.pattern().as_usize()];
         if cat > best_cat {
             best_cat = cat;
@@ -321,11 +325,14 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
 
     let (ac, cats, patterns) = &*AC;
 
+    // Pad with a leading space so patterns with leading-space word-boundary
+    // anchors can match at the start of the query.
+    let padded = format!(" {}", query);
     let mut best_cat: u8 = 0;
     let mut matched_terms: Vec<String> = Vec::new();
     let mut matched_cats: std::collections::HashSet<u8> = std::collections::HashSet::new();
 
-    for mat in ac.find_iter(query) {
+    for mat in ac.find_iter(&padded) {
         let cat = cats[mat.pattern().as_usize()];
         let term = &patterns[mat.pattern().as_usize()];
         if cat > best_cat {

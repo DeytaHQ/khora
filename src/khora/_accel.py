@@ -1277,7 +1277,8 @@ def detect_temporal_category(query: str) -> int:
         return _rust_detect_temporal_category(query)
 
     # Python fallback: simple substring matching
-    query_lower = query.lower()
+    # Pad with leading space so patterns like " does she still" match at query start
+    query_lower = " " + query.lower()
     best_cat = 0
     for cat, terms in TEMPORAL_DICTIONARY.items():
         for term in terms:
@@ -1306,7 +1307,8 @@ def detect_temporal_category_with_confidence(
         return _rust_detect_temporal_category_with_confidence(query)
 
     # Python fallback
-    query_lower = query.lower()
+    # Pad with leading space so patterns with leading-space anchors match at query start
+    query_lower = " " + query.lower()
     best_cat = 0
     matched_terms: list[str] = []
     matched_cats: set[int] = set()
