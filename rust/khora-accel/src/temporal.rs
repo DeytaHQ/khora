@@ -182,6 +182,7 @@ pub fn detect_temporal_category(query: &str) -> u8 {
             // Implicit state-query patterns for conversational memory (synced from Python _accel.py)
             " does he still", " does she still", " do they still",
             " is he still", " is she still", " are they still",
+            " does it still", " is it still", " am i still", " do i still",
             "'s current ", " current job", " current role", " current position",
             " live now", " work now", " working now", " living now", " doing now",
         ]);
@@ -206,9 +207,13 @@ pub fn detect_temporal_category(query: &str) -> u8 {
         ]);
 
         // Category 6: CHANGE
+        // NOTE: "still " intentionally omitted — it conflicts with STATE_QUERY
+        // patterns (" does she still", " is he still", etc.) which are more
+        // specific. Since max(cat_id) wins, having "still " here would override
+        // STATE_QUERY for queries like "Does she still work there?".
         add(6, &[
             "changed", "switched", "moved to", "used to",
-            "no longer", "still ", "anymore", "former ",
+            "no longer", "anymore", "former ",
             "previous ", "ex-", "updated", "replaced",
             "went from", "transitioned",
             "turned into ", "switched to ", "became ",
@@ -224,8 +229,12 @@ pub fn detect_temporal_category(query: &str) -> u8 {
 
     let (ac, cats) = &*AC;
 
+    // Pad with a leading space so patterns like " does she still" can match
+    // at the start of the query (many patterns use leading spaces as word
+    // boundary anchors).
+    let padded = format!(" {}", query);
     let mut best_cat: u8 = 0;
-    for mat in ac.find_iter(query) {
+    for mat in ac.find_iter(&padded) {
         let cat = cats[mat.pattern().as_usize()];
         if cat > best_cat {
             best_cat = cat;
@@ -275,6 +284,7 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
             // Implicit state-query patterns for conversational memory (synced from Python _accel.py)
             " does he still", " does she still", " do they still",
             " is he still", " is she still", " are they still",
+            " does it still", " is it still", " am i still", " do i still",
             "'s current ", " current job", " current role", " current position",
             " live now", " work now", " working now", " living now", " doing now",
         ]);
@@ -291,9 +301,10 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
             "most recent", "newest", "just ", "recently",
             "latest ",
         ]);
+        // NOTE: "still " intentionally omitted — see detect_temporal_category.
         add(6, &[
             "changed", "switched", "moved to", "used to",
-            "no longer", "still ", "anymore", "former ",
+            "no longer", "anymore", "former ",
             "previous ", "ex-", "updated", "replaced",
             "went from", "transitioned",
             "turned into ", "switched to ", "became ",
@@ -314,11 +325,14 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
 
     let (ac, cats, patterns) = &*AC;
 
+    // Pad with a leading space so patterns with leading-space word-boundary
+    // anchors can match at the start of the query.
+    let padded = format!(" {}", query);
     let mut best_cat: u8 = 0;
     let mut matched_terms: Vec<String> = Vec::new();
     let mut matched_cats: std::collections::HashSet<u8> = std::collections::HashSet::new();
 
-    for mat in ac.find_iter(query) {
+    for mat in ac.find_iter(&padded) {
         let cat = cats[mat.pattern().as_usize()];
         let term = &patterns[mat.pattern().as_usize()];
         if cat > best_cat {
@@ -497,7 +511,21 @@ mod tests {
 
     #[test]
     fn test_detect_temporal_category_change() {
-        assert_eq!(detect_temporal_category("Does she still work at Google?"), 6);
+        // "used to" is a clear CHANGE signal
+        assert_eq!(detect_temporal_category("She used to work there"), 6);
+    }
+
+    #[test]
+    fn test_still_state_query_not_change() {
+        // "Does she still" should match STATE_QUERY (cat 2), not CHANGE.
+        // Previously "still " in CHANGE (cat 6) overrode the more specific
+        // STATE_QUERY patterns due to max(cat_id) priority.
+        assert_eq!(detect_temporal_category("Does she still work at Google?"), 2);
+    }
+
+    #[test]
+    fn test_is_it_still_state_query() {
+        assert_eq!(detect_temporal_category("Is it still raining?"), 2);
     }
 
     #[test]
