@@ -65,7 +65,7 @@ class TestFormulateQueries:
             "preferred_formats": ["csv", "json"],
         }
 
-        with patch.object(planner._llm, "complete", new_callable=AsyncMock, return_value=mock_result):
+        with patch.object(planner._planning_llm, "complete", new_callable=AsyncMock, return_value=mock_result):
             plan = await planner.formulate_queries("I need European wine data")
 
         assert plan.domain == "wine"
@@ -81,7 +81,7 @@ class TestFormulateQueries:
             "search_queries": ["new query"],
         }
 
-        with patch.object(planner._llm, "complete", new_callable=AsyncMock, return_value=mock_result) as mock:
+        with patch.object(planner._planning_llm, "complete", new_callable=AsyncMock, return_value=mock_result) as mock:
             await planner.formulate_queries("wine data", previous_queries=["old query"])
 
         call_args = mock.call_args
@@ -91,7 +91,9 @@ class TestFormulateQueries:
     async def test_fallback_on_error(self) -> None:
         planner = DiscoveryPlanner()
 
-        with patch.object(planner._llm, "complete", new_callable=AsyncMock, side_effect=Exception("API error")):
+        with patch.object(
+            planner._planning_llm, "complete", new_callable=AsyncMock, side_effect=Exception("API error")
+        ):
             plan = await planner.formulate_queries("wine data")
 
         # Should fall back to using the intent as the query
@@ -130,7 +132,7 @@ class TestClassifySources:
             ]
         }
 
-        with patch.object(planner._llm, "complete", new_callable=AsyncMock, return_value=mock_result):
+        with patch.object(planner._planning_llm, "complete", new_callable=AsyncMock, return_value=mock_result):
             sources = await planner.classify_sources(
                 "wine",
                 ["https://example.com/data.csv", "https://api.example.com/wine"],
@@ -153,7 +155,9 @@ class TestClassifySources:
     async def test_fallback_on_error(self) -> None:
         planner = DiscoveryPlanner()
 
-        with patch.object(planner._llm, "complete", new_callable=AsyncMock, side_effect=Exception("API error")):
+        with patch.object(
+            planner._planning_llm, "complete", new_callable=AsyncMock, side_effect=Exception("API error")
+        ):
             sources = await planner.classify_sources("wine", ["https://a.com", "https://b.com"])
 
         # Should fall back to raw citations with default scores
@@ -174,7 +178,7 @@ class TestClassifySources:
             ]
         }
 
-        with patch.object(planner._llm, "complete", new_callable=AsyncMock, return_value=mock_result):
+        with patch.object(planner._planning_llm, "complete", new_callable=AsyncMock, return_value=mock_result):
             sources = await planner.classify_sources("test", ["https://example.com"])
 
         assert sources[0].source_type == SourceType.OTHER
@@ -249,7 +253,7 @@ class TestGenerateFetchScript:
         planner = DiscoveryPlanner()
 
         with patch.object(
-            planner._llm,
+            planner._codegen_llm,
             "complete_raw",
             new_callable=AsyncMock,
             return_value='```python\nimport httpx\nprint("hello")\n```',

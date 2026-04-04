@@ -146,8 +146,12 @@ class FetchStrategy:
 class DiscoveryPlanner:
     """LLM-backed planner for the discovery agent.
 
-    Uses gpt-4o-mini (or configured model) via OntologyLLM for all
-    planning decisions. Budget is shared with the discovery session.
+    Uses separate models per task via OntologyLLM:
+    - ``planning_model`` for query formulation and source classification (fast, cheap)
+    - ``codegen_model`` for generating fetch scripts (stronger model for better code)
+    - ``summarization_model`` for content summarization (fast, cheap)
+
+    Budget is shared with the discovery session.
 
     Usage::
 
@@ -159,18 +163,38 @@ class DiscoveryPlanner:
     def __init__(
         self,
         *,
-        model: str = "gpt-4o-mini",
+        planning_model: str = "gpt-4o-mini",
+        codegen_model: str = "claude-sonnet-4-20250514",
+        summarization_model: str = "gpt-4o-mini",
         budget_usd: float = 0.50,
     ) -> None:
-        self._llm = OntologyLLM(model=model, budget_usd=budget_usd, interactive=False)
+        self._planning_llm = OntologyLLM(model=planning_model, budget_usd=budget_usd, interactive=False)
+        self._codegen_llm = OntologyLLM(model=codegen_model, budget_usd=budget_usd, interactive=False)
+        self._summary_llm = OntologyLLM(model=summarization_model, budget_usd=budget_usd, interactive=False)
 
     @property
     def usage_summary(self) -> dict[str, Any]:
-        return self._llm.usage_summary
+        planning = self._planning_llm.usage_summary
+        codegen = self._codegen_llm.usage_summary
+        summary = self._summary_llm.usage_summary
+        return {
+            "calls": planning["calls"] + codegen["calls"] + summary["calls"],
+            "input_tokens": planning["input_tokens"] + codegen["input_tokens"] + summary["input_tokens"],
+            "output_tokens": planning["output_tokens"] + codegen["output_tokens"] + summary["output_tokens"],
+            "total_tokens": planning["total_tokens"] + codegen["total_tokens"] + summary["total_tokens"],
+            "cost_usd": planning["cost_usd"] + codegen["cost_usd"] + summary["cost_usd"],
+            "budget_remaining_usd": min(
+                planning["budget_remaining_usd"],
+                codegen["budget_remaining_usd"],
+                summary["budget_remaining_usd"],
+            ),
+        }
 
     @property
     def cost_usd(self) -> float:
-        return self._llm._total_cost_usd
+        return (
+            self._planning_llm._total_cost_usd + self._codegen_llm._total_cost_usd + self._summary_llm._total_cost_usd
+        )
 
     async def formulate_queries(
         self,
@@ -192,7 +216,7 @@ class DiscoveryPlanner:
             user_msg += f"\n\nAlready tried these queries (generate different ones): {previous_queries}"
 
         try:
-            result = await self._llm.complete(
+            result = await self._planning_llm.complete(
                 system=_QUERY_FORMULATION_SYSTEM,
                 user=user_msg,
                 temperature=0.3,
@@ -232,7 +256,7 @@ class DiscoveryPlanner:
         user_msg = f"Topic: {domain}\n\nURLs to classify:\n{urls_text}"
 
         try:
-            result = await self._llm.complete(
+            result = await self._planning_llm.complete(
                 system=_SOURCE_CLASSIFICATION_SYSTEM,
                 user=user_msg,
                 temperature=0.1,
@@ -310,7 +334,7 @@ class DiscoveryPlanner:
         *,
         max_pages: int = 10,
         timeout: int = 120,
-        extra_context: str = "",
+        error_history: list[dict] | None = None,
     ) -> str:
         """Generate a Python script to download data from a source.
 
@@ -319,7 +343,8 @@ class DiscoveryPlanner:
             output_dir: Directory to write fetched data to.
             max_pages: Maximum pagination pages.
             timeout: Script execution timeout.
-            extra_context: Additional context (e.g., error from previous attempt).
+            error_history: List of dicts describing previous failed attempts
+                (keys: ``attempt``, ``error_type``, ``error``).
 
         Returns:
             Python script as a string.
@@ -333,11 +358,17 @@ class DiscoveryPlanner:
             f"Description: {source.description}\n\n"
             f"Save output to: {output_dir}"
         )
-        if extra_context:
-            user_msg += extra_context
+
+        if error_history:
+            user_msg += "\n\n## Previous attempts (avoid repeating these failures):\n"
+            for entry in error_history:
+                user_msg += f"\n### Attempt {entry.get('attempt', '?')}:\n"
+                user_msg += f"Error type: {entry.get('error_type', 'unknown')}\n"
+                user_msg += f"Error: {entry.get('error', 'unknown')}\n"
+            user_msg += "\nTake a COMPLETELY DIFFERENT approach from the failed attempts above."
 
         # Use complete_raw — code generation returns Python, not JSON
-        raw = await self._llm.complete_raw(
+        raw = await self._codegen_llm.complete_raw(
             system=system,
             user=user_msg,
             temperature=0.2,
@@ -357,7 +388,7 @@ class DiscoveryPlanner:
         """
         truncated = content[:3000]
         try:
-            result = await self._llm.complete(
+            result = await self._summary_llm.complete(
                 system=(
                     "Summarize the following fetched content in 2-3 sentences. "
                     "Focus on: what data it contains, how many records/items, "

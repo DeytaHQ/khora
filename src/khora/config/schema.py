@@ -627,10 +627,18 @@ class DiscoverySettings(BaseSettings):
         description="Max output size from generated scripts (bytes)",
     )
 
-    # Code generation
-    codegen_model: str | None = Field(
-        default=None,
-        description="Model for generating fetch scripts (defaults to main LLM model)",
+    # Model selection per task
+    planning_model: str = Field(
+        default="gpt-4o-mini",
+        description="Model for query formulation and source classification (fast, cheap)",
+    )
+    codegen_model: str = Field(
+        default="claude-sonnet-4-20250514",
+        description="Model for generating fetch scripts (stronger model for better code)",
+    )
+    summarization_model: str = Field(
+        default="gpt-4o-mini",
+        description="Model for content summarization (fast, cheap)",
     )
 
     # Search result caching
