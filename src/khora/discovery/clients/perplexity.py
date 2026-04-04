@@ -90,7 +90,7 @@ class PerplexityClient:
             self._client = None
 
     @retry(
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError)),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout)),
         wait=wait_exponential(multiplier=1, min=2, max=30),
         stop=stop_after_attempt(3),
         reraise=True,

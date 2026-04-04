@@ -45,12 +45,14 @@ class FirecrawlCrawlResult:
     pages: list[FirecrawlScrapeResult] = field(default_factory=list)
     total_pages: int = 0
     success: bool = True
+    partial: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "pages": [p.to_dict() for p in self.pages],
             "total_pages": self.total_pages,
             "success": self.success,
+            "partial": self.partial,
         }
 
 
@@ -106,7 +108,7 @@ class FirecrawlClient:
         return self._client
 
     @retry(
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError)),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout)),
         wait=wait_exponential(multiplier=1, min=2, max=30),
         stop=stop_after_attempt(3),
         reraise=True,
@@ -160,6 +162,7 @@ class FirecrawlClient:
         """Crawl a site starting from the given URL.
 
         Starts an async crawl job and polls until completion.
+        On timeout, returns any pages accumulated so far with ``partial=True``.
 
         Args:
             url: Starting URL for the crawl.
@@ -175,7 +178,86 @@ class FirecrawlClient:
 
         logger.debug(f"Firecrawl crawl: {url} (max {limit} pages)")
 
-        # Start crawl job
+        # Start crawl job (retry on transient failures)
+        job_id = await self._start_crawl_job(url, limit)
+
+        if not job_id:
+            raise ValueError("Firecrawl did not return a crawl job ID")
+
+        logger.debug(f"Firecrawl crawl job started: {job_id}")
+
+        # Poll for completion, accumulating partial pages
+        accumulated_pages: list[FirecrawlScrapeResult] = []
+        seen_urls: set[str] = set()
+
+        for attempt in range(max_poll_attempts):
+            await asyncio.sleep(poll_interval)
+
+            status_resp = await client.get(f"/crawl/{job_id}")
+            status_resp.raise_for_status()
+            status_data = status_resp.json()
+            status = status_data.get("status", "")
+
+            # Accumulate pages from each poll response
+            for page_data in status_data.get("data", []):
+                page_url = page_data.get("metadata", {}).get("sourceURL", "")
+                if page_url and page_url in seen_urls:
+                    continue
+                if page_url:
+                    seen_urls.add(page_url)
+                accumulated_pages.append(
+                    FirecrawlScrapeResult(
+                        markdown=page_data.get("markdown", ""),
+                        html=page_data.get("html", ""),
+                        metadata=page_data.get("metadata", {}),
+                        links=page_data.get("links", []),
+                    )
+                )
+
+            if status == "completed":
+                logger.info(f"Firecrawl crawl complete: {len(accumulated_pages)} page(s) from {url}")
+                return FirecrawlCrawlResult(
+                    pages=accumulated_pages,
+                    total_pages=len(accumulated_pages),
+                    success=True,
+                )
+
+            if status == "failed":
+                error = status_data.get("error", "unknown error")
+                logger.error(f"Firecrawl crawl failed: {error}")
+                if accumulated_pages:
+                    logger.warning(f"Returning {len(accumulated_pages)} partial page(s) despite crawl failure")
+                    return FirecrawlCrawlResult(
+                        pages=accumulated_pages,
+                        total_pages=len(accumulated_pages),
+                        success=True,
+                        partial=True,
+                    )
+                return FirecrawlCrawlResult(success=False)
+
+            logger.debug(f"Firecrawl crawl poll {attempt + 1}/{max_poll_attempts}: {status}")
+
+        # Timeout — return whatever we've accumulated
+        logger.error(f"Firecrawl crawl timed out after {max_poll_attempts * poll_interval:.0f}s")
+        if accumulated_pages:
+            logger.warning(f"Returning {len(accumulated_pages)} partial page(s) on timeout")
+            return FirecrawlCrawlResult(
+                pages=accumulated_pages,
+                total_pages=len(accumulated_pages),
+                success=True,
+                partial=True,
+            )
+        return FirecrawlCrawlResult(success=False)
+
+    @retry(
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout)),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        stop=stop_after_attempt(3),
+        reraise=True,
+    )
+    async def _start_crawl_job(self, url: str, limit: int) -> str | None:
+        """Start a crawl job and return the job ID (retries on transient errors)."""
+        client = self._ensure_connected()
         response = await client.post(
             "/crawl",
             json={
@@ -186,46 +268,4 @@ class FirecrawlClient:
         )
         response.raise_for_status()
         job = response.json()
-        job_id = job.get("id")
-
-        if not job_id:
-            raise ValueError("Firecrawl did not return a crawl job ID")
-
-        logger.debug(f"Firecrawl crawl job started: {job_id}")
-
-        # Poll for completion
-        for attempt in range(max_poll_attempts):
-            await asyncio.sleep(poll_interval)
-
-            status_resp = await client.get(f"/crawl/{job_id}")
-            status_resp.raise_for_status()
-            status_data = status_resp.json()
-            status = status_data.get("status", "")
-
-            if status == "completed":
-                pages = []
-                for page_data in status_data.get("data", []):
-                    pages.append(
-                        FirecrawlScrapeResult(
-                            markdown=page_data.get("markdown", ""),
-                            html=page_data.get("html", ""),
-                            metadata=page_data.get("metadata", {}),
-                            links=page_data.get("links", []),
-                        )
-                    )
-                logger.info(f"Firecrawl crawl complete: {len(pages)} page(s) from {url}")
-                return FirecrawlCrawlResult(
-                    pages=pages,
-                    total_pages=len(pages),
-                    success=True,
-                )
-
-            if status == "failed":
-                error = status_data.get("error", "unknown error")
-                logger.error(f"Firecrawl crawl failed: {error}")
-                return FirecrawlCrawlResult(success=False)
-
-            logger.debug(f"Firecrawl crawl poll {attempt + 1}/{max_poll_attempts}: {status}")
-
-        logger.error(f"Firecrawl crawl timed out after {max_poll_attempts * poll_interval:.0f}s")
-        return FirecrawlCrawlResult(success=False)
+        return job.get("id")

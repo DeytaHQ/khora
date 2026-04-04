@@ -12,6 +12,8 @@ from pathlib import Path
 
 from loguru import logger
 
+from khora.cli.ontology.llm import BudgetExhaustedError
+
 from .clients.firecrawl import FirecrawlClient
 from .clients.perplexity import PerplexityClient
 from .planner import DiscoveryPlanner
@@ -86,7 +88,12 @@ class DiscoveryAgent:
                 break
 
             prev_phase = self._state.phase
-            next_phase = await handler()
+            try:
+                next_phase = await handler()
+            except BudgetExhaustedError as e:
+                self._ui.show_error(f"Budget exceeded: {e}")
+                self._state.warnings.append(f"Budget exceeded: {e}")
+                break
             self._state.phase = next_phase
 
             # Only count full cycles (REVIEW transitions), not individual phase steps
@@ -111,14 +118,20 @@ class DiscoveryAgent:
         self._state.conversation_history.append({"role": "user", "content": intent})
 
         # Use planner to formulate queries
-        plan = await self._planner.formulate_queries(
-            intent,
-            previous_queries=self._state.search_queries or None,
-        )
-        self._state.search_queries = plan.search_queries
+        try:
+            plan = await self._planner.formulate_queries(
+                intent,
+                previous_queries=self._state.search_queries or None,
+            )
+            self._state.search_queries = plan.search_queries
+        except Exception as e:
+            logger.warning(f"Query formulation failed, using intent as-is: {e}")
+            self._state.search_queries = [intent]
+            self._state.warnings.append(f"Query planning failed: {e}")
+
         self._state.total_cost_usd = self._planner.cost_usd
 
-        logger.debug(f"Query plan: {plan.domain} — {len(plan.search_queries)} queries")
+        logger.debug(f"Search queries: {len(self._state.search_queries)} queries")
         return AgentPhase.SEARCH
 
     async def _handle_search(self) -> AgentPhase:
@@ -133,6 +146,7 @@ class DiscoveryAgent:
         queries = self._state.search_queries or [self._state.user_intent]
         all_citations: list[str] = []
         last_answer = ""
+        failed_queries: list[tuple[str, str]] = []
 
         for query in queries:
             with self._ui.show_searching(query):
@@ -148,8 +162,17 @@ class DiscoveryAgent:
                     if response.answer:
                         last_answer = response.answer
                 except Exception as e:
+                    failed_queries.append((query, str(e)))
                     self._ui.show_search_failed(str(e))
                     logger.warning(f"Search failed for query '{query}': {e}")
+
+        if failed_queries and not all_citations:
+            for query, error in failed_queries:
+                self._ui.show_info(f"  [red]Query failed:[/] {query}: {error}")
+                self._state.warnings.append(f"Search failed for '{query}': {error}")
+        elif failed_queries:
+            for query, error in failed_queries:
+                self._state.warnings.append(f"Search failed for '{query}': {error}")
 
         if not all_citations:
             if last_answer:
@@ -380,73 +403,6 @@ class DiscoveryAgent:
         return new_sources
 
     # ------------------------------------------------------------------
-    # Index page detection
-    # ------------------------------------------------------------------
-
-    async def _check_for_index_pages(self) -> list[DiscoveredSource]:
-        """Check successful fetches for index pages and offer deep crawl.
-
-        Returns new DiscoveredSource objects for document links if the
-        user chooses to download them, or an empty list otherwise.
-        """
-        from .validation import ContentClass, classify_content
-
-        new_sources: list[DiscoveredSource] = []
-
-        for fetch in self._state.successful_fetches:
-            if not fetch.local_path or not Path(fetch.local_path).exists():
-                continue
-
-            try:
-                content = Path(fetch.local_path).read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-
-            classification = classify_content(content, fetch.source.url)
-            if classification.content_class != ContentClass.INDEX:
-                continue
-
-            doc_count = len(classification.document_links)
-            sub_count = len(classification.subpage_links)
-
-            if doc_count == 0 and sub_count == 0:
-                continue
-
-            self._ui.show_index_detected(fetch.source.title, doc_count, sub_count)
-
-            action = await self._ui.prompt_index_action(doc_count)
-
-            if action == "skip":
-                continue
-
-            links = classification.document_links
-            if action == "pick":
-                start, end = await self._ui.prompt_pick_range(len(links))
-                links = links[start:end]
-
-            # Create DiscoveredSource for each selected document link
-            for title, url in links:
-                ext = Path(url.split("?")[0]).suffix.lower()
-                from .state import SourceType
-
-                source_type = SourceType.PDF if ext == ".pdf" else SourceType.CSV if ext == ".csv" else SourceType.OTHER
-                new_sources.append(
-                    DiscoveredSource(
-                        url=url,
-                        title=title or Path(url).name,
-                        source_type=source_type,
-                        access_method="direct_download",
-                        discovered_via="index_extraction",
-                        discovery_query=self._state.user_intent,
-                        relevance_score=fetch.source.relevance_score,
-                    )
-                )
-
-            self._ui.show_info(f"  [{len(new_sources)} document(s) queued for download]")
-
-        return new_sources
-
-    # ------------------------------------------------------------------
     # Fetch helpers
     # ------------------------------------------------------------------
 
@@ -516,7 +472,12 @@ class DiscoveryAgent:
                 self._ui.show_fetch_saved(out_file.name, len(resp.content), unit="bytes")
 
                 # Attempt text extraction
-                from .extraction import extract_if_needed
+                from .extraction import extract_if_needed, get_extraction_warning
+
+                warning = get_extraction_warning(out_file)
+                if warning:
+                    self._ui.show_info(f"    [yellow]⚠ {warning}[/]")
+                    self._state.warnings.append(f"Text extraction failed for {out_file.name}")
 
                 extracted_path = extract_if_needed(out_file)
                 local_path = str(extracted_path) if extracted_path else str(out_file)
@@ -581,7 +542,9 @@ class DiscoveryAgent:
                 # AST validation
                 violations = validate_script(script)
                 if violations:
-                    last_error = "AST validation failed: " + "; ".join(str(v) for v in violations[:3])
+                    last_error = f"AST validation failed ({len(violations)} issues): " + "; ".join(
+                        str(v) for v in violations
+                    )
                     self._ui.show_info(f"    [dim]attempt {attempt}: validation failed, retrying...[/]")
                     continue
 
@@ -631,7 +594,14 @@ class DiscoveryAgent:
                     )
                     return  # Success — exit retry loop
                 else:
-                    last_error = result.stderr or result.summary.get("error", "Script produced no output")
+                    last_error = (
+                        result.stderr
+                        or (result.stdout[-500:] if result.stdout else None)
+                        or result.summary.get(
+                            "error",
+                            f"Script failed with no output (exit code: {result.summary.get('exit_code', 'unknown')})",
+                        )
+                    )
                     self._ui.show_info(f"    [dim]attempt {attempt}: execution failed, retrying...[/]")
                     continue
 
