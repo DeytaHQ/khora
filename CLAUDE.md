@@ -42,13 +42,16 @@ uv run khora ontology preview <file.yaml>         # Rich preview
 
 ### Version Bumps
 
-When bumping the version, update all of the following and regenerate lockfiles:
+Khora uses `hatch-vcs` — the package version comes from git tags (`git tag vX.Y.Z`). Only khora-accel needs a manual version in source:
 
-1. `pyproject.toml`
-2. `src/khora/__init__.py`
-3. `rust/khora-accel/Cargo.toml`
-4. `rust/khora-accel/pyproject.toml`
-5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
+1. `rust/khora-accel/Cargo.toml` — update `version = "X.Y.Z"`
+2. Run `cargo generate-lockfile` in `rust/khora-accel/` to update `rust/Cargo.lock`
+3. Commit both `Cargo.toml` and `Cargo.lock` in the same PR
+4. After merge: `git tag vX.Y.Z && git push origin vX.Y.Z`
+
+### Before Creating PRs
+
+Always run `make format && make test` before committing. CI will reject PRs that fail formatting or tests.
 
 ## Gotchas
 
