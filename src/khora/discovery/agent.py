@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -52,11 +53,23 @@ class DiscoveryAgent:
         planner: DiscoveryPlanner | None = None,
         perplexity: PerplexityClient | None = None,
         firecrawl: FirecrawlClient | None = None,
+        settings: Any | None = None,
     ) -> None:
         self._ui = ui
         self._output_dir = output_dir
         self._state = state or SessionState(output_dir=str(output_dir))
-        self._planner = planner or DiscoveryPlanner()
+
+        if planner:
+            self._planner = planner
+        elif settings:
+            self._planner = DiscoveryPlanner(
+                planning_model=settings.planning_model,
+                codegen_model=settings.codegen_model,
+                summarization_model=settings.summarization_model,
+                budget_usd=settings.max_cost_usd,
+            )
+        else:
+            self._planner = DiscoveryPlanner()
 
         # Detect available API keys
         self._has_perplexity = perplexity is not None or bool(os.environ.get("PERPLEXITY_API_KEY"))
@@ -513,12 +526,12 @@ class DiscoveryAgent:
         """Generate a fetch script via LLM, validate, confirm, and execute.
 
         Retries up to 3 times on generation/validation/execution failures,
-        feeding the error back to the LLM for correction.
+        feeding the cumulative error history back to the LLM for correction.
         """
         from .codegen import execute_script, extract_urls, render_template, validate_script
 
         max_attempts = 3
-        last_error = ""
+        error_history: list[dict] = []
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -528,13 +541,8 @@ class DiscoveryAgent:
                 else:
                     self._ui.show_info(f"[dim]Retrying script generation (attempt {attempt}/{max_attempts})...[/]")
 
-                # Include previous error for correction
-                extra_context = ""
-                if last_error:
-                    extra_context = f"\n\nPrevious attempt failed: {last_error[:500]}\nPlease fix the issue and try a different approach."
-
                 raw_body = await self._planner.generate_fetch_script(
-                    src, str(self._output_dir), extra_context=extra_context
+                    src, str(self._output_dir), error_history=error_history or None
                 )
 
                 script = render_template(title=src.title, url=src.url, fetch_body=raw_body)
@@ -542,8 +550,13 @@ class DiscoveryAgent:
                 # AST validation
                 violations = validate_script(script)
                 if violations:
-                    last_error = f"AST validation failed ({len(violations)} issues): " + "; ".join(
-                        str(v) for v in violations
+                    error_history.append(
+                        {
+                            "attempt": attempt,
+                            "error_type": "validation",
+                            "error": f"AST validation failed ({len(violations)} issues): "
+                            + "; ".join(str(v) for v in violations),
+                        }
                     )
                     self._ui.show_info(f"    [dim]attempt {attempt}: validation failed, retrying...[/]")
                     continue
@@ -594,7 +607,7 @@ class DiscoveryAgent:
                     )
                     return  # Success — exit retry loop
                 else:
-                    last_error = (
+                    exec_error = (
                         result.stderr
                         or (result.stdout[-500:] if result.stdout else None)
                         or result.summary.get(
@@ -602,16 +615,30 @@ class DiscoveryAgent:
                             f"Script failed with no output (exit code: {result.summary.get('exit_code', 'unknown')})",
                         )
                     )
+                    error_history.append(
+                        {
+                            "attempt": attempt,
+                            "error_type": "execution",
+                            "error": str(exec_error)[:500],
+                        }
+                    )
                     self._ui.show_info(f"    [dim]attempt {attempt}: execution failed, retrying...[/]")
                     continue
 
             except Exception as e:
-                last_error = str(e)
-                self._ui.show_info(f"    [dim]attempt {attempt}: {last_error[:100]}[/]")
+                error_history.append(
+                    {
+                        "attempt": attempt,
+                        "error_type": "exception",
+                        "error": str(e)[:500],
+                    }
+                )
+                self._ui.show_info(f"    [dim]attempt {attempt}: {str(e)[:100]}[/]")
                 if attempt < max_attempts:
                     continue
 
         # All attempts exhausted
+        last_error = error_history[-1]["error"] if error_history else "unknown"
         self._ui.show_fetch_failed(f"Failed after {max_attempts} attempts: {last_error[:200]}")
         self._state.fetched.append(FetchResult(source=src, local_path="", error=last_error[:500]))
 

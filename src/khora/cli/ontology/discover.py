@@ -93,8 +93,16 @@ async def run_discovery_session(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Load discovery settings from config (if available)
+    try:
+        from khora.config.schema import KhoraConfig
+
+        discovery_settings = KhoraConfig().discovery
+    except Exception:
+        discovery_settings = None
+
     # Run the agent
-    agent = DiscoveryAgent(ui=ui, output_dir=output_dir, state=state)
+    agent = DiscoveryAgent(ui=ui, output_dir=output_dir, state=state, settings=discovery_settings)
     final_state = await agent.run()
 
     # Save session for potential resume
