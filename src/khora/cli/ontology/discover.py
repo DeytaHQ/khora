@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 import click
+from loguru import logger
 
 from .tui.console import console
 
@@ -95,6 +96,26 @@ async def run_discovery_session(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Initialize discovery memory (optional -- requires surrealdb)
+    memory = None
+    try:
+        from khora.discovery.memory import DiscoveryMemory
+
+        data_dir = output_dir / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        memory = DiscoveryMemory(str(data_dir / ".chronicle.db"))
+        await memory.connect()
+        if memory.available and memory._connected:
+            stats = await memory.get_stats()
+            if stats["total"] > 0:
+                ui.show_info(
+                    f"[dim]Memory loaded: {stats['total']} entries"
+                    f" ({stats['successes']} successes, {stats['failures']} failures)[/]"
+                )
+    except Exception as e:
+        logger.debug(f"Discovery memory not available: {e}")
+        memory = None
+
     # Load discovery settings from config (if available)
     try:
         from khora.config.schema import KhoraConfig
@@ -112,8 +133,15 @@ async def run_discovery_session(
         discovery_settings = DiscoverySettings(litellm_config=litellm_config)
 
     # Run the agent
-    agent = DiscoveryAgent(ui=ui, output_dir=output_dir, state=state, settings=discovery_settings)
+    agent = DiscoveryAgent(ui=ui, output_dir=output_dir, state=state, settings=discovery_settings, memory=memory)
     final_state = await agent.run()
+
+    # Close discovery memory
+    if memory:
+        try:
+            await memory.close()
+        except Exception:
+            pass
 
     # Save session for potential resume
     session_file = output_dir / ".discovery_session.json"
