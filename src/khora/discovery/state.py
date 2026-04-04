@@ -254,6 +254,9 @@ class SessionState:
     total_cost_usd: float = 0.0
     max_cost_usd: float = 2.0
 
+    # Accumulated warnings (surfaced to user at end of session)
+    warnings: list[str] = field(default_factory=list)
+
     @property
     def selected_sources(self) -> list[DiscoveredSource]:
         """Return the sources the user has selected."""
@@ -284,6 +287,7 @@ class SessionState:
             "max_iterations": self.max_iterations,
             "total_cost_usd": self.total_cost_usd,
             "max_cost_usd": self.max_cost_usd,
+            "warnings": self.warnings,
         }
 
     @classmethod
@@ -303,6 +307,7 @@ class SessionState:
             max_iterations=data.get("max_iterations", 5),
             total_cost_usd=data.get("total_cost_usd", 0.0),
             max_cost_usd=data.get("max_cost_usd", 2.0),
+            warnings=data.get("warnings", []),
         )
 
     def save(self, path: str | Path) -> None:

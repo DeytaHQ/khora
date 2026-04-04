@@ -135,6 +135,20 @@ _EXTRACTORS: dict[str, callable] = {
 }
 
 
+def get_extraction_warning(path: Path) -> str | None:
+    """Return a user-facing warning if extraction would fail for this file type.
+
+    Checks whether the required optional dependency is installed for the
+    given file extension.  Returns ``None`` when everything looks fine.
+    """
+    ext = path.suffix.lower()
+    if ext == ".pdf" and not _HAS_PYMUPDF:
+        return f"Cannot extract text from {path.name} — install pymupdf: pip install pymupdf"
+    if ext in (".xlsx", ".xls") and not _HAS_OPENPYXL:
+        return f"Cannot extract text from {path.name} — install openpyxl: pip install openpyxl"
+    return None
+
+
 def extract_if_needed(path: Path) -> Path | None:
     """Extract text from a binary file if an extractor is available.
 
