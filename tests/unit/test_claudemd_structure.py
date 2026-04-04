@@ -107,13 +107,11 @@ class TestContentPreservation:
         assert "_SurrealDBEntityKeyGate" in claude_md_content
 
     def test_version_bumps_checklist(self, claude_md_content: str) -> None:
-        """All 5 version bump items must be listed."""
+        """Version bump section must reference key files and commands."""
         for item in [
-            "pyproject.toml",
-            "src/khora/__init__.py",
             "rust/khora-accel/Cargo.toml",
-            "rust/khora-accel/pyproject.toml",
-            "uv lock",
+            "cargo generate-lockfile",
+            "git tag",
         ]:
             assert item in claude_md_content, f"Version bump checklist missing: {item}"
 
