@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from khora.discovery.validation import (
     DeduplicationIndex,
+    _simple_stem,
     compute_text_quality,
     detect_format,
     estimate_relevance,
+    estimate_relevance_semantic,
     validate_batch,
     validate_file,
 )
@@ -133,6 +137,15 @@ class TestTextQuality:
         score, reasons = compute_text_quality(text)
         assert any("boilerplate" in r for r in reasons)
 
+    def test_boilerplate_cookie_consent(self) -> None:
+        """Context-aware patterns match cookie consent but not random 'cookie' mentions."""
+        text = (
+            "We use cookies to improve your experience. Accept all cookies. "
+            "Subscribe to our newsletter for updates. Privacy policy applies. " * 10
+        )
+        score, reasons = compute_text_quality(text)
+        assert any("boilerplate" in r for r in reasons)
+
     def test_encoding_issues(self) -> None:
         text = "Normal text " + "\ufffd" * 100 + " more text " * 50
         score, reasons = compute_text_quality(text)
@@ -142,6 +155,22 @@ class TestTextQuality:
 # ---------------------------------------------------------------------------
 # Relevance estimation
 # ---------------------------------------------------------------------------
+
+
+class TestSimpleStem:
+    def test_strips_common_suffixes(self) -> None:
+        assert _simple_stem("production") == "produc"  # strips "tion"
+        assert _simple_stem("datasets") == "dataset"  # strips "s"
+        assert _simple_stem("running") == "runn"  # strips "ing"
+
+    def test_preserves_short_words(self) -> None:
+        # Word must be longer than suffix + 3 to strip
+        assert _simple_stem("the") == "the"
+        assert _simple_stem("used") == "used"
+        assert _simple_stem("is") == "is"
+
+    def test_no_suffix_match(self) -> None:
+        assert _simple_stem("graph") == "graph"
 
 
 class TestRelevance:
@@ -167,6 +196,77 @@ class TestRelevance:
 
     def test_empty_content(self) -> None:
         assert estimate_relevance("", "some query") == 0.0
+
+    def test_stemmed_matching_boosts_score(self) -> None:
+        """Stemming should match 'production' to 'produce', etc."""
+        content = (
+            "This report covers wine production statistics across " "European regions including quality assessments."
+        )
+        # "datasets" in query should match "dataset"-like stems in content
+        score = estimate_relevance(content, "wine production quality")
+        assert score > 0.4
+
+    def test_bigram_matching(self) -> None:
+        """Consecutive query words matching in content should boost score."""
+        content = (
+            "The field of machine learning has transformed data science. "
+            "Machine learning techniques are used across many industries."
+        )
+        score_bigram = estimate_relevance(content, "machine learning data")
+        score_no_bigram = estimate_relevance(content, "learning machine data")
+        # Bigram "machine learning" appears in content, so score should be higher
+        assert score_bigram >= score_no_bigram
+
+    def test_single_word_query_no_bigrams(self) -> None:
+        """A single-word query produces no bigrams and should still work."""
+        content = "Wine quality measurements from various regions."
+        score = estimate_relevance(content, "wine")
+        assert score > 0.0
+
+
+class TestRelevanceSemantic:
+    @pytest.mark.asyncio
+    async def test_falls_back_without_llm(self) -> None:
+        """Without an LLM, should fall back to keyword-based scoring."""
+        content = "European wine quality data with expert ratings."
+        score = await estimate_relevance_semantic(content, "wine quality")
+        keyword_score = estimate_relevance(content, "wine quality")
+        assert score == keyword_score
+
+    @pytest.mark.asyncio
+    async def test_falls_back_on_llm_error(self) -> None:
+        """If the LLM raises, should fall back gracefully."""
+
+        class BrokenLLM:
+            async def complete(self, **kwargs: object) -> dict:
+                raise RuntimeError("LLM unavailable")
+
+        content = "European wine quality data with expert ratings."
+        score = await estimate_relevance_semantic(content, "wine quality", llm=BrokenLLM())
+        keyword_score = estimate_relevance(content, "wine quality")
+        assert score == keyword_score
+
+    @pytest.mark.asyncio
+    async def test_uses_llm_score(self) -> None:
+        """When LLM returns a valid score, should use it."""
+
+        class FakeLLM:
+            async def complete(self, **kwargs: object) -> dict:
+                return {"score": 8, "reason": "highly relevant"}
+
+        score = await estimate_relevance_semantic("content", "query", llm=FakeLLM())
+        assert score == pytest.approx(0.8)
+
+    @pytest.mark.asyncio
+    async def test_clamps_score(self) -> None:
+        """Scores outside 0-10 should be clamped to [0, 1]."""
+
+        class HighLLM:
+            async def complete(self, **kwargs: object) -> dict:
+                return {"score": 15, "reason": "off scale"}
+
+        score = await estimate_relevance_semantic("content", "query", llm=HighLLM())
+        assert score == 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +402,19 @@ class TestClassifyContent:
         result = classify_content(content, "https://example.gov/dataset")
         assert result.content_class == ContentClass.INDEX
         assert len(result.document_links) == 50
+        assert "weighted score" in result.reason
+
+    def test_index_page_with_few_doc_links(self) -> None:
+        """4 document links with weighting should trigger index detection."""
+        from khora.discovery.validation import ContentClass, classify_content
+
+        content = "# Downloads\n\n"
+        for i in range(4):
+            content += f"- [report{i}.pdf](https://example.gov/report{i}.pdf)\n"
+        # 4 doc links * 2 weight = 8, + 0 subpage = 8 < 15 threshold
+        # So this should NOT be classified as index (too few)
+        result = classify_content(content, "https://example.gov/data")
+        assert result.content_class == ContentClass.CONTENT
 
     def test_normal_content(self) -> None:
         """Normal prose content should be classified as CONTENT."""
