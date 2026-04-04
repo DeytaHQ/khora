@@ -277,6 +277,7 @@ class DiscoveryAgent:
 
                 # Enrich with LLM summaries for the top results (limit to 5 to save cost)
                 enriched: list[dict] = []
+                semantic_scored = 0
                 for vr in val_results:
                     entry = vr.to_dict()
                     if vr.decision in ("accept", "review") and len(enriched) < 5:
@@ -286,6 +287,25 @@ class DiscoveryAgent:
                             entry["content_summary"] = summary
                         except Exception:
                             entry["content_summary"] = ""
+
+                    # Optionally enhance borderline results with semantic relevance
+                    if vr.decision == "review" and semantic_scored < 5:
+                        try:
+                            review_content = Path(vr.path).read_text(encoding="utf-8", errors="replace")
+                            from .validation import estimate_relevance_semantic
+
+                            sem = await estimate_relevance_semantic(
+                                review_content,
+                                self._state.user_intent,
+                                llm=self._planner._summary_llm,
+                            )
+                            entry["semantic_score"] = round(sem, 3)
+                            if sem > 0.6:
+                                entry["decision"] = "accept"  # upgrade borderline
+                            semantic_scored += 1
+                        except Exception:
+                            pass
+
                     enriched.append(entry)
 
                 self._ui.show_validation_results(enriched)

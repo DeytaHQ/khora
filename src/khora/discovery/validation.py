@@ -13,12 +13,15 @@ import csv
 import hashlib
 import io
 import json
+import logging
 import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Quality thresholds
@@ -185,6 +188,21 @@ def _is_valid_csv(content: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+_BOILERPLATE_PATTERNS = [
+    re.compile(r"\blorem\s+ipsum\b", re.IGNORECASE),
+    re.compile(r"\bexample\s+data\b", re.IGNORECASE),
+    re.compile(r"\bplaceholder\b", re.IGNORECASE),
+    re.compile(r"\bcoming\s+soon\b", re.IGNORECASE),
+    re.compile(r"\bunder\s+construction\b", re.IGNORECASE),
+    re.compile(r"\bcookie\s+(policy|consent|notice|preferences)\b", re.IGNORECASE),
+    re.compile(r"\bprivacy\s+policy\b", re.IGNORECASE),
+    re.compile(r"\bterms\s+(of\s+)?(service|use)\b", re.IGNORECASE),
+    re.compile(r"\bsubscribe\s+to\s+(our\s+)?newsletter\b", re.IGNORECASE),
+    re.compile(r"\bwe\s+use\s+cookies\b", re.IGNORECASE),
+    re.compile(r"\baccept\s+(all\s+)?cookies\b", re.IGNORECASE),
+]
+
+
 def compute_text_quality(content: str) -> tuple[float, list[str]]:
     """Compute text quality score from statistical metrics.
 
@@ -240,19 +258,7 @@ def compute_text_quality(content: str) -> tuple[float, list[str]]:
         scores.append(0.8)
 
     # 4. Boilerplate/placeholder detection
-    lower = content.lower()
-    boilerplate_patterns = [
-        "lorem ipsum",
-        "todo",
-        "example data",
-        "placeholder",
-        "coming soon",
-        "under construction",
-        "cookie",
-        "privacy policy",
-        "terms of service",
-    ]
-    boilerplate_hits = sum(1 for p in boilerplate_patterns if p in lower)
+    boilerplate_hits = sum(1 for p in _BOILERPLATE_PATTERNS if p.search(content))
     if boilerplate_hits >= 3:
         reasons.append(f"boilerplate content detected ({boilerplate_hits} patterns)")
         scores.append(0.2)
@@ -291,40 +297,133 @@ def _shannon_entropy(words: list[str]) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _simple_stem(word: str) -> str:
+    """Lightweight English suffix stripping (no external dependencies)."""
+    for suffix in (
+        "ation",
+        "tion",
+        "sion",
+        "ment",
+        "ness",
+        "ence",
+        "ance",
+        "ible",
+        "able",
+        "ious",
+        "eous",
+        "ings",
+        "ally",
+        "ful",
+        "less",
+        "ing",
+        "ity",
+        "ies",
+        "ous",
+        "ive",
+        "ent",
+        "ant",
+        "ist",
+        "ism",
+        "ers",
+        "ed",
+        "ly",
+        "er",
+        "es",
+        "al",
+        "ic",
+        "en",
+        "or",
+        "ty",
+        "ry",
+        "ar",
+        "s",
+    ):
+        if len(word) > len(suffix) + 3 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
 def estimate_relevance(content: str, query: str) -> float:
     """Estimate content relevance to the user's query.
 
-    Uses keyword overlap (TF-based) — lightweight, no embedding model needed.
-    For production use, swap with embedding similarity.
+    Uses keyword overlap with stemming and bigram matching —
+    lightweight, no embedding model needed.
     """
     if not content or not query:
         return 0.0
 
     # Tokenize
-    query_words = set(re.findall(r"\w{3,}", query.lower()))
-    content_words = re.findall(r"\w{3,}", content.lower())
+    query_tokens = re.findall(r"\w{3,}", query.lower())
+    content_tokens = re.findall(r"\w{3,}", content.lower())
 
-    if not query_words or not content_words:
+    if not query_tokens or not content_tokens:
         return 0.0
 
-    # Count query term occurrences in content
-    content_counter = Counter(content_words)
-    total_content_words = len(content_words)
+    # Exact word matching
+    query_words = set(query_tokens)
+    content_counter = Counter(content_tokens)
+    exact_hits = sum(1 for qw in query_words if content_counter[qw] > 0)
 
-    hits = 0
-    for qw in query_words:
-        if content_counter[qw] > 0:
-            hits += 1
+    # Stemmed matching (catches "datasets" vs "dataset", "production" vs "produce")
+    query_stems = {_simple_stem(w) for w in query_tokens}
+    content_stems = Counter(_simple_stem(w) for w in content_tokens)
+    stem_hits = sum(1 for qs in query_stems if content_stems[qs] > 0)
 
-    # Coverage: what fraction of query terms appear in content
-    coverage = hits / len(query_words)
+    # Bigram matching (catches "machine learning", "wine production")
+    query_bigrams: set[str] = set()
+    for i in range(len(query_tokens) - 1):
+        query_bigrams.add(f"{query_tokens[i]} {query_tokens[i + 1]}")
+
+    content_bigram_set: set[str] = set()
+    for i in range(len(content_tokens) - 1):
+        content_bigram_set.add(f"{content_tokens[i]} {content_tokens[i + 1]}")
+
+    bigram_hits = len(query_bigrams & content_bigram_set)
+
+    # Coverage scores
+    exact_coverage = exact_hits / len(query_words) if query_words else 0
+    stem_coverage = stem_hits / len(query_stems) if query_stems else 0
+    bigram_coverage = bigram_hits / len(query_bigrams) if query_bigrams else 0
 
     # Density: how frequently query terms appear
+    total_content_words = len(content_tokens)
     query_term_count = sum(content_counter[qw] for qw in query_words)
     density = min(1.0, query_term_count / max(1, total_content_words) * 20)
 
-    # Weighted combination
-    return 0.6 * coverage + 0.4 * density
+    # Weighted combination: stem coverage > exact coverage > density > bigrams
+    return 0.30 * exact_coverage + 0.30 * stem_coverage + 0.20 * density + 0.20 * bigram_coverage
+
+
+async def estimate_relevance_semantic(
+    content: str,
+    query: str,
+    *,
+    llm: Any | None = None,
+) -> float:
+    """Estimate relevance using LLM (optional, budget-aware).
+
+    Falls back to keyword-based ``estimate_relevance()`` on error or if
+    no *llm* is provided.
+    """
+    if llm is None:
+        return estimate_relevance(content, query)
+
+    truncated = content[:2000]
+    try:
+        result = await llm.complete(
+            system=(
+                "Rate how relevant this content is to the user's query on a scale of 0 to 10. "
+                "10 = perfectly relevant dataset/source, 0 = completely unrelated. "
+                'Return JSON: {"score": <0-10>, "reason": "brief explanation"}'
+            ),
+            user=f"Query: {query}\n\nContent preview:\n{truncated}",
+            temperature=0.1,
+        )
+        score = float(result.get("score", 5)) / 10.0
+        return max(0.0, min(1.0, score))
+    except Exception as e:
+        logger.debug("Semantic relevance failed, falling back to keyword: %s", e)
+        return estimate_relevance(content, query)
 
 
 # ---------------------------------------------------------------------------
@@ -442,10 +541,15 @@ def classify_content(content: str, source_url: str = "") -> ContentClassificatio
         return result
 
     # -- Index detection --
-    if result.link_count > 10 and len(result.document_links) > 5:
-        # Mostly file links = file index
+    # Weight document links higher than generic links
+    doc_link_weight = len(result.document_links) * 2  # PDFs/CSVs are strong index signals
+    total_weighted_links = doc_link_weight + len(result.subpage_links)
+
+    if total_weighted_links > 15 and len(result.document_links) > 3:
         result.content_class = ContentClass.INDEX
-        result.reason = f"{len(result.document_links)} document links detected"
+        result.reason = (
+            f"{len(result.document_links)} document links detected " f"(weighted score: {total_weighted_links})"
+        )
         return result
 
     if result.link_count > 10 and result.prose_lines > 0:
