@@ -179,6 +179,11 @@ pub fn detect_temporal_category(query: &str) -> u8 {
         add(2, &[
             "currently", "right now", "at present", "presently",
             "these days", "nowadays", "at this point", "at the moment",
+            // Implicit state-query patterns for conversational memory (synced from Python _accel.py)
+            " does he still", " does she still", " do they still",
+            " is he still", " is she still", " are they still",
+            "'s current ", " current job", " current role", " current position",
+            " live now", " work now", " working now", " living now", " doing now",
         ]);
 
         // Category 3: ORDINAL
@@ -267,6 +272,11 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
         add(2, &[
             "currently", "right now", "at present", "presently",
             "these days", "nowadays", "at this point", "at the moment",
+            // Implicit state-query patterns for conversational memory (synced from Python _accel.py)
+            " does he still", " does she still", " do they still",
+            " is he still", " is she still", " are they still",
+            "'s current ", " current job", " current role", " current position",
+            " live now", " work now", " working now", " living now", " doing now",
         ]);
         add(3, &[
             "first ", " earliest", "which came", "what came",
@@ -513,6 +523,22 @@ mod tests {
     #[test]
     fn test_detect_temporal_category_switched_to() {
         assert_eq!(detect_temporal_category("He switched to piano"), 6);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_state_query_current_job() {
+        // "current job" is a STATE_QUERY (cat 2) pattern — no overlap with CHANGE
+        assert_eq!(detect_temporal_category("What is her current job?"), 2);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_state_query_live_now() {
+        assert_eq!(detect_temporal_category("Where does she live now?"), 2);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_state_query_working_now() {
+        assert_eq!(detect_temporal_category("What is he working now?"), 2);
     }
 
     #[test]
