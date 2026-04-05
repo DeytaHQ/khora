@@ -179,7 +179,7 @@ class AGEBackend(GraphBackendBase):
         """
         cols = columns or ["v agtype"]
         col_clause = ", ".join(cols)
-        sql = f"SELECT * FROM cypher('{self._graph_name}', $$ {cypher_query} $$) " f"AS ({col_clause})"
+        sql = f"SELECT * FROM cypher('{self._graph_name}', $$ {cypher_query} $$) " f"AS ({col_clause})"  # nosec B608
 
         result = await session.execute(text(sql))
         rows = result.fetchall()
