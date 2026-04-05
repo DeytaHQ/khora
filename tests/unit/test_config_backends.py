@@ -3,6 +3,7 @@
 import pytest
 
 from khora.config.schema import (
+    AGEConfig,
     KhoraConfig,
     KuzuConfig,
     MemgraphConfig,
@@ -92,6 +93,20 @@ class TestDiscriminatedUnionParsing:
             }
         )
         assert isinstance(settings.graph, Neo4jConfig)
+
+    def test_age_config_from_dict(self):
+        settings = StorageSettings.model_validate(
+            {
+                "graph": {
+                    "backend": "age",
+                    "url": "postgresql://localhost:5432/khora",
+                    "graph_name": "my_graph",
+                },
+            }
+        )
+        assert isinstance(settings.graph, AGEConfig)
+        assert settings.graph.url == "postgresql://localhost:5432/khora"
+        assert settings.graph.graph_name == "my_graph"
 
     def test_pgvector_is_default_vector_backend(self):
         settings = StorageSettings.model_validate(

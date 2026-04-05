@@ -32,6 +32,7 @@ _GRAPH_REGISTRY: dict[str, tuple[str, str]] = {
     "memgraph": ("khora.storage.backends.memgraph", "MemgraphBackend"),
     "neptune": ("khora.storage.backends.neptune", "NeptuneBackend"),
     "surrealdb": ("khora.storage.backends.surrealdb.graph", "SurrealDBGraphAdapter"),
+    "age": ("khora.storage.backends.age", "AGEBackend"),
 }
 
 _VECTOR_REGISTRY: dict[str, tuple[str, str]] = {
