@@ -304,12 +304,12 @@ class DiscoveryUI:
             )
         )
 
-    async def prompt_review_action(self) -> Literal["accept", "retry", "search", "add", "quit"]:
+    async def prompt_review_action(self) -> Literal["accept", "retry", "search", "add", "explore", "quit"]:
         """Ask the user what to do after reviewing fetched data."""
         choice = await asyncio.to_thread(
             Prompt.ask,
-            f"[{_ACCENT}]>[/] Action [{_DIM}](accept/add/retry/search/quit)[/]",
-            choices=["accept", "add", "retry", "search", "quit"],
+            f"[{_ACCENT}]>[/] Action [{_DIM}](accept/add/retry/search/[e]xplore/quit)[/]",
+            choices=["accept", "add", "retry", "search", "explore", "quit"],
             default="accept",
         )
         return choice  # type: ignore[return-value]
@@ -385,6 +385,48 @@ class DiscoveryUI:
     def show_cost(self, cost_usd: float) -> None:
         """Show running cost estimate."""
         self._console.print(f"[{_DIM}]cost: ~${cost_usd:.2f}[/]")
+
+    def show_exploration_suggestions(self, suggestions: list[str], analysis: str = "") -> None:
+        """Display exploration follow-up query suggestions."""
+        if analysis:
+            self._console.print(f"\n[dim]{analysis}[/]")
+        if not suggestions:
+            self._console.print("[dim]No further exploration suggested — data looks comprehensive.[/]")
+            return
+        self._console.print("\n[bold]Suggested follow-up searches:[/]")
+        for i, suggestion in enumerate(suggestions, 1):
+            self._console.print(f"  {i}. {suggestion}")
+
+    async def prompt_exploration_choice(self, suggestions: list[str]) -> str | None:
+        """Prompt user to pick an exploration query or skip.
+
+        Returns:
+            The chosen query string, or None to skip exploration.
+        """
+        if not suggestions:
+            return None
+
+        choices = [str(i) for i in range(1, len(suggestions) + 1)] + ["s", "c"]
+        prompt_text = f"Pick a query (1-{len(suggestions)}) or [s]kip / [c]ustom: "
+
+        choice = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: Prompt.ask(prompt_text, choices=choices, default="s")
+        )
+
+        if choice == "s":
+            return None
+        elif choice == "c":
+            custom = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: Prompt.ask("Enter custom search query")
+            )
+            return custom.strip() or None
+        else:
+            idx = int(choice) - 1
+            return suggestions[idx] if 0 <= idx < len(suggestions) else None
+
+    def show_exploration_depth(self, current: int, maximum: int) -> None:
+        """Show current exploration depth."""
+        self._console.print(f"[dim]Exploration depth: {current}/{maximum}[/]")
 
 
 # ---------------------------------------------------------------------------
