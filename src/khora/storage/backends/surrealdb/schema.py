@@ -135,6 +135,8 @@ DEFINE FIELD IF NOT EXISTS updated_at ON relates_to TYPE datetime DEFAULT time::
 DEFINE INDEX IF NOT EXISTS idx_relates_to_namespace ON relates_to FIELDS namespace_id;
 DEFINE INDEX IF NOT EXISTS idx_relates_to_ns_type ON relates_to FIELDS namespace_id, relationship_type;
 DEFINE INDEX IF NOT EXISTS idx_relates_to_ns_weight ON relates_to FIELDS namespace_id, relationship_type, weight;
+DEFINE INDEX IF NOT EXISTS idx_relates_to_in ON relates_to FIELDS in;
+DEFINE INDEX IF NOT EXISTS idx_relates_to_out ON relates_to FIELDS out;
 
 -- Episode (aligned with SQLAlchemy Episode model)
 DEFINE TABLE IF NOT EXISTS episode SCHEMAFULL;

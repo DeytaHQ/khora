@@ -403,12 +403,8 @@ class SurrealDBRelationalAdapter:
     async def delete_document(self, document_id: UUID) -> bool:
         """Delete a document, returning True if it existed."""
         rid = _record_id("document", document_id)
-        # Check existence first to return accurate bool
-        existing = await self._conn.query_one("SELECT id FROM $rid", {"rid": rid})
-        if existing is None:
-            return False
-        await self._conn.execute("DELETE $rid", {"rid": rid})
-        return True
+        deleted = await self._conn.query("DELETE $rid RETURN BEFORE", {"rid": rid})
+        return bool(deleted)
 
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
         """Get a document by content checksum within a namespace."""

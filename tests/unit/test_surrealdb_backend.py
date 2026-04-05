@@ -744,23 +744,23 @@ class TestRelationalAdapterDocument:
 
         doc_id = uuid4()
         conn = _make_mock_conn()
-        conn.query_one = AsyncMock(return_value={"id": f"document:⟨{doc_id!s}⟩"})
+        conn.query = AsyncMock(return_value=[{"id": f"document:⟨{doc_id!s}⟩"}])
         adapter = SurrealDBRelationalAdapter(conn)
 
         result = await adapter.delete_document(doc_id)
         assert result is True
-        conn.execute.assert_awaited_once()
+        conn.query.assert_awaited_once()
 
     async def test_delete_document_missing(self) -> None:
         from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
 
         conn = _make_mock_conn()
-        conn.query_one = AsyncMock(return_value=None)
+        conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBRelationalAdapter(conn)
 
         result = await adapter.delete_document(uuid4())
         assert result is False
-        conn.execute.assert_not_awaited()
+        conn.query.assert_awaited_once()
 
     async def test_get_document_by_checksum(self) -> None:
         from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
@@ -3615,3 +3615,255 @@ class TestSurrealDBGetDocumentsByChecksums:
         adapter = SurrealDBRelationalAdapter(conn)
         result = await adapter.get_documents_by_checksums(uuid4(), [])
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# SurrealDB optimizations (DYT-1121)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSurrealDBDepthCapRaised:
+    """Verify that graph depth caps were raised from 3 to 6."""
+
+    async def test_find_paths_depth_5_not_capped_to_3(self) -> None:
+        """find_paths with max_depth=5 generates d1..d5 columns, not d1..d3."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        src_id = uuid4()
+        tgt_id = uuid4()
+
+        conn = _make_mock_conn()
+        # Return empty to verify query shape without needing full result
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        await adapter.find_paths(ns_id, src_id, tgt_id, max_depth=5)
+
+        conn.query.assert_awaited_once()
+        sql = conn.query.call_args[0][0]
+        # Should contain d5 (depth 5 column) since cap is now 6
+        assert " AS d5" in sql
+        # Should NOT contain d6 since max_depth=5
+        assert " AS d6" not in sql
+
+    async def test_find_paths_depth_8_capped_to_6(self) -> None:
+        """find_paths with max_depth=8 caps to 6."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        src_id = uuid4()
+        tgt_id = uuid4()
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        await adapter.find_paths(ns_id, src_id, tgt_id, max_depth=8)
+
+        sql = conn.query.call_args[0][0]
+        assert " AS d6" in sql
+        assert " AS d7" not in sql
+
+
+@pytest.mark.unit
+class TestSurrealDBSingleQueryTemporalNeighbors:
+    """Verify get_temporal_neighbors uses a single query with d1..dN columns."""
+
+    async def test_single_query_for_multiple_hops(self) -> None:
+        """get_temporal_neighbors with max_hops=4 issues exactly one query."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        entity_id = uuid4()
+        ns_id = uuid4()
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        await adapter.get_temporal_neighbors(entity_id, ns_id, max_hops=4)
+
+        # Should be exactly 1 query (not 4 separate queries)
+        assert conn.query.await_count == 1
+
+    async def test_temporal_neighbors_query_has_depth_columns(self) -> None:
+        """The single query should contain d1..d4 columns for max_hops=4."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        entity_id = uuid4()
+        ns_id = uuid4()
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        await adapter.get_temporal_neighbors(entity_id, ns_id, max_hops=4)
+
+        sql = conn.query.call_args[0][0]
+        assert " AS d1" in sql
+        assert " AS d4" in sql
+        assert " AS d5" not in sql
+
+    async def test_temporal_neighbors_returns_results(self) -> None:
+        """get_temporal_neighbors returns neighbor entities from the single query."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        entity_id = uuid4()
+        ns_id = uuid4()
+        neighbor_id = uuid4()
+
+        neighbor_row = _graph_entity_row(neighbor_id, ns_id, name="Temporal-Neighbor")
+        single_result = [
+            {
+                "d1": [neighbor_row],
+                "d2": None,
+            },
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=single_result)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_temporal_neighbors(entity_id, ns_id, max_hops=2)
+        assert len(result) == 1
+        assert result[0]["name"] == "Temporal-Neighbor"
+
+    async def test_temporal_neighbors_cap_raised_to_6(self) -> None:
+        """get_temporal_neighbors with max_hops=6 generates d1..d6 columns."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        entity_id = uuid4()
+        ns_id = uuid4()
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        await adapter.get_temporal_neighbors(entity_id, ns_id, max_hops=10)
+
+        sql = conn.query.call_args[0][0]
+        assert " AS d6" in sql
+        assert " AS d7" not in sql
+
+
+@pytest.mark.unit
+class TestSurrealDBBatchRelationshipFetch:
+    """Verify get_neighborhoods_batch uses a single batch relationship query."""
+
+    async def test_batch_neighborhoods_single_rel_query(self) -> None:
+        """Relationship fetch for multiple entities uses one query, not N."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        eid1 = uuid4()
+        eid2 = uuid4()
+        neighbor1 = uuid4()
+        neighbor2 = uuid4()
+
+        # Batch entity query returns rows with neighbors
+        entity_rows = [
+            {
+                "id": f"entity:\u27e8{eid1!s}\u27e9",
+                "out_neighbors": [_graph_entity_row(neighbor1, ns_id, name="N1")],
+                "in_neighbors": None,
+            },
+            {
+                "id": f"entity:\u27e8{eid2!s}\u27e9",
+                "out_neighbors": [_graph_entity_row(neighbor2, ns_id, name="N2")],
+                "in_neighbors": None,
+            },
+        ]
+
+        conn = _make_mock_conn()
+        # First call: batch entity neighborhood query; second call: batch relationship query
+        conn.query = AsyncMock(side_effect=[entity_rows, []])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_neighborhoods_batch([eid1, eid2], depth=1)
+
+        # 2 queries total: 1 batch entity fetch + 1 batch relationship fetch
+        assert conn.query.await_count == 2
+        assert eid1 in result
+        assert eid2 in result
+        assert len(result[eid1]["entities"]) == 1
+        assert len(result[eid2]["entities"]) == 1
+
+    async def test_batch_neighborhoods_no_rels_when_no_neighbors(self) -> None:
+        """When entities have no neighbors, skip the relationship batch query."""
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        eid = uuid4()
+
+        entity_rows = [
+            {
+                "id": f"entity:\u27e8{eid!s}\u27e9",
+                "out_neighbors": None,
+                "in_neighbors": None,
+            },
+        ]
+
+        conn = _make_mock_conn()
+        conn.query = AsyncMock(return_value=entity_rows)
+        adapter = SurrealDBGraphAdapter(conn)
+
+        result = await adapter.get_neighborhoods_batch([eid], depth=1)
+
+        # Only 1 query (entity fetch), no relationship fetch needed
+        assert conn.query.await_count == 1
+        assert eid in result
+        assert result[eid]["entities"] == []
+        assert result[eid]["relationships"] == []
+
+
+@pytest.mark.unit
+class TestSurrealDBSingleQueryDelete:
+    """Verify delete_document uses DELETE ... RETURN BEFORE (single query)."""
+
+    async def test_delete_existing_document(self) -> None:
+        """delete_document returns True when document existed."""
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        doc_id = uuid4()
+        conn = _make_mock_conn()
+        # DELETE ... RETURN BEFORE returns the deleted record
+        conn.query = AsyncMock(return_value=[{"id": f"document:\u27e8{doc_id!s}\u27e9"}])
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.delete_document(doc_id)
+        assert result is True
+        # Single query call (no separate SELECT + DELETE)
+        conn.query.assert_awaited_once()
+        sql = conn.query.call_args[0][0]
+        assert "DELETE" in sql
+        assert "RETURN BEFORE" in sql
+
+    async def test_delete_missing_document(self) -> None:
+        """delete_document returns False when document did not exist."""
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        # DELETE ... RETURN BEFORE returns empty list when nothing existed
+        conn.query = AsyncMock(return_value=[])
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.delete_document(uuid4())
+        assert result is False
+        conn.query.assert_awaited_once()
+
+
+@pytest.mark.unit
+class TestSurrealDBGraphTraversalIndexes:
+    """Verify schema includes in/out indexes for relates_to."""
+
+    def test_schema_has_relates_to_in_index(self) -> None:
+        from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+
+        assert "idx_relates_to_in" in _TABLE_DEFINITIONS
+        assert "ON relates_to FIELDS in" in _TABLE_DEFINITIONS
+
+    def test_schema_has_relates_to_out_index(self) -> None:
+        from khora.storage.backends.surrealdb.schema import _TABLE_DEFINITIONS
+
+        assert "idx_relates_to_out" in _TABLE_DEFINITIONS
+        assert "ON relates_to FIELDS out" in _TABLE_DEFINITIONS
