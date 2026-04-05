@@ -1177,20 +1177,25 @@ class VectorCypherEngine:
         # Respect SearchMode.ALL: lower hybrid_alpha to give BM25 equal weight
         # with vector similarity, enabling keyword-based retrieval alongside
         # semantic search.  An explicit hybrid_alpha kwarg takes precedence.
+        # Save and restore to avoid stateful side-effects on the shared config.
+        original_alpha = retriever._config.hybrid_alpha
         if hybrid_alpha is not None:
             retriever._config.hybrid_alpha = hybrid_alpha
         elif mode == SearchMode.ALL:
             retriever._config.hybrid_alpha = 0.5
 
         # Use VectorCypher retriever
-        result = await retriever.retrieve(
-            query=query,
-            namespace_id=namespace_id,
-            temporal_filter=temporal_filter,
-            temporal_signal=temporal_signal,
-            graph_depth=graph_depth,
-            limit=limit,
-        )
+        try:
+            result = await retriever.retrieve(
+                query=query,
+                namespace_id=namespace_id,
+                temporal_filter=temporal_filter,
+                temporal_signal=temporal_signal,
+                graph_depth=graph_depth,
+                limit=limit,
+            )
+        finally:
+            retriever._config.hybrid_alpha = original_alpha
 
         # Post-retrieval: taxonomy boost + relationship expansion (behind config flags)
         _query_cfg = self._config.query if hasattr(self._config, "query") else None
