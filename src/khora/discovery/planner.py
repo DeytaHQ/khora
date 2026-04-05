@@ -57,8 +57,9 @@ def _extract_code(raw: str) -> str:
 _QUERY_FORMULATION_SYSTEM = """\
 You are a data source planning assistant.
 Given a user's description of what knowledge graph they want to build,
-generate 1-3 targeted search queries for finding downloadable datasets,
-APIs, or structured data files.
+generate 3-5 targeted search queries for finding downloadable datasets,
+APIs, or structured data files. Each query should target a DIFFERENT
+source type or aspect to maximize coverage.
 
 Return JSON:
 {
@@ -66,8 +67,10 @@ Return JSON:
   "description": "1-sentence summary of what data they need",
   "search_queries": [
     "specific query targeting datasets/CSVs",
-    "specific query targeting APIs",
-    "optional third query for structured web pages"
+    "specific query targeting APIs or download pages",
+    "specific query targeting academic/research data",
+    "optional fourth query for government/official data",
+    "optional fifth query for structured web pages"
   ],
   "preferred_formats": ["csv", "json", "api"]
 }
@@ -77,6 +80,8 @@ Each query should be specific and target different source types."""
 _SOURCE_CLASSIFICATION_SYSTEM = """\
 Classify each URL into a data source type and rate its usefulness
 for building a knowledge graph about the given topic.
+
+Classify ALL URLs provided. Return all of them ranked by relevance — do not omit any.
 
 Return JSON:
 {
@@ -284,7 +289,7 @@ class DiscoveryPlanner:
         *,
         previous_queries: list[str] | None = None,
     ) -> QueryPlan:
-        """Turn user intent into 1-3 targeted search queries.
+        """Turn user intent into 3-5 targeted search queries.
 
         Args:
             user_intent: Natural language description of needed data.
