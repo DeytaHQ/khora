@@ -789,7 +789,9 @@ class SurrealDBGraphAdapter:
             rel_filter = "[WHERE relationship_type IN $rel_types]"
             rel_bindings["rel_types"] = list(relationship_types)
 
-        effective_max = min(max_depth, 3)
+        # Cap at 6 to avoid excessive query complexity in arrow-chain syntax.
+        # For deeper traversals, consider iterative BFS at the application level.
+        effective_max = min(max_depth, 6)
         hop = "->relates_to" + rel_filter + "->entity"
 
         # Build a single SELECT with one column per depth level.
@@ -962,6 +964,7 @@ class SurrealDBGraphAdapter:
                 rid_str = str(_parse_uuid(row["id"]))
                 row_by_id[rid_str] = row
 
+        pending_rels: dict[UUID, tuple[Any, list[str]]] = {}
         result = {}
         for eid in entity_ids:
             eid_str = str(eid)
@@ -985,24 +988,42 @@ class SurrealDBGraphAdapter:
                         seen_ids.add(item_id)
                         entities.append(item)
 
-            # Fetch relationships connecting each center to its neighbors
-            relationships: list[dict[str, Any]] = []
+            # Defer relationship fetch — collect pairs for batch query
             if seen_ids:
                 center_rid = _rid("entity", eid)
-                neighbor_rids = ", ".join(str(_rid("entity", UUID(nid))) for nid in seen_ids)
-                rel_sql = (
-                    f"SELECT * FROM relates_to WHERE "  # nosec B608
-                    f"(in = {center_rid} AND out IN [{neighbor_rids}]) OR "
-                    f"(out = {center_rid} AND in IN [{neighbor_rids}]) "
-                    f"LIMIT {limit_per_entity}"
+                pending_rels[eid] = (center_rid, list(seen_ids))
+
+            result[eid] = {"entities": entities, "relationships": []}
+
+        # Batch-fetch relationships for all entities at once
+        if pending_rels:
+            or_conditions = []
+            for eid, (center_rid, neighbor_ids) in pending_rels.items():
+                neighbor_rids = ", ".join(str(_rid("entity", UUID(nid))) for nid in neighbor_ids)
+                or_conditions.append(
+                    f"((in = {center_rid} AND out IN [{neighbor_rids}]) OR "
+                    f"(out = {center_rid} AND in IN [{neighbor_rids}]))"
+                )
+
+            if or_conditions:
+                batch_sql = (
+                    "SELECT * FROM relates_to WHERE "  # nosec B608
+                    + " OR ".join(or_conditions)
+                    + f" LIMIT {limit_per_entity * len(pending_rels)}"
                 )
                 try:
-                    rel_rows = await self._conn.query(rel_sql)
-                    relationships = rel_rows
+                    all_rels = await self._conn.query(batch_sql)
+                    # Distribute relationships back to each entity
+                    for rel in all_rels:
+                        rel_in = str(_parse_uuid(rel.get("in", "")))
+                        rel_out = str(_parse_uuid(rel.get("out", "")))
+                        for eid, (center_rid, _) in pending_rels.items():
+                            center_str = str(eid)
+                            if rel_in == center_str or rel_out == center_str:
+                                if len(result[eid]["relationships"]) < limit_per_entity:
+                                    result[eid]["relationships"].append(rel)
                 except Exception:
                     pass
-
-            result[eid] = {"entities": entities, "relationships": relationships}
 
         return result
 
@@ -1068,36 +1089,40 @@ class SurrealDBGraphAdapter:
             List of neighbor entity property dicts
         """
         eid = _rid("entity", entity_id)
-        effective_max = min(max_hops, 3)
+        effective_max = min(max_hops, 6)
 
         all_neighbors: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
 
+        # Build temporal filter for the relationship hop
+        rel_conditions: list[str] = []
+        bindings: dict[str, Any] = {"limit": limit}
+
+        if valid_after is not None:
+            rel_conditions.append("(valid_from IS NULL OR valid_from >= $valid_after)")
+            bindings["valid_after"] = valid_after
+        if valid_before is not None:
+            rel_conditions.append("(valid_until IS NULL OR valid_until <= $valid_before)")
+            bindings["valid_before"] = valid_before
+
+        rel_filter = ""
+        if rel_conditions:
+            rel_filter = "[WHERE " + " AND ".join(rel_conditions) + "]"
+
+        # Build a single SELECT with one column per depth level (same pattern as find_paths)
+        hop = "->relates_to" + rel_filter + "->entity"
+        columns = ", ".join(f"{hop * d} AS d{d}" for d in range(1, effective_max + 1))
+        sql = f"SELECT {columns} FROM {eid}"  # nosec B608
+
+        rows = await self._conn.query(sql, bindings or None)
+        if not rows:
+            return all_neighbors
+
+        row = rows[0] if isinstance(rows[0], dict) else {}
+
+        # Process depths in order (closer neighbors first)
         for depth in range(1, effective_max + 1):
-            # Build temporal filter for the relationship hop
-            rel_conditions: list[str] = []
-            bindings: dict[str, Any] = {"limit": limit}
-
-            if valid_after is not None:
-                rel_conditions.append("(valid_from IS NULL OR valid_from >= $valid_after)")
-                bindings["valid_after"] = valid_after
-            if valid_before is not None:
-                rel_conditions.append("(valid_until IS NULL OR valid_until <= $valid_before)")
-                bindings["valid_before"] = valid_before
-
-            rel_filter = ""
-            if rel_conditions:
-                rel_filter = "[WHERE " + " AND ".join(rel_conditions) + "]"
-
-            # Chain arrows for the requested depth
-            arrow_chain = ("->relates_to" + rel_filter + "->entity") * depth
-            sql = f"SELECT {arrow_chain} AS targets FROM {eid}"  # nosec B608
-
-            rows = await self._conn.query(sql, bindings or None)
-            if not rows:
-                continue
-
-            targets_raw = rows[0].get("targets") if rows else None
+            targets_raw = row.get(f"d{depth}")
             if targets_raw is None:
                 continue
 
