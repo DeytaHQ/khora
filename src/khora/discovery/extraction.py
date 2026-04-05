@@ -35,6 +35,22 @@ try:
 except ImportError:
     pass
 
+_HAS_DOCX = False
+try:
+    import docx  # noqa: F401
+
+    _HAS_DOCX = True
+except ImportError:
+    pass
+
+_HAS_PYARROW = False
+try:
+    import pyarrow  # noqa: F401
+
+    _HAS_PYARROW = True
+except ImportError:
+    pass
+
 
 # ---------------------------------------------------------------------------
 # Extractors
@@ -123,6 +139,58 @@ def extract_xls_text(path: Path) -> str:
     return ""
 
 
+def extract_docx_text(path: Path) -> str:
+    """Extract text from a Word (.docx) file.
+
+    Uses python-docx for paragraph extraction.
+    Returns empty string if python-docx is not installed.
+    """
+    if not _HAS_DOCX:
+        logger.warning(
+            f"python-docx not installed — cannot extract text from {path.name}. " "Install: pip install python-docx"
+        )
+        return ""
+
+    import docx
+
+    try:
+        doc = docx.Document(str(path))
+        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        return "\n\n".join(paragraphs)
+    except Exception as e:
+        logger.error(f"DOCX extraction failed for {path.name}: {e}")
+        return ""
+
+
+def extract_parquet_text(path: Path) -> str:
+    """Extract data from a Parquet file as markdown table.
+
+    Uses pyarrow for reading. Returns the first 100 rows and schema.
+    Returns empty string if pyarrow is not installed.
+    """
+    if not _HAS_PYARROW:
+        logger.warning(f"pyarrow not installed — cannot extract data from {path.name}. " "Install: pip install pyarrow")
+        return ""
+
+    import pyarrow.parquet as pq
+
+    try:
+        table = pq.read_table(str(path))
+        schema_text = "## Schema\n\n"
+        for field in table.schema:
+            schema_text += f"- **{field.name}**: {field.type}\n"
+
+        # Convert first 100 rows to pandas for display
+        df = table.to_pandas().head(100)
+        rows_text = f"\n## Data ({len(table)} total rows, showing first {min(100, len(table))})\n\n"
+        rows_text += df.to_markdown(index=False) if hasattr(df, "to_markdown") else df.to_string(index=False)
+
+        return schema_text + rows_text
+    except Exception as e:
+        logger.error(f"Parquet extraction failed for {path.name}: {e}")
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -132,6 +200,8 @@ _EXTRACTORS: dict[str, callable] = {
     ".pdf": extract_pdf_text,
     ".xlsx": extract_xlsx_text,
     ".xls": extract_xls_text,
+    ".docx": extract_docx_text,
+    ".parquet": extract_parquet_text,
 }
 
 
@@ -146,6 +216,10 @@ def get_extraction_warning(path: Path) -> str | None:
         return f"Cannot extract text from {path.name} — install pymupdf: pip install pymupdf"
     if ext in (".xlsx", ".xls") and not _HAS_OPENPYXL:
         return f"Cannot extract text from {path.name} — install openpyxl: pip install openpyxl"
+    if ext == ".docx" and not _HAS_DOCX:
+        return f"Cannot extract text from {path.name} — install python-docx: pip install python-docx"
+    if ext == ".parquet" and not _HAS_PYARROW:
+        return f"Cannot extract text from {path.name} — install pyarrow: pip install pyarrow"
     return None
 
 

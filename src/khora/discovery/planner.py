@@ -96,6 +96,27 @@ Return JSON:
 Rank by: direct downloadable data > free API > scrapable page > PDF.
 Give higher relevance to sources with structured, machine-readable data."""
 
+_EXPLORATION_SYSTEM = """\
+You are a data completeness analyst. Given what data has already been collected
+for building a knowledge graph, identify GAPS and suggest follow-up search queries.
+
+Return JSON:
+{
+  "analysis": "Brief assessment of what's missing",
+  "queries": [
+    "specific follow-up query 1",
+    "specific follow-up query 2"
+  ],
+  "confidence": 0.0-1.0
+}
+
+Rules:
+- Only suggest queries if there are genuine gaps
+- Each query should target a DIFFERENT aspect than previous queries
+- Return empty queries list [] if the data is comprehensive
+- Be specific: "European wine production statistics 2020-2024 CSV" not "wine data"
+"""
+
 _FETCH_SCRIPT_SYSTEM = """\
 Generate a Python script that downloads data from the given source.
 
@@ -463,3 +484,46 @@ class DiscoveryPlanner:
         except Exception as e:
             logger.debug(f"Content summarization failed: {e}")
             return ""
+
+    async def suggest_exploration(
+        self,
+        intent: str,
+        fetched_summaries: list[str],
+        previous_queries: list[str],
+    ) -> list[str]:
+        """Analyze fetched content and suggest follow-up search queries.
+
+        Identifies gaps in the data collected so far and proposes 1-3
+        refinement queries to fill them.
+
+        Args:
+            intent: Original user intent.
+            fetched_summaries: Summaries of successfully fetched content.
+            previous_queries: Queries already tried (to avoid repetition).
+
+        Returns:
+            List of 1-3 suggested follow-up queries, or empty list.
+        """
+        if not fetched_summaries:
+            return []
+
+        summaries_text = "\n".join(f"- {s}" for s in fetched_summaries[:10])
+        prev_text = "\n".join(f"- {q}" for q in previous_queries) if previous_queries else "None"
+
+        try:
+            result = await self._planning_llm.complete(
+                system=_EXPLORATION_SYSTEM,
+                user=(
+                    f"User intent: {intent}\n\n"
+                    f"Data collected so far:\n{summaries_text}\n\n"
+                    f"Previous search queries (already tried):\n{prev_text}\n\n"
+                    "Suggest 1-3 follow-up queries to fill gaps in the collected data. "
+                    "If the data is already comprehensive, return an empty list."
+                ),
+                temperature=0.3,
+            )
+            queries = result.get("queries", [])
+            return [q for q in queries if isinstance(q, str) and q.strip()][:3]
+        except Exception as e:
+            logger.warning(f"Exploration suggestion failed: {e}")
+            return []

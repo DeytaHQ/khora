@@ -97,6 +97,7 @@ class DiscoveryAgent:
             AgentPhase.FETCH: self._handle_fetch,
             AgentPhase.REVIEW: self._handle_review,
             AgentPhase.AUGMENT: self._handle_augment,
+            AgentPhase.EXPLORE: self._handle_explore,
         }
 
         while self._state.phase != AgentPhase.DONE:
@@ -320,6 +321,8 @@ class DiscoveryAgent:
             return AgentPhase.DONE
         elif choice == "add":
             return AgentPhase.AUGMENT
+        elif choice == "explore":
+            return AgentPhase.EXPLORE
         elif choice == "retry":
             self._state.fetched.clear()
             return AgentPhase.FETCH
@@ -371,6 +374,53 @@ class DiscoveryAgent:
 
         else:  # "done"
             return AgentPhase.REVIEW
+
+    async def _handle_explore(self) -> AgentPhase:
+        """Analyze fetched content and suggest follow-up searches.
+
+        Uses the planner to identify gaps in collected data and proposes
+        refinement queries. Tracks exploration depth to prevent loops.
+        """
+        if self._state.exploration_depth >= self._state.max_exploration_depth:
+            self._ui.show_info("[yellow]Maximum exploration depth reached.[/]")
+            return AgentPhase.REVIEW
+
+        self._ui.show_exploration_depth(self._state.exploration_depth + 1, self._state.max_exploration_depth)
+
+        # Build summaries from successful fetches
+        summaries: list[str] = []
+        for fetch in self._state.successful_fetches:
+            if fetch.local_path and Path(fetch.local_path).exists():
+                try:
+                    content = Path(fetch.local_path).read_text(encoding="utf-8", errors="replace")
+                    summary = await self._planner.summarize_content(content, fetch.source.title)
+                    if summary:
+                        summaries.append(f"{fetch.source.title}: {summary}")
+                except Exception:
+                    summaries.append(f"{fetch.source.title}: (content available)")
+
+        if not summaries:
+            self._ui.show_info("[dim]No content to analyze for exploration suggestions.[/]")
+            return AgentPhase.REVIEW
+
+        # Get suggestions from planner
+        suggestions = await self._planner.suggest_exploration(
+            intent=self._state.user_intent,
+            fetched_summaries=summaries,
+            previous_queries=self._state.search_queries,
+        )
+
+        self._ui.show_exploration_suggestions(suggestions)
+        choice = await self._ui.prompt_exploration_choice(suggestions)
+
+        if choice is None:
+            return AgentPhase.REVIEW
+
+        # Use the chosen query for a new search
+        self._state.search_queries = [choice]
+        self._state.exploration_depth += 1
+        self._state.total_cost_usd = self._planner.cost_usd
+        return AgentPhase.SEARCH
 
     # ------------------------------------------------------------------
     # Index page detection

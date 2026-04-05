@@ -78,8 +78,10 @@ all-backends = [
 reranking = [
     "sentence-transformers>=3.0.0",
 ]
-# Discovery agent: PDF and Excel text extraction
-discovery = ["pymupdf>=1.25.0", "openpyxl>=3.1.0"]
+# Discovery agent: PDF, Excel, and Word text extraction
+discovery = ["pymupdf>=1.25.0", "openpyxl>=3.1.0", "python-docx>=1.1.0"]
+# Parquet file support for discovery
+parquet = ["pyarrow>=18.0.0"]
 # Accelerated CPU operations (numpy for cosine sim, rapidfuzz for string matching)
 accel = [
     "rapidfuzz>=3.0.0",

@@ -30,6 +30,7 @@ class TestAgentPhase:
             "fetch",
             "review",
             "augment",
+            "explore",
             "ingest",
             "done",
         }

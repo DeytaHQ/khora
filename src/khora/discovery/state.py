@@ -32,6 +32,7 @@ class AgentPhase(str, Enum):
         FETCH (all failed)           → SEARCH
         REVIEW (retry)               → SEARCH
         REVIEW (refine)              → GATHER_INTENT
+        REVIEW (explore)             → EXPLORE → SEARCH
     """
 
     GATHER_INTENT = "gather_intent"
@@ -41,6 +42,7 @@ class AgentPhase(str, Enum):
     FETCH = "fetch"
     REVIEW = "review"
     AUGMENT = "augment"
+    EXPLORE = "explore"
     INGEST = "ingest"
     DONE = "done"
 
@@ -257,6 +259,10 @@ class SessionState:
     # Chronicle memory
     chronicle_db_path: str | None = None
 
+    # Exploration loop control
+    exploration_depth: int = 0
+    max_exploration_depth: int = 3
+
     # Accumulated warnings (surfaced to user at end of session)
     warnings: list[str] = field(default_factory=list)
 
@@ -291,6 +297,8 @@ class SessionState:
             "total_cost_usd": self.total_cost_usd,
             "max_cost_usd": self.max_cost_usd,
             "chronicle_db_path": self.chronicle_db_path,
+            "exploration_depth": self.exploration_depth,
+            "max_exploration_depth": self.max_exploration_depth,
             "warnings": self.warnings,
         }
 
@@ -312,6 +320,8 @@ class SessionState:
             total_cost_usd=data.get("total_cost_usd", 0.0),
             max_cost_usd=data.get("max_cost_usd", 2.0),
             chronicle_db_path=data.get("chronicle_db_path"),
+            exploration_depth=data.get("exploration_depth", 0),
+            max_exploration_depth=data.get("max_exploration_depth", 3),
             warnings=data.get("warnings", []),
         )
 

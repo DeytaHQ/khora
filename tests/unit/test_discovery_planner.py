@@ -270,3 +270,93 @@ class TestGenerateFetchScript:
         planner = DiscoveryPlanner.from_config(budget_usd=1.0)
         assert planner.cost_usd == 0.0
         assert planner.usage_summary["calls"] == 0
+
+
+# ---------------------------------------------------------------------------
+# DiscoveryPlanner.suggest_exploration
+# ---------------------------------------------------------------------------
+
+
+class TestSuggestExploration:
+    @pytest.mark.asyncio
+    async def test_suggest_exploration_returns_queries(self) -> None:
+        planner = DiscoveryPlanner.from_config()
+        with patch.object(planner._planning_llm, "complete", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "analysis": "Missing export data",
+                "queries": ["wine export statistics", "vineyard count by region"],
+                "confidence": 0.8,
+            }
+            result = await planner.suggest_exploration(
+                intent="European wine data",
+                fetched_summaries=["Wine production by country"],
+                previous_queries=["wine production data"],
+            )
+            assert len(result) == 2
+            assert "wine export statistics" in result
+
+    @pytest.mark.asyncio
+    async def test_suggest_exploration_empty_on_comprehensive(self) -> None:
+        planner = DiscoveryPlanner.from_config()
+        with patch.object(planner._planning_llm, "complete", new_callable=AsyncMock) as mock:
+            mock.return_value = {"analysis": "Data is comprehensive", "queries": [], "confidence": 0.9}
+            result = await planner.suggest_exploration(
+                intent="test",
+                fetched_summaries=["Everything covered"],
+                previous_queries=[],
+            )
+            assert result == []
+
+    @pytest.mark.asyncio
+    async def test_suggest_exploration_empty_on_no_summaries(self) -> None:
+        planner = DiscoveryPlanner.from_config()
+        result = await planner.suggest_exploration(
+            intent="test",
+            fetched_summaries=[],
+            previous_queries=[],
+        )
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_suggest_exploration_handles_error(self) -> None:
+        planner = DiscoveryPlanner.from_config()
+        with patch.object(planner._planning_llm, "complete", new_callable=AsyncMock) as mock:
+            mock.side_effect = Exception("LLM failed")
+            result = await planner.suggest_exploration(
+                intent="test",
+                fetched_summaries=["Some data"],
+                previous_queries=[],
+            )
+            assert result == []
+
+    @pytest.mark.asyncio
+    async def test_suggest_exploration_limits_to_three(self) -> None:
+        planner = DiscoveryPlanner.from_config()
+        with patch.object(planner._planning_llm, "complete", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "analysis": "Many gaps",
+                "queries": ["q1", "q2", "q3", "q4", "q5"],
+                "confidence": 0.5,
+            }
+            result = await planner.suggest_exploration(
+                intent="test",
+                fetched_summaries=["Some data"],
+                previous_queries=[],
+            )
+            assert len(result) == 3
+
+    @pytest.mark.asyncio
+    async def test_suggest_exploration_filters_non_strings(self) -> None:
+        planner = DiscoveryPlanner.from_config()
+        with patch.object(planner._planning_llm, "complete", new_callable=AsyncMock) as mock:
+            mock.return_value = {
+                "analysis": "Gaps found",
+                "queries": ["valid query", 42, None, "", "another valid"],
+                "confidence": 0.5,
+            }
+            result = await planner.suggest_exploration(
+                intent="test",
+                fetched_summaries=["Some data"],
+                previous_queries=[],
+            )
+            assert result == ["valid query", "another valid"]
