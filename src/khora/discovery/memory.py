@@ -84,7 +84,6 @@ class DiscoveryMemory:
             await self._client.connect()
             await self._client.use("discovery", "memory")
             await self._client.signin({"username": "root", "password": "root"})
-
             # Create table schema
             await self._client.query("""
                 DEFINE TABLE IF NOT EXISTS memory SCHEMAFULL;

@@ -191,6 +191,7 @@ unresolved-import = "warn"             # 1 error, optional dependency (kuzu)
 invalid-assignment = "warn"            # 2 errors, third-party stub mismatches
 invalid-return-type = "warn"           # 2 errors, implicit None returns
 not-iterable = "warn"                  # 1 error, exception unpacking pattern
+invalid-await = "warn"                 # 3 errors, surrealdb SDK stubs missing async annotations
 unused-ignore-comment = "warn"         # 1 warning, stale type: ignore comment
 
 [tool.uv]
