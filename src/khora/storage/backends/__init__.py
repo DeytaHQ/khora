@@ -29,6 +29,11 @@ try:
 except ImportError:
     NeptuneBackend = None  # type: ignore[assignment,misc]
 
+try:
+    from .age import AGEBackend
+except ImportError:
+    AGEBackend = None  # type: ignore[assignment,misc]
+
 __all__ = [
     # Protocols
     "RelationalBackendProtocol",
@@ -45,4 +50,5 @@ __all__ = [
     "KuzuBackend",
     "MemgraphBackend",
     "NeptuneBackend",
+    "AGEBackend",
 ]

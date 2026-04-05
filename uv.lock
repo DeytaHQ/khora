@@ -1176,6 +1176,9 @@ dependencies = [
 accel = [
     { name = "rapidfuzz" },
 ]
+age = [
+    { name = "asyncpg" },
+]
 all-backends = [
     { name = "asyncpg" },
     { name = "httpx" },
@@ -1273,6 +1276,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.18.4" },
     { name = "asyncpg", specifier = ">=0.31.0" },
+    { name = "asyncpg", marker = "extra == 'age'", specifier = ">=0.31.0" },
     { name = "asyncpg", marker = "extra == 'all-backends'", specifier = ">=0.31.0" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.31.0" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=26.1.0" },
@@ -1329,7 +1333,7 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'all-backends'", specifier = ">=4.20.1" },
     { name = "weaviate-client", marker = "extra == 'weaviate'", specifier = ">=4.20.1" },
 ]
-provides-extras = ["accel", "all-backends", "dev", "discovery", "embedded", "graph-all", "kuzu", "lancedb", "logfire", "memgraph", "neo4j", "neptune", "neptune-iam", "nlp", "parquet", "postgres", "reranking", "rust", "surrealdb", "weaviate"]
+provides-extras = ["accel", "age", "all-backends", "dev", "discovery", "embedded", "graph-all", "kuzu", "lancedb", "logfire", "memgraph", "neo4j", "neptune", "neptune-iam", "nlp", "parquet", "postgres", "reranking", "rust", "surrealdb", "weaviate"]
 
 [package.metadata.requires-dev]
 dev = [

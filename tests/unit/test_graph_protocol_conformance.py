@@ -32,6 +32,12 @@ try:
 except ImportError:
     HAS_NEPTUNE = False
 
+HAS_AGE = True
+try:
+    from khora.storage.backends.age import AGEBackend
+except ImportError:
+    HAS_AGE = False
+
 
 @pytest.mark.unit
 class TestProtocolConformance:
@@ -55,6 +61,11 @@ class TestProtocolConformance:
     @pytest.mark.skipif(not HAS_NEPTUNE, reason="neo4j package not installed")
     def test_neptune_implements_protocol(self):
         backend = NeptuneBackend("bolt://localhost:8182")
+        self._assert_graph_protocol(backend)
+
+    @pytest.mark.skipif(not HAS_AGE, reason="age backend not available")
+    def test_age_implements_protocol(self):
+        backend = AGEBackend("postgresql://localhost:5432/test")
         self._assert_graph_protocol(backend)
 
     def _assert_graph_protocol(self, backend):
@@ -133,3 +144,13 @@ class TestFromConfig:
         assert backend._url == "bolt://cluster:8182"
         assert backend._iam_auth is True
         assert backend._aws_region == "eu-west-1"
+
+    @pytest.mark.skipif(not HAS_AGE, reason="age backend not available")
+    def test_age_from_config(self):
+        from khora.config.schema import AGEConfig
+
+        config = AGEConfig(url="postgresql://localhost:5432/test", graph_name="test_graph", pool_size=5)
+        backend = AGEBackend.from_config(config)
+        assert backend._database_url == "postgresql://localhost:5432/test"
+        assert backend._graph_name == "test_graph"
+        assert backend._pool_size == 5

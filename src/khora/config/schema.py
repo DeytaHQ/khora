@@ -140,6 +140,20 @@ class SurrealDBConfig(BaseModel):
     sync_data: bool = Field(default=True, description="Enable SURREAL_SYNC_DATA for crash-safe writes")
 
 
+class AGEConfig(BaseModel):
+    """PostgreSQL AGE graph backend configuration.
+
+    Uses Apache AGE extension to run openCypher queries inside PostgreSQL.
+    Can share the same connection pool as the relational backend.
+    """
+
+    backend: Literal["age"] = "age"
+    url: str | None = Field(default=None, description="PostgreSQL URL (can share with relational backend)")
+    graph_name: str = Field(default="khora_graph", description="Name of the AGE graph")
+    pool_size: int = Field(default=10, description="Connection pool size")
+    max_overflow: int = Field(default=20, description="Max overflow connections")
+
+
 def _graph_discriminator(v: Any) -> str:
     if isinstance(v, dict):
         return v.get("backend", "neo4j")
@@ -151,7 +165,8 @@ GraphConfig = Annotated[
     | Annotated[KuzuConfig, Tag("kuzu")]
     | Annotated[MemgraphConfig, Tag("memgraph")]
     | Annotated[NeptuneConfig, Tag("neptune")]
-    | Annotated[SurrealDBConfig, Tag("surrealdb")],
+    | Annotated[SurrealDBConfig, Tag("surrealdb")]
+    | Annotated[AGEConfig, Tag("age")],
     Discriminator(_graph_discriminator),
 ]
 

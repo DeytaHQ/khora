@@ -62,6 +62,7 @@ kuzu = ["kuzu>=0.11.3"]
 memgraph = ["neo4j>=6.1.0"]  # Memgraph uses bolt protocol via neo4j driver
 neptune = ["neo4j>=6.1.0"]  # Neptune uses Bolt protocol via neo4j driver
 neptune-iam = ["neo4j>=6.1.0", "boto3>=1.35.0"]  # With IAM auth support
+age = ["asyncpg>=0.31.0"]  # AGE uses PostgreSQL via asyncpg
 # All graph backends
 graph-all = ["neo4j>=6.1.0", "kuzu>=0.11.3"]
 # Weaviate vector database

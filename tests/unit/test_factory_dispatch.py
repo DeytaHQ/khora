@@ -3,6 +3,7 @@
 import pytest
 
 from khora.config.schema import (
+    AGEConfig,
     KuzuConfig,
     MemgraphConfig,
     Neo4jConfig,
@@ -21,6 +22,7 @@ class TestRegistryContents:
         assert "kuzu" in _GRAPH_REGISTRY
         assert "memgraph" in _GRAPH_REGISTRY
         assert "neptune" in _GRAPH_REGISTRY
+        assert "age" in _GRAPH_REGISTRY
 
     def test_vector_registry_has_all_backends(self):
         assert "pgvector" in _VECTOR_REGISTRY
@@ -104,6 +106,15 @@ class TestFactoryNewStyleDispatch:
         backend = factory.create_graph_backend()
         if backend is not None:
             assert type(backend).__name__ == "NeptuneBackend"
+
+    def test_age_config_dispatch(self):
+        config = StorageConfig(
+            graph_config=AGEConfig(url="postgresql://localhost:5432/test", graph_name="test"),
+        )
+        factory = StorageFactory(config=config)
+        backend = factory.create_graph_backend()
+        if backend is not None:
+            assert type(backend).__name__ == "AGEBackend"
 
     def test_pgvector_config_dispatch(self):
         config = StorageConfig(
