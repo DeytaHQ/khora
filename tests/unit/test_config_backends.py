@@ -76,6 +76,15 @@ class TestDiscriminatedUnionParsing:
         assert isinstance(settings.graph, MemgraphConfig)
         assert settings.graph.url == "bolt://mg:7687"
 
+    def test_neptune_config_from_dict(self):
+        settings = StorageSettings.model_validate(
+            {"graph": {"backend": "neptune", "url": "bolt://cluster:8182", "iam_auth": True}}
+        )
+        from khora.config.schema import NeptuneConfig
+
+        assert isinstance(settings.graph, NeptuneConfig)
+        assert settings.graph.iam_auth is True
+
     def test_neo4j_is_default_graph_backend(self):
         settings = StorageSettings.model_validate(
             {

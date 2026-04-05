@@ -30,6 +30,7 @@ _GRAPH_REGISTRY: dict[str, tuple[str, str]] = {
     "neo4j": ("khora.storage.backends.neo4j", "Neo4jBackend"),
     "kuzu": ("khora.storage.backends.kuzu", "KuzuBackend"),
     "memgraph": ("khora.storage.backends.memgraph", "MemgraphBackend"),
+    "neptune": ("khora.storage.backends.neptune", "NeptuneBackend"),
     "surrealdb": ("khora.storage.backends.surrealdb.graph", "SurrealDBGraphAdapter"),
 }
 

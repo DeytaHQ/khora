@@ -6,6 +6,7 @@ from khora.config.schema import (
     KuzuConfig,
     MemgraphConfig,
     Neo4jConfig,
+    NeptuneConfig,
     PgVectorConfig,
 )
 from khora.storage.factory import _GRAPH_REGISTRY, _VECTOR_REGISTRY, StorageConfig, StorageFactory
@@ -19,6 +20,7 @@ class TestRegistryContents:
         assert "neo4j" in _GRAPH_REGISTRY
         assert "kuzu" in _GRAPH_REGISTRY
         assert "memgraph" in _GRAPH_REGISTRY
+        assert "neptune" in _GRAPH_REGISTRY
 
     def test_vector_registry_has_all_backends(self):
         assert "pgvector" in _VECTOR_REGISTRY
@@ -93,6 +95,15 @@ class TestFactoryNewStyleDispatch:
         # Uses neo4j driver, should succeed
         if backend is not None:
             assert type(backend).__name__ == "MemgraphBackend"
+
+    def test_neptune_config_dispatch(self):
+        config = StorageConfig(
+            graph_config=NeptuneConfig(url="bolt://cluster:8182"),
+        )
+        factory = StorageFactory(config=config)
+        backend = factory.create_graph_backend()
+        if backend is not None:
+            assert type(backend).__name__ == "NeptuneBackend"
 
     def test_pgvector_config_dispatch(self):
         config = StorageConfig(
