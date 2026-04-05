@@ -26,6 +26,12 @@ try:
 except ImportError:
     HAS_MEMGRAPH = False
 
+HAS_NEPTUNE = True
+try:
+    from khora.storage.backends.neptune import NeptuneBackend
+except ImportError:
+    HAS_NEPTUNE = False
+
 
 @pytest.mark.unit
 class TestProtocolConformance:
@@ -44,6 +50,11 @@ class TestProtocolConformance:
     @pytest.mark.skipif(not HAS_MEMGRAPH, reason="neo4j package not installed")
     def test_memgraph_implements_protocol(self):
         backend = MemgraphBackend("bolt://localhost:7687")
+        self._assert_graph_protocol(backend)
+
+    @pytest.mark.skipif(not HAS_NEPTUNE, reason="neo4j package not installed")
+    def test_neptune_implements_protocol(self):
+        backend = NeptuneBackend("bolt://localhost:8182")
         self._assert_graph_protocol(backend)
 
     def _assert_graph_protocol(self, backend):
@@ -112,3 +123,13 @@ class TestFromConfig:
         backend = MemgraphBackend.from_config(config)
         assert backend._url == "bolt://mg:7687"
         assert backend._user == "mg"
+
+    @pytest.mark.skipif(not HAS_NEPTUNE, reason="neo4j package not installed")
+    def test_neptune_from_config(self):
+        from khora.config.schema import NeptuneConfig
+
+        config = NeptuneConfig(url="bolt://cluster:8182", iam_auth=True, aws_region="eu-west-1")
+        backend = NeptuneBackend.from_config(config)
+        assert backend._url == "bolt://cluster:8182"
+        assert backend._iam_auth is True
+        assert backend._aws_region == "eu-west-1"

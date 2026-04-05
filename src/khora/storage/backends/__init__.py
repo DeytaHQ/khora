@@ -24,6 +24,11 @@ try:
 except ImportError:
     MemgraphBackend = None  # type: ignore[assignment,misc]
 
+try:
+    from .neptune import NeptuneBackend
+except ImportError:
+    NeptuneBackend = None  # type: ignore[assignment,misc]
+
 __all__ = [
     # Protocols
     "RelationalBackendProtocol",
@@ -39,4 +44,5 @@ __all__ = [
     "Neo4jBackend",
     "KuzuBackend",
     "MemgraphBackend",
+    "NeptuneBackend",
 ]

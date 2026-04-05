@@ -105,6 +105,22 @@ class MemgraphConfig(BaseModel):
     password: str = Field(default="", description="Memgraph password")
 
 
+class NeptuneConfig(BaseModel):
+    """AWS Neptune graph backend configuration.
+
+    Neptune supports openCypher via Bolt protocol. Uses the same neo4j
+    Python driver as Neo4j and Memgraph backends.
+    """
+
+    backend: Literal["neptune"] = "neptune"
+    url: str | None = Field(default=None, description="Neptune Bolt endpoint (bolt://cluster:8182)")
+    user: str = Field(default="", description="Username (empty for IAM auth)")
+    password: str = Field(default="", description="Password (empty for IAM auth)")
+    iam_auth: bool = Field(default=False, description="Use AWS IAM SigV4 authentication")
+    aws_region: str = Field(default="us-east-1", description="AWS region for IAM auth signing")
+    max_connection_pool_size: int = Field(default=100, description="Bolt connection pool size (Neptune max: 1000)")
+
+
 class SurrealDBConfig(BaseModel):
     """SurrealDB unified backend configuration (graph role).
 
@@ -134,6 +150,7 @@ GraphConfig = Annotated[
     Annotated[Neo4jConfig, Tag("neo4j")]
     | Annotated[KuzuConfig, Tag("kuzu")]
     | Annotated[MemgraphConfig, Tag("memgraph")]
+    | Annotated[NeptuneConfig, Tag("neptune")]
     | Annotated[SurrealDBConfig, Tag("surrealdb")],
     Discriminator(_graph_discriminator),
 ]
