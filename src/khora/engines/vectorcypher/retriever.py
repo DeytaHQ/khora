@@ -815,11 +815,17 @@ class VectorCypherRetriever:
         candidates_to_rerank = fused_results[:top_n]
         remainder = fused_results[top_n:]
 
-        # Build rerank candidates from FusedResult items (Chunk objects)
+        # Normalize original scores to [0,1] before passing to the reranker
+        # so the 0.3 original_score blend is meaningful (raw RRF scores are
+        # ~0.01-0.02 which would make the blend effectively zero).
+        raw_scores = [r.rrf_score for r in candidates_to_rerank]
+        score_min = min(raw_scores) if raw_scores else 0.0
+        score_max = max(raw_scores) if raw_scores else 1.0
+        score_range = score_max - score_min
         candidates = [
             RerankCandidate(
                 item=r,
-                original_score=r.rrf_score,
+                original_score=(r.rrf_score - score_min) / score_range if score_range > 1e-9 else 0.5,
                 content=r.item.content if hasattr(r.item, "content") else str(r.item),
                 metadata=r.item.metadata if hasattr(r.item, "metadata") else {},
             )
