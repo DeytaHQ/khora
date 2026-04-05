@@ -191,3 +191,13 @@ class SurrealDBConnection:
     async def execute(self, sql: str, bindings: dict[str, Any] | None = None) -> Any:
         """Execute a SurrealQL statement, returning raw result."""
         return await self._execute_raw(sql, bindings)
+
+    async def execute_transaction(self, sql: str, bindings: dict[str, Any] | None = None) -> Any:
+        """Execute a multi-statement SurrealQL block inside BEGIN/COMMIT.
+
+        Wraps the given SQL in ``BEGIN TRANSACTION; ... COMMIT TRANSACTION;``
+        so all statements succeed or fail atomically.  Works in embedded mode
+        where the SDK's ``begin()/commit()`` methods are unavailable.
+        """
+        txn_sql = f"BEGIN TRANSACTION;\n{sql}\nCOMMIT TRANSACTION;"
+        return await self._execute_raw(txn_sql, bindings)

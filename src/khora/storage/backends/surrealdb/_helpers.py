@@ -32,11 +32,13 @@ def _rid(table: str, uid: UUID) -> Any:
     SurrealDB 1.x+ requires ``RecordID`` objects (not strings) when binding
     record IDs in parameterised queries like ``CREATE $rid SET ...``.
 
-    The SDK's ``RecordID`` accepts ``UUID`` objects directly — no ``str()``
-    wrapper needed.
+    Always passes ``str(uid)`` to ensure string-keyed RecordIDs that
+    produce properly escaped ``table:⟨uuid⟩`` literals when stringified.
+    UUID-keyed RecordIDs produce ``table:uuid-without-brackets`` which
+    SurrealDB cannot parse due to unescaped hyphens.
     """
     if _RecordID is not None:
-        return _RecordID(table, uid)
+        return _RecordID(table, str(uid))
     # Fallback for environments without surrealdb (e.g. unit tests with mocks)
     import warnings
 

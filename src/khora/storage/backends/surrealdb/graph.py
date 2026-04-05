@@ -249,8 +249,8 @@ class SurrealDBGraphAdapter:
 
     @trace("khora.surrealdb.graph.get_entity", include={"entity_id"})
     async def get_entity(self, entity_id: UUID) -> Entity | None:
-        sql = "SELECT * FROM entity:\u27e8$id\u27e9"
-        row = await self._conn.query_one(sql, {"id": str(entity_id)})
+        sql = "SELECT * FROM $rid"
+        row = await self._conn.query_one(sql, {"rid": _rid("entity", entity_id)})
         if not row:
             return None
         return _row_to_entity(row)
@@ -271,7 +271,7 @@ class SurrealDBGraphAdapter:
     @trace("khora.surrealdb.graph.update_entity", include={"entity"})
     async def update_entity(self, entity: Entity) -> Entity:
         sql = (
-            "UPDATE entity:\u27e8$id\u27e9 SET "
+            "UPDATE $rid SET "
             "name = $name, "
             "entity_type = $entity_type, "
             "description = $description, "
@@ -356,6 +356,12 @@ class SurrealDBGraphAdapter:
         row = await self._conn.query_one(sql, {"ns_rid": ns_rid})
         return int(row.get("cnt", 0)) if row else 0
 
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        ns_str = str(namespace_id)
+        sql = "SELECT count() AS cnt FROM relates_to WHERE namespace_id = $ns GROUP ALL"
+        row = await self._conn.query_one(sql, {"ns": ns_str})
+        return int(row.get("cnt", 0)) if row else 0
+
     @trace(
         "khora.surrealdb.graph.upsert_entities_batch",
         include={"namespace_id"},
@@ -394,12 +400,16 @@ class SurrealDBGraphAdapter:
         namespace_id: UUID,
         entities: list[Entity],
     ) -> list[tuple[Entity, bool]]:
-        """Inner upsert logic, called while holding the entity key gate."""
+        """Inner upsert logic, called while holding the entity key gate.
+
+        Uses a single BEGIN/COMMIT transaction to atomically fetch existing
+        entities, insert new ones, and update existing ones.  This prevents
+        write conflicts in SurrealDB embedded mode where concurrent upserts
+        on the same entity would otherwise race.
+        """
         # 1. Batch-fetch all existing entities matching any (name, type) pair.
-        #    Uses SurrealDB tuple IN syntax: [name, entity_type] IN $pairs
-        #    which is more efficient than N OR clauses for large batches.
         unique_pairs = list({(e.name, e.entity_type) for e in entities})
-        fetch_sql = "SELECT * FROM entity WHERE namespace = $ns_rid " "AND [name, entity_type] IN $pairs"
+        fetch_sql = "SELECT * FROM entity WHERE namespace = $ns_rid AND [name, entity_type] IN $pairs"
         existing_rows = await self._conn.query(
             fetch_sql,
             {"ns_rid": ns_rid, "pairs": [list(p) for p in unique_pairs]},
@@ -411,10 +421,10 @@ class SurrealDBGraphAdapter:
             ent = _row_to_entity(row)
             existing_map[(ent.name, ent.entity_type)] = ent
 
-        # 2. Separate into creates vs updates and process in batches
+        # 2. Separate into creates vs updates
         results: list[tuple[Entity, bool]] = []
         to_create: list[Entity] = []
-        to_update: list[Entity] = []  # merged entities
+        to_update: list[Entity] = []
 
         for entity in entities:
             key = (entity.name, entity.entity_type)
@@ -428,16 +438,18 @@ class SurrealDBGraphAdapter:
                 to_create.append(entity)
                 results.append((entity, True))
 
-        # 3. Batch create new entities via INSERT INTO (faster than FOR loops).
-        #    INSERT INTO expects records with schema field names as keys.
+        # 3. Build a single transactional query for all inserts + updates
+        sql_parts: list[str] = []
+        bindings: dict[str, Any] = {}
+
         if to_create:
             records = []
             for e in to_create:
                 b = _entity_to_bindings(e)
                 records.append(
                     {
-                        "id": b["rid"],  # RecordID
-                        "namespace": b["ns_rid"],  # record<memory_namespace>
+                        "id": b["rid"],
+                        "namespace": b["ns_rid"],
                         "name": b["name"],
                         "entity_type": b["entity_type"],
                         "description": b["description"],
@@ -456,9 +468,9 @@ class SurrealDBGraphAdapter:
                         "updated_at": b["updated_at"],
                     }
                 )
-            await self._conn.execute("INSERT INTO entity $records", {"records": records})
+            sql_parts.append("INSERT INTO entity $create_records;")
+            bindings["create_records"] = records
 
-        # 4. Batch update existing entities in a single FOR statement
         if to_update:
             update_data = []
             for ent in to_update:
@@ -475,8 +487,8 @@ class SurrealDBGraphAdapter:
                         "updated_at": ent.updated_at,
                     }
                 )
-            update_sql = (
-                "FOR $e IN $entities {"
+            sql_parts.append(
+                "FOR $e IN $update_entities {"
                 "  UPDATE entity:\u27e8$e.id\u27e9 SET "
                 "    description = $e.description, "
                 "    attributes = $e.attributes, "
@@ -486,9 +498,14 @@ class SurrealDBGraphAdapter:
                 "    confidence = $e.confidence, "
                 "    metadata_ = $e.metadata_, "
                 "    updated_at = $e.updated_at;"
-                "}"
+                "};"
             )
-            await self._conn.execute(update_sql, {"entities": update_data})
+            bindings["update_entities"] = update_data
+
+        # Execute as atomic transaction if there are any writes
+        if sql_parts:
+            combined_sql = "\n".join(sql_parts)
+            await self._conn.execute_transaction(combined_sql, bindings)
 
         return results
 
@@ -502,7 +519,7 @@ class SurrealDBGraphAdapter:
         tgt = _rid("entity", relationship.target_entity_id)
 
         sql = (
-            f"RELATE {src}->relates_to->{tgt} SET "
+            "RELATE $src->relates_to->$tgt SET "
             "rel_id = $rel_id, "
             "namespace_id = $namespace_id, "
             "relationship_type = $relationship_type, "
@@ -518,7 +535,10 @@ class SurrealDBGraphAdapter:
             "created_at = $created_at, "
             "updated_at = $updated_at"
         )
-        await self._conn.execute(sql, _relationship_to_bindings(relationship))
+        bindings = _relationship_to_bindings(relationship)
+        bindings["src"] = src
+        bindings["tgt"] = tgt
+        await self._conn.execute(sql, bindings)
         return relationship
 
     @trace("khora.surrealdb.graph.get_relationship", include={"relationship_id"})
@@ -606,35 +626,43 @@ class SurrealDBGraphAdapter:
         if not relationships:
             return 0
 
-        # Build a batch array and execute all RELATEs in a single round-trip
-        rels_data: list[dict[str, Any]] = []
-        for rel in relationships:
+        # Build individual RELATE statements with unique param names per
+        # relationship.  SurrealDB does not support $loop_var.field in the
+        # RELATE position, so we concatenate N statements into one query.
+        sql_parts: list[str] = []
+        bindings: dict[str, Any] = {}
+        for i, rel in enumerate(relationships):
             b = _relationship_to_bindings(rel)
-            b["source_rid"] = str(rel.source_entity_id)
-            b["target_rid"] = str(rel.target_entity_id)
-            rels_data.append(b)
+            src_key, tgt_key = f"src_{i}", f"tgt_{i}"
+            bindings[src_key] = _rid("entity", rel.source_entity_id)
+            bindings[tgt_key] = _rid("entity", rel.target_entity_id)
+            # Prefix all field bindings with index
+            for k, v in b.items():
+                bindings[f"r{i}_{k}"] = v
+            sql_parts.append(
+                f"RELATE ${src_key}->relates_to->${tgt_key} SET "
+                f"rel_id = $r{i}_rel_id, "
+                f"namespace_id = $r{i}_namespace_id, "
+                f"relationship_type = $r{i}_relationship_type, "
+                f"description = $r{i}_description, "
+                f"properties = $r{i}_properties, "
+                f"source_document_ids = $r{i}_source_document_ids, "
+                f"source_chunk_ids = $r{i}_source_chunk_ids, "
+                f"valid_from = $r{i}_valid_from, "
+                f"valid_until = $r{i}_valid_until, "
+                f"confidence = $r{i}_confidence, "
+                f"weight = $r{i}_weight, "
+                f"metadata_ = $r{i}_metadata_, "
+                f"created_at = $r{i}_created_at, "
+                f"updated_at = $r{i}_updated_at;"
+            )
 
-        sql = (
-            "FOR $rel IN $rels {"
-            "  RELATE entity:\u27e8$rel.source_rid\u27e9->relates_to->entity:\u27e8$rel.target_rid\u27e9 SET "
-            "    rel_id = $rel.rel_id, "
-            "    namespace_id = $rel.namespace_id, "
-            "    relationship_type = $rel.relationship_type, "
-            "    description = $rel.description, "
-            "    properties = $rel.properties, "
-            "    source_document_ids = $rel.source_document_ids, "
-            "    source_chunk_ids = $rel.source_chunk_ids, "
-            "    valid_from = $rel.valid_from, "
-            "    valid_until = $rel.valid_until, "
-            "    confidence = $rel.confidence, "
-            "    weight = $rel.weight, "
-            "    metadata_ = $rel.metadata_, "
-            "    created_at = $rel.created_at, "
-            "    updated_at = $rel.updated_at;"
-            "}"
-        )
         try:
-            await self._conn.execute(sql, {"rels": rels_data})
+            # Execute in batches to avoid oversized queries
+            for start in range(0, len(sql_parts), batch_size):
+                batch = sql_parts[start : start + batch_size]
+                combined = "\n".join(batch)
+                await self._conn.execute_transaction(combined, bindings)
             return len(relationships)
         except Exception:
             logger.warning("Batch relationship creation failed, falling back to individual inserts")
@@ -657,8 +685,8 @@ class SurrealDBGraphAdapter:
     @trace("khora.surrealdb.graph.create_episode", include={"episode"})
     async def create_episode(self, episode: Episode) -> Episode:
         sql = (
-            "CREATE episode:\u27e8$id\u27e9 SET "
-            "namespace = memory_namespace:\u27e8$ns\u27e9, "
+            "CREATE $rid SET "
+            "namespace = $ns_rid, "
             "name = $name, "
             "description = $description, "
             "occurred_at = $occurred_at, "
@@ -674,7 +702,9 @@ class SurrealDBGraphAdapter:
         )
         bindings = {
             "id": str(episode.id),
+            "rid": _rid("episode", episode.id),
             "ns": str(episode.namespace_id),
+            "ns_rid": _rid("memory_namespace", episode.namespace_id),
             "name": episode.name,
             "description": episode.description,
             "occurred_at": episode.occurred_at,
@@ -716,8 +746,8 @@ class SurrealDBGraphAdapter:
 
     @trace("khora.surrealdb.graph.get_episode", include={"episode_id"})
     async def get_episode(self, episode_id: UUID) -> Episode | None:
-        sql = "SELECT * FROM episode:\u27e8$id\u27e9"
-        row = await self._conn.query_one(sql, {"id": str(episode_id)})
+        sql = "SELECT * FROM $rid"
+        row = await self._conn.query_one(sql, {"rid": _rid("episode", episode_id)})
         if not row:
             return None
         return _row_to_episode(row)
@@ -863,32 +893,44 @@ class SurrealDBGraphAdapter:
         entities: list[dict[str, Any]] = []
         relationships: list[dict[str, Any]] = []
 
+        # Collect neighbor entity IDs from traversal results.
+        # SurrealDB arrow traversal returns RecordID objects (not full records),
+        # so we collect IDs first, then batch-fetch the full entities.
+        neighbor_ids: list[UUID] = []
         if rows:
             for key in ("out_neighbors", "in_neighbors"):
-                # Support old-style single-key response shape (test mocks)
                 raw = rows[0].get(key) if isinstance(rows[0], dict) else None
                 if raw is None:
                     continue
                 flat = self._flatten(raw)
                 for item in flat:
-                    if not isinstance(item, dict):
-                        continue
-                    item_id = str(_parse_uuid(item.get("id", "")))
-                    if item_id not in seen_ids and len(entities) < limit:
-                        seen_ids.add(item_id)
-                        entities.append(item)
+                    if isinstance(item, dict):
+                        item_id = str(_parse_uuid(item.get("id", "")))
+                        if item_id not in seen_ids and len(neighbor_ids) < limit:
+                            seen_ids.add(item_id)
+                            entities.append(item)
+                    else:
+                        # RecordID from arrow traversal
+                        rid = item
+                        if hasattr(rid, "id"):
+                            uid_str = str(rid.id)
+                        else:
+                            uid_str = str(rid).split(":")[-1].strip("\u27e8\u27e9")
+                        if uid_str not in seen_ids and len(neighbor_ids) < limit:
+                            seen_ids.add(uid_str)
+                            try:
+                                neighbor_ids.append(UUID(uid_str))
+                            except (ValueError, AttributeError):
+                                pass
 
-        # Also handle flat entity rows returned directly (e.g. from mocks
-        # that don't use the out_neighbors/in_neighbors shape)
-        if rows and not entities:
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                if "id" in row and "name" in row:
-                    item_id = str(_parse_uuid(row.get("id", "")))
-                    if item_id not in seen_ids and len(entities) < limit:
-                        seen_ids.add(item_id)
-                        entities.append(row)
+        # Batch-fetch full entity records for any RecordID-only results
+        if neighbor_ids and not entities:
+            fetch_rids = [_rid("entity", uid) for uid in neighbor_ids]
+            fetch_sql = "SELECT * FROM entity WHERE id IN $ids"
+            fetched = await self._conn.query(fetch_sql, {"ids": fetch_rids})
+            for row in fetched:
+                if isinstance(row, dict):
+                    entities.append(row)
 
         # Fetch relationships connecting the center to discovered neighbors
         if seen_ids:

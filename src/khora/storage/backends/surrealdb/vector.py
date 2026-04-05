@@ -109,9 +109,9 @@ class SurrealDBVectorAdapter:
     async def create_chunk(self, chunk: Chunk, *, session: Any = None) -> Chunk:
         """Create a single chunk record in SurrealDB."""
         sql = (
-            "CREATE chunk:\u27e8$id\u27e9 SET "
-            "namespace = memory_namespace:\u27e8$ns\u27e9, "
-            "document = document:\u27e8$doc\u27e9, "
+            "CREATE $rid SET "
+            "namespace = $ns_rid, "
+            "document = $doc_rid, "
             "content = $content, "
             "embedding = $embedding, "
             "embedding_model = $embedding_model, "
@@ -158,8 +158,8 @@ class SurrealDBVectorAdapter:
 
     async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
         """Fetch a single chunk by primary key."""
-        sql = "SELECT * FROM chunk:\u27e8$id\u27e9"
-        row = await self._conn.query_one(sql, {"id": str(chunk_id)})
+        sql = "SELECT * FROM $rid"
+        row = await self._conn.query_one(sql, {"rid": _rid("chunk", chunk_id)})
         if not row:
             return None
         return self._row_to_chunk(row)
@@ -180,20 +180,20 @@ class SurrealDBVectorAdapter:
 
     async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
         """Return all chunks belonging to a document, ordered by index."""
-        sql = "SELECT * FROM chunk WHERE document = document:\u27e8$doc\u27e9 ORDER BY chunk_index ASC"
-        rows = await self._conn.query(sql, {"doc": str(document_id)})
+        sql = "SELECT * FROM chunk WHERE document = $doc_rid ORDER BY chunk_index ASC"
+        rows = await self._conn.query(sql, {"doc_rid": _rid("document", document_id)})
         return [self._row_to_chunk(r) for r in rows]
 
     async def delete_chunks_by_document(self, document_id: UUID) -> int:
         """Delete all chunks for a document and return the count deleted."""
         # First count so we can report back
-        count_sql = "SELECT count() AS cnt FROM chunk WHERE document = document:\u27e8$doc\u27e9 GROUP ALL"
-        count_row = await self._conn.query_one(count_sql, {"doc": str(document_id)})
+        count_sql = "SELECT count() AS cnt FROM chunk WHERE document = $doc_rid GROUP ALL"
+        count_row = await self._conn.query_one(count_sql, {"doc_rid": _rid("document", document_id)})
         count = int(count_row.get("cnt", 0)) if count_row else 0
 
         if count > 0:
-            del_sql = "DELETE FROM chunk WHERE document = document:\u27e8$doc\u27e9"
-            await self._conn.execute(del_sql, {"doc": str(document_id)})
+            del_sql = "DELETE FROM chunk WHERE document = $doc_rid"
+            await self._conn.execute(del_sql, {"doc_rid": _rid("document", document_id)})
 
         return count
 
@@ -322,13 +322,7 @@ class SurrealDBVectorAdapter:
             "ORDER BY rank DESC LIMIT $limit"
         )
 
-        try:
-            rows = await self._conn.query(sql, bindings)
-        except Exception as e:
-            if "no suitable index" in str(e).lower():
-                logger.warning("BM25 index not available — run optimize_storage() to create search indexes")
-                return []
-            raise
+        rows = await self._conn.query(sql, bindings)
         return [(self._row_to_chunk(row), float(row.get("rank", 0.0))) for row in rows]
 
     async def count_chunks(self, namespace_id: UUID) -> int:
@@ -360,8 +354,8 @@ class SurrealDBVectorAdapter:
     async def create_entity(self, entity: Entity) -> None:
         """Create an entity record for vector search."""
         sql = (
-            "CREATE entity:\u27e8$id\u27e9 SET "
-            "namespace = memory_namespace:\u27e8$ns\u27e9, "
+            "CREATE $rid SET "
+            "namespace = $ns_rid, "
             "name = $name, "
             "entity_type = $entity_type, "
             "description = $description, "
@@ -384,7 +378,7 @@ class SurrealDBVectorAdapter:
     async def update_entity(self, entity: Entity) -> None:
         """Update an existing entity record."""
         sql = (
-            "UPDATE entity:\u27e8$id\u27e9 SET "
+            "UPDATE $rid SET "
             "name = $name, "
             "entity_type = $entity_type, "
             "description = $description, "
@@ -408,14 +402,14 @@ class SurrealDBVectorAdapter:
 
     async def entity_exists(self, entity_id: UUID) -> bool:
         """Check whether an entity record exists."""
-        sql = "SELECT count() AS cnt FROM entity WHERE id = entity:\u27e8$id\u27e9 GROUP ALL"
-        row = await self._conn.query_one(sql, {"id": str(entity_id)})
+        sql = "SELECT count() AS cnt FROM entity WHERE id = $rid GROUP ALL"
+        row = await self._conn.query_one(sql, {"rid": _rid("entity", entity_id)})
         return int(row.get("cnt", 0)) > 0 if row else False
 
     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
         """Set the embedding vector on a single entity."""
         sql = (
-            "UPDATE entity:\u27e8$id\u27e9 SET "
+            "UPDATE $rid SET "
             "embedding = $embedding, "
             "embedding_model = $embedding_model, "
             "updated_at = $updated_at"
@@ -423,7 +417,7 @@ class SurrealDBVectorAdapter:
         await self._conn.execute(
             sql,
             {
-                "id": str(entity_id),
+                "rid": _rid("entity", entity_id),
                 "embedding": list(embedding),
                 "embedding_model": model,
                 "updated_at": datetime.now(UTC),
@@ -599,7 +593,8 @@ class SurrealDBVectorAdapter:
         ns_rid = _rid("memory_namespace", namespace_id)
         sql = (
             "SELECT id, vector::dot(embedding, $query_embedding) AS similarity "  # nosec B608
-            "FROM entity WHERE (namespace = $ns_rid OR namespace.namespace_id = $ns_str) AND embedding IS NOT NULL "
+            "FROM entity WHERE (namespace = $ns_rid OR namespace.namespace_id = $ns_str) "
+            "AND embedding IS NOT NULL AND embedding IS NOT NONE AND array::len(embedding) > 0 "
             f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )
         bindings: dict[str, Any] = {
@@ -629,8 +624,8 @@ class SurrealDBVectorAdapter:
         other backends but is not used for filtering — SurrealDB record IDs
         are globally unique.
         """
-        sql = "SELECT * FROM entity:⟨$id⟩"
-        row = await self._conn.query_one(sql, {"id": str(entity_id)})
+        sql = "SELECT * FROM $rid"
+        row = await self._conn.query_one(sql, {"rid": _rid("entity", entity_id)})
         if not row:
             return None
         return _row_to_entity(row)
@@ -669,8 +664,11 @@ class SurrealDBVectorAdapter:
         """Convert a :class:`Chunk` to SurrealQL parameter bindings."""
         return {
             "id": str(chunk.id),
+            "rid": _rid("chunk", chunk.id),
             "ns": str(chunk.namespace_id),
+            "ns_rid": _rid("memory_namespace", chunk.namespace_id),
             "doc": str(chunk.document_id),
+            "doc_rid": _rid("document", chunk.document_id),
             "content": chunk.content,
             "embedding": list(chunk.embedding) if chunk.embedding is not None else None,
             "embedding_model": chunk.embedding_model,

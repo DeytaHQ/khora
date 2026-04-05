@@ -329,6 +329,12 @@ class SurrealDBRelationalAdapter:
             return None
         return self._row_to_document(row)
 
+    async def count_documents(self, namespace_id: UUID) -> int:
+        ns_str = str(namespace_id)
+        sql = "SELECT count() AS cnt FROM document WHERE namespace_id = $ns GROUP ALL"
+        row = await self._conn.query_one(sql, {"ns": ns_str})
+        return int(row.get("cnt", 0)) if row else 0
+
     async def list_documents(
         self,
         namespace_id: UUID,

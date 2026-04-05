@@ -3267,7 +3267,13 @@ class HybridQueryEngine:
             return []
 
         # Collect all entity IDs for batch fetch
-        entity_ids = [UUID(node["id"]) for node in entity_nodes]
+        def _to_uuid(val: Any) -> UUID:
+            if isinstance(val, UUID):
+                return val
+            if hasattr(val, "id"):  # RecordID from SurrealDB
+                return UUID(str(val.id))
+            return UUID(str(val))
+        entity_ids = [_to_uuid(node["id"]) for node in entity_nodes]
 
         # Batch fetch all entities in a single query (avoids N+1)
         entities_map = await self._storage.get_entities_batch(entity_ids)
@@ -3278,7 +3284,7 @@ class HybridQueryEngine:
 
         entities = []
         for node in entity_nodes:
-            eid = UUID(node["id"])
+            eid = _to_uuid(node["id"])
             if eid in entities_map:
                 entities.append((entities_map[eid], base_score))
 

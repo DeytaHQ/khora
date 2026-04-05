@@ -525,11 +525,23 @@ class StorageCoordinator:
             created_before=created_before,
         )
 
+    async def count_documents(self, namespace_id: UUID) -> int:
+        """Count documents in a namespace."""
+        if self.relational:
+            return await self.relational.count_documents(namespace_id)
+        return 0
+
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Count chunks in a namespace."""
         if not self.vector:
             raise RuntimeError("Vector backend not configured")
         return await self.vector.count_chunks(namespace_id)
+
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        """Count relationships in a namespace."""
+        if self.graph:
+            return await self.graph.count_relationships(namespace_id)
+        return 0
 
     async def list_chunks(
         self,

@@ -289,7 +289,7 @@ class EntityIndex:
         Returns:
             List of (candidate, similarity) pairs, highest first.
         """
-        if not entity.embedding:
+        if entity.embedding is None:
             return []
 
         type_str = entity.entity_type
@@ -323,7 +323,7 @@ class EntityIndex:
             if len(valid_candidates) >= max_candidates:
                 break
             candidate = self._by_id.get(cid)
-            if candidate is None or not candidate.embedding:
+            if candidate is None or candidate.embedding is None:
                 continue
             if candidate.entity_type != type_str:
                 continue
