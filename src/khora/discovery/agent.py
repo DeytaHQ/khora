@@ -250,10 +250,20 @@ class DiscoveryAgent:
                 await self._fetch_with_firecrawl(src)
             elif strategy.method == "direct_download":
                 await self._fetch_direct(src)
+                # Fallback to Firecrawl if direct download failed and Firecrawl is available
+                if self._has_firecrawl and self._state.fetched and not self._state.fetched[-1].success:
+                    logger.info(f"Direct download failed for {src.url}, trying Firecrawl fallback")
+                    self._state.fetched.pop()  # remove failed result
+                    await self._fetch_with_firecrawl(src)
             elif strategy.method == "generated_script":
                 await self._fetch_with_script(src)
             else:
                 await self._fetch_direct(src)
+                # Same Firecrawl fallback for default case
+                if self._has_firecrawl and self._state.fetched and not self._state.fetched[-1].success:
+                    logger.info(f"Direct download failed for {src.url}, trying Firecrawl fallback")
+                    self._state.fetched.pop()
+                    await self._fetch_with_firecrawl(src)
 
         return AgentPhase.REVIEW
 

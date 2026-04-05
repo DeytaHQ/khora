@@ -76,13 +76,14 @@ def extract_pdf_text(path: Path) -> str:
             text = page.get_text()
             if text.strip():
                 pages.append(text)
+        page_count = doc.page_count
         doc.close()
 
         full_text = "\n\n---\n\n".join(pages)
 
         # Check for scanned PDFs (very little text per page)
-        if doc.page_count > 0:
-            chars_per_page = len(full_text) / doc.page_count
+        if page_count > 0:
+            chars_per_page = len(full_text) / page_count
             if chars_per_page < 50:
                 logger.warning(
                     f"{path.name}: ~{chars_per_page:.0f} chars/page — "

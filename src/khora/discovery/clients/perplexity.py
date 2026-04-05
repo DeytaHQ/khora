@@ -129,10 +129,9 @@ class PerplexityClient:
                 {"role": "system", "content": system},
                 {"role": "user", "content": query},
             ],
-            "max_tokens": 2048,
+            "max_tokens": 4096,
             "temperature": 0.1,
             "return_citations": True,
-            "search_recency_filter": "year",
         }
 
         logger.debug(f"Perplexity search: {query[:80]}...")
