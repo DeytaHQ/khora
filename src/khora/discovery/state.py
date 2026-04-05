@@ -254,6 +254,9 @@ class SessionState:
     total_cost_usd: float = 0.0
     max_cost_usd: float = 2.0
 
+    # Chronicle memory
+    chronicle_db_path: str | None = None
+
     # Accumulated warnings (surfaced to user at end of session)
     warnings: list[str] = field(default_factory=list)
 
@@ -287,6 +290,7 @@ class SessionState:
             "max_iterations": self.max_iterations,
             "total_cost_usd": self.total_cost_usd,
             "max_cost_usd": self.max_cost_usd,
+            "chronicle_db_path": self.chronicle_db_path,
             "warnings": self.warnings,
         }
 
@@ -307,6 +311,7 @@ class SessionState:
             max_iterations=data.get("max_iterations", 5),
             total_cost_usd=data.get("total_cost_usd", 0.0),
             max_cost_usd=data.get("max_cost_usd", 2.0),
+            chronicle_db_path=data.get("chronicle_db_path"),
             warnings=data.get("warnings", []),
         )
 

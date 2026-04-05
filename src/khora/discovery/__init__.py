@@ -7,6 +7,7 @@ from the internet using Perplexity (search) and Firecrawl (scraping).
 
 from __future__ import annotations
 
+from .memory import DiscoveryMemory, MemoryEntry
 from .state import (
     AgentPhase,
     DiscoveredSource,
@@ -21,9 +22,11 @@ from .state import (
 __all__ = [
     "AgentPhase",
     "DiscoveredSource",
+    "DiscoveryMemory",
     "FetchAttempt",
     "FetchMethod",
     "FetchResult",
+    "MemoryEntry",
     "SessionState",
     "SourceStatus",
     "SourceType",

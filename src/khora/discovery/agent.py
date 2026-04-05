@@ -55,10 +55,12 @@ class DiscoveryAgent:
         perplexity: PerplexityClient | None = None,
         firecrawl: FirecrawlClient | None = None,
         settings: Any | None = None,
+        memory: Any | None = None,  # DiscoveryMemory
     ) -> None:
         self._ui = ui
         self._output_dir = output_dir
         self._state = state or SessionState(output_dir=str(output_dir))
+        self._memory = memory
 
         if planner:
             self._planner = planner
@@ -470,12 +472,21 @@ class DiscoveryAgent:
                     )
                 )
                 self._ui.show_fetch_saved(out_file.name, len(result.markdown))
+                await self._record_memory(
+                    src,
+                    "firecrawl_scrape",
+                    "success",
+                    content_type="text/markdown",
+                    file_size=len(result.markdown.encode()),
+                )
             else:
                 self._ui.show_fetch_empty(src.url)
                 self._state.fetched.append(FetchResult(source=src, local_path="", error="no content"))
+                await self._record_memory(src, "firecrawl_scrape", "failure", error="no content")
         except Exception as e:
             self._ui.show_fetch_failed(str(e))
             self._state.fetched.append(FetchResult(source=src, local_path="", error=str(e)))
+            await self._record_memory(src, "firecrawl_scrape", "failure", error=str(e))
 
     async def _fetch_direct(self, src: DiscoveredSource) -> None:
         """Fetch a source via direct HTTP download.
@@ -562,9 +573,13 @@ class DiscoveryAgent:
                     ],
                 )
             )
+            await self._record_memory(
+                src, "direct_download", "success", content_type=content_type, file_size=len(resp.content)
+            )
         except Exception as e:
             self._ui.show_fetch_failed(str(e))
             self._state.fetched.append(FetchResult(source=src, local_path="", error=str(e)))
+            await self._record_memory(src, "direct_download", "failure", error=str(e))
 
     async def _fetch_with_script(self, src: DiscoveredSource) -> None:
         """Generate a fetch script via LLM, validate, confirm, and execute.
@@ -576,6 +591,31 @@ class DiscoveryAgent:
 
         max_attempts = 3
         error_history: list[dict] = []
+
+        # Check memory for previous failures on this URL
+        prior_context = ""
+        if self._memory:
+            try:
+                failures = await self._memory.recall_failures(src.url)
+                if failures:
+                    prior_context = "\n\nPrevious failures for this URL (avoid these approaches):\n"
+                    for f in failures[:3]:
+                        prior_context += f"- Method: {f.get('method', '?')}, Error: {f.get('error', '?')[:200]}\n"
+
+                successful_methods = await self._memory.recall_successful_methods(src.source_type.value)
+                if successful_methods:
+                    prior_context += f"\nMethods that worked for similar sources: {', '.join(successful_methods)}\n"
+            except Exception:
+                pass  # Memory failures must never block the agent
+
+        if prior_context:
+            error_history.append(
+                {
+                    "attempt": 0,
+                    "error_type": "context",
+                    "error": prior_context,
+                }
+            )
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -649,6 +689,12 @@ class DiscoveryAgent:
                             ],
                         )
                     )
+                    await self._record_memory(
+                        src,
+                        "generated_script",
+                        "success",
+                        file_size=self._state.fetched[-1].size_bytes if self._state.fetched else 0,
+                    )
                     return  # Success — exit retry loop
                 else:
                     exec_error = (
@@ -685,6 +731,37 @@ class DiscoveryAgent:
         last_error = error_history[-1]["error"] if error_history else "unknown"
         self._ui.show_fetch_failed(f"Failed after {max_attempts} attempts: {last_error[:200]}")
         self._state.fetched.append(FetchResult(source=src, local_path="", error=last_error[:500]))
+        await self._record_memory(src, "generated_script", "failure", error=last_error[:500])
+
+    async def _record_memory(
+        self,
+        src: DiscoveredSource,
+        method: str,
+        outcome: str,
+        *,
+        error: str = "",
+        content_type: str = "",
+        file_size: int = 0,
+    ) -> None:
+        """Record a fetch outcome in discovery memory (best-effort)."""
+        if not self._memory:
+            return
+        try:
+            from .memory import MemoryEntry
+
+            await self._memory.remember(
+                MemoryEntry(
+                    url=src.url,
+                    method=method,
+                    outcome=outcome,
+                    error=error,
+                    content_type=content_type,
+                    file_size=file_size,
+                    query=self._state.user_intent,
+                )
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record memory: {e}")
 
     def _save_content(self, src: DiscoveredSource, content: str, ext: str) -> Path:
         """Write text content to a file in the output directory."""
