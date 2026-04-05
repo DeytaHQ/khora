@@ -17,9 +17,10 @@ from loguru import logger
 
 _HAS_SURREALDB = False
 try:
-    from surrealdb import Surreal
+    import surrealdb as _  # noqa: F811
 
     _HAS_SURREALDB = True
+    del _
 except ImportError:
     pass
 
@@ -80,10 +81,16 @@ class DiscoveryMemory:
             return
 
         try:
-            self._client = Surreal(f"surrealkv://{self._db_path}")
+            import surrealdb
+
+            # Use getattr to create the client so ty does not infer the union
+            # return type of AsyncSurreal() (whose HTTP variant .connect(url)
+            # has a required url param that conflicts with the WS variant).
+            factory = getattr(surrealdb, "AsyncSurreal")
+            self._client = factory(f"surrealkv://{self._db_path}")
             await self._client.connect()
             await self._client.use("discovery", "memory")
-            await self._client.signin({"username": "root", "password": "root"})
+            # Embedded/memory modes don't have a root user — no signin needed
             # Create table schema
             await self._client.query("""
                 DEFINE TABLE IF NOT EXISTS memory SCHEMAFULL;
