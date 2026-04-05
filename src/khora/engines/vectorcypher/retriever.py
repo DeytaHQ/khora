@@ -931,7 +931,12 @@ class VectorCypherRetriever:
             # Apply temporal sort: re-order by occurred_at DESC so the most
             # recent chunks rank first. This mirrors the graph path's
             # temporal_sort and is critical for STATE_QUERY/RECENCY/CHANGE.
-            if temporal_sort and chunk_results:
+            #
+            # Skip when cross-encoder reranking is active: the reranker already
+            # captures semantic relevance order, and the recency boost (above)
+            # provides temporal discrimination. A hard re-sort by timestamp
+            # would override the reranker's carefully computed ranking.
+            if temporal_sort and chunk_results and not self._config.enable_reranking:
                 from datetime import datetime as _dt
 
                 def _ts(pair: tuple[Chunk, float]) -> _dt:
