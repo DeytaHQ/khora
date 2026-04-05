@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
     from khora.engines.skeleton.backends import TemporalFilter, TemporalVectorStore
     from khora.extraction.embedders import EmbedderProtocol  # type: ignore[unresolved-import]
+    from khora.query.reranking import CrossEncoderReranker
     from khora.storage import StorageCoordinator
 
 
@@ -196,6 +197,9 @@ class VectorCypherRetriever:
 
         # Lazy entity expansion cache: chunk_id -> expansion_score (0 = no match)
         self._expansion_cache: dict[UUID, float] = {}
+
+        # Cached cross-encoder reranker (lazy-init on first use, reused across queries)
+        self._reranker: CrossEncoderReranker | None = None
 
     async def retrieve(
         self,
@@ -833,8 +837,9 @@ class VectorCypherRetriever:
         ]
 
         try:
-            reranker = CrossEncoderReranker(model_name=self._config.reranking_model)
-            results = await reranker.rerank(query, candidates, top_k=top_n)
+            if self._reranker is None:
+                self._reranker = CrossEncoderReranker(model_name=self._config.reranking_model)
+            results = await self._reranker.rerank(query, candidates, top_k=top_n)
 
             # Map reranked scores back onto FusedResult objects
             reranked: list[FusedResult] = []
