@@ -534,6 +534,12 @@ class VectorCypherRetriever:
             with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
                 fused_results = await self._apply_reranking(query, fused_results, limit)
 
+        # Normalize scores to [0,1] — ensures consistent score scale for
+        # downstream consumers (abstention detection, adapter score reporting).
+        # This is a single normalization of the final fused+boosted scores,
+        # matching what _simple_retrieve does at its exit.
+        fused_results = normalize_scores(fused_results)
+
         # Build result
         chunk_results = [(r.item, r.rrf_score) for r in fused_results[:limit]]
 
