@@ -221,6 +221,9 @@ __marimo__/
 .claude/
 !.claude/docs/
 
+# Dispatch coordinator runtime files
+.dispatch/
+
 # TTOJ installer metadata
 .ttoj.toml
 .ttoj-backups/
