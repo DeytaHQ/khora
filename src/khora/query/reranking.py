@@ -50,6 +50,7 @@ class Reranker(ABC):
         query: str,
         candidates: list[RerankCandidate[T]],
         top_k: int = 10,
+        blend_weight: float = 0.7,
     ) -> list[RerankResult[T]]:
         """Rerank candidates based on relevance to query.
 
@@ -57,6 +58,8 @@ class Reranker(ABC):
             query: Query text
             candidates: Candidates to rerank
             top_k: Number of results to return
+            blend_weight: Weight for rerank score vs original score (0-1).
+                          Final score = blend_weight * rerank + (1 - blend_weight) * original.
 
         Returns:
             List of RerankResult sorted by final_score descending
@@ -104,6 +107,7 @@ class CrossEncoderReranker(Reranker):
         query: str,
         candidates: list[RerankCandidate[T]],
         top_k: int = 10,
+        blend_weight: float = 0.7,
     ) -> list[RerankResult[T]]:
         """Rerank using cross-encoder scoring.
 
@@ -111,6 +115,7 @@ class CrossEncoderReranker(Reranker):
             query: Query text
             candidates: Candidates to rerank
             top_k: Number of results to return
+            blend_weight: Weight for rerank score vs original score (0-1)
 
         Returns:
             Reranked results
@@ -158,8 +163,7 @@ class CrossEncoderReranker(Reranker):
             # Combine with original scores (both now in [0,1])
             results = []
             for candidate, normalized_rerank in zip(candidates, normalized_scores):
-                # Weighted combination: 70% rerank score, 30% original score
-                final_score = 0.7 * normalized_rerank + 0.3 * candidate.original_score
+                final_score = blend_weight * normalized_rerank + (1 - blend_weight) * candidate.original_score
 
                 results.append(
                     RerankResult(
@@ -262,6 +266,7 @@ class LLMReranker(Reranker):
         query: str,
         candidates: list[RerankCandidate[T]],
         top_k: int = 10,
+        blend_weight: float = 0.7,
     ) -> list[RerankResult[T]]:
         """Rerank using batched LLM scoring.
 
@@ -271,6 +276,7 @@ class LLMReranker(Reranker):
             query: Query text
             candidates: Candidates to rerank
             top_k: Number of results to return
+            blend_weight: Weight for rerank score vs original score (0-1)
 
         Returns:
             Reranked results
@@ -333,7 +339,7 @@ class LLMReranker(Reranker):
             for batch, scores in zip(batches, batch_scores):
                 for candidate, raw_score in zip(batch, scores):
                     normalized_score = raw_score / 10.0
-                    final_score = 0.7 * normalized_score + 0.3 * candidate.original_score
+                    final_score = blend_weight * normalized_score + (1 - blend_weight) * candidate.original_score
                     results.append(
                         RerankResult(
                             item=candidate.item,
