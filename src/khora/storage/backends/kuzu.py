@@ -378,7 +378,8 @@ class KuzuBackend(GraphBackendBase):
 
         try:
             return await asyncio.to_thread(_delete)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to delete entity {entity_id}: {e}")
             return False
 
     async def list_entities(
@@ -528,7 +529,8 @@ class KuzuBackend(GraphBackendBase):
                 parameters={"id": str(relationship_id)},
             )
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to delete relationship {relationship_id}: {e}")
             return False
 
     async def get_entity_relationships(

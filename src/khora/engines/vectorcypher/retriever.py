@@ -797,8 +797,8 @@ class VectorCypherRetriever:
                                     "description": r.description or "",
                                 }
                             )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch relationships for entity {eid}: {e}")
                 return rels
 
             rels_task = asyncio.create_task(_fetch_rels_from_storage())

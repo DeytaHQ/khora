@@ -112,8 +112,8 @@ def detect_format(path: Path) -> tuple[str, float]:
                     return "jsonl", 1.0
                 if fmt == "csv" and _is_valid_csv(content):
                     return "csv", 1.0
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Content validation failed for {path}: {e}")
             return fmt, 0.7  # extension matches but content didn't validate
         return fmt, 0.9
 

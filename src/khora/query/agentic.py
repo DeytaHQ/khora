@@ -630,8 +630,8 @@ class AgenticSearchAgent:
                 if not source and doc.metadata.source:
                     source = doc.metadata.source.split("/")[0]
                 return source or "unknown"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to get source system for chunk {chunk.id}: {e}")
         return "unknown"
 
     async def _get_chunk_sources_batch(self, chunks: list[tuple[Chunk, float]]) -> dict[str, str]:

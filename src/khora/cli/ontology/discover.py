@@ -140,8 +140,8 @@ async def run_discovery_session(
     if memory:
         try:
             await memory.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Error closing discovery memory: {e}")
 
     # Save session for potential resume
     session_file = output_dir / ".discovery_session.json"

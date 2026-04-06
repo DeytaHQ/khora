@@ -141,8 +141,8 @@ class SkillRegistry:
             expertise = loader.load_builtin(name)
             self.register(expertise)
             return expertise
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to load builtin expertise '{name}': {e}")
 
         # Fall back to general
         if "general" in self._expertise:

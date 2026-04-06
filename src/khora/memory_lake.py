@@ -691,10 +691,12 @@ class MemoryLake:
                 engine = self._get_engine()
                 storage = getattr(engine, "_storage", None) or getattr(engine, "storage", None)
                 pg = getattr(storage, "relational", None)
-                if pg and hasattr(pg, "_session_factory") and pg._session_factory:
+                # TODO(DYT-1884): expose public API for cross-reference chunk fetching
+                session_factory = getattr(pg, "_session_factory", None) or getattr(pg, "session_factory", None)
+                if pg and session_factory:
                     from sqlalchemy import text
 
-                    async with pg._session_factory() as session:
+                    async with session_factory() as session:
                         for xref_id in list(xref_section_ids)[:5]:
                             try:
                                 result_rows = await session.execute(
@@ -714,8 +716,8 @@ class MemoryLake:
                                         content=row[1],
                                     )
                                     xref_chunks.append((xref_chunk, 0.5))
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug(f"Failed to fetch cross-reference chunk {xref_id}: {e}")
 
                 if xref_chunks:
                     logger.debug(

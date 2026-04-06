@@ -29,6 +29,8 @@ from collections.abc import Callable
 from typing import Any, overload
 from uuid import UUID
 
+from loguru import logger
+
 from . import logfire_integration as _li
 from .logfire_integration import trace_span
 
@@ -103,8 +105,8 @@ def _make_wrapper(
                 if result_extractor is not None:
                     try:
                         span.set_attributes(result_extractor(ret))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Trace result extractor failed for {span_name}: {e}")
                 return ret
 
         return async_wrapper
@@ -120,8 +122,8 @@ def _make_wrapper(
                 if result_extractor is not None:
                     try:
                         span.set_attributes(result_extractor(ret))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Trace result extractor failed for {span_name}: {e}")
                 return ret
 
         return sync_wrapper

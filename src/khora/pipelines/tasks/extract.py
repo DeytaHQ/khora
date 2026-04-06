@@ -107,8 +107,9 @@ async def extract_entities(
 
             try:
                 resolved_expertise = load_expertise(expertise)
-            except Exception:
+            except Exception as e:
                 # Fall back to registry lookup
+                logger.debug(f"load_expertise('{expertise}') failed, falling back to registry: {e}")
                 registry = get_default_registry()
                 resolved_expertise = registry.get_expertise(expertise)
 
