@@ -2175,8 +2175,8 @@ class VectorCypherEngine:
                 dt = dateparser.parse(value, settings={"RETURN_AS_TIMEZONE_AWARE": True})
                 if dt is not None:
                     return dt
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"dateparser failed for '{value}': {e}")
         raise ValueError(f"Cannot parse datetime: {value}")
 
     # =========================================================================
@@ -2351,8 +2351,8 @@ class VectorCypherEngine:
             try:
                 await self._neo4j_driver.verify_connectivity()
                 neo4j_healthy = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Neo4j health check failed: {e}")
 
         all_healthy = storage_health.is_healthy and temporal_health.get("status") == "healthy" and neo4j_healthy
 

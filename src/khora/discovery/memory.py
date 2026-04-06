@@ -117,8 +117,8 @@ class DiscoveryMemory:
         if self._client:
             try:
                 await self._client.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing discovery memory connection: {e}")
             self._client = None
             self._connected = False
 

@@ -105,8 +105,8 @@ class AGEBackend(GraphBackendBase):
                 # create_graph raises if the graph already exists; swallow.
                 try:
                     await session.execute(text(f"SELECT create_graph('{self._graph_name}')"))
-                except Exception:
-                    pass  # graph already exists
+                except Exception as e:
+                    logger.debug(f"Graph creation skipped (likely already exists): {e}")
 
         await self._create_indexes()
         logger.info(f"Connected to PostgreSQL AGE (graph: {self._graph_name})")

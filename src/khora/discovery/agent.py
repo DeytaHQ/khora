@@ -298,7 +298,8 @@ class DiscoveryAgent:
                             content = Path(vr.path).read_text(encoding="utf-8", errors="replace")
                             summary = await self._planner.summarize_content(content, Path(vr.path).name)
                             entry["content_summary"] = summary
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Content summarization failed for {Path(vr.path).name}: {e}")
                             entry["content_summary"] = ""
 
                     # Optionally enhance borderline results with semantic relevance
@@ -316,8 +317,8 @@ class DiscoveryAgent:
                             if sem > 0.6:
                                 entry["decision"] = "accept"  # upgrade borderline
                             semantic_scored += 1
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"Semantic relevance scoring failed for {vr.path}: {e}")
 
                     enriched.append(entry)
 
@@ -452,7 +453,8 @@ class DiscoveryAgent:
 
             try:
                 content = Path(fetch.local_path).read_text(encoding="utf-8", errors="replace")
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Failed to read fetched file {fetch.local_path}: {e}")
                 continue
 
             classification = classify_content(content, fetch.source.url)
@@ -665,8 +667,8 @@ class DiscoveryAgent:
                 successful_methods = await self._memory.recall_successful_methods(src.source_type.value)
                 if successful_methods:
                     prior_context += f"\nMethods that worked for similar sources: {', '.join(successful_methods)}\n"
-            except Exception:
-                pass  # Memory failures must never block the agent
+            except Exception as e:
+                logger.debug(f"Memory recall failed (non-blocking): {e}")
 
         if prior_context:
             error_history.append(

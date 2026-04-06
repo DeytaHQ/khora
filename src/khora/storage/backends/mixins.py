@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
@@ -98,8 +99,8 @@ def element_to_dict(element: Any) -> dict[str, Any]:
     if hasattr(element, "items"):
         try:
             return dict(element.items())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to convert graph element via items(): {e}")
     # Last resort — avoid crashing on unexpected types
     return {"_raw": str(element)}
 

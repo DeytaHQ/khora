@@ -594,8 +594,8 @@ async def optimize_neo4j(driver, *, database: str = "neo4j") -> dict:
         for idx_name in legacy_indexes_to_drop:
             try:
                 await session.run(f"DROP INDEX {idx_name} IF EXISTS")
-            except Exception:
-                pass  # index doesn't exist or already dropped
+            except Exception as e:
+                logger.debug(f"Failed to drop legacy index {idx_name}: {e}")
 
     async with driver.session(database=database) as session:
         for idx in NEO4J_INDEXES:

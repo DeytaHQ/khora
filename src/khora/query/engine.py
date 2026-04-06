@@ -1662,7 +1662,8 @@ class HybridQueryEngine:
                         if str(chunk_obj.id) not in existing_ids:
                             entity_chunks.append((chunk_obj, score * 0.7))
                             existing_ids.add(str(chunk_obj.id))
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Entity chunk search failed for '{name}': {e}")
                     continue
 
             if entity_chunks:

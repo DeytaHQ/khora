@@ -1022,8 +1022,8 @@ class SurrealDBGraphAdapter:
                             if rel_in == center_str or rel_out == center_str:
                                 if len(result[eid]["relationships"]) < limit_per_entity:
                                     result[eid]["relationships"].append(rel)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Failed to parse relationship record: {e}")
 
         return result
 

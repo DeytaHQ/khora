@@ -493,8 +493,8 @@ class LiteLLMEmbedder(Embedder):
                 if session is not None:
                     try:
                         await session.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Failed to close litellm session ({attr}): {e}")
         except ImportError:
             pass
 

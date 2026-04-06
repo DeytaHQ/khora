@@ -116,8 +116,8 @@ class WeaviateTemporalStore(TemporalVectorStore):
             from weaviate.classes.tenants import Tenant
 
             collection.tenants.create([Tenant(name=tenant_name)])
-        except Exception:
-            pass  # Tenant already exists
+        except Exception as e:
+            logger.debug(f"Tenant creation skipped (likely already exists): {e}")
 
         return collection.with_tenant(tenant_name)
 
@@ -200,7 +200,8 @@ class WeaviateTemporalStore(TemporalVectorStore):
             if not obj:
                 return None
             return self._object_to_chunk(obj, namespace_id)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to get chunk {chunk_id}: {e}")
             return None
 
     async def delete_chunk(self, chunk_id: UUID, namespace_id: UUID) -> bool:
@@ -210,7 +211,8 @@ class WeaviateTemporalStore(TemporalVectorStore):
         try:
             collection.data.delete_by_id(chunk_id)
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to delete chunk {chunk_id}: {e}")
             return False
 
     async def delete_chunks_by_document(self, document_id: UUID, namespace_id: UUID) -> int:

@@ -68,7 +68,8 @@ class TelemetryCollector:
             try:
                 result = await conn.execute(sa.text("SELECT trace_id FROM llm_events LIMIT 0"))
                 result.close()
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Telemetry schema probe failed (will recreate): {e}")
                 needs_recreate = True
             finally:
                 await conn.rollback()
@@ -81,9 +82,9 @@ class TelemetryCollector:
                     # Old table exists without trace_id — drop all
                     logger.info(f"Telemetry schema v{SCHEMA_VERSION}: dropping old tables for migration")
                     await conn.run_sync(metadata.drop_all)
-            except Exception:
+            except Exception as e:
                 # Tables don't exist at all — fine, create_all will handle it
-                pass
+                logger.debug(f"Old telemetry tables not found (will create fresh): {e}")
 
         # Step 3: create tables (no-op if already up-to-date)
         async with self._engine.begin() as conn:

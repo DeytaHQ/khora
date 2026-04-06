@@ -833,8 +833,8 @@ async def process_document(
         elif isinstance(expertise, str):
             try:
                 resolved_expertise = load_expertise(expertise)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to load expertise '{expertise}': {e}")
 
     # Check if expansion is enabled in expertise config
     if resolved_expertise and resolved_expertise.expansion.enabled:
@@ -1416,8 +1416,8 @@ async def ingest_documents(
         elif isinstance(expertise, str):
             try:
                 resolved_expertise = load_expertise(expertise)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to load expertise '{expertise}': {e}")
 
     inference_mode = resolved_expertise.expansion.inference_mode if resolved_expertise else "none"
     is_smart = inference_mode == "smart"

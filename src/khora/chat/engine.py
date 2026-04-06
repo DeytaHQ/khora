@@ -124,8 +124,8 @@ class ChatEngine:
                             if not source:
                                 source = doc.metadata.source.split("/")[0] if doc.metadata.source else "unknown"
                             doc_cache[doc_id_str] = source
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch document source for {doc_id_str}: {e}")
 
             # Look up search provenance from recall metadata
             source_method = chunk_provenance_map.get(str(chunk.id), "")
