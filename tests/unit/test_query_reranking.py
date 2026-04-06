@@ -71,6 +71,26 @@ class TestCrossEncoderReranker:
         assert results[0].rerank_score > results[1].rerank_score
 
     @pytest.mark.asyncio
+    async def test_custom_blend_weight(self) -> None:
+        """Blend weight parameterises rerank vs original score mix."""
+        reranker = CrossEncoderReranker()
+
+        mock_model = MagicMock()
+        # Two candidates with identical original_score but different rerank scores.
+        # With scores [0.9, 0.1], min-max normalises to [1.0, 0.0].
+        mock_model.predict.return_value = [0.9, 0.1]
+        reranker._model = mock_model
+
+        candidates = [_make_candidate("a", 0.5), _make_candidate("b", 0.5)]
+
+        # blend_weight=0.5 → final = 0.5 * normalized_rerank + 0.5 * original_score
+        results = await reranker.rerank("query", candidates, top_k=2, blend_weight=0.5)
+        # First result: 0.5 * 1.0 + 0.5 * 0.5 = 0.75
+        assert results[0].final_score == pytest.approx(0.75)
+        # Second result: 0.5 * 0.0 + 0.5 * 0.5 = 0.25
+        assert results[1].final_score == pytest.approx(0.25)
+
+    @pytest.mark.asyncio
     async def test_top_k_limit(self) -> None:
         """Results are limited to top_k."""
         reranker = CrossEncoderReranker()

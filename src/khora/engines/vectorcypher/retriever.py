@@ -863,20 +863,39 @@ class VectorCypherRetriever:
         score_min = min(raw_scores) if raw_scores else 0.0
         score_max = max(raw_scores) if raw_scores else 1.0
         score_range = score_max - score_min
-        candidates = [
-            RerankCandidate(
-                item=r,
-                original_score=(r.rrf_score - score_min) / score_range if score_range > 1e-9 else 0.5,
-                content=r.item.content if hasattr(r.item, "content") else str(r.item),
-                metadata=r.item.metadata if hasattr(r.item, "metadata") else {},
+        candidates = []
+        for r in candidates_to_rerank:
+            # Build content with optional temporal prefix for cross-encoder context
+            chunk_content = r.item.content if hasattr(r.item, "content") else str(r.item)
+            if hasattr(r.item, "metadata") and r.item.metadata:
+                meta = r.item.metadata
+                # Support both ChunkMetadata objects and plain dicts
+                raw = meta.custom if hasattr(meta, "custom") else (meta if isinstance(meta, dict) else {})
+                if raw:
+                    prefix_parts = []
+                    session_id = raw.get("session_id") or raw.get("conversation_id")
+                    if session_id:
+                        prefix_parts.append(f"Session: {session_id}")
+                    occurred_at = raw.get("occurred_at") or raw.get("source_timestamp")
+                    if occurred_at:
+                        prefix_parts.append(f"Date: {str(occurred_at)[:10]}")
+                    if prefix_parts:
+                        chunk_content = f"[{', '.join(prefix_parts)}] {chunk_content}"
+            candidates.append(
+                RerankCandidate(
+                    item=r,
+                    original_score=(r.rrf_score - score_min) / score_range if score_range > 1e-9 else 0.5,
+                    content=chunk_content,
+                    metadata=r.item.metadata if hasattr(r.item, "metadata") else {},
+                )
             )
-            for r in candidates_to_rerank
-        ]
 
         try:
             if self._reranker is None:
                 self._reranker = CrossEncoderReranker(model_name=self._config.reranking_model)
-            results = await self._reranker.rerank(query, candidates, top_k=top_n)
+            results = await self._reranker.rerank(
+                query, candidates, top_k=top_n, blend_weight=self._config.reranking_blend_weight
+            )
 
             # Map reranked scores back onto FusedResult objects
             reranked: list[FusedResult] = []
