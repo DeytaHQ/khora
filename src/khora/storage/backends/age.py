@@ -229,11 +229,15 @@ class AGEBackend(GraphBackendBase):
 
         AGE parameters cannot be passed via ``$param`` -- values are
         interpolated into the Cypher string.  This escaper handles single
-        quotes and backslashes.
+        quotes, backslashes, and control characters.
         """
         if not value:
             return ""
-        return value.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
+        # Replace backslashes first, then single quotes
+        escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+        # Strip null bytes and escape other control characters
+        escaped = escaped.replace("\x00", "").replace("\r", "\\r").replace("\n", "\\n")
+        return escaped
 
     @staticmethod
     def _sanitize_label(label: str) -> str:

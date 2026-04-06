@@ -7,6 +7,7 @@ backends get them for free and can override with optimized versions.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -101,6 +102,27 @@ def element_to_dict(element: Any) -> dict[str, Any]:
             pass
     # Last resort — avoid crashing on unexpected types
     return {"_raw": str(element)}
+
+
+# ---------------------------------------------------------------------------
+# Cypher label/relationship-type sanitizer (shared across graph backends)
+# ---------------------------------------------------------------------------
+
+_CYPHER_LABEL_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def sanitize_cypher_label(label: str) -> str:
+    """Sanitize a string for safe use as a Cypher relationship type or node label.
+
+    Strips all characters except alphanumeric and underscore. Converts to
+    UPPER_SNAKE_CASE. Falls back to ``RELATES_TO`` if the result is empty.
+
+    This **must** be applied to any user-controlled value interpolated into
+    Cypher query patterns like ``[r:TYPE]`` where parameterization is not
+    possible.
+    """
+    sanitized = _CYPHER_LABEL_RE.sub("_", label.strip())
+    return sanitized.upper() if sanitized else "RELATES_TO"
 
 
 # ---------------------------------------------------------------------------
