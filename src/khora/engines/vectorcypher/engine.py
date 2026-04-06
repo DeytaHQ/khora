@@ -217,6 +217,9 @@ class VectorCypherConfig:
     bm25_weight: float = 0.3
     bm25_top_k: int = 50
 
+    # Session-aware parallel retrieval for cross-session temporal queries
+    enable_session_aware_search: bool = False
+
     # Cross-encoder reranking
     enable_reranking: bool = False
     reranking_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -406,6 +409,7 @@ class VectorCypherEngine:
             query_cache_max_size=self._vc_config.query_cache_max_size,
             lazy_entity_expansion=self._vc_config.lazy_entity_expansion,
             skeleton_core_ratio=self._vc_config.skeleton_core_ratio,
+            enable_session_aware_search=self._vc_config.enable_session_aware_search,
             enable_bm25_channel=self._vc_config.enable_bm25_channel,
             bm25_weight=self._vc_config.bm25_weight,
             bm25_top_k=self._vc_config.bm25_top_k,
