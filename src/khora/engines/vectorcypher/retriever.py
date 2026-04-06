@@ -116,6 +116,11 @@ class RetrieverConfig:
     lazy_entity_expansion: bool = False
     skeleton_core_ratio: float = 0.70  # Skip lazy expansion when > 0.6
 
+    # BM25 channel (independent full-text search alongside vector + graph)
+    enable_bm25_channel: bool = False
+    bm25_weight: float = 0.3
+    bm25_top_k: int = 50  # How many BM25 results to fetch
+
     # Cross-encoder reranking
     enable_reranking: bool = False
     reranking_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -363,7 +368,11 @@ class VectorCypherRetriever:
         entry_limit = routing.suggested_entry_limit
 
         # OPTIMIZATION: Start vector chunk search immediately in parallel
-        # This operation doesn't depend on entity search results
+        # This operation doesn't depend on entity search results.
+        # When the BM25 channel is active, use pure vector (hybrid_alpha=1.0)
+        # to avoid double-counting BM25 (once in the vector blend, once as
+        # its own independent channel).
+        effective_hybrid_alpha = 1.0 if self._config.enable_bm25_channel else None
         vector_chunks_task = asyncio.create_task(
             self._vector_search_chunks(
                 query_embedding=query_embedding,
@@ -371,8 +380,20 @@ class VectorCypherRetriever:
                 temporal_filter=temporal_filter,
                 query_text=query,
                 limit=limit,
+                hybrid_alpha_override=effective_hybrid_alpha,
             )
         )
+
+        # Launch BM25 search in parallel with vector search (independent channel)
+        bm25_chunks_task: asyncio.Task[list[tuple[UUID, float, Chunk]]] | None = None
+        if self._config.enable_bm25_channel and self._storage:
+            bm25_chunks_task = asyncio.create_task(
+                self._bm25_search_chunks(
+                    query=query,
+                    namespace_id=namespace_id,
+                    limit=self._config.bm25_top_k,
+                )
+            )
 
         # Step 3a: Find entry entities via vector search (runs in parallel with vector_chunks_task)
         entry_entities = await self._vector_search_entities(
@@ -383,12 +404,18 @@ class VectorCypherRetriever:
 
         if not entry_entities:
             logger.debug("No entry entities found, falling back to simple retrieval")
-            # Cancel the parallel task since we're taking a different path
+            # Cancel the parallel tasks since we're taking a different path
             vector_chunks_task.cancel()
             try:
                 await vector_chunks_task
             except asyncio.CancelledError:
                 pass
+            if bm25_chunks_task is not None:
+                bm25_chunks_task.cancel()
+                try:
+                    await bm25_chunks_task
+                except asyncio.CancelledError:
+                    pass
             return await self._simple_retrieve(
                 query=query,
                 query_embedding=query_embedding,
@@ -460,6 +487,14 @@ class VectorCypherRetriever:
         # This was started at the beginning and may already be done
         vector_chunks = await vector_chunks_task
 
+        # Await BM25 results (also launched in parallel at the beginning)
+        bm25_chunks: list[tuple[UUID, float, Chunk]] = []
+        if bm25_chunks_task is not None:
+            try:
+                bm25_chunks = await bm25_chunks_task
+            except Exception as e:
+                logger.warning(f"BM25 channel failed, continuing without: {e}")
+
         # Step 6a: Temporal query decomposition for CHANGE queries
         # Runs a second vector search focused on the "current state" sub-query
         # to ensure both past and present evidence are retrieved. The original
@@ -503,6 +538,7 @@ class VectorCypherRetriever:
         fused_results = self._fuse_results(
             vector_chunks=vector_chunks,
             graph_chunks=graph_chunks,
+            bm25_chunks=bm25_chunks if bm25_chunks else None,
             use_normalization=True,
             routing=routing,
             is_temporal=_tp.recency_weight > 0.2,
@@ -731,11 +767,12 @@ class VectorCypherRetriever:
                 "graph_depth": depth,
                 "base_depth": base_depth,
                 "adaptive_depth_applied": depth != base_depth,
-                "total_chunks_before_fusion": len(graph_chunks) + len(vector_chunks),
+                "total_chunks_before_fusion": len(graph_chunks) + len(vector_chunks) + len(bm25_chunks),
                 "routing_confidence": routing.confidence,
                 # Fusion telemetry
                 "vector_chunk_count": len(vector_chunks),
                 "graph_chunk_count": len(graph_chunks),
+                "bm25_chunk_count": len(bm25_chunks),
                 "is_temporal": _tp.recency_weight > 0.2,
                 "recency_weight": _tp.recency_weight,
                 "effective_recency": effective_recency,
@@ -880,10 +917,27 @@ class VectorCypherRetriever:
         (matches the graph-path behaviour for temporal categories).
         """
         with trace_span("khora.vectorcypher.simple_retrieve", namespace_id=str(namespace_id)) as span:
-            # WS8: Lower alpha for SIMPLE queries to boost BM25 signal
-            effective_alpha = self._config.hybrid_alpha
-            if routing.complexity == QueryComplexity.SIMPLE:
-                effective_alpha = min(effective_alpha, 0.5)
+            # When BM25 channel is active, use pure vector (hybrid_alpha=1.0)
+            # to avoid double-counting BM25 in both the vector blend and the
+            # independent channel. Otherwise, lower alpha for SIMPLE queries
+            # to boost the pgvector-internal BM25 signal.
+            if self._config.enable_bm25_channel:
+                effective_alpha = 1.0
+            else:
+                effective_alpha = self._config.hybrid_alpha
+                if routing.complexity == QueryComplexity.SIMPLE:
+                    effective_alpha = min(effective_alpha, 0.5)
+
+            # Launch BM25 search in parallel with vector search
+            bm25_task: asyncio.Task[list[tuple[UUID, float, Chunk]]] | None = None
+            if self._config.enable_bm25_channel and self._storage:
+                bm25_task = asyncio.create_task(
+                    self._bm25_search_chunks(
+                        query=query,
+                        namespace_id=namespace_id,
+                        limit=self._config.bm25_top_k,
+                    )
+                )
 
             results = await self._vector_store.search(
                 namespace_id=namespace_id,
@@ -910,6 +964,38 @@ class VectorCypherRetriever:
                     created_at=r.chunk.created_at or r.chunk.occurred_at,
                 )
                 chunk_results.append((chunk, r.combined_score or r.similarity))
+
+            # Fuse with BM25 results if the channel is active
+            simple_bm25_count = 0
+            if bm25_task is not None:
+                try:
+                    bm25_results = await bm25_task
+                except Exception as e:
+                    logger.warning(f"BM25 channel failed in simple path: {e}")
+                    bm25_results = []
+
+                simple_bm25_count = len(bm25_results)
+                if bm25_results:
+                    from khora.query.fusion import reciprocal_rank_fusion as _nlist_rrf
+
+                    bm25_weight = self._config.bm25_weight
+                    # Convert vector results to (item, score) format
+                    ranked_lists: dict[str, list[tuple[Chunk, float]]] = {
+                        "vector": [(c, s) for c, s in chunk_results],
+                        "bm25": [(bm25_chunk, bm25_score) for _cid, bm25_score, bm25_chunk in bm25_results],
+                    }
+                    weights: dict[str, float] = {"vector": 1.0, "bm25": bm25_weight}
+                    fused_raw = _nlist_rrf(
+                        ranked_lists,
+                        weights=weights,
+                        k=self._config.rrf_k,
+                        id_extractor=lambda c: c.id,
+                    )
+                    chunk_results = list(fused_raw[:limit])
+                    logger.debug(
+                        f"Simple path BM25 fusion: {len(bm25_results)} BM25 + "
+                        f"{len(chunk_results)} vector -> {len(fused_raw)} fused"
+                    )
 
             # Apply recency boost to simple path (was previously missing)
             if effective_recency > 0 and chunk_results:
@@ -977,10 +1063,11 @@ class VectorCypherRetriever:
                 entities=[],
                 routing_decision=routing,
                 metadata={
-                    "search_mode": "simple_vector",
+                    "search_mode": "simple_vector" if not simple_bm25_count else "simple_vector_bm25",
                     "routing_confidence": routing.confidence,
                     "vector_chunk_count": len(chunk_results),
                     "graph_chunk_count": 0,
+                    "bm25_chunk_count": simple_bm25_count,
                     "effective_recency": effective_recency,
                     "temporal_sort": temporal_sort,
                     # Search provenance: all chunks from vector in simple mode
@@ -1397,6 +1484,8 @@ class VectorCypherRetriever:
         temporal_filter: TemporalFilter | None,
         query_text: str,
         limit: int,
+        *,
+        hybrid_alpha_override: float | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Direct vector search on chunks via pgvector.
 
@@ -1406,17 +1495,21 @@ class VectorCypherRetriever:
             temporal_filter: Temporal constraints
             query_text: Original query text for hybrid search
             limit: Maximum results
+            hybrid_alpha_override: If set, overrides the configured hybrid_alpha.
+                                   Used to force pure vector (1.0) when the BM25
+                                   channel is active to avoid double-counting.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
         """
+        effective_alpha = hybrid_alpha_override if hybrid_alpha_override is not None else self._config.hybrid_alpha
         with trace_span("khora.vectorcypher.vector_search_chunks", namespace_id=str(namespace_id)) as span:
             results = await self._vector_store.search(
                 namespace_id=namespace_id,
                 query_embedding=query_embedding,
                 limit=limit,
                 temporal_filter=temporal_filter,
-                hybrid_alpha=self._config.hybrid_alpha,
+                hybrid_alpha=effective_alpha,
                 query_text=query_text,
             )
 
@@ -1441,6 +1534,50 @@ class VectorCypherRetriever:
                 )
                 for r in results
             ]
+
+    async def _bm25_search_chunks(
+        self,
+        query: str,
+        namespace_id: UUID,
+        limit: int,
+    ) -> list[tuple[UUID, float, Chunk]]:
+        """Full-text BM25 search on chunks via StorageCoordinator.
+
+        Mirrors the pattern of ``_vector_search_chunks`` but uses PostgreSQL
+        full-text search (``ts_rank``) instead of vector similarity.
+
+        Args:
+            query: Original query text
+            namespace_id: Namespace to search
+            limit: Maximum results
+
+        Returns:
+            List of (chunk_id, score, chunk) tuples
+        """
+        if not self._storage:
+            logger.debug("Storage coordinator not available for BM25 search")
+            return []
+
+        with trace_span("khora.vectorcypher.bm25_search_chunks", namespace_id=str(namespace_id)) as span:
+            try:
+                results = await self._storage.search_fulltext_chunks(
+                    namespace_id,
+                    query,
+                    limit=limit,
+                )
+                span.set_attribute("chunk_count", len(results))
+                logger.debug(f"BM25 channel returned {len(results)} chunks")
+                return [
+                    (
+                        chunk.id,
+                        score,
+                        chunk,
+                    )
+                    for chunk, score in results
+                ]
+            except Exception as e:
+                logger.warning(f"BM25 search failed: {e}")
+                return []
 
     def _lazy_expand_chunks(
         self,
@@ -1500,15 +1637,22 @@ class VectorCypherRetriever:
         vector_chunks: list[tuple[UUID, float, Chunk]],
         graph_chunks: list[tuple[UUID, float, Chunk]],
         *,
+        bm25_chunks: list[tuple[UUID, float, Chunk]] | None = None,
         use_normalization: bool = False,
         routing: RoutingDecision | None = None,
         is_temporal: bool = False,
     ) -> list[FusedResult]:
-        """Fuse vector and graph results using weighted RRF.
+        """Fuse vector, graph, and optionally BM25 results using weighted RRF.
+
+        When ``bm25_chunks`` is provided (BM25 channel active), uses the N-list
+        ``reciprocal_rank_fusion`` from :mod:`khora.query.fusion` to fuse all
+        three channels. Otherwise falls back to the 2-list
+        ``weighted_rrf_normalized`` for vector+graph fusion.
 
         Args:
             vector_chunks: Results from vector search
             graph_chunks: Results from graph traversal
+            bm25_chunks: Results from BM25 full-text search (optional)
             use_normalization: If True, normalize scores before fusion for better ranking
             routing: If provided, adjust weights based on query complexity
             is_temporal: If True, use temporal fusion weights (graph-heavy)
@@ -1563,6 +1707,65 @@ class VectorCypherRetriever:
             span.set_attribute("vector_weight", vector_weight)
             span.set_attribute("graph_weight", graph_weight)
 
+            # ── 3-channel fusion (vector + graph + BM25) ────────────────
+            if bm25_chunks:
+                from khora.query.fusion import reciprocal_rank_fusion as _nlist_rrf
+
+                bm25_weight = self._config.bm25_weight
+                span.set_attribute("bm25_weight", bm25_weight)
+                span.set_attribute("bm25_count", len(bm25_chunks))
+
+                # Build ranked lists in the (item, score) format expected by
+                # the N-list reciprocal_rank_fusion.
+                ranked_lists: dict[str, list[tuple[Chunk, float]]] = {}
+                if vector_chunks:
+                    ranked_lists["vector"] = [(chunk, score) for _cid, score, chunk in vector_chunks]
+                if graph_chunks:
+                    ranked_lists["graph"] = [(chunk, score) for _cid, score, chunk in graph_chunks]
+                ranked_lists["bm25"] = [(chunk, score) for _cid, score, chunk in bm25_chunks]
+
+                weights: dict[str, float] = {
+                    "vector": vector_weight,
+                    "graph": graph_weight,
+                    "bm25": bm25_weight,
+                }
+
+                fused_raw: list[tuple[Chunk, float]] = _nlist_rrf(
+                    ranked_lists,
+                    weights=weights,
+                    k=self._config.rrf_k,
+                    id_extractor=lambda chunk: chunk.id,
+                )
+
+                # Convert (Chunk, rrf_score) tuples to FusedResult objects.
+                # The N-list RRF doesn't populate per-source ranks, so we
+                # build lookup maps to back-fill vector/graph provenance.
+                vector_rank_map: dict[UUID, int] = {}
+                vector_score_map: dict[UUID, float] = {}
+                for rank, (cid, score, _chunk) in enumerate(vector_chunks, start=1):
+                    vector_rank_map[cid] = rank
+                    vector_score_map[cid] = score
+
+                graph_rank_map: dict[UUID, int] = {}
+                graph_score_map: dict[UUID, float] = {}
+                for rank, (cid, score, _chunk) in enumerate(graph_chunks, start=1):
+                    graph_rank_map[cid] = rank
+                    graph_score_map[cid] = score
+
+                return [
+                    FusedResult(
+                        item_id=chunk.id,
+                        item=chunk,
+                        rrf_score=rrf_score,
+                        vector_rank=vector_rank_map.get(chunk.id),
+                        graph_rank=graph_rank_map.get(chunk.id),
+                        vector_score=vector_score_map.get(chunk.id),
+                        graph_score=graph_score_map.get(chunk.id),
+                    )
+                    for chunk, rrf_score in fused_raw
+                ]
+
+            # ── 2-channel fusion (vector + graph) ──────────────────────
             if use_normalization:
                 return weighted_rrf_normalized(
                     vector_results=vector_chunks,

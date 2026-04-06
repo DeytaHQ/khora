@@ -212,6 +212,11 @@ class VectorCypherConfig:
     fusion_hybrid_alpha: float = 0.7
     retriever_min_entity_similarity: float = 0.3
 
+    # BM25 channel (independent full-text search alongside vector + graph)
+    enable_bm25_channel: bool = False
+    bm25_weight: float = 0.3
+    bm25_top_k: int = 50
+
     # Cross-encoder reranking
     enable_reranking: bool = False
     reranking_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -401,6 +406,9 @@ class VectorCypherEngine:
             query_cache_max_size=self._vc_config.query_cache_max_size,
             lazy_entity_expansion=self._vc_config.lazy_entity_expansion,
             skeleton_core_ratio=self._vc_config.skeleton_core_ratio,
+            enable_bm25_channel=self._vc_config.enable_bm25_channel,
+            bm25_weight=self._vc_config.bm25_weight,
+            bm25_top_k=self._vc_config.bm25_top_k,
             enable_reranking=self._vc_config.enable_reranking,
             reranking_model=self._vc_config.reranking_model,
             reranking_top_n=self._vc_config.reranking_top_n,
