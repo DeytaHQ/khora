@@ -40,62 +40,6 @@ uv run khora ontology preview <file.yaml>         # Rich preview
 - `config/schema.py` — `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
 - `telemetry/` — Optional PostgreSQL-backed telemetry collector + `@trace` decorator
 
-## Conventions
-
-### Version Bumps
-
-When bumping the version, update all of the following and regenerate lockfiles:
-
-1. `pyproject.toml`
-2. `src/khora/__init__.py`
-3. `rust/khora-accel/Cargo.toml`
-4. `rust/khora-accel/pyproject.toml`
-5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
-
-## Gotchas
-
-### Migrations & Schema
-- **Never use `create_tables()`** — deprecated, bypasses Alembic. Use `run_migrations()` or `MemoryLake(run_migrations=True)`. Create new migrations with `uv run alembic revision --autogenerate -m "desc"`
-- **Version table:** `khora_alembic_version` (not `alembic_version`) — avoids conflicts with downstream apps
-- **Advisory lock:** `run_migrations()` uses `pg_advisory_xact_lock` (ID `6001515088189075507`), 60s timeout
-- **Migrations bundled** in `src/khora/db/migrations/`, not `alembic/`. Root `alembic.ini` is dev-only
-- **Skip-ahead:** When multiple services share a DB with different Khora versions, `run_migrations()` detects if the DB revision is unknown (ahead) and skips gracefully — returns `MigrationResult(success=True, skipped=True)`. Signaled via `_DatabaseAheadError` from `env.py` to `session.py`
-- **Fresh-DB behavior:** On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrations()` / `MemoryLake(run_migrations=True)` correctly creates all tables from scratch. Prior to v0.6.6 (DYT-1447), querying the missing version table inside an explicit transaction caused `InFailedSQLTransactionError`. The fix uses `information_schema.tables` to check table existence before querying it — never issuing a statement that could abort the transaction.
-
-### UUID & Type Handling
-- **ORM:** all 52 UUID columns use `as_uuid=True` — native `uuid.UUID`, never `str()` wrap
-- **Graph boundary:** Neo4j/Memgraph need `str(uuid)` at the driver boundary only
-- **SurrealDB:** `RecordID` accepts UUID objects directly (no `str()` needed since SDK 2.0)
-
-### Backend Specifics
-- **Shared engine pools:** `StorageFactory` caches by URL. Shared-engine backends skip `dispose()`
-- **Transactions:** `async with coordinator.transaction() as txn:` for atomic multi-backend ops
-- **SurrealDB unified:** all four adapters share one `SurrealDBConnection`. Coordinator skips duplicate writes
-- **SurrealDB schema:** declarative (`DEFINE IF NOT EXISTS`), auto-initializes on `connect()`. No Alembic
-- **SurrealDB SDK:** pinned `>=2.0.0a1` for 3.x support. Install: `pip install khora[surrealdb]`
-- **SurrealDB KNN broken:** `<|K|>` unreliable in embedded mode. Uses brute-force cosine + HNSW instead
-- **SurrealDB entity gate:** `_SurrealDBEntityKeyGate` serializes concurrent upserts by (ns, name, type) key
-
-### Extraction & Search
-- **Pre-normalized embeddings** — L2-normalized at ingest. Uses `batch_dot_product` (3x faster than cosine)
-- **Entity unique constraint** — `(namespace_id, name, entity_type)` UNIQUE in both PostgreSQL and SurrealDB
-- **Namespace versioning** — dual IDs: `id` (row-level) vs `namespace_id` (stable). Public API uses `namespace_id`, resolves to `id` via indexed lookup
-- **Selective extraction** — KET-RAG style: scores chunk importance, sends top 70% to LLM, rest get co-occurrence edges only
-- **Entity resolution** — multi-strategy dedup with per-type thresholds (PERSON 0.92, DATE 0.95, default 0.85)
-- **Semantic expansion** — optional cross-tool entity unification + relationship inference (4 modes: smart/batch/incremental/none)
-
-### Optional Dependencies
-- **spaCy:** `_HAS_SPACY` flag, falls back to regex sentence splitting
-- **Logfire:** `_HAS_LOGFIRE` flag, `trace_span()` yields no-op when absent. Install: `pip install khora[logfire]`
-- **`@trace` decorator:** `from khora.telemetry import trace`. Zero overhead when logfire absent
-- **Telemetry collector:** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording. Without it, `NoOpCollector` is used (zero cost)
-
-### Downstream
-- `genesis` and `khora-benchmarks` depend on khora. `lake.storage` is a stable public API
-- **LLMUsage contract:** `LLMUsage` fields are consumed by Poros/Peras for cost tracking (DYT-645) — changes require coordination
-- **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` changes require coordination
-- `scripts/` vendored from TTOJ — skip in audits
-
 ## Workflow Reference
 
 <!-- Shared workflow doc installed by TTOJ at .claude/docs/workflow.md.      -->
@@ -303,6 +247,61 @@ The recommended command sequence for feature development:
 
 Default team profiles are deployed to `.ttoj/templates/team-profiles/` and referenced by the `/team:*` commands. To customize team composition for this project, edit the deployed profiles or create project-specific overrides in `.claude/commands/team/`.
 
+## Conventions
+
+### Version Bumps
+
+When bumping the version, update all of the following and regenerate lockfiles:
+
+1. `pyproject.toml`
+2. `src/khora/__init__.py`
+3. `rust/khora-accel/Cargo.toml`
+4. `rust/khora-accel/pyproject.toml`
+5. Run `uv lock` and `cargo generate-lockfile` in `rust/khora-accel/`
+
+## Gotchas
+
+### Migrations & Schema
+- **Never use `create_tables()`** — deprecated, bypasses Alembic. Use `run_migrations()` or `MemoryLake(run_migrations=True)`. Create new migrations with `uv run alembic revision --autogenerate -m "desc"`
+- **Version table:** `khora_alembic_version` (not `alembic_version`) — avoids conflicts with downstream apps
+- **Advisory lock:** `run_migrations()` uses `pg_advisory_xact_lock` (ID `6001515088189075507`), 60s timeout
+- **Migrations bundled** in `src/khora/db/migrations/`, not `alembic/`. Root `alembic.ini` is dev-only
+- **Skip-ahead:** When multiple services share a DB with different Khora versions, `run_migrations()` detects if the DB revision is unknown (ahead) and skips gracefully — returns `MigrationResult(success=True, skipped=True)`. Signaled via `_DatabaseAheadError` from `env.py` to `session.py`
+- **Fresh-DB behavior:** On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrations()` / `MemoryLake(run_migrations=True)` correctly creates all tables from scratch. Prior to v0.6.6 (DYT-1447), querying the missing version table inside an explicit transaction caused `InFailedSQLTransactionError`. The fix uses `information_schema.tables` to check table existence before querying it — never issuing a statement that could abort the transaction.
+
+### UUID & Type Handling
+- **ORM:** all 52 UUID columns use `as_uuid=True` — native `uuid.UUID`, never `str()` wrap
+- **Graph boundary:** Neo4j/Memgraph need `str(uuid)` at the driver boundary only
+- **SurrealDB:** `RecordID` accepts UUID objects directly (no `str()` needed since SDK 2.0)
+
+### Backend Specifics
+- **Shared engine pools:** `StorageFactory` caches by URL. Shared-engine backends skip `dispose()`
+- **Transactions:** `async with coordinator.transaction() as txn:` for atomic multi-backend ops
+- **SurrealDB unified:** all four adapters share one `SurrealDBConnection`. Coordinator skips duplicate writes
+- **SurrealDB schema:** declarative (`DEFINE IF NOT EXISTS`), auto-initializes on `connect()`. No Alembic
+- **SurrealDB SDK:** pinned `>=2.0.0a1` for 3.x support. Install: `pip install khora[surrealdb]`
+- **SurrealDB KNN broken:** `<|K|>` unreliable in embedded mode. Uses brute-force cosine + HNSW instead
+- **SurrealDB entity gate:** `_SurrealDBEntityKeyGate` serializes concurrent upserts by (ns, name, type) key
+
+### Extraction & Search
+- **Pre-normalized embeddings** — L2-normalized at ingest. Uses `batch_dot_product` (3x faster than cosine)
+- **Entity unique constraint** — `(namespace_id, name, entity_type)` UNIQUE in both PostgreSQL and SurrealDB
+- **Namespace versioning** — dual IDs: `id` (row-level) vs `namespace_id` (stable). Public API uses `namespace_id`, resolves to `id` via indexed lookup
+- **Selective extraction** — KET-RAG style: scores chunk importance, sends top 70% to LLM, rest get co-occurrence edges only
+- **Entity resolution** — multi-strategy dedup with per-type thresholds (PERSON 0.92, DATE 0.95, default 0.85)
+- **Semantic expansion** — optional cross-tool entity unification + relationship inference (4 modes: smart/batch/incremental/none)
+
+### Optional Dependencies
+- **spaCy:** `_HAS_SPACY` flag, falls back to regex sentence splitting
+- **Logfire:** `_HAS_LOGFIRE` flag, `trace_span()` yields no-op when absent. Install: `pip install khora[logfire]`
+- **`@trace` decorator:** `from khora.telemetry import trace`. Zero overhead when logfire absent
+- **Telemetry collector:** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording. Without it, `NoOpCollector` is used (zero cost)
+
+### Downstream
+- `genesis` and `khora-benchmarks` depend on khora. `lake.storage` is a stable public API
+- **LLMUsage contract:** `LLMUsage` fields are consumed by Poros/Peras for cost tracking (DYT-645) — changes require coordination
+- **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` changes require coordination
+- `scripts/` vendored from TTOJ — skip in audits
 
 ## Codex Skill Mapping
 
