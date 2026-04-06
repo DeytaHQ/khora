@@ -1917,6 +1917,16 @@ class VectorCypherEngine:
                 all_entities = list(deduped.values())
                 logger.debug(f"Cross-document dedup: {len(deduped)} unique entities")
 
+                # Rebuild entity-chunk links after dedup: the pre-dedup links
+                # reference UUIDs of discarded entities, causing MATCH failures
+                # in Neo4j (silent MENTIONED_IN edge loss).  Surviving entities
+                # already carry the merged source_chunk_ids from all duplicates.
+                all_entity_chunk_links = [
+                    EntityChunkLink(entity_id=entity.id, chunk_id=chunk_id)
+                    for entity in all_entities
+                    for chunk_id in entity.source_chunk_ids
+                ]
+
             _t0 = _time.perf_counter()
             await storage.upsert_entities_batch(namespace_id, all_entities)
             _stage6_upsert_ms = (_time.perf_counter() - _t0) * 1000
