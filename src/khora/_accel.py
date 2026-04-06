@@ -294,7 +294,13 @@ def levenshtein_similarity(s1: str, s2: str) -> float:
 def sequence_match_ratio(s1: str, s2: str) -> float:
     """Compute sequence match ratio between two strings.
 
-    Uses Rust > rapidfuzz > difflib.
+    Uses Rust > rapidfuzz > difflib, in order of preference.
+
+    Note: The Rust backend uses Jaro-Winkler similarity as an approximation.
+    This produces slightly different scores than difflib.SequenceMatcher.ratio()
+    (Jaro-Winkler weights character transpositions higher). For entity resolution
+    thresholds, this difference is calibrated: Rust thresholds are set assuming
+    Jaro-Winkler scores. If switching backends, thresholds may need adjustment.
     """
     if _HAS_RUST:
         return _rust_sequence_match(s1, s2)
@@ -974,6 +980,11 @@ def resolve_entities_enhanced(
     2. Alias match — case-insensitive alias equality (score 1.0)
     3. Enhanced fuzzy — combined Jaro-Winkler (0.6) + token overlap (0.4),
        checked against the per-type threshold.
+
+    Note: Thresholds (PERSON 0.92, DATE 0.95, default 0.85) are calibrated for
+    Jaro-Winkler scores produced by the Rust backend. The Python fallback also
+    uses Jaro-Winkler via :func:`sequence_match_ratio`, so thresholds are
+    consistent across backends.
 
     Args:
         new_names: Names of new entities to resolve.
