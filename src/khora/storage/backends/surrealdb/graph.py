@@ -23,6 +23,7 @@ from khora.storage.backends.surrealdb._helpers import (
     _parse_dt,
     _parse_uuid,
     _rid,
+    _rid_sql,
     _row_to_entity,
     _sanitize_field_name,
 )
@@ -340,7 +341,7 @@ class SurrealDBGraphAdapter:
     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
         if not entity_ids:
             return {}
-        ids_list = ", ".join(str(_rid("entity", uid)) for uid in entity_ids)
+        ids_list = ", ".join(_rid_sql("entity", uid) for uid in entity_ids)
         sql = f"SELECT * FROM entity WHERE id IN [{ids_list}]"  # nosec B608
         rows = await self._conn.query(sql)
         result: dict[UUID, Entity] = {}
@@ -870,7 +871,7 @@ class SurrealDBGraphAdapter:
         relationship_types: list[str] | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        eid = _rid("entity", entity_id)
+        eid_sql = _rid_sql("entity", entity_id)
 
         rel_filter = ""
         rel_bindings: dict[str, Any] = {}
@@ -884,7 +885,7 @@ class SurrealDBGraphAdapter:
         combined_sql = (
             f"SELECT {out_arrow} AS out_neighbors, "  # nosec B608
             f"{in_arrow} AS in_neighbors "
-            f"FROM {eid}"
+            f"FROM {eid_sql}"
         )
         rows = await self._conn.query(combined_sql, rel_bindings or None)
 
@@ -934,11 +935,11 @@ class SurrealDBGraphAdapter:
 
         # Fetch relationships connecting the center to discovered neighbors
         if seen_ids:
-            neighbor_rids = ", ".join(str(_rid("entity", UUID(nid))) for nid in seen_ids)
+            neighbor_rids = ", ".join(_rid_sql("entity", UUID(nid)) for nid in seen_ids)
             rel_sql = (
                 f"SELECT * FROM relates_to WHERE "  # nosec B608
-                f"(in = {eid} AND out IN [{neighbor_rids}]) OR "
-                f"(out = {eid} AND in IN [{neighbor_rids}]) "
+                f"(in = {eid_sql} AND out IN [{neighbor_rids}]) OR "
+                f"(out = {eid_sql} AND in IN [{neighbor_rids}]) "
                 f"LIMIT {limit}"
             )
             rel_rows = await self._conn.query(rel_sql)
@@ -972,7 +973,7 @@ class SurrealDBGraphAdapter:
         in_arrow = ("<-relates_to" + rel_filter + "<-entity") * depth
 
         # Fetch all neighborhoods in a single query using an IN filter
-        ids_list = ", ".join(str(_rid("entity", uid)) for uid in entity_ids)
+        ids_list = ", ".join(_rid_sql("entity", uid) for uid in entity_ids)
         batch_sql = (
             f"SELECT id, {out_arrow} AS out_neighbors, "  # nosec B608
             f"{in_arrow} AS in_neighbors "
@@ -1030,12 +1031,12 @@ class SurrealDBGraphAdapter:
             # Fetch relationships connecting each center to its neighbors
             relationships: list[dict[str, Any]] = []
             if seen_ids:
-                center_rid = _rid("entity", eid)
-                neighbor_rids = ", ".join(str(_rid("entity", UUID(nid))) for nid in seen_ids)
+                center_rid_sql = _rid_sql("entity", eid)
+                neighbor_rids = ", ".join(_rid_sql("entity", UUID(nid)) for nid in seen_ids)
                 rel_sql = (
                     f"SELECT * FROM relates_to WHERE "  # nosec B608
-                    f"(in = {center_rid} AND out IN [{neighbor_rids}]) OR "
-                    f"(out = {center_rid} AND in IN [{neighbor_rids}]) "
+                    f"(in = {center_rid_sql} AND out IN [{neighbor_rids}]) OR "
+                    f"(out = {center_rid_sql} AND in IN [{neighbor_rids}]) "
                     f"LIMIT {limit_per_entity}"
                 )
                 try:
@@ -1109,7 +1110,7 @@ class SurrealDBGraphAdapter:
         Returns:
             List of neighbor entity property dicts
         """
-        eid = _rid("entity", entity_id)
+        eid_sql = _rid_sql("entity", entity_id)
         effective_max = min(max_hops, 3)
 
         all_neighbors: list[dict[str, Any]] = []
@@ -1133,7 +1134,7 @@ class SurrealDBGraphAdapter:
 
             # Chain arrows for the requested depth
             arrow_chain = ("->relates_to" + rel_filter + "->entity") * depth
-            sql = f"SELECT {arrow_chain} AS targets FROM {eid}"  # nosec B608
+            sql = f"SELECT {arrow_chain} AS targets FROM {eid_sql}"  # nosec B608
 
             rows = await self._conn.query(sql, bindings or None)
             if not rows:
@@ -1181,12 +1182,12 @@ class SurrealDBGraphAdapter:
         Returns:
             Number of next_session edges created
         """
-        ns_rid = _rid("memory_namespace", namespace_id)
+        ns_rid_sql = _rid_sql("memory_namespace", namespace_id)
 
         # 1. Fetch all chunks with their metadata
         rows = await self._conn.query(
             f"SELECT id, metadata_, created_at, source_timestamp FROM chunk "  # nosec B608
-            f"WHERE namespace = {ns_rid} "
+            f"WHERE namespace = {ns_rid_sql} "
             f"ORDER BY (source_timestamp ?? created_at) ASC",
         )
         if not rows:

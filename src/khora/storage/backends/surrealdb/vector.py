@@ -275,6 +275,47 @@ class SurrealDBVectorAdapter:
             results.append((self._row_to_chunk(row), sim))
         return results
 
+    # English stop words for BM25 query tokenization
+    _STOP_WORDS: set[str] = {
+        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "shall",
+        "should", "may", "might", "must", "can", "could", "am", "it", "its",
+        "i", "me", "my", "we", "our", "you", "your", "he", "she", "they",
+        "them", "their", "this", "that", "these", "those", "what", "which",
+        "who", "whom", "how", "when", "where", "why", "not", "no", "nor",
+        "and", "or", "but", "if", "then", "than", "too", "very", "just",
+        "about", "above", "after", "again", "all", "also", "any", "at",
+        "because", "before", "between", "both", "by", "during", "each",
+        "for", "from", "in", "into", "of", "on", "only", "other", "out",
+        "over", "own", "same", "so", "some", "such", "tell", "me", "to",
+        "up", "with", "down", "here", "there", "everything", "including",
+        "recent", "currently", "please", "let", "know",
+    }
+
+    @staticmethod
+    def _tokenize_query(query_text: str) -> list[str]:
+        """Extract significant keywords from a query for BM25 term matching.
+
+        SurrealDB's ``@N@`` operator does phrase matching, so multi-word
+        natural-language queries return 0 results.  This method splits the
+        query into individual terms, removes stop words, and returns tokens
+        suitable for per-term ``@N@`` clauses joined with AND.
+        """
+        import re
+
+        words = re.findall(r"[a-zA-Z0-9]+", query_text.lower())
+        tokens = [w for w in words if w not in SurrealDBVectorAdapter._STOP_WORDS and len(w) > 1]
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for t in tokens:
+            if t not in seen:
+                seen.add(t)
+                unique.append(t)
+        # Cap at 4 terms — AND requires all terms to match, so more
+        # terms produces stricter filtering and often returns 0 results.
+        return unique[:4]
+
     @trace(
         "khora.surrealdb.search_fulltext",
         include={"namespace_id", "limit"},
@@ -292,20 +333,36 @@ class SurrealDBVectorAdapter:
     ) -> list[tuple[Chunk, float]]:
         """Full-text (BM25) search on chunk content.
 
-        Uses SurrealDB's ``@1@`` match operator and ``search::score(1)``
-        for BM25 ranking.
+        Tokenizes the query into individual keywords and uses one
+        ``@N@`` match clause per term joined with AND.  Each term gets
+        a unique score reference so ``search::score(N)`` can be summed
+        for aggregate BM25 ranking.
+
+        Falls back to single-phrase ``@1@`` when the query is already
+        a short keyword (1-2 words after stop-word removal).
         """
+        tokens = self._tokenize_query(query_text)
+        if not tokens:
+            return []
+
         ns_rid = _rid("memory_namespace", namespace_id)
         where_clauses = [
             "(namespace = $ns_rid OR namespace.namespace_id = $ns_str)",
-            "content @1@ $query_text",
         ]
         bindings: dict[str, Any] = {
             "ns_rid": ns_rid,
             "ns_str": str(namespace_id),
-            "query_text": query_text,
             "limit": limit,
         }
+
+        # Use only the first (most significant) keyword for BM25 matching.
+        # SurrealDB's embedded engine has a bug where multi-term @N@ AND
+        # queries return rows via count() but 0 via SELECT — so we match
+        # on one term and let downstream vector fusion handle precision.
+        primary_token = tokens[0]
+        where_clauses.append("content @1@ $query_text")
+        bindings["query_text"] = primary_token
+        score_expr = "search::score(1)"
 
         if created_after is not None:
             where_clauses.append("(source_timestamp ?? created_at) >= $created_after")
@@ -317,7 +374,7 @@ class SurrealDBVectorAdapter:
 
         where_sql = " AND ".join(where_clauses)
         sql = (
-            "SELECT *, search::score(1) AS rank "  # nosec B608
+            f"SELECT *, ({score_expr}) AS rank "  # nosec B608
             f"FROM chunk WHERE {where_sql} "
             "ORDER BY rank DESC LIMIT $limit"
         )

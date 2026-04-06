@@ -32,13 +32,11 @@ def _rid(table: str, uid: UUID) -> Any:
     SurrealDB 1.x+ requires ``RecordID`` objects (not strings) when binding
     record IDs in parameterised queries like ``CREATE $rid SET ...``.
 
-    Always passes ``str(uid)`` to ensure string-keyed RecordIDs that
-    produce properly escaped ``table:⟨uuid⟩`` literals when stringified.
-    UUID-keyed RecordIDs produce ``table:uuid-without-brackets`` which
-    SurrealDB cannot parse due to unescaped hyphens.
+    Uses UUID-keyed RecordIDs to match how data is stored.  For f-string
+    SQL interpolation use :func:`_rid_sql` instead.
     """
     if _RecordID is not None:
-        return _RecordID(table, str(uid))
+        return _RecordID(table, uid)
     # Fallback for environments without surrealdb (e.g. unit tests with mocks)
     import warnings
 
@@ -46,6 +44,18 @@ def _rid(table: str, uid: UUID) -> Any:
         "surrealdb not installed; _rid returns string fallback",
         stacklevel=2,
     )
+    return f"{table}:\u27e8{uid}\u27e9"
+
+
+def _rid_sql(table: str, uid: UUID) -> str:
+    """Build a SurrealDB record ID literal safe for f-string SQL interpolation.
+
+    UUID-keyed RecordIDs stringify as ``table:uuid`` (no brackets), which
+    SurrealDB cannot parse when UUIDs contain hex digits.  This function
+    returns ``table:⟨uuid⟩`` with angle brackets for safe SQL embedding.
+
+    For parameterised queries (``$rid`` bindings), use :func:`_rid` instead.
+    """
     return f"{table}:\u27e8{uid}\u27e9"
 
 
