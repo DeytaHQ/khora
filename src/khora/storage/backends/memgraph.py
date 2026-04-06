@@ -22,6 +22,7 @@ from khora.storage.backends.mixins import (
     GraphBackendBase,
     deserialize_dict,
     element_to_dict,
+    sanitize_cypher_label,
     serialize_dict,
 )
 
@@ -380,7 +381,7 @@ class MemgraphBackend(GraphBackendBase):
     async def create_relationship(self, relationship: Relationship) -> Relationship:
         driver = self._get_driver()
 
-        rel_type = relationship.relationship_type
+        rel_type = sanitize_cypher_label(relationship.relationship_type)
 
         # Dynamic relationship type via f-string (parameterized labels not supported in Cypher)
         query = f"""
@@ -473,7 +474,8 @@ class MemgraphBackend(GraphBackendBase):
 
         rel_filter = ""
         if relationship_types:
-            rel_filter = ":" + "|".join(relationship_types)
+            sanitized = [sanitize_cypher_label(rt) for rt in relationship_types]
+            rel_filter = ":" + "|".join(sanitized)
 
         if direction == "outgoing":
             pattern = f"(e)-[r{rel_filter}]->(other)"
@@ -507,7 +509,7 @@ class MemgraphBackend(GraphBackendBase):
     ) -> list[Relationship]:
         driver = self._get_driver()
 
-        rel_filter = f":{relationship_type}" if relationship_type else ""
+        rel_filter = f":{sanitize_cypher_label(relationship_type)}" if relationship_type else ""
 
         query = f"""
         MATCH (source)-[r{rel_filter}]->(target)
@@ -645,7 +647,8 @@ class MemgraphBackend(GraphBackendBase):
 
         rel_filter = ""
         if relationship_types:
-            rel_filter = ":" + "|".join(relationship_types)
+            sanitized = [sanitize_cypher_label(rt) for rt in relationship_types]
+            rel_filter = ":" + "|".join(sanitized)
 
         # Memgraph supports BFS shortest path
         query = f"""
@@ -690,7 +693,8 @@ class MemgraphBackend(GraphBackendBase):
 
         rel_filter = ""
         if relationship_types:
-            rel_filter = ":" + "|".join(relationship_types)
+            sanitized = [sanitize_cypher_label(rt) for rt in relationship_types]
+            rel_filter = ":" + "|".join(sanitized)
 
         # Pure Cypher — no APOC needed
         query = f"""
