@@ -689,6 +689,55 @@ class DualNodeManager:
 
         return records
 
+    @trace(
+        "khora.neo4j.get_entity_channels",
+        include={"entity_ids", "namespace_id"},
+        result=lambda r: {"channel_count": len(r)},
+    )
+    async def get_entity_channels(
+        self,
+        entity_ids: list[str],
+        namespace_id: str,
+    ) -> list[str]:
+        """Get distinct session channels from entities' connected chunks.
+
+        Queries Neo4j for all Chunk nodes connected to the given entities
+        via MENTIONED_IN relationships and returns the distinct non-null
+        channel values.
+
+        Args:
+            entity_ids: Entity IDs (strings) to find channels for
+            namespace_id: Namespace constraint (string)
+
+        Returns:
+            List of distinct channel strings (never contains None)
+        """
+        if not entity_ids:
+            return []
+
+        query = """
+        MATCH (e:Entity)-[:MENTIONED_IN]->(c:Chunk)
+        WHERE e.id IN $entity_ids
+          AND c.namespace_id = $namespace_id
+          AND c.channel IS NOT NULL
+        RETURN DISTINCT c.channel AS channel
+        """
+
+        async with self._driver.session(database=self._database) as session:
+
+            async def _work(tx):
+                result = await tx.run(
+                    query,
+                    entity_ids=entity_ids,
+                    namespace_id=namespace_id,
+                )
+                return [record["channel"] async for record in result]
+
+            channels = await session.execute_read(_work)
+
+        logger.debug(f"Found {len(channels)} distinct channels for {len(entity_ids)} entities")
+        return channels
+
     async def delete_chunks_by_document(
         self,
         document_id: UUID,

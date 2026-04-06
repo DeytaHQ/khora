@@ -127,6 +127,12 @@ class RetrieverConfig:
     reranking_top_n: int = 50  # Candidates to feed to the cross-encoder
     reranking_blend_weight: float = 0.7  # Rerank vs original score blend
 
+    # Session-aware parallel retrieval for cross-session temporal queries.
+    # When enabled AND the query is temporal AND entry entities span multiple
+    # sessions, fans out parallel per-session vector searches instead of a
+    # single global search.  Improves session_crossing_recall.
+    enable_session_aware_search: bool = False
+
     # Limits
     max_chunks: int = 50
     max_entities: int = 30
@@ -429,6 +435,121 @@ class VectorCypherRetriever:
                 recency_floor=_tp.recency_floor,
             )
 
+        # Step 3b: Session-aware parallel retrieval
+        # When enabled and the query is temporal, discover which sessions the
+        # entry entities belong to. If they span multiple sessions, cancel the
+        # single global vector search and fan out parallel per-session searches
+        # to improve session_crossing_recall.
+        session_aware_activated = False
+        _session_aware_chunks: list[tuple[UUID, float, Chunk]] | None = None
+        if (
+            self._config.enable_session_aware_search
+            and self._dual_nodes is not None
+            and temporal_signal
+            and temporal_signal.is_temporal
+            and len(entry_entities) >= 2
+        ):
+            with trace_span(
+                "khora.vectorcypher.session_discovery",
+                entity_count=len(entry_entities),
+            ) as sa_span:
+                try:
+                    entity_channels = await self._dual_nodes.get_entity_channels(
+                        entity_ids=[str(e[0]) for e in entry_entities],
+                        namespace_id=str(namespace_id),
+                    )
+                    sa_span.set_attribute("channel_count", len(entity_channels))
+                except Exception as e:
+                    logger.warning(f"Session discovery failed, using global search: {e}")
+                    entity_channels = []
+
+            if len(entity_channels) >= 2:
+                # Cancel the original global vector search
+                vector_chunks_task.cancel()
+                try:
+                    await vector_chunks_task
+                except asyncio.CancelledError:
+                    pass
+
+                # Fan out per-session vector searches + one unscoped fallback
+                session_aware_activated = True
+                per_session_limit = max(3, limit // len(entity_channels))
+                logger.info(
+                    f"Session-aware search: {len(entity_channels)} sessions, " f"{per_session_limit} chunks/session"
+                )
+
+                from khora.engines.skeleton.backends import TemporalFilter as _TF
+
+                session_tasks: list[asyncio.Task[list[tuple[UUID, float, Chunk]]]] = []
+                for ch in entity_channels:
+                    # Build a per-session temporal filter, preserving any existing
+                    # time-range constraints from the original filter.
+                    if temporal_filter is not None:
+                        session_tf = _TF(
+                            occurred_after=temporal_filter.occurred_after,
+                            occurred_before=temporal_filter.occurred_before,
+                            created_after=temporal_filter.created_after,
+                            created_before=temporal_filter.created_before,
+                            source_system=temporal_filter.source_system,
+                            author=temporal_filter.author,
+                            channel=ch,
+                            tags=temporal_filter.tags,
+                            additional=temporal_filter.additional,
+                        )
+                    else:
+                        session_tf = _TF(channel=ch)
+
+                    session_tasks.append(
+                        asyncio.create_task(
+                            self._vector_search_chunks(
+                                query_embedding=query_embedding,
+                                namespace_id=namespace_id,
+                                temporal_filter=session_tf,
+                                query_text=query,
+                                limit=per_session_limit,
+                                hybrid_alpha_override=effective_hybrid_alpha,
+                            )
+                        )
+                    )
+
+                # Also keep one unscoped search as fallback (in case sessions
+                # are incomplete or the query spans non-entity sessions)
+                fallback_limit = max(3, limit // 3)
+                session_tasks.append(
+                    asyncio.create_task(
+                        self._vector_search_chunks(
+                            query_embedding=query_embedding,
+                            namespace_id=namespace_id,
+                            temporal_filter=temporal_filter,
+                            query_text=query,
+                            limit=fallback_limit,
+                            hybrid_alpha_override=effective_hybrid_alpha,
+                        )
+                    )
+                )
+
+                # Gather all per-session results
+                all_session_results = await asyncio.gather(*session_tasks, return_exceptions=True)
+
+                # Merge and deduplicate by chunk_id, keeping the best score
+                merged: dict[UUID, tuple[UUID, float, Chunk]] = {}
+                for i, result in enumerate(all_session_results):
+                    if isinstance(result, Exception):
+                        ch_label = entity_channels[i] if i < len(entity_channels) else "fallback"
+                        logger.warning(f"Session search failed for channel={ch_label}: {result}")
+                        continue
+                    for chunk_id, score, chunk in result:
+                        if chunk_id not in merged or score > merged[chunk_id][1]:
+                            merged[chunk_id] = (chunk_id, score, chunk)
+
+                # Store merged results; we'll use _session_aware_chunks instead
+                # of awaiting vector_chunks_task in Step 6.
+                _session_aware_chunks = list(merged.values())
+                logger.info(
+                    f"Session-aware search merged {len(merged)} unique chunks "
+                    f"from {len(entity_channels)} sessions + fallback"
+                )
+
         # Compute adaptive depth based on entry entity count
         # This prevents explosion when many entities are found
         depth = self._router.compute_adaptive_depth(
@@ -484,8 +605,13 @@ class VectorCypherRetriever:
         )
 
         # Step 6: Wait for parallel vector chunk search to complete
-        # This was started at the beginning and may already be done
-        vector_chunks = await vector_chunks_task
+        # This was started at the beginning and may already be done.
+        # If session-aware search produced results, use those instead.
+        if _session_aware_chunks is not None:
+            vector_chunks = _session_aware_chunks
+            # The original task was already cancelled; no need to await.
+        else:
+            vector_chunks = await vector_chunks_task
 
         # Await BM25 results (also launched in parallel at the beginning)
         bm25_chunks: list[tuple[UUID, float, Chunk]] = []
@@ -776,6 +902,8 @@ class VectorCypherRetriever:
                 "is_temporal": _tp.recency_weight > 0.2,
                 "recency_weight": _tp.recency_weight,
                 "effective_recency": effective_recency,
+                # Session-aware search telemetry
+                "session_aware_activated": session_aware_activated,
                 # Bi-temporal entity version history (populated for CHANGE queries)
                 "version_history": version_history,
                 # Search provenance: which method(s) found each chunk

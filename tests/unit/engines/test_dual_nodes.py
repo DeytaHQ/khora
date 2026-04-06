@@ -403,3 +403,51 @@ class TestDualNodeManagerCountChunks:
         count = await manager.count_chunks(uuid4())
 
         assert count == 42
+
+
+@pytest.mark.unit
+class TestDualNodeManagerGetEntityChannels:
+    """Tests for get_entity_channels method."""
+
+    @pytest.mark.asyncio
+    async def test_get_entity_channels_returns_channels(self) -> None:
+        """Test that get_entity_channels returns distinct channel strings."""
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(return_value=["session-1", "session-2", "session-3"])
+
+        manager = DualNodeManager(driver)
+        channels = await manager.get_entity_channels(
+            entity_ids=[str(uuid4()), str(uuid4())],
+            namespace_id=str(uuid4()),
+        )
+
+        assert channels == ["session-1", "session-2", "session-3"]
+        session.execute_read.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_entity_channels_empty_entity_ids(self) -> None:
+        """Test that get_entity_channels returns empty list for no entities."""
+        driver, session = _make_neo4j_driver()
+        manager = DualNodeManager(driver)
+
+        channels = await manager.get_entity_channels(
+            entity_ids=[],
+            namespace_id=str(uuid4()),
+        )
+
+        assert channels == []
+        session.execute_read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_entity_channels_single_channel(self) -> None:
+        """Test that a single channel is returned correctly."""
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(return_value=["only-session"])
+
+        manager = DualNodeManager(driver)
+        channels = await manager.get_entity_channels(
+            entity_ids=[str(uuid4())],
+            namespace_id=str(uuid4()),
+        )
+
+        assert channels == ["only-session"]

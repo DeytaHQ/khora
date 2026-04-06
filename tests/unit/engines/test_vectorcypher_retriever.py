@@ -42,6 +42,7 @@ class TestRetrieverConfig:
         assert config.query_cache_ttl_seconds == 0
         assert config.query_cache_max_size == 100
         assert config.lazy_entity_expansion is False
+        assert config.enable_session_aware_search is False
         assert config.max_chunks == 50
         assert config.max_entities == 30
 
@@ -63,6 +64,11 @@ class TestRetrieverConfig:
         assert config.graph_weight == 0.3
         assert config.recency_weight == 0.0
         assert config.query_cache_ttl_seconds == 300
+
+    def test_session_aware_search_enabled(self) -> None:
+        """Test enabling session-aware search."""
+        config = RetrieverConfig(enable_session_aware_search=True)
+        assert config.enable_session_aware_search is True
 
 
 class TestVectorCypherResult:
