@@ -285,7 +285,7 @@ class TestSkeletonEngineStats:
 class TestVectorCypherEngineStats:
     """Tests for VectorCypherEngine.stats() with last_activity_at."""
 
-    def _make_engine(self) -> "VectorCypherEngine":  # noqa: F821
+    def _make_engine(self) -> VectorCypherEngine:  # noqa: F821
         from khora.engines.vectorcypher.engine import VectorCypherEngine
 
         config = _mock_khora_config()
