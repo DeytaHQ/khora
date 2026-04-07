@@ -54,7 +54,6 @@ class SearchMode(Enum):
     GRAPH = auto()  # Graph traversal only
     HYBRID = auto()  # Combine vector and graph
     ALL = auto()  # Vector, graph, and keyword
-    ONTOLOGY = auto()  # Ontology-first: taxonomy → PageRank → cross-refs → vector fallback
 
 
 @dataclass
@@ -477,12 +476,6 @@ class QueryConfig:
     # Linked entity boost
     linked_entity_boost: float = 1.5
 
-    # Structured document features (default off to avoid per-query DB lookups)
-    enable_relationship_expansion: bool = False
-    relationship_expansion_max: int = 5
-    enable_taxonomy_boost: bool = False
-    taxonomy_boost_factor: float = 1.5
-
     @classmethod
     def from_settings(cls, settings: Any) -> QueryConfig:
         """Create QueryConfig from QuerySettings.
@@ -558,11 +551,6 @@ class QueryConfig:
             graph_chunk_query_sim_weight=getattr(settings, "graph_chunk_query_sim_weight", 0.6),
             expanded_query_discount=getattr(settings, "expanded_query_discount", 0.7),
             linked_entity_boost=getattr(settings, "linked_entity_boost", 1.5),
-            # Structured document features
-            enable_relationship_expansion=getattr(settings, "enable_relationship_expansion", False),
-            relationship_expansion_max=getattr(settings, "relationship_expansion_max", 5),
-            enable_taxonomy_boost=getattr(settings, "enable_taxonomy_boost", False),
-            taxonomy_boost_factor=getattr(settings, "taxonomy_boost_factor", 1.5),
         )
 
 
@@ -987,118 +975,7 @@ class HybridQueryEngine:
 
         # Step 3-7: Execute search pipeline
         # ONTOLOGY mode: taxonomy → PageRank → cross-refs → vector fallback
-        if cfg.mode == SearchMode.ONTOLOGY:
-            metadata["ontology_mode"] = True
-            fused_chunks: list[tuple[Any, float]] = []
-            fused_entities: list[tuple[Any, float]] = []
-            graph_context: dict[str, Any] = {}
-            search_contributions = None
-
-            try:
-                # Step A: Taxonomy classification (if enabled)
-                taxonomy_chapters: set[str] = set()
-                if cfg.enable_taxonomy_boost:
-                    ns = await self._storage.get_namespace(namespace_id)
-                    ns_meta = ns.metadata or {} if ns else {}
-                    khora_meta = ns_meta.get("khora", {})
-                    taxonomy = khora_meta.get("taxonomy") or ns_meta.get("taxonomy")
-                    if taxonomy:
-                        query_lower = query_text.lower()
-                        for ch_id, ch_data in taxonomy.items():
-                            for kw in ch_data.get("keywords", []):
-                                if kw in query_lower:
-                                    taxonomy_chapters.add(ch_id)
-                                    break
-                        if taxonomy_chapters:
-                            metadata["ontology_taxonomy_chapters"] = list(taxonomy_chapters)
-
-                # Step B: Entity linking (already done above)
-                # Use linked entities as PageRank seeds
-                seed_entity_ids = list(linked_entity_ids[:15])
-
-                # Step C: If we have linked entities, get their neighborhoods
-                if seed_entity_ids:
-                    entities_map, neighborhoods = await asyncio.gather(
-                        self._storage.get_entities_batch(seed_entity_ids),
-                        self._storage.get_neighborhoods_batch(
-                            seed_entity_ids,
-                            depth=3,
-                            limit_per_entity=20,
-                        ),
-                    )
-
-                    # Collect all entity IDs from neighborhoods for PageRank
-                    all_entity_ids = set(seed_entity_ids)
-                    edge_list: list[tuple[str, str]] = []
-                    for eid in seed_entity_ids:
-                        if eid in neighborhoods:
-                            for rel in neighborhoods[eid].get("relationships", []):
-                                src = str(rel.get("source_id", ""))
-                                tgt = str(rel.get("target_id", ""))
-                                if src and tgt:
-                                    all_entity_ids.add(src)
-                                    all_entity_ids.add(tgt)
-                                    edge_list.append((src, tgt))
-
-                    # Build entities list from seeds + neighborhoods
-                    for eid in seed_entity_ids:
-                        if eid in entities_map:
-                            entity = entities_map[eid]
-                            score = 1.0 if eid in linked_entity_ids else 0.5
-                            fused_entities.append((entity, score))
-
-                    # Collect chunks from entities
-                    chunk_ids_to_fetch: list[UUID] = []
-                    chunk_source: dict[str, float] = {}
-                    for entity, score in fused_entities:
-                        for cid in entity.source_chunk_ids[:10]:
-                            if str(cid) not in chunk_source:
-                                chunk_ids_to_fetch.append(cid)
-                                chunk_source[str(cid)] = score
-
-                    if chunk_ids_to_fetch:
-                        chunks_map = await self._storage.get_chunks_batch(chunk_ids_to_fetch)
-                        for cid, chunk in chunks_map.items():
-                            score = chunk_source.get(str(cid), 0.5)
-                            # Taxonomy boost
-                            if taxonomy_chapters and hasattr(chunk, "metadata") and chunk.metadata:
-                                custom = getattr(chunk.metadata, "custom", {}) or {}
-                                khora_c = custom.get("khora", {})
-                                ch = khora_c.get("chapter_number", "") or custom.get("chapter_number", "")
-                                if ch in taxonomy_chapters:
-                                    score *= cfg.taxonomy_boost_factor
-                            fused_chunks.append((chunk, score))
-
-                    fused_chunks = sorted(fused_chunks, key=lambda x: x[1], reverse=True)
-                    fused_entities = sorted(fused_entities, key=lambda x: x[1], reverse=True)
-                    metadata["ontology_entities_found"] = len(fused_entities)
-                    metadata["ontology_chunks_found"] = len(fused_chunks)
-                    logger.debug(f"Ontology mode: {len(fused_entities)} entities, {len(fused_chunks)} chunks")
-
-                # Step D: Vector fallback if graph navigation found too few results
-                if len(fused_chunks) < cfg.max_chunks and query_embedding is not None:
-                    existing_ids = {c.id for c, _ in fused_chunks}
-                    vector_results = await self._storage.search_similar_chunks(
-                        namespace_id,
-                        query_embedding,
-                        limit=cfg.max_chunks - len(fused_chunks),
-                        min_similarity=cfg.min_chunk_similarity,
-                    )
-                    for chunk, score in vector_results:
-                        if chunk.id not in existing_ids:
-                            fused_chunks.append((chunk, score * 0.8))  # Discount vector fallback
-                    fused_chunks = sorted(fused_chunks, key=lambda x: x[1], reverse=True)
-                    metadata["ontology_vector_fallback"] = len(vector_results)
-
-            except Exception as e:
-                logger.warning(f"Ontology mode failed, falling back to hybrid: {e}")
-                cfg.mode = SearchMode.HYBRID  # Fall through to standard pipeline
-
-        if cfg.mode == SearchMode.ONTOLOGY:
-            # Already handled above — limit results
-            fused_chunks = fused_chunks[: cfg.max_chunks]
-            fused_entities = fused_entities[: cfg.max_entities]
-        elif cfg.enable_multi_stage:
+        if cfg.enable_multi_stage:
             # Use multi-stage ranking pipeline for improved quality
             metrics.multi_stage_enabled = True
             metadata["multi_stage_enabled"] = True
@@ -1133,71 +1010,6 @@ class HybridQueryEngine:
                     else:
                         boosted_entities.append((entity, score))
                 fused_entities = sorted(boosted_entities, key=lambda x: x[1], reverse=True)
-
-            # Relationship expansion: follow edges from top entities to inject related chunks
-            if cfg.enable_relationship_expansion and fused_entities:
-                try:
-                    existing_ids = {c.id for c, _ in fused_chunks}
-                    expansion_count = 0
-                    for entity, score in fused_entities[:10]:
-                        if expansion_count >= cfg.relationship_expansion_max:
-                            break
-                        # Find related entities via relationships
-                        related = await self._storage.find_related_entities(
-                            entity.id,
-                            limit=3,
-                        )
-                        for rel_entity in related:
-                            if expansion_count >= cfg.relationship_expansion_max:
-                                break
-                            for chunk_id in rel_entity.source_chunk_ids[:2]:
-                                if chunk_id not in existing_ids:
-                                    chunk_obj = await self._storage.get_chunk(chunk_id)
-                                    if chunk_obj:
-                                        fused_chunks.append((chunk_obj, score * 0.5))
-                                        existing_ids.add(chunk_id)
-                                        expansion_count += 1
-                    if expansion_count > 0:
-                        fused_chunks = sorted(fused_chunks, key=lambda x: x[1], reverse=True)
-                        metadata["relationship_expansion"] = {"added": expansion_count}
-                        logger.debug(f"Relationship expansion: injected {expansion_count} chunks")
-                except Exception as e:
-                    logger.warning(f"Relationship expansion failed: {e}")
-
-            # Taxonomy boost: boost chunks from chapters matching the query topic
-            if cfg.enable_taxonomy_boost and fused_chunks:
-                try:
-                    # Get namespace metadata for taxonomy
-                    ns = await self._storage.get_namespace(namespace_id)
-                    ns_meta = ns.metadata or {} if ns else {}
-                    khora_meta = ns_meta.get("khora", {})
-                    taxonomy = khora_meta.get("taxonomy") or ns_meta.get("taxonomy")
-                    if taxonomy and isinstance(taxonomy, dict):
-                        # Classify query against taxonomy keywords
-                        query_lower = query_text.lower()
-                        matched_chapters = set()
-                        for ch_id, ch_data in taxonomy.items():
-                            keywords = ch_data.get("keywords", [])
-                            for kw in keywords:
-                                if kw in query_lower:
-                                    matched_chapters.add(ch_id)
-                                    break
-                        if matched_chapters:
-                            boosted = []
-                            for chunk, score in fused_chunks:
-                                ch = ""
-                                if hasattr(chunk, "metadata") and chunk.metadata:
-                                    custom = getattr(chunk.metadata, "custom", {}) or {}
-                                    khora_c = custom.get("khora", {})
-                                ch = khora_c.get("chapter_number", "") or custom.get("chapter_number", "")
-                                if ch in matched_chapters:
-                                    boosted.append((chunk, score * cfg.taxonomy_boost_factor))
-                                else:
-                                    boosted.append((chunk, score))
-                            fused_chunks = sorted(boosted, key=lambda x: x[1], reverse=True)
-                            metadata["taxonomy_boost"] = {"matched_chapters": list(matched_chapters)}
-                except Exception as e:
-                    logger.warning(f"Taxonomy boost failed: {e}")
 
             # Compute overlap statistics
             search_contributions.compute_overlaps()

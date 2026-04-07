@@ -1209,83 +1209,6 @@ class VectorCypherEngine:
         finally:
             retriever._config.hybrid_alpha = original_alpha
 
-        # Post-retrieval: taxonomy boost + relationship expansion (behind config flags)
-        _query_cfg = self._config.query if hasattr(self._config, "query") else None
-
-        if _query_cfg and getattr(_query_cfg, "enable_taxonomy_boost", False) and result.chunks:
-            try:
-                ns = await self._get_storage().get_namespace(namespace_id)
-                ns_meta = ns.metadata or {} if ns else {}
-                khora_meta = ns_meta.get("khora", {})
-                taxonomy = khora_meta.get("taxonomy") or ns_meta.get("taxonomy")
-                if taxonomy and isinstance(taxonomy, dict):
-                    query_lower = query.lower()
-                    matched_chapters: set[str] = set()
-                    for ch_id, ch_data in taxonomy.items():
-                        for kw in ch_data.get("keywords", []):
-                            if kw in query_lower:
-                                matched_chapters.add(ch_id)
-                                break
-                    if matched_chapters:
-                        boost_factor = getattr(_query_cfg, "taxonomy_boost_factor", 1.5)
-                        boosted = []
-                        for chunk, score in result.chunks:
-                            ch = ""
-                            if hasattr(chunk, "metadata") and chunk.metadata:
-                                custom = getattr(chunk.metadata, "custom", {}) or {}
-                                khora_c = custom.get("khora", {})
-                                ch = khora_c.get("chapter_number", "") or custom.get("chapter_number", "")
-                            if ch in matched_chapters:
-                                boosted.append((chunk, score * boost_factor))
-                            else:
-                                boosted.append((chunk, score))
-                        result.chunks = sorted(boosted, key=lambda x: x[1], reverse=True)
-                        logger.debug(f"VectorCypher taxonomy boost: matched {matched_chapters}")
-            except Exception as e:
-                logger.warning(f"VectorCypher taxonomy boost failed: {e}")
-
-        if _query_cfg and getattr(_query_cfg, "enable_relationship_expansion", False) and result.entities:
-            try:
-                max_expansion = getattr(_query_cfg, "relationship_expansion_max", 5)
-                # Get entity IDs from top entities
-                top_entity_ids = [e.id for e, _ in result.entities[:10] if hasattr(e, "id")]
-                if top_entity_ids:
-                    neighborhoods = await self._get_storage().get_neighborhoods_batch(
-                        top_entity_ids,
-                        depth=1,
-                        limit_per_entity=5,
-                    )
-                    # Collect chunk IDs from neighboring entities
-                    existing_ids = {str(c.id) for c, _ in result.chunks}
-                    expansion_count = 0
-                    expanded_chunks = list(result.chunks)
-                    for eid in top_entity_ids:
-                        if expansion_count >= max_expansion:
-                            break
-                        if eid not in neighborhoods:
-                            continue
-                        for neighbor in neighborhoods[eid].get("entities", []):
-                            if expansion_count >= max_expansion:
-                                break
-                            # Each neighbor has source_chunk_ids
-                            neighbor_chunk_ids = neighbor.get("source_chunk_ids", [])
-                            if not neighbor_chunk_ids and hasattr(neighbor, "source_chunk_ids"):
-                                neighbor_chunk_ids = neighbor.source_chunk_ids
-                            for cid in (neighbor_chunk_ids or [])[:2]:
-                                if cid not in existing_ids:
-                                    chunk_obj = await self._get_storage().get_chunk(cid)
-                                    if chunk_obj:
-                                        # Score based on parent entity score
-                                        parent_score = next((s for e, s in result.entities if e.id == eid), 0.5)
-                                        expanded_chunks.append((chunk_obj, parent_score * 0.5))
-                                        existing_ids.add(cid)
-                                        expansion_count += 1
-                    if expansion_count > 0:
-                        result.chunks = sorted(expanded_chunks, key=lambda x: x[1], reverse=True)
-                        logger.debug(f"VectorCypher relationship expansion: added {expansion_count} chunks")
-            except Exception as e:
-                logger.warning(f"VectorCypher relationship expansion failed: {e}")
-
         # Validate and filter retrieval results
         validated_chunks = self._validate_recall_results(result.chunks, query)
 
@@ -2197,12 +2120,10 @@ class VectorCypherEngine:
         self,
         *,
         config_overrides: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace."""
         namespace = MemoryNamespace(
             config_overrides=config_overrides or {},
-            metadata=metadata or {},
         )
         return await self._get_storage().create_namespace(namespace)
 
