@@ -691,7 +691,7 @@ class GraphRAGEngine:
         last_activity_at = None
 
         try:
-            doc_count = await storage.count_documents(namespace_id)
+            doc_count, last_activity_at = await storage.get_document_stats(namespace_id)
         except (AttributeError, NotImplementedError):
             pass
 
@@ -707,11 +707,6 @@ class GraphRAGEngine:
 
         try:
             relationship_count = await storage.count_relationships(namespace_id)
-        except (AttributeError, NotImplementedError):
-            pass
-
-        try:
-            last_activity_at = await storage.get_last_activity_at(namespace_id)
         except (AttributeError, NotImplementedError):
             pass
 
