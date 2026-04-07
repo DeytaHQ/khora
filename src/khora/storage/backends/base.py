@@ -161,9 +161,24 @@ class RelationalBackendProtocol(Protocol):
     async def get_last_activity_at(self, namespace_id: UUID) -> datetime | None:
         """Get the most recent document creation timestamp in a namespace.
 
-        Returns None if the namespace has no documents.
+        Args:
+            namespace_id: Namespace UUID
+
+        Returns:
+            datetime: Timestamp of the most recently created document (UTC)
+            None: If the namespace has no documents
         """
         ...
+
+    async def get_document_stats(self, namespace_id: UUID) -> tuple[int, datetime | None]:
+        """Count documents and get last activity in a single query.
+
+        Returns (count, last_activity_at). Backends may override for efficiency;
+        the default falls back to two separate calls.
+        """
+        count = await self.count_documents(namespace_id)
+        last_activity = await self.get_last_activity_at(namespace_id)
+        return count, last_activity
 
     @abstractmethod
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:

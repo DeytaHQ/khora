@@ -444,6 +444,12 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.get_last_activity_at(namespace_id)
 
+    async def get_document_stats(self, namespace_id: UUID) -> tuple[int, datetime | None]:
+        """Get document count and last activity timestamp in a single query."""
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.get_document_stats(namespace_id)
+
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
         """Get a document by its content checksum."""
         if not self.relational:

@@ -457,6 +457,18 @@ class PostgreSQLBackend(AsyncSessionMixin):
             )
             return result.scalar_one_or_none()
 
+    async def get_document_stats(self, namespace_id: UUID) -> tuple[int, datetime | None]:
+        """Get document count and last activity timestamp in a single query."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(
+                    func.count(DocumentModel.id),
+                    func.max(DocumentModel.created_at),
+                ).where(DocumentModel.namespace_id == namespace_id)
+            )
+            row = result.one()
+            return row[0], row[1]
+
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
         """Get a document by its content checksum (for deduplication).
 
