@@ -117,28 +117,6 @@ class RecallResult:
     llm_usage: list[LLMUsage] = field(default_factory=list)
 
 
-@dataclass(slots=True, frozen=True)
-class SynthesizeResult:
-    """Result of a synthesize operation.
-
-    Synthesize = recall + LLM answer generation. The LLM reads retrieved
-    chunks and writes a focused answer with citations.
-
-    Attributes:
-        answer: LLM-generated answer text.
-        citations: Section/entity references extracted from the answer.
-        recall_result: The underlying RecallResult (chunks, entities, etc.).
-        model: LLM model used for synthesis.
-        llm_usage: Token usage for the synthesis LLM call.
-    """
-
-    answer: str
-    citations: list[str]
-    recall_result: RecallResult
-    model: str = ""
-    llm_usage: list[LLMUsage] = field(default_factory=list)
-
-
 class MemoryLake:
     """Primary interface for Khora Memory Lake.
 
@@ -338,20 +316,17 @@ class MemoryLake:
         self,
         *,
         config_overrides: dict[str, Any] | None = None,
-        metadata: dict[str, Any] | None = None,
     ) -> MemoryNamespace:
         """Create a new memory namespace.
 
         Args:
             config_overrides: Optional configuration overrides
-            metadata: Optional namespace metadata (e.g., taxonomy for query routing)
 
         Returns:
             Created MemoryNamespace
         """
         return await self._get_engine().create_namespace(
             config_overrides=config_overrides,
-            metadata=metadata,
         )
 
     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
@@ -614,191 +589,6 @@ class MemoryLake:
         finally:
             collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
-
-    async def synthesize(
-        self,
-        query: str,
-        *,
-        namespace: str | UUID,
-        limit: int = 20,
-        mode: SearchMode = SearchMode.HYBRID,
-        model: str = "gpt-4o",
-        system_prompt: str | None = None,
-        expertise: ExpertiseConfig | None = None,
-    ) -> SynthesizeResult:
-        """Recall memories and synthesize a focused answer.
-
-        This is recall() + LLM answer generation. The LLM reads retrieved
-        chunks and writes a cited answer based on the domain context.
-
-        The system prompt is resolved in priority order:
-        1. Explicit ``system_prompt`` parameter
-        2. ``expertise.system_prompt`` if expertise is provided
-        3. A sensible default prompt
-
-        Args:
-            query: Question to answer
-            namespace: Namespace UUID
-            limit: Maximum chunks to retrieve and show to the LLM
-            mode: Search mode for recall
-            model: LLM model for answer generation (default: gpt-4o)
-            system_prompt: Override system prompt for the LLM
-            expertise: Optional ExpertiseConfig (uses its system_prompt if set)
-
-        Returns:
-            SynthesizeResult with answer, citations, and underlying recall result
-        """
-        import re
-
-        import litellm
-
-        # Step 1: Recall
-        recall_result = await self.recall(
-            query,
-            namespace=namespace,
-            limit=limit,
-            mode=mode,
-            include_sources=True,
-        )
-
-        # Step 1.5: Cross-reference expansion from chunk metadata
-        # Read cross_references from top chunks, fetch referenced chunks,
-        # add to result set. This bridges the gap between vector-retrieved
-        # chunks and structurally related sections.
-        xref_chunks: list[tuple[Chunk, float]] = []
-        try:
-            existing_section_ids: set[str] = set()
-            xref_section_ids: set[str] = set()
-
-            for chunk, score in recall_result.chunks[:10]:
-                # Get section_id and cross_references from chunk metadata
-                # Check both khora namespaced key and top-level (backward compat)
-                custom = {}
-                if hasattr(chunk, "metadata") and chunk.metadata:
-                    custom = getattr(chunk.metadata, "custom", {}) or {}
-                khora_custom = custom.get("khora", {})
-                section_id = khora_custom.get("section_id", "") or custom.get("section_id", "")
-                if section_id:
-                    existing_section_ids.add(section_id)
-                xrefs = khora_custom.get("cross_references", []) or custom.get("cross_references", [])
-                for xref_id in xrefs:
-                    if xref_id not in existing_section_ids:
-                        xref_section_ids.add(xref_id)
-
-            # Fetch chunks for cross-referenced sections (limit to 5)
-            if xref_section_ids:
-                namespace_id = await self._resolve_namespace(namespace)
-                engine = self._get_engine()
-                storage = getattr(engine, "_storage", None) or getattr(engine, "storage", None)
-                pg = getattr(storage, "relational", None)
-                # TODO(DYT-1884): expose public API for cross-reference chunk fetching
-                session_factory = getattr(pg, "_session_factory", None) or getattr(pg, "session_factory", None)
-                if pg and session_factory:
-                    from sqlalchemy import text
-
-                    async with session_factory() as session:
-                        for xref_id in list(xref_section_ids)[:5]:
-                            try:
-                                result_rows = await session.execute(
-                                    text(
-                                        "SELECT id, content, metadata FROM khora_chunks "
-                                        "WHERE namespace_id = :ns AND ("
-                                        "  metadata->>'section_id' = :sid OR "
-                                        "  metadata->'khora'->>'section_id' = :sid"
-                                        ") ORDER BY (metadata->>'chunk_index')::int LIMIT 1"
-                                    ),
-                                    {"ns": str(namespace_id), "sid": xref_id},
-                                )
-                                for row in result_rows:
-                                    xref_chunk = Chunk(
-                                        id=row[0],
-                                        namespace_id=namespace_id,
-                                        content=row[1],
-                                    )
-                                    xref_chunks.append((xref_chunk, 0.5))
-                            except Exception as e:
-                                logger.debug(f"Failed to fetch cross-reference chunk {xref_id}: {e}")
-
-                if xref_chunks:
-                    logger.debug(
-                        f"Cross-ref expansion: {len(xref_section_ids)} refs found, " f"{len(xref_chunks)} chunks added"
-                    )
-        except Exception as e:
-            logger.warning(f"Cross-ref expansion failed: {e}")
-
-        # Step 2: Build context from chunks + cross-ref chunks
-        context_parts = []
-        for chunk, score in recall_result.chunks:
-            title = ""
-            if hasattr(chunk, "source_document") and chunk.source_document:
-                title = chunk.source_document.title or ""
-            header = f"[{title}]" if title else ""
-            context_parts.append(f"{header}\n{chunk.content}")
-
-        # Add cross-referenced sections
-        for chunk, score in xref_chunks:
-            title = ""
-            if hasattr(chunk, "source_document") and chunk.source_document:
-                title = chunk.source_document.title or ""
-            header = f"[{title}] (cross-referenced)" if title else "(cross-referenced)"
-            context_parts.append(f"{header}\n{chunk.content}")
-
-        context_text = "\n\n---\n\n".join(context_parts[:25])  # Cap total context
-
-        # Step 3: Resolve system prompt
-        if system_prompt is None:
-            if expertise and hasattr(expertise, "system_prompt") and expertise.system_prompt:
-                system_prompt = expertise.system_prompt
-            else:
-                system_prompt = (
-                    "You are an expert assistant. Answer the user's question based ONLY on "
-                    "the retrieved content provided below. Cite specific sections or sources "
-                    "when stating facts. If the retrieved content doesn't contain enough "
-                    "information, say what you CAN answer and note what's missing. "
-                    "Be specific and concise."
-                )
-
-        # Step 4: Call LLM
-        user_msg = f"QUESTION: {query}\n\nRETRIEVED CONTENT:\n\n{context_text}"
-
-        import time as _time
-
-        _synth_t0 = _time.perf_counter()
-        with trace_span("khora.synthesize", query=query, model=model):
-            response = await litellm.acompletion(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_msg},
-                ],
-                temperature=0.1,
-                max_tokens=2000,
-            )
-
-        answer = response.choices[0].message.content.strip()
-
-        # Step 5: Extract citations (section references)
-        citations = list(set(re.findall(r"SEC\.\s*([\d.]+[A-Za-z]?\.?[\d.]*)", answer)))
-
-        # Track LLM usage
-        usage = getattr(response, "usage", None)
-        _synth_latency_ms = (_time.perf_counter() - _synth_t0) * 1000
-        synth_usage = LLMUsage(
-            operation="synthesize",
-            model=model,
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
-            total_tokens=getattr(usage, "total_tokens", 0) or 0,
-            latency_ms=round(_synth_latency_ms, 2),
-        )
-
-        return SynthesizeResult(
-            answer=answer,
-            citations=citations,
-            recall_result=recall_result,
-            model=model,
-            llm_usage=[synth_usage],
-        )
 
     async def forget(
         self,

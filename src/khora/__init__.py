@@ -53,7 +53,7 @@ from .engines import create_engine, list_engines, register_engine
 from .exceptions import KhoraError
 from .extraction.skills import EntityTypeConfig, ExpertiseConfig, RelationshipTypeConfig
 from .hooks import SemanticFilter
-from .memory_lake import BatchResult, LLMUsage, MemoryLake, RecallResult, RememberResult, Stats, SynthesizeResult
+from .memory_lake import BatchResult, LLMUsage, MemoryLake, RecallResult, RememberResult, Stats
 from .query import SearchMode
 
 __version__ = __import__("importlib").metadata.version("khora")
@@ -67,7 +67,6 @@ __all__ = [
     "RecallResult",
     "BatchResult",
     "Stats",
-    "SynthesizeResult",
     "SearchMode",
     "KhoraConfig",
     "DocumentSource",
