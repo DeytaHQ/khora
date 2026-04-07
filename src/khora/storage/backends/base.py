@@ -146,6 +146,16 @@ class RelationalBackendProtocol(Protocol):
         ...
 
     @abstractmethod
+    async def count_documents(self, namespace_id: UUID) -> int:
+        """Count documents in a namespace."""
+        ...
+
+    @abstractmethod
+    async def get_last_activity_at(self, namespace_id: UUID) -> datetime | None:
+        """Get the most recent document creation timestamp in a namespace."""
+        ...
+
+    @abstractmethod
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
         """Get a document by its content checksum (for deduplication)."""
         ...

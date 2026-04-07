@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -662,6 +663,31 @@ class TestStats:
         assert s.chunks == 500
         assert s.entities == 200
         assert s.relationships == 150
+
+    def test_last_activity_at_default_none(self) -> None:
+        """last_activity_at defaults to None for backward compatibility."""
+        s = Stats(documents=1, chunks=2, entities=3, relationships=4)
+        assert s.last_activity_at is None
+
+    def test_last_activity_at_with_value(self) -> None:
+        """last_activity_at accepts a datetime value."""
+        from datetime import UTC, datetime
+
+        ts = datetime(2026, 4, 7, 12, 0, 0, tzinfo=UTC)
+        s = Stats(
+            documents=1,
+            chunks=2,
+            entities=3,
+            relationships=4,
+            last_activity_at=ts,
+        )
+        assert s.last_activity_at == ts
+
+    def test_frozen(self) -> None:
+        """Stats is immutable."""
+        s = Stats(documents=1, chunks=2, entities=3, relationships=4)
+        with pytest.raises(AttributeError):
+            s.last_activity_at = datetime.now()  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------

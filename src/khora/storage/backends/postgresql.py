@@ -441,6 +441,22 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 return True
             return False
 
+    async def count_documents(self, namespace_id: UUID) -> int:
+        """Count documents in a namespace."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(func.count(DocumentModel.id)).where(DocumentModel.namespace_id == namespace_id)
+            )
+            return result.scalar_one()
+
+    async def get_last_activity_at(self, namespace_id: UUID) -> datetime | None:
+        """Get the most recent document creation timestamp in a namespace."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(func.max(DocumentModel.created_at)).where(DocumentModel.namespace_id == namespace_id)
+            )
+            return result.scalar_one_or_none()
+
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
         """Get a document by its content checksum (for deduplication).
 

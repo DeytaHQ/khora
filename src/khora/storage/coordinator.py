@@ -411,6 +411,18 @@ class StorageCoordinator:
 
         return await self.relational.delete_document(document_id)
 
+    async def count_documents(self, namespace_id: UUID) -> int:
+        """Count documents in a namespace."""
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.count_documents(namespace_id)
+
+    async def get_last_activity_at(self, namespace_id: UUID) -> datetime | None:
+        """Get the most recent document creation timestamp in a namespace."""
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.get_last_activity_at(namespace_id)
+
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
         """Get a document by its content checksum."""
         if not self.relational:

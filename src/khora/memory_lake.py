@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -88,6 +89,7 @@ class Stats:
     chunks: int
     entities: int
     relationships: int
+    last_activity_at: datetime | None = None
 
 
 @dataclass(slots=True, frozen=True)

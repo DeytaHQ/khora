@@ -688,6 +688,7 @@ class GraphRAGEngine:
         chunk_count = 0
         entity_count = 0
         relationship_count = 0
+        last_activity_at = None
 
         try:
             doc_count = await storage.count_documents(namespace_id)
@@ -709,11 +710,17 @@ class GraphRAGEngine:
         except (AttributeError, NotImplementedError):
             pass
 
+        try:
+            last_activity_at = await storage.get_last_activity_at(namespace_id)
+        except (AttributeError, NotImplementedError):
+            pass
+
         return Stats(
             documents=doc_count,
             chunks=chunk_count,
             entities=entity_count,
             relationships=relationship_count,
+            last_activity_at=last_activity_at,
         )
 
     async def health_check(self) -> dict[str, Any]:
