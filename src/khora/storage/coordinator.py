@@ -412,13 +412,34 @@ class StorageCoordinator:
         return await self.relational.delete_document(document_id)
 
     async def count_documents(self, namespace_id: UUID) -> int:
-        """Count documents in a namespace."""
+        """Count documents in a namespace.
+
+        Args:
+            namespace_id: Namespace UUID
+
+        Returns:
+            Total number of documents in the namespace (0 if empty)
+
+        Raises:
+            RuntimeError: If relational backend is not configured
+        """
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.count_documents(namespace_id)
 
     async def get_last_activity_at(self, namespace_id: UUID) -> datetime | None:
-        """Get the most recent document creation timestamp in a namespace."""
+        """Get the most recent document creation timestamp in a namespace.
+
+        Args:
+            namespace_id: Namespace UUID
+
+        Returns:
+            Timestamp of the most recently created document in the namespace.
+            None if the namespace has no documents.
+
+        Raises:
+            RuntimeError: If relational backend is not configured
+        """
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.get_last_activity_at(namespace_id)

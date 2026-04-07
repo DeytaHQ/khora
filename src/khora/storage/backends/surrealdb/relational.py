@@ -413,7 +413,7 @@ class SurrealDBRelationalAdapter:
             "SELECT count() AS cnt FROM document WHERE namespace_id = $ns GROUP ALL",
             {"ns": ns_str},
         )
-        return row["cnt"] if row else 0
+        return (row["cnt"] or 0) if row else 0
 
     async def get_last_activity_at(self, namespace_id: UUID) -> datetime | None:
         """Get the most recent document creation timestamp in a namespace."""

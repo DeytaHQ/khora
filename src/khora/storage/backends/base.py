@@ -147,12 +147,22 @@ class RelationalBackendProtocol(Protocol):
 
     @abstractmethod
     async def count_documents(self, namespace_id: UUID) -> int:
-        """Count documents in a namespace."""
+        """Count documents in a namespace.
+
+        Args:
+            namespace_id: Namespace UUID
+
+        Returns:
+            Total number of documents. Returns 0 if namespace is empty.
+        """
         ...
 
     @abstractmethod
     async def get_last_activity_at(self, namespace_id: UUID) -> datetime | None:
-        """Get the most recent document creation timestamp in a namespace."""
+        """Get the most recent document creation timestamp in a namespace.
+
+        Returns None if the namespace has no documents.
+        """
         ...
 
     @abstractmethod

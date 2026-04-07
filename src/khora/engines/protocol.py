@@ -313,12 +313,17 @@ class MemoryEngineProtocol(Protocol):
     # =========================================================================
 
     async def stats(self, namespace_id: UUID) -> Stats:
-        """Get document/chunk/entity/relationship counts for a namespace.
+        """Get document/chunk/entity/relationship counts and last activity time for a namespace.
 
         Args:
             namespace_id: Namespace UUID
 
         Returns:
-            Stats with document/chunk/entity/relationship counts
+            Stats with:
+            - documents: Count of documents in the namespace
+            - chunks: Count of document chunks
+            - entities: Count of extracted entities
+            - relationships: Count of entity relationships
+            - last_activity_at: Timestamp of most recent document (None if namespace is empty)
         """
         ...
