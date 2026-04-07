@@ -408,15 +408,15 @@ class TestMigrationPackageStructure:
         assert env_path.exists(), f"env.py not found at {env_path}"
 
     @pytest.mark.unit
-    def test_versions_dir_has_19_files(self):
-        """versions/ directory contains 19 migration files."""
+    def test_versions_dir_has_20_files(self):
+        """versions/ directory contains 20 migration files."""
         versions_dir = _MIGRATIONS_DIR / "versions"
         migration_files = sorted(versions_dir.glob("*.py"))
         # Filter out __pycache__ and __init__
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
         assert (
-            len(migration_files) == 19
-        ), f"Expected 19 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
+            len(migration_files) == 20
+        ), f"Expected 20 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
 
     @pytest.mark.unit
     def test_env_py_constants(self):

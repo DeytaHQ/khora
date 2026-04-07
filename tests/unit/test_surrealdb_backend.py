@@ -847,6 +847,73 @@ class TestRelationalAdapterDocument:
         result = await adapter.get_document_sources_batch([])
         assert result == {}
 
+    async def test_count_documents(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        ns_id = uuid4()
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"cnt": 7})
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.count_documents(ns_id)
+        assert result == 7
+
+    async def test_count_documents_empty(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.count_documents(uuid4())
+        assert result == 0
+
+    async def test_get_last_activity_at(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        ns_id = uuid4()
+        ts = datetime(2026, 4, 7, 12, 0, 0, tzinfo=UTC)
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"latest": ts})
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_last_activity_at(ns_id)
+        assert result == ts
+
+    async def test_get_last_activity_at_empty(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        result = await adapter.get_last_activity_at(uuid4())
+        assert result is None
+
+    async def test_get_document_stats(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        ns_id = uuid4()
+        ts = datetime(2026, 4, 7, 12, 0, 0, tzinfo=UTC)
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value={"cnt": 5, "latest": ts})
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        count, last_activity = await adapter.get_document_stats(ns_id)
+        assert count == 5
+        assert last_activity == ts
+
+    async def test_get_document_stats_empty(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=None)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        count, last_activity = await adapter.get_document_stats(uuid4())
+        assert count == 0
+        assert last_activity is None
+
 
 # ── Relational Adapter — sync checkpoint operations ───────────────────────
 
