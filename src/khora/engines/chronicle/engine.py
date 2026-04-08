@@ -395,6 +395,7 @@ class ChronicleEngine:
         _rrf_w_temporal = getattr(qs, "chronicle_rrf_temporal_weight", 0.9) if qs else 0.9
         _rrf_w_entity = getattr(qs, "chronicle_rrf_entity_weight", 0.85) if qs else 0.85
         _cfg_decay = getattr(qs, "chronicle_decay_weight", 0.25) if qs else 0.25
+        _cfg_half_life = getattr(qs, "temporal_half_life_hours", 168.0) if qs else 168.0
         overfetch_limit = limit * _overfetch
 
         # ── Phase 1: Embed query + BM25 in parallel ───────────────────
@@ -549,6 +550,7 @@ class ChronicleEngine:
         chunks_with_scores = _apply_temporal_decay(
             chunks_with_scores,
             decay_weight=decay_weight,
+            half_life_hours=_cfg_half_life,
         )
         timings["decay_ms"] = (time.perf_counter() - start) * 1000
 
