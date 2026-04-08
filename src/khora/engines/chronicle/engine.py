@@ -15,6 +15,7 @@ Implements:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import time
@@ -396,71 +397,115 @@ class ChronicleEngine:
         _cfg_decay = getattr(qs, "chronicle_decay_weight", 0.25) if qs else 0.25
         overfetch_limit = limit * _overfetch
 
-        # ── Channel 1: Semantic (vector similarity) ──────────────────────
-        semantic_results: list[tuple[Chunk, float]] = []
+        # ── Phase 1: Embed query + BM25 in parallel ───────────────────
+        # BM25 needs only the query text (no embedding), so start it
+        # concurrently with embedding to save one round-trip of latency.
+        query_embedding: list[float] | None = None
+        bm25_results: list[tuple[Chunk, float]] = []
+
+        bm25_task: asyncio.Task[list[tuple[Chunk, float]]] | None = None
+        if mode in (SearchMode.HYBRID, SearchMode.ALL):
+            bm25_task = asyncio.create_task(
+                storage.search_fulltext_chunks(
+                    namespace_id,
+                    query,
+                    limit=overfetch_limit,
+                )
+            )
+
         if mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
             start = time.perf_counter()
             query_embedding = await embedder.embed(query)
             timings["embed_ms"] = (time.perf_counter() - start) * 1000
 
+        # Collect BM25 result (already running in background)
+        if bm25_task is not None:
             start = time.perf_counter()
             try:
-                semantic_results = await storage.search_similar_chunks(
-                    namespace_id,
-                    query_embedding,
-                    limit=overfetch_limit,
-                    min_similarity=min_similarity,
-                )
+                bm25_results = await bm25_task
             except RuntimeError:
-                # Vector backend not configured
-                logger.debug("Vector backend not available for semantic search")
-            timings["semantic_ms"] = (time.perf_counter() - start) * 1000
-
-        # ── Channel 2: BM25 (full-text search) ──────────────────────────
-        bm25_results: list[tuple[Chunk, float]] = []
-        if mode in (SearchMode.HYBRID, SearchMode.ALL):
-            start = time.perf_counter()
-            try:
-                bm25_results = await storage.search_fulltext_chunks(
-                    namespace_id,
-                    query,
-                    limit=overfetch_limit,
-                )
-            except RuntimeError:
-                # Vector backend not configured (fulltext lives on same backend)
                 logger.debug("Fulltext backend not available for BM25 search")
+            except Exception:
+                logger.debug("BM25 channel failed")
             timings["bm25_ms"] = (time.perf_counter() - start) * 1000
 
-        # ── Channel 3: Temporal (time-scoped retrieval) ─────────────────
+        # ── Phase 2: Semantic + Temporal + Entity in parallel ───────────
+        # All three need the embedding, so they run after Phase 1 completes.
+        semantic_results: list[tuple[Chunk, float]] = []
         temporal_results: list[tuple[Chunk, float]] = []
-        if mode in (SearchMode.HYBRID, SearchMode.ALL):
-            start = time.perf_counter()
-            try:
-                temporal_results = await self._temporal_channel(
-                    namespace_id,
-                    query,
-                    query_embedding,
-                    overfetch_limit,
-                    temporal_filter,
-                )
-            except Exception:
-                logger.debug("Temporal channel failed")
-            timings["temporal_ms"] = (time.perf_counter() - start) * 1000
-
-        # ── Channel 4: Entity co-occurrence ─────────────────────────────
         entity_results: list[tuple[Chunk, float]] = []
-        if mode in (SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
-            start = time.perf_counter()
-            try:
-                entity_results = await self._entity_channel(
-                    namespace_id,
-                    query,
-                    query_embedding,
-                    overfetch_limit,
+
+        # Determine whether temporal channel adds value: when
+        # chronicle_temporal_window_days == 0 (default) it runs a
+        # near-duplicate of the semantic channel.  Skip it and let
+        # post-fusion temporal decay handle recency scoring instead.
+        _temporal_window_days = getattr(qs, "chronicle_temporal_window_days", 0.0) if qs else 0.0
+        run_temporal = mode in (SearchMode.HYBRID, SearchMode.ALL) and (
+            _temporal_window_days > 0 or temporal_filter is not None
+        )
+
+        channel_coros: list[tuple[str, Any]] = []
+
+        if mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
+            channel_coros.append(
+                (
+                    "semantic",
+                    storage.search_similar_chunks(
+                        namespace_id,
+                        query_embedding,
+                        limit=overfetch_limit,
+                        min_similarity=min_similarity,
+                    ),
                 )
-            except Exception:
-                logger.debug("Entity channel failed")
-            timings["entity_ms"] = (time.perf_counter() - start) * 1000
+            )
+
+        if run_temporal and query_embedding is not None:
+            channel_coros.append(
+                (
+                    "temporal",
+                    self._temporal_channel(
+                        namespace_id,
+                        query,
+                        query_embedding,
+                        overfetch_limit,
+                        temporal_filter,
+                    ),
+                )
+            )
+
+        if mode in (SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
+            channel_coros.append(
+                (
+                    "entity",
+                    self._entity_channel(
+                        namespace_id,
+                        query,
+                        query_embedding,
+                        overfetch_limit,
+                    ),
+                )
+            )
+
+        if channel_coros:
+            start = time.perf_counter()
+            gathered = await asyncio.gather(
+                *[coro for _name, coro in channel_coros],
+                return_exceptions=True,
+            )
+            elapsed = (time.perf_counter() - start) * 1000
+
+            for (name, _coro), result in zip(channel_coros, gathered):
+                if isinstance(result, BaseException):
+                    logger.debug(f"{name.capitalize()} channel failed: {result}")
+                    timings[f"{name}_ms"] = elapsed
+                    continue
+                timings[f"{name}_ms"] = elapsed
+                if name == "semantic":
+                    semantic_results = result
+                elif name == "temporal":
+                    temporal_results = result
+                elif name == "entity":
+                    entity_results = result
 
         # ── Fusion via Reciprocal Rank Fusion ────────────────────────────
         start = time.perf_counter()
