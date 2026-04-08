@@ -942,6 +942,9 @@ class StorageCoordinator:
             return {}
         if self.graph:
             return await self.graph.get_entities_batch(entity_ids)
+        # Fallback to pgvector for engines without graph backend (e.g., Chronicle)
+        if self.vector and hasattr(self.vector, "get_entities_batch"):
+            return await self.vector.get_entities_batch(entity_ids)
         return {}
 
     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
