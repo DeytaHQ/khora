@@ -157,6 +157,40 @@ class TestRetrieverInit:
 
         assert retriever._storage is storage
 
+    def test_init_default_neo4j_query_timeout_is_none(self) -> None:
+        """When the kwarg is omitted, the inner DualNodeManager has no timeout."""
+        retriever = VectorCypherRetriever(
+            vector_store=AsyncMock(),
+            neo4j_driver=AsyncMock(),
+            embedder=AsyncMock(),
+        )
+
+        assert retriever._dual_nodes is not None
+        assert retriever._dual_nodes._query_timeout is None
+
+    def test_init_forwards_neo4j_query_timeout_to_dual_nodes(self) -> None:
+        """neo4j_query_timeout is forwarded to the underlying DualNodeManager."""
+        retriever = VectorCypherRetriever(
+            vector_store=AsyncMock(),
+            neo4j_driver=AsyncMock(),
+            embedder=AsyncMock(),
+            neo4j_query_timeout=3.0,
+        )
+
+        assert retriever._dual_nodes is not None
+        assert retriever._dual_nodes._query_timeout == 3.0
+
+    def test_init_no_dual_nodes_when_driver_missing(self) -> None:
+        """Without a driver, _dual_nodes is None even when timeout is set."""
+        retriever = VectorCypherRetriever(
+            vector_store=AsyncMock(),
+            neo4j_driver=None,
+            embedder=AsyncMock(),
+            neo4j_query_timeout=3.0,
+        )
+
+        assert retriever._dual_nodes is None
+
 
 @pytest.mark.unit
 class TestRetrieverSimpleRetrieve:

@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from loguru import logger
+from neo4j import unit_of_work
+from neo4j.exceptions import ClientError
 
 from khora.storage.backends.mixins import deserialize_dict, serialize_dict
 from khora.telemetry import trace
@@ -28,6 +30,17 @@ if TYPE_CHECKING:
     from neo4j import AsyncDriver
 
     from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter
+
+
+# Neo4j 5.x splits timeout errors into two codes depending on whether
+# the timeout fired from the server's db.transaction.timeout setting
+# or from our client-configured unit_of_work(timeout=...). We catch
+# both so that our configured ceiling is always respected regardless
+# of which code path the server takes.
+_NEO4J_TIMEOUT_CODES = (
+    "Neo.ClientError.Transaction.TransactionTimedOut",
+    "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration",
+)
 
 
 @dataclass
@@ -68,15 +81,25 @@ class DualNodeManager:
     - Chunk retrieval via MENTIONED_IN for context
     """
 
-    def __init__(self, driver: AsyncDriver, database: str = "neo4j"):
+    def __init__(
+        self,
+        driver: AsyncDriver,
+        database: str = "neo4j",
+        *,
+        query_timeout: float | None = None,
+    ) -> None:
         """Initialize the manager.
 
         Args:
             driver: Neo4j async driver
             database: Database name
+            query_timeout: Optional per-transaction timeout in seconds,
+                applied to ``get_entity_neighborhoods`` to bound runaway
+                variable-length path queries. ``None`` disables the timeout.
         """
         self._driver = driver
         self._database = database
+        self._query_timeout = query_timeout
 
     async def ensure_indexes(self) -> None:
         """Create indexes for Chunk and TimeNode nodes."""
@@ -538,18 +561,47 @@ class DualNodeManager:
                [x IN related_raw WHERE x IS NOT NULL] AS related_entities
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async def _work(tx):
+            result = await tx.run(
+                query,
+                entity_ids=[str(eid) for eid in entity_ids],
+                namespace_id=str(namespace_id),
+                limit=limit_per_entity,
+            )
+            return [record.data() async for record in result]
 
-            async def _work(tx):
-                result = await tx.run(
-                    query,
-                    entity_ids=[str(eid) for eid in entity_ids],
-                    namespace_id=str(namespace_id),
-                    limit=limit_per_entity,
+        # Apply the configured transaction timeout via unit_of_work. The Neo4j
+        # Python driver's `tx.run()` does NOT accept a timeout kwarg — timeouts
+        # must be set at transaction-begin time, which unit_of_work does by
+        # attaching metadata the session reads when starting the managed tx.
+        # TODO(follow-up): add a timeout counter / trace attribute so ops can
+        # alert on timeout frequency rather than relying on result_count=0.
+        if self._query_timeout is not None:
+            _work = unit_of_work(timeout=self._query_timeout)(_work)
+
+        try:
+            async with self._driver.session(database=self._database) as session:
+                records = await session.execute_read(_work)
+        except ClientError as exc:
+            # Match only the two known transaction-timeout codes (explicit
+            # tuple, not a prefix match) so we don't swallow syntax errors,
+            # auth failures, or constraint violations that are also ClientError.
+            if exc.code in _NEO4J_TIMEOUT_CODES:
+                logger.warning(
+                    "Neo4j get_entity_neighborhoods timed out after {timeout}s "
+                    "(namespace_id={ns}, entity_count={n}, depth={d}, code={code}); "
+                    "returning empty neighborhood",
+                    timeout=self._query_timeout,
+                    ns=namespace_id,
+                    n=len(entity_ids),
+                    d=depth,
+                    code=exc.code,
                 )
-                return [record.data() async for record in result]
-
-            records = await session.execute_read(_work)
+                # TODO(DYT-1948-followup): emit dedicated telemetry counter for
+                # query timeouts. @trace already records result_count=0 which
+                # is the minimum viable signal but we want explicit alerting.
+                return {}
+            raise
 
         return {record["source_id"]: record["related_entities"] for record in records}
 

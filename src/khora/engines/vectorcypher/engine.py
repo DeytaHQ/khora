@@ -300,6 +300,7 @@ class VectorCypherEngine:
         # Detect unified SurrealDB backend — skips Neo4j and uses SurrealDB for everything
         is_surrealdb = getattr(self._config.storage, "backend", "postgres") == "surrealdb"
         neo4j_database = "neo4j"
+        neo4j_query_timeout: float | None = 5.0
 
         if not is_surrealdb:
             # Connect to Neo4j (required for VectorCypher with traditional stack)
@@ -313,6 +314,7 @@ class VectorCypherEngine:
             pool_size = getattr(neo4j_cfg, "max_connection_pool_size", 100) if neo4j_cfg else 100
             max_conn_lifetime = getattr(neo4j_cfg, "max_connection_lifetime", 900) if neo4j_cfg else 900
             liveness_timeout = getattr(neo4j_cfg, "liveness_check_timeout", 30.0) if neo4j_cfg else 30.0
+            neo4j_query_timeout = getattr(neo4j_cfg, "query_timeout", 5.0) if neo4j_cfg else 5.0
             self._neo4j_driver = AsyncGraphDatabase.driver(
                 neo4j_url,
                 auth=(self._config.get_neo4j_user(), self._config.get_neo4j_password()),
@@ -376,7 +378,11 @@ class VectorCypherEngine:
 
         # Initialize dual node manager (Neo4j only — SurrealDB uses graph adapter)
         if not is_surrealdb:
-            self._dual_nodes = DualNodeManager(self._neo4j_driver, neo4j_database)
+            self._dual_nodes = DualNodeManager(
+                self._neo4j_driver,
+                neo4j_database,
+                query_timeout=neo4j_query_timeout,
+            )
             await self._dual_nodes.ensure_indexes()
 
         # Initialize router
@@ -425,6 +431,7 @@ class VectorCypherEngine:
             database=neo4j_database,
             config=retriever_config,
             storage=self._storage,
+            neo4j_query_timeout=neo4j_query_timeout,
         )
 
         # Initialize telemetry

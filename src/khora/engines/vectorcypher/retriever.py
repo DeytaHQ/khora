@@ -171,6 +171,7 @@ class VectorCypherRetriever:
         config: RetrieverConfig | None = None,
         router_config: RouterConfig | None = None,
         storage: StorageCoordinator | None = None,
+        neo4j_query_timeout: float | None = None,
     ):
         """Initialize the retriever.
 
@@ -182,6 +183,9 @@ class VectorCypherRetriever:
             config: Retriever configuration
             router_config: Router configuration (optional, for LLM routing etc.)
             storage: Storage coordinator for entity vector search via pgvector
+            neo4j_query_timeout: Optional per-transaction timeout in seconds
+                forwarded to the underlying ``DualNodeManager`` to bound
+                ``get_entity_neighborhoods``. ``None`` disables the timeout.
         """
         self._vector_store = vector_store
         self._neo4j_driver = neo4j_driver
@@ -199,7 +203,9 @@ class VectorCypherRetriever:
                 complex_depth=self._config.default_depth,
             )
         self._router = QueryComplexityRouter(router_config)
-        self._dual_nodes = DualNodeManager(neo4j_driver, database) if neo4j_driver else None
+        self._dual_nodes = (
+            DualNodeManager(neo4j_driver, database, query_timeout=neo4j_query_timeout) if neo4j_driver else None
+        )
 
         # Query result cache (LRU + TTL)
         self._cache: dict[str, tuple[float, VectorCypherResult]] = {}

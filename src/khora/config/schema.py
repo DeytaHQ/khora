@@ -78,6 +78,22 @@ class Neo4jConfig(BaseModel):
         description="Seconds of idle time after which connections are checked for liveness "
         "before being returned from the pool. None disables the check.",
     )
+    query_timeout: float | None = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Per-transaction timeout in seconds for bounded read queries "
+            "(currently applied only to get_entity_neighborhoods). Bounds the "
+            "worst ~0.5-1% of outlier queries that otherwise hold connections "
+            "for 27+ seconds and exhaust the pool. The Neo4j server terminates "
+            "transactions exceeding this duration, raising ClientError with "
+            "code Neo.ClientError.Transaction.TransactionTimedOut* — the "
+            "client catches this and returns an empty neighborhood dict. "
+            "Set to None to disable entirely. Values <= 0 are rejected "
+            "(the driver would interpret 0 as 'run forever', which defeats "
+            "the purpose)."
+        ),
+    )
     entity_write_concurrency: int = Field(default=12, description="Max concurrent entity write transactions")
     relationship_write_concurrency: int = Field(default=8, description="Max concurrent relationship write transactions")
 

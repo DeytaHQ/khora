@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from neo4j.exceptions import ClientError, Neo4jError
 
 from khora.engines.vectorcypher.dual_nodes import (
+    _NEO4J_TIMEOUT_CODES,
     ChunkNode,
     DualNodeManager,
     EntityChunkLink,
 )
+
+
+def _make_neo4j_error(code: str, message: str = "boom") -> Neo4jError:
+    """Build a Neo4jError subclass instance with a given server-side code.
+
+    The driver's ``code`` attribute is a read-only property derived from
+    ``_neo4j_code``, so the public constructor cannot set it. We use the
+    same internal factory the driver itself uses when hydrating server
+    errors, which guarantees the resulting instance is the correct
+    subclass (e.g. ``ClientError`` for ``Neo.ClientError.*``) and exposes
+    the requested ``code``.
+    """
+    return Neo4jError._basic_hydrate(neo4j_code=code, message=message)
 
 
 def _make_neo4j_driver() -> tuple[MagicMock, AsyncMock]:
@@ -116,6 +131,24 @@ class TestDualNodeManagerInit:
         driver = MagicMock()
         manager = DualNodeManager(driver, database="custom_db")
         assert manager._database == "custom_db"
+
+    def test_init_default_query_timeout_is_none(self) -> None:
+        """Default query_timeout is None (opt-in at the engine layer)."""
+        driver = MagicMock()
+        manager = DualNodeManager(driver)
+        assert manager._query_timeout is None
+
+    def test_init_stores_query_timeout(self) -> None:
+        """A non-None query_timeout is stored on the instance."""
+        driver = MagicMock()
+        manager = DualNodeManager(driver, query_timeout=2.5)
+        assert manager._query_timeout == 2.5
+
+    def test_init_query_timeout_is_keyword_only(self) -> None:
+        """query_timeout must be passed as a keyword argument."""
+        driver = MagicMock()
+        with pytest.raises(TypeError):
+            DualNodeManager(driver, "neo4j", 2.5)  # type: ignore[misc]
 
 
 @pytest.mark.unit
@@ -371,6 +404,175 @@ class TestDualNodeManagerGetEntityNeighborhoods:
         await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=0)
         # Depth 10 should be clamped to 4
         await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=10)
+
+
+@pytest.mark.unit
+class TestDualNodeManagerGetEntityNeighborhoodsTimeout:
+    """Tests for the configurable per-transaction timeout in get_entity_neighborhoods.
+
+    The Neo4j Python driver applies transaction-level timeouts via
+    ``neo4j.unit_of_work(timeout=...)``, which decorates the read closure
+    that ``session.execute_read`` runs. The DualNodeManager should:
+      * skip the decorator entirely when ``query_timeout`` is None,
+      * apply it (with the configured value) otherwise,
+      * convert the two known transaction-timeout error codes into an
+        empty result dict + warning log,
+      * re-raise any other error so callers still see real failures.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wraps_work_with_unit_of_work_when_timeout_set(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When query_timeout is set, _work is wrapped via unit_of_work(timeout=...)."""
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(return_value=[])
+
+        # Replace unit_of_work in the dual_nodes module with a passthrough
+        # decorator that records how it was invoked.
+        decorator_factory = MagicMock(side_effect=lambda fn: fn)
+        unit_of_work_mock = MagicMock(return_value=decorator_factory)
+        monkeypatch.setattr(
+            "khora.engines.vectorcypher.dual_nodes.unit_of_work",
+            unit_of_work_mock,
+        )
+
+        manager = DualNodeManager(driver, query_timeout=3.0)
+        result = await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=1)
+
+        assert result == {}
+        unit_of_work_mock.assert_called_once_with(timeout=3.0)
+        # The returned decorator must have been applied to the inner _work fn.
+        decorator_factory.assert_called_once()
+        # And execute_read must still have been invoked once with the
+        # (now-wrapped) function.
+        session.execute_read.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_unit_of_work_when_timeout_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When query_timeout is None, unit_of_work is NOT invoked."""
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(return_value=[])
+
+        unit_of_work_mock = MagicMock()
+        monkeypatch.setattr(
+            "khora.engines.vectorcypher.dual_nodes.unit_of_work",
+            unit_of_work_mock,
+        )
+
+        manager = DualNodeManager(driver)  # default: query_timeout=None
+        result = await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=1)
+
+        assert result == {}
+        unit_of_work_mock.assert_not_called()
+        session.execute_read.assert_awaited_once()
+
+    @pytest.mark.parametrize("timeout_code", _NEO4J_TIMEOUT_CODES)
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_timeout_codes(self, timeout_code: str) -> None:
+        """Both server- and client-configured timeout codes degrade to {}."""
+        driver, session = _make_neo4j_driver()
+        timeout_exc = _make_neo4j_error(timeout_code, message="transaction timed out")
+        # Sanity-check the constructed exception so a future driver upgrade
+        # that breaks _basic_hydrate would fail loudly here, not silently
+        # masquerade as a successful test.
+        assert isinstance(timeout_exc, ClientError)
+        assert timeout_exc.code == timeout_code
+
+        session.execute_read = AsyncMock(side_effect=timeout_exc)
+
+        manager = DualNodeManager(driver, query_timeout=1.0)
+
+        with patch("khora.engines.vectorcypher.dual_nodes.logger") as mock_logger:
+            result = await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=2)
+
+        assert result == {}
+        mock_logger.warning.assert_called_once()
+
+        # The warning includes the offending code so ops can grep for it.
+        warning_call = mock_logger.warning.call_args
+        assert warning_call.kwargs.get("code") == timeout_code
+        assert warning_call.kwargs.get("timeout") == 1.0
+
+    @pytest.mark.asyncio
+    async def test_reraises_non_timeout_client_error(self) -> None:
+        """Non-timeout ClientErrors (e.g. syntax errors) propagate to the caller."""
+        driver, session = _make_neo4j_driver()
+        syntax_exc = _make_neo4j_error(
+            "Neo.ClientError.Statement.SyntaxError",
+            message="Cypher syntax error",
+        )
+        # Make sure we built a real ClientError-shaped instance — if a
+        # future driver split this code into a different class hierarchy
+        # the test setup itself should fail rather than the assertion.
+        assert isinstance(syntax_exc, ClientError)
+        assert syntax_exc.code not in _NEO4J_TIMEOUT_CODES
+
+        session.execute_read = AsyncMock(side_effect=syntax_exc)
+        manager = DualNodeManager(driver, query_timeout=1.0)
+
+        with pytest.raises(ClientError) as excinfo:
+            await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=1)
+
+        assert excinfo.value.code == "Neo.ClientError.Statement.SyntaxError"
+
+    @pytest.mark.asyncio
+    async def test_reraises_non_client_errors(self) -> None:
+        """Errors that are not ClientError (e.g. RuntimeError) also propagate."""
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(side_effect=RuntimeError("connection lost"))
+        manager = DualNodeManager(driver, query_timeout=1.0)
+
+        with pytest.raises(RuntimeError, match="connection lost"):
+            await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=1)
+
+    @pytest.mark.asyncio
+    async def test_timeout_disabled_still_handles_results(self) -> None:
+        """With query_timeout=None, normal execution returns parsed neighborhoods."""
+        driver, session = _make_neo4j_driver()
+        source_id = str(uuid4())
+        related_id = str(uuid4())
+        session.execute_read = AsyncMock(
+            return_value=[
+                {
+                    "source_id": source_id,
+                    "source_name": "alice",
+                    "source_entity_type": "PERSON",
+                    "source_description": None,
+                    "source_source_tool": None,
+                    "related_entities": [
+                        {
+                            "id": related_id,
+                            "name": "bob",
+                            "entity_type": "PERSON",
+                            "description": None,
+                            "source_tool": None,
+                            "distance": 1,
+                        }
+                    ],
+                }
+            ]
+        )
+
+        manager = DualNodeManager(driver)
+        result = await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=1)
+
+        assert result == {
+            source_id: [
+                {
+                    "id": related_id,
+                    "name": "bob",
+                    "entity_type": "PERSON",
+                    "description": None,
+                    "source_tool": None,
+                    "distance": 1,
+                }
+            ]
+        }
 
 
 @pytest.mark.unit
