@@ -6,6 +6,7 @@ using pgvector extension in PostgreSQL.
 
 from __future__ import annotations
 
+import struct
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -33,6 +34,17 @@ except ImportError:
 
 
 _DEADLOCK_MAX_RETRIES = 3
+
+# Advisory lock key-space for entity upserts (avoids collision with other lock users).
+_ENTITY_UPSERT_LOCK_KEY1 = 0x4B484F52  # "KHOR" in hex
+
+
+def _namespace_lock_key(namespace_id: UUID) -> int:
+    """Derive a stable 32-bit advisory lock key from a namespace UUID."""
+    b = namespace_id.bytes
+    chunks = struct.unpack(">IIII", b)
+    folded = chunks[0] ^ chunks[1] ^ chunks[2] ^ chunks[3]
+    return struct.unpack(">i", struct.pack(">I", folded))[0]
 
 
 async def _retry_on_deadlock(coro_fn, *args, **kwargs):
@@ -623,64 +635,82 @@ class PgVectorBackend(AsyncSessionMixin):
 
         Uses multi-row INSERT ... ON CONFLICT DO UPDATE statements, chunked
         into sub-batches to stay within asyncpg's parameter limit.
+
+        Acquires a namespace-scoped PostgreSQL advisory lock to serialise
+        concurrent entity upserts within the same namespace, preventing
+        deadlocks when multiple documents share entities.  Upserts for
+        different namespaces proceed in parallel without contention.
+
         Returns list of (entity, is_new) tuples (is_new is approximate).
         """
         if not entities:
             return []
 
-        from sqlalchemy.dialects.postgresql import insert
+        async def _do_upsert():
+            from sqlalchemy.dialects.postgresql import insert
 
-        # Sort by (namespace_id, name, entity_type) to ensure consistent lock ordering
-        # across concurrent batches, preventing deadlocks
-        entities = sorted(entities, key=lambda e: (str(e.namespace_id), e.name, str(e.entity_type)))
+            # Sort by (namespace_id, name, entity_type) to ensure consistent lock ordering
+            sorted_entities = sorted(entities, key=lambda e: (str(e.namespace_id), e.name, str(e.entity_type)))
+            lock_key2 = _namespace_lock_key(namespace_id)
 
-        for start in range(0, len(entities), batch_size):
-            batch = entities[start : start + batch_size]
-            values = [
-                {
-                    "id": entity.id,
-                    "namespace_id": entity.namespace_id,
-                    "name": entity.name,
-                    "entity_type": (entity.entity_type),
-                    "description": entity.description,
-                    "attributes": entity.attributes,
-                    "source_document_ids": entity.source_document_ids,
-                    "source_chunk_ids": entity.source_chunk_ids,
-                    "mention_count": entity.mention_count,
-                    "embedding": entity.embedding,
-                    "embedding_model": entity.embedding_model,
-                    "valid_from": entity.valid_from,
-                    "valid_until": entity.valid_until,
-                    "confidence": entity.confidence,
-                    "metadata_": entity.metadata,
-                    "created_at": entity.created_at,
-                    "updated_at": entity.updated_at,
-                }
-                for entity in batch
-            ]
             async with self._get_session() as session:
-                stmt = insert(EntityModel).values(values)
-                stmt = stmt.on_conflict_do_update(
-                    constraint="uq_entities_namespace_name_type",
-                    set_={
-                        "description": stmt.excluded.description,
-                        "attributes": stmt.excluded.attributes,
-                        "source_document_ids": stmt.excluded.source_document_ids,
-                        "source_chunk_ids": stmt.excluded.source_chunk_ids,
-                        "mention_count": stmt.excluded.mention_count,
-                        "embedding": stmt.excluded.embedding,
-                        "embedding_model": stmt.excluded.embedding_model,
-                        "valid_from": stmt.excluded.valid_from,
-                        "valid_until": stmt.excluded.valid_until,
-                        "confidence": stmt.excluded.confidence,
-                        "metadata": stmt.excluded.metadata,
-                        "updated_at": stmt.excluded.updated_at,
-                    },
+                # Acquire namespace-scoped advisory lock for the duration of this
+                # transaction.  pg_advisory_xact_lock auto-releases on commit/rollback.
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
+                    {"key1": _ENTITY_UPSERT_LOCK_KEY1, "key2": lock_key2},
                 )
-                await session.execute(stmt)
+
+                for start in range(0, len(sorted_entities), batch_size):
+                    batch = sorted_entities[start : start + batch_size]
+                    values = [
+                        {
+                            "id": entity.id,
+                            "namespace_id": entity.namespace_id,
+                            "name": entity.name,
+                            "entity_type": (entity.entity_type),
+                            "description": entity.description,
+                            "attributes": entity.attributes,
+                            "source_document_ids": entity.source_document_ids,
+                            "source_chunk_ids": entity.source_chunk_ids,
+                            "mention_count": entity.mention_count,
+                            "embedding": entity.embedding,
+                            "embedding_model": entity.embedding_model,
+                            "valid_from": entity.valid_from,
+                            "valid_until": entity.valid_until,
+                            "confidence": entity.confidence,
+                            "metadata_": entity.metadata,
+                            "created_at": entity.created_at,
+                            "updated_at": entity.updated_at,
+                        }
+                        for entity in batch
+                    ]
+                    stmt = insert(EntityModel).values(values)
+                    stmt = stmt.on_conflict_do_update(
+                        constraint="uq_entities_namespace_name_type",
+                        set_={
+                            "description": stmt.excluded.description,
+                            "attributes": stmt.excluded.attributes,
+                            "source_document_ids": stmt.excluded.source_document_ids,
+                            "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                            "mention_count": stmt.excluded.mention_count,
+                            "embedding": stmt.excluded.embedding,
+                            "embedding_model": stmt.excluded.embedding_model,
+                            "valid_from": stmt.excluded.valid_from,
+                            "valid_until": stmt.excluded.valid_until,
+                            "confidence": stmt.excluded.confidence,
+                            "metadata": stmt.excluded.metadata,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    await session.execute(stmt)
+
+                # Single commit for all sub-batches under the advisory lock
                 await session.commit()
 
-        return [(entity, True) for entity in entities]
+            return [(entity, True) for entity in sorted_entities]
+
+        return await _retry_on_deadlock(_do_upsert)
 
     # =========================================================================
     # Entity embedding operations

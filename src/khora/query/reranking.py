@@ -469,3 +469,108 @@ async def rerank_entities(
 
     results = await reranker.rerank(query, candidates, top_k)
     return [(r.item, r.final_score) for r in results]
+
+
+# ---------------------------------------------------------------------------
+# LLM Listwise Reranker (cost-aware, cache-backed)
+# ---------------------------------------------------------------------------
+
+_LLM_LISTWISE_PROMPT = """Given this memory retrieval query, rank the passages below by relevance.
+Consider temporal recency, entity mentions, and conversational context.
+For temporal queries ("what does X do now?", "latest", "current"), strongly prefer the most recent information.
+
+Query: {query}
+
+Passages:
+{passages}
+
+Return ONLY a JSON array of passage numbers in order of relevance, most relevant first.
+Example: [3, 1, 5, 2, 4]"""
+
+
+async def llm_listwise_rerank(
+    query: str,
+    chunks: list[tuple[Chunk, float]],
+    *,
+    model: str = "gpt-4o-mini",
+    top_n: int = 10,
+    confidence_threshold: float = 0.1,
+) -> list[tuple[Chunk, float]]:
+    """LLM-based listwise reranking with cost-aware triggering.
+
+    Only activates when the score gap between rank 1 and rank 2 is below
+    ``confidence_threshold`` (uncertain ranking). Falls back to original
+    ordering on failure.
+    """
+    import hashlib
+    import json
+    import pathlib
+
+    from khora.config.llm import LiteLLMConfig, acompletion
+
+    if len(chunks) < 2:
+        return chunks
+
+    # Cost guard: only rerank when ranking is uncertain
+    gap = chunks[0][1] - chunks[1][1] if len(chunks) >= 2 else 1.0
+    if gap >= confidence_threshold:
+        return chunks
+
+    to_rerank = chunks[:top_n]
+    remainder = chunks[top_n:]
+
+    # Check disk cache
+    cache_dir = pathlib.Path.home() / ".cache" / "khora" / "llm_reranker"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    content_hash = hashlib.sha256(
+        (query + "||" + "||".join(c.content[:200] for c, _ in to_rerank)).encode()
+    ).hexdigest()[:16]
+    cache_file = cache_dir / f"{content_hash}.json"
+
+    if cache_file.exists():
+        try:
+            order = json.loads(cache_file.read_text())
+            reordered: list[tuple[Chunk, float]] = []
+            for idx in order:
+                if 0 <= idx < len(to_rerank):
+                    chunk, score = to_rerank[idx]
+                    reordered.append((chunk, score + (len(to_rerank) - len(reordered)) * 0.001))
+            for _i, (chunk, score) in enumerate(to_rerank):
+                if not any(c.id == chunk.id for c, _ in reordered):
+                    reordered.append((chunk, score))
+            return reordered + remainder
+        except Exception:
+            pass
+
+    # Build prompt
+    passage_lines = []
+    for i, (chunk, _score) in enumerate(to_rerank):
+        passage_lines.append(f"[{i + 1}] {chunk.content[:400]}")
+    passages = "\n".join(passage_lines)
+    prompt = _LLM_LISTWISE_PROMPT.format(query=query, passages=passages)
+
+    try:
+        config = LiteLLMConfig(model=model, temperature=0.0, max_tokens=100)
+        response = await acompletion(prompt, config)
+        order = json.loads(response.strip())
+        order = [int(x) - 1 for x in order if isinstance(x, (int, float))]
+
+        try:
+            cache_file.write_text(json.dumps(order))
+        except Exception:
+            pass
+
+        reordered = []
+        for idx in order:
+            if 0 <= idx < len(to_rerank):
+                chunk, score = to_rerank[idx]
+                reordered.append((chunk, score + (len(to_rerank) - len(reordered)) * 0.001))
+        for _i, (chunk, score) in enumerate(to_rerank):
+            if not any(c.id == chunk.id for c, _ in reordered):
+                reordered.append((chunk, score))
+
+        return reordered + remainder
+
+    except Exception as e:
+        logger.debug(f"LLM listwise reranking failed: {e}")
+        return chunks

@@ -386,6 +386,16 @@ class ChronicleEngine:
         timings: dict[str, float] = {}
         total_start = time.perf_counter()
 
+        # Read Chronicle-specific config from QuerySettings (with safe defaults)
+        qs = getattr(self._config, "query", None)
+        _overfetch = getattr(qs, "chronicle_overfetch_multiplier", 4) if qs else 4
+        _rrf_w_semantic = getattr(qs, "chronicle_rrf_semantic_weight", 1.0) if qs else 1.0
+        _rrf_w_bm25 = getattr(qs, "chronicle_rrf_bm25_weight", 0.8) if qs else 0.8
+        _rrf_w_temporal = getattr(qs, "chronicle_rrf_temporal_weight", 0.9) if qs else 0.9
+        _rrf_w_entity = getattr(qs, "chronicle_rrf_entity_weight", 0.85) if qs else 0.85
+        _cfg_decay = getattr(qs, "chronicle_decay_weight", 0.25) if qs else 0.25
+        overfetch_limit = limit * _overfetch
+
         # ── Channel 1: Semantic (vector similarity) ──────────────────────
         semantic_results: list[tuple[Chunk, float]] = []
         if mode in (SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL):
@@ -398,7 +408,7 @@ class ChronicleEngine:
                 semantic_results = await storage.search_similar_chunks(
                     namespace_id,
                     query_embedding,
-                    limit=limit * 2,  # Over-fetch for fusion
+                    limit=overfetch_limit,
                     min_similarity=min_similarity,
                 )
             except RuntimeError:
@@ -414,7 +424,7 @@ class ChronicleEngine:
                 bm25_results = await storage.search_fulltext_chunks(
                     namespace_id,
                     query,
-                    limit=limit * 2,  # Over-fetch for fusion
+                    limit=overfetch_limit,
                 )
             except RuntimeError:
                 # Vector backend not configured (fulltext lives on same backend)
@@ -430,7 +440,7 @@ class ChronicleEngine:
                     namespace_id,
                     query,
                     query_embedding,
-                    limit * 2,
+                    overfetch_limit,
                     temporal_filter,
                 )
             except Exception:
@@ -446,7 +456,7 @@ class ChronicleEngine:
                     namespace_id,
                     query,
                     query_embedding,
-                    limit * 2,
+                    overfetch_limit,
                 )
             except Exception:
                 logger.debug("Entity channel failed")
@@ -460,16 +470,16 @@ class ChronicleEngine:
 
         if semantic_results:
             ranked_lists["semantic"] = semantic_results
-            weights["semantic"] = 1.0
+            weights["semantic"] = _rrf_w_semantic
         if bm25_results:
             ranked_lists["bm25"] = bm25_results
-            weights["bm25"] = 0.8
+            weights["bm25"] = _rrf_w_bm25
         if temporal_results:
             ranked_lists["temporal"] = temporal_results
-            weights["temporal"] = 0.6
+            weights["temporal"] = _rrf_w_temporal
         if entity_results:
             ranked_lists["entity"] = entity_results
-            weights["entity"] = 0.7
+            weights["entity"] = _rrf_w_entity
 
         if ranked_lists:
             fused: list[tuple[Any, float]] = reciprocal_rank_fusion(
@@ -477,12 +487,12 @@ class ChronicleEngine:
                 weights=weights,
                 id_extractor=lambda chunk: chunk.id,
             )
-            chunks_with_scores: list[tuple[Chunk, float]] = fused[: limit * 2]
+            chunks_with_scores: list[tuple[Chunk, float]] = fused[:overfetch_limit]
         elif semantic_results:
             # Fallback: only one channel had results
-            chunks_with_scores = semantic_results[: limit * 2]
+            chunks_with_scores = semantic_results[:overfetch_limit]
         elif bm25_results:
-            chunks_with_scores = bm25_results[: limit * 2]
+            chunks_with_scores = bm25_results[:overfetch_limit]
         else:
             chunks_with_scores = []
 
@@ -490,7 +500,7 @@ class ChronicleEngine:
 
         # ── Temporal decay scoring ───────────────────────────────────────
         start = time.perf_counter()
-        decay_weight = recency_bias if recency_bias is not None else 0.15
+        decay_weight = recency_bias if recency_bias is not None else _cfg_decay
         chunks_with_scores = _apply_temporal_decay(
             chunks_with_scores,
             decay_weight=decay_weight,
@@ -559,10 +569,13 @@ class ChronicleEngine:
             created_before = getattr(temporal_filter, "end_time", None)
 
         if created_after is None and created_before is None:
-            # Default: search recent 7 days for temporal signal
-            from datetime import timedelta
+            # Use configurable temporal window (0 = unlimited — let decay handle scoring)
+            qs = getattr(self._config, "query", None)
+            window_days = getattr(qs, "chronicle_temporal_window_days", 0.0) if qs else 0.0
+            if window_days > 0:
+                from datetime import timedelta
 
-            created_after = datetime.now(UTC) - timedelta(days=7)
+                created_after = datetime.now(UTC) - timedelta(days=window_days)
 
         # Use semantic search with temporal bounds
         if query_embedding is None:
@@ -586,7 +599,7 @@ class ChronicleEngine:
             chunk_time = getattr(chunk, "source_timestamp", None) or chunk.created_at
             if chunk_time:
                 hours_old = max(0, (now - chunk_time).total_seconds() / 3600)
-                temporal_boost = _ebbinghaus_decay(hours_old, tau_hours=72)  # 3-day half-life
+                temporal_boost = _ebbinghaus_decay(hours_old, half_life_hours=72)  # 3-day half-life
                 blended = sim * 0.6 + temporal_boost * 0.4
             else:
                 blended = sim
