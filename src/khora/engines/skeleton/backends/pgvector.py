@@ -98,6 +98,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         self._embedding_dimension = config.llm.embedding_dimension or 1536
         self._hnsw_m: int = config.storage.hnsw_m
         self._hnsw_ef_construction: int = config.storage.hnsw_ef_construction
+        self._hnsw_ef_search: int = config.storage.hnsw_ef_search
 
     async def connect(self) -> None:
         """Connect to PostgreSQL and ensure schema exists."""
@@ -391,8 +392,8 @@ class PgVectorTemporalStore(TemporalVectorStore):
         min_similarity: float,
     ) -> list[TemporalSearchResult]:
         """Perform vector similarity search."""
-        # Increase HNSW search accuracy for this transaction
-        await session.execute(text("SET LOCAL hnsw.ef_search = 200"))
+        # Set HNSW search accuracy for this transaction (configurable, default 100)
+        await session.execute(text(f"SET LOCAL hnsw.ef_search = {self._hnsw_ef_search}"))
 
         # Calculate cosine similarity: 1 - cosine_distance
         similarity = (1 - khora_chunks_table.c.embedding.cosine_distance(query_embedding)).label("similarity")
