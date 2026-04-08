@@ -191,6 +191,9 @@ pub fn detect_temporal_category(query: &str) -> u8 {
         add(3, &[
             "first ", " earliest", "which came", "what came",
             "preceding", "following ", "subsequent",
+            "in what order", "chronological", "what order did",
+            "what sequence", "which came before", "which came after",
+            "happened before or after", "came before or after",
         ]);
 
         // Category 4: AGGREGATE
@@ -291,6 +294,9 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
         add(3, &[
             "first ", " earliest", "which came", "what came",
             "preceding", "following ", "subsequent",
+            "in what order", "chronological", "what order did",
+            "what sequence", "which came before", "which came after",
+            "happened before or after", "came before or after",
         ]);
         add(4, &[
             "how many times", "how many total", "all instances",
@@ -492,6 +498,21 @@ mod tests {
     #[test]
     fn test_detect_temporal_category_ordinal() {
         assert_eq!(detect_temporal_category("Which event happened first ?"), 3);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_ordinal_in_what_order() {
+        assert_eq!(detect_temporal_category("In what order did the events happen?"), 3);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_ordinal_chronological() {
+        assert_eq!(detect_temporal_category("List the changes in chronological order"), 3);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_ordinal_before_or_after() {
+        assert_eq!(detect_temporal_category("Did X happened before or after Y?"), 3);
     }
 
     #[test]

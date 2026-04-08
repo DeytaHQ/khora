@@ -616,6 +616,18 @@ class VectorCypherRetriever:
         else:
             vector_chunks = await vector_chunks_task
 
+        # Fallback: if temporal filter was too restrictive, re-run without it
+        if temporal_filter and len(vector_chunks) < limit // 2:
+            logger.debug(f"Temporal filter too restrictive ({len(vector_chunks)} results), falling back to unfiltered")
+            vector_chunks = await self._vector_search_chunks(
+                query_embedding=query_embedding,
+                namespace_id=namespace_id,
+                temporal_filter=None,
+                query_text=query,
+                limit=limit,
+                hybrid_alpha_override=effective_hybrid_alpha,
+            )
+
         # Await BM25 results (also launched in parallel at the beginning)
         bm25_chunks: list[tuple[UUID, float, Chunk]] = []
         if bm25_chunks_task is not None:
@@ -1197,6 +1209,47 @@ class VectorCypherRetriever:
                         fused, recency_scores, recency_weight=effective_recency, recency_floor=recency_floor
                     )
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
+
+            # Version-aware scoring: penalize chunks from superseded documents
+            # Mirrors the logic in _vectorcypher_retrieve (Step 8a')
+            if (
+                temporal_signal
+                and temporal_signal.category
+                in (
+                    TemporalCategory.STATE_QUERY,
+                    TemporalCategory.RECENCY,
+                    TemporalCategory.CHANGE,
+                )
+                and chunk_results
+            ):
+                from collections import defaultdict as _defaultdict
+
+                _entity_versions: dict[str, int] = _defaultdict(int)
+                _chunk_versions: dict[UUID, int] = {}
+
+                for c, _s in chunk_results:
+                    meta = c.metadata.custom if c.metadata and isinstance(c.metadata, ChunkMetadata) else {}
+                    if isinstance(meta, dict):
+                        version = meta.get("version") or meta.get("entity_version", 0)
+                        if version:
+                            _chunk_versions[c.id] = int(version)
+                            for ref in meta.get("entity_refs") or []:
+                                _entity_versions[ref] = max(_entity_versions[ref], int(version))
+
+                if _entity_versions:
+                    updated = []
+                    for c, s in chunk_results:
+                        v = _chunk_versions.get(c.id, 0)
+                        if v > 0:
+                            meta = c.metadata.custom if c.metadata and isinstance(c.metadata, ChunkMetadata) else {}
+                            if isinstance(meta, dict):
+                                for ref in meta.get("entity_refs") or []:
+                                    max_v = _entity_versions.get(ref, v)
+                                    if max_v > v:
+                                        s *= v / max_v
+                                        break
+                        updated.append((c, s))
+                    chunk_results = updated
 
             # Cross-encoder reranking (after recency boost, before temporal sort)
             if self._config.enable_reranking and chunk_results:
