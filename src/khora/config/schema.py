@@ -590,6 +590,74 @@ class QuerySettings(BaseSettings):
         description="Score multiplier for entities matched via entity linking.",
     )
 
+    # Structured document features (default off — enable per-namespace to avoid per-query DB lookups)
+    enable_relationship_expansion: bool = Field(
+        default=False,
+        description="After retrieval, follow relationship edges from top entities to inject "
+        "related chunks. Enable per-namespace for structured documents with dense cross-references. "
+        "When True, adds a DB round-trip per query to check for relationship data.",
+    )
+    relationship_expansion_max: int = Field(
+        default=5, ge=1, le=20, description="Maximum additional chunks from relationship expansion"
+    )
+    enable_taxonomy_boost: bool = Field(
+        default=False,
+        description="Classify query against document hierarchy (chapters/topics) and boost chunks "
+        "from matching scope. Reads from namespace.metadata['khora']['taxonomy']. "
+        "When True, adds a DB round-trip per query to fetch namespace metadata.",
+    )
+    taxonomy_boost_factor: float = Field(
+        default=1.5, ge=1.0, le=3.0, description="Score multiplier for chunks from taxonomy-matched scope"
+    )
+
+    # Chronicle engine tuning
+    chronicle_temporal_window_days: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Temporal channel window in days for Chronicle engine (0 = unlimited, no time-window filter)",
+    )
+    chronicle_decay_weight: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description="Weight of temporal decay in Chronicle scoring (blended with relevance score)",
+    )
+    chronicle_overfetch_multiplier: int = Field(
+        default=4, ge=2, le=10, description="Over-fetch multiplier for Chronicle retrieval channels"
+    )
+    chronicle_rrf_semantic_weight: float = Field(
+        default=1.0, ge=0.0, le=2.0, description="RRF weight for semantic channel in Chronicle fusion"
+    )
+    chronicle_rrf_bm25_weight: float = Field(
+        default=0.8, ge=0.0, le=2.0, description="RRF weight for BM25 channel in Chronicle fusion"
+    )
+    chronicle_rrf_temporal_weight: float = Field(
+        default=0.9, ge=0.0, le=2.0, description="RRF weight for temporal channel in Chronicle fusion"
+    )
+    chronicle_rrf_entity_weight: float = Field(
+        default=0.85, ge=0.0, le=2.0, description="RRF weight for entity co-occurrence channel in Chronicle fusion"
+    )
+
+    # LLM listwise reranking
+    enable_llm_reranking: bool = Field(
+        default=False, description="Enable LLM-based listwise reranking after cross-encoder stage"
+    )
+    llm_reranking_model: str = Field(default="gpt-4o-mini", description="Model for LLM listwise reranking")
+    llm_reranking_top_n: int = Field(default=10, ge=3, le=30, description="Number of top candidates to rerank with LLM")
+    llm_reranking_confidence_threshold: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=1.0,
+        description="Only trigger LLM reranking when cross-encoder score gap between rank 1 and 2 is below this",
+    )
+
+    # Query normalization
+    enable_query_normalization: bool = Field(
+        default=True, description="Normalize queries (filler removal, contraction expansion) before embedding"
+    )
+    enable_multi_vector_query: bool = Field(
+        default=False, description="Average original and normalized query embeddings for more robust retrieval"
+    )
     # Two-tier temporal resolver
     enable_temporal_resolver: bool = Field(
         default=True, description="Enable two-tier temporal resolver (dateparser + LLM)"
