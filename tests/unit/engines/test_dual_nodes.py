@@ -17,8 +17,8 @@ from khora.engines.vectorcypher.dual_nodes import (
 )
 
 
-def _make_neo4j_error(code: str, message: str = "boom") -> Neo4jError:
-    """Build a Neo4jError subclass instance with a given server-side code.
+def _make_neo4j_error(code: str, message: str = "boom") -> ClientError:
+    """Build a ClientError instance with a given server-side code.
 
     The driver's ``code`` attribute is a read-only property derived from
     ``_neo4j_code``, so the public constructor cannot set it. We use the
@@ -27,7 +27,18 @@ def _make_neo4j_error(code: str, message: str = "boom") -> Neo4jError:
     subclass (e.g. ``ClientError`` for ``Neo.ClientError.*``) and exposes
     the requested ``code``.
     """
-    return Neo4jError._basic_hydrate(neo4j_code=code, message=message)
+    exc = Neo4jError._basic_hydrate(neo4j_code=code, message=message)
+    # Guard against a future driver refactor silently returning a
+    # different subclass. Our except clause in dual_nodes.py catches
+    # only ClientError — if _basic_hydrate starts returning a bare
+    # Neo4jError (or a different hierarchy), the test would pass
+    # vacuously and the production code would break in prod.
+    assert isinstance(exc, ClientError), (
+        f"expected ClientError for code {code}, got {type(exc).__name__} — "
+        "neo4j driver may have changed internal API"
+    )
+    assert exc.code == code, f"expected code={code}, got {exc.code}"
+    return exc
 
 
 def _make_neo4j_driver() -> tuple[MagicMock, AsyncMock]:
@@ -425,29 +436,99 @@ class TestDualNodeManagerGetEntityNeighborhoodsTimeout:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When query_timeout is set, _work is wrapped via unit_of_work(timeout=...)."""
-        driver, session = _make_neo4j_driver()
-        session.execute_read = AsyncMock(return_value=[])
+        """When query_timeout is set, the closure passed to execute_read is
+        the decorated one — end-to-end, not just "the decorator was called".
 
-        # Replace unit_of_work in the dual_nodes module with a passthrough
-        # decorator that records how it was invoked.
-        decorator_factory = MagicMock(side_effect=lambda fn: fn)
-        unit_of_work_mock = MagicMock(return_value=decorator_factory)
+        This guards against a refactor that drops the wrap or rebinds
+        ``_work`` back to the original between the decorate step and the
+        execute_read call. We verify by:
+          * Spying on ``unit_of_work`` to tag its output with a sentinel
+            attribute (``_is_timed_work``) AND preserve the driver's
+            real ``.timeout`` attribute.
+          * Capturing the function handed to ``session.execute_read`` and
+            asserting the sentinel is present.
+          * Actually invoking the captured function with a mock tx so we
+            exercise the full wrap → execute_read → _work path.
+        """
+        driver, session = _make_neo4j_driver()
+
+        # Import the real neo4j.unit_of_work so the spy delegates to
+        # it (keeps the .timeout attribute the driver sets).
+        from neo4j import unit_of_work as real_unit_of_work
+
+        decorator_calls: list[float | None] = []
+
+        def _spy_unit_of_work(*, timeout: float | None = None, **kwargs):
+            decorator_calls.append(timeout)
+            real_decorator = real_unit_of_work(timeout=timeout, **kwargs)
+
+            def _marking_decorator(fn):
+                wrapped = real_decorator(fn)
+                wrapped._is_timed_work = True  # test-only sentinel
+                return wrapped
+
+            return _marking_decorator
+
         monkeypatch.setattr(
             "khora.engines.vectorcypher.dual_nodes.unit_of_work",
-            unit_of_work_mock,
+            _spy_unit_of_work,
         )
+
+        # Capture whatever function is passed to execute_read, and
+        # actually invoke it against a mock tx so the inner closure
+        # runs (otherwise the test degenerates to "mock returned []").
+        captured: dict[str, object] = {}
+
+        async def _capture_execute_read(work_fn):
+            captured["work_fn"] = work_fn
+
+            # Build a minimal AsyncManagedTransaction-shaped mock.
+            async def _empty_result_iter():
+                if False:  # pragma: no cover
+                    yield
+                return
+
+            class _AsyncIter:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    raise StopAsyncIteration
+
+            result_cursor = MagicMock()
+            result_cursor.__aiter__ = lambda self: _AsyncIter()
+            fake_tx = AsyncMock()
+            fake_tx.run = AsyncMock(return_value=result_cursor)
+
+            inner = await work_fn(fake_tx)
+            captured["inner_called"] = True
+            captured["inner_result"] = inner
+            return inner
+
+        session.execute_read = AsyncMock(side_effect=_capture_execute_read)
 
         manager = DualNodeManager(driver, query_timeout=3.0)
         result = await manager.get_entity_neighborhoods([uuid4()], uuid4(), depth=1)
 
+        # unit_of_work was called exactly once — during __init__'s hoist,
+        # NOT per get_entity_neighborhoods call. Behaviour-locks the
+        # M8 hoist against accidental un-hoisting.
+        assert decorator_calls == [3.0]
+
+        # The function reaching execute_read MUST carry:
+        #   (1) our test sentinel — proves our decorator ran,
+        #   (2) the driver's own .timeout attribute — proves it's still
+        #       the real neo4j.unit_of_work wrapper (not something we
+        #       accidentally unwrapped along the way).
+        work_fn = captured["work_fn"]
+        assert getattr(
+            work_fn, "_is_timed_work", False
+        ), "decorator was not applied to the function handed to execute_read"
+        assert getattr(work_fn, "timeout", None) == 3.0, "wrapped function missing the driver's .timeout attribute"
+
+        # The inner Cypher closure actually ran (full end-to-end wrap).
+        assert captured.get("inner_called") is True
         assert result == {}
-        unit_of_work_mock.assert_called_once_with(timeout=3.0)
-        # The returned decorator must have been applied to the inner _work fn.
-        decorator_factory.assert_called_once()
-        # And execute_read must still have been invoked once with the
-        # (now-wrapped) function.
-        session.execute_read.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_skips_unit_of_work_when_timeout_none(
@@ -477,9 +558,9 @@ class TestDualNodeManagerGetEntityNeighborhoodsTimeout:
         """Both server- and client-configured timeout codes degrade to {}."""
         driver, session = _make_neo4j_driver()
         timeout_exc = _make_neo4j_error(timeout_code, message="transaction timed out")
-        # Sanity-check the constructed exception so a future driver upgrade
-        # that breaks _basic_hydrate would fail loudly here, not silently
-        # masquerade as a successful test.
+        # _make_neo4j_error already asserts isinstance(ClientError) + code
+        # internally (see the guard in the helper). Re-assert here as a
+        # call-site layer of defence.
         assert isinstance(timeout_exc, ClientError)
         assert timeout_exc.code == timeout_code
 
@@ -493,10 +574,26 @@ class TestDualNodeManagerGetEntityNeighborhoodsTimeout:
         assert result == {}
         mock_logger.warning.assert_called_once()
 
-        # The warning includes the offending code so ops can grep for it.
         warning_call = mock_logger.warning.call_args
+        # Structured kwargs (operators rely on these for filtering).
         assert warning_call.kwargs.get("code") == timeout_code
         assert warning_call.kwargs.get("timeout") == 1.0
+        assert warning_call.kwargs.get("timeout_occurred") is True
+        assert warning_call.kwargs.get("n") == 1
+        assert warning_call.kwargs.get("d") == 2
+        # Template assertions (M7). When loguru is patched,
+        # ``mock_logger.warning.call_args.args[0]`` is the RAW template
+        # string (verified at runtime), NOT the interpolated form. These
+        # guard against a future refactor silently dropping the structured
+        # fields or switching to f-string interpolation — in either case
+        # the placeholder markers disappear from args[0] and the assertion
+        # fires.
+        template = warning_call.args[0]
+        assert "timed out" in template
+        assert "{timeout}" in template
+        assert "{code}" in template
+        assert "{n}" in template
+        assert "{d}" in template
 
     @pytest.mark.asyncio
     async def test_reraises_non_timeout_client_error(self) -> None:
@@ -573,6 +670,72 @@ class TestDualNodeManagerGetEntityNeighborhoodsTimeout:
                 }
             ]
         }
+
+    @pytest.mark.asyncio
+    async def test_emits_timeout_telemetry_span(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """On timeout, a dedicated trace_span is emitted with structured attrs.
+
+        Replaces the former ``TODO(DYT-1948-followup)`` telemetry counter —
+        operators can now alert on span name ``*.timeout`` in Logfire/OTEL
+        and filter by ``timeout_s``, ``entity_count``, ``depth``, ``code``,
+        and ``namespace_id`` attributes.
+        """
+        from contextlib import contextmanager
+
+        driver, session = _make_neo4j_driver()
+        timeout_exc = _make_neo4j_error(
+            "Neo.ClientError.Transaction.TransactionTimedOut",
+            message="transaction timed out",
+        )
+        session.execute_read = AsyncMock(side_effect=timeout_exc)
+
+        captured_spans: list[tuple[str, dict]] = []
+
+        @contextmanager
+        def _fake_trace_span(name, **attributes):
+            entry = (name, dict(attributes))
+            captured_spans.append(entry)
+
+            class _NoOp:
+                def set_attribute(self, key, value):
+                    captured_spans[-1][1][key] = value
+
+                def set_attributes(self, attrs):
+                    captured_spans[-1][1].update(attrs)
+
+            yield _NoOp()
+
+        monkeypatch.setattr(
+            "khora.engines.vectorcypher.dual_nodes.trace_span",
+            _fake_trace_span,
+        )
+
+        manager = DualNodeManager(driver, query_timeout=2.5)
+        ns = uuid4()
+        eids = [uuid4(), uuid4(), uuid4()]
+
+        result = await manager.get_entity_neighborhoods(eids, ns, depth=3)
+
+        assert result == {}
+        # Exactly one span ending in ``.timeout`` — this is the signal
+        # operators will alert on. If a refactor drops the trace_span
+        # call, this test fires.
+        timeout_spans = [s for s in captured_spans if s[0].endswith(".timeout")]
+        assert len(timeout_spans) == 1, f"expected exactly one .timeout span, got {[s[0] for s in captured_spans]}"
+        name, attrs = timeout_spans[0]
+        assert name == "khora.neo4j.get_entity_neighborhoods.timeout"
+        # All five attributes ops needs for dashboard filters.
+        assert attrs["timeout_s"] == 2.5
+        assert attrs["entity_count"] == 3
+        assert attrs["depth"] == 3
+        assert attrs["code"] == "Neo.ClientError.Transaction.TransactionTimedOut"
+        assert attrs["namespace_id"] == str(ns)
+        # The Devil's-Advocate delta: timeout_occurred lives on the
+        # OTEL span as an attribute (not just in the loguru log).
+        assert attrs["timeout_occurred"] is True
 
 
 @pytest.mark.unit

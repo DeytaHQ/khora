@@ -151,13 +151,24 @@ class TestNeo4jConfigQueryTimeout:
         assert isinstance(settings.graph, Neo4jConfig)
         assert settings.graph.query_timeout == 7.5
 
-    @pytest.mark.parametrize("bad_value", [0, 0.0, -1, -0.5])
-    def test_query_timeout_rejects_zero_and_negative(self, bad_value):
-        """Values <= 0 must be rejected: the driver treats 0 as 'run forever',
-        which silently defeats the purpose of the cap. Users who want to
-        disable the timeout must pass ``None`` explicitly."""
+    @pytest.mark.parametrize("bad_value", [0, 0.0, -1, -0.5, 301.0, 1000.0, 1e18])
+    def test_query_timeout_rejects_zero_negative_and_over_cap(self, bad_value):
+        """Values <= 0 and values > 300s are both rejected.
+
+        <= 0: driver treats 0 as 'run forever' (defeats the purpose);
+              negative is nonsense.
+        > 300: sanity cap. A 5-minute per-transaction timeout is already
+               far beyond any reasonable interactive recall budget; higher
+               values almost certainly indicate misconfiguration. Users
+               who truly want no ceiling must pass ``None`` explicitly.
+        """
         with pytest.raises(ValidationError):
             Neo4jConfig(query_timeout=bad_value)
+
+    def test_query_timeout_accepts_boundary_values(self):
+        """Sub-millisecond and exactly 300s are both valid."""
+        assert Neo4jConfig(query_timeout=0.001).query_timeout == 0.001
+        assert Neo4jConfig(query_timeout=300.0).query_timeout == 300.0
 
 
 @pytest.mark.unit

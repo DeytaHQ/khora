@@ -24,7 +24,7 @@ from neo4j import unit_of_work
 from neo4j.exceptions import ClientError
 
 from khora.storage.backends.mixins import deserialize_dict, serialize_dict
-from khora.telemetry import trace
+from khora.telemetry import trace, trace_span
 
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
@@ -100,6 +100,13 @@ class DualNodeManager:
         self._driver = driver
         self._database = database
         self._query_timeout = query_timeout
+        # Pre-bind the unit_of_work decorator once. The factory call is
+        # cheap but non-zero and the produced decorator is fully reusable
+        # — see neo4j.unit_of_work: it closes over (metadata, timeout) and
+        # returns a plain wrapper function that can decorate any number of
+        # transaction callables. Hoisting shaves an allocation per call
+        # on the hot neighborhood lookup path.
+        self._timed_unit_of_work = unit_of_work(timeout=query_timeout) if query_timeout is not None else None
 
     async def ensure_indexes(self) -> None:
         """Create indexes for Chunk and TimeNode nodes."""
@@ -570,14 +577,15 @@ class DualNodeManager:
             )
             return [record.data() async for record in result]
 
-        # Apply the configured transaction timeout via unit_of_work. The Neo4j
-        # Python driver's `tx.run()` does NOT accept a timeout kwarg — timeouts
-        # must be set at transaction-begin time, which unit_of_work does by
-        # attaching metadata the session reads when starting the managed tx.
-        # TODO(follow-up): add a timeout counter / trace attribute so ops can
-        # alert on timeout frequency rather than relying on result_count=0.
-        if self._query_timeout is not None:
-            _work = unit_of_work(timeout=self._query_timeout)(_work)
+        # Apply the configured transaction timeout via the pre-bound
+        # unit_of_work decorator (hoisted in __init__). The Neo4j Python
+        # driver's `tx.run()` does NOT accept a timeout kwarg — timeouts
+        # must be set at transaction-begin time, which unit_of_work does
+        # by attaching metadata the session reads when starting the
+        # managed tx. Hoisting means we pay the factory cost once per
+        # DualNodeManager rather than once per query.
+        if self._timed_unit_of_work is not None:
+            _work = self._timed_unit_of_work(_work)
 
         try:
             async with self._driver.session(database=self._database) as session:
@@ -587,6 +595,22 @@ class DualNodeManager:
             # tuple, not a prefix match) so we don't swallow syntax errors,
             # auth failures, or constraint violations that are also ClientError.
             if exc.code in _NEO4J_TIMEOUT_CODES:
+                # Emit a dedicated child span so operators can alert on
+                # timeout frequency in Logfire/OTEL via a span-name filter
+                # (the ".timeout" suffix). The parent @trace span records
+                # result_count=0 on timeout, but a distinct span carries
+                # the timeout-specific attributes ops needs for dashboards
+                # (configured timeout, entity count, depth, error code).
+                with trace_span(
+                    "khora.neo4j.get_entity_neighborhoods.timeout",
+                    timeout_s=self._query_timeout,
+                    entity_count=len(entity_ids),
+                    depth=depth,
+                    code=exc.code,
+                    namespace_id=str(namespace_id),
+                    timeout_occurred=True,
+                ):
+                    pass  # attributes set via kwargs; no inner work
                 logger.warning(
                     "Neo4j get_entity_neighborhoods timed out after {timeout}s "
                     "(namespace_id={ns}, entity_count={n}, depth={d}, code={code}); "
@@ -596,10 +620,8 @@ class DualNodeManager:
                     n=len(entity_ids),
                     d=depth,
                     code=exc.code,
+                    timeout_occurred=True,
                 )
-                # TODO(DYT-1948-followup): emit dedicated telemetry counter for
-                # query timeouts. @trace already records result_count=0 which
-                # is the minimum viable signal but we want explicit alerting.
                 return {}
             raise
 
