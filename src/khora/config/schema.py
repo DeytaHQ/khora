@@ -22,19 +22,29 @@ class ParsedNeo4jUrl:
     database: str
 
     @classmethod
-    def parse(cls, url: str, default_user: str = "neo4j", default_database: str = "neo4j") -> ParsedNeo4jUrl:
+    def parse(
+        cls,
+        url: str,
+        default_user: str = "neo4j",
+        default_password: str = "",
+        default_database: str = "neo4j",
+    ) -> ParsedNeo4jUrl:
         """Parse a Neo4j URL with optional embedded credentials.
 
         Supports formats:
         - bolt://host:port
         - bolt://user:password@host:port
         - bolt://user:password@host:port/database
+
+        ``default_password`` is used when the URL has no embedded password, so
+        callers can pass a separately-configured password (e.g. from
+        ``Neo4jConfig.password``) and have it flow through correctly.
         """
         parsed = urlparse(url)
 
         # Extract user and password from URL
         user = parsed.username or default_user
-        password = parsed.password or ""
+        password = parsed.password or default_password
 
         # Extract database from path (e.g., /mydb -> mydb)
         database = parsed.path.lstrip("/") if parsed.path and parsed.path != "/" else default_database
@@ -883,8 +893,14 @@ class KhoraConfig(BaseSettings):
         # Use graph config defaults if available
         graph = self.storage.graph
         default_user = graph.user if isinstance(graph, Neo4jConfig) else self.storage.neo4j_user
+        default_password = graph.password if isinstance(graph, Neo4jConfig) else self.storage.neo4j_password
         default_db = graph.database if isinstance(graph, Neo4jConfig) else self.storage.neo4j_database
-        return ParsedNeo4jUrl.parse(raw_url, default_user=default_user, default_database=default_db)
+        return ParsedNeo4jUrl.parse(
+            raw_url,
+            default_user=default_user,
+            default_password=default_password,
+            default_database=default_db,
+        )
 
     def get_neo4j_url(self) -> str | None:
         """Get Neo4j URL without credentials (for driver connection).
@@ -895,7 +911,13 @@ class KhoraConfig(BaseSettings):
         return parsed.url if parsed else None
 
     def get_neo4j_user(self) -> str:
-        """Get Neo4j username from URL or config."""
+        """Get Neo4j username.
+
+        Precedence: username embedded in ``Neo4jConfig.url`` (or the legacy
+        ``neo4j_url``) wins. Otherwise, falls back to the separately-configured
+        ``Neo4jConfig.user`` (or the legacy ``neo4j_user``). Returns ``"neo4j"``
+        when neither is set.
+        """
         parsed = self._parse_neo4j_url()
         if parsed:
             return parsed.user
@@ -905,7 +927,13 @@ class KhoraConfig(BaseSettings):
         return self.storage.neo4j_user
 
     def get_neo4j_password(self) -> str:
-        """Get Neo4j password from URL or config."""
+        """Get Neo4j password.
+
+        Precedence: password embedded in ``Neo4jConfig.url`` (or the legacy
+        ``neo4j_url``) wins. Otherwise, falls back to the separately-configured
+        ``Neo4jConfig.password`` (or the legacy ``neo4j_password``). Returns an
+        empty string when neither is set.
+        """
         parsed = self._parse_neo4j_url()
         if parsed:
             return parsed.password
@@ -915,7 +943,13 @@ class KhoraConfig(BaseSettings):
         return self.storage.neo4j_password
 
     def get_neo4j_database(self) -> str:
-        """Get Neo4j database from URL or config."""
+        """Get Neo4j database name.
+
+        Precedence: database embedded in ``Neo4jConfig.url`` path (or the legacy
+        ``neo4j_url``) wins. Otherwise, falls back to the separately-configured
+        ``Neo4jConfig.database`` (or the legacy ``neo4j_database``). Returns
+        ``"neo4j"`` when neither is set.
+        """
         parsed = self._parse_neo4j_url()
         if parsed:
             return parsed.database

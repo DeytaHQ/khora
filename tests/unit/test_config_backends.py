@@ -9,6 +9,7 @@ from khora.config.schema import (
     KuzuConfig,
     MemgraphConfig,
     Neo4jConfig,
+    ParsedNeo4jUrl,
     PgVectorConfig,
     StorageSettings,
 )
@@ -202,3 +203,104 @@ class TestKhoraConfigGraphHelpers:
         vector = config.get_vector_config()
         assert isinstance(vector, PgVectorConfig)
         assert vector.url == "postgresql://localhost:5432/khora"
+
+
+@pytest.mark.unit
+class TestGetNeo4jCredentials:
+    """Regression tests for DYT-2049: Neo4j credentials must flow through when split from URL."""
+
+    def test_get_neo4j_password_prefers_explicit_graph_password_over_credential_free_url(self) -> None:
+        graph = Neo4jConfig(url="bolt://localhost:7687", user="neo4j", password="secretpass")
+        cfg = KhoraConfig(database_url="postgresql://x@y/z", storage=StorageSettings(graph=graph))
+        assert cfg.get_neo4j_password() == "secretpass"
+
+    def test_get_neo4j_password_extracts_from_embedded_url(self) -> None:
+        graph = Neo4jConfig(url="bolt://neo4j:secretpass@localhost:7687")
+        cfg = KhoraConfig(database_url="postgresql://x@y/z", storage=StorageSettings(graph=graph))
+        assert cfg.get_neo4j_password() == "secretpass"
+
+    def test_get_neo4j_password_embedded_url_wins_over_field(self) -> None:
+        graph = Neo4jConfig(url="bolt://neo4j:urlpass@localhost:7687", password="fieldpass")
+        cfg = KhoraConfig(database_url="postgresql://x@y/z", storage=StorageSettings(graph=graph))
+        assert cfg.get_neo4j_password() == "urlpass"
+
+    def test_get_neo4j_user_and_database_fall_through_from_credential_free_url(self) -> None:
+        graph = Neo4jConfig(
+            url="bolt://localhost:7687",
+            user="admin",
+            password="secretpass",
+            database="mydb",
+        )
+        cfg = KhoraConfig(database_url="postgresql://x@y/z", storage=StorageSettings(graph=graph))
+        assert cfg.get_neo4j_user() == "admin"
+        assert cfg.get_neo4j_password() == "secretpass"
+        assert cfg.get_neo4j_database() == "mydb"
+
+    def test_get_neo4j_password_legacy_flat_fields_are_migrated_into_graph_config(self) -> None:
+        # StorageSettings._migrate_legacy_fields() migrates the flat neo4j_*
+        # fields into a Neo4jConfig at validation time, so _parse_neo4j_url()
+        # takes the new-style `graph` branch here, not the legacy `else` branch.
+        cfg = KhoraConfig(
+            database_url="postgresql://x@y/z",
+            storage=StorageSettings(
+                neo4j_url="bolt://localhost:7687",
+                neo4j_user="legacy",
+                neo4j_password="legacypass",
+            ),
+        )
+        assert cfg.get_neo4j_password() == "legacypass"
+        assert cfg.get_neo4j_user() == "legacy"
+
+    def test_get_neo4j_password_top_level_neo4j_url_shortcut_falls_through_storage_defaults(
+        self,
+    ) -> None:
+        """Top-level ``KhoraConfig.neo4j_url`` bypasses StorageSettings migration.
+
+        This exercises the ``else`` branch of ``_parse_neo4j_url`` where
+        defaults come from ``self.storage.neo4j_*`` rather than a migrated
+        ``Neo4jConfig`` — ``_migrate_legacy_fields`` lives on
+        ``StorageSettings`` and only sees fields passed under ``storage=``,
+        so the top-level shortcut never triggers it.
+        """
+        cfg = KhoraConfig(
+            database_url="postgresql://x@y/z",
+            neo4j_url="bolt://localhost:7687",
+        )
+        # No graph config, no storage.neo4j_password set — defaults apply.
+        assert cfg.storage.graph is None
+        assert cfg.get_neo4j_url() == "bolt://localhost:7687"
+        assert cfg.get_neo4j_user() == "neo4j"  # default
+        assert cfg.get_neo4j_password() == ""  # default
+        assert cfg.get_neo4j_database() == "neo4j"  # default
+
+
+@pytest.mark.unit
+class TestParsedNeo4jUrl:
+    """Direct contract tests for ParsedNeo4jUrl.parse()."""
+
+    def test_parse_respects_default_password_when_url_has_none(self) -> None:
+        parsed = ParsedNeo4jUrl.parse("bolt://localhost:7687", default_password="fallbackpass")
+        assert parsed.password == "fallbackpass"
+
+    def test_parse_embedded_password_overrides_default(self) -> None:
+        parsed = ParsedNeo4jUrl.parse("bolt://user:embedded@localhost:7687", default_password="fallback")
+        assert parsed.password == "embedded"
+
+    def test_parse_neo4j_scheme_preserved(self) -> None:
+        """``neo4j://`` routing URLs are parsed and reconstructed with scheme intact."""
+        parsed = ParsedNeo4jUrl.parse("neo4j://user:pass@cluster.example.com:7687")
+        assert parsed.url == "neo4j://cluster.example.com:7687"
+        assert parsed.user == "user"
+        assert parsed.password == "pass"
+
+    def test_parse_explicit_empty_password_falls_through_to_default(self) -> None:
+        """A URL like ``bolt://user:@host:7687`` (trailing colon, no password)
+        is indistinguishable from a credential-free URL — ``urlparse`` returns
+        an empty string for ``.password``, and the ``default_password`` fallback
+        fires. This is intentional: Neo4j rejects empty-auth connections on
+        most servers, so falling through to a configured default is the
+        sensible behavior.
+        """
+        parsed = ParsedNeo4jUrl.parse("bolt://user:@localhost:7687", default_password="fallback")
+        assert parsed.user == "user"
+        assert parsed.password == "fallback"
