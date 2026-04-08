@@ -188,12 +188,14 @@ pub fn detect_temporal_category(query: &str) -> u8 {
         ]);
 
         // Category 3: ORDINAL
+        // NOTE: "before/after" comparison patterns intentionally omitted —
+        // they belong in EXPLICIT (cat 1) for temporal date filtering.
+        // ORDINAL (3) > EXPLICIT (1) in max(cat_id) priority.
         add(3, &[
             "first ", " earliest", "which came", "what came",
             "preceding", "following ", "subsequent",
             "in what order", "chronological", "what order did",
-            "what sequence", "which came before", "which came after",
-            "happened before or after", "came before or after",
+            "what sequence",
         ]);
 
         // Category 4: AGGREGATE
@@ -295,8 +297,7 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
             "first ", " earliest", "which came", "what came",
             "preceding", "following ", "subsequent",
             "in what order", "chronological", "what order did",
-            "what sequence", "which came before", "which came after",
-            "happened before or after", "came before or after",
+            "what sequence",
         ]);
         add(4, &[
             "how many times", "how many total", "all instances",

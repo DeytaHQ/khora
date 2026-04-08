@@ -622,8 +622,16 @@ class VectorCypherRetriever:
         else:
             vector_chunks = await vector_chunks_task
 
-        # Fallback: if temporal filter was too restrictive, re-run without it
-        if temporal_filter and len(vector_chunks) < limit // 2:
+        # Fallback: if temporal filter was too restrictive, re-run without it.
+        # SKIP fallback when the temporal signal is EXPLICIT with a parsed date —
+        # sparse results are the correct signal (the data may not exist for that
+        # time window, which is important for abstention on unanswerable queries).
+        is_explicit_with_date = (
+            temporal_signal
+            and temporal_signal.category == TemporalCategory.EXPLICIT
+            and temporal_signal.temporal_filter is not None
+        )
+        if temporal_filter and len(vector_chunks) < limit // 2 and not is_explicit_with_date:
             logger.debug(f"Temporal filter too restrictive ({len(vector_chunks)} results), falling back to unfiltered")
             vector_chunks = await self._vector_search_chunks(
                 query_embedding=query_embedding,

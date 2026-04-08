@@ -1239,10 +1239,6 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         "chronological",
         "what order did",
         "what sequence",
-        "which came before",
-        "which came after",
-        "happened before or after",
-        "came before or after",
     ],
     4: [  # AGGREGATE
         "how many times",
