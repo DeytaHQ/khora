@@ -93,6 +93,14 @@ Always run `make format && make test` before committing. CI will reject PRs that
 - **`@trace` decorator:** `from khora.telemetry import trace`. Zero overhead when logfire absent
 - **Telemetry collector:** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording. Without it, `NoOpCollector` is used (zero cost)
 
+### Logging
+- **loguru sinks are sync by default** — `logger.add(...)` has `enqueue=False`. In async code, `logger.*` calls then block the event loop on each format+write. Khora's `setup_logging()` enables `enqueue=True` on all sinks it installs, and registers `atexit.register(logger.complete)` so the queue drains on clean exit.
+- **Library consumers MUST either** (a) call `khora.logging_config.setup_logging()`, OR (b) configure their own loguru sinks with `enqueue=True` explicitly. If a downstream service imports khora without doing either, it inherits loguru's default sync stderr sink and silently pays event-loop-blocking cost on every `logger.*` call inside an `async def`.
+- **Graceful shutdown drains via `logger.complete()`** — setup_logging registers this via atexit. Downstream consumers that configure their own sinks must do the same, otherwise in-flight queue entries are lost on exit.
+- **Abrupt termination (SIGKILL, crash) drops in-flight log records.** This is inherent to the enqueue model — the queue is drained by a background thread that can't run during a kill.
+- **loguru queue is unbounded in 0.7.3.** Under sustained burst (DEBUG mode + error storm + slow sink), records accumulate faster than the background thread can drain them and eventually OOM the process. Napkin math: ~1 KB/record × ~9k records/s net accumulation → 512 MB pod OOMs in ~60s (INFO) or ~3s (DEBUG with cascading errors). loguru 0.7.3 does not expose a `maxsize` kwarg on `logger.add()`. Mitigation: keep log volume bounded by request rate (avoid unbounded DEBUG in prod); watch for `MemoryError` in low-memory containers. Revisit if loguru exposes `maxsize` upstream.
+- **`enqueue=True` is not a free latency win.** See `scripts/bench_logger_enqueue.py`: on fast buffered sinks, the pickle + IPC overhead dominates a userspace memcpy, so enqueue is ~5× slower per call than sync. On slow sinks with sustained throughput (no idle between bursts), enqueue does not help either — the kernel pipe fills and the producer blocks. Enqueue wins only in the realistic case: slow sink + idle between bursts (a request handler doing async I/O between log calls), where p99 event-loop stalls drop ~25-40% (≈15-18 ms → ≈11 ms, run-dependent) and wall time drops ~23% (2058 ms → 1593 ms) on the handler-shaped scenario. Keep this in mind when evaluating logging overhead on hot paths.
+
 ### Downstream
 - `genesis` and `khora-benchmarks` depend on khora. `lake.storage` is a stable public API
 - **LLMUsage contract:** `LLMUsage` fields are consumed by Poros/Peras for cost tracking (DYT-645) — changes require coordination
