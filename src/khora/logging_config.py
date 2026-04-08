@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import sys
 from pathlib import Path
 
 from loguru import logger
+
+# Module-level sentinel: atexit.register stacks duplicate callables, so guard
+# against re-registering logger.complete when setup_logging() is called more
+# than once (e.g. tests reconfiguring logging between cases).
+_drain_registered = False
 
 
 class InterceptHandler(logging.Handler):
@@ -36,13 +42,26 @@ def setup_logging(
 ) -> None:
     """Configure logging for the application using loguru.
 
+    All sinks are added with ``enqueue=True`` so that log writes never block
+    the event loop from inside ``async def`` code paths — loguru pushes
+    records onto a background thread that owns the actual I/O. To guarantee
+    queued records are flushed before interpreter shutdown (normal exit,
+    ``sys.exit``, or an exception propagating out of ``main``), we register
+    ``logger.complete`` with ``atexit`` exactly once per process.
+
     Args:
         level: Log level (DEBUG, INFO, WARNING, ERROR)
         json_logs: If True, output logs in JSON format
         log_file: Optional file path to write logs to
     """
+    global _drain_registered
+
     # Remove default loguru handler
     logger.remove()
+
+    # NOTE: loguru 0.7.3 does not expose maxsize; queue is unbounded.
+    # Acceptable for this codebase because log volume is bounded by request
+    # rate, not by a loop.
 
     # Console handler with custom format
     if json_logs:
@@ -50,6 +69,7 @@ def setup_logging(
             sys.stdout,
             level=level.upper(),
             serialize=True,  # JSON format
+            enqueue=True,  # async-safe: queue writes off the event loop
         )
     else:
         logger.add(
@@ -57,6 +77,7 @@ def setup_logging(
             level=level.upper(),
             format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan> | <level>{message}</level>",
             colorize=True,
+            enqueue=True,  # async-safe: queue writes off the event loop
         )
 
     # File handler (optional)
@@ -68,7 +89,15 @@ def setup_logging(
             rotation="10 MB",
             retention="7 days",
             serialize=json_logs,
+            enqueue=True,  # async-safe: queue writes off the event loop
         )
+
+    # Drain the loguru queue on interpreter shutdown so buffered records are
+    # not dropped. Guarded by a sentinel because atexit stacks duplicate
+    # registrations and setup_logging() may be re-invoked (e.g. in tests).
+    if not _drain_registered:
+        atexit.register(logger.complete)
+        _drain_registered = True
 
     # Intercept standard logging and redirect to loguru
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
