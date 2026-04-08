@@ -174,7 +174,7 @@ class TestRetrievalParams:
         params = RETRIEVAL_PARAMS[TemporalCategory.ORDINAL]
         assert params.recency_weight == 0.3
         assert params.temporal_sort is True
-        assert params.decay_days_override == 7
+        assert params.decay_days_override is None
 
     def test_aggregate_params(self) -> None:
         params = RETRIEVAL_PARAMS[TemporalCategory.AGGREGATE]
