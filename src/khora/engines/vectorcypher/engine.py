@@ -2239,11 +2239,15 @@ class VectorCypherEngine:
         storage = self._get_storage()
         dual_nodes = self._get_dual_nodes()
 
+        doc_count = 0
+        entity_count = 0
+        relationship_count = 0
+        last_activity_at = None
+
         try:
-            doc_count = await storage.count_documents(namespace_id)  # type: ignore[unresolved-attribute]
+            doc_count, last_activity_at = await storage.get_document_stats(namespace_id)
         except (AttributeError, NotImplementedError):
-            documents = await storage.list_documents(namespace_id, limit=0)
-            doc_count = len(documents) if documents else 0
+            pass
 
         # Get chunk count
         if dual_nodes is not None:
@@ -2254,18 +2258,19 @@ class VectorCypherEngine:
         try:
             entity_count = await storage.count_entities(namespace_id)
         except (AttributeError, NotImplementedError):
-            entity_count = 0
+            pass
 
         try:
-            relationship_count = await storage.count_relationships(namespace_id)  # type: ignore[unresolved-attribute]
+            relationship_count = await storage.count_relationships(namespace_id)
         except (AttributeError, NotImplementedError):
-            relationship_count = 0
+            pass
 
         return Stats(
             documents=doc_count,
             chunks=chunk_count,
             entities=entity_count,
             relationships=relationship_count,
+            last_activity_at=last_activity_at,
         )
 
     async def health_check(self) -> dict[str, Any]:

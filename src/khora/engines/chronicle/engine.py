@@ -926,9 +926,10 @@ class ChronicleEngine:
         chunk_count = 0
         entity_count = 0
         relationship_count = 0
+        last_activity_at = None
 
         try:
-            doc_count = await storage.count_documents(namespace_id)
+            doc_count, last_activity_at = await storage.get_document_stats(namespace_id)
         except (AttributeError, NotImplementedError):
             pass
 
@@ -952,6 +953,7 @@ class ChronicleEngine:
             chunks=chunk_count,
             entities=entity_count,
             relationships=relationship_count,
+            last_activity_at=last_activity_at,
         )
 
     async def health_check(self) -> dict[str, Any]:

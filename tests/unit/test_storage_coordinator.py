@@ -173,6 +173,55 @@ class TestDocumentOps:
         assert result is True
 
     @pytest.mark.asyncio
+    async def test_count_documents(self) -> None:
+        """count_documents delegates to relational."""
+        ns_id = uuid4()
+        rel = MagicMock()
+        rel.count_documents = AsyncMock(return_value=42)
+        coord = StorageCoordinator(relational=rel)
+        result = await coord.count_documents(ns_id)
+        assert result == 42
+        rel.count_documents.assert_awaited_once_with(ns_id)
+
+    @pytest.mark.asyncio
+    async def test_count_documents_missing_relational(self) -> None:
+        """count_documents without relational raises RuntimeError."""
+        coord = StorageCoordinator()
+        with pytest.raises(RuntimeError, match="Relational backend not configured"):
+            await coord.count_documents(uuid4())
+
+    @pytest.mark.asyncio
+    async def test_get_last_activity_at(self) -> None:
+        """get_last_activity_at delegates to relational."""
+        from datetime import UTC, datetime
+
+        ns_id = uuid4()
+        ts = datetime(2026, 4, 7, 12, 0, 0, tzinfo=UTC)
+        rel = MagicMock()
+        rel.get_last_activity_at = AsyncMock(return_value=ts)
+        coord = StorageCoordinator(relational=rel)
+        result = await coord.get_last_activity_at(ns_id)
+        assert result == ts
+        rel.get_last_activity_at.assert_awaited_once_with(ns_id)
+
+    @pytest.mark.asyncio
+    async def test_get_last_activity_at_none(self) -> None:
+        """get_last_activity_at returns None when no documents exist."""
+        ns_id = uuid4()
+        rel = MagicMock()
+        rel.get_last_activity_at = AsyncMock(return_value=None)
+        coord = StorageCoordinator(relational=rel)
+        result = await coord.get_last_activity_at(ns_id)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_last_activity_at_missing_relational(self) -> None:
+        """get_last_activity_at without relational raises RuntimeError."""
+        coord = StorageCoordinator()
+        with pytest.raises(RuntimeError, match="Relational backend not configured"):
+            await coord.get_last_activity_at(uuid4())
+
+    @pytest.mark.asyncio
     async def test_missing_relational(self) -> None:
         """Operations without relational raise RuntimeError."""
         coord = StorageCoordinator()

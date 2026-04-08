@@ -406,6 +406,36 @@ class SurrealDBRelationalAdapter:
         deleted = await self._conn.query("DELETE $rid RETURN BEFORE", {"rid": rid})
         return bool(deleted)
 
+    async def count_documents(self, namespace_id: UUID) -> int:
+        """Count documents in a namespace."""
+        ns_str = str(namespace_id)
+        row = await self._conn.query_one(
+            "SELECT count() AS cnt FROM document WHERE namespace_id = $ns GROUP ALL",
+            {"ns": ns_str},
+        )
+        return (row["cnt"] or 0) if row else 0
+
+    async def get_last_activity_at(self, namespace_id: UUID) -> datetime | None:
+        """Get the most recent document creation timestamp in a namespace."""
+        ns_str = str(namespace_id)
+        row = await self._conn.query_one(
+            "SELECT math::max(created_at) AS latest FROM document WHERE namespace_id = $ns GROUP ALL",
+            {"ns": ns_str},
+        )
+        return row["latest"] if row else None
+
+    async def get_document_stats(self, namespace_id: UUID) -> tuple[int, datetime | None]:
+        """Get document count and last activity timestamp in a single query."""
+        ns_str = str(namespace_id)
+        row = await self._conn.query_one(
+            "SELECT count() AS cnt, math::max(created_at) AS latest "
+            "FROM document WHERE namespace_id = $ns GROUP ALL",
+            {"ns": ns_str},
+        )
+        if not row:
+            return 0, None
+        return (row["cnt"] or 0), row["latest"]
+
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
         """Get a document by content checksum within a namespace."""
         ns_str = str(namespace_id)
