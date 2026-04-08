@@ -436,13 +436,13 @@ class ChronicleEngine:
         temporal_results: list[tuple[Chunk, float]] = []
         entity_results: list[tuple[Chunk, float]] = []
 
-        # Determine whether temporal channel adds value: when
-        # chronicle_temporal_window_days == 0 (default) it runs a
-        # near-duplicate of the semantic channel.  Skip it and let
-        # post-fusion temporal decay handle recency scoring instead.
+        # chronicle_temporal_window_days semantics:
+        #   -1  = disable temporal channel entirely
+        #    0  = unlimited window (search ALL data with recency-primary scoring)
+        #   >0  = N-day window filter
         _temporal_window_days = getattr(qs, "chronicle_temporal_window_days", 0.0) if qs else 0.0
         run_temporal = mode in (SearchMode.HYBRID, SearchMode.ALL) and (
-            _temporal_window_days > 0 or temporal_filter is not None
+            _temporal_window_days >= 0 or temporal_filter is not None
         )
 
         channel_coros: list[tuple[str, Any]] = []
@@ -508,6 +508,19 @@ class ChronicleEngine:
                 elif name == "entity":
                     entity_results = result
 
+        # ── Pre-fusion temporal decay on raw semantic scores ────────────
+        # Apply decay BEFORE RRF compresses scores into a narrow range
+        # where the decay multiplier would have negligible effect.
+        if semantic_results:
+            semantic_results = _apply_temporal_decay(
+                semantic_results,
+                decay_weight=recency_bias if recency_bias is not None else _cfg_decay,
+                half_life_hours=_cfg_half_life,
+            )
+
+        # Capture max raw cosine similarity for abstention signals
+        max_raw_cosine = max((score for _, score in semantic_results), default=0.0) if semantic_results else 0.0
+
         # ── Fusion via Reciprocal Rank Fusion ────────────────────────────
         start = time.perf_counter()
 
@@ -565,7 +578,8 @@ class ChronicleEngine:
 
         logger.debug(
             f"recall() completed: {len(chunks_with_scores)} chunks "
-            f"(semantic={len(semantic_results)}, bm25={len(bm25_results)}) "
+            f"(semantic={len(semantic_results)}, bm25={len(bm25_results)}, "
+            f"temporal={len(temporal_results)}, entity={len(entity_results)}) "
             f"in {timings['total_ms']:.1f}ms"
         )
 
@@ -584,6 +598,7 @@ class ChronicleEngine:
                     "entity": len(entity_results),
                 },
                 "decay_weight": decay_weight,
+                "max_raw_vector_score": max_raw_cosine,
                 "timings": timings,
             },
         )
@@ -639,15 +654,18 @@ class ChronicleEngine:
         except Exception:
             return []
 
-        # Boost chunks that are temporally closer to now (recency signal)
+        # Recency-primary scoring: 70% recency, 30% semantic — gives RRF
+        # a genuinely different ranking compared to the semantic channel.
         now = datetime.now(UTC)
         scored = []
         for chunk, sim in results:
             chunk_time = getattr(chunk, "source_timestamp", None) or chunk.created_at
             if chunk_time:
+                if chunk_time.tzinfo is None:
+                    chunk_time = chunk_time.replace(tzinfo=UTC)
                 hours_old = max(0, (now - chunk_time).total_seconds() / 3600)
-                temporal_boost = _ebbinghaus_decay(hours_old, half_life_hours=72)  # 3-day half-life
-                blended = sim * 0.6 + temporal_boost * 0.4
+                recency_factor = _ebbinghaus_decay(hours_old, half_life_hours=72)  # 3-day half-life
+                blended = sim * 0.3 + recency_factor * 0.7
             else:
                 blended = sim
             scored.append((chunk, blended))
@@ -677,11 +695,15 @@ class ChronicleEngine:
                 query_embedding,
                 limit=10,
             )
-        except Exception:
+        except Exception as e:
+            logger.warning("Entity channel: search_similar_entities failed: %s", e)
             return []
 
         if not entity_results:
+            logger.debug("Entity channel: no similar entities found")
             return []
+
+        logger.debug("Entity channel: found %d similar entities", len(entity_results))
 
         # Step 2: Get the source chunk IDs from matching entities
         entity_ids = [eid for eid, _score in entity_results]
@@ -689,8 +711,11 @@ class ChronicleEngine:
 
         try:
             entities = await storage.get_entities_batch(entity_ids)
-        except Exception:
+        except Exception as e:
+            logger.warning("Entity channel: get_entities_batch failed for %d IDs: %s", len(entity_ids), e)
             return []
+
+        logger.debug("Entity channel: resolved %d/%d entities", len(entities), len(entity_ids))
 
         # Collect chunk IDs from entity sources, weighted by entity similarity
         chunk_scores: dict[UUID, float] = {}
@@ -700,13 +725,15 @@ class ChronicleEngine:
                 chunk_scores[cid] = max(chunk_scores.get(cid, 0.0), escore)
 
         if not chunk_scores:
+            logger.debug("Entity channel: no source chunks from matched entities")
             return []
 
         # Step 3: Fetch the actual chunks
         chunk_ids = sorted(chunk_scores, key=lambda k: chunk_scores.get(k, 0.0), reverse=True)[:limit]
         try:
             chunks_map = await storage.get_chunks_batch(chunk_ids)
-        except Exception:
+        except Exception as e:
+            logger.warning("Entity channel: get_chunks_batch failed for %d IDs: %s", len(chunk_ids), e)
             return []
 
         results = []
