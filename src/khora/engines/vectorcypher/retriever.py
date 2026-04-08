@@ -299,6 +299,7 @@ class VectorCypherRetriever:
                     decay_days_override=params.decay_days_override,
                     temporal_sort=params.temporal_sort,
                     recency_floor=params.recency_floor,
+                    temporal_signal=temporal_signal,
                 )
             else:
                 # Complex/moderate path: VectorCypher with parallel execution
@@ -328,6 +329,7 @@ class VectorCypherRetriever:
                         decay_days_override=params.decay_days_override,
                         temporal_sort=params.temporal_sort,
                         recency_floor=params.recency_floor,
+                        temporal_signal=temporal_signal,
                     )
 
             # Store in cache
@@ -433,6 +435,7 @@ class VectorCypherRetriever:
                 decay_days_override=_tp.decay_days_override,
                 temporal_sort=_tp.temporal_sort,
                 recency_floor=_tp.recency_floor,
+                temporal_signal=temporal_signal,
             )
 
         # Step 3b: Session-aware parallel retrieval
@@ -687,6 +690,44 @@ class VectorCypherRetriever:
                     recency_floor=_tp.recency_floor,
                 )
 
+        # Step 8a': Version-aware scoring: penalize chunks from superseded documents
+        # when temporal signal indicates a state/recency query
+        if temporal_signal and temporal_signal.category in (
+            TemporalCategory.STATE_QUERY,
+            TemporalCategory.RECENCY,
+            TemporalCategory.CHANGE,
+        ):
+            from collections import defaultdict
+
+            entity_versions: dict[str, int] = defaultdict(int)  # entity -> max version
+            chunk_versions: dict[UUID, int] = {}  # chunk_id -> version
+
+            for r in fused_results:
+                meta = r.item.metadata if hasattr(r.item, "metadata") and r.item.metadata else {}
+                if isinstance(meta, ChunkMetadata):
+                    meta = meta.custom or {}
+                if isinstance(meta, dict):
+                    version = meta.get("version") or meta.get("entity_version", 0)
+                    if version:
+                        chunk_versions[r.item_id] = int(version)
+                        for ref in meta.get("entity_refs") or []:
+                            entity_versions[ref] = max(entity_versions[ref], int(version))
+
+            if entity_versions:
+                for r in fused_results:
+                    v = chunk_versions.get(r.item_id, 0)
+                    if v > 0:
+                        meta = r.item.metadata if hasattr(r.item, "metadata") and r.item.metadata else {}
+                        if isinstance(meta, ChunkMetadata):
+                            meta = meta.custom or {}
+                        if isinstance(meta, dict):
+                            for ref in meta.get("entity_refs") or []:
+                                max_v = entity_versions.get(ref, v)
+                                if max_v > v:
+                                    # Penalize older versions: score *= (version / max_version)
+                                    r.rrf_score *= v / max_v
+                                    break
+
         # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
         if self._config.coherence_weight > 0:
             with trace_span("khora.vectorcypher.coherence_boost", chunk_count=len(fused_results)):
@@ -924,6 +965,7 @@ class VectorCypherRetriever:
         decay_days_override: int | None = None,
         temporal_sort: bool = False,
         recency_floor: float = 0.5,
+        temporal_signal: TemporalSignal | None = None,
     ) -> VectorCypherResult:
         """Fallback to vector-only search when graph operations fail.
 
@@ -944,6 +986,7 @@ class VectorCypherRetriever:
             decay_days_override=decay_days_override,
             temporal_sort=temporal_sort,
             recency_floor=recency_floor,
+            temporal_signal=temporal_signal,
         )
 
         # Update metadata to indicate fallback was used
@@ -1053,6 +1096,7 @@ class VectorCypherRetriever:
         decay_days_override: int | None = None,
         temporal_sort: bool = False,
         recency_floor: float = 0.5,
+        temporal_signal: TemporalSignal | None = None,
     ) -> VectorCypherResult:
         """Simple retrieval path - vector search only.
 
@@ -1181,7 +1225,13 @@ class VectorCypherRetriever:
                             pass
                     return pair[0].created_at or _dt.min
 
-                chunk_results.sort(key=_ts, reverse=True)
+                # ORDINAL queries ("first", "which came earlier") need ascending
+                # order; all other temporal categories use descending (most recent first).
+                sort_descending = True
+                if temporal_signal and temporal_signal.category == TemporalCategory.ORDINAL:
+                    sort_descending = False
+
+                chunk_results.sort(key=_ts, reverse=sort_descending)
 
             # Normalize scores to [0,1] — matches complex path behavior
             if chunk_results:
