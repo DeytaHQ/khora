@@ -1,6 +1,7 @@
 """Tests for discriminated-union backend config parsing and backwards compatibility."""
 
 import pytest
+from pydantic import ValidationError
 
 from khora.config.schema import (
     AGEConfig,
@@ -115,6 +116,59 @@ class TestDiscriminatedUnionParsing:
             }
         )
         assert isinstance(settings.vector, PgVectorConfig)
+
+
+@pytest.mark.unit
+class TestNeo4jConfigQueryTimeout:
+    """Tests for the Neo4jConfig.query_timeout field (DYT-1948)."""
+
+    def test_default_query_timeout_is_5_seconds(self):
+        """Default query_timeout caps long-running graph reads at 5 s."""
+        cfg = Neo4jConfig()
+        assert cfg.query_timeout == 5.0
+
+    def test_query_timeout_can_be_overridden(self):
+        """Callers can dial the cap up or down."""
+        cfg = Neo4jConfig(query_timeout=10.0)
+        assert cfg.query_timeout == 10.0
+
+    def test_query_timeout_can_be_disabled(self):
+        """Setting None disables the cap and falls back to the server default."""
+        cfg = Neo4jConfig(query_timeout=None)
+        assert cfg.query_timeout is None
+
+    def test_query_timeout_round_trips_through_storage_settings(self):
+        """The field survives parsing via the discriminated-union loader."""
+        settings = StorageSettings.model_validate(
+            {
+                "graph": {
+                    "backend": "neo4j",
+                    "url": "bolt://neo:7687",
+                    "query_timeout": 7.5,
+                },
+            }
+        )
+        assert isinstance(settings.graph, Neo4jConfig)
+        assert settings.graph.query_timeout == 7.5
+
+    @pytest.mark.parametrize("bad_value", [0, 0.0, -1, -0.5, 301.0, 1000.0, 1e18])
+    def test_query_timeout_rejects_zero_negative_and_over_cap(self, bad_value):
+        """Values <= 0 and values > 300s are both rejected.
+
+        <= 0: driver treats 0 as 'run forever' (defeats the purpose);
+              negative is nonsense.
+        > 300: sanity cap. A 5-minute per-transaction timeout is already
+               far beyond any reasonable interactive recall budget; higher
+               values almost certainly indicate misconfiguration. Users
+               who truly want no ceiling must pass ``None`` explicitly.
+        """
+        with pytest.raises(ValidationError):
+            Neo4jConfig(query_timeout=bad_value)
+
+    def test_query_timeout_accepts_boundary_values(self):
+        """Sub-millisecond and exactly 300s are both valid."""
+        assert Neo4jConfig(query_timeout=0.001).query_timeout == 0.001
+        assert Neo4jConfig(query_timeout=300.0).query_timeout == 300.0
 
 
 @pytest.mark.unit
