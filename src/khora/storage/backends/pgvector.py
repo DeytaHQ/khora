@@ -596,6 +596,18 @@ class PgVectorBackend(AsyncSessionMixin):
                 return None
             return self._entity_model_to_domain(model)
 
+    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict:
+        """Fetch multiple entities by ID from pgvector storage.
+
+        Provides a pgvector-backed fallback for Chronicle (which has no graph
+        backend) so the entity co-occurrence channel can resolve entities.
+        """
+        if not entity_ids:
+            return {}
+        async with self._get_session() as session:
+            result = await session.execute(select(EntityModel).where(EntityModel.id.in_(entity_ids)))
+            return {model.id: self._entity_model_to_domain(model) for model in result.scalars()}
+
     async def entity_exists(self, entity_id: UUID) -> bool:
         """Check if an entity exists in PostgreSQL."""
         async with self._get_session() as session:
