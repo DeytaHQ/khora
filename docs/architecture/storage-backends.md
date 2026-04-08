@@ -253,6 +253,35 @@ Or via environment:
 export KHORA_NEO4J_URL="bolt://neo4j:password@localhost:7687"
 ```
 
+**New-style graph config (recommended):**
+
+```python
+from khora.config.schema import KhoraConfig, Neo4jConfig, StorageSettings
+
+# Embedded credentials
+cfg = KhoraConfig(
+    database_url="postgresql://user:pass@localhost:5432/khora",
+    storage=StorageSettings(
+        graph=Neo4jConfig(url="bolt://neo4j:password@localhost:7687"),
+    ),
+)
+
+# Split credentials (URL and password managed separately — e.g. password
+# sourced from a secrets manager, URL from service discovery)
+cfg = KhoraConfig(
+    database_url="postgresql://user:pass@localhost:5432/khora",
+    storage=StorageSettings(
+        graph=Neo4jConfig(
+            url="bolt://localhost:7687",
+            user="neo4j",
+            password="from-secrets-manager",
+        ),
+    ),
+)
+```
+
+Embedded credentials in the URL take precedence; the explicit `password` field is used as the fallback when the URL has none.
+
 ## Dual Entity Storage
 
 Here's something important: **entities live in both Neo4j AND pgvector**.
