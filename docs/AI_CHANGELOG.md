@@ -6,3 +6,4 @@
 - 2026-04-01: DYT-1798: Switch discovery models to LiteLLM YAML config
 - 2026-04-01: DYT-1884: Add KhoraError exception hierarchy, fix silent swallowing
 - 2026-04-08: DYT-1948: Add configurable query timeout for Neo4j get_entity_neighborhoods
+- 2026-04-08: DYT-2049: Fix get_neo4j_password() returning empty when credentials are split from URL
