@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "khora-accel"
-version = "0.7.22"
+version = "0.7.23"
 dependencies = [
  "aho-corasick",
  "criterion",
