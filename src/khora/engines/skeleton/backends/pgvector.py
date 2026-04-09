@@ -116,7 +116,12 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
             pool_size = self._config.storage.postgresql_pool_size
             max_overflow = self._config.storage.postgresql_max_overflow
-            self._engine = create_async_engine(database_url, pool_size=pool_size, max_overflow=max_overflow)
+            self._engine = create_async_engine(
+                database_url,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
+                connect_args={"server_settings": {"hnsw.ef_search": str(self._hnsw_ef_search)}},
+            )
 
         # Create tables if they don't exist
         async with self._engine.begin() as conn:
@@ -392,14 +397,17 @@ class PgVectorTemporalStore(TemporalVectorStore):
         min_similarity: float,
     ) -> list[TemporalSearchResult]:
         """Perform vector similarity search."""
-        # Set HNSW search accuracy for this transaction (configurable, default 100)
-        await session.execute(text(f"SET LOCAL hnsw.ef_search = {self._hnsw_ef_search}"))
+        # hnsw.ef_search is set at connection level via server_settings
+        # (no per-query SET LOCAL needed)
 
         # Calculate cosine similarity: 1 - cosine_distance
         similarity = (1 - khora_chunks_table.c.embedding.cosine_distance(query_embedding)).label("similarity")
 
+        # Exclude embedding column — retrieval doesn't need the 1536-float vector
+        # (saves ~6KB per row, ~300KB for 50 results)
+        _retrieval_cols = [c for c in khora_chunks_table.c if c.name != "embedding"]
         stmt = (
-            select(khora_chunks_table, similarity)
+            select(*_retrieval_cols, similarity)
             .where(
                 and_(
                     *conditions,
@@ -441,8 +449,9 @@ class PgVectorTemporalStore(TemporalVectorStore):
         tsquery = func.plainto_tsquery("english", query_text)
         rank = func.ts_rank(khora_chunks_table.c.content_tsv, tsquery).label("bm25_score")
 
+        _retrieval_cols_bm25 = [c for c in khora_chunks_table.c if c.name != "embedding"]
         stmt = (
-            select(khora_chunks_table, rank)
+            select(*_retrieval_cols_bm25, rank)
             .where(
                 and_(
                     *conditions,
@@ -574,7 +583,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
             namespace_id=row.namespace_id,
             document_id=row.document_id,
             content=row.content,
-            embedding=list(row.embedding) if row.embedding is not None else None,
+            embedding=list(row.embedding) if hasattr(row, "embedding") and row.embedding is not None else None,
             occurred_at=row.occurred_at,
             created_at=row.created_at,
             source_system=row.source_system,
