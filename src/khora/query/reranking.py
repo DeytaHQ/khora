@@ -7,6 +7,7 @@ Provides neural re-ranking of search results using:
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
@@ -139,7 +140,9 @@ class CrossEncoderReranker(Reranker):
                 pairs.append((query, content_with_meta))
 
             # Score in batches
-            scores = model.predict(pairs, batch_size=self._batch_size)
+            # Offload synchronous PyTorch inference to a thread to avoid
+            # blocking the event loop during cross-encoder scoring.
+            scores = await asyncio.to_thread(model.predict, pairs, batch_size=self._batch_size)
 
             # Convert all scores to floats for normalization
             # Cross-encoders output logits (roughly -3 to 3), we need to normalize
