@@ -1201,6 +1201,20 @@ class VectorCypherEngine:
                 if temporal_signal.temporal_filter is not None:
                     temporal_filter = temporal_signal.temporal_filter
 
+                # Resolve relative dates ("last 7 days") to SQL-pushdown filter
+                # for RECENCY / STATE_QUERY / CHANGE categories that the
+                # EXPLICIT extractor can't handle.
+                if temporal_filter is None and temporal_signal.is_temporal:
+                    from khora.query.temporal_resolver import resolve_temporal_filter
+
+                    temporal_filter = resolve_temporal_filter(query, temporal_signal)
+                    if temporal_filter:
+                        logger.debug(
+                            "Resolved temporal filter: {} to {}",
+                            temporal_filter.occurred_after,
+                            temporal_filter.occurred_before,
+                        )
+
         # Respect SearchMode.ALL: lower hybrid_alpha to give BM25 equal weight
         # with vector similarity, enabling keyword-based retrieval alongside
         # semantic search.  An explicit hybrid_alpha kwarg takes precedence.
