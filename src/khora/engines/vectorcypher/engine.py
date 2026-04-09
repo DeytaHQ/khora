@@ -1739,6 +1739,12 @@ class VectorCypherEngine:
                     for chunk in all_core_chunk_objects:
                         doc_chunks_map[chunk.document_id].append(chunk)
 
+                    # Map document_id -> occurred_at for temporal context in extraction
+                    doc_occurred_at: dict[UUID, datetime | None] = {}
+                    for state in ok_states:
+                        if state.document is not None:
+                            doc_occurred_at[state.document.id] = state.occurred_at
+
                     logger.debug(
                         f"Conversation extraction: {len(all_core_chunk_objects)} chunks "
                         f"across {len(doc_chunks_map)} documents (per-document mode)"
@@ -1748,7 +1754,10 @@ class VectorCypherEngine:
                     per_doc_relationships: list[Relationship] = []
                     sem = asyncio.Semaphore(self._vc_config.max_concurrent_extractions)
 
-                    async def _extract_one_doc(chunks: list[Chunk]) -> tuple[list, list]:
+                    async def _extract_one_doc(
+                        chunks: list[Chunk], occurred_at: datetime | None = None
+                    ) -> tuple[list, list]:
+                        ctx = {"document_created_at": occurred_at.isoformat()} if occurred_at else None
                         async with sem:
                             return await extract_entities(
                                 chunks,
@@ -1756,6 +1765,7 @@ class VectorCypherEngine:
                                 expertise=expertise,
                                 model=model,
                                 max_concurrent=1,
+                                context=ctx,
                                 timeout=self._config.llm.timeout,
                                 max_tokens=self._config.llm.max_tokens,
                                 extraction_batch_size=self._vc_config.extraction_batch_size,
@@ -1765,7 +1775,7 @@ class VectorCypherEngine:
                             )
 
                     extraction_results = await asyncio.gather(
-                        *[_extract_one_doc(cks) for cks in doc_chunks_map.values()]
+                        *[_extract_one_doc(cks, doc_occurred_at.get(doc_id)) for doc_id, cks in doc_chunks_map.items()]
                     )
                     for ents, rels in extraction_results:
                         per_doc_entities.extend(ents)
