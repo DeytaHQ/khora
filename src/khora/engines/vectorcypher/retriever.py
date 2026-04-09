@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 
     from khora.engines.skeleton.backends import TemporalFilter, TemporalVectorStore
     from khora.extraction.embedders import EmbedderProtocol  # type: ignore[unresolved-import]
-    from khora.query.reranking import CrossEncoderReranker
+    from khora.query.reranking import CrossEncoderReranker, LLMReranker
     from khora.storage import StorageCoordinator
 
 
@@ -126,6 +126,11 @@ class RetrieverConfig:
     reranking_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     reranking_top_n: int = 50  # Candidates to feed to the cross-encoder
     reranking_blend_weight: float = 0.7  # Rerank vs original score blend
+
+    # LLM reranking (applied after cross-encoder, only for temporal queries)
+    enable_llm_reranking: bool = False
+    llm_reranking_model: str = "gpt-4o-mini"
+    llm_reranking_top_n: int = 5
 
     # Session-aware parallel retrieval for cross-session temporal queries.
     # When enabled AND the query is temporal AND entry entities span multiple
@@ -217,6 +222,9 @@ class VectorCypherRetriever:
 
         # Cached cross-encoder reranker (lazy-init on first use, reused across queries)
         self._reranker: CrossEncoderReranker | None = None
+
+        # Cached LLM reranker for temporal queries (lazy-init on first use)
+        self._llm_reranker: LLMReranker | None = None
 
     async def retrieve(
         self,
@@ -767,6 +775,11 @@ class VectorCypherRetriever:
             with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
                 fused_results = await self._apply_reranking(query, fused_results, limit)
 
+        # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder)
+        if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal:
+            with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused_results)):
+                fused_results = await self._apply_llm_reranking(query, fused_results, limit)
+
         # Normalize scores to [0,1] — ensures consistent score scale for
         # downstream consumers (abstention detection, adapter score reporting).
         # This is a single normalization of the final fused+boosted scores,
@@ -1109,6 +1122,86 @@ class VectorCypherRetriever:
             logger.warning(f"Cross-encoder reranking failed, keeping original order: {e}")
             return fused_results
 
+    async def _apply_llm_reranking(
+        self,
+        query: str,
+        fused_results: list[FusedResult],
+        limit: int,
+    ) -> list[FusedResult]:
+        """Apply LLM reranking to the top-N fused results for temporal queries.
+
+        Similar to ``_apply_reranking`` but uses the LLM-based reranker which
+        understands temporal context better than the cross-encoder.  Only the
+        top ``llm_reranking_top_n`` candidates are sent to the LLM; the
+        remainder is appended unchanged.
+
+        Args:
+            query: Original query text
+            fused_results: Fused results (already cross-encoder reranked if enabled)
+            limit: Final number of results to return
+
+        Returns:
+            Re-ordered FusedResult list
+        """
+        if not fused_results:
+            return fused_results
+
+        from khora.query.reranking import LLMReranker, RerankCandidate
+
+        top_n = min(self._config.llm_reranking_top_n, len(fused_results))
+        candidates_to_rerank = fused_results[:top_n]
+        remainder = fused_results[top_n:]
+
+        # Normalize original scores to [0,1] for blending
+        raw_scores = [r.rrf_score for r in candidates_to_rerank]
+        score_min = min(raw_scores) if raw_scores else 0.0
+        score_max = max(raw_scores) if raw_scores else 1.0
+        score_range = score_max - score_min
+
+        candidates = []
+        for r in candidates_to_rerank:
+            # Build content with temporal metadata prefix
+            chunk_content = r.item.content if hasattr(r.item, "content") else str(r.item)
+            if hasattr(r.item, "metadata") and r.item.metadata:
+                meta = r.item.metadata
+                raw = meta.custom if hasattr(meta, "custom") else (meta if isinstance(meta, dict) else {})
+                if raw:
+                    prefix_parts = []
+                    session_id = raw.get("session_id") or raw.get("conversation_id")
+                    if session_id:
+                        prefix_parts.append(f"Session: {session_id}")
+                    occurred_at = raw.get("occurred_at") or raw.get("source_timestamp")
+                    if occurred_at:
+                        prefix_parts.append(f"Date: {str(occurred_at)[:10]}")
+                    if prefix_parts:
+                        chunk_content = f"[{', '.join(prefix_parts)}] {chunk_content}"
+            candidates.append(
+                RerankCandidate(
+                    item=r,
+                    original_score=(r.rrf_score - score_min) / score_range if score_range > 1e-9 else 0.5,
+                    content=chunk_content,
+                    metadata=r.item.metadata if hasattr(r.item, "metadata") else {},
+                )
+            )
+
+        try:
+            if self._llm_reranker is None:
+                self._llm_reranker = LLMReranker(model=self._config.llm_reranking_model)
+            results = await self._llm_reranker.rerank(query, candidates, top_k=top_n, blend_weight=0.7)
+
+            reranked: list[FusedResult] = []
+            for rr in results:
+                fused = rr.item  # The original FusedResult
+                fused.rrf_score = rr.final_score
+                reranked.append(fused)
+
+            reranked.extend(remainder)
+            logger.debug(f"LLM reranking applied: {top_n} candidates scored for temporal query")
+            return reranked[:limit]
+        except Exception as e:
+            logger.warning(f"LLM reranking failed, keeping current order: {e}")
+            return fused_results
+
     async def _simple_retrieve(
         self,
         query: str,
@@ -1270,6 +1363,13 @@ class VectorCypherRetriever:
                 fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
                 with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused)):
                     fused = await self._apply_reranking(query, fused, limit)
+                chunk_results = [(r.item, r.rrf_score) for r in fused]
+
+            # LLM reranking of top-N for temporal queries (after cross-encoder)
+            if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal and chunk_results:
+                fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
+                with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused)):
+                    fused = await self._apply_llm_reranking(query, fused, limit)
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # Apply temporal sort: re-order by occurred_at DESC so the most

@@ -226,6 +226,11 @@ class VectorCypherConfig:
     reranking_top_n: int = 50  # How many candidates to feed to the cross-encoder
     reranking_blend_weight: float = 0.7  # Rerank vs original score blend (passed to reranker)
 
+    # LLM reranking (applied after cross-encoder, only for temporal queries)
+    enable_llm_reranking: bool = False
+    llm_reranking_model: str = "gpt-4o-mini"
+    llm_reranking_top_n: int = 5
+
 
 class VectorCypherEngine:
     """VectorCypher engine - hybrid vector+graph retrieval with temporal support.
@@ -423,6 +428,9 @@ class VectorCypherEngine:
             reranking_model=self._vc_config.reranking_model,
             reranking_top_n=self._vc_config.reranking_top_n,
             reranking_blend_weight=self._vc_config.reranking_blend_weight,
+            enable_llm_reranking=self._vc_config.enable_llm_reranking,
+            llm_reranking_model=self._vc_config.llm_reranking_model,
+            llm_reranking_top_n=self._vc_config.llm_reranking_top_n,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,
