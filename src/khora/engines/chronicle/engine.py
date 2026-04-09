@@ -557,6 +557,27 @@ class ChronicleEngine:
         )
         timings["decay_ms"] = (time.perf_counter() - start) * 1000
 
+        # ── Cross-encoder reranking (post-fusion) ───────────────────────
+        _enable_reranking = getattr(qs, "enable_reranking", False) if qs else False
+        if _enable_reranking and chunks_with_scores:
+            start = time.perf_counter()
+            _reranking_model = getattr(qs, "reranking_model", None) if qs else None
+            _reranking_top_n = getattr(qs, "reranking_top_n", 30) if qs else 30
+            try:
+                from khora.query.reranking import rerank_chunks
+
+                reranked = await rerank_chunks(
+                    query,
+                    chunks_with_scores[:_reranking_top_n],
+                    method="cross_encoder",
+                    top_k=limit,
+                    model=_reranking_model,
+                )
+                chunks_with_scores = reranked
+            except Exception as e:
+                logger.warning("Chronicle cross-encoder reranking failed: %s", e)
+            timings["reranking_ms"] = (time.perf_counter() - start) * 1000
+
         # Trim to requested limit
         chunks_with_scores = chunks_with_scores[:limit]
 
@@ -644,6 +665,23 @@ class ChronicleEngine:
         except Exception:
             return []
 
+        # Detect timestamp collapse: if all chunks were created within ~1 hour
+        # (e.g., benchmark batch ingestion), recency scoring is pure noise.
+        # Fall back to semantic-only scores so the channel doesn't pollute RRF.
+        if results:
+            times = []
+            for chunk, _ in results:
+                ct = getattr(chunk, "source_timestamp", None) or chunk.created_at
+                if ct:
+                    if ct.tzinfo is None:
+                        ct = ct.replace(tzinfo=UTC)
+                    times.append(ct.timestamp())
+            if len(times) > 1:
+                import statistics
+
+                if statistics.stdev(times) < 3600:  # < 1 hour spread
+                    return results  # Pure semantic scores
+
         # Balanced scoring: 60% semantic, 40% recency — gives RRF
         # a meaningfully different ranking without drowning out relevance.
         now = datetime.now(UTC)
@@ -726,12 +764,29 @@ class ChronicleEngine:
             logger.warning("Entity channel: get_chunks_batch failed for %d IDs: %s", len(chunk_ids), e)
             return []
 
+        # Semantic relevance gate: filter out entity-adjacent chunks that
+        # share entity mentions but are semantically irrelevant to the query.
         results = []
         for cid in chunk_ids:
             chunk = chunks_map.get(cid)
-            if chunk:
+            if not chunk:
+                continue
+            if query_embedding is not None and chunk.embedding is not None:
+                # Compute cosine similarity between query and chunk
+                try:
+                    dot = sum(a * b for a, b in zip(query_embedding, chunk.embedding))
+                    norm_q = sum(a * a for a in query_embedding) ** 0.5
+                    norm_c = sum(a * a for a in chunk.embedding) ** 0.5
+                    sim = dot / (norm_q * norm_c) if norm_q > 0 and norm_c > 0 else 0.0
+                    if sim < 0.3:
+                        continue  # Below relevance threshold
+                    results.append((chunk, chunk_scores[cid] * sim))
+                except Exception:
+                    results.append((chunk, chunk_scores[cid]))
+            else:
                 results.append((chunk, chunk_scores[cid]))
 
+        logger.debug("Entity channel: returning %d chunks (after relevance gate)", len(results))
         return results
 
     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
