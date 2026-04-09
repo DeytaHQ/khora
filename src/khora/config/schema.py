@@ -652,7 +652,7 @@ class QuerySettings(BaseSettings):
         description="Temporal channel window: 0=unlimited (search all data), >0=N-day window, -1=disable channel",
     )
     chronicle_decay_weight: float = Field(
-        default=0.25,
+        default=0.10,
         ge=0.0,
         le=1.0,
         description="Weight of temporal decay in Chronicle scoring (blended with relevance score)",
