@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 from loguru import logger
 
@@ -270,3 +270,74 @@ class TemporalResolver:
             e = e.replace(tzinfo=UTC)
 
         return s, e
+
+
+# ---------------------------------------------------------------------------
+# Public helper — converts a temporal signal + query into a pushdown filter
+# ---------------------------------------------------------------------------
+
+
+def resolve_temporal_filter(
+    query: str,
+    temporal_signal: Any = None,
+) -> Any | None:
+    """Attempt to resolve a temporal query into a SQL-pushdown TemporalFilter.
+
+    Parses relative date expressions ("last 7 days", "this week", "since Monday")
+    into absolute datetime ranges suitable for WHERE clause filtering.
+
+    Returns a ``khora.engines.skeleton.backends.TemporalFilter`` with
+    ``occurred_after`` / ``occurred_before`` set, or *None* if the query
+    doesn't contain parseable temporal expressions.
+
+    This is intentionally engine-agnostic: callers that need the
+    ``khora.query.temporal.TemporalFilter`` (``start_time`` / ``end_time``)
+    can convert via :func:`to_query_temporal_filter`.
+    """
+    # 1. If the signal already carries an explicit filter, pass it through.
+    if temporal_signal is not None and getattr(temporal_signal, "temporal_filter", None) is not None:
+        return temporal_signal.temporal_filter
+
+    # 2. Only attempt resolution for queries with temporal intent.
+    if temporal_signal is not None and not getattr(temporal_signal, "is_temporal", False):
+        return None
+
+    # 3. Use TemporalResolver (dateparser path — no LLM, ~0.25 ms).
+    try:
+        resolver = TemporalResolver()
+        resolved = resolver.resolve_fast(query)
+        if resolved and resolved.start:
+            from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
+
+            return SkeletonTemporalFilter(
+                occurred_after=resolved.start,
+                occurred_before=resolved.end,
+            )
+    except Exception:
+        logger.debug("resolve_temporal_filter: dateparser resolution failed", exc_info=True)
+
+    return None
+
+
+def to_query_temporal_filter(
+    skeleton_filter: Any,
+) -> Any | None:
+    """Convert a skeleton TemporalFilter to a ``khora.query.temporal.TemporalFilter``.
+
+    Useful for engines (GraphRAG, Chronicle) that pass the filter into
+    ``HybridQueryEngine`` or ``_temporal_channel`` which read
+    ``start_time`` / ``end_time``.
+
+    Returns *None* if the input has no usable time bounds.
+    """
+    occurred_after = getattr(skeleton_filter, "occurred_after", None)
+    occurred_before = getattr(skeleton_filter, "occurred_before", None)
+    if occurred_after is None and occurred_before is None:
+        return None
+
+    from khora.query.temporal import TemporalFilter as QueryTemporalFilter
+
+    return QueryTemporalFilter(
+        start_time=occurred_after,
+        end_time=occurred_before,
+    )

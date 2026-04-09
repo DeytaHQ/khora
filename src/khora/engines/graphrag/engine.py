@@ -386,12 +386,24 @@ class GraphRAGEngine:
                 config.apply_recency_bias = True
                 config.recency_weight = params.recency_weight
 
+        # Resolve relative dates ("last 7 days") to SQL-pushdown filter
+        # for RECENCY / STATE_QUERY categories when no explicit filter exists.
+        query_temporal_filter = temporal_filter  # may already be set by caller
+        if query_temporal_filter is None and temporal_signal is not None and temporal_signal.is_temporal:
+            from khora.query.temporal_resolver import resolve_temporal_filter, to_query_temporal_filter
+
+            skeleton_filter = resolve_temporal_filter(query, temporal_signal)
+            if skeleton_filter is not None:
+                query_temporal_filter = to_query_temporal_filter(skeleton_filter)
+
         # Apply explicit recency_bias override
         if recency_bias is not None:
             config.apply_recency_bias = True
             config.recency_weight = recency_bias
 
-        result = await self._get_query_engine().query(query, namespace_id, config=config, agentic=agentic)
+        result = await self._get_query_engine().query(
+            query, namespace_id, config=config, temporal_filter=query_temporal_filter, agentic=agentic
+        )
 
         metadata = dict(result.metadata)
         if temporal_signal is not None:
