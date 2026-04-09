@@ -508,16 +508,6 @@ class ChronicleEngine:
                 elif name == "entity":
                     entity_results = result
 
-        # ── Pre-fusion temporal decay on raw semantic scores ────────────
-        # Apply decay BEFORE RRF compresses scores into a narrow range
-        # where the decay multiplier would have negligible effect.
-        if semantic_results:
-            semantic_results = _apply_temporal_decay(
-                semantic_results,
-                decay_weight=recency_bias if recency_bias is not None else _cfg_decay,
-                half_life_hours=_cfg_half_life,
-            )
-
         # Capture max raw cosine similarity for abstention signals
         max_raw_cosine = max((score for _, score in semantic_results), default=0.0) if semantic_results else 0.0
 
@@ -654,8 +644,8 @@ class ChronicleEngine:
         except Exception:
             return []
 
-        # Recency-primary scoring: 70% recency, 30% semantic — gives RRF
-        # a genuinely different ranking compared to the semantic channel.
+        # Balanced scoring: 60% semantic, 40% recency — gives RRF
+        # a meaningfully different ranking without drowning out relevance.
         now = datetime.now(UTC)
         scored = []
         for chunk, sim in results:
@@ -665,7 +655,7 @@ class ChronicleEngine:
                     chunk_time = chunk_time.replace(tzinfo=UTC)
                 hours_old = max(0, (now - chunk_time).total_seconds() / 3600)
                 recency_factor = _ebbinghaus_decay(hours_old, half_life_hours=72)  # 3-day half-life
-                blended = sim * 0.3 + recency_factor * 0.7
+                blended = sim * 0.6 + recency_factor * 0.4
             else:
                 blended = sim
             scored.append((chunk, blended))
