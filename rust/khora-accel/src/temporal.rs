@@ -305,7 +305,7 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
             " live now", " work now", " working now", " living now", " doing now",
             // Enterprise domain patterns (DYT-2143)
             " current ", " active ",
-            "who is the ", "who are the ", "what is the ",
+            "who is the ", "who are the ",
             "up-to-date", "up to date",
             "authoritative", "most reliable", "official record",
         ]);
