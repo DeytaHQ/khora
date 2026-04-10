@@ -1226,8 +1226,16 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         " working now",
         " living now",
         " doing now",
-        # DYT-2143: Enterprise domain patterns for implicit current-state queries.
-        " current ",
+        # DYT-2143/DYT-2145: Enterprise domain compound current-state patterns.
+        # Generic " current " was too broad — triggered on recency lookups.
+        " current status",
+        " current stage",
+        " current state",
+        " current health",
+        " current deal",
+        " current project",
+        " current plan",
+        " current team",
         " active ",
         "who is the ",
         "who are the ",
