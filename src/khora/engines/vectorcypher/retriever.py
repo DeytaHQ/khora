@@ -738,10 +738,27 @@ class VectorCypherRetriever:
             with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
                 fused_results = await self._apply_reranking(query, fused_results, limit)
 
-        # Step 8c': Version-aware scoring: penalize chunks from superseded documents.
-        # Applied AFTER cross-encoder so the relevance baseline is established
-        # before version preference is layered on top. The cross-encoder has no
-        # temporal awareness and would otherwise undo the version penalty.
+        # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder)
+        # Skip when cross-encoder is already confident (large gap between #1 and #2).
+        if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal:
+            _skip_llm = False
+            if len(fused_results) >= 2:
+                gap = fused_results[0].rrf_score - fused_results[1].rrf_score
+                if gap >= self._config.llm_reranking_confidence_threshold:
+                    _skip_llm = True
+                    logger.debug(
+                        f"Skipping LLM reranking: cross-encoder gap {gap:.4f} >= "
+                        f"threshold {self._config.llm_reranking_confidence_threshold}"
+                    )
+            if not _skip_llm:
+                with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused_results)):
+                    fused_results = await self._apply_llm_reranking(query, fused_results, limit)
+
+        # Step 8e: Version-aware scoring — the FINAL score adjustment.
+        # Applied after ALL reranking (cross-encoder + LLM) so nothing can
+        # undo the version preference. The LLM reranker provides valuable
+        # content understanding but has no temporal awareness; version scoring
+        # layers recency preference on top of the LLM's relevance baseline.
         # CHANGE excluded: needs both old and new versions for comparison.
         # ORDINAL excluded: needs full version history for ordering.
         if temporal_signal and temporal_signal.category in (
@@ -779,34 +796,6 @@ class VectorCypherRetriever:
                                     ratio = v / max_v
                                     r.rrf_score *= 1.0 - _VERSION_DECAY * (1.0 - ratio)
                                     break
-
-        # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder)
-        # Skip when:
-        # - Cross-encoder is already confident (large gap between #1 and #2)
-        # - Version scoring just fired (STATE_QUERY/RECENCY) — LLM reranker has no
-        #   temporal awareness and would undo the version preference
-        _version_scored = temporal_signal and temporal_signal.category in (
-            TemporalCategory.STATE_QUERY,
-            TemporalCategory.RECENCY,
-        )
-        if (
-            self._config.enable_llm_reranking
-            and temporal_signal
-            and temporal_signal.is_temporal
-            and not _version_scored
-        ):
-            _skip_llm = False
-            if len(fused_results) >= 2:
-                gap = fused_results[0].rrf_score - fused_results[1].rrf_score
-                if gap >= self._config.llm_reranking_confidence_threshold:
-                    _skip_llm = True
-                    logger.debug(
-                        f"Skipping LLM reranking: cross-encoder gap {gap:.4f} >= "
-                        f"threshold {self._config.llm_reranking_confidence_threshold}"
-                    )
-            if not _skip_llm:
-                with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused_results)):
-                    fused_results = await self._apply_llm_reranking(query, fused_results, limit)
 
         # Normalize scores to [0,1] — ensures consistent score scale for
         # downstream consumers (abstention detection, adapter score reporting).
@@ -1352,9 +1341,21 @@ class VectorCypherRetriever:
                     fused = await self._apply_reranking(query, fused, limit)
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
-            # Version-aware scoring: penalize chunks from superseded documents.
-            # Applied AFTER cross-encoder so the relevance baseline is established
-            # before version preference is layered on top.
+            # LLM reranking of top-N for temporal queries (after cross-encoder)
+            # Skip when cross-encoder is already confident (large gap between #1 and #2).
+            if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal and chunk_results:
+                _skip_llm_simple = False
+                if len(chunk_results) >= 2:
+                    _gap = chunk_results[0][1] - chunk_results[1][1]
+                    if _gap >= self._config.llm_reranking_confidence_threshold:
+                        _skip_llm_simple = True
+                if not _skip_llm_simple:
+                    fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
+                    with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused)):
+                        fused = await self._apply_llm_reranking(query, fused, limit)
+                    chunk_results = [(r.item, r.rrf_score) for r in fused]
+
+            # Version-aware scoring — the FINAL score adjustment after ALL reranking.
             # CHANGE/ORDINAL excluded: need full version history.
             if (
                 temporal_signal
@@ -1395,30 +1396,6 @@ class VectorCypherRetriever:
                                         break
                         updated.append((c, s))
                     chunk_results = updated
-
-            # LLM reranking of top-N for temporal queries (after cross-encoder)
-            # Skip when version scoring just fired — LLM reranker undoes version preference.
-            _version_scored_simple = temporal_signal and temporal_signal.category in (
-                TemporalCategory.STATE_QUERY,
-                TemporalCategory.RECENCY,
-            )
-            if (
-                self._config.enable_llm_reranking
-                and temporal_signal
-                and temporal_signal.is_temporal
-                and chunk_results
-                and not _version_scored_simple
-            ):
-                _skip_llm_simple = False
-                if len(chunk_results) >= 2:
-                    _gap = chunk_results[0][1] - chunk_results[1][1]
-                    if _gap >= self._config.llm_reranking_confidence_threshold:
-                        _skip_llm_simple = True
-                if not _skip_llm_simple:
-                    fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
-                    with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused)):
-                        fused = await self._apply_llm_reranking(query, fused, limit)
-                    chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # Apply temporal sort: re-order by occurred_at DESC so the most
             # recent chunks rank first. This mirrors the graph path's
