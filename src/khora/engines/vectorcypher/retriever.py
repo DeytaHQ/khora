@@ -765,7 +765,7 @@ class VectorCypherRetriever:
                             entity_versions[ref] = max(entity_versions[ref], int(version))
 
             if entity_versions:
-                _VERSION_DECAY = 0.5  # Gentler penalty: v1/v5 → 0.6 (not 0.2)
+                _VERSION_DECAY = 0.7  # Stronger penalty: v1/v5 → 0.44 (was 0.6 with 0.5)
                 for r in fused_results:
                     v = chunk_versions.get(r.item_id, 0)
                     if v > 0:
@@ -1368,7 +1368,7 @@ class VectorCypherRetriever:
                                 _entity_versions[ref] = max(_entity_versions[ref], int(version))
 
                 if _entity_versions:
-                    _VERSION_DECAY = 0.5  # Gentler penalty: v1/v5 → 0.6 (not 0.2)
+                    _VERSION_DECAY = 0.7  # Stronger penalty: v1/v5 → 0.44 (was 0.6 with 0.5)
                     updated = []
                     for c, s in chunk_results:
                         v = _chunk_versions.get(c.id, 0)
