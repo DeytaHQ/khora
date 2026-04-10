@@ -1226,6 +1226,16 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         " working now",
         " living now",
         " doing now",
+        # DYT-2143: Enterprise domain patterns for implicit current-state queries.
+        " current ",
+        " active ",
+        "who is the ",
+        "who are the ",
+        "up-to-date",
+        "up to date",
+        "authoritative",
+        "most reliable",
+        "official record",
     ],
     3: [  # ORDINAL
         "first ",
