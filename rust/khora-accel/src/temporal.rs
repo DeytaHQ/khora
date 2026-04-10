@@ -188,14 +188,17 @@ pub fn detect_temporal_category(query: &str) -> u8 {
         ]);
 
         // Category 3: ORDINAL
-        // NOTE: "before/after" comparison patterns intentionally omitted —
-        // they belong in EXPLICIT (cat 1) for temporal date filtering.
-        // ORDINAL (3) > EXPLICIT (1) in max(cat_id) priority.
+        // "before or after" is a compound phrase that unambiguously signals
+        // ordering intent (not date filtering like bare "before "/"after ").
+        // ORDINAL (3) > EXPLICIT (1) so it wins when both match.
         add(3, &[
             "first ", " earliest", "which came", "what came",
             "preceding", "following ", "subsequent",
             "in what order", "chronological", "what order did",
             "what sequence",
+            "before or after",
+            "happened first", "closed first", "created first",
+            "came first", "started first", "completed first",
         ]);
 
         // Category 4: AGGREGATE
@@ -239,7 +242,7 @@ pub fn detect_temporal_category(query: &str) -> u8 {
     // boundary anchors).
     let padded = format!(" {}", query);
     let mut best_cat: u8 = 0;
-    for mat in ac.find_iter(&padded) {
+    for mat in ac.find_overlapping_iter(&padded) {
         let cat = cats[mat.pattern().as_usize()];
         if cat > best_cat {
             best_cat = cat;
@@ -298,6 +301,9 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
             "preceding", "following ", "subsequent",
             "in what order", "chronological", "what order did",
             "what sequence",
+            "before or after",
+            "happened first", "closed first", "created first",
+            "came first", "started first", "completed first",
         ]);
         add(4, &[
             "how many times", "how many total", "all instances",
@@ -339,7 +345,7 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
     let mut matched_terms: Vec<String> = Vec::new();
     let mut matched_cats: std::collections::HashSet<u8> = std::collections::HashSet::new();
 
-    for mat in ac.find_iter(&padded) {
+    for mat in ac.find_overlapping_iter(&padded) {
         let cat = cats[mat.pattern().as_usize()];
         let term = &patterns[mat.pattern().as_usize()];
         if cat > best_cat {
@@ -514,6 +520,21 @@ mod tests {
     #[test]
     fn test_detect_temporal_category_ordinal_before_or_after() {
         assert_eq!(detect_temporal_category("Did X happened before or after Y?"), 3);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_ordinal_closed_first() {
+        assert_eq!(detect_temporal_category("Which deal closed first: Acme or Pinnacle?"), 3);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_ordinal_created_first() {
+        assert_eq!(detect_temporal_category("Which support ticket was created first?"), 3);
+    }
+
+    #[test]
+    fn test_detect_temporal_category_ordinal_started_before_or_after() {
+        assert_eq!(detect_temporal_category("Did the sabbatical start before or after the price increase?"), 3);
     }
 
     #[test]
