@@ -131,6 +131,7 @@ class RetrieverConfig:
     enable_llm_reranking: bool = False
     llm_reranking_model: str = "gpt-4o-mini"
     llm_reranking_top_n: int = 5
+    llm_reranking_confidence_threshold: float = 0.1  # Skip LLM reranking when cross-encoder gap >= this
 
     # Session-aware parallel retrieval for cross-session temporal queries.
     # When enabled AND the query is temporal AND entry entities span multiple
