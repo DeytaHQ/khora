@@ -725,8 +725,23 @@ class VectorCypherRetriever:
                     recency_floor=_tp.recency_floor,
                 )
 
-        # Step 8a': Version-aware scoring: penalize chunks from superseded documents
-        # when temporal signal indicates a state/recency query.
+        # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
+        if self._config.coherence_weight > 0:
+            with trace_span("khora.vectorcypher.coherence_boost", chunk_count=len(fused_results)):
+                fused_results = apply_coherence_boost(
+                    fused_results,
+                    coherence_weight=self._config.coherence_weight,
+                )
+
+        # Step 8c: Cross-encoder reranking (after boosts, before version scoring)
+        if self._config.enable_reranking:
+            with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
+                fused_results = await self._apply_reranking(query, fused_results, limit)
+
+        # Step 8c': Version-aware scoring: penalize chunks from superseded documents.
+        # Applied AFTER cross-encoder so the relevance baseline is established
+        # before version preference is layered on top. The cross-encoder has no
+        # temporal awareness and would otherwise undo the version penalty.
         # CHANGE excluded: needs both old and new versions for comparison.
         # ORDINAL excluded: needs full version history for ordering.
         if temporal_signal and temporal_signal.category in (
@@ -764,19 +779,6 @@ class VectorCypherRetriever:
                                     ratio = v / max_v
                                     r.rrf_score *= 1.0 - _VERSION_DECAY * (1.0 - ratio)
                                     break
-
-        # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
-        if self._config.coherence_weight > 0:
-            with trace_span("khora.vectorcypher.coherence_boost", chunk_count=len(fused_results)):
-                fused_results = apply_coherence_boost(
-                    fused_results,
-                    coherence_weight=self._config.coherence_weight,
-                )
-
-        # Step 8c: Cross-encoder reranking (after boosts, before normalization)
-        if self._config.enable_reranking:
-            with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
-                fused_results = await self._apply_reranking(query, fused_results, limit)
 
         # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder)
         # Skip when cross-encoder is already confident (large gap between #1 and #2).
@@ -1331,8 +1333,16 @@ class VectorCypherRetriever:
                     )
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
-            # Version-aware scoring: penalize chunks from superseded documents
-            # Mirrors the logic in _vectorcypher_retrieve (Step 8a')
+            # Cross-encoder reranking (after recency boost, before version scoring)
+            if self._config.enable_reranking and chunk_results:
+                fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
+                with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused)):
+                    fused = await self._apply_reranking(query, fused, limit)
+                chunk_results = [(r.item, r.rrf_score) for r in fused]
+
+            # Version-aware scoring: penalize chunks from superseded documents.
+            # Applied AFTER cross-encoder so the relevance baseline is established
+            # before version preference is layered on top.
             # CHANGE/ORDINAL excluded: need full version history.
             if (
                 temporal_signal
@@ -1373,13 +1383,6 @@ class VectorCypherRetriever:
                                         break
                         updated.append((c, s))
                     chunk_results = updated
-
-            # Cross-encoder reranking (after recency boost, before temporal sort)
-            if self._config.enable_reranking and chunk_results:
-                fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
-                with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused)):
-                    fused = await self._apply_reranking(query, fused, limit)
-                chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # LLM reranking of top-N for temporal queries (after cross-encoder)
             # Skip when cross-encoder is already confident (large gap between #1 and #2).
