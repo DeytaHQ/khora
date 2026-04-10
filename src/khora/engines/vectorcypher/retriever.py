@@ -782,7 +782,7 @@ class VectorCypherRetriever:
                             entity_versions[ref] = max(entity_versions[ref], int(version))
 
             if entity_versions:
-                _VERSION_DECAY = 0.7  # Stronger penalty: v1/v5 → 0.44 (was 0.6 with 0.5)
+                _VERSION_DECAY = 0.85  # Strong penalty: v1/v5 → 0.32 (was 0.44 with 0.7)
                 for r in fused_results:
                     v = chunk_versions.get(r.item_id, 0)
                     if v > 0:
@@ -1381,7 +1381,7 @@ class VectorCypherRetriever:
                                 _entity_versions[ref] = max(_entity_versions[ref], int(version))
 
                 if _entity_versions:
-                    _VERSION_DECAY = 0.7  # Stronger penalty: v1/v5 → 0.44 (was 0.6 with 0.5)
+                    _VERSION_DECAY = 0.85  # Strong penalty: v1/v5 → 0.32 (was 0.44 with 0.7)
                     updated = []
                     for c, s in chunk_results:
                         v = _chunk_versions.get(c.id, 0)
@@ -1405,7 +1405,12 @@ class VectorCypherRetriever:
             # captures semantic relevance order, and the recency boost (above)
             # provides temporal discrimination. A hard re-sort by timestamp
             # would override the reranker's carefully computed ranking.
-            if temporal_sort and chunk_results and not self._config.enable_reranking:
+            #
+            # EXCEPTION: ORDINAL queries ("which happened first") ALWAYS get
+            # ascending sort as the final step, even with reranking enabled,
+            # because chronological order IS the answer for these queries.
+            _is_ordinal = temporal_signal and temporal_signal.category == TemporalCategory.ORDINAL
+            if temporal_sort and chunk_results and (not self._config.enable_reranking or _is_ordinal):
                 from datetime import datetime as _dt
 
                 def _ts(pair: tuple[Chunk, float]) -> _dt:
@@ -1419,9 +1424,7 @@ class VectorCypherRetriever:
 
                 # ORDINAL queries ("first", "which came earlier") need ascending
                 # order; all other temporal categories use descending (most recent first).
-                sort_descending = True
-                if temporal_signal and temporal_signal.category == TemporalCategory.ORDINAL:
-                    sort_descending = False
+                sort_descending = not _is_ordinal
 
                 chunk_results.sort(key=_ts, reverse=sort_descending)
 
