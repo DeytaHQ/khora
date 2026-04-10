@@ -185,8 +185,12 @@ pub fn detect_temporal_category(query: &str) -> u8 {
             " does it still", " is it still", " am i still", " do i still",
             "'s current ", " current job", " current role", " current position",
             " live now", " work now", " working now", " living now", " doing now",
-            // Enterprise domain patterns (DYT-2143): implicit current-state queries
-            " current ",           // generic: "current status", "current stage", "current health"
+            // Enterprise domain patterns (DYT-2143/DYT-2145): compound current-state queries.
+            // Generic " current " was too broad — triggered on recency lookups like
+            // "current quota" that work better without temporal intelligence.
+            " current status", " current stage", " current state",
+            " current health", " current deal", " current project",
+            " current plan", " current team",
             " active ",            // "active deals", "active projects"
             "who is the ",         // implicit state: "Who is the account manager?"
             "who are the ",        // "Who are the team members involved?"
@@ -303,8 +307,11 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
             " does it still", " is it still", " am i still", " do i still",
             "'s current ", " current job", " current role", " current position",
             " live now", " work now", " working now", " living now", " doing now",
-            // Enterprise domain patterns (DYT-2143)
-            " current ", " active ",
+            // Enterprise domain patterns (DYT-2143/DYT-2145)
+            " current status", " current stage", " current state",
+            " current health", " current deal", " current project",
+            " current plan", " current team",
+            " active ",
             "who is the ", "who are the ",
             "up-to-date", "up to date",
             "authoritative", "most reliable", "official record",
@@ -689,8 +696,20 @@ mod tests {
 
     #[test]
     fn test_change_still_wins_over_current() {
-        // "changed" is CHANGE (cat 6), " current " is STATE_QUERY (cat 2)
+        // "changed" is CHANGE (cat 6), " current status" is STATE_QUERY (cat 2)
         // CHANGE should win via max(cat_id)
         assert_eq!(detect_temporal_category("How has the current deal stage changed?"), 6);
+    }
+
+    // DYT-2145: Verify compound patterns don't over-trigger on recency lookups
+    #[test]
+    fn test_current_quota_not_state_query() {
+        // "current quota" should NOT match — it's a simple recency lookup
+        assert_eq!(detect_temporal_category("What is Sarah's current quota attainment?"), 0);
+    }
+
+    #[test]
+    fn test_current_pipeline_not_state_query() {
+        assert_eq!(detect_temporal_category("What is the current pipeline value?"), 0);
     }
 }
