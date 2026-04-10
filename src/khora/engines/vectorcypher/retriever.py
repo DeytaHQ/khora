@@ -725,11 +725,12 @@ class VectorCypherRetriever:
                 )
 
         # Step 8a': Version-aware scoring: penalize chunks from superseded documents
-        # when temporal signal indicates a state/recency query
+        # when temporal signal indicates a state/recency query.
+        # CHANGE excluded: needs both old and new versions for comparison.
+        # ORDINAL excluded: needs full version history for ordering.
         if temporal_signal and temporal_signal.category in (
             TemporalCategory.STATE_QUERY,
             TemporalCategory.RECENCY,
-            TemporalCategory.CHANGE,
         ):
             from collections import defaultdict
 
@@ -748,6 +749,7 @@ class VectorCypherRetriever:
                             entity_versions[ref] = max(entity_versions[ref], int(version))
 
             if entity_versions:
+                _VERSION_DECAY = 0.5  # Gentler penalty: v1/v5 → 0.6 (not 0.2)
                 for r in fused_results:
                     v = chunk_versions.get(r.item_id, 0)
                     if v > 0:
@@ -758,8 +760,8 @@ class VectorCypherRetriever:
                             for ref in meta.get("entity_refs") or []:
                                 max_v = entity_versions.get(ref, v)
                                 if max_v > v:
-                                    # Penalize older versions: score *= (version / max_version)
-                                    r.rrf_score *= v / max_v
+                                    ratio = v / max_v
+                                    r.rrf_score *= 1.0 - _VERSION_DECAY * (1.0 - ratio)
                                     break
 
         # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
@@ -776,9 +778,20 @@ class VectorCypherRetriever:
                 fused_results = await self._apply_reranking(query, fused_results, limit)
 
         # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder)
+        # Skip when cross-encoder is already confident (large gap between #1 and #2).
         if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal:
-            with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused_results)):
-                fused_results = await self._apply_llm_reranking(query, fused_results, limit)
+            _skip_llm = False
+            if len(fused_results) >= 2:
+                gap = fused_results[0].rrf_score - fused_results[1].rrf_score
+                if gap >= self._config.llm_reranking_confidence_threshold:
+                    _skip_llm = True
+                    logger.debug(
+                        f"Skipping LLM reranking: cross-encoder gap {gap:.4f} >= "
+                        f"threshold {self._config.llm_reranking_confidence_threshold}"
+                    )
+            if not _skip_llm:
+                with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused_results)):
+                    fused_results = await self._apply_llm_reranking(query, fused_results, limit)
 
         # Normalize scores to [0,1] — ensures consistent score scale for
         # downstream consumers (abstention detection, adapter score reporting).
@@ -1319,13 +1332,13 @@ class VectorCypherRetriever:
 
             # Version-aware scoring: penalize chunks from superseded documents
             # Mirrors the logic in _vectorcypher_retrieve (Step 8a')
+            # CHANGE/ORDINAL excluded: need full version history.
             if (
                 temporal_signal
                 and temporal_signal.category
                 in (
                     TemporalCategory.STATE_QUERY,
                     TemporalCategory.RECENCY,
-                    TemporalCategory.CHANGE,
                 )
                 and chunk_results
             ):
@@ -1344,6 +1357,7 @@ class VectorCypherRetriever:
                                 _entity_versions[ref] = max(_entity_versions[ref], int(version))
 
                 if _entity_versions:
+                    _VERSION_DECAY = 0.5  # Gentler penalty: v1/v5 → 0.6 (not 0.2)
                     updated = []
                     for c, s in chunk_results:
                         v = _chunk_versions.get(c.id, 0)
@@ -1353,7 +1367,8 @@ class VectorCypherRetriever:
                                 for ref in meta.get("entity_refs") or []:
                                     max_v = _entity_versions.get(ref, v)
                                     if max_v > v:
-                                        s *= v / max_v
+                                        ratio = v / max_v
+                                        s *= 1.0 - _VERSION_DECAY * (1.0 - ratio)
                                         break
                         updated.append((c, s))
                     chunk_results = updated
@@ -1366,11 +1381,18 @@ class VectorCypherRetriever:
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # LLM reranking of top-N for temporal queries (after cross-encoder)
+            # Skip when cross-encoder is already confident (large gap between #1 and #2).
             if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal and chunk_results:
-                fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
-                with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused)):
-                    fused = await self._apply_llm_reranking(query, fused, limit)
-                chunk_results = [(r.item, r.rrf_score) for r in fused]
+                _skip_llm_simple = False
+                if len(chunk_results) >= 2:
+                    _gap = chunk_results[0][1] - chunk_results[1][1]
+                    if _gap >= self._config.llm_reranking_confidence_threshold:
+                        _skip_llm_simple = True
+                if not _skip_llm_simple:
+                    fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
+                    with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused)):
+                        fused = await self._apply_llm_reranking(query, fused, limit)
+                    chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # Apply temporal sort: re-order by occurred_at DESC so the most
             # recent chunks rank first. This mirrors the graph path's
