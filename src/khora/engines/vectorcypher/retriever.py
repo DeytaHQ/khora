@@ -781,8 +781,20 @@ class VectorCypherRetriever:
                                     break
 
         # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder)
-        # Skip when cross-encoder is already confident (large gap between #1 and #2).
-        if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal:
+        # Skip when:
+        # - Cross-encoder is already confident (large gap between #1 and #2)
+        # - Version scoring just fired (STATE_QUERY/RECENCY) — LLM reranker has no
+        #   temporal awareness and would undo the version preference
+        _version_scored = temporal_signal and temporal_signal.category in (
+            TemporalCategory.STATE_QUERY,
+            TemporalCategory.RECENCY,
+        )
+        if (
+            self._config.enable_llm_reranking
+            and temporal_signal
+            and temporal_signal.is_temporal
+            and not _version_scored
+        ):
             _skip_llm = False
             if len(fused_results) >= 2:
                 gap = fused_results[0].rrf_score - fused_results[1].rrf_score
@@ -1385,8 +1397,18 @@ class VectorCypherRetriever:
                     chunk_results = updated
 
             # LLM reranking of top-N for temporal queries (after cross-encoder)
-            # Skip when cross-encoder is already confident (large gap between #1 and #2).
-            if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal and chunk_results:
+            # Skip when version scoring just fired — LLM reranker undoes version preference.
+            _version_scored_simple = temporal_signal and temporal_signal.category in (
+                TemporalCategory.STATE_QUERY,
+                TemporalCategory.RECENCY,
+            )
+            if (
+                self._config.enable_llm_reranking
+                and temporal_signal
+                and temporal_signal.is_temporal
+                and chunk_results
+                and not _version_scored_simple
+            ):
                 _skip_llm_simple = False
                 if len(chunk_results) >= 2:
                     _gap = chunk_results[0][1] - chunk_results[1][1]
