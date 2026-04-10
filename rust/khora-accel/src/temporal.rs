@@ -185,6 +185,15 @@ pub fn detect_temporal_category(query: &str) -> u8 {
             " does it still", " is it still", " am i still", " do i still",
             "'s current ", " current job", " current role", " current position",
             " live now", " work now", " working now", " living now", " doing now",
+            // Enterprise domain patterns (DYT-2143): implicit current-state queries
+            " current ",           // generic: "current status", "current stage", "current health"
+            " active ",            // "active deals", "active projects"
+            "who is the ",         // implicit state: "Who is the account manager?"
+            "who are the ",        // "Who are the team members involved?"
+            "up-to-date", "up to date",   // "more up-to-date"
+            "authoritative",       // "authoritative source"
+            "most reliable",       // "most reliable source"
+            "official record",     // "official record of"
         ]);
 
         // Category 3: ORDINAL
@@ -289,12 +298,16 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
         add(2, &[
             "currently", "right now", "at present", "presently",
             "these days", "nowadays", "at this point", "at the moment",
-            // Implicit state-query patterns for conversational memory (synced from Python _accel.py)
             " does he still", " does she still", " do they still",
             " is he still", " is she still", " are they still",
             " does it still", " is it still", " am i still", " do i still",
             "'s current ", " current job", " current role", " current position",
             " live now", " work now", " working now", " living now", " doing now",
+            // Enterprise domain patterns (DYT-2143)
+            " current ", " active ",
+            "who is the ", "who are the ",
+            "up-to-date", "up to date",
+            "authoritative", "most reliable", "official record",
         ]);
         add(3, &[
             "first ", " earliest", "which came", "what came",
@@ -646,5 +659,38 @@ mod tests {
         assert_eq!(cat, 1);
         // Should get date bonus: 0.6 + 0.1 = 0.7
         assert!(conf >= 0.7);
+    }
+
+    // DYT-2143: Enterprise domain STATE_QUERY patterns
+    #[test]
+    fn test_state_current_status() {
+        assert_eq!(detect_temporal_category("What is the current status of the Acme deal?"), 2);
+    }
+
+    #[test]
+    fn test_state_active_deals() {
+        assert_eq!(detect_temporal_category("What are all the active deals in the pipeline?"), 2);
+    }
+
+    #[test]
+    fn test_state_who_is() {
+        assert_eq!(detect_temporal_category("Who is the account manager for GreenWave?"), 2);
+    }
+
+    #[test]
+    fn test_state_authoritative() {
+        assert_eq!(detect_temporal_category("Which system is the authoritative source for deal terms?"), 2);
+    }
+
+    #[test]
+    fn test_state_up_to_date() {
+        assert_eq!(detect_temporal_category("Does the wiki or CRM have the more up-to-date status?"), 2);
+    }
+
+    #[test]
+    fn test_change_still_wins_over_current() {
+        // "changed" is CHANGE (cat 6), " current " is STATE_QUERY (cat 2)
+        // CHANGE should win via max(cat_id)
+        assert_eq!(detect_temporal_category("How has the current deal stage changed?"), 6);
     }
 }
