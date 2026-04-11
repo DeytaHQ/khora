@@ -14,17 +14,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# ---------------------------------------------------------------------------
+# Shared cache key for the Python venv.  Every job that needs the installed
+# packages restores the same cache entry, so `uv sync` becomes a no-op (~2s).
+# ---------------------------------------------------------------------------
+env:
+  VENV_CACHE_KEY: venv-${{ github.run_id }}
+  UV_CACHE_KEY_PREFIX: uv-Linux-py3.13
+
 jobs:
   # ============================================================================
-  # Test Job — runs on all pushes and PRs
+  # Install — build the venv once, cache it for parallel jobs
   # ============================================================================
-  test:
+  install:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.13"]
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -37,19 +40,46 @@ jobs:
           cache-dependency-glob: "uv.lock"
           prune-cache: false
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-
-      - name: Restore venv cache
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}
-          restore-keys: |
-            venv-${{ runner.os }}-py${{ matrix.python-version }}-
+      - name: Set up Python
+        run: uv python install 3.13
 
       - name: Install dependencies
         run: uv sync --all-extras
+
+      - name: Save venv cache
+        uses: actions/cache/save@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+
+  # ============================================================================
+  # Security — bandit + pip-audit (parallel with lint and test)
+  # ============================================================================
+  security:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Restore venv cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
 
       - name: Security scan (bandit)
         run: uvx bandit -r src/ -f json -o bandit-report.json -ll
@@ -61,15 +91,74 @@ jobs:
           uvx pip-audit -r /tmp/pip-audit-requirements.txt --progress-spinner off
         continue-on-error: false
 
+  # ============================================================================
+  # Lint — ty type check + prek (formatting, linting, imports)
+  # ============================================================================
+  lint:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Restore venv cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
+
       - name: Type check with ty
         run: uv run ty check src/
 
       - name: Run prek checks (formatting, linting, imports)
-        run: uv run prek run --all-files
+        run: uv run prek run --all-files --hook-stage manual
+        env:
+          SKIP: ty  # ty already ran above — skip duplicate
+
+  # ============================================================================
+  # Test — pytest with coverage (parallel with lint and security)
+  # ============================================================================
+  test:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Restore venv cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
 
       - name: Verify migration source files and ORM/migration drift
-        run: |
-          uv run pytest tests/unit/test_migration_drift.py -v -o "addopts=" --no-cov
+        run: uv run pytest tests/unit/test_migration_drift.py -v -o "addopts=" --no-cov
 
       - name: Run tests with coverage
         run: |
@@ -89,15 +178,15 @@ jobs:
   # Dev Release — publish dev versions on every merge to main.
   #
   # Pipeline (mirrors release.yml structure):
-  #   test ──> build-accel-dev (3 platforms × 2 Python versions) ──┬──> publish-dev-khora
-  #                                                              └──> publish-dev-accel
+  #   install+security+lint+test ──> build-accel-dev ──┬──> publish-dev-khora
+  #                                                    └──> publish-dev-accel
   #
   # Version: hatch-vcs produces e.g. 0.5.5.dev14 (PEP 440 dev release).
   # khora-accel: git describe → semver pre-release (0.5.5-dev.14).
   # ============================================================================
 
   build-accel-dev:
-    needs: test
+    needs: [security, lint, test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
