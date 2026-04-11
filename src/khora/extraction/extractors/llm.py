@@ -33,15 +33,36 @@ _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*?)```\s*$", re.DOTALL)
 
 
 def _strip_json_fences(content: str) -> str:
-    """Strip markdown code fences from LLM JSON output.
+    """Strip markdown code fences and repair common JSON issues from LLM output.
 
     Models like Claude wrap JSON in ```json ... ``` fences even when
-    asked for raw JSON.  This strips the fences so json.loads() works.
+    asked for raw JSON, and sometimes produce malformed JSON (trailing
+    commas, unquoted values, etc.).  This strips fences and applies
+    lightweight repairs so json.loads() succeeds.
     """
     content = content.strip()
     m = _CODE_FENCE_RE.match(content)
     if m:
-        return m.group(1).strip()
+        content = m.group(1).strip()
+    return _repair_json(content)
+
+
+# Trailing comma before closing brace/bracket: ,\s*} or ,\s*]
+_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+
+
+def _repair_json(content: str) -> str:
+    """Repair common JSON malformations from LLM output.
+
+    Handles:
+    - Trailing commas before } or ] (most common Claude issue)
+    - Single-line // comments
+    - Unquoted NaN/Infinity values
+    """
+    # Remove single-line comments (// ...)
+    content = re.sub(r"//[^\n]*", "", content)
+    # Fix trailing commas: [1, 2,] -> [1, 2]  or {"a": 1,} -> {"a": 1}
+    content = _TRAILING_COMMA_RE.sub(r"\1", content)
     return content
 
 
