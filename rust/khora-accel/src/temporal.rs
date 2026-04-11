@@ -198,12 +198,6 @@ pub fn detect_temporal_category(query: &str) -> u8 {
             "authoritative",       // "authoritative source"
             "most reliable",       // "most reliable source"
             "official record",     // "official record of"
-            // DYT-2146: targeted patterns for 5 specific SC failures
-            " deployment status",  // et_006: "production deployment status"
-            " deal value",         // et_007: "total deal value"
-            " deal amount",        // et_054: "deal amount"
-            " close date",         // et_009: "deal's close date"
-            " deal stage",         // et_091: "Acme Corp deal stage"
         ]);
 
         // Category 3: ORDINAL
@@ -321,8 +315,6 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
             "who is the ", "who are the ",
             "up-to-date", "up to date",
             "authoritative", "most reliable", "official record",
-            " deployment status", " deal value", " deal amount",
-            " close date", " deal stage",
         ]);
         add(3, &[
             "first ", " earliest", "which came", "what came",

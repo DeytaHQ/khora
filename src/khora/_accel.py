@@ -1244,12 +1244,6 @@ TEMPORAL_DICTIONARY: dict[int, list[str]] = {
         "authoritative",
         "most reliable",
         "official record",
-        # DYT-2146: targeted patterns for specific SC failures
-        " deployment status",
-        " deal value",
-        " deal amount",
-        " close date",
-        " deal stage",
     ],
     3: [  # ORDINAL
         "first ",
