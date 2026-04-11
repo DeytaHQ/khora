@@ -999,6 +999,9 @@ class VectorCypherRetriever:
                 "is_temporal": _tp.recency_weight > 0.2,
                 "recency_weight": _tp.recency_weight,
                 "effective_recency": effective_recency,
+                # Max raw cosine similarity from vector search (pre-fusion).
+                # Used by abstention system's vector_confidence_override.
+                "max_raw_vector_score": max(s for _, s, _ in vector_chunks) if vector_chunks else 0.0,
                 # Session-aware search telemetry
                 "session_aware_activated": session_aware_activated,
                 # Bi-temporal entity version history (populated for CHANGE queries)
@@ -1276,6 +1279,7 @@ class VectorCypherRetriever:
             )
 
             chunk_results: list[tuple[Chunk, float]] = []
+            _max_raw_cosine = max((r.similarity for r in results), default=0.0)
             for r in results:
                 chunk = Chunk(
                     id=r.chunk.id,
@@ -1459,6 +1463,8 @@ class VectorCypherRetriever:
                     "bm25_chunk_count": simple_bm25_count,
                     "effective_recency": effective_recency,
                     "temporal_sort": temporal_sort,
+                    # Max raw cosine similarity (pre-fusion) for abstention system
+                    "max_raw_vector_score": _max_raw_cosine,
                     # Search provenance: all chunks from vector in simple mode
                     "search_methods": search_methods,
                 },
