@@ -28,6 +28,23 @@ _DATE_RE = re.compile(r"\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\
 _PROPER_NOUN_RE = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b")
 _SINGLE_CAPITALIZED_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")
 
+# Markdown code-fence pattern: ```json\n...\n``` or ```\n...\n```
+_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*\n(.*?)```\s*$", re.DOTALL)
+
+
+def _strip_json_fences(content: str) -> str:
+    """Strip markdown code fences from LLM JSON output.
+
+    Models like Claude wrap JSON in ```json ... ``` fences even when
+    asked for raw JSON.  This strips the fences so json.loads() works.
+    """
+    content = content.strip()
+    m = _CODE_FENCE_RE.match(content)
+    if m:
+        return m.group(1).strip()
+    return content
+
+
 if TYPE_CHECKING:
     from khora.config import LiteLLMConfig
     from khora.extraction.skills import ExpertiseConfig
@@ -917,7 +934,7 @@ class LLMEntityExtractor(EntityExtractor):
             if not content:
                 return []
 
-            data = json.loads(content)
+            data = json.loads(_strip_json_fences(content))
             if not isinstance(data, dict):
                 return []
 
@@ -1638,7 +1655,7 @@ Return ONLY valid JSON, no other text."""
 
                     # Parse JSON with error handling - don't retry on parse errors
                     try:
-                        data = json.loads(content)
+                        data = json.loads(_strip_json_fences(content))
                     except json.JSONDecodeError as json_err:
                         # Log details to help diagnose the issue
                         logger.warning(
@@ -1815,7 +1832,7 @@ Return ONLY valid JSON, no other text."""
                 return ExtractionResult(metadata={"error": "empty_response"})
 
             # Accept pre-parsed dict directly (from extract_multi_batch)
-            data = content if isinstance(content, dict) else json.loads(content)
+            data = content if isinstance(content, dict) else json.loads(_strip_json_fences(content))
 
             # Ensure data is actually a dict (not a string that parsed as string)
             if not isinstance(data, dict):
