@@ -398,18 +398,27 @@ class ChronicleEngine:
         _cfg_half_life = getattr(qs, "temporal_half_life_hours", 168.0) if qs else 168.0
         overfetch_limit = limit * _overfetch
 
-        # Resolve relative dates ("last 7 days") to SQL-pushdown filter
+        # Resolve temporal references from query (fast dateparser, ~0.25ms)
         # when the caller didn't supply an explicit temporal_filter.
-        if temporal_filter is None:
-            from khora.query.temporal_detection import TemporalDetector
-            from khora.query.temporal_resolver import resolve_temporal_filter, to_query_temporal_filter
+        _enable_resolver = getattr(qs, "enable_temporal_resolver", True) if qs else True
+        if _enable_resolver and temporal_filter is None:
+            from khora.query.temporal import TemporalFilter
+            from khora.query.temporal_resolver import TemporalResolver
 
-            _detector = TemporalDetector()
-            _signal = _detector.detect(query)
-            if _signal.is_temporal:
-                _skeleton_filter = resolve_temporal_filter(query, _signal)
-                if _skeleton_filter is not None:
-                    temporal_filter = to_query_temporal_filter(_skeleton_filter)
+            resolver = TemporalResolver()
+            resolved = resolver.resolve_fast(query)
+            if resolved and resolved.confidence > 0.5 and (resolved.start or resolved.end):
+                temporal_filter = TemporalFilter(
+                    start_time=resolved.start,
+                    end_time=resolved.end,
+                )
+                logger.debug(
+                    "Temporal resolver: %r -> %s to %s (confidence=%.2f)",
+                    resolved.expression,
+                    resolved.start,
+                    resolved.end,
+                    resolved.confidence,
+                )
 
         # ── Phase 1: Embed query + BM25 in parallel ───────────────────
         # BM25 needs only the query text (no embedding), so start it
