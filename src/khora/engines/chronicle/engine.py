@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -106,6 +107,94 @@ def _apply_temporal_decay(
     rescored: list[tuple[Chunk, float]] = [
         (chunk, relevance * mult) for (chunk, relevance), mult in zip(chunks_with_scores, recency_multipliers)
     ]
+    rescored.sort(key=lambda pair: pair[1], reverse=True)
+    return rescored
+
+
+# ---------------------------------------------------------------------------
+# Version-aware scoring helpers
+# ---------------------------------------------------------------------------
+
+# Patterns that signal the user wants the latest/current state
+_VERSION_INTENT_PATTERNS = re.compile(
+    r"\b(current|currently|latest|newest|most\s+recent|up[- ]?to[- ]?date|now|today|present"
+    r"|status|state|active|existing)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_version_intent(query: str) -> bool:
+    """Return True when the query signals interest in the latest version/state."""
+    return _VERSION_INTENT_PATTERNS.search(query) is not None
+
+
+def _apply_version_scoring(
+    chunks_with_scores: list[tuple[Chunk, float]],
+    query: str,
+) -> list[tuple[Chunk, float]]:
+    """Penalize superseded document versions so the latest state floats up.
+
+    Only activates when:
+      - The query contains temporal/state intent keywords
+      - At least one chunk carries ``version`` metadata
+
+    Chunks are grouped by entity (first ``entity_refs`` entry, falling back
+    to document title stored in ``chunk.metadata.custom``).  Within each
+    group the maximum version is identified, and older versions receive a
+    soft penalty::
+
+        score *= (version / max_version) ** 0.5
+
+    The square-root exponent ensures old versions are demoted but not
+    aggressively filtered out.
+    """
+    if not chunks_with_scores:
+        return chunks_with_scores
+
+    # Gate: only apply when the query signals latest/current intent
+    if not _has_version_intent(query):
+        return chunks_with_scores
+
+    # Collect version info — bail quickly if no chunk has a version
+    has_any_version = False
+    chunk_meta: list[tuple[str, int | None]] = []  # (group_key, version)
+    for chunk, _score in chunks_with_scores:
+        custom = chunk.metadata.custom if chunk.metadata else {}
+        version = custom.get("version")
+        if version is not None:
+            has_any_version = True
+            try:
+                version = int(version)
+            except (TypeError, ValueError):
+                version = None
+
+        # Group key: first entity_ref, or title, or document_id
+        entity_refs = custom.get("entity_refs")
+        if entity_refs and isinstance(entity_refs, list) and len(entity_refs) > 0:
+            group_key = str(entity_refs[0])
+        else:
+            group_key = custom.get("title", str(chunk.document_id))
+
+        chunk_meta.append((group_key, version))
+
+    if not has_any_version:
+        return chunks_with_scores
+
+    # Build max-version lookup per entity group
+    max_version: dict[str, int] = {}
+    for group_key, version in chunk_meta:
+        if version is not None:
+            if group_key not in max_version or version > max_version[group_key]:
+                max_version[group_key] = version
+
+    # Re-score
+    rescored: list[tuple[Chunk, float]] = []
+    for (chunk, score), (group_key, version) in zip(chunks_with_scores, chunk_meta):
+        if version is not None and group_key in max_version and max_version[group_key] > 0:
+            penalty = (version / max_version[group_key]) ** 0.5
+            score = score * penalty
+        rescored.append((chunk, score))
+
     rescored.sort(key=lambda pair: pair[1], reverse=True)
     return rescored
 
@@ -569,6 +658,14 @@ class ChronicleEngine:
             half_life_hours=_cfg_half_life,
         )
         timings["decay_ms"] = (time.perf_counter() - start) * 1000
+
+        # ── Version-aware scoring ───────────────────────────────────────
+        # Penalize superseded document versions so the latest state
+        # surfaces first.  Only fires when the query has temporal/state
+        # intent and chunks carry version metadata.
+        start = time.perf_counter()
+        chunks_with_scores = _apply_version_scoring(chunks_with_scores, query)
+        timings["version_scoring_ms"] = (time.perf_counter() - start) * 1000
 
         # ── Cross-encoder reranking (post-fusion) ───────────────────────
         _enable_reranking = getattr(qs, "enable_reranking", False) if qs else False
