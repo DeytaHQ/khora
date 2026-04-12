@@ -544,10 +544,20 @@ class PgVectorBackend(AsyncSessionMixin):
         Uses the unique constraint on (namespace_id, name, entity_type) to
         properly merge entities with the same identity, matching Neo4j's
         MERGE semantics.
+
+        Acquires a namespace-scoped advisory lock to prevent deadlocks
+        when concurrent coroutines upsert entities in the same namespace.
         """
         from sqlalchemy.dialects.postgresql import insert
 
         async with self._get_session() as session:
+            # Advisory lock prevents deadlocks with concurrent upserts
+            lock_key2 = _namespace_lock_key(entity.namespace_id)
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
+                {"key1": _ENTITY_UPSERT_LOCK_KEY1, "key2": lock_key2},
+            )
+
             stmt = insert(EntityModel).values(
                 id=entity.id,
                 namespace_id=entity.namespace_id,
