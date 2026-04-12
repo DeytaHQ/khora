@@ -370,12 +370,21 @@ class LLMReranker(Reranker):
             ]
 
 
+# Module-level cache for reranker instances.  Cross-encoder models are
+# expensive to load (~500ms + GPU memory), so we reuse them across calls.
+_reranker_cache: dict[str, Reranker] = {}
+
+
 def create_reranker(
     method: str = "cross_encoder",
     model: str | None = None,
     llm_config: LiteLLMConfig | None = None,
 ) -> Reranker:
-    """Create a reranker based on method.
+    """Create or return a cached reranker based on method.
+
+    Cross-encoder rerankers are cached by model name to avoid reloading
+    the model on every query (~500ms per load).  LLM rerankers are
+    lightweight and created fresh each time.
 
     Args:
         method: Reranking method (cross_encoder, llm)
@@ -387,7 +396,10 @@ def create_reranker(
     """
     if method == "cross_encoder":
         model_name = model or "cross-encoder/ms-marco-MiniLM-L-6-v2"
-        return CrossEncoderReranker(model_name=model_name)
+        cache_key = f"cross_encoder:{model_name}"
+        if cache_key not in _reranker_cache:
+            _reranker_cache[cache_key] = CrossEncoderReranker(model_name=model_name)
+        return _reranker_cache[cache_key]
     elif method == "llm":
         return LLMReranker(llm_config=llm_config, model=model)
     else:
