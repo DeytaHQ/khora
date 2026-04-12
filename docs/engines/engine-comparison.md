@@ -4,16 +4,16 @@ Khora supports four pluggable engines with different strengths. This guide helps
 
 ## Quick Comparison
 
-| Aspect | GraphRAG | Skeleton Construction | VectorCypher | Chronicle |
-|--------|----------|----------------------|--------------|-----------|
-| **Primary Focus** | Knowledge graphs | Temporal events | Hybrid retrieval | Conversational memory |
-| **Entity Extraction** | Upfront (all documents) | Lazy (on-demand) | Skeleton (70%) | Full extraction |
-| **Core Data Model** | Entities & relationships | Chunks with temporal metadata | Dual nodes (Entity + Chunk) | SVO events + facts |
-| **Time Model** | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) | Bi-temporal + temporal detection (7 categories) | Triple timestamps + Ebbinghaus decay |
-| **LLM Cost** | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) | Medium (~700 calls/1000 docs) | Medium (~700 calls/1000 docs) |
-| **Graph Backend** | Required (Neo4j/Memgraph) | Not required | Required (Neo4j) | Not required |
-| **Search Modes** | Vector + Graph + Keyword | Vector + BM25 Hybrid | Vector + Cypher + RRF | 4-channel: Semantic + BM25 + Temporal + Entity |
-| **Best For** | Knowledge bases | Chat history, logs, events | Complex multi-hop queries | Temporal queries, long conversations |
+| Aspect | VectorCypher (default) | GraphRAG | Skeleton Construction | Chronicle |
+|--------|------------------------|----------|----------------------|-----------|
+| **Primary Focus** | Hybrid retrieval | Knowledge graphs | Temporal events | Conversational memory |
+| **Entity Extraction** | Skeleton (70%) | Upfront (all documents) | Lazy (on-demand) | Full extraction |
+| **Core Data Model** | Dual nodes (Entity + Chunk) | Entities & relationships | Chunks with temporal metadata | SVO events + facts |
+| **Time Model** | Bi-temporal + temporal detection (7 categories) | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) | Triple timestamps + Ebbinghaus decay |
+| **LLM Cost** | Medium (~700 calls/1000 docs) | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) | Medium (~700 calls/1000 docs) |
+| **Graph Backend** | Required (Neo4j/Neptune/AGE) | Required (Neo4j/Memgraph) | Not required | Not required |
+| **Search Modes** | Vector + Cypher + BM25 + RRF | Vector + Graph + Keyword | Vector + BM25 Hybrid | 4-channel: Semantic + BM25 + Temporal + Entity |
+| **Best For** | Complex multi-hop queries | Knowledge bases | Chat history, logs, events | Temporal queries, long conversations |
 
 ## Detailed Comparison
 

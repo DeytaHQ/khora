@@ -628,6 +628,16 @@ Run the migration with:
 uv run alembic upgrade head
 ```
 
+## Recent Improvements
+
+**Cross-encoder reranking.** After the initial vector + Cypher retrieval, an optional cross-encoder model rescores the top candidates for precision. The model is cached across queries to avoid reload overhead, and inference runs in `asyncio.to_thread` to keep the event loop free. Enable/disable via `KHORA_QUERY_ENABLE_RERANKING`.
+
+**Independent BM25 channel.** VectorCypher now runs BM25 full-text search as a separate retrieval channel alongside vector and Cypher graph traversal. Results are fused via RRF, giving keyword-exact matches a dedicated signal path rather than relying solely on embedding similarity.
+
+**Temporal SQL pushdown.** Relative date expressions in queries ("last 7 days", "since March") are detected by the temporal classifier and translated into SQL WHERE clauses that filter at the database level before vector search. This reduces the candidate set and improves both latency and relevance for time-scoped queries. Controlled by `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN`.
+
+**VectorCypher is now the default engine** when creating a `MemoryLake` without an explicit `engine=` argument.
+
 ## Related Documentation
 
 - [Engine Comparison](engine-comparison.md) - Detailed comparison of all engines
