@@ -199,6 +199,14 @@ def _apply_version_scoring(
     return rescored
 
 
+_CROSS_SESSION_INTENT = re.compile(
+    r"\b(chang(ed?|es|ing)|switch(ed)?|over\s+time|history|before\s+and\s+after"
+    r"|different|evolv(ed?|ing)|transition|progress(ed|ion)?|moved?\s+(to|from)"
+    r"|used\s+to|previous(ly)?|started|stopped|quit|left|joined)\b",
+    re.IGNORECASE,
+)
+
+
 class ChronicleEngine:
     """Chronicle engine — temporal-semantic memory for benchmark-optimized recall.
 
@@ -697,6 +705,13 @@ class ChronicleEngine:
                 logger.warning("Chronicle cross-encoder reranking failed: %s", e)
             timings["reranking_ms"] = (time.perf_counter() - start) * 1000
 
+        # ── Cross-session expansion ─────────────────────────────────────
+        start = time.perf_counter()
+        chunks_with_scores = await self._cross_session_expand(
+            chunks_with_scores, query, namespace_id, query_embedding, limit
+        )
+        timings["cross_session_ms"] = (time.perf_counter() - start) * 1000
+
         # Trim to requested limit
         chunks_with_scores = chunks_with_scores[:limit]
 
@@ -907,6 +922,100 @@ class ChronicleEngine:
 
         logger.debug("Entity channel: returning %d chunks (after relevance gate)", len(results))
         return results
+
+    async def _cross_session_expand(
+        self,
+        chunks_with_scores: list[tuple[Chunk, float]],
+        query: str,
+        namespace_id: UUID,
+        query_embedding: list[float] | None,
+        limit: int,
+    ) -> list[tuple[Chunk, float]]:
+        """Expand results with chunks from other sessions mentioning same entities.
+
+        After initial retrieval finds content from session A, this method
+        identifies key entities and fetches additional chunks from sessions
+        B, C, ... that mention those entities. This bridges the session gap
+        for temporal/change queries.
+
+        Only triggers when the query has cross-session intent (change,
+        switch, history, etc.) and results span fewer sessions than expected.
+        """
+        if not chunks_with_scores or query_embedding is None:
+            return chunks_with_scores
+        if not _CROSS_SESSION_INTENT.search(query):
+            return chunks_with_scores
+
+        storage = self._get_storage()
+
+        # Collect session IDs from current results
+        seen_sessions: set[str] = set()
+        seen_chunk_ids: set[UUID] = set()
+        for chunk, _ in chunks_with_scores:
+            seen_chunk_ids.add(chunk.id)
+            custom = chunk.metadata.custom if chunk.metadata else {}
+            sid = custom.get("session_id") or custom.get("thread_id")
+            if sid:
+                seen_sessions.add(str(sid))
+
+        # If we already have results from multiple sessions, expansion is less needed
+        if len(seen_sessions) >= 3:
+            return chunks_with_scores
+
+        # Find entities similar to query, then fetch their source chunks
+        # from OTHER sessions
+        try:
+            entity_results = await storage.search_similar_entities(namespace_id, query_embedding, limit=5)
+        except Exception:
+            return chunks_with_scores
+
+        if not entity_results:
+            return chunks_with_scores
+
+        entity_ids = [eid for eid, _ in entity_results]
+        try:
+            entities = await storage.get_entities_batch(entity_ids)
+        except Exception:
+            return chunks_with_scores
+
+        # Collect chunk IDs from entity sources that aren't already in results
+        expansion_chunk_ids: list[UUID] = []
+        for entity in entities.values():
+            for cid in entity.source_chunk_ids:
+                if cid not in seen_chunk_ids:
+                    expansion_chunk_ids.append(cid)
+                    seen_chunk_ids.add(cid)
+
+        if not expansion_chunk_ids:
+            return chunks_with_scores
+
+        # Fetch and score expansion chunks
+        expansion_chunk_ids = expansion_chunk_ids[:limit]  # Cap expansion size
+        try:
+            chunks_map = await storage.get_chunks_batch(expansion_chunk_ids)
+        except Exception:
+            return chunks_with_scores
+
+        # Discount factor: expansion results score lower than reranked results
+        avg_score = sum(s for _, s in chunks_with_scores[:5]) / min(5, len(chunks_with_scores))
+        discount = avg_score * 0.6
+
+        expanded = list(chunks_with_scores)
+        added = 0
+        for cid in expansion_chunk_ids:
+            chunk = chunks_map.get(cid)
+            if chunk:
+                # Check this chunk is from a different session
+                custom = chunk.metadata.custom if chunk.metadata else {}
+                sid = custom.get("session_id") or custom.get("thread_id")
+                if sid and str(sid) not in seen_sessions:
+                    expanded.append((chunk, discount * (0.95**added)))
+                    added += 1
+
+        if added > 0:
+            logger.debug("Cross-session expansion: added %d chunks from other sessions", added)
+
+        return expanded
 
     async def forget(self, document_id: UUID, namespace_id: UUID | None) -> bool:
         """Remove a memory from the engine."""
