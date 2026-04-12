@@ -4,6 +4,62 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [Unreleased] — Graph Backends, Temporal Precision, Discovery Agent Overhaul
+
+### New graph backends
+- AWS Neptune with Bolt protocol + IAM SigV4 auth (#272)
+- PostgreSQL AGE with Cypher-in-SQL, shares PG connection pool (#273)
+
+### Retrieval quality
+- Cross-encoder reranking integrated into VectorCypher and Chronicle (#236, #314)
+- Version-aware scoring penalizes superseded document versions (#319, #328, #344)
+- Independent BM25 channel in VectorCypher retriever (#276)
+- Temporal SQL WHERE pushdown for relative dates ("last 7 days") across all engines (#316)
+- LLM temporal reranking for top-5 after cross-encoder (#311)
+- Entity semantic gate filters low-relevance entity-adjacent chunks (#314)
+- Timestamp collapse detection for batch-ingested content (#314)
+- Session-aware parallel retrieval for cross-session temporal queries (#279)
+
+### Discovery agent overhaul
+- 6-phase improvement: bug fixes, model hierarchy, retry resilience, semantic relevance, Chronicle memory, multi-step exploration (#256-#263)
+- LiteLLM YAML config for per-task model selection (#258)
+- .docx and .parquet extractors (#263)
+- Firecrawl fallback on HTTP 403 (#267)
+
+### Security
+- Cypher injection fixes in Neptune, Memgraph, AGE backends (#281)
+- KhoraError exception hierarchy with domain-specific exceptions (#282)
+
+### Performance
+- Cross-encoder model caching — avoid reloading per query (#270, #340)
+- asyncio.to_thread for reranker inference (#317)
+- Column projection excludes embeddings from search results (#317)
+- ef_search at connection level (#317)
+- Parallel Chronicle channels (#301)
+- CI parallel jobs — 50% faster feedback (#335)
+
+### Configuration
+- Default engine changed from graphrag to vectorcypher
+- LLM max_tokens default 8192 to 12288 (#333)
+- Configurable extraction_batch_size (#339)
+- Neo4j query timeout configuration (#293)
+
+### Bug fixes
+- PDF extraction "document closed" error (#267)
+- Neo4j credential passthrough (#294)
+- Async logging with enqueue=True (#295)
+- Advisory lock for entity upsert deadlocks (#341)
+- JSON repair for malformed LLM responses (#338)
+- Markdown fence stripping from extraction responses (#336)
+
+### SurrealDB optimizations
+- Graph traversal depth cap raised from 3 to 6 hops (#265)
+- Single-query temporal neighbors (N queries to 1) (#265)
+- Batch relationship fetch in get_neighborhoods_batch (#265)
+- Graph traversal indexes on in/out fields (#265)
+
+---
+
 ## [0.7.0] — 2026-04-02 — Chronicle Engine, Semantic Hooks, Retrieval Quality
 
 ### Chronicle engine (new)

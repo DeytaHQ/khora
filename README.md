@@ -19,7 +19,11 @@ async with MemoryLake("memory://") as lake:                     # embedded Surre
 ```bash
 pip install khora                   # core (PostgreSQL + pgvector)
 pip install khora[surrealdb]        # embedded SurrealDB (zero infrastructure)
-pip install khora[lancedb]          # embedded LanceDB vector store
+pip install khora[neptune]          # AWS Neptune graph backend
+pip install khora[neptune-iam]      # Neptune with IAM auth
+pip install khora[age]              # PostgreSQL AGE graph backend
+pip install khora[discovery]        # PDF/Excel extraction for ontology discovery
+pip install khora[lancedb]          # LanceDB embedded vector store
 pip install khora[all]              # everything
 ```
 
@@ -39,7 +43,6 @@ async def main():
     async with MemoryLake("memory://", engine="skeleton") as lake:
         ns = await lake.create_namespace("quickstart")
 
-        # Store knowledge
         result = await lake.remember(
             "Marie Curie won the Nobel Prize in Physics in 1903 "
             "and the Nobel Prize in Chemistry in 1911.",
@@ -47,7 +50,6 @@ async def main():
         )
         print(f"Stored: {result.chunks_created} chunks, {result.entities_extracted} entities")
 
-        # Retrieve knowledge
         answer = await lake.recall("What prizes did Curie win?", namespace=ns.namespace_id)
         print(answer.context_text)
 
@@ -78,7 +80,7 @@ import asyncio
 from khora import MemoryLake
 
 async def main():
-    async with MemoryLake(engine="graphrag", run_migrations=True) as lake:
+    async with MemoryLake(run_migrations=True) as lake:  # uses vectorcypher by default
         ns = await lake.create_namespace("research")
 
         await lake.remember(
@@ -86,7 +88,7 @@ async def main():
             namespace=ns.namespace_id,
         )
 
-        # Hybrid search: vector + graph + keyword with RRF fusion
+        # Hybrid search: vector + Cypher graph + BM25 with RRF fusion
         result = await lake.recall("Where did Einstein work?", namespace=ns.namespace_id)
         print(result.context_text)
 
@@ -103,8 +105,8 @@ asyncio.run(main())
 
 | Engine | Best For | Graph DB | LLM Cost |
 |--------|----------|----------|----------|
-| **[GraphRAG](docs/engines/engine-comparison.md)** (default) | Knowledge bases, entity exploration | Required | Higher |
-| **[VectorCypher](docs/engines/vectorcypher-engine.md)** | Multi-hop queries, complex relationships | Required | Medium |
+| **[VectorCypher](docs/engines/vectorcypher-engine.md)** (default) | Multi-hop queries, complex relationships | Required | Medium |
+| **[GraphRAG](docs/engines/engine-comparison.md)** | Knowledge bases, entity exploration | Required | Higher |
 | **[Skeleton](docs/engines/skeleton-engine.md)** | Chat logs, events, cost-sensitive apps | Optional | Lower |
 | **[Chronicle](docs/engines/chronicle-engine.md)** | Temporal memory, conversational recall | Not needed | Medium |
 
@@ -120,10 +122,13 @@ See [Engine Comparison](docs/engines/engine-comparison.md) for detailed guidance
 ## Key Features
 
 - **`remember()` / `recall()` / `forget()`** — simple API for storing and retrieving knowledge
-- **Hybrid Search** — vector + graph + keyword with [Reciprocal Rank Fusion](docs/query-engine/fusion.md)
-- **4 Engines** — GraphRAG, VectorCypher, Skeleton, Chronicle
+- **Hybrid Search** — vector + Cypher graph + BM25 with [Reciprocal Rank Fusion](docs/query-engine/fusion.md)
+- **Cross-Encoder Reranking** — optional reranking via cross-encoder models for precision
+- **Temporal SQL Pushdown** — relative date queries ("last 7 days") pushed to SQL WHERE clauses
+- **Version-Aware Scoring** — superseded document versions penalized in retrieval
+- **4 Engines** — VectorCypher (default), GraphRAG, Skeleton, Chronicle
+- **6 Graph Backends** — Neo4j, Memgraph, Kuzu, SurrealDB, AWS Neptune, PostgreSQL AGE
 - **Multi-Tenancy** — namespace-level isolation
-- **Event Sourcing** — immutable event log for audit trails
 - **Semantic Hooks** — subscribe to extraction events with [3-level semantic filtering](docs/hooks/semantic-hooks.md)
 - **3-Phase Ingestion** — stage, enrich, expand with [domain expertise](docs/extraction/expertise-system.md)
 - **Rust Acceleration** — optional native extensions for cosine, PageRank, entity resolution
@@ -142,6 +147,9 @@ All settings use the `KHORA_` prefix (e.g., `KHORA_LLM_MODEL=gpt-4o`).
 | `KHORA_LLM_EMBEDDING_MODEL` | Embedding model | `text-embedding-3-small` |
 | `KHORA_QUERY_DEFAULT_MODE` | Search mode: `vector`, `graph`, `hybrid` | `hybrid` |
 | `KHORA_QUERY_ENABLE_HYDE` | HyDE query expansion: `auto`, `always`, `never` | `auto` |
+| `KHORA_QUERY_ENABLE_RERANKING` | Cross-encoder reranking | `true` |
+| `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN` | Temporal SQL WHERE pushdown | `true` |
+| `KHORA_EXTRACTION_BATCH_SIZE` | Chunks per extraction LLM call | `5` |
 | `KHORA_DEBUG` | Debug logging | `false` |
 
 See [full configuration reference](docs/architecture/storage-backends.md) for all options.
@@ -150,7 +158,7 @@ See [full configuration reference](docs/architecture/storage-backends.md) for al
 
 | Topic | Pages |
 |-------|-------|
-| **[Engines](docs/engines/)** | [Comparison](docs/engines/engine-comparison.md) · [GraphRAG](docs/engines/engine-comparison.md#graphrag) · [VectorCypher](docs/engines/vectorcypher-engine.md) · [Skeleton](docs/engines/skeleton-engine.md) · [Chronicle](docs/engines/chronicle-engine.md) |
+| **[Engines](docs/engines/)** | [Comparison](docs/engines/engine-comparison.md) · [VectorCypher](docs/engines/vectorcypher-engine.md) · [GraphRAG](docs/engines/engine-comparison.md#graphrag) · [Skeleton](docs/engines/skeleton-engine.md) · [Chronicle](docs/engines/chronicle-engine.md) |
 | **[Architecture](docs/architecture/)** | [Overview](docs/architecture/overview.md) · [Storage Backends](docs/architecture/storage-backends.md) · [Multi-Tenancy](docs/architecture/multi-tenancy.md) · [Event Sourcing](docs/architecture/event-sourcing.md) |
 | **[Extraction](docs/extraction/)** | [Pipeline](docs/extraction/ingestion-pipeline.md) · [Chunkers](docs/extraction/chunkers.md) · [Expertise](docs/extraction/expertise-system.md) · [Expansion](docs/extraction/semantic-expansion.md) |
 | **[Query Engine](docs/query-engine/)** | [Overview](docs/query-engine/overview.md) · [Search Modes](docs/query-engine/search-modes.md) · [Fusion](docs/query-engine/fusion.md) · [Temporal](docs/query-engine/temporal-queries.md) |

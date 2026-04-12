@@ -4,7 +4,7 @@ This is the main entry point for using Khora as a library.
 Provides a simple, unified interface for memory storage and retrieval.
 
 The MemoryLake class is a thin facade that delegates to pluggable engines.
-The default engine is "graphrag" which uses knowledge graphs, vectors, and LLM extraction.
+The default engine is "vectorcypher" which uses knowledge graphs, vectors, and LLM extraction.
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ class MemoryLake:
     Can be used as a context manager for automatic connection handling.
 
     The MemoryLake is a facade that delegates to pluggable engines.
-    The default engine is "graphrag" which uses knowledge graphs and vector embeddings.
+    The default engine is "vectorcypher" which uses knowledge graphs and vector embeddings.
 
     Usage:
         # Simplest - from env vars (KHORA_DATABASE_URL)
@@ -149,7 +149,7 @@ class MemoryLake:
             ...
 
         # Explicit engine selection (same as default)
-        async with MemoryLake("postgresql://...", engine="graphrag") as lake:
+        async with MemoryLake("postgresql://...", engine="vectorcypher") as lake:
             ...
 
         # Full config
@@ -161,7 +161,7 @@ class MemoryLake:
         self,
         database_url: str | KhoraConfig | None = None,
         *,
-        engine: str = "graphrag",
+        engine: str = "vectorcypher",
         graph_url: str | None = None,
         embedding_model: str = "text-embedding-3-small",
         storage_config: StorageConfig | None = None,
@@ -172,7 +172,7 @@ class MemoryLake:
 
         Args:
             database_url: PostgreSQL URL, or full KhoraConfig, or None (reads KHORA_DATABASE_URL from env)
-            engine: Engine to use (default: "graphrag")
+            engine: Engine to use (default: "vectorcypher")
             graph_url: Optional Neo4j/graph database URL (bolt://user:pass@host:port)
             embedding_model: Embedding model to use (default: text-embedding-3-small)
             storage_config: Storage configuration (derived from config if None) - deprecated
@@ -191,7 +191,7 @@ class MemoryLake:
             lake = MemoryLake("postgresql://...", graph_url="bolt://...")
 
             # Explicit engine selection
-            lake = MemoryLake("postgresql://...", engine="graphrag")
+            lake = MemoryLake("postgresql://...", engine="vectorcypher")
 
             # Full config
             lake = MemoryLake(KhoraConfig(...))

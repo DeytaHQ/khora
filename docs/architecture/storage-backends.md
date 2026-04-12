@@ -502,6 +502,8 @@ Beyond Neo4j, Khora supports three additional graph backends:
 | **Kùzu** | Embedded | Cypher | Single-process, CI/testing, edge devices |
 | **Memgraph** | Server | Bolt/Cypher | In-memory, low-latency, streaming |
 | **SurrealDB** | Server/Embedded | WebSocket/HTTP | Unified multi-model (graph + vector + relational in one DB) |
+| **Neptune** | Managed (AWS) | Bolt/OpenCypher | AWS-native, managed, no operational overhead |
+| **AGE** | PostgreSQL extension | Cypher-in-SQL | Graph queries without extra infrastructure |
 
 ### Kùzu (Embedded)
 
@@ -533,6 +535,37 @@ storage:
     url: bolt://localhost:7687
     user: memgraph
 ```
+
+## AWS Neptune
+
+Neptune is Amazon's managed graph database. Khora connects via the Bolt protocol (OpenCypher) and optionally supports IAM SigV4 auth for secure, password-less access.
+
+```bash
+pip install khora[neptune]          # Bolt protocol
+pip install khora[neptune-iam]      # Bolt + IAM SigV4
+```
+
+```bash
+export KHORA_STORAGE_GRAPH_BACKEND=neptune
+export KHORA_STORAGE_GRAPH_URL="bolt://your-cluster.neptune.amazonaws.com:8182"
+```
+
+**When to use:** AWS-native deployments where you want a managed graph service with no operational overhead. Neptune handles backups, patching, and scaling automatically.
+
+## PostgreSQL AGE
+
+Apache AGE adds Cypher query support to PostgreSQL via an extension. Khora's AGE backend runs Cypher-in-SQL, sharing the same connection pool as the relational backend — no separate graph server required.
+
+```bash
+pip install khora[age]
+```
+
+```bash
+export KHORA_STORAGE_GRAPH_BACKEND=age
+export KHORA_STORAGE_GRAPH_AGE_GRAPH_NAME=khora  # default: khora
+```
+
+**When to use:** When you want graph queries without adding another database to your stack. AGE runs inside PostgreSQL, so there is no extra infrastructure to manage.
 
 ## SurrealDB: The Unified Backend
 

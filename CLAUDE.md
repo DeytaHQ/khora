@@ -17,8 +17,8 @@ uv run khora ontology preview <file.yaml>         # Rich preview
 
 ## Architecture
 
-- **Engines:** implement `MemoryEngineProtocol` in `engines/protocol.py`
-- **Graph backends:** Neo4j, SurrealDB, Memgraph — implement `GraphBackend` in `storage/backends/base.py`
+- **Engines:** implement `MemoryEngineProtocol` in `engines/protocol.py`. Default engine is `vectorcypher`
+- **Graph backends:** Neo4j, SurrealDB, Memgraph, Neptune, AGE — implement `GraphBackend` in `storage/backends/base.py`
 - **SurrealDB:** unified backend (graph + vector + relational). Modes: `memory://`, `surrealkv://` (embedded), `ws://` (remote). Set `backend: surrealdb` in config
 - **Extraction skills:** YAML-defined in `extraction/skills/builtin/`. Generate with `khora ontology construct`
 - **Config:** env vars with `KHORA_` prefix and single underscore (e.g., `KHORA_QUERY_ENABLE_HYDE=true`, `KHORA_LLM_MODEL=gpt-4o`). Legacy `__` nesting also supported
@@ -36,6 +36,7 @@ uv run khora ontology preview <file.yaml>         # Rich preview
 - `pipelines/flows/ingest.py` — Document ingestion pipeline (3-phase: stage → enrich → expand)
 - `db/migrations/env.py` — Alembic with advisory locking
 - `config/schema.py` — `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
+- `exceptions.py` — `KhoraError` hierarchy with domain-specific exceptions
 - `telemetry/` — Optional PostgreSQL-backed telemetry collector + `@trace` decorator
 
 @.claude/docs/workflow.md
@@ -83,6 +84,8 @@ Always run `make format && make test` before committing. CI will reject PRs that
 - **Pre-normalized embeddings** — L2-normalized at ingest. Uses `batch_dot_product` (3x faster than cosine)
 - **Entity unique constraint** — `(namespace_id, name, entity_type)` UNIQUE in both PostgreSQL and SurrealDB
 - **Namespace versioning** — dual IDs: `id` (row-level) vs `namespace_id` (stable). Public API uses `namespace_id`, resolves to `id` via indexed lookup
+- **Cross-encoder reranking** — optional reranking via cross-encoder models (cached, runs in asyncio.to_thread)
+- **Temporal SQL pushdown** — relative date queries ("last 7 days") pushed to SQL WHERE clauses
 - **Selective extraction** — KET-RAG style: scores chunk importance, sends top 70% to LLM, rest get co-occurrence edges only
 - **Entity resolution** — multi-strategy dedup with per-type thresholds (PERSON 0.92, DATE 0.95, default 0.85)
 - **Semantic expansion** — optional cross-tool entity unification + relationship inference (4 modes: smart/batch/incremental/none)
