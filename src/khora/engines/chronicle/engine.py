@@ -831,6 +831,8 @@ class ChronicleEngine:
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        extraction_batch_size: int | None = None,
+        extraction_max_tokens: int | None = None,
     ) -> BatchResult:
         """Store multiple documents via the shared ingest pipeline.
 
@@ -850,6 +852,8 @@ class ChronicleEngine:
             expertise: Optional expertise config (ADR-022)
             extraction_config_hash: Hash for change detection
             chunk_strategy: Override chunking strategy
+            extraction_batch_size: Max texts per LLM extraction call (None = pipeline default)
+            extraction_max_tokens: Max tokens for extraction LLM calls (None = pipeline default)
 
         Returns:
             BatchResult with aggregated statistics
@@ -915,6 +919,7 @@ class ChronicleEngine:
             skill_name=skill_name,
             embedding_model=self._config.llm.embedding_model,
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
+            extraction_timeout=self._config.llm.timeout,
             max_concurrent_documents=max_concurrent,
             shared_embedder=shared_embedder,
             shared_entity_index=shared_entity_index,
@@ -925,6 +930,10 @@ class ChronicleEngine:
         )
         if chunk_strategy is not None:
             ingest_kwargs["chunk_strategy"] = chunk_strategy
+        if extraction_batch_size is not None:
+            ingest_kwargs["extraction_batch_size"] = extraction_batch_size
+        if extraction_max_tokens is not None:
+            ingest_kwargs["extraction_max_tokens"] = extraction_max_tokens
         result = await ingest_documents(namespace_id, doc_inputs, self._get_storage(), **ingest_kwargs)
         timings["ingest_pipeline_ms"] = (time.perf_counter() - start) * 1000
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000

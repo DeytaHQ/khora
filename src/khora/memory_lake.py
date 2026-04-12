@@ -447,6 +447,8 @@ class MemoryLake:
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        extraction_batch_size: int | None = None,
+        extraction_max_tokens: int | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
@@ -496,9 +498,7 @@ class MemoryLake:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
                 # NOTE: see remember() comment re: custom engine compatibility
-                result = await self._get_engine().remember_batch(
-                    documents,
-                    namespace_id,
+                batch_kwargs: dict[str, Any] = dict(
                     skill_name=skill_name,
                     max_concurrent=max_concurrent,
                     deduplicate=deduplicate,
@@ -509,6 +509,15 @@ class MemoryLake:
                     expertise=expertise,
                     extraction_config_hash=extraction_config_hash,
                     chunk_strategy=chunk_strategy,
+                )
+                if extraction_batch_size is not None:
+                    batch_kwargs["extraction_batch_size"] = extraction_batch_size
+                if extraction_max_tokens is not None:
+                    batch_kwargs["extraction_max_tokens"] = extraction_max_tokens
+                result = await self._get_engine().remember_batch(
+                    documents,
+                    namespace_id,
+                    **batch_kwargs,
                 )
                 return replace(result, llm_usage=collect_usage())
         finally:
