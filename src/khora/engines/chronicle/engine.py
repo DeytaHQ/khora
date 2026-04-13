@@ -559,19 +559,13 @@ class ChronicleEngine:
         #   -1  = disable temporal channel entirely
         #    0  = unlimited window (search ALL data with recency-primary scoring)
         #   >0  = N-day window filter
-        # Optimization: skip temporal channel for non-temporal queries (~40ms savings
-        # for ~60% of queries). Uses Rust detect_temporal_category when available.
+        # NOTE: temporal channel always runs when enabled (window >= 0).
+        # Conditional skipping based on detect_temporal_category was reverted
+        # because it caused paraphrase instability — different code paths for
+        # semantically equivalent queries.
         _temporal_window_days = getattr(qs, "chronicle_temporal_window_days", 0.0) if qs else 0.0
-        _has_temporal_intent = temporal_filter is not None
-        if not _has_temporal_intent:
-            try:
-                from khora._accel import detect_temporal_category
-
-                _has_temporal_intent = detect_temporal_category(query) != 0
-            except Exception:
-                _has_temporal_intent = True  # Conservative fallback: always run
         run_temporal = mode in (SearchMode.HYBRID, SearchMode.ALL) and (
-            (_temporal_window_days >= 0 and _has_temporal_intent) or temporal_filter is not None
+            _temporal_window_days >= 0 or temporal_filter is not None
         )
 
         channel_coros: list[tuple[str, Any]] = []
@@ -972,16 +966,20 @@ class ChronicleEngine:
         if not chunks_with_scores or query_embedding is None:
             return chunks_with_scores
 
-        # Use Rust temporal category detection (wider coverage than regex).
-        # Categories: 2=STATE_QUERY, 3=ORDINAL, 6=CHANGE — all benefit from
-        # cross-session expansion.  Falls back to regex if Rust unavailable.
-        try:
-            from khora._accel import detect_temporal_category
+        # Use BOTH Rust temporal category detection AND regex for maximum
+        # coverage.  The Rust detector catches explicit temporal patterns
+        # (STATE_QUERY, ORDINAL, CHANGE, RECENCY) while the regex catches
+        # implicit change vocabulary ("switched", "moved", "used to").
+        # Either match triggers expansion.
+        should_expand = _CROSS_SESSION_INTENT.search(query) is not None
+        if not should_expand:
+            try:
+                from khora._accel import detect_temporal_category
 
-            cat = detect_temporal_category(query)
-            should_expand = cat in (2, 3, 6)  # STATE_QUERY, ORDINAL, CHANGE
-        except Exception:
-            should_expand = _CROSS_SESSION_INTENT.search(query) is not None
+                cat = detect_temporal_category(query)
+                should_expand = cat in (1, 2, 3, 6)  # RECENCY, STATE_QUERY, ORDINAL, CHANGE
+            except Exception:  # noqa: S110 — _accel import failure is non-fatal
+                pass
 
         if not should_expand:
             return chunks_with_scores
@@ -998,8 +996,8 @@ class ChronicleEngine:
             if sid:
                 seen_sessions.add(str(sid))
 
-        # If we already have results from multiple sessions, expansion is less needed
-        if len(seen_sessions) >= 3:
+        # If we already have results from many sessions, expansion is less needed
+        if len(seen_sessions) >= 5:
             return chunks_with_scores
 
         # Find entities similar to query, then fetch their source chunks
