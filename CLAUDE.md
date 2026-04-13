@@ -13,6 +13,8 @@ uv run alembic upgrade head                       # Run migrations
 uv run khora ontology construct --source <path>   # AI ontology generation
 uv run khora ontology validate <file.yaml>        # Validate ontology YAML
 uv run khora ontology preview <file.yaml>         # Rich preview
+uv run khora extract <file-or-dir>                # Ingest into knowledge graph
+uv run khora search "query" -n <namespace>        # Search knowledge graph
 ```
 
 ## Architecture

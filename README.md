@@ -101,6 +101,22 @@ async def main():
 asyncio.run(main())
 ```
 
+## CLI Commands
+
+```bash
+# Extract files into the knowledge graph
+khora extract report.pdf
+khora extract ./docs/ --namespace <uuid>
+cat data.json | khora extract -
+
+# Search the knowledge graph
+khora search "Who worked on the API design?" -n <namespace-id>
+echo "revenue trends" | khora search -n <namespace-id> --format json
+khora search "team changes" -n <ns> --mode vector --limit 5
+```
+
+Both commands output JSON when piped, text when interactive. See `khora extract --help` and `khora search --help`.
+
 ## Pluggable Engines
 
 | Engine | Best For | Graph DB | LLM Cost |

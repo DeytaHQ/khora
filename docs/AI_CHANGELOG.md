@@ -9,3 +9,4 @@
 - 2026-04-08: DYT-2049: Fix get_neo4j_password() returning empty when credentials are split from URL
 - 2026-04-12: DYT-2286: Consolidate toolchain — ruff replaces black, isort, pyupgrade, bandit
 - 2026-04-12: DYT-2294: Add khora extract + khora search CLI commands
+- 2026-04-12: DYT-2299: CLI tests and docs for extract + search commands
