@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -409,9 +410,9 @@ class TestTemporalInfo:
 
     def test_to_dict_with_times(self) -> None:
         """to_dict formats datetime values."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         info = TemporalInfo(detected=True, filter_applied=True, time_start=now, time_end=now)
         d = info.to_dict()
         assert d["time_start"] == now.isoformat()

@@ -47,7 +47,8 @@ def upgrade() -> None:
     # versions of the same logical namespace under one chain_root. Then picks
     # the id of the max-version row as the stable namespace_id for the group.
     # =========================================================================
-    op.execute(text("""
+    op.execute(
+        text("""
             WITH RECURSIVE chain AS (
                 -- Roots: rows with no parent (first version of each namespace)
                 SELECT id, id AS chain_root, version
@@ -77,7 +78,8 @@ def upgrade() -> None:
             JOIN max_version_ids mv ON c.chain_root = mv.chain_root
             WHERE mn.id = c.id
               AND mn.namespace_id IS NULL
-        """))
+        """)
+    )
 
     # Verify backfill completeness before enforcing NOT NULL
     conn = op.get_bind()

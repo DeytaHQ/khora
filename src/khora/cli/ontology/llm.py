@@ -91,7 +91,7 @@ class OntologyLLM:
         self._total_output_tokens += output_tokens
         self._total_cost_usd += cost
 
-        logger.debug(f"LLM call #{self._call_count}: " f"{input_tokens}in/{output_tokens}out, ${cost:.4f}")
+        logger.debug(f"LLM call #{self._call_count}: {input_tokens}in/{output_tokens}out, ${cost:.4f}")
 
         content = response.choices[0].message.content or ""
         return self._parse_json(content)

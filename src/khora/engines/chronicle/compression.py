@@ -252,7 +252,8 @@ class FactExtractor:
 
         # Build context for LLM
         existing_list = "\n".join(
-            f"  [{f.id}] {f.content} (category: {f.category})" for f in existing_facts[:10]  # Cap for token efficiency
+            f"  [{f.id}] {f.content} (category: {f.category})"
+            for f in existing_facts[:10]  # Cap for token efficiency
         )
 
         prompt = (

@@ -179,7 +179,7 @@ class AGEBackend(GraphBackendBase):
         """
         cols = columns or ["v agtype"]
         col_clause = ", ".join(cols)
-        sql = f"SELECT * FROM cypher('{self._graph_name}', $$ {cypher_query} $$) " f"AS ({col_clause})"  # nosec B608
+        sql = f"SELECT * FROM cypher('{self._graph_name}', $$ {cypher_query} $$) AS ({col_clause})"  # noqa: S608
 
         result = await session.execute(text(sql))
         rows = result.fetchall()
@@ -371,8 +371,8 @@ class AGEBackend(GraphBackendBase):
                 source_document_ids: {src_doc_ids},
                 source_chunk_ids: {src_chunk_ids},
                 mention_count: {entity.mention_count},
-                valid_from: {f"'{entity.valid_from.isoformat()}'" if entity.valid_from else 'null'},
-                valid_until: {f"'{entity.valid_until.isoformat()}'" if entity.valid_until else 'null'},
+                valid_from: {f"'{entity.valid_from.isoformat()}'" if entity.valid_from else "null"},
+                valid_until: {f"'{entity.valid_until.isoformat()}'" if entity.valid_until else "null"},
                 confidence: {entity.confidence},
                 metadata: '{serialize_dict(entity.metadata) or "{}"}',
                 created_at: '{now}',
@@ -438,8 +438,8 @@ class AGEBackend(GraphBackendBase):
                 e.source_document_ids = {src_doc_ids},
                 e.source_chunk_ids = {src_chunk_ids},
                 e.mention_count = {entity.mention_count},
-                e.valid_from = {f"'{entity.valid_from.isoformat()}'" if entity.valid_from else 'null'},
-                e.valid_until = {f"'{entity.valid_until.isoformat()}'" if entity.valid_until else 'null'},
+                e.valid_from = {f"'{entity.valid_from.isoformat()}'" if entity.valid_from else "null"},
+                e.valid_until = {f"'{entity.valid_until.isoformat()}'" if entity.valid_until else "null"},
                 e.confidence = {entity.confidence},
                 e.metadata = '{serialize_dict(entity.metadata) or "{}"}',
                 e.updated_at = '{now}'
@@ -534,8 +534,8 @@ class AGEBackend(GraphBackendBase):
                 properties: '{serialize_dict(relationship.properties) or "{}"}',
                 source_document_ids: {src_doc_ids},
                 source_chunk_ids: {src_chunk_ids},
-                valid_from: {f"'{relationship.valid_from.isoformat()}'" if relationship.valid_from else 'null'},
-                valid_until: {f"'{relationship.valid_until.isoformat()}'" if relationship.valid_until else 'null'},
+                valid_from: {f"'{relationship.valid_from.isoformat()}'" if relationship.valid_from else "null"},
+                valid_until: {f"'{relationship.valid_until.isoformat()}'" if relationship.valid_until else "null"},
                 confidence: {relationship.confidence},
                 weight: {relationship.weight},
                 metadata: '{serialize_dict(relationship.metadata) or "{}"}',
@@ -712,7 +712,7 @@ class AGEBackend(GraphBackendBase):
                 name: '{self._escape(episode.name)}',
                 description: '{self._escape(episode.description or "")}',
                 occurred_at: '{episode.occurred_at.isoformat()}',
-                duration_seconds: {episode.duration_seconds if episode.duration_seconds is not None else 'null'},
+                duration_seconds: {episode.duration_seconds if episode.duration_seconds is not None else "null"},
                 entity_ids: {entity_id_list},
                 source_document_ids: {src_doc_ids},
                 source_chunk_ids: {src_chunk_ids},

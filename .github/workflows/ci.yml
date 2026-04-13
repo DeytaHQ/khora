@@ -53,7 +53,7 @@ jobs:
           key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
 
   # ============================================================================
-  # Security — bandit + pip-audit (parallel with lint and test)
+  # Security — pip-audit (parallel with lint and test)
   # ============================================================================
   security:
     needs: install
@@ -80,10 +80,6 @@ jobs:
           key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
           restore-keys: |
             venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
-
-      - name: Security scan (bandit)
-        run: uvx bandit -r src/ -f json -o bandit-report.json -ll
-        continue-on-error: false
 
       - name: Dependency vulnerability scan (pip-audit)
         run: |

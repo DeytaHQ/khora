@@ -554,7 +554,7 @@ async def llm_listwise_rerank(
                 if not any(c.id == chunk.id for c, _ in reordered):
                     reordered.append((chunk, score))
             return reordered + remainder
-        except Exception:
+        except Exception:  # noqa: S110 — cache miss is non-fatal
             pass
 
     # Build prompt
@@ -572,7 +572,7 @@ async def llm_listwise_rerank(
 
         try:
             cache_file.write_text(json.dumps(order))
-        except Exception:
+        except Exception:  # noqa: S110 — cache write failure is non-fatal
             pass
 
         reordered = []

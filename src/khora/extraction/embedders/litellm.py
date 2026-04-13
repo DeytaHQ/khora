@@ -476,8 +476,7 @@ class LiteLLMEmbedder(Embedder):
 
             mid = len(texts) // 2
             logger.warning(
-                f"Embedding batch ({len(texts)} texts) hit JSON parse error, "
-                f"bisecting into {mid} + {len(texts) - mid}"
+                f"Embedding batch ({len(texts)} texts) hit JSON parse error, bisecting into {mid} + {len(texts) - mid}"
             )
             left = await self._embed_with_bisect(texts[:mid])
             right = await self._embed_with_bisect(texts[mid:])

@@ -720,12 +720,12 @@ class DualNodeManager:
         conditions: list[str] = []
         if after is not None:
             conditions.append(
-                "(coalesce(c.occurred_at, c.created_at) IS NULL OR " "coalesce(c.occurred_at, c.created_at) >= $after)"
+                "(coalesce(c.occurred_at, c.created_at) IS NULL OR coalesce(c.occurred_at, c.created_at) >= $after)"
             )
             params["after"] = after.isoformat()
         if before is not None:
             conditions.append(
-                "(coalesce(c.occurred_at, c.created_at) IS NULL OR " "coalesce(c.occurred_at, c.created_at) <= $before)"
+                "(coalesce(c.occurred_at, c.created_at) IS NULL OR coalesce(c.occurred_at, c.created_at) <= $before)"
             )
             params["before"] = before.isoformat()
 

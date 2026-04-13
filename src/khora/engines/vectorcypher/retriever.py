@@ -493,7 +493,7 @@ class VectorCypherRetriever:
                 session_aware_activated = True
                 per_session_limit = max(3, limit // len(entity_channels))
                 logger.info(
-                    f"Session-aware search: {len(entity_channels)} sessions, " f"{per_session_limit} chunks/session"
+                    f"Session-aware search: {len(entity_channels)} sessions, {per_session_limit} chunks/session"
                 )
 
                 from khora.engines.skeleton.backends import TemporalFilter as _TF
@@ -1136,7 +1136,7 @@ class VectorCypherRetriever:
 
             # Append any remainder that wasn't reranked (already sorted by original score)
             reranked.extend(remainder)
-            logger.debug(f"Cross-encoder reranking applied: {top_n} candidates scored, " f"returning top {limit}")
+            logger.debug(f"Cross-encoder reranking applied: {top_n} candidates scored, returning top {limit}")
             return reranked[:limit]
         except Exception as e:
             logger.warning(f"Cross-encoder reranking failed, keeping original order: {e}")

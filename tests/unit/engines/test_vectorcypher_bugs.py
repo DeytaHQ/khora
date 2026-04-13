@@ -137,9 +137,9 @@ class TestMetadataSerializedForNeo4j:
         # The metadata value sent to Neo4j must be a JSON string, not a dict
         assert "metadata" in captured_params, "metadata param not found in Cypher params"
         metadata_value = captured_params["metadata"]
-        assert isinstance(
-            metadata_value, str
-        ), f"metadata must be a JSON string for Neo4j, got {type(metadata_value).__name__}: {metadata_value!r}"
+        assert isinstance(metadata_value, str), (
+            f"metadata must be a JSON string for Neo4j, got {type(metadata_value).__name__}: {metadata_value!r}"
+        )
         # Verify it round-trips correctly
         parsed = json.loads(metadata_value)
         assert parsed == {"chunk_index": 0, "source": "test"}
@@ -216,9 +216,9 @@ class TestMetadataSerializedForNeo4j:
         await manager.create_chunk_node(chunk)
 
         metadata_value = captured_params["metadata"]
-        assert isinstance(
-            metadata_value, str
-        ), f"metadata must be a JSON string for Neo4j, got {type(metadata_value).__name__}: {metadata_value!r}"
+        assert isinstance(metadata_value, str), (
+            f"metadata must be a JSON string for Neo4j, got {type(metadata_value).__name__}: {metadata_value!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

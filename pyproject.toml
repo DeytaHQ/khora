@@ -45,9 +45,7 @@ dev = [
     "pytest-mock>=3.15.1",
     "pytest-asyncio>=1.3.0",
     "coverage>=7.13.4",
-    "black>=26.1.0",
     "ruff>=0.15.2",
-    "isort>=8.0.0",
     "prek>=0.3.3",
     "ty>=0.0.18",
 ]
@@ -158,23 +156,29 @@ exclude_lines = [
     "if TYPE_CHECKING:",
 ]
 
-[tool.black]
-target-version = ["py313"]
-line-length = 120
-
-[tool.isort]
-profile = "black"
-line_length = 120
-known_first_party = ["khora"]
-skip_gitignore = true
-
 [tool.ruff]
 target-version = "py313"
 line-length = 120
 
+[tool.ruff.format]
+# Replaces black — same style
+quote-style = "double"
+indent-style = "space"
+
 [tool.ruff.lint]
-select = ["E", "F", "W"]
-ignore = ["E501"]  # Line too long - handled by black
+select = ["E", "F", "W", "I", "UP", "S"]
+ignore = [
+    "E501",   # Line too long — handled by formatter
+    "S101",   # Allow assert in non-test code (used in internal invariants)
+    "UP042",  # str(Enum) pattern is deliberate — StrEnum changes serialization
+    "UP046",  # Generic[T] subclass — PEP 695 type params not adopted yet
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S107", "S108", "S110", "S311"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["khora"]
 
 [tool.ty.environment]
 python-version = "3.13"
@@ -216,9 +220,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",
-    "black>=26.1.0",
     "ruff>=0.15.2",
-    "isort>=8.0.0",
     "ty>=0.0.18",
     "rapidfuzz>=3.14.3",  # For ty type checking of optional accel module
     "spacy>=3.8.11",

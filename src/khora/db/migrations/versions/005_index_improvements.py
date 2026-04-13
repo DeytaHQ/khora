@@ -27,18 +27,16 @@ def upgrade() -> None:
     # Only create indexes if the table already exists.
     conn = op.get_bind()
     result = conn.execute(
-        sa.text("SELECT EXISTS (" "  SELECT FROM information_schema.tables" "  WHERE table_name = 'khora_chunks'" ")")
+        sa.text("SELECT EXISTS (  SELECT FROM information_schema.tables  WHERE table_name = 'khora_chunks')")
     )
     has_khora_chunks = result.scalar()
 
     if has_khora_chunks:
         # GIN index on tags for array containment queries (@>, &&)
-        op.execute("CREATE INDEX IF NOT EXISTS ix_khora_chunks_tags_gin " "ON khora_chunks USING GIN (tags)")
+        op.execute("CREATE INDEX IF NOT EXISTS ix_khora_chunks_tags_gin ON khora_chunks USING GIN (tags)")
 
         # Composite index for temporal filtering within namespace
-        op.execute(
-            "CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_occurred " "ON khora_chunks (namespace_id, occurred_at)"
-        )
+        op.execute("CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_occurred ON khora_chunks (namespace_id, occurred_at)")
 
         # Rebuild HNSW index with higher ef_construction for better recall.
         # ef_construction=128 (up from default 64) improves recall at build time

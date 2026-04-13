@@ -67,7 +67,7 @@ class DataSampler:
                 chunks = source.sample(budget)
                 self.samples.extend(chunks)
                 total_chars = sum(c.char_count for c in chunks)
-                logger.debug(f"Sampled {total_chars} chars from {summary.source_id} " f"(budget: {budget})")
+                logger.debug(f"Sampled {total_chars} chars from {summary.source_id} (budget: {budget})")
             except Exception:
                 logger.warning(f"Failed to sample from {summary.source_id}")
 

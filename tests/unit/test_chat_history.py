@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -31,7 +31,7 @@ class TestChatMessage:
     def test_all_fields(self) -> None:
         """All fields can be set explicitly."""
         msg_id = uuid4()
-        ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        ts = datetime(2025, 1, 1, tzinfo=UTC)
         ctx = [{"content": "result", "score": 0.9}]
 
         msg = ChatMessage(
