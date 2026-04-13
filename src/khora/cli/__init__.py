@@ -38,9 +38,13 @@ def cli(ctx: click.Context, log_level: str, json_logs: bool, log_file: Path | No
 
 def _register_subcommands() -> None:
     """Register subcommand groups (called after cli is defined)."""
+    from khora.cli.extract.commands import extract
     from khora.cli.ontology import ontology_group
+    from khora.cli.search.commands import search
 
     cli.add_command(ontology_group)
+    cli.add_command(extract)
+    cli.add_command(search)
 
 
 _register_subcommands()
