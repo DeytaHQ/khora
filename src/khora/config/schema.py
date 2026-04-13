@@ -236,6 +236,18 @@ class SurrealDBVectorConfig(BaseModel):
     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
 
 
+class SQLiteVectorConfig(BaseModel):
+    """SQLite embedded backend configuration (relational + vector).
+
+    Uses a single SQLite file for both relational and vector storage.
+    Vector search is brute-force cosine via khora._accel.
+    """
+
+    backend: Literal["sqlite"] = "sqlite"
+    url: str | None = Field(default=None, description="SQLite path (sqlite:///path.db or :memory:)")
+    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+
+
 def _vector_discriminator(v: Any) -> str:
     if isinstance(v, dict):
         return v.get("backend", "pgvector")
@@ -243,7 +255,9 @@ def _vector_discriminator(v: Any) -> str:
 
 
 VectorConfig = Annotated[
-    Annotated[PgVectorConfig, Tag("pgvector")] | Annotated[SurrealDBVectorConfig, Tag("surrealdb")],
+    Annotated[PgVectorConfig, Tag("pgvector")]
+    | Annotated[SurrealDBVectorConfig, Tag("surrealdb")]
+    | Annotated[SQLiteVectorConfig, Tag("sqlite")],
     Discriminator(_vector_discriminator),
 ]
 

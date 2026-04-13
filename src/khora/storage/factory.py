@@ -38,6 +38,11 @@ _GRAPH_REGISTRY: dict[str, tuple[str, str]] = {
 _VECTOR_REGISTRY: dict[str, tuple[str, str]] = {
     "pgvector": ("khora.storage.backends.pgvector", "PgVectorBackend"),
     "surrealdb": ("khora.storage.backends.surrealdb.vector", "SurrealDBVectorAdapter"),
+    "sqlite": ("khora.storage.backends.sqlite", "SQLiteVectorBackend"),
+}
+
+_RELATIONAL_REGISTRY: dict[str, tuple[str, str]] = {
+    "sqlite": ("khora.storage.backends.sqlite", "SQLiteRelationalBackend"),
 }
 
 
@@ -409,11 +414,39 @@ class StorageFactory:
                     "Install with: pip install khora[surrealdb]"
                 )
 
+        if self.config.backend == "sqlite":
+            return self._create_sqlite_coordinator()
+
         return StorageCoordinator(
             relational=self.create_relational_backend(),
             vector=self.create_vector_backend(),
             graph=self.create_graph_backend(),
             event_store=self.create_event_store(),
+        )
+
+    def _create_sqlite_coordinator(self) -> StorageCoordinator:
+        """Create a coordinator using SQLite for both relational and vector roles."""
+        vector_config = self.config.vector_config
+        if vector_config is None:
+            raise ValueError("SQLite backend selected but vector config is not set")
+
+        module_path, class_name = _RELATIONAL_REGISTRY["sqlite"]
+        rel_cls = _import_backend_class(module_path, class_name)
+        if rel_cls is None:
+            raise ValueError(
+                "SQLite backend selected but aiosqlite is not installed. Install with: pip install khora[sqlite]"
+            )
+
+        module_path, class_name = _VECTOR_REGISTRY["sqlite"]
+        vec_cls = _import_backend_class(module_path, class_name)
+        if vec_cls is None:
+            raise ValueError("SQLite vector backend not available")
+
+        return StorageCoordinator(
+            relational=rel_cls.from_config(vector_config),
+            vector=vec_cls.from_config(vector_config),
+            graph=None,
+            event_store=None,
         )
 
 

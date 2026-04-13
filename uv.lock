@@ -98,6 +98,15 @@ wheels = [
 ]
 
 [[package]]
+name = "aiosqlite"
+version = "0.22.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/8a/64761f4005f17809769d23e518d915db74e6310474e733e3593cfc854ef1/aiosqlite-0.22.1.tar.gz", hash = "sha256:043e0bd78d32888c0a9ca90fc788b38796843360c855a7262a532813133a0650", size = 14821, upload-time = "2025-12-23T19:25:43.997Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/00/b7/e3bf5133d697a08128598c8d0abc5e16377b51465a33756de24fa7dee953/aiosqlite-0.22.1-py3-none-any.whl", hash = "sha256:21c002eb13823fad740196c5a2e9d8e62f6243bd9e7e4a1f87fb5e44ecb4fceb", size = 17405, upload-time = "2025-12-23T19:25:42.139Z" },
+]
+
+[[package]]
 name = "alembic"
 version = "1.18.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1144,6 +1153,7 @@ age = [
     { name = "asyncpg" },
 ]
 all-backends = [
+    { name = "aiosqlite" },
     { name = "asyncpg" },
     { name = "httpx" },
     { name = "kuzu" },
@@ -1213,6 +1223,9 @@ reranking = [
 rust = [
     { name = "khora-accel" },
 ]
+sqlite = [
+    { name = "aiosqlite" },
+]
 surrealdb = [
     { name = "surrealdb" },
 ]
@@ -1222,6 +1235,7 @@ weaviate = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "aiosqlite" },
     { name = "prek" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1234,6 +1248,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiosqlite", marker = "extra == 'all-backends'", specifier = ">=0.20.0" },
+    { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.20.0" },
     { name = "alembic", specifier = ">=1.18.4" },
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "asyncpg", marker = "extra == 'age'", specifier = ">=0.31.0" },
@@ -1291,10 +1307,11 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'all-backends'", specifier = ">=4.20.1" },
     { name = "weaviate-client", marker = "extra == 'weaviate'", specifier = ">=4.20.1" },
 ]
-provides-extras = ["accel", "age", "all-backends", "dev", "discovery", "embedded", "graph-all", "kuzu", "lancedb", "logfire", "memgraph", "neo4j", "neptune", "neptune-iam", "nlp", "parquet", "postgres", "reranking", "rust", "surrealdb", "weaviate"]
+provides-extras = ["accel", "age", "all-backends", "dev", "discovery", "embedded", "graph-all", "kuzu", "lancedb", "logfire", "memgraph", "neo4j", "neptune", "neptune-iam", "nlp", "parquet", "postgres", "reranking", "rust", "sqlite", "surrealdb", "weaviate"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "prek", specifier = ">=0.3.3" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
