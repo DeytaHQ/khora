@@ -220,6 +220,7 @@ __marimo__/
 # Claude Code settings
 .claude/
 !.claude/docs/
+!.claude/agents/
 
 # Dispatch coordinator runtime files
 .dispatch/
