@@ -188,7 +188,11 @@ class TestCreateTablesDeprecation:
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
                 await backend.create_tables()
-                deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning) and "create_tables() is deprecated" in str(x.message)]
+                deprecation_warnings = [
+                    x
+                    for x in w
+                    if issubclass(x.category, DeprecationWarning) and "create_tables() is deprecated" in str(x.message)
+                ]
                 assert len(deprecation_warnings) >= 1
 
     async def test_pgvector_backend_warns(self):
