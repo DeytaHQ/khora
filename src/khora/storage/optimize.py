@@ -267,15 +267,14 @@ NEO4J_INDEXES = [
     {
         "name": "rel_collaborates_valid_from",
         "cypher": (
-            "CREATE INDEX rel_collaborates_valid_from IF NOT EXISTS "
-            "FOR ()-[r:COLLABORATES_WITH]-() ON (r.valid_from)"
+            "CREATE INDEX rel_collaborates_valid_from IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.valid_from)"
         ),
         "purpose": "Temporal filtering on COLLABORATES_WITH relationships",
     },
     {
         "name": "rel_associated_valid_from",
         "cypher": (
-            "CREATE INDEX rel_associated_valid_from IF NOT EXISTS " "FOR ()-[r:ASSOCIATED_WITH]-() ON (r.valid_from)"
+            "CREATE INDEX rel_associated_valid_from IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.valid_from)"
         ),
         "purpose": "Temporal filtering on ASSOCIATED_WITH relationships",
     },

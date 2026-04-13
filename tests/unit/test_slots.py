@@ -51,7 +51,7 @@ class TestSlottedInstancesOmitDict:
     def test_hot_path_model_instance_has_no_dict(self, cls):
         instance = cls()
         assert not hasattr(instance, "__dict__"), (
-            f"{cls.__name__} instance has __dict__ — " "slots=True may have been removed from the dataclass decorator"
+            f"{cls.__name__} instance has __dict__ — slots=True may have been removed from the dataclass decorator"
         )
 
     @pytest.mark.parametrize("cls", _FROZEN_RESULT_CLASSES, ids=lambda c: c.__name__)
@@ -61,7 +61,7 @@ class TestSlottedInstancesOmitDict:
         kwargs = _minimal_kwargs(cls)
         instance = cls(**kwargs)
         assert not hasattr(instance, "__dict__"), (
-            f"{cls.__name__} instance has __dict__ — " "slots=True may have been removed from the dataclass decorator"
+            f"{cls.__name__} instance has __dict__ — slots=True may have been removed from the dataclass decorator"
         )
 
 

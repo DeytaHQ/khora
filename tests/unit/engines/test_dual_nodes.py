@@ -34,8 +34,7 @@ def _make_neo4j_error(code: str, message: str = "boom") -> ClientError:
     # Neo4jError (or a different hierarchy), the test would pass
     # vacuously and the production code would break in prod.
     assert isinstance(exc, ClientError), (
-        f"expected ClientError for code {code}, got {type(exc).__name__} — "
-        "neo4j driver may have changed internal API"
+        f"expected ClientError for code {code}, got {type(exc).__name__} — neo4j driver may have changed internal API"
     )
     assert exc.code == code, f"expected code={code}, got {exc.code}"
     return exc
@@ -521,9 +520,9 @@ class TestDualNodeManagerGetEntityNeighborhoodsTimeout:
         #       the real neo4j.unit_of_work wrapper (not something we
         #       accidentally unwrapped along the way).
         work_fn = captured["work_fn"]
-        assert getattr(
-            work_fn, "_is_timed_work", False
-        ), "decorator was not applied to the function handed to execute_read"
+        assert getattr(work_fn, "_is_timed_work", False), (
+            "decorator was not applied to the function handed to execute_read"
+        )
         assert getattr(work_fn, "timeout", None) == 3.0, "wrapped function missing the driver's .timeout attribute"
 
         # The inner Cypher closure actually ran (full end-to-end wrap).

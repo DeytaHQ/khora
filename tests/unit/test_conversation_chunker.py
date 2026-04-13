@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from khora.extraction.chunkers.conversation import (
     ConversationChunker,
@@ -14,7 +14,7 @@ from khora.extraction.chunkers.conversation import (
 
 def _ts(minutes: int = 0) -> datetime:
     """Helper: return a UTC datetime offset by *minutes* from a fixed base."""
-    base = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+    base = datetime(2025, 1, 15, 10, 0, 0, tzinfo=UTC)
     return base + timedelta(minutes=minutes)
 
 

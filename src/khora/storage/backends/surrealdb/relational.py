@@ -179,12 +179,12 @@ class SurrealDBRelationalAdapter:
         where = "WHERE is_active = true" if active_only else ""
 
         count_row = await self._conn.query_one(
-            f"SELECT count() AS total FROM memory_namespace {where} GROUP ALL",  # nosec B608
+            f"SELECT count() AS total FROM memory_namespace {where} GROUP ALL",  # noqa: S608
         )
         total = count_row["total"] if count_row else 0
 
         rows = await self._conn.query(
-            f"SELECT * FROM memory_namespace {where} ORDER BY id ASC LIMIT $lim START $off",  # nosec B608
+            f"SELECT * FROM memory_namespace {where} ORDER BY id ASC LIMIT $lim START $off",  # noqa: S608
             {"lim": limit, "off": offset},
         )
         items = [self._row_to_namespace(r) for r in rows]
@@ -348,7 +348,7 @@ class SurrealDBRelationalAdapter:
             )
         else:
             rows = await self._conn.query(
-                "SELECT * FROM document " "WHERE namespace_id = $ns " "ORDER BY created_at DESC LIMIT $lim START $off",
+                "SELECT * FROM document WHERE namespace_id = $ns ORDER BY created_at DESC LIMIT $lim START $off",
                 {"ns": ns_str, "lim": limit, "off": offset},
             )
         return [self._row_to_document(r) for r in rows]
@@ -428,8 +428,7 @@ class SurrealDBRelationalAdapter:
         """Get document count and last activity timestamp in a single query."""
         ns_str = str(namespace_id)
         row = await self._conn.query_one(
-            "SELECT count() AS cnt, math::max(created_at) AS latest "
-            "FROM document WHERE namespace_id = $ns GROUP ALL",
+            "SELECT count() AS cnt, math::max(created_at) AS latest FROM document WHERE namespace_id = $ns GROUP ALL",
             {"ns": ns_str},
         )
         if not row:
@@ -440,7 +439,7 @@ class SurrealDBRelationalAdapter:
         """Get a document by content checksum within a namespace."""
         ns_str = str(namespace_id)
         row = await self._conn.query_one(
-            "SELECT * FROM document " "WHERE namespace_id = $ns AND checksum = $checksum " "LIMIT 1",
+            "SELECT * FROM document WHERE namespace_id = $ns AND checksum = $checksum LIMIT 1",
             {"ns": ns_str, "checksum": checksum},
         )
         if row is None:
@@ -491,7 +490,7 @@ class SurrealDBRelationalAdapter:
             return {}
         id_strs = [_record_id("document", uid) for uid in document_ids]
         rows = await self._conn.query(
-            "SELECT id, title, source, source_type, created_at, source_timestamp " "FROM document WHERE id IN $ids",
+            "SELECT id, title, source, source_type, created_at, source_timestamp FROM document WHERE id IN $ids",
             {"ids": id_strs},
         )
         result: dict[UUID, DocumentSource] = {}
@@ -545,7 +544,7 @@ class SurrealDBRelationalAdapter:
         """Get the last sync checkpoint for a source."""
         ns_str = str(namespace_id)
         row = await self._conn.query_one(
-            "SELECT checkpoint FROM sync_checkpoint " "WHERE namespace_id = $ns AND source = $source " "LIMIT 1",
+            "SELECT checkpoint FROM sync_checkpoint WHERE namespace_id = $ns AND source = $source LIMIT 1",
             {"ns": ns_str, "source": source},
         )
         if row is None:
@@ -563,11 +562,7 @@ class SurrealDBRelationalAdapter:
         # Deterministic record ID avoids duplicates
         upsert_id = f"sync_checkpoint:⟨{ns_str}_{source}⟩"
         await self._conn.execute(
-            "UPSERT $rid SET "
-            "namespace_id = $ns, "
-            "source = $source, "
-            "checkpoint = $checkpoint, "
-            "updated_at = $updated_at",
+            "UPSERT $rid SET namespace_id = $ns, source = $source, checkpoint = $checkpoint, updated_at = $updated_at",
             {
                 "rid": upsert_id,
                 "ns": ns_str,

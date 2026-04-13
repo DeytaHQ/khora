@@ -20,9 +20,9 @@ help:
 	@echo "  make dev              Start databases (postgres + neo4j)"
 	@echo "  make dev-down         Stop databases"
 	@echo "  make test             Run tests with coverage"
-	@echo "  make lint             Run linting (ruff, black, isort, ty)"
+	@echo "  make lint             Run linting (ruff, ty)"
 	@echo "  make typecheck        Run type checking (ty)"
-	@echo "  make format           Format code (black, isort, ruff)"
+	@echo "  make format           Format code (ruff)"
 	@echo "  make prek             Run pre-commit hooks"
 	@echo "  make clean            Clean build artifacts"
 	@echo ""
@@ -77,14 +77,12 @@ typecheck:
 # Run linting
 lint:
 	uv run ruff check .
-	uv run black --check .
-	uv run isort --check .
+	uv run ruff format --check .
 	uv run ty check src/
 
 # Format code
 format:
-	uv run black .
-	uv run isort .
+	uv run ruff format .
 	uv run ruff check --fix .
 
 # Run prek hooks

@@ -155,7 +155,7 @@ class ChatEngine:
                 entity_context.append(entry)
 
         logger.debug(
-            f"Found {len(search_results)} relevant search results" f" and {len(entity_context)} entity context entries"
+            f"Found {len(search_results)} relevant search results and {len(entity_context)} entity context entries"
         )
 
         # 2. Get conversation context

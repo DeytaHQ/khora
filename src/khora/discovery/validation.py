@@ -547,9 +547,7 @@ def classify_content(content: str, source_url: str = "") -> ContentClassificatio
 
     if total_weighted_links > 15 and len(result.document_links) > 3:
         result.content_class = ContentClass.INDEX
-        result.reason = (
-            f"{len(result.document_links)} document links detected " f"(weighted score: {total_weighted_links})"
-        )
+        result.reason = f"{len(result.document_links)} document links detected (weighted score: {total_weighted_links})"
         return result
 
     if result.link_count > 10 and result.prose_lines > 0:

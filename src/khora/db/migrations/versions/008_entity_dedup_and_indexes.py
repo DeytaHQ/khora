@@ -46,7 +46,8 @@ def upgrade() -> None:
 
     # Step 1: Merge source_document_ids, source_chunk_ids, and mention_counts
     # from all duplicates into the survivor (highest mention_count, lowest id).
-    op.execute(text("""
+    op.execute(
+        text("""
             WITH duplicate_groups AS (
                 SELECT namespace_id, name, entity_type
                 FROM entities
@@ -105,7 +106,8 @@ def upgrade() -> None:
                 mention_count = md.total_mentions
             FROM merged_data md
             WHERE e.id = md.survivor_id
-        """))
+        """)
+    )
 
     # Step 2: Re-point relationships from duplicate entities to survivors.
     # This prevents cascade-delete from dropping valid relationship data.
@@ -131,7 +133,8 @@ def upgrade() -> None:
             op.execute(text(_remap_sql.format(table=table, column=column)))
 
     # Step 3: Delete non-survivor duplicates.
-    op.execute(text("""
+    op.execute(
+        text("""
             WITH ranked AS (
                 SELECT id,
                        ROW_NUMBER() OVER (
@@ -142,7 +145,8 @@ def upgrade() -> None:
             )
             DELETE FROM entities
             WHERE id IN (SELECT id FROM ranked WHERE rn > 1)
-        """))
+        """)
+    )
 
     # Step 4: Drop the old non-unique index and create a unique constraint.
     op.execute(text("DROP INDEX IF EXISTS ix_entities_namespace_name_type"))
@@ -161,21 +165,18 @@ def upgrade() -> None:
     ).scalar()
     if has_khora_chunks:
         op.execute(
-            text("CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_doc " "ON khora_chunks (namespace_id, document_id)")
+            text("CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_doc ON khora_chunks (namespace_id, document_id)")
         )
 
     # =========================================================================
     # 5.5: Entity temporal partial indexes
     # =========================================================================
     op.execute(
-        text(
-            "CREATE INDEX IF NOT EXISTS ix_entities_valid_from " "ON entities (valid_from) WHERE valid_from IS NOT NULL"
-        )
+        text("CREATE INDEX IF NOT EXISTS ix_entities_valid_from ON entities (valid_from) WHERE valid_from IS NOT NULL")
     )
     op.execute(
         text(
-            "CREATE INDEX IF NOT EXISTS ix_entities_valid_until "
-            "ON entities (valid_until) WHERE valid_until IS NOT NULL"
+            "CREATE INDEX IF NOT EXISTS ix_entities_valid_until ON entities (valid_until) WHERE valid_until IS NOT NULL"
         )
     )
 

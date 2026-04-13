@@ -32,7 +32,7 @@ class SurrealDBConnection:
         namespace: str = "khora",
         database: str = "default",
         user: str = "root",
-        password: str = "root",
+        password: str = "root",  # noqa: S107
         sync_data: bool = True,
     ) -> None:
         self._mode = mode

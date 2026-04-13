@@ -224,7 +224,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
 
     async def get_chunk(self, chunk_id: UUID, namespace_id: UUID) -> TemporalChunk | None:
         """Fetch a temporal chunk by ID, scoped to namespace."""
-        sql = "SELECT * FROM temporal_chunk:\u27e8$id\u27e9 " "WHERE namespace = memory_namespace:\u27e8$ns\u27e9"
+        sql = "SELECT * FROM temporal_chunk:\u27e8$id\u27e9 WHERE namespace = memory_namespace:\u27e8$ns\u27e9"
         row = await self._conn.query_one(sql, {"id": str(chunk_id), "ns": str(namespace_id)})
         if not row:
             return None
@@ -381,7 +381,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         # The SurrealDB <|K|> KNN operator does not accept parameterised
         # values and is unreliable in embedded mode (returns 0 results).
         sql = (
-            "SELECT *, vector::similarity::cosine(embedding, $query_embedding) AS similarity "  # nosec B608
+            "SELECT *, vector::similarity::cosine(embedding, $query_embedding) AS similarity "  # noqa: S608
             f"FROM temporal_chunk WHERE {where_sql} "
             f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )
@@ -422,7 +422,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         where_sql = " AND ".join(clauses)
 
         sql = (
-            "SELECT *, search::score(1) AS rank "  # nosec B608
+            "SELECT *, search::score(1) AS rank "  # noqa: S608
             f"FROM temporal_chunk WHERE {where_sql} "
             "ORDER BY rank DESC LIMIT $bm25_limit"
         )
@@ -518,7 +518,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Return the total number of temporal chunks in a namespace."""
         sql = (
-            "SELECT count() AS cnt FROM temporal_chunk "  # nosec B608
+            "SELECT count() AS cnt FROM temporal_chunk "  # noqa: S608
             f"WHERE namespace = memory_namespace:\u27e8{namespace_id}\u27e9 GROUP ALL"
         )
         row = await self._conn.query_one(sql)

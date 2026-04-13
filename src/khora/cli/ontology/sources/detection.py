@@ -26,4 +26,4 @@ def detect_source(raw: str) -> DataSource:
     if path.suffix:
         raise FileNotFoundError(f"File not found: {path}")
 
-    raise ValueError(f"Cannot determine source type for: {raw!r}. " "Provide a path to a local file or directory.")
+    raise ValueError(f"Cannot determine source type for: {raw!r}. Provide a path to a local file or directory.")

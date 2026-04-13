@@ -133,5 +133,5 @@ def downgrade() -> None:
         op.execute(text("DROP INDEX CONCURRENTLY IF EXISTS ix_khora_chunks_embedding_hnsw"))
     with op.get_context().autocommit_block():
         op.execute(
-            text("ALTER INDEX IF EXISTS ix_khora_chunks_embedding_hnsw_v2 " "RENAME TO ix_khora_chunks_embedding_hnsw")
+            text("ALTER INDEX IF EXISTS ix_khora_chunks_embedding_hnsw_v2 RENAME TO ix_khora_chunks_embedding_hnsw")
         )

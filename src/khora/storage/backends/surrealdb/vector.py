@@ -260,7 +260,7 @@ class SurrealDBVectorAdapter:
         # vector::dot() is ~3x faster than vector::similarity::cosine() and
         # produces identical results for L2-normalized embeddings (unit vectors).
         sql = (
-            "SELECT *, vector::dot(embedding, $query_embedding) AS similarity "  # nosec B608
+            "SELECT *, vector::dot(embedding, $query_embedding) AS similarity "  # noqa: S608
             f"FROM chunk WHERE {where_sql} "
             f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )
@@ -317,7 +317,7 @@ class SurrealDBVectorAdapter:
 
         where_sql = " AND ".join(where_clauses)
         sql = (
-            "SELECT *, search::score(1) AS rank "  # nosec B608
+            "SELECT *, search::score(1) AS rank "  # noqa: S608
             f"FROM chunk WHERE {where_sql} "
             "ORDER BY rank DESC LIMIT $limit"
         )
@@ -347,9 +347,7 @@ class SurrealDBVectorAdapter:
     ) -> list[Chunk]:
         """Paginated listing of chunks in a namespace."""
         ns_rid = _rid("memory_namespace", namespace_id)
-        sql = (
-            "SELECT * FROM chunk " "WHERE namespace = $ns_rid " "ORDER BY created_at DESC " "LIMIT $limit START $offset"
-        )
+        sql = "SELECT * FROM chunk WHERE namespace = $ns_rid ORDER BY created_at DESC LIMIT $limit START $offset"
         rows = await self._conn.query(sql, {"ns_rid": ns_rid, "limit": limit, "offset": offset})
         return [self._row_to_chunk(r) for r in rows]
 
@@ -486,7 +484,7 @@ class SurrealDBVectorAdapter:
 
         # 1. Batch-fetch existing entities using tuple IN syntax (faster than N OR clauses)
         unique_pairs = list({(e.name, e.entity_type) for e in entities})
-        fetch_sql = "SELECT * FROM entity WHERE namespace = $ns_rid " "AND [name, entity_type] IN $pairs"
+        fetch_sql = "SELECT * FROM entity WHERE namespace = $ns_rid AND [name, entity_type] IN $pairs"
         existing_rows = await self._conn.query(
             fetch_sql,
             {"ns_rid": ns_rid, "pairs": [list(p) for p in unique_pairs]},
@@ -598,7 +596,7 @@ class SurrealDBVectorAdapter:
         """
         ns_rid = _rid("memory_namespace", namespace_id)
         sql = (
-            "SELECT id, vector::dot(embedding, $query_embedding) AS similarity "  # nosec B608
+            "SELECT id, vector::dot(embedding, $query_embedding) AS similarity "  # noqa: S608
             "FROM entity WHERE (namespace = $ns_rid OR namespace.namespace_id = $ns_str) AND embedding IS NOT NULL "
             f"ORDER BY similarity DESC LIMIT {int(limit)}"
         )

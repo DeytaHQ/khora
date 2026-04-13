@@ -912,7 +912,7 @@ class VectorCypherEngine:
         if is_conversation:
             min_tokens = min(min_tokens, 15)
         if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in chunks):
-            logger.debug(f"Skipping entity extraction for {len(chunks)} short chunks " f"(all ≤ {min_tokens} tokens)")
+            logger.debug(f"Skipping entity extraction for {len(chunks)} short chunks (all ≤ {min_tokens} tokens)")
             return [], [], []
 
         # Skip skeleton overhead for small documents (≤2 chunks)
@@ -1809,8 +1809,7 @@ class VectorCypherEngine:
                     relationships = per_doc_relationships
                 else:
                     logger.debug(
-                        f"Batch extraction: {len(all_core_chunk_objects)} core chunks "
-                        f"from {len(ok_states)} documents"
+                        f"Batch extraction: {len(all_core_chunk_objects)} core chunks from {len(ok_states)} documents"
                     )
                     entities, relationships = await extract_entities(
                         all_core_chunk_objects,

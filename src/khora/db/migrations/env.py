@@ -94,7 +94,7 @@ def _acquire_advisory_lock(
             high = min(max_delay, min_delay * (2**attempt))
         except OverflowError:
             high = max_delay
-        time.sleep(random.uniform(min_delay, high))
+        time.sleep(random.uniform(min_delay, high))  # noqa: S311
         attempt += 1
 
 
@@ -126,7 +126,7 @@ def do_run_migrations(connection: Connection) -> None:
         current_rev = None
         if table_exists:
             try:
-                result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))  # nosec B608
+                result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))  # noqa: S608
                 row = result.fetchone()
                 current_rev = row[0] if row else None
             except Exception:

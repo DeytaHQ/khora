@@ -2870,7 +2870,7 @@ class TestSurrealDBAutoSchemaInit:
 
         conn = SurrealDBConnection()
         assert hasattr(conn, "_sync_data"), (
-            "Phase 3 contract: SurrealDBConnection must expose _sync_data " "flag so crash-safe fsync can be toggled"
+            "Phase 3 contract: SurrealDBConnection must expose _sync_data flag so crash-safe fsync can be toggled"
         )
         assert conn._sync_data is True
 
@@ -2892,7 +2892,7 @@ class TestSurrealDBCrashSafeDefaults:
 
         cfg = SurrealDBConfig()
         assert hasattr(cfg, "sync_data"), (
-            "Phase 3 contract: SurrealDBConfig must include sync_data " "field to control crash-safe fsync behaviour"
+            "Phase 3 contract: SurrealDBConfig must include sync_data field to control crash-safe fsync behaviour"
         )
         assert cfg.sync_data is True
 
@@ -3475,9 +3475,9 @@ class TestKuzuDeprecation:
             importlib.reload(kuzu_mod)
 
         deprecation_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-        assert (
-            len(deprecation_warnings) >= 1
-        ), f"Expected DeprecationWarning from kuzu import, got: {[w.category.__name__ for w in caught]}"
+        assert len(deprecation_warnings) >= 1, (
+            f"Expected DeprecationWarning from kuzu import, got: {[w.category.__name__ for w in caught]}"
+        )
 
 
 # ---------------------------------------------------------------------------

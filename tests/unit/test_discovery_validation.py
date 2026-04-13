@@ -199,9 +199,7 @@ class TestRelevance:
 
     def test_stemmed_matching_boosts_score(self) -> None:
         """Stemming should match 'production' to 'produce', etc."""
-        content = (
-            "This report covers wine production statistics across " "European regions including quality assessments."
-        )
+        content = "This report covers wine production statistics across European regions including quality assessments."
         # "datasets" in query should match "dataset"-like stems in content
         score = estimate_relevance(content, "wine production quality")
         assert score > 0.4

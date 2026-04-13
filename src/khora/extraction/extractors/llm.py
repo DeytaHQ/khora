@@ -1513,7 +1513,9 @@ class LLMEntityExtractor(EntityExtractor):
 
             composer = ExpertiseComposer()
             # Append multi-section response format to the text
-            multi_text = sections + """
+            multi_text = (
+                sections
+                + """
 
 ## MULTI-SECTION RESPONSE FORMAT:
 Return a JSON object with a "sections" array, one object per input section:
@@ -1522,6 +1524,7 @@ Return a JSON object with a "sections" array, one object per input section:
     ...
 ]}
 Each section follows the entity/relationship format from the instructions above."""
+            )
 
             prompt_context = {
                 **(context or {}),

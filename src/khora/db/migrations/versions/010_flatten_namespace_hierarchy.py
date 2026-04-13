@@ -38,12 +38,14 @@ def upgrade() -> None:
     # Step 1: Pre-check for duplicate slugs across workspaces
     # =========================================================================
     conn = op.get_bind()
-    result = conn.execute(text("""
+    result = conn.execute(
+        text("""
         SELECT slug, version, count(*) AS cnt
         FROM memory_namespaces
         GROUP BY slug, version
         HAVING count(*) > 1
-    """))
+    """)
+    )
     duplicates = result.fetchall()
     if duplicates:
         lines = [f"  slug={row[0]!r}, version={row[1]}, count={row[2]}" for row in duplicates]
@@ -172,12 +174,15 @@ def downgrade() -> None:
 
     # Reverse step 5: Re-add workspace_id column with FK
     # Create a default org and workspace to satisfy FK constraints
-    op.execute(text("""
+    op.execute(
+        text("""
         INSERT INTO organizations (id, name, slug)
         VALUES ('00000000-0000-0000-0000-000000000001', 'Default Organization', 'default')
         ON CONFLICT DO NOTHING
-    """))
-    op.execute(text("""
+    """)
+    )
+    op.execute(
+        text("""
         INSERT INTO workspaces (id, organization_id, name, slug)
         VALUES (
             '00000000-0000-0000-0000-000000000002',
@@ -186,7 +191,8 @@ def downgrade() -> None:
             'default'
         )
         ON CONFLICT DO NOTHING
-    """))
+    """)
+    )
 
     op.add_column(
         "memory_namespaces",

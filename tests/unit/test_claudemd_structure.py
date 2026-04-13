@@ -66,9 +66,9 @@ class TestCriticalGotchas:
         assert "deprecated" in claude_md_content.lower(), "create_tables() must be marked as deprecated"
 
     def test_khora_alembic_version_table(self, claude_md_content: str) -> None:
-        assert (
-            "khora_alembic_version" in claude_md_content
-        ), "Missing critical gotcha: khora_alembic_version table naming"
+        assert "khora_alembic_version" in claude_md_content, (
+            "Missing critical gotcha: khora_alembic_version table naming"
+        )
 
     def test_as_uuid_true(self, claude_md_content: str) -> None:
         assert "as_uuid=True" in claude_md_content, "Missing critical gotcha: as_uuid=True UUID handling"

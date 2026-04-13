@@ -69,6 +69,6 @@ class RelationshipInferrer:
             logger.debug(f"Relationship inference reasoning: {reasoning}")
 
         logger.info(
-            f"Inferred {len(valid)} relationship types " f"(dropped {len(rel_types) - len(valid)} with bad references)"
+            f"Inferred {len(valid)} relationship types (dropped {len(rel_types) - len(valid)} with bad references)"
         )
         return valid

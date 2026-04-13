@@ -159,8 +159,7 @@ class OntologyConstructFlow:
             self._sampler.sample_all(budget_chars=30_000)
 
         console.print(
-            f"[green]Sampled {self._sampler.total_chars:,} characters "
-            f"from {self._sampler.source_count} source(s).[/]\n"
+            f"[green]Sampled {self._sampler.total_chars:,} characters from {self._sampler.source_count} source(s).[/]\n"
         )
 
     def _prompt_for_sources(self) -> list[str]:

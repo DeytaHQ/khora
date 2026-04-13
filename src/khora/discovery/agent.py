@@ -581,7 +581,7 @@ class DiscoveryAgent:
                     break
                 except retryable_errors as e:
                     if _attempt < 2:
-                        logger.warning(f"Transient error fetching {src.url} " f"(attempt {_attempt + 1}/3): {e}")
+                        logger.warning(f"Transient error fetching {src.url} (attempt {_attempt + 1}/3): {e}")
                         await asyncio.sleep(2.0 * (_attempt + 1))
                         continue
                     raise

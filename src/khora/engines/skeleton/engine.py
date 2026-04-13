@@ -702,7 +702,7 @@ class SkeletonConstructionEngine:
                 new_indices.append(i)
 
             timings["dedup_ms"] = (time.perf_counter() - start) * 1000
-            logger.debug(f"Stage 0 dedup: {len(new_indices)} new, {skipped} skipped " f"in {timings['dedup_ms']:.1f}ms")
+            logger.debug(f"Stage 0 dedup: {len(new_indices)} new, {skipped} skipped in {timings['dedup_ms']:.1f}ms")
 
             if not new_indices:
                 timings["total_ms"] = (time.perf_counter() - total_start) * 1000
@@ -779,9 +779,7 @@ class SkeletonConstructionEngine:
                 span.set_attribute("doc_count", len(created_docs))
 
             timings["create_and_chunk_ms"] = (time.perf_counter() - start) * 1000
-            logger.debug(
-                f"Stage 1 create+chunk: {len(created_docs)} docs " f"in {timings['create_and_chunk_ms']:.1f}ms"
-            )
+            logger.debug(f"Stage 1 create+chunk: {len(created_docs)} docs in {timings['create_and_chunk_ms']:.1f}ms")
 
             # Build per-document chunk lists, tracking which docs had errors
             per_doc_chunks: list[list[Any]] = []
@@ -814,7 +812,7 @@ class SkeletonConstructionEngine:
                     span.set_attribute("chunk_count", len(all_chunk_texts))
 
             timings["embed_ms"] = (time.perf_counter() - start) * 1000
-            logger.debug(f"Stage 2 embed: {len(all_chunk_texts)} chunks " f"in {timings['embed_ms']:.1f}ms")
+            logger.debug(f"Stage 2 embed: {len(all_chunk_texts)} chunks in {timings['embed_ms']:.1f}ms")
 
             # ── Stage 3: Build TemporalChunks + store batch ──────────────
             start = time.perf_counter()
@@ -855,7 +853,7 @@ class SkeletonConstructionEngine:
                     span.set_attribute("stored_count", len(stored_chunks))
 
             timings["store_ms"] = (time.perf_counter() - start) * 1000
-            logger.debug(f"Stage 3 store: {len(stored_chunks)} chunks " f"in {timings['store_ms']:.1f}ms")
+            logger.debug(f"Stage 3 store: {len(stored_chunks)} chunks in {timings['store_ms']:.1f}ms")
 
             # ── Stage 4: Update document statuses ─────────────────────────
             start = time.perf_counter()

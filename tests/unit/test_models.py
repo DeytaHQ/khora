@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from khora.core.models import Chunk, Document, Entity, Relationship
@@ -32,7 +32,7 @@ class TestDocument:
 
     def test_document_timestamps(self) -> None:
         """Test document timestamp handling."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         doc = Document(content="Content", created_at=now, updated_at=now)
         assert doc.created_at == now
         assert doc.updated_at == now
@@ -165,7 +165,7 @@ class TestEntity:
 
     def test_entity_temporal_validity(self) -> None:
         """Test entity temporal validity range."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         entity = Entity(
             name="Test",
             entity_type="EVENT",
@@ -277,7 +277,7 @@ class TestEpisode:
 
     def test_episode_temporal(self) -> None:
         """Test episode with temporal information."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         episode = Episode(name="Conference", occurred_at=now)
         assert episode.occurred_at == now
 

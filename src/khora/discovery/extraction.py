@@ -148,7 +148,7 @@ def extract_docx_text(path: Path) -> str:
     """
     if not _HAS_DOCX:
         logger.warning(
-            f"python-docx not installed — cannot extract text from {path.name}. " "Install: pip install python-docx"
+            f"python-docx not installed — cannot extract text from {path.name}. Install: pip install python-docx"
         )
         return ""
 
@@ -170,7 +170,7 @@ def extract_parquet_text(path: Path) -> str:
     Returns empty string if pyarrow is not installed.
     """
     if not _HAS_PYARROW:
-        logger.warning(f"pyarrow not installed — cannot extract data from {path.name}. " "Install: pip install pyarrow")
+        logger.warning(f"pyarrow not installed — cannot extract data from {path.name}. Install: pip install pyarrow")
         return ""
 
     import pyarrow.parquet as pq

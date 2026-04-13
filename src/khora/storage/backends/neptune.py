@@ -104,7 +104,7 @@ class NeptuneBackend(GraphBackendBase):
                 auth_token = json.dumps(dict(request.headers))
                 auth = neo4j.basic_auth("", auth_token)
             except ImportError:
-                raise ImportError("boto3 is required for Neptune IAM auth. " "Install: pip install khora[neptune-iam]")
+                raise ImportError("boto3 is required for Neptune IAM auth. Install: pip install khora[neptune-iam]")
         else:
             auth = (self._user, self._password) if self._user else None
 
