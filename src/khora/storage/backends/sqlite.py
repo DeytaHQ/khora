@@ -493,8 +493,10 @@ class SQLiteRelationalBackend:
         return row["cnt"], _parse_dt(row["last_at"])
 
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
+        """Get a document by content checksum. FAILED documents are excluded."""
+        # Note: SQLite (dev/test only) relies on full table scan; no partial index optimization
         cursor = await self._conn.execute(
-            "SELECT * FROM documents WHERE namespace_id = ? AND checksum = ? LIMIT 1",
+            "SELECT * FROM documents WHERE namespace_id = ? AND checksum = ? AND status != 'failed' LIMIT 1",
             (str(namespace_id), checksum),
         )
         row = await cursor.fetchone()
