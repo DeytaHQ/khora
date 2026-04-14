@@ -15,6 +15,8 @@ NAMESPACE_ID = uuid4()
 def _make_existing_doc(checksum: str) -> MagicMock:
     """Create a mock existing document (returned by get_documents_by_checksums)."""
     doc = MagicMock()
+    doc.id = uuid4()
+    doc.namespace_id = NAMESPACE_ID
     doc.status = "completed"
     doc.metadata.checksum = checksum
     return doc
@@ -55,6 +57,10 @@ class TestStageDocumentsBatchDedupe:
         assert results[0] is not None
         assert results[1] is not None
         assert results[0] is results[1]
+
+        # L1: verify get_documents_by_checksums called with correct args
+        checksum = compute_checksum("same content")
+        storage.get_documents_by_checksums.assert_awaited_once_with(NAMESPACE_ID, [checksum])
 
     @pytest.mark.asyncio
     async def test_three_docs_two_identical_one_unique(self) -> None:
@@ -144,3 +150,16 @@ class TestStageDocumentsBatchDedupe:
         assert len(results) == 3
         assert all(r is None for r in results)
         assert storage.create_document.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_large_batch_with_many_dups(self) -> None:
+        """15 identical docs -> create_document called once, all results same object."""
+        storage = _make_storage()
+        inputs = [_doc_input("repeated") for _ in range(15)]
+
+        results = await stage_documents_batch(inputs, NAMESPACE_ID, storage)
+
+        assert len(results) == 15
+        assert storage.create_document.call_count == 1
+        assert all(r is not None for r in results)
+        assert all(r is results[0] for r in results)

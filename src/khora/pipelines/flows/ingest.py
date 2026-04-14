@@ -662,8 +662,9 @@ async def stage_documents_batch(
         total_dups = sum(len(idxs) for idxs in dup_groups.values())
         logger.debug(f"Intra-batch dedup: {total_dups} duplicate(s) across {len(dup_groups)} checksum(s)")
 
-    # Single batch query for existing documents (replaces N individual queries)
-    existing = await storage.get_documents_by_checksums(namespace_id, checksums)
+    # Single batch query for existing documents — query only unique checksums
+    unique_checksums = list(canonical_idx.keys())
+    existing = await storage.get_documents_by_checksums(namespace_id, unique_checksums)
 
     results: list[Document | None] = [None] * len(doc_inputs)
     stage_sem = asyncio.Semaphore(10)

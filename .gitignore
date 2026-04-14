@@ -1,6 +1,7 @@
 # Khora specific
 config/khora.yaml
 docs/REFERENCES.md
+docs/AI_CHANGELOG.md
 plans/
 
 # Byte-compiled / optimized / DLL files
