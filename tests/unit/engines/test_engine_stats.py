@@ -315,27 +315,28 @@ class TestVectorCypherStats:
         assert result.last_activity_at == ts
 
     @pytest.mark.asyncio
-    async def test_stats_uses_dual_nodes_for_chunks(self) -> None:
-        """stats() uses dual_nodes.count_chunks when available."""
-        storage = _make_mock_storage()
-        dual_nodes = AsyncMock()
-        dual_nodes.count_chunks = AsyncMock(return_value=42)
-        engine = self._make_engine(storage, dual_nodes=dual_nodes)
+    async def test_stats_uses_storage_for_chunks(self) -> None:
+        """stats() uses storage.count_chunks for chunk count (DYT-2116)."""
+        storage = _make_mock_storage(chunk_count=42)
+        engine = self._make_engine(storage)
 
         result = await engine.stats(uuid4())
 
         assert result.chunks == 42
-        dual_nodes.count_chunks.assert_awaited_once()
+        storage.count_chunks.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_stats_uses_temporal_store_for_chunks(self) -> None:
-        """stats() falls back to temporal_store.count_chunks when no dual_nodes."""
+    async def test_stats_no_neo4j_calls(self) -> None:
+        """stats() does not call dual_nodes.count_chunks."""
         storage = _make_mock_storage()
-        engine = self._make_engine(storage, dual_nodes=None)
+        dual_nodes = AsyncMock()
+        dual_nodes.count_chunks = AsyncMock(return_value=99)
+        engine = self._make_engine(storage, dual_nodes=dual_nodes)
 
         result = await engine.stats(uuid4())
 
-        assert result.chunks == 20  # from temporal_store mock
+        assert result.chunks == 20  # from storage, not dual_nodes
+        dual_nodes.count_chunks.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_stats_get_document_stats_fallback(self) -> None:

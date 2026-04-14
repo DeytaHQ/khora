@@ -298,19 +298,18 @@ class TestVectorCypherEngineStats:
         return VectorCypherEngine(config)
 
     @pytest.mark.asyncio
-    async def test_stats_returns_last_activity_at_with_dual_nodes(self) -> None:
-        """stats() returns last_activity_at; uses dual_nodes for chunk count."""
+    async def test_stats_routes_chunks_through_storage(self) -> None:
+        """stats() gets chunk count from storage.count_chunks (DYT-2116)."""
         ts = datetime(2026, 1, 10, 9, 0, 0, tzinfo=UTC)
         engine = self._make_engine()
         engine._connected = True
         engine._storage = _mock_storage(
             doc_count=4,
+            chunk_count=15,
             entity_count=6,
             relationship_count=3,
             last_activity_at=ts,
         )
-        engine._dual_nodes = AsyncMock()
-        engine._dual_nodes.count_chunks = AsyncMock(return_value=15)
 
         result = await engine.stats(uuid4())
 
@@ -321,28 +320,6 @@ class TestVectorCypherEngineStats:
         assert result.last_activity_at == ts
 
     @pytest.mark.asyncio
-    async def test_stats_returns_last_activity_at_with_temporal_store(self) -> None:
-        """stats() uses temporal_store for chunk count when dual_nodes is None."""
-        ts = datetime(2026, 1, 10, 9, 0, 0, tzinfo=UTC)
-        engine = self._make_engine()
-        engine._connected = True
-        engine._storage = _mock_storage(
-            doc_count=4,
-            entity_count=6,
-            relationship_count=3,
-            last_activity_at=ts,
-        )
-        engine._dual_nodes = None
-        engine._temporal_store = AsyncMock()
-        engine._temporal_store.count_chunks = AsyncMock(return_value=12)
-
-        result = await engine.stats(uuid4())
-
-        assert result.documents == 4
-        assert result.chunks == 12
-        assert result.last_activity_at == ts
-
-    @pytest.mark.asyncio
     async def test_stats_fallback_on_error(self) -> None:
         """stats() returns zeros and None when storage methods fail."""
         engine = self._make_engine()
@@ -350,15 +327,15 @@ class TestVectorCypherEngineStats:
 
         storage = AsyncMock()
         storage.get_document_stats = AsyncMock(side_effect=AttributeError)
+        storage.count_chunks = AsyncMock(return_value=0)
         storage.count_entities = AsyncMock(side_effect=NotImplementedError)
         storage.count_relationships = AsyncMock(side_effect=AttributeError)
         engine._storage = storage
-        engine._dual_nodes = AsyncMock()
-        engine._dual_nodes.count_chunks = AsyncMock(return_value=0)
 
         result = await engine.stats(uuid4())
 
         assert result.documents == 0
+        assert result.chunks == 0
         assert result.entities == 0
         assert result.relationships == 0
         assert result.last_activity_at is None
@@ -372,11 +349,10 @@ class TestVectorCypherEngineStats:
 
         storage = AsyncMock()
         storage.get_document_stats = AsyncMock(return_value=(10, ts))
+        storage.count_chunks = AsyncMock(return_value=50)
         storage.count_entities = AsyncMock(side_effect=AttributeError)
         storage.count_relationships = AsyncMock(return_value=5)
         engine._storage = storage
-        engine._dual_nodes = AsyncMock()
-        engine._dual_nodes.count_chunks = AsyncMock(return_value=50)
 
         result = await engine.stats(uuid4())
 

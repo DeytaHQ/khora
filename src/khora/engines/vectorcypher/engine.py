@@ -2291,7 +2291,6 @@ class VectorCypherEngine:
     async def stats(self, namespace_id: UUID) -> Stats:
         """Get document/chunk/entity/relationship counts for a namespace."""
         storage = self._get_storage()
-        dual_nodes = self._get_dual_nodes()
 
         doc_count = 0
         entity_count = 0
@@ -2303,11 +2302,8 @@ class VectorCypherEngine:
         except (AttributeError, NotImplementedError):
             pass
 
-        # Get chunk count
-        if dual_nodes is not None:
-            chunk_count = await dual_nodes.count_chunks(namespace_id)
-        else:
-            chunk_count = await self._get_temporal_store().count_chunks(namespace_id)
+        # Get chunk count — routed through Postgres via StorageCoordinator (DYT-2116)
+        chunk_count = await storage.count_chunks(namespace_id)
 
         try:
             entity_count = await storage.count_entities(namespace_id)

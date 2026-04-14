@@ -592,7 +592,9 @@ class StorageCoordinator:
         return await self.vector.list_chunks(namespace_id, limit=limit, offset=offset)
 
     async def count_entities(self, namespace_id: UUID) -> int:
-        """Count entities in a namespace."""
+        """Count entities in a namespace. Best-effort during active ingestion (non-atomic dual-write)."""
+        if self.vector and hasattr(self.vector, "count_entities"):
+            return await self.vector.count_entities(namespace_id)
         if self.graph:
             return await self.graph.count_entities(namespace_id)
         return 0
