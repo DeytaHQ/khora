@@ -66,6 +66,7 @@ DEFINE FIELD IF NOT EXISTS updated_at ON document TYPE datetime DEFAULT time::no
 DEFINE FIELD IF NOT EXISTS processed_at ON document TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS source_timestamp ON document TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS idx_document_namespace ON document FIELDS namespace_id;
+-- Note: SurrealDB does not support partial indexes; full index used for dedup queries
 DEFINE INDEX IF NOT EXISTS idx_document_ns_checksum ON document FIELDS namespace_id, checksum;
 DEFINE INDEX IF NOT EXISTS idx_document_ns_status ON document FIELDS namespace_id, status;
 

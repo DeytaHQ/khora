@@ -169,6 +169,12 @@ class DocumentModel(Base):
 
     __table_args__ = (
         Index("ix_documents_namespace_checksum", "namespace_id", "checksum"),
+        Index(
+            "ix_documents_namespace_checksum_active",
+            "namespace_id",
+            "checksum",
+            postgresql_where=text("status != 'failed'"),
+        ),
         Index("ix_documents_namespace_source_type", "namespace_id", "source_type"),
         Index("ix_documents_namespace_created_at", "namespace_id", "created_at"),
     )

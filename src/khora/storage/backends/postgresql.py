@@ -473,6 +473,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Get a document by its content checksum (for deduplication).
 
         Returns the first matching document if multiple exist with the same checksum.
+        FAILED documents are excluded to allow re-ingestion of previously failed content.
         """
         async with self._get_session() as session:
             result = await session.execute(
@@ -506,6 +507,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Fetch documents by content checksums in a single query.
 
         Used for batch deduplication to avoid N serial DB queries.
+        FAILED documents are excluded to allow re-ingestion of previously failed content.
 
         Args:
             namespace_id: Namespace to search in
