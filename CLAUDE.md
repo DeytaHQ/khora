@@ -20,7 +20,7 @@ uv run khora search "query" -n <namespace>        # Search knowledge graph
 ## Architecture
 
 - **Engines:** implement `MemoryEngineProtocol` in `engines/protocol.py`. Default engine is `vectorcypher`
-- **Graph backends:** Neo4j, SurrealDB, Memgraph, Neptune, AGE — implement `GraphBackend` in `storage/backends/base.py`
+- **Graph backends:** Neo4j, SurrealDB, Memgraph, Kuzu, Neptune, AGE — implement `GraphBackend` in `storage/backends/base.py`
 - **SurrealDB:** unified backend (graph + vector + relational). Modes: `memory://`, `surrealkv://` (embedded), `ws://` (remote). Set `backend: surrealdb` in config
 - **Extraction skills:** YAML-defined in `extraction/skills/builtin/`. Generate with `khora ontology construct`
 - **Config:** env vars with `KHORA_` prefix and single underscore (e.g., `KHORA_QUERY_ENABLE_HYDE=true`, `KHORA_LLM_MODEL=gpt-4o`). Legacy `__` nesting also supported
