@@ -418,7 +418,9 @@ class MemoryLake:
                 # NOTE: expertise and extraction_config_hash are always forwarded,
                 # even when None. Custom engines registered via register_engine()
                 # must accept these kwargs to remain compatible (ADR-022).
-                remember_kwargs: dict[str, Any] = dict(
+                result = await self._get_engine().remember(
+                    content,
+                    namespace_id,
                     title=title,
                     source=source,
                     metadata=metadata,
@@ -428,13 +430,7 @@ class MemoryLake:
                     expertise=expertise,
                     extraction_config_hash=extraction_config_hash,
                     chunk_strategy=chunk_strategy,
-                )
-                if external_id is not None:
-                    remember_kwargs["external_id"] = external_id
-                result = await self._get_engine().remember(
-                    content,
-                    namespace_id,
-                    **remember_kwargs,
+                    external_id=external_id,
                 )
                 return replace(result, llm_usage=collect_usage())
         finally:

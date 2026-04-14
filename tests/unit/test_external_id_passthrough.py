@@ -75,7 +75,7 @@ class TestRememberWithExternalId:
 
         assert result == mock_result
         call_kwargs = lake._engine.remember.call_args.kwargs
-        assert "external_id" not in call_kwargs
+        assert call_kwargs["external_id"] is None
 
 
 # ---------------------------------------------------------------------------

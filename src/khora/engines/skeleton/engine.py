@@ -207,6 +207,7 @@ class SkeletonConstructionEngine:
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        external_id: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 

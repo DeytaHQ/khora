@@ -322,7 +322,7 @@ class TestRemember:
 
     @pytest.mark.asyncio
     async def test_remember_without_external_id(self) -> None:
-        """remember() without external_id omits it from engine kwargs (backward compat)."""
+        """remember() without external_id passes None (backward compat)."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
 
@@ -347,7 +347,7 @@ class TestRemember:
             )
 
         call_kwargs = lake._engine.remember.call_args.kwargs
-        assert "external_id" not in call_kwargs
+        assert call_kwargs["external_id"] is None
 
     @pytest.mark.asyncio
     async def test_remember_passes_special_char_external_id(self) -> None:
