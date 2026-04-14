@@ -803,6 +803,7 @@ class TestVectorCypherEngineConnectAcquisitionTimeout:
     @pytest.mark.asyncio
     async def test_default_acquisition_timeout(self, mock_config: MagicMock) -> None:
         """Test that default 60.0 is used when config has no connection_acquisition_timeout."""
+        # spec=[] prevents MagicMock from auto-creating attributes, so getattr falls through to default
         neo4j_cfg = MagicMock(spec=[])
         mock_config.get_graph_config.return_value = neo4j_cfg
 
@@ -823,6 +824,32 @@ class TestVectorCypherEngineConnectAcquisitionTimeout:
         mock_driver_cls.assert_called_once()
         call_kwargs = mock_driver_cls.call_args[1]
         assert call_kwargs["connection_acquisition_timeout"] == 60.0
+
+    @pytest.mark.asyncio
+    async def test_none_graph_config_uses_defaults(self, mock_config: MagicMock) -> None:
+        """Test that None graph config falls through to all driver defaults."""
+        mock_config.get_graph_config.return_value = None
+
+        engine = VectorCypherEngine(mock_config)
+
+        mock_driver = AsyncMock()
+        sentinel = RuntimeError("stop after driver")
+        with (
+            patch("neo4j.AsyncGraphDatabase.driver", return_value=mock_driver) as mock_driver_cls,
+            patch(
+                "khora.engines.vectorcypher.engine.create_storage_coordinator",
+                side_effect=sentinel,
+            ),
+            pytest.raises(RuntimeError, match="stop after driver"),
+        ):
+            await engine.connect()
+
+        mock_driver_cls.assert_called_once()
+        call_kwargs = mock_driver_cls.call_args[1]
+        assert call_kwargs["connection_acquisition_timeout"] == 60.0
+        assert call_kwargs["max_connection_pool_size"] == 100
+        assert call_kwargs["max_connection_lifetime"] == 900
+        assert call_kwargs["liveness_check_timeout"] == 30.0
 
 
 @pytest.mark.unit

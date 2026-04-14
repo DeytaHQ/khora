@@ -296,6 +296,24 @@ class VectorCypherEngine:
         self._router: QueryComplexityRouter | None = None
         self._connected = False
 
+    @staticmethod
+    def _neo4j_driver_kwargs(neo4j_cfg: Any) -> dict[str, Any]:
+        """Extract Neo4j driver kwargs from config.
+
+        Centralises the config → driver mapping so new fields cannot be
+        silently omitted.
+        """
+
+        def _get(attr: str, default: Any) -> Any:
+            return getattr(neo4j_cfg, attr, default) if neo4j_cfg else default
+
+        return {
+            "max_connection_pool_size": _get("max_connection_pool_size", 100),
+            "max_connection_lifetime": _get("max_connection_lifetime", 900),
+            "liveness_check_timeout": _get("liveness_check_timeout", 30.0),
+            "connection_acquisition_timeout": _get("connection_acquisition_timeout", 60.0),
+        }
+
     async def connect(self) -> None:
         """Connect to all storage backends."""
         if self._connected:
@@ -317,18 +335,12 @@ class VectorCypherEngine:
                 )
 
             neo4j_cfg = self._config.get_graph_config()
-            pool_size = getattr(neo4j_cfg, "max_connection_pool_size", 100) if neo4j_cfg else 100
-            max_conn_lifetime = getattr(neo4j_cfg, "max_connection_lifetime", 900) if neo4j_cfg else 900
-            liveness_timeout = getattr(neo4j_cfg, "liveness_check_timeout", 30.0) if neo4j_cfg else 30.0
             neo4j_query_timeout = getattr(neo4j_cfg, "query_timeout", 5.0) if neo4j_cfg else 5.0
-            acquisition_timeout = getattr(neo4j_cfg, "connection_acquisition_timeout", 60.0) if neo4j_cfg else 60.0
+            driver_kwargs = self._neo4j_driver_kwargs(neo4j_cfg)
             self._neo4j_driver = AsyncGraphDatabase.driver(
                 neo4j_url,
                 auth=(self._config.get_neo4j_user(), self._config.get_neo4j_password()),
-                max_connection_pool_size=pool_size,
-                max_connection_lifetime=max_conn_lifetime,
-                connection_acquisition_timeout=acquisition_timeout,
-                liveness_check_timeout=liveness_timeout,
+                **driver_kwargs,
                 keep_alive=True,
             )
             await self._neo4j_driver.verify_connectivity()
