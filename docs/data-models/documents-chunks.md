@@ -12,6 +12,7 @@ class Document:
     id: UUID
     namespace_id: UUID
     content: str
+    external_id: str | None = None  # Caller-supplied source identity (ADR-050)
     metadata: DocumentMetadata
     status: DocumentStatus = DocumentStatus.PENDING
 
@@ -280,6 +281,7 @@ CREATE TABLE documents (
     id UUID PRIMARY KEY,
     namespace_id UUID NOT NULL,
     content TEXT,
+    external_id VARCHAR,          -- Caller-supplied source identity (ADR-050)
     status VARCHAR(20) DEFAULT 'pending',
     metadata JSONB,
     chunk_count INTEGER DEFAULT 0,
@@ -292,6 +294,8 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_namespace ON documents(namespace_id);
 CREATE INDEX idx_documents_status ON documents(namespace_id, status);
 CREATE INDEX idx_documents_checksum ON documents(namespace_id, (metadata->>'checksum'));
+CREATE INDEX ix_documents_namespace_external_id
+    ON documents(namespace_id, external_id) WHERE external_id IS NOT NULL;
 ```
 
 Chunks with embeddings are stored in pgvector:
