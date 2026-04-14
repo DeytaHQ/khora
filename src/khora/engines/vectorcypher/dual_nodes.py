@@ -417,7 +417,8 @@ class DualNodeManager:
             limit: Maximum chunks to return
 
         Returns:
-            List of chunk dicts with entity connection info
+            List of chunk dicts with entity connection info.
+            Returns ``[]`` on query timeout when ``query_timeout`` is set.
         """
         if not entity_ids:
             return []
@@ -681,7 +682,8 @@ class DualNodeManager:
         Returns:
             List of relationship dicts with id, source_entity_id,
             target_entity_id, relationship_type, description, confidence, weight,
-            source_document_ids, source_chunk_ids
+            source_document_ids, source_chunk_ids.
+            Returns ``[]`` on query timeout when ``query_timeout`` is set.
         """
         if len(entity_ids) < 2:
             return []
@@ -766,7 +768,8 @@ class DualNodeManager:
             limit: Maximum chunks to return
 
         Returns:
-            List of chunk property dicts with entity connection info
+            List of chunk property dicts with entity connection info.
+            Returns ``[]`` on query timeout when ``query_timeout`` is set.
         """
         if not entity_ids:
             return []
@@ -870,7 +873,8 @@ class DualNodeManager:
             namespace_id: Namespace constraint (string)
 
         Returns:
-            List of distinct channel strings (never contains None)
+            List of distinct channel strings (never contains None).
+            Returns ``[]`` on query timeout when ``query_timeout`` is set.
         """
         if not entity_ids:
             return []

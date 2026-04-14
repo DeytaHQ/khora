@@ -1630,7 +1630,10 @@ class Neo4jBackend(GraphBackendBase):
         relationship_types: list[str] | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """Get the neighborhood of an entity up to a certain depth."""
+        """Get the neighborhood of an entity up to a certain depth.
+
+        Returns ``{"entities": [], "relationships": []}`` on query timeout.
+        """
         driver = self._get_driver()
 
         rel_filter = ""
@@ -1669,6 +1672,11 @@ class Neo4jBackend(GraphBackendBase):
             _work_apoc = self._timed_unit_of_work(_work_apoc)
             _work_fallback = self._timed_unit_of_work(_work_fallback)
 
+        # Nested exception strategy: the inner try handles APOC availability.
+        # If APOC times out, re-raise immediately — the fallback query would
+        # also time out (similar traversal). Only non-timeout errors (APOC not
+        # installed) fall through to the fallback. Both paths feed the outer
+        # catch which converts timeouts to empty results.
         try:
             async with driver.session(database=self._database) as session:
                 try:
@@ -1735,7 +1743,8 @@ class Neo4jBackend(GraphBackendBase):
             limit_per_entity: Max nodes per entity neighborhood
 
         Returns:
-            Dictionary mapping entity ID to neighborhood data
+            Dictionary mapping entity ID to neighborhood data.
+            Returns ``{}`` on query timeout when ``query_timeout`` is set.
         """
         if not entity_ids:
             return {}

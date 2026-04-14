@@ -895,6 +895,21 @@ class TestDualNodeManagerSiblingTimeouts:
         assert attrs["code"] == "Neo.ClientError.Transaction.TransactionTimedOut"
         assert attrs["timeout_occurred"] is True
 
+    @pytest.mark.parametrize(
+        "method_name",
+        ["get_chunks_by_entities", "get_relationships_between", "get_temporal_chunks", "get_entity_channels"],
+    )
+    @pytest.mark.asyncio
+    async def test_reraises_non_client_errors(self, method_name: str) -> None:
+        """Non-ClientError exceptions (e.g. RuntimeError) propagate unchanged."""
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(side_effect=RuntimeError("connection lost"))
+
+        manager = DualNodeManager(driver, query_timeout=1.0)
+
+        with pytest.raises(RuntimeError, match="connection lost"):
+            await self._call_method(manager, method_name)
+
 
 @pytest.mark.unit
 class TestDualNodeManagerDeleteOperations:
