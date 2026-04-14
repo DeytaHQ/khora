@@ -175,7 +175,7 @@ Commands post to team-wide default channels (deployed via TTOJ):
 - `/done` → `#pull-requests` — PR opened notification with detailed context in thread.
 - `/automerge` → `#pull-requests` — merge success or CI failure.
 - `/plan:create` → `#engineering` — optionally shares a PRD summary with goals and requirements in thread.
-- `/slack:notify` — sends an ad-hoc message to any channel or user.
+- `/slack-notify` — sends an ad-hoc message to any channel or user.
 
 Default channels are configured per-project via TTOJ. Commands never fail due to Slack errors.
 
