@@ -417,7 +417,8 @@ class DualNodeManager:
             limit: Maximum chunks to return
 
         Returns:
-            List of chunk dicts with entity connection info
+            List of chunk dicts with entity connection info.
+            Returns ``[]`` on query timeout when ``query_timeout`` is set.
         """
         if not entity_ids:
             return []
@@ -475,13 +476,42 @@ class DualNodeManager:
         LIMIT $limit
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async def _work(tx):
+            result = await tx.run(query, **params)
+            return [record.data() async for record in result]
 
-            async def _work(tx):
-                result = await tx.run(query, **params)
-                return [record.data() async for record in result]
+        if self._timed_unit_of_work is not None:
+            _work = self._timed_unit_of_work(_work)
 
-            records = await session.execute_read(_work)
+        try:
+            async with self._driver.session(database=self._database) as session:
+                records = await session.execute_read(_work)
+        except ClientError as exc:
+            if exc.code in _NEO4J_TIMEOUT_CODES:
+                timeout = self._query_timeout
+                ns = namespace_id
+                n = len(entity_ids)
+                with trace_span(
+                    "khora.neo4j.get_chunks_by_entities.timeout",
+                    timeout_s=timeout,
+                    entity_count=n,
+                    namespace_id=str(ns),
+                    code=exc.code,
+                    timeout_occurred=True,
+                ):
+                    pass
+                logger.warning(
+                    "Neo4j get_chunks_by_entities timed out after {timeout}s "
+                    "(namespace_id={ns}, entity_count={n}, code={code}); "
+                    "returning empty list",
+                    timeout=timeout,
+                    ns=ns,
+                    n=n,
+                    code=exc.code,
+                    timeout_occurred=True,
+                )
+                return []
+            raise
 
         # Deserialize metadata from JSON string back to dict
         for record in records:
@@ -652,7 +682,8 @@ class DualNodeManager:
         Returns:
             List of relationship dicts with id, source_entity_id,
             target_entity_id, relationship_type, description, confidence, weight,
-            source_document_ids, source_chunk_ids
+            source_document_ids, source_chunk_ids.
+            Returns ``[]`` on query timeout when ``query_timeout`` is set.
         """
         if len(entity_ids) < 2:
             return []
@@ -671,19 +702,50 @@ class DualNodeManager:
         LIMIT $limit
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async def _work(tx):
+            result = await tx.run(
+                query,
+                entity_ids=entity_ids,
+                namespace_id=namespace_id,
+                limit=limit,
+            )
+            return [record.data() async for record in result]
 
-            async def _work(tx):
-                result = await tx.run(
-                    query,
-                    entity_ids=entity_ids,
+        if self._timed_unit_of_work is not None:
+            _work = self._timed_unit_of_work(_work)
+
+        try:
+            async with self._driver.session(database=self._database) as session:
+                return await session.execute_read(_work)
+        except ClientError as exc:
+            if exc.code in _NEO4J_TIMEOUT_CODES:
+                with trace_span(
+                    "khora.neo4j.get_relationships_between.timeout",
+                    timeout_s=self._query_timeout,
+                    entity_count=len(entity_ids),
                     namespace_id=namespace_id,
-                    limit=limit,
+                    code=exc.code,
+                    timeout_occurred=True,
+                ):
+                    pass
+                logger.warning(
+                    "Neo4j get_relationships_between timed out after {timeout}s "
+                    "(namespace_id={ns}, entity_count={n}, code={code}); "
+                    "returning empty list",
+                    timeout=self._query_timeout,
+                    ns=namespace_id,
+                    n=len(entity_ids),
+                    code=exc.code,
+                    timeout_occurred=True,
                 )
-                return [record.data() async for record in result]
+                return []
+            raise
 
-            return await session.execute_read(_work)
-
+    @trace(
+        "khora.neo4j.get_temporal_chunks",
+        include={"entity_ids", "namespace_id"},
+        result=lambda r: {"chunk_count": len(r)},
+    )
     async def get_temporal_chunks(
         self,
         namespace_id: UUID,
@@ -706,7 +768,8 @@ class DualNodeManager:
             limit: Maximum chunks to return
 
         Returns:
-            List of chunk property dicts with entity connection info
+            List of chunk property dicts with entity connection info.
+            Returns ``[]`` on query timeout when ``query_timeout`` is set.
         """
         if not entity_ids:
             return []
@@ -749,13 +812,39 @@ class DualNodeManager:
         LIMIT $limit
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async def _work(tx):
+            result = await tx.run(query, **params)
+            return [record.data() async for record in result]
 
-            async def _work(tx):
-                result = await tx.run(query, **params)
-                return [record.data() async for record in result]
+        if self._timed_unit_of_work is not None:
+            _work = self._timed_unit_of_work(_work)
 
-            records = await session.execute_read(_work)
+        try:
+            async with self._driver.session(database=self._database) as session:
+                records = await session.execute_read(_work)
+        except ClientError as exc:
+            if exc.code in _NEO4J_TIMEOUT_CODES:
+                with trace_span(
+                    "khora.neo4j.get_temporal_chunks.timeout",
+                    timeout_s=self._query_timeout,
+                    entity_count=len(entity_ids),
+                    namespace_id=str(namespace_id),
+                    code=exc.code,
+                    timeout_occurred=True,
+                ):
+                    pass
+                logger.warning(
+                    "Neo4j get_temporal_chunks timed out after {timeout}s "
+                    "(namespace_id={ns}, entity_count={n}, code={code}); "
+                    "returning empty list",
+                    timeout=self._query_timeout,
+                    ns=namespace_id,
+                    n=len(entity_ids),
+                    code=exc.code,
+                    timeout_occurred=True,
+                )
+                return []
+            raise
 
         for record in records:
             if "metadata" in record:
@@ -784,7 +873,8 @@ class DualNodeManager:
             namespace_id: Namespace constraint (string)
 
         Returns:
-            List of distinct channel strings (never contains None)
+            List of distinct channel strings (never contains None).
+            Returns ``[]`` on query timeout when ``query_timeout`` is set.
         """
         if not entity_ids:
             return []
@@ -797,17 +887,43 @@ class DualNodeManager:
         RETURN DISTINCT c.channel AS channel
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async def _work(tx):
+            result = await tx.run(
+                query,
+                entity_ids=entity_ids,
+                namespace_id=namespace_id,
+            )
+            return [record["channel"] async for record in result]
 
-            async def _work(tx):
-                result = await tx.run(
-                    query,
-                    entity_ids=entity_ids,
+        if self._timed_unit_of_work is not None:
+            _work = self._timed_unit_of_work(_work)
+
+        try:
+            async with self._driver.session(database=self._database) as session:
+                channels = await session.execute_read(_work)
+        except ClientError as exc:
+            if exc.code in _NEO4J_TIMEOUT_CODES:
+                with trace_span(
+                    "khora.neo4j.get_entity_channels.timeout",
+                    timeout_s=self._query_timeout,
+                    entity_count=len(entity_ids),
                     namespace_id=namespace_id,
+                    code=exc.code,
+                    timeout_occurred=True,
+                ):
+                    pass
+                logger.warning(
+                    "Neo4j get_entity_channels timed out after {timeout}s "
+                    "(namespace_id={ns}, entity_count={n}, code={code}); "
+                    "returning empty list",
+                    timeout=self._query_timeout,
+                    ns=namespace_id,
+                    n=len(entity_ids),
+                    code=exc.code,
+                    timeout_occurred=True,
                 )
-                return [record["channel"] async for record in result]
-
-            channels = await session.execute_read(_work)
+                return []
+            raise
 
         logger.debug(f"Found {len(channels)} distinct channels for {len(entity_ids)} entities")
         return channels

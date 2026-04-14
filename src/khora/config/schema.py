@@ -93,24 +93,18 @@ class Neo4jConfig(BaseModel):
         gt=0,
         le=300,
         description=(
-            "Per-transaction timeout in seconds for bounded read queries. "
-            "Currently applied ONLY to DualNodeManager.get_entity_neighborhoods "
-            "in the VectorCypher engine — Neo4jBackend.get_neighborhood and "
-            "get_neighborhoods_batch in storage/backends/neo4j.py do NOT "
-            "currently respect this setting (see DYT-1948 follow-up). Bounds "
-            "the worst ~0.5-1% of outlier queries that otherwise hold "
-            "connections for 27+ seconds and exhaust the pool. The Neo4j "
-            "server terminates transactions exceeding this duration, raising "
-            "ClientError with code Neo.ClientError.Transaction.TransactionTimedOut* "
-            "— the client catches this and returns an empty neighborhood dict. "
-            "Set to None to disable entirely. Values <= 0 are rejected (the "
-            "driver would interpret 0 as 'run forever', which defeats the "
-            "purpose). Values above 300 seconds (5 minutes) are also rejected "
-            "as a sanity cap: any recall budget that tolerates a 5-minute "
-            "neighborhood lookup is better served by batched offline jobs, "
-            "not interactive reads. Override via env var "
-            "KHORA_STORAGE__GRAPH__QUERY_TIMEOUT (note the double underscores "
-            "— StorageSettings nests graph config via env_nested_delimiter='__')."
+            "Per-transaction timeout in seconds for bounded Neo4j read queries. "
+            "Applied to all read methods on DualNodeManager and Neo4jBackend "
+            "that issue MATCH traversals. Write paths (upsert / link / delete) "
+            "are not bounded by this setting and require separate design. The "
+            "Neo4j server terminates transactions exceeding this duration, "
+            "raising ClientError with code "
+            "Neo.ClientError.Transaction.TransactionTimedOut* — the client "
+            "catches this and returns an empty result. Set to None to disable "
+            "entirely. Values <= 0 are rejected (the driver would interpret 0 "
+            "as 'run forever', which defeats the purpose). Values above 300 "
+            "seconds (5 minutes) are also rejected as a sanity cap. Override "
+            "via env var KHORA_STORAGE__GRAPH__QUERY_TIMEOUT."
         ),
     )
     entity_write_concurrency: int = Field(default=12, description="Max concurrent entity write transactions")

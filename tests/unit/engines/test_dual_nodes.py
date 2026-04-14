@@ -738,6 +738,180 @@ class TestDualNodeManagerGetEntityNeighborhoodsTimeout:
 
 
 @pytest.mark.unit
+class TestDualNodeManagerSiblingTimeouts:
+    """Tests for the configurable per-transaction timeout in the 4 sibling methods:
+
+    - get_chunks_by_entities
+    - get_relationships_between
+    - get_temporal_chunks
+    - get_entity_channels
+
+    All four use the same pattern as get_entity_neighborhoods:
+      * apply ``_timed_unit_of_work`` when ``query_timeout`` is set,
+      * convert known timeout codes into an empty result + warning log,
+      * re-raise non-timeout ClientErrors,
+      * work normally when ``query_timeout=None``.
+    """
+
+    # Each entry: (method_name, call_args_factory, expected_empty_sentinel)
+    # call_args_factory returns (args, kwargs) for the method call.
+    _METHOD_SPECS: list[tuple[str, str]] = [
+        ("get_chunks_by_entities", "list"),
+        ("get_relationships_between", "list"),
+        ("get_temporal_chunks", "list"),
+        ("get_entity_channels", "list"),
+    ]
+
+    @staticmethod
+    def _call_method(manager: DualNodeManager, method_name: str):
+        """Build (args, kwargs) for the given method and call it."""
+        if method_name == "get_chunks_by_entities":
+            return manager.get_chunks_by_entities([uuid4()], uuid4())
+        elif method_name == "get_relationships_between":
+            return manager.get_relationships_between([str(uuid4()), str(uuid4())], str(uuid4()))
+        elif method_name == "get_temporal_chunks":
+            return manager.get_temporal_chunks(uuid4(), [uuid4()])
+        elif method_name == "get_entity_channels":
+            return manager.get_entity_channels([str(uuid4())], str(uuid4()))
+        else:
+            raise ValueError(f"unknown method: {method_name}")
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["get_chunks_by_entities", "get_relationships_between", "get_temporal_chunks", "get_entity_channels"],
+    )
+    @pytest.mark.parametrize("timeout_code", _NEO4J_TIMEOUT_CODES)
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_timeout(self, method_name: str, timeout_code: str) -> None:
+        """Each method degrades to [] on both known timeout codes."""
+        driver, session = _make_neo4j_driver()
+        timeout_exc = _make_neo4j_error(timeout_code, message="transaction timed out")
+        session.execute_read = AsyncMock(side_effect=timeout_exc)
+
+        manager = DualNodeManager(driver, query_timeout=1.0)
+
+        with patch("khora.engines.vectorcypher.dual_nodes.logger") as mock_logger:
+            result = await self._call_method(manager, method_name)
+
+        assert result == []
+        mock_logger.warning.assert_called_once()
+        warning_call = mock_logger.warning.call_args
+        assert warning_call.kwargs.get("timeout_occurred") is True
+        assert warning_call.kwargs.get("code") == timeout_code
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["get_chunks_by_entities", "get_relationships_between", "get_temporal_chunks", "get_entity_channels"],
+    )
+    @pytest.mark.asyncio
+    async def test_reraises_non_timeout_client_error(self, method_name: str) -> None:
+        """Non-timeout ClientErrors propagate to the caller."""
+        driver, session = _make_neo4j_driver()
+        syntax_exc = _make_neo4j_error(
+            "Neo.ClientError.Statement.SyntaxError",
+            message="Cypher syntax error",
+        )
+        session.execute_read = AsyncMock(side_effect=syntax_exc)
+
+        manager = DualNodeManager(driver, query_timeout=1.0)
+
+        with pytest.raises(ClientError) as excinfo:
+            await self._call_method(manager, method_name)
+
+        assert excinfo.value.code == "Neo.ClientError.Statement.SyntaxError"
+
+    @pytest.mark.parametrize(
+        "method_name,mock_return",
+        [
+            ("get_chunks_by_entities", [{"chunk_id": "c1", "content": "hi", "metadata": None}]),
+            ("get_relationships_between", [{"id": "r1", "source_entity_id": "a", "target_entity_id": "b"}]),
+            ("get_temporal_chunks", [{"chunk_id": "c2", "content": "hello", "metadata": None}]),
+            ("get_entity_channels", ["session-1", "session-2"]),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_works_normally_with_timeout_none(self, method_name: str, mock_return: list) -> None:
+        """With query_timeout=None, methods return data normally."""
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(return_value=mock_return)
+
+        manager = DualNodeManager(driver)  # default: query_timeout=None
+
+        result = await self._call_method(manager, method_name)
+
+        assert result == mock_return
+        session.execute_read.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_emits_timeout_telemetry_span_get_chunks_by_entities(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """On timeout, get_chunks_by_entities emits a trace_span with structured attrs."""
+        from contextlib import contextmanager
+
+        driver, session = _make_neo4j_driver()
+        timeout_exc = _make_neo4j_error(
+            "Neo.ClientError.Transaction.TransactionTimedOut",
+            message="transaction timed out",
+        )
+        session.execute_read = AsyncMock(side_effect=timeout_exc)
+
+        captured_spans: list[tuple[str, dict]] = []
+
+        @contextmanager
+        def _fake_trace_span(name, **attributes):
+            entry = (name, dict(attributes))
+            captured_spans.append(entry)
+
+            class _NoOp:
+                def set_attribute(self, key, value):
+                    captured_spans[-1][1][key] = value
+
+                def set_attributes(self, attrs):
+                    captured_spans[-1][1].update(attrs)
+
+            yield _NoOp()
+
+        monkeypatch.setattr(
+            "khora.engines.vectorcypher.dual_nodes.trace_span",
+            _fake_trace_span,
+        )
+
+        manager = DualNodeManager(driver, query_timeout=2.5)
+        ns = uuid4()
+        eids = [uuid4(), uuid4()]
+
+        result = await manager.get_chunks_by_entities(eids, ns)
+
+        assert result == []
+        timeout_spans = [s for s in captured_spans if s[0].endswith(".timeout")]
+        assert len(timeout_spans) == 1
+        name, attrs = timeout_spans[0]
+        assert name == "khora.neo4j.get_chunks_by_entities.timeout"
+        assert attrs["timeout_s"] == 2.5
+        assert attrs["entity_count"] == 2
+        assert attrs["namespace_id"] == str(ns)
+        assert attrs["code"] == "Neo.ClientError.Transaction.TransactionTimedOut"
+        assert attrs["timeout_occurred"] is True
+
+    @pytest.mark.parametrize(
+        "method_name",
+        ["get_chunks_by_entities", "get_relationships_between", "get_temporal_chunks", "get_entity_channels"],
+    )
+    @pytest.mark.asyncio
+    async def test_reraises_non_client_errors(self, method_name: str) -> None:
+        """Non-ClientError exceptions (e.g. RuntimeError) propagate unchanged."""
+        driver, session = _make_neo4j_driver()
+        session.execute_read = AsyncMock(side_effect=RuntimeError("connection lost"))
+
+        manager = DualNodeManager(driver, query_timeout=1.0)
+
+        with pytest.raises(RuntimeError, match="connection lost"):
+            await self._call_method(manager, method_name)
+
+
+@pytest.mark.unit
 class TestDualNodeManagerDeleteOperations:
     """Tests for delete operations."""
 

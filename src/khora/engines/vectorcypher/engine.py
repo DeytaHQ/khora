@@ -360,6 +360,7 @@ class VectorCypherEngine:
                     database=neo4j_database,
                     entity_write_concurrency=getattr(neo4j_cfg, "entity_write_concurrency", 12),
                     relationship_write_concurrency=getattr(neo4j_cfg, "relationship_write_concurrency", 8),
+                    query_timeout=neo4j_query_timeout,
                 )
 
         await self._storage.connect()
