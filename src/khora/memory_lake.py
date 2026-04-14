@@ -397,6 +397,8 @@ class MemoryLake:
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
             external_id: Optional caller-supplied external identifier for the document.
+                Must be None or a non-blank string (max 512 chars).
+                Raises ValueError if constraints are violated.
 
         Returns:
             RememberResult with details
@@ -416,9 +418,7 @@ class MemoryLake:
                 # NOTE: expertise and extraction_config_hash are always forwarded,
                 # even when None. Custom engines registered via register_engine()
                 # must accept these kwargs to remain compatible (ADR-022).
-                result = await self._get_engine().remember(
-                    content,
-                    namespace_id,
+                remember_kwargs: dict[str, Any] = dict(
                     title=title,
                     source=source,
                     metadata=metadata,
@@ -428,7 +428,13 @@ class MemoryLake:
                     expertise=expertise,
                     extraction_config_hash=extraction_config_hash,
                     chunk_strategy=chunk_strategy,
-                    external_id=external_id,
+                )
+                if external_id is not None:
+                    remember_kwargs["external_id"] = external_id
+                result = await self._get_engine().remember(
+                    content,
+                    namespace_id,
+                    **remember_kwargs,
                 )
                 return replace(result, llm_usage=collect_usage())
         finally:

@@ -80,6 +80,8 @@ class MemoryEngineProtocol(Protocol):
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
             external_id: Optional caller-supplied external identifier for the document.
+                Must be None or a non-blank string (max 512 chars).
+                Raises ValueError if constraints are violated.
 
         Returns:
             RememberResult with details
@@ -152,7 +154,8 @@ class MemoryEngineProtocol(Protocol):
         """Store multiple documents with automatic optimization.
 
         Args:
-            documents: List of document dicts with keys: content, title, source, metadata
+            documents: List of document dicts with keys: content, title, source, metadata,
+                external_id (optional caller-supplied external identifier)
             namespace_id: Target namespace UUID
             skill_name: Extraction skill to use
             max_concurrent: Maximum concurrent document processing

@@ -207,7 +207,6 @@ class SkeletonConstructionEngine:
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
-        external_id: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -222,7 +221,6 @@ class SkeletonConstructionEngine:
             chunk_strategy: Override chunking strategy for this call.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
-            external_id: Optional caller-supplied external identifier for the document.
 
         Returns:
             RememberResult with document_id and counts
@@ -259,7 +257,6 @@ class SkeletonConstructionEngine:
             content=content,
             metadata=doc_metadata,
             extraction_config_hash=extraction_config_hash,
-            external_id=external_id,
         )
         document = await storage.create_document(document)
 
@@ -765,7 +762,6 @@ class SkeletonConstructionEngine:
                     content=content,
                     metadata=doc_meta,
                     extraction_config_hash=extraction_config_hash,
-                    external_id=doc_data.get("external_id"),
                 )
                 try:
                     document = await storage.create_document(document)

@@ -322,7 +322,7 @@ class TestRemember:
 
     @pytest.mark.asyncio
     async def test_remember_without_external_id(self) -> None:
-        """remember() without external_id passes None (backward compat)."""
+        """remember() without external_id omits it from engine kwargs (backward compat)."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
 
@@ -347,7 +347,78 @@ class TestRemember:
             )
 
         call_kwargs = lake._engine.remember.call_args.kwargs
-        assert call_kwargs["external_id"] is None
+        assert "external_id" not in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_remember_passes_special_char_external_id(self) -> None:
+        """remember() passes external_id with special characters through unchanged."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+
+        mock_result = RememberResult(
+            document_id=uuid4(),
+            namespace_id=ns_id,
+            chunks_created=1,
+            entities_extracted=0,
+            relationships_created=0,
+        )
+        lake._engine.remember = AsyncMock(return_value=mock_result)
+
+        special_id = "org/repo#123 — «test» 'quotes' & unicode: café ñ 日本語"
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await lake.remember(
+                "test content",
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                external_id=special_id,
+            )
+
+        call_kwargs = lake._engine.remember.call_args.kwargs
+        assert call_kwargs["external_id"] == special_id
+
+
+class TestExternalIdValidation:
+    """Tests for Document-level external_id validation."""
+
+    def test_blank_external_id_rejected(self) -> None:
+        """Document rejects blank external_id."""
+        from khora.core.models import Document
+
+        with pytest.raises(ValueError, match="non-blank"):
+            Document(external_id="")
+
+    def test_whitespace_only_external_id_rejected(self) -> None:
+        """Document rejects whitespace-only external_id."""
+        from khora.core.models import Document
+
+        with pytest.raises(ValueError, match="non-blank"):
+            Document(external_id="   ")
+
+    def test_oversized_external_id_rejected(self) -> None:
+        """Document rejects external_id exceeding 512 chars."""
+        from khora.core.models import Document
+
+        with pytest.raises(ValueError, match="at most 512"):
+            Document(external_id="x" * 513)
+
+    def test_max_length_external_id_accepted(self) -> None:
+        """Document accepts external_id at exactly 512 chars."""
+        from khora.core.models import Document
+
+        doc = Document(external_id="x" * 512)
+        assert doc.external_id == "x" * 512
+
+    def test_none_external_id_accepted(self) -> None:
+        """Document accepts None external_id (default)."""
+        from khora.core.models import Document
+
+        doc = Document()
+        assert doc.external_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -389,8 +460,9 @@ class TestRememberBatchExternalId:
                 relationship_types=["KNOWS"],
             )
 
-        # The doc dicts are passed as the first positional arg to engine.remember_batch
+        # Doc dicts are the first positional arg to engine.remember_batch
         call_args = lake._engine.remember_batch.call_args
+        assert call_args.args, "remember_batch should receive doc list as positional arg"
         passed_docs = call_args.args[0]
         assert passed_docs[0]["external_id"] == "ext-abc"
 
@@ -430,6 +502,7 @@ class TestRememberBatchExternalId:
             )
 
         call_args = lake._engine.remember_batch.call_args
+        assert call_args.args, "remember_batch should receive doc list as positional arg"
         passed_docs = call_args.args[0]
         assert passed_docs[0]["external_id"] == "ext-1"
         assert "external_id" not in passed_docs[1]
