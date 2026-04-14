@@ -996,14 +996,13 @@ class ChronicleEngine:
             if sid:
                 seen_sessions.add(str(sid))
 
-        # If we already have results from many sessions, expansion is less needed
-        if len(seen_sessions) >= 5:
-            return chunks_with_scores
+        # Always attempt expansion — even with multiple sessions, cross-session
+        # entity links can surface important state changes across sessions.
 
         # Find entities similar to query, then fetch their source chunks
         # from OTHER sessions
         try:
-            entity_results = await storage.search_similar_entities(namespace_id, query_embedding, limit=5)
+            entity_results = await storage.search_similar_entities(namespace_id, query_embedding, limit=10)
         except Exception:
             return chunks_with_scores
 
@@ -1034,21 +1033,20 @@ class ChronicleEngine:
         except Exception:
             return chunks_with_scores
 
-        # Discount factor: expansion results score lower than reranked results
+        # Discount factor: expansion results score close to reranked results
+        # to ensure cross-session content is competitive in the final ranking
         avg_score = sum(s for _, s in chunks_with_scores[:5]) / min(5, len(chunks_with_scores))
-        discount = avg_score * 0.6
+        discount = avg_score * 0.8
 
         expanded = list(chunks_with_scores)
         added = 0
         for cid in expansion_chunk_ids:
             chunk = chunks_map.get(cid)
             if chunk:
-                # Check this chunk is from a different session
-                custom = chunk.metadata.custom if chunk.metadata else {}
-                sid = custom.get("session_id") or custom.get("thread_id")
-                if sid and str(sid) not in seen_sessions:
-                    expanded.append((chunk, discount * (0.95**added)))
-                    added += 1
+                # Include chunks from ANY session (not just different ones)
+                # to also surface same-session entity co-occurrences
+                expanded.append((chunk, discount * (0.95**added)))
+                added += 1
 
         if added > 0:
             logger.debug("Cross-session expansion: added %d chunks from other sessions", added)
