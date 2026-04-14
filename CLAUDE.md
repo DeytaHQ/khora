@@ -17,6 +17,16 @@ uv run khora extract <file-or-dir>                # Ingest into knowledge graph
 uv run khora search "query" -n <namespace>        # Search knowledge graph
 ```
 
+## Test Commands
+
+```bash
+make test                                          # Full test suite (unit + integration + e2e), coverage ≥30%
+uv run pytest -m integration                       # Integration tests only
+uv run pytest -m e2e                               # End-to-end tests only
+```
+
+Docker Compose is always available. Always run `make test` before opening a PR. Never skip tests.
+
 ## Architecture
 
 - **Engines:** implement `MemoryEngineProtocol` in `engines/protocol.py`. Default engine is `vectorcypher`
@@ -56,7 +66,7 @@ Khora uses `hatch-vcs` — the package version comes from git tags (`git tag vX.
 
 ### Before Creating PRs
 
-Always run `make format && make test` before committing. CI will reject PRs that fail formatting or tests.
+Always run `make format && make test` before committing. CI will reject PRs that fail formatting or tests. Docker Compose is always available — never skip tests by claiming infrastructure is unavailable.
 
 ### Coding Principles
 
