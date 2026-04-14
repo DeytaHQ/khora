@@ -137,7 +137,7 @@ class RetrieverConfig:
     # When enabled AND the query is temporal AND entry entities span multiple
     # sessions, fans out parallel per-session vector searches instead of a
     # single global search.  Improves session_crossing_recall.
-    enable_session_aware_search: bool = False
+    enable_session_aware_search: bool = True
 
     # Limits
     max_chunks: int = 50
