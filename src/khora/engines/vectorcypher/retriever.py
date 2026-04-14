@@ -739,10 +739,27 @@ class VectorCypherRetriever:
                 fused_results = await self._apply_reranking(query, fused_results, limit)
 
         # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder)
-        # Skip when cross-encoder is already confident (large gap between #1 and #2).
+        # Skip when:
+        #   - Cross-encoder is already confident (large gap between #1 and #2)
+        #   - No version metadata in results (conversational data like LongMemEval/LoCoMo
+        #     doesn't benefit from temporal LLM reranking — it can hurt MRR)
         if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal:
             _skip_llm = False
-            if len(fused_results) >= 2:
+            # Check if any results carry version metadata (enterprise temporal signal)
+            _has_versions = any(
+                (
+                    (
+                        r.item.metadata.custom if isinstance(r.item.metadata, ChunkMetadata) else r.item.metadata or {}
+                    ).get("version")
+                    if hasattr(r.item, "metadata") and r.item.metadata
+                    else False
+                )
+                for r in fused_results[:10]
+            )
+            if not _has_versions:
+                _skip_llm = True
+                logger.debug("Skipping LLM reranking: no version metadata in results (conversational data)")
+            elif len(fused_results) >= 2:
                 gap = fused_results[0].rrf_score - fused_results[1].rrf_score
                 if gap >= self._config.llm_reranking_confidence_threshold:
                     _skip_llm = True
@@ -1346,10 +1363,17 @@ class VectorCypherRetriever:
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # LLM reranking of top-N for temporal queries (after cross-encoder)
-            # Skip when cross-encoder is already confident (large gap between #1 and #2).
+            # Skip when: no version metadata (conversational data) or cross-encoder confident.
             if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal and chunk_results:
                 _skip_llm_simple = False
-                if len(chunk_results) >= 2:
+                _has_versions_simple = any(
+                    (c.metadata.custom if isinstance(c.metadata, ChunkMetadata) else {}).get("version")
+                    for c, _ in chunk_results[:10]
+                    if c.metadata
+                )
+                if not _has_versions_simple:
+                    _skip_llm_simple = True
+                elif len(chunk_results) >= 2:
                     _gap = chunk_results[0][1] - chunk_results[1][1]
                     if _gap >= self._config.llm_reranking_confidence_threshold:
                         _skip_llm_simple = True
