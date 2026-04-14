@@ -326,20 +326,6 @@ class TestVectorCypherStats:
         storage.count_chunks.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_stats_no_neo4j_calls(self) -> None:
-        """stats() does not call dual_nodes.count_chunks."""
-        storage = _make_mock_storage()
-        dual_nodes = AsyncMock()
-        dual_nodes.count_chunks = AsyncMock(return_value=99)
-        engine = self._make_engine(storage, dual_nodes=dual_nodes)
-
-        result = await engine.stats(uuid4())
-
-        assert result.chunks == 20  # from storage, not dual_nodes
-        dual_nodes.count_chunks.assert_not_awaited()
-        storage.count_chunks.assert_awaited_once()
-
-    @pytest.mark.asyncio
     async def test_stats_get_document_stats_fallback(self) -> None:
         """stats() defaults doc_count to 0 on get_document_stats failure."""
         storage = _make_mock_storage()

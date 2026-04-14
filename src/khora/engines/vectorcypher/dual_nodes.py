@@ -849,30 +849,6 @@ class DualNodeManager:
         logger.debug(f"Deleted {deleted} Chunk nodes for document {document_id}")
         return deleted
 
-    # NOTE: Unused after DYT-2116 (stats routed through Postgres). Tracked for removal in DYT-2117.
-    async def count_chunks(self, namespace_id: UUID) -> int:
-        """Count Chunk nodes in a namespace.
-
-        Args:
-            namespace_id: Namespace ID
-
-        Returns:
-            Number of chunks
-        """
-        query = """
-        MATCH (c:Chunk {namespace_id: $namespace_id})
-        RETURN count(c) AS count
-        """
-
-        async with self._driver.session(database=self._database) as session:
-
-            async def _work(tx):
-                result = await tx.run(query, namespace_id=str(namespace_id))
-                record = await result.single()
-                return record["count"] if record else 0
-
-            return await session.execute_read(_work)
-
 
 __all__ = [
     "ChunkNode",
