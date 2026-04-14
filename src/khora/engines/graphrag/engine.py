@@ -215,6 +215,7 @@ class GraphRAGEngine:
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        external_id: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -235,6 +236,7 @@ class GraphRAGEngine:
             chunk_strategy: Override chunking strategy for this call.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
+            external_id: Optional caller-supplied external identifier for the document.
 
         Returns:
             RememberResult with document_id, counts, and timing metrics in metadata.
@@ -284,6 +286,7 @@ class GraphRAGEngine:
             content=content,
             metadata=doc_metadata,
             extraction_config_hash=extraction_config_hash,
+            external_id=external_id,
         )
         document = await storage.create_document(document)
         timings["document_create_ms"] = (time.perf_counter() - start) * 1000
@@ -500,6 +503,9 @@ class GraphRAGEngine:
             }
             if extraction_config_hash is not None:
                 entry["extraction_config_hash"] = extraction_config_hash
+            ext_id = doc_data.get("external_id")
+            if ext_id is not None:
+                entry["external_id"] = ext_id
             doc_inputs.append(entry)
         timings["prepare_inputs_ms"] = (time.perf_counter() - start) * 1000
 

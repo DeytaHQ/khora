@@ -290,10 +290,150 @@ class TestRemember:
         assert result.llm_usage == []
         lake._engine.remember.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_remember_passes_external_id(self) -> None:
+        """remember() passes external_id through to engine.remember()."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+
+        mock_result = RememberResult(
+            document_id=uuid4(),
+            namespace_id=ns_id,
+            chunks_created=1,
+            entities_extracted=0,
+            relationships_created=0,
+        )
+        lake._engine.remember = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await lake.remember(
+                "test content",
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                external_id="test-123",
+            )
+
+        call_kwargs = lake._engine.remember.call_args.kwargs
+        assert call_kwargs["external_id"] == "test-123"
+
+    @pytest.mark.asyncio
+    async def test_remember_without_external_id(self) -> None:
+        """remember() without external_id passes None (backward compat)."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+
+        mock_result = RememberResult(
+            document_id=uuid4(),
+            namespace_id=ns_id,
+            chunks_created=1,
+            entities_extracted=0,
+            relationships_created=0,
+        )
+        lake._engine.remember = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await lake.remember(
+                "test content",
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        call_kwargs = lake._engine.remember.call_args.kwargs
+        assert call_kwargs["external_id"] is None
+
 
 # ---------------------------------------------------------------------------
 # remember_batch
 # ---------------------------------------------------------------------------
+
+
+class TestRememberBatchExternalId:
+    """Tests for external_id pass-through in remember_batch()."""
+
+    @pytest.mark.asyncio
+    async def test_remember_batch_passes_external_id_in_doc_dicts(self) -> None:
+        """remember_batch() forwards doc dicts containing external_id to engine."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+
+        lake._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(
+                total=1,
+                processed=1,
+                skipped=0,
+                failed=0,
+                chunks=2,
+                entities=1,
+                relationships=0,
+            )
+        )
+
+        docs = [{"content": "doc one", "external_id": "ext-abc"}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await lake.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        # The doc dicts are passed as the first positional arg to engine.remember_batch
+        call_args = lake._engine.remember_batch.call_args
+        passed_docs = call_args.args[0]
+        assert passed_docs[0]["external_id"] == "ext-abc"
+
+    @pytest.mark.asyncio
+    async def test_remember_batch_mixed_external_ids(self) -> None:
+        """remember_batch() with mixed docs (some with external_id, some without)."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+
+        lake._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(
+                total=3,
+                processed=3,
+                skipped=0,
+                failed=0,
+                chunks=6,
+                entities=3,
+                relationships=1,
+            )
+        )
+
+        docs = [
+            {"content": "doc one", "external_id": "ext-1"},
+            {"content": "doc two"},
+            {"content": "doc three", "external_id": "ext-3"},
+        ]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await lake.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        call_args = lake._engine.remember_batch.call_args
+        passed_docs = call_args.args[0]
+        assert passed_docs[0]["external_id"] == "ext-1"
+        assert "external_id" not in passed_docs[1]
+        assert passed_docs[2]["external_id"] == "ext-3"
 
 
 # ---------------------------------------------------------------------------

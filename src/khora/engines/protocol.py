@@ -61,6 +61,7 @@ class MemoryEngineProtocol(Protocol):
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        external_id: str | None = None,
     ) -> RememberResult:
         """Store content in the memory engine.
 
@@ -78,6 +79,7 @@ class MemoryEngineProtocol(Protocol):
             chunk_strategy: Override chunking strategy for this call only.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
+            external_id: Optional caller-supplied external identifier for the document.
 
         Returns:
             RememberResult with details

@@ -618,6 +618,7 @@ async def stage_document(
         namespace_id=namespace_id,
         content=content,
         metadata=metadata,
+        external_id=doc_input.get("external_id"),
         created_at=created_at,
         updated_at=created_at,  # Set updated_at to source time too
         source_timestamp=source_timestamp,
@@ -696,6 +697,7 @@ async def stage_documents_batch(
             content=content,
             metadata=metadata,
             extraction_config_hash=doc_input.get("extraction_config_hash"),
+            external_id=doc_input.get("external_id"),
             created_at=created_at,
             updated_at=created_at,
             source_timestamp=source_timestamp,
@@ -766,6 +768,7 @@ async def _stage_all_documents(
             content=content,
             metadata=metadata,
             extraction_config_hash=doc_input.get("extraction_config_hash"),
+            external_id=doc_input.get("external_id"),
             created_at=created_at,
             updated_at=created_at,
             source_timestamp=source_timestamp,
