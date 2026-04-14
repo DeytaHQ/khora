@@ -6,9 +6,6 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased] — Graph Backends, Temporal Precision, Discovery Agent Overhaul
 
-### Breaking changes
-- Remove `DualNodeManager.count_chunks` — dead code after DYT-2116 routed chunk counts through Postgres (#363). Use `PgVectorBackend.count_chunks` or `StorageCoordinator.count_chunks` instead
-
 ### New graph backends
 - AWS Neptune with Bolt protocol + IAM SigV4 auth (#272)
 - PostgreSQL AGE with Cypher-in-SQL, shares PG connection pool (#273)
