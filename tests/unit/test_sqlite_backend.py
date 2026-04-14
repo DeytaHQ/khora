@@ -268,6 +268,21 @@ class TestDocumentCRUD:
         count = await relational.count_documents(ns.id)
         assert count == 1
 
+    async def test_update_document_external_id(self, relational: SQLiteRelationalBackend):
+        ns = _make_namespace()
+        await relational.create_namespace(ns)
+
+        doc = _make_document(ns.id)
+        await relational.create_document(doc)
+        assert doc.external_id is None
+
+        doc.external_id = "ext-456"
+        await relational.update_document(doc)
+
+        fetched = await relational.get_document(doc.id)
+        assert fetched is not None
+        assert fetched.external_id == "ext-456"
+
     async def test_create_document_with_external_id(self, relational: SQLiteRelationalBackend):
         ns = _make_namespace()
         await relational.create_namespace(ns)
