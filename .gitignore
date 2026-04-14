@@ -243,5 +243,3 @@ scripts/slack-notify.py
 .claude/projects/
 .claude/worktrees/
 khora_discovery_data/
-# Generated rules (from .agent-rules/)
-.claude/rules/
