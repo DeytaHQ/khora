@@ -743,6 +743,89 @@ class TestVectorCypherEngineValidateRecallResults:
 
 
 @pytest.mark.unit
+class TestVectorCypherEngineConnectAcquisitionTimeout:
+    """Tests for connection_acquisition_timeout being passed to Neo4j driver."""
+
+    @pytest.fixture
+    def mock_config(self) -> MagicMock:
+        """Create a mock KhoraConfig."""
+        config = MagicMock()
+        config.get_postgresql_url.return_value = "postgresql://localhost/test"
+        config.get_neo4j_url.return_value = "bolt://localhost:7687"
+        config.get_neo4j_user.return_value = "neo4j"
+        config.get_neo4j_password.return_value = "password"
+        config.get_neo4j_database.return_value = "neo4j"
+        config.get_graph_config.return_value = MagicMock()
+        config.get_vector_config.return_value = MagicMock()
+        config.storage.postgresql_pool_size = 5
+        config.storage.postgresql_max_overflow = 10
+        config.storage.embedding_dimension = 1536
+        config.storage.backend = "postgres"
+        config.llm.model = "gpt-4o-mini"
+        config.llm.embedding_model = "text-embedding-3-small"
+        config.llm.embedding_dimension = 1536
+        config.llm.timeout = 30
+        config.llm.max_retries = 3
+        config.llm.max_concurrent_llm_calls = 5
+        config.pipeline.chunking_strategy = "recursive"
+        config.pipeline.chunk_size = 1000
+        config.pipeline.chunk_overlap = 200
+        config.pipeline.extract_entities = True
+        config.telemetry_database_url = None
+        config.telemetry_service_name = "test"
+        return config
+
+    @pytest.mark.asyncio
+    async def test_custom_acquisition_timeout(self, mock_config: MagicMock) -> None:
+        """Test that connection_acquisition_timeout from config is passed to driver."""
+        neo4j_cfg = MagicMock()
+        neo4j_cfg.connection_acquisition_timeout = 2.5
+        mock_config.get_graph_config.return_value = neo4j_cfg
+
+        engine = VectorCypherEngine(mock_config)
+
+        mock_driver = AsyncMock()
+        sentinel = RuntimeError("stop after driver")
+        with (
+            patch("neo4j.AsyncGraphDatabase.driver", return_value=mock_driver) as mock_driver_cls,
+            patch(
+                "khora.engines.vectorcypher.engine.create_storage_coordinator",
+                side_effect=sentinel,
+            ),
+            pytest.raises(RuntimeError, match="stop after driver"),
+        ):
+            await engine.connect()
+
+        mock_driver_cls.assert_called_once()
+        call_kwargs = mock_driver_cls.call_args[1]
+        assert call_kwargs["connection_acquisition_timeout"] == 2.5
+
+    @pytest.mark.asyncio
+    async def test_default_acquisition_timeout(self, mock_config: MagicMock) -> None:
+        """Test that default 60.0 is used when config has no connection_acquisition_timeout."""
+        neo4j_cfg = MagicMock(spec=[])
+        mock_config.get_graph_config.return_value = neo4j_cfg
+
+        engine = VectorCypherEngine(mock_config)
+
+        mock_driver = AsyncMock()
+        sentinel = RuntimeError("stop after driver")
+        with (
+            patch("neo4j.AsyncGraphDatabase.driver", return_value=mock_driver) as mock_driver_cls,
+            patch(
+                "khora.engines.vectorcypher.engine.create_storage_coordinator",
+                side_effect=sentinel,
+            ),
+            pytest.raises(RuntimeError, match="stop after driver"),
+        ):
+            await engine.connect()
+
+        mock_driver_cls.assert_called_once()
+        call_kwargs = mock_driver_cls.call_args[1]
+        assert call_kwargs["connection_acquisition_timeout"] == 60.0
+
+
+@pytest.mark.unit
 class TestVectorCypherEngineParseDatetime:
     """Tests for _parse_datetime helper."""
 

@@ -10,3 +10,5 @@
 - 2026-04-12: DYT-2286: Consolidate toolchain — ruff replaces black, isort, pyupgrade, bandit
 - 2026-04-12: DYT-2294: Add khora extract + khora search CLI commands
 - 2026-04-12: DYT-2298: SQLite embedded backend for zero-infra CLI mode
+- 2026-04-12: DYT-2299: CLI tests and docs for extract + search commands
+- 2026-04-14: DYT-2120: Pass connection_acquisition_timeout to Neo4j driver

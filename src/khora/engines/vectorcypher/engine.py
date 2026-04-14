@@ -321,11 +321,13 @@ class VectorCypherEngine:
             max_conn_lifetime = getattr(neo4j_cfg, "max_connection_lifetime", 900) if neo4j_cfg else 900
             liveness_timeout = getattr(neo4j_cfg, "liveness_check_timeout", 30.0) if neo4j_cfg else 30.0
             neo4j_query_timeout = getattr(neo4j_cfg, "query_timeout", 5.0) if neo4j_cfg else 5.0
+            acquisition_timeout = getattr(neo4j_cfg, "connection_acquisition_timeout", 60.0) if neo4j_cfg else 60.0
             self._neo4j_driver = AsyncGraphDatabase.driver(
                 neo4j_url,
                 auth=(self._config.get_neo4j_user(), self._config.get_neo4j_password()),
                 max_connection_pool_size=pool_size,
                 max_connection_lifetime=max_conn_lifetime,
+                connection_acquisition_timeout=acquisition_timeout,
                 liveness_check_timeout=liveness_timeout,
                 keep_alive=True,
             )
