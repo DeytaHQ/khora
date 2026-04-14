@@ -217,8 +217,10 @@ class VectorCypherConfig:
     bm25_weight: float = 0.3
     bm25_top_k: int = 50
 
-    # Session-aware parallel retrieval for cross-session temporal queries
-    enable_session_aware_search: bool = False
+    # Session-aware parallel retrieval for cross-session temporal queries.
+    # Only activates when: Neo4j is connected, query is temporal, and entry
+    # entities span multiple sessions/channels.
+    enable_session_aware_search: bool = True
 
     # Cross-encoder reranking
     enable_reranking: bool = False
