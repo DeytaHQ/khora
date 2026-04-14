@@ -337,6 +337,7 @@ class TestVectorCypherStats:
 
         assert result.chunks == 20  # from storage, not dual_nodes
         dual_nodes.count_chunks.assert_not_awaited()
+        storage.count_chunks.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_stats_get_document_stats_fallback(self) -> None:

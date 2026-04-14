@@ -593,7 +593,7 @@ class StorageCoordinator:
 
     async def count_entities(self, namespace_id: UUID) -> int:
         """Count entities in a namespace. Best-effort during active ingestion (non-atomic dual-write)."""
-        if self.vector and hasattr(self.vector, "count_entities"):
+        if self.vector:
             return await self.vector.count_entities(namespace_id)
         if self.graph:
             return await self.graph.count_entities(namespace_id)

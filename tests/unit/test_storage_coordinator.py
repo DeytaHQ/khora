@@ -348,15 +348,24 @@ class TestCountEntities:
 
     @pytest.mark.asyncio
     async def test_count_entities_falls_back_to_graph(self) -> None:
-        """count_entities uses graph when vector has no count_entities."""
+        """count_entities uses graph when no vector backend configured."""
         ns_id = uuid4()
-        vec = MagicMock(spec=[])  # No count_entities method
         graph = MagicMock()
         graph.count_entities = AsyncMock(return_value=99)
-        coord = StorageCoordinator(vector=vec, graph=graph)
+        coord = StorageCoordinator(graph=graph)
         result = await coord.count_entities(ns_id)
         assert result == 99
         graph.count_entities.assert_awaited_once_with(ns_id)
+
+    @pytest.mark.asyncio
+    async def test_count_entities_vector_raises(self) -> None:
+        """count_entities propagates when vector raises (engine catches)."""
+        ns_id = uuid4()
+        vec = MagicMock()
+        vec.count_entities = AsyncMock(side_effect=RuntimeError("db down"))
+        coord = StorageCoordinator(vector=vec)
+        with pytest.raises(RuntimeError, match="db down"):
+            await coord.count_entities(ns_id)
 
     @pytest.mark.asyncio
     async def test_count_entities_no_backends(self) -> None:
