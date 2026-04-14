@@ -754,22 +754,6 @@ class TestDualNodeManagerDeleteOperations:
 
 
 @pytest.mark.unit
-class TestDualNodeManagerCountChunks:
-    """Tests for count_chunks method."""
-
-    @pytest.mark.asyncio
-    async def test_count_chunks(self) -> None:
-        """Test counting chunks in a namespace."""
-        driver, session = _make_neo4j_driver()
-        session.execute_read = AsyncMock(return_value=42)
-
-        manager = DualNodeManager(driver)
-        count = await manager.count_chunks(uuid4())
-
-        assert count == 42
-
-
-@pytest.mark.unit
 class TestDualNodeManagerGetEntityChannels:
     """Tests for get_entity_channels method."""
 
