@@ -34,6 +34,12 @@ try:
 except ImportError:
     AGEBackend = None  # type: ignore[assignment,misc]
 
+try:
+    from .sqlite import SQLiteRelationalBackend, SQLiteVectorBackend
+except ImportError:
+    SQLiteRelationalBackend = None  # type: ignore[assignment,misc]
+    SQLiteVectorBackend = None  # type: ignore[assignment,misc]
+
 __all__ = [
     # Protocols
     "RelationalBackendProtocol",
@@ -51,4 +57,6 @@ __all__ = [
     "MemgraphBackend",
     "NeptuneBackend",
     "AGEBackend",
+    "SQLiteRelationalBackend",
+    "SQLiteVectorBackend",
 ]

@@ -74,6 +74,7 @@ all-backends = [
     "httpx>=0.28.1",
     "weaviate-client>=4.20.1",
     "surrealdb>=2.0.0a1",
+    "aiosqlite>=0.20.0",
 ]
 # Neural reranking
 reranking = [
@@ -98,6 +99,8 @@ rust = [
 # SurrealDB unified backend (graph + vector + relational in one DB)
 surrealdb = ["surrealdb>=2.0.0a1"]
 embedded = ["surrealdb>=2.0.0a1"]
+# SQLite embedded backend (zero-infrastructure relational + vector)
+sqlite = ["aiosqlite>=0.20.0"]
 # LanceDB embedded vector store (Chronicle engine, zero-infrastructure)
 lancedb = ["lancedb>=0.17.0", "pyarrow>=18.0.0"]
 
@@ -224,4 +227,5 @@ dev = [
     "ty>=0.0.18",
     "rapidfuzz>=3.14.3",  # For ty type checking of optional accel module
     "spacy>=3.8.11",
+    "aiosqlite>=0.20.0",  # For SQLite backend tests
 ]
