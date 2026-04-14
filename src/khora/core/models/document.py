@@ -89,7 +89,17 @@ class Document:
     processed_at: datetime | None = None
     source_timestamp: datetime | None = None
 
+    # Maximum length for external_id (matches DB column String(512))
+    _EXTERNAL_ID_MAX_LEN: int = field(default=512, init=False, repr=False, compare=False)
+
     def __post_init__(self) -> None:
+        if self.external_id is not None:
+            if not self.external_id.strip():
+                raise ValueError("external_id must be None or a non-blank string")
+            if len(self.external_id) > self._EXTERNAL_ID_MAX_LEN:
+                raise ValueError(
+                    f"external_id must be at most {self._EXTERNAL_ID_MAX_LEN} characters, got {len(self.external_id)}"
+                )
         if self.extraction_config_hash is not None and len(self.extraction_config_hash) > self._EXTRACTION_HASH_MAX_LEN:
             raise ValueError(
                 f"extraction_config_hash must be at most {self._EXTRACTION_HASH_MAX_LEN} characters, "

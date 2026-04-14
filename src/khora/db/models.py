@@ -144,7 +144,7 @@ class DocumentModel(Base):
     checksum: Mapped[str] = mapped_column(String(64), default="", index=True)
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
-    external_id: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
+    external_id: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
 
     # Processing info
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)

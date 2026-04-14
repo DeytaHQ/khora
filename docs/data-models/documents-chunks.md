@@ -281,7 +281,7 @@ CREATE TABLE documents (
     id UUID PRIMARY KEY,
     namespace_id UUID NOT NULL,
     content TEXT,
-    external_id VARCHAR,          -- Caller-supplied source identity (ADR-050)
+    external_id VARCHAR(512),      -- Caller-supplied source identity (ADR-050)
     status VARCHAR(20) DEFAULT 'pending',
     metadata JSONB,
     chunk_count INTEGER DEFAULT 0,

@@ -69,6 +69,37 @@ class TestDocument:
         doc = Document(content="Content", external_id="test-123")
         assert doc.external_id == "test-123"
 
+    def test_document_external_id_special_chars(self) -> None:
+        """Test external_id with special characters."""
+        doc = Document(content="Content", external_id="prefix/id:123@host")
+        assert doc.external_id == "prefix/id:123@host"
+
+    def test_document_external_id_rejects_empty_string(self) -> None:
+        """Test that empty string external_id is rejected."""
+        import pytest
+
+        with pytest.raises(ValueError, match="non-blank"):
+            Document(content="Content", external_id="")
+
+    def test_document_external_id_rejects_blank_string(self) -> None:
+        """Test that blank (whitespace-only) external_id is rejected."""
+        import pytest
+
+        with pytest.raises(ValueError, match="non-blank"):
+            Document(content="Content", external_id="   ")
+
+    def test_document_external_id_rejects_too_long(self) -> None:
+        """Test that external_id exceeding 512 chars is rejected."""
+        import pytest
+
+        with pytest.raises(ValueError, match="at most 512"):
+            Document(content="Content", external_id="x" * 513)
+
+    def test_document_external_id_max_length_accepted(self) -> None:
+        """Test that external_id at exactly 512 chars is accepted."""
+        doc = Document(content="Content", external_id="x" * 512)
+        assert len(doc.external_id) == 512
+
 
 class TestChunk:
     """Tests for Chunk model."""
