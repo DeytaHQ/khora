@@ -17,7 +17,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from loguru import logger
-from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction
+from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction, unit_of_work
+from neo4j.exceptions import ClientError
 
 from khora.core.models import Entity, Episode, Relationship
 from khora.storage.backends.mixins import (
@@ -49,6 +50,12 @@ _HIGH_DENSITY_REL_BATCH_SIZE = 50  # smaller sub-batches for dense data
 # Relationship types sharing >30% of source/target entities are serialized
 # to prevent concurrent MERGE deadlocks on shared hub nodes.
 _HUB_OVERLAP_THRESHOLD = 0.3  # Jaccard similarity
+
+# Neo4j 5.x timeout error codes — same tuple used in dual_nodes.py.
+_NEO4J_TIMEOUT_CODES = (
+    "Neo.ClientError.Transaction.TransactionTimedOut",
+    "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration",
+)
 
 
 class _EntityKeyGate:
@@ -205,6 +212,7 @@ class Neo4jBackend(GraphBackendBase):
         retry_delay_jitter_factor: float = 0.5,
         max_connection_lifetime: int = 900,
         liveness_check_timeout: float | None = 30.0,
+        query_timeout: float | None = 5.0,
         entity_write_concurrency: int = _DEFAULT_ENTITY_WRITE_CONCURRENCY,
         relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
     ) -> None:
@@ -220,6 +228,7 @@ class Neo4jBackend(GraphBackendBase):
             retry_delay_jitter_factor: Jitter factor for transaction retry delays (0.0-1.0)
             max_connection_lifetime: Max seconds a connection stays in the pool before rotation
             liveness_check_timeout: Seconds of idle time before liveness check (None disables)
+            query_timeout: Per-transaction timeout in seconds for bounded read queries (None disables)
             entity_write_concurrency: Max concurrent entity write transactions
             relationship_write_concurrency: Max concurrent relationship write transactions
         """
@@ -232,6 +241,8 @@ class Neo4jBackend(GraphBackendBase):
         self._retry_delay_jitter_factor = retry_delay_jitter_factor
         self._max_connection_lifetime = max_connection_lifetime
         self._liveness_check_timeout = liveness_check_timeout
+        self._query_timeout = query_timeout
+        self._timed_unit_of_work = unit_of_work(timeout=query_timeout) if query_timeout is not None else None
         self._driver: AsyncDriver | None = None
         self._owns_driver: bool = True
         self._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
@@ -250,6 +261,7 @@ class Neo4jBackend(GraphBackendBase):
             retry_delay_jitter_factor=getattr(config, "retry_delay_jitter_factor", 0.5),
             max_connection_lifetime=getattr(config, "max_connection_lifetime", 900),
             liveness_check_timeout=getattr(config, "liveness_check_timeout", 30.0),
+            query_timeout=getattr(config, "query_timeout", 5.0),
             entity_write_concurrency=getattr(config, "entity_write_concurrency", _DEFAULT_ENTITY_WRITE_CONCURRENCY),
             relationship_write_concurrency=getattr(
                 config, "relationship_write_concurrency", _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY
@@ -264,6 +276,7 @@ class Neo4jBackend(GraphBackendBase):
         database: str = "neo4j",
         entity_write_concurrency: int = _DEFAULT_ENTITY_WRITE_CONCURRENCY,
         relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
+        query_timeout: float | None = 5.0,
     ) -> Neo4jBackend:
         """Create a Neo4jBackend from an existing AsyncDriver.
 
@@ -275,6 +288,7 @@ class Neo4jBackend(GraphBackendBase):
             database: Database name
             entity_write_concurrency: Max concurrent entity write transactions
             relationship_write_concurrency: Max concurrent relationship write transactions
+            query_timeout: Per-transaction timeout in seconds for bounded read queries (None disables)
 
         Returns:
             Neo4jBackend wrapping the shared driver
@@ -289,6 +303,8 @@ class Neo4jBackend(GraphBackendBase):
         instance._retry_delay_jitter_factor = 0.5
         instance._max_connection_lifetime = 900
         instance._liveness_check_timeout = 30.0
+        instance._query_timeout = query_timeout
+        instance._timed_unit_of_work = unit_of_work(timeout=query_timeout) if query_timeout is not None else None
         instance._driver = driver
         instance._owns_driver = False
         instance._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
@@ -1639,21 +1655,63 @@ class Neo4jBackend(GraphBackendBase):
         LIMIT $limit
         """
 
-        async with driver.session(database=self._database) as session:
-            try:
-                result = await session.run(query, entity_id=str(entity_id), limit=limit)
-                record = await result.single()
-            except Exception:
-                # Fallback if APOC not available
-                result = await session.run(fallback_query, entity_id=str(entity_id), limit=limit)
-                record = await result.single()
+        _apoc_failed = False
 
-            if record:
-                nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
-                relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
-                return {"entities": nodes, "relationships": relationships}
+        async def _work_apoc(tx):
+            result = await tx.run(query, entity_id=str(entity_id), limit=limit)
+            return await result.single()
 
-            return {"entities": [], "relationships": []}
+        async def _work_fallback(tx):
+            result = await tx.run(fallback_query, entity_id=str(entity_id), limit=limit)
+            return await result.single()
+
+        if self._timed_unit_of_work is not None:
+            _work_apoc = self._timed_unit_of_work(_work_apoc)
+            _work_fallback = self._timed_unit_of_work(_work_fallback)
+
+        try:
+            async with driver.session(database=self._database) as session:
+                try:
+                    record = await session.execute_read(_work_apoc)
+                except ClientError as exc:
+                    if exc.code in _NEO4J_TIMEOUT_CODES:
+                        raise
+                    # APOC not available — fall through to fallback
+                    _apoc_failed = True
+                    record = None
+                except Exception:
+                    _apoc_failed = True
+                    record = None
+
+                if _apoc_failed:
+                    record = await session.execute_read(_work_fallback)
+        except ClientError as exc:
+            if exc.code in _NEO4J_TIMEOUT_CODES:
+                with trace_span(
+                    "khora.neo4j.get_neighborhood.timeout",
+                    timeout_s=self._query_timeout,
+                    entity_id=str(entity_id),
+                    code=exc.code,
+                    timeout_occurred=True,
+                ):
+                    pass
+                logger.warning(
+                    "Neo4j get_neighborhood timed out after {timeout}s "
+                    "(entity_id={eid}, code={code}); returning empty neighborhood",
+                    timeout=self._query_timeout,
+                    eid=entity_id,
+                    code=exc.code,
+                    timeout_occurred=True,
+                )
+                return {"entities": [], "relationships": []}
+            raise
+
+        if record:
+            nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
+            relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
+            return {"entities": nodes, "relationships": relationships}
+
+        return {"entities": [], "relationships": []}
 
     @trace(
         "khora.neo4j.get_neighborhoods_batch",
@@ -1698,23 +1756,50 @@ class Neo4jBackend(GraphBackendBase):
         RETURN eid, neighbors, rels
         """
 
-        async with driver.session(database=self._database) as session:
-            result = await session.run(query, entity_ids=id_strings, limit=limit_per_entity)
-            records = await result.data()
+        async def _work(tx):
+            result = await tx.run(query, entity_ids=id_strings, limit=limit_per_entity)
+            return await result.data()
 
-            neighborhoods = {}
-            for record in records:
-                eid = UUID(record["eid"])
-                nodes = [_element_to_dict(n) for n in (record.get("neighbors") or []) if n]
-                relationships = []
-                for rel_list in record.get("rels") or []:
-                    if rel_list:
-                        for r in rel_list if isinstance(rel_list, list) else [rel_list]:
-                            if r:
-                                relationships.append(_element_to_dict(r))
-                neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+        if self._timed_unit_of_work is not None:
+            _work = self._timed_unit_of_work(_work)
 
-            return neighborhoods
+        try:
+            async with driver.session(database=self._database) as session:
+                records = await session.execute_read(_work)
+        except ClientError as exc:
+            if exc.code in _NEO4J_TIMEOUT_CODES:
+                with trace_span(
+                    "khora.neo4j.get_neighborhoods_batch.timeout",
+                    timeout_s=self._query_timeout,
+                    entity_count=len(entity_ids),
+                    code=exc.code,
+                    timeout_occurred=True,
+                ):
+                    pass
+                logger.warning(
+                    "Neo4j get_neighborhoods_batch timed out after {timeout}s "
+                    "(entity_count={n}, code={code}); returning empty dict",
+                    timeout=self._query_timeout,
+                    n=len(entity_ids),
+                    code=exc.code,
+                    timeout_occurred=True,
+                )
+                return {}
+            raise
+
+        neighborhoods = {}
+        for record in records:
+            eid = UUID(record["eid"])
+            nodes = [_element_to_dict(n) for n in (record.get("neighbors") or []) if n]
+            relationships = []
+            for rel_list in record.get("rels") or []:
+                if rel_list:
+                    for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+                        if r:
+                            relationships.append(_element_to_dict(r))
+            neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
+
+        return neighborhoods
 
     async def get_temporal_neighbors(
         self,
