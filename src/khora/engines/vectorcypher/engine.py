@@ -2291,7 +2291,6 @@ class VectorCypherEngine:
     async def stats(self, namespace_id: UUID) -> Stats:
         """Get document/chunk/entity/relationship counts for a namespace."""
         storage = self._get_storage()
-        dual_nodes = self._get_dual_nodes()
 
         doc_count = 0
         entity_count = 0
@@ -2303,21 +2302,22 @@ class VectorCypherEngine:
         except (AttributeError, NotImplementedError):
             pass
 
-        # Get chunk count
-        if dual_nodes is not None:
-            chunk_count = await dual_nodes.count_chunks(namespace_id)
-        else:
-            chunk_count = await self._get_temporal_store().count_chunks(namespace_id)
+        # Run independent counts in parallel (DYT-2116)
+        chunk_result, entity_result, rel_result = await asyncio.gather(
+            storage.count_chunks(namespace_id),
+            storage.count_entities(namespace_id),
+            storage.count_relationships(namespace_id),
+            return_exceptions=True,
+        )
 
-        try:
-            entity_count = await storage.count_entities(namespace_id)
-        except (AttributeError, NotImplementedError):
-            pass
+        # Re-raise unexpected errors — only suppress AttributeError/NotImplementedError
+        for result in (chunk_result, entity_result, rel_result):
+            if isinstance(result, Exception) and not isinstance(result, (AttributeError, NotImplementedError)):
+                raise result
 
-        try:
-            relationship_count = await storage.count_relationships(namespace_id)
-        except (AttributeError, NotImplementedError):
-            pass
+        chunk_count = chunk_result if isinstance(chunk_result, int) else 0
+        entity_count = entity_result if isinstance(entity_result, int) else 0
+        relationship_count = rel_result if isinstance(rel_result, int) else 0
 
         return Stats(
             documents=doc_count,

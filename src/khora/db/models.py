@@ -307,7 +307,7 @@ class EntityModel(Base):
 
 
 class RelationshipModel(Base):
-    """Relationship between entities (stored in both PostgreSQL and Neo4j)."""
+    """Relationship between entities (stored in Neo4j; Postgres table exists but is not actively written)."""
 
     __tablename__ = "relationships"
 

@@ -847,6 +847,14 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             return result.scalar_one()
 
+    async def count_entities(self, namespace_id: UUID) -> int:
+        """Count total entities in a namespace."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(func.count(EntityModel.id)).where(EntityModel.namespace_id == namespace_id)
+            )
+            return result.scalar_one()
+
     async def list_chunks(
         self,
         namespace_id: UUID,

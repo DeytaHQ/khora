@@ -849,6 +849,7 @@ class DualNodeManager:
         logger.debug(f"Deleted {deleted} Chunk nodes for document {document_id}")
         return deleted
 
+    # NOTE: Unused after DYT-2116 (stats routed through Postgres). Tracked for removal in DYT-2117.
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Count Chunk nodes in a namespace.
 
