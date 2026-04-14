@@ -268,6 +268,30 @@ class TestDocumentCRUD:
         count = await relational.count_documents(ns.id)
         assert count == 1
 
+    async def test_create_document_with_external_id(self, relational: SQLiteRelationalBackend):
+        ns = _make_namespace()
+        await relational.create_namespace(ns)
+
+        doc = _make_document(ns.id, external_id="ext-123")
+        created = await relational.create_document(doc)
+        assert created.external_id == "ext-123"
+
+        fetched = await relational.get_document(doc.id)
+        assert fetched is not None
+        assert fetched.external_id == "ext-123"
+
+    async def test_create_document_without_external_id_is_none(self, relational: SQLiteRelationalBackend):
+        ns = _make_namespace()
+        await relational.create_namespace(ns)
+
+        doc = _make_document(ns.id)
+        created = await relational.create_document(doc)
+        assert created.external_id is None
+
+        fetched = await relational.get_document(doc.id)
+        assert fetched is not None
+        assert fetched.external_id is None
+
     async def test_get_last_activity_at(self, relational: SQLiteRelationalBackend):
         ns = _make_namespace()
         await relational.create_namespace(ns)
