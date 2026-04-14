@@ -649,8 +649,22 @@ async def stage_documents_batch(
     # Compute all checksums upfront
     checksums = [compute_checksum(doc.get("content", "")) for doc in doc_inputs]
 
-    # Single batch query for existing documents (replaces N individual queries)
-    existing = await storage.get_documents_by_checksums(namespace_id, checksums)
+    # Intra-batch dedup: only process first occurrence of each checksum
+    canonical_idx: dict[str, int] = {}
+    dup_groups: dict[str, list[int]] = {}
+    for i, checksum in enumerate(checksums):
+        if checksum not in canonical_idx:
+            canonical_idx[checksum] = i
+        else:
+            dup_groups.setdefault(checksum, []).append(i)
+
+    if dup_groups:
+        total_dups = sum(len(idxs) for idxs in dup_groups.values())
+        logger.debug(f"Intra-batch dedup: {total_dups} duplicate(s) across {len(dup_groups)} checksum(s)")
+
+    # Single batch query for existing documents — query only unique checksums
+    unique_checksums = list(canonical_idx.keys())
+    existing = await storage.get_documents_by_checksums(namespace_id, unique_checksums)
 
     results: list[Document | None] = [None] * len(doc_inputs)
     stage_sem = asyncio.Semaphore(10)
@@ -691,9 +705,19 @@ async def stage_documents_batch(
             doc = await storage.create_document(document)
         results[idx] = doc
 
+    # Only create documents for canonical (first-occurrence) indices
     await asyncio.gather(
-        *[_create_one(i, doc_input, checksum) for i, (doc_input, checksum) in enumerate(zip(doc_inputs, checksums))]
+        *[
+            _create_one(canonical_idx[checksum], doc_inputs[canonical_idx[checksum]], checksum)
+            for checksum in canonical_idx
+        ]
     )
+
+    # Copy results from canonical indices to their intra-batch duplicates
+    for checksum, dup_idxs in dup_groups.items():
+        canonical_result = results[canonical_idx[checksum]]
+        for dup_idx in dup_idxs:
+            results[dup_idx] = canonical_result
 
     return results
 
