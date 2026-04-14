@@ -403,6 +403,7 @@ class LiteLLMEmbedder(Embedder):
                         model=self._model,
                         input=sanitized,
                         timeout=self._timeout,
+                        dimensions=self._dimension,
                     )
                     _latency = (_time.perf_counter() - _t0) * 1000
                     req_span.set_attribute("latency_ms", round(_latency, 2))
