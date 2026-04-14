@@ -59,6 +59,16 @@ class TestDocument:
         assert doc.status == DocumentStatus.FAILED
         assert doc.error_message == "Processing error"
 
+    def test_document_external_id_default_none(self) -> None:
+        """Test document external_id defaults to None."""
+        doc = Document(content="Content")
+        assert doc.external_id is None
+
+    def test_document_with_external_id(self) -> None:
+        """Test document with explicit external_id."""
+        doc = Document(content="Content", external_id="test-123")
+        assert doc.external_id == "test-123"
+
 
 class TestChunk:
     """Tests for Chunk model."""

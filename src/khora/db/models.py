@@ -144,6 +144,7 @@ class DocumentModel(Base):
     checksum: Mapped[str] = mapped_column(String(64), default="", index=True)
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    external_id: Mapped[str | None] = mapped_column(String, nullable=True, default=None)
 
     # Processing info
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -177,6 +178,12 @@ class DocumentModel(Base):
         ),
         Index("ix_documents_namespace_source_type", "namespace_id", "source_type"),
         Index("ix_documents_namespace_created_at", "namespace_id", "created_at"),
+        Index(
+            "ix_documents_namespace_external_id",
+            "namespace_id",
+            "external_id",
+            postgresql_where=text("external_id IS NOT NULL"),
+        ),
     )
 
     def __repr__(self) -> str:

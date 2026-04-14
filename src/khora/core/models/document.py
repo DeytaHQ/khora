@@ -68,6 +68,7 @@ class Document:
     id: UUID = field(default_factory=uuid4)
     namespace_id: UUID = field(default_factory=uuid4)
     content: str = ""
+    external_id: str | None = None
     metadata: DocumentMetadata = field(default_factory=DocumentMetadata)
     status: DocumentStatus = DocumentStatus.PENDING
 
