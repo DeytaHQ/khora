@@ -477,7 +477,9 @@ class PostgreSQLBackend(AsyncSessionMixin):
         async with self._get_session() as session:
             result = await session.execute(
                 select(DocumentModel).where(
-                    DocumentModel.namespace_id == namespace_id, DocumentModel.checksum == checksum
+                    DocumentModel.namespace_id == namespace_id,
+                    DocumentModel.checksum == checksum,
+                    DocumentModel.status != DocumentStatus.FAILED,
                 )
             )
             model = result.scalars().first()
@@ -520,6 +522,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 select(DocumentModel).where(
                     DocumentModel.namespace_id == namespace_id,
                     DocumentModel.checksum.in_(checksums),
+                    DocumentModel.status != DocumentStatus.FAILED,
                 )
             )
             models = result.scalars().all()

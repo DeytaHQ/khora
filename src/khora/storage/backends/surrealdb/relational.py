@@ -439,7 +439,7 @@ class SurrealDBRelationalAdapter:
         """Get a document by content checksum within a namespace."""
         ns_str = str(namespace_id)
         row = await self._conn.query_one(
-            "SELECT * FROM document WHERE namespace_id = $ns AND checksum = $checksum LIMIT 1",
+            "SELECT * FROM document WHERE namespace_id = $ns AND checksum = $checksum AND status != 'failed' LIMIT 1",
             {"ns": ns_str, "checksum": checksum},
         )
         if row is None:
@@ -462,7 +462,7 @@ class SurrealDBRelationalAdapter:
             return {}
         ns_str = str(namespace_id)
         rows = await self._conn.query(
-            "SELECT * FROM document WHERE namespace_id = $ns AND checksum IN $checksums",
+            "SELECT * FROM document WHERE namespace_id = $ns AND checksum IN $checksums AND status != 'failed'",
             {"ns": ns_str, "checksums": checksums},
         )
         result: dict[str, Document] = {}

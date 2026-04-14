@@ -163,3 +163,42 @@ class TestStageDocumentsBatchDedupe:
         assert storage.create_document.call_count == 1
         assert all(r is not None for r in results)
         assert all(r is results[0] for r in results)
+
+    @pytest.mark.asyncio
+    async def test_failed_doc_not_treated_as_duplicate(self) -> None:
+        """FAILED doc excluded by storage layer -> new doc created (DYT-2381).
+
+        The storage layer now filters out FAILED docs from checksum lookups,
+        so get_documents_by_checksums returns empty. stage_documents_batch
+        should then create a new document instead of skipping.
+        """
+        content = "previously failed"
+        storage = _make_storage()  # empty = simulates FAILED doc filtered out
+        inputs = [_doc_input(content)]
+
+        results = await stage_documents_batch(inputs, NAMESPACE_ID, storage)
+
+        assert len(results) == 1
+        assert results[0] is not None
+        assert storage.create_document.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_and_completed_docs_mixed(self) -> None:
+        """COMPLETED doc skipped, FAILED doc (filtered out) gets re-created (DYT-2381).
+
+        - doc 0: checksum matches a COMPLETED doc in DB -> None (skipped)
+        - doc 1: checksum had a FAILED doc, storage filtered it out -> new doc created
+        """
+        completed_content = "completed doc"
+        completed_checksum = compute_checksum(completed_content)
+        failed_content = "previously failed doc"
+        # Storage returns only the COMPLETED doc; FAILED doc is filtered out
+        storage = _make_storage(existing_checksums=[completed_checksum])
+        inputs = [_doc_input(completed_content), _doc_input(failed_content)]
+
+        results = await stage_documents_batch(inputs, NAMESPACE_ID, storage)
+
+        assert len(results) == 2
+        assert results[0] is None  # COMPLETED doc skipped
+        assert results[1] is not None  # FAILED doc re-created
+        assert storage.create_document.call_count == 1

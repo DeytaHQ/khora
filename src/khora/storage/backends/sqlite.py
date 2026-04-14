@@ -494,7 +494,7 @@ class SQLiteRelationalBackend:
 
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
         cursor = await self._conn.execute(
-            "SELECT * FROM documents WHERE namespace_id = ? AND checksum = ? LIMIT 1",
+            "SELECT * FROM documents WHERE namespace_id = ? AND checksum = ? AND status != 'failed' LIMIT 1",
             (str(namespace_id), checksum),
         )
         row = await cursor.fetchone()

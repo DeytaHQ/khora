@@ -289,6 +289,29 @@ class TestDocumentCRUD:
         assert fetched is not None
         assert fetched.id == doc.id
 
+    async def test_get_document_by_checksum_excludes_failed(self, relational: SQLiteRelationalBackend):
+        """FAILED documents should not be returned by checksum lookup (DYT-2381)."""
+        ns = _make_namespace()
+        await relational.create_namespace(ns)
+
+        doc = _make_document(ns.id, status=DocumentStatus.FAILED)
+        await relational.create_document(doc)
+
+        fetched = await relational.get_document_by_checksum(ns.id, "abc123")
+        assert fetched is None
+
+    async def test_get_document_by_checksum_returns_completed(self, relational: SQLiteRelationalBackend):
+        """COMPLETED documents should still be returned by checksum lookup."""
+        ns = _make_namespace()
+        await relational.create_namespace(ns)
+
+        doc = _make_document(ns.id, status=DocumentStatus.COMPLETED)
+        await relational.create_document(doc)
+
+        fetched = await relational.get_document_by_checksum(ns.id, "abc123")
+        assert fetched is not None
+        assert fetched.id == doc.id
+
     async def test_get_document_stats(self, relational: SQLiteRelationalBackend):
         ns = _make_namespace()
         await relational.create_namespace(ns)
