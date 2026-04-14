@@ -255,7 +255,7 @@ class LLMEntityExtractor(EntityExtractor):
         self,
         model: str = "gpt-4o-mini",
         *,
-        temperature: float = 0.3,  # Lower for more consistent extraction
+        temperature: float = 0.0,  # Deterministic extraction for reproducible entity sets
         max_tokens: int = 16384,
         timeout: int = 60,
         max_retries: int = 3,
@@ -679,7 +679,7 @@ class LLMEntityExtractor(EntityExtractor):
         """
         return cls(
             model=config.model,
-            temperature=0.3,  # Override for extraction
+            temperature=0.0,  # Deterministic extraction for reproducible entity sets
             max_tokens=config.max_tokens,
             timeout=config.timeout,
             max_retries=config.max_retries,
@@ -757,13 +757,9 @@ class LLMEntityExtractor(EntityExtractor):
                         from khora.telemetry import get_collector, trace_span
 
                         _t0 = _time.perf_counter()
-                        # Adaptive max_tokens: reduce for short texts to signal API to reserve less compute
+                        # Don't cap below the configured max_tokens — JSON structure overhead
+                        # is constant regardless of input size. Let the model use its full budget.
                         effective_max_tokens = self._max_tokens
-                        text_len = len(text)
-                        if text_len < 500:
-                            effective_max_tokens = min(self._max_tokens, 4096)
-                        elif text_len < 2000:
-                            effective_max_tokens = min(self._max_tokens, 8192)
 
                         with trace_span("khora.extraction.llm_call", model=self._model, call_type="single"):
                             response = await litellm.acompletion(
