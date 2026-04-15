@@ -337,6 +337,20 @@ class TestRegisterPoolMetrics:
             assert "khora.neo4j.pool.connections.creating" in names
             assert "khora.neo4j.pool.utilization" in names
 
+    def test_idempotent_on_repeated_connect(self) -> None:
+        """_register_pool_metrics registers gauges only once even if called twice."""
+        driver = MagicMock()
+        driver._pool = MagicMock()
+        driver._pool.connections = {}
+        driver._pool.connections_reservations = {}
+
+        backend = Neo4jBackend.from_driver(driver)
+
+        with patch("khora.telemetry.metrics.metric_gauge_callback") as mock_gauge:
+            backend._register_pool_metrics()
+            backend._register_pool_metrics()  # second call should be a no-op
+            assert mock_gauge.call_count == 5  # not 10
+
 
 def _make_mock_connection(in_use: bool = False) -> MagicMock:
     conn = MagicMock()

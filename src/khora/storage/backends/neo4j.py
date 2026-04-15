@@ -253,6 +253,7 @@ class Neo4jBackend(GraphBackendBase):
         """Initialise OTel metric instruments (no-op when logfire absent)."""
         from khora.telemetry.metrics import metric_counter, metric_histogram
 
+        self._pool_metrics_registered = False
         self._acquisition_histogram = metric_histogram(
             "khora.neo4j.pool.acquisition_time",
             unit="s",
@@ -537,6 +538,9 @@ class Neo4jBackend(GraphBackendBase):
 
     def _register_pool_metrics(self) -> None:
         """Register OTel gauge callbacks for Neo4j connection pool state."""
+        if self._pool_metrics_registered:
+            return
+
         from khora.telemetry.metrics import metric_gauge_callback
 
         pool = getattr(self._driver, "_pool", None)
@@ -610,6 +614,7 @@ class Neo4jBackend(GraphBackendBase):
             [_observe_utilization],
             description="Neo4j connection pool utilization ratio (active / max_pool_size)",
         )
+        self._pool_metrics_registered = True
 
     # =========================================================================
     # Entity operations
