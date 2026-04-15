@@ -541,6 +541,8 @@ class MemoryLake:
         agentic: bool = False,
         raw: bool = False,
         include_sources: bool = False,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
     ) -> RecallResult:
         """Recall memories relevant to a query.
 
@@ -573,11 +575,20 @@ class MemoryLake:
             raw: If True, skip all LLM features (default: False)
             include_sources: If True, populate source document metadata on
                 returned chunks and entities (default: False)
+            start_time: Optional lower bound (inclusive) for memory time.
+                Timezone-aware datetimes are recommended; naive datetimes are
+                assumed UTC. When provided, bypasses NLP temporal detection.
+            end_time: Optional upper bound (inclusive) for memory time.
+                Same timezone semantics as start_time.
 
         Returns:
             RecallResult with matched memories.  When using the VectorCypher
             engine, ``relationships`` contains scored relationship tuples and
             ``context_text`` includes a ``--- Relationships ---`` section.
+
+        Raises:
+            ValueError: If both ``start_time`` and ``end_time`` are provided
+                and ``start_time > end_time``.
         """
         from khora.telemetry.context import (
             clear_trace_id,
@@ -589,6 +600,21 @@ class MemoryLake:
         ensure_trace_id()
         start_usage_collection()
         try:
+            if start_time is not None or end_time is not None:
+                if start_time is not None and end_time is not None:
+                    try:
+                        if start_time > end_time:
+                            raise ValueError("start_time must be <= end_time")
+                    except TypeError as e:
+                        raise ValueError("start_time and end_time must both be timezone-aware or both naive") from e
+                from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
+
+                temporal_filter: Any = SkeletonTemporalFilter(
+                    occurred_after=start_time,
+                    occurred_before=end_time,
+                )
+            else:
+                temporal_filter = None
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.recall", namespace_id=str(namespace_id), query=query):
                 result = await self._get_engine().recall(
@@ -599,6 +625,7 @@ class MemoryLake:
                     min_similarity=min_similarity,
                     agentic=agentic,
                     raw=raw,
+                    temporal_filter=temporal_filter,
                 )
                 if include_sources:
                     await self._populate_sources(result.chunks, result.entities, result.relationships)

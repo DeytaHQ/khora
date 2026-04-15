@@ -571,6 +571,144 @@ class TestRecall:
 
 
 # ---------------------------------------------------------------------------
+# recall — temporal bounds (start_time / end_time)
+# ---------------------------------------------------------------------------
+
+
+class TestRecallTemporalBounds:
+    """Tests for start_time/end_time parameters on recall()."""
+
+    # Shared helper: make a minimal RecallResult mock return value
+    @staticmethod
+    def _mock_result(ns_id: object) -> RecallResult:
+        return RecallResult(
+            query="q",
+            namespace_id=ns_id,  # type: ignore[arg-type]
+            chunks=[],
+            entities=[],
+            context_text="",
+        )
+
+    @pytest.mark.asyncio
+    async def test_start_time_only_constructs_filter(self) -> None:
+        """start_time only → SkeletonTemporalFilter with occurred_after set, occurred_before None."""
+        from datetime import UTC, datetime
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+
+        lake._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await lake.recall("q", namespace=ns_id, start_time=start)
+
+        call_kwargs = lake._engine.recall.call_args
+        temporal_filter = call_kwargs.kwargs.get("temporal_filter")
+        assert temporal_filter is not None
+        assert temporal_filter.occurred_after == start
+        assert temporal_filter.occurred_before is None
+
+    @pytest.mark.asyncio
+    async def test_end_time_only_constructs_filter(self) -> None:
+        """end_time only → SkeletonTemporalFilter with occurred_before set, occurred_after None."""
+        from datetime import UTC, datetime
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        end = datetime(2024, 12, 31, tzinfo=UTC)
+
+        lake._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await lake.recall("q", namespace=ns_id, end_time=end)
+
+        call_kwargs = lake._engine.recall.call_args
+        temporal_filter = call_kwargs.kwargs.get("temporal_filter")
+        assert temporal_filter is not None
+        assert temporal_filter.occurred_before == end
+        assert temporal_filter.occurred_after is None
+
+    @pytest.mark.asyncio
+    async def test_both_bounds_valid(self) -> None:
+        """Both bounds provided (start < end) → filter constructed correctly."""
+        from datetime import UTC, datetime
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+        end = datetime(2024, 12, 31, tzinfo=UTC)
+
+        lake._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await lake.recall("q", namespace=ns_id, start_time=start, end_time=end)
+
+        call_kwargs = lake._engine.recall.call_args
+        temporal_filter = call_kwargs.kwargs.get("temporal_filter")
+        assert temporal_filter is not None
+        assert temporal_filter.occurred_after == start
+        assert temporal_filter.occurred_before == end
+
+    @pytest.mark.asyncio
+    async def test_no_bounds_passes_none_filter(self) -> None:
+        """Neither bound → temporal_filter=None passed to engine."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+
+        lake._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await lake.recall("q", namespace=ns_id)
+
+        call_kwargs = lake._engine.recall.call_args
+        temporal_filter = call_kwargs.kwargs.get("temporal_filter")
+        assert temporal_filter is None
+
+    @pytest.mark.asyncio
+    async def test_start_after_end_raises_valueerror(self) -> None:
+        """start_time > end_time → ValueError before engine is called."""
+        from datetime import UTC, datetime
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        start = datetime(2024, 12, 31, tzinfo=UTC)
+        end = datetime(2024, 1, 1, tzinfo=UTC)
+
+        with pytest.raises(ValueError, match="start_time must be <= end_time"):
+            await lake.recall("q", namespace=ns_id, start_time=start, end_time=end)
+
+        lake._engine.recall.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mixed_timezone_raises_valueerror(self) -> None:
+        """naive start_time with aware end_time → ValueError."""
+        from datetime import UTC, datetime
+
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        start = datetime(2024, 1, 1)  # naive
+        end = datetime(2024, 12, 31, tzinfo=UTC)  # aware
+
+        with pytest.raises(ValueError, match="timezone-aware or both naive"):
+            await lake.recall("q", namespace=ns_id, start_time=start, end_time=end)
+
+        lake._engine.recall.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # forget
 # ---------------------------------------------------------------------------
 

@@ -778,8 +778,18 @@ class ChronicleEngine:
         created_after = None
         created_before = None
         if temporal_filter is not None:
-            created_after = getattr(temporal_filter, "start_time", None)
-            created_before = getattr(temporal_filter, "end_time", None)
+            created_after = getattr(temporal_filter, "occurred_after", None) or getattr(
+                temporal_filter, "start_time", None
+            )
+            created_before = getattr(temporal_filter, "occurred_before", None) or getattr(
+                temporal_filter, "end_time", None
+            )
+            if created_after is None and created_before is None:
+                logger.debug(
+                    "temporal_filter provided but no time bounds extracted "
+                    "(expected occurred_after/occurred_before or start_time/end_time); "
+                    "using default temporal window"
+                )
 
         if created_after is None and created_before is None:
             # Use configurable temporal window (0 = unlimited — let decay handle scoring)
