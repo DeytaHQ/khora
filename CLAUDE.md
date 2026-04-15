@@ -164,6 +164,7 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **Logfire:** `_HAS_LOGFIRE` flag, `trace_span()` yields no-op when absent. Install: `pip install khora[logfire]`
 - **`@trace` decorator:** `from khora.telemetry import trace`. Zero overhead when logfire absent
 - **Telemetry collector:** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording. Without it, `NoOpCollector` is used (zero cost)
+- **Neo4j pool metrics:** When logfire is installed, `Neo4jBackend` emits OTel metrics: `khora.neo4j.pool.connections.{active,idle,total,creating}` (gauges), `khora.neo4j.pool.utilization` (gauge), `khora.neo4j.pool.acquisition_time` / `khora.neo4j.session.duration` (histograms), `khora.neo4j.pool.timeout` (counter). Zero cost without logfire. Pool gauges rely on `driver._pool` internals (verified stable neo4j 5.x–6.1); degrade gracefully if unavailable.
 
 ### Logging
 - **loguru sinks are sync by default** — `logger.add(...)` has `enqueue=False`. In async code, `logger.*` calls then block the event loop on each format+write. Khora's `setup_logging()` enables `enqueue=True` on all sinks it installs, and registers `atexit.register(logger.complete)` so the queue drains on clean exit.
