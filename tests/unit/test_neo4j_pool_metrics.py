@@ -1,0 +1,512 @@
+"""Unit tests for Neo4j pool metrics instrumentation.
+
+Validates that:
+- _NoOpCounter and _NoOpHistogram silently discard calls
+- metric_counter/metric_histogram return no-ops when logfire absent
+- metric_gauge_callback is a no-op when logfire absent
+- When logfire is present, helpers delegate to logfire APIs
+- Neo4jBackend._session() records acquisition time and session duration
+- Neo4jBackend._session() increments timeout counter on acquisition timeout
+- Neo4jBackend._session() re-raises the original exception
+- Neo4jBackend._register_pool_metrics() registers gauge callbacks
+- Gauge callbacks return correct Observations from mock pool state
+- Neo4jBackend._init_metrics() creates histogram and counter instruments
+"""
+
+from __future__ import annotations
+
+from collections import deque
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from neo4j.exceptions import ConnectionAcquisitionTimeoutError
+
+from khora.storage.backends.neo4j import Neo4jBackend
+from khora.telemetry.metrics import (
+    _NOOP_COUNTER,
+    _NOOP_HISTOGRAM,
+    _NoOpCounter,
+    _NoOpHistogram,
+    metric_counter,
+    metric_gauge_callback,
+    metric_histogram,
+)
+
+# ---------------------------------------------------------------------------
+# telemetry.metrics no-op fallbacks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNoOpCounter:
+    def test_add_accepts_int(self) -> None:
+        _NOOP_COUNTER.add(1)
+
+    def test_add_accepts_float_with_attributes(self) -> None:
+        _NOOP_COUNTER.add(3.14, attributes={"key": "val"})
+
+    def test_singleton_identity(self) -> None:
+        c = metric_counter("test.counter")
+        assert isinstance(c, _NoOpCounter)
+
+
+@pytest.mark.unit
+class TestNoOpHistogram:
+    def test_record_accepts_int(self) -> None:
+        _NOOP_HISTOGRAM.record(42)
+
+    def test_record_accepts_float_with_attributes(self) -> None:
+        _NOOP_HISTOGRAM.record(0.5, attributes={"op": "read"})
+
+    def test_singleton_identity(self) -> None:
+        h = metric_histogram("test.histogram", unit="s")
+        assert isinstance(h, _NoOpHistogram)
+
+
+@pytest.mark.unit
+class TestMetricHelpersDelegation:
+    """Tests that metric helpers delegate to logfire when present."""
+
+    def test_metric_counter_delegates_to_logfire(self) -> None:
+        mock_logfire = MagicMock()
+        mock_counter = MagicMock()
+        mock_logfire.metric_counter.return_value = mock_counter
+
+        with (
+            patch("khora.telemetry.metrics._HAS_LOGFIRE", True),
+            patch("khora.telemetry.metrics._logfire", mock_logfire),
+        ):
+            result = metric_counter("test.counter", unit="1", description="A counter")
+
+        assert result is mock_counter
+        mock_logfire.metric_counter.assert_called_once_with("test.counter", unit="1", description="A counter")
+
+    def test_metric_histogram_delegates_to_logfire(self) -> None:
+        mock_logfire = MagicMock()
+        mock_histogram = MagicMock()
+        mock_logfire.metric_histogram.return_value = mock_histogram
+
+        with (
+            patch("khora.telemetry.metrics._HAS_LOGFIRE", True),
+            patch("khora.telemetry.metrics._logfire", mock_logfire),
+        ):
+            result = metric_histogram("test.hist", unit="s", description="Latency")
+
+        assert result is mock_histogram
+        mock_logfire.metric_histogram.assert_called_once_with("test.hist", unit="s", description="Latency")
+
+    def test_metric_gauge_callback_delegates_to_logfire(self) -> None:
+        mock_logfire = MagicMock()
+        callback = MagicMock()
+
+        with (
+            patch("khora.telemetry.metrics._HAS_LOGFIRE", True),
+            patch("khora.telemetry.metrics._logfire", mock_logfire),
+        ):
+            metric_gauge_callback("test.gauge", [callback], unit="1", description="A gauge")
+
+        mock_logfire.metric_gauge_callback.assert_called_once_with(
+            "test.gauge", [callback], unit="1", description="A gauge"
+        )
+
+
+@pytest.mark.unit
+class TestMetricGaugeCallback:
+    def test_noop_does_not_raise(self) -> None:
+        """metric_gauge_callback is silent when logfire is absent."""
+        metric_gauge_callback("test.gauge", [lambda _: iter([])])
+
+
+# ---------------------------------------------------------------------------
+# Neo4jBackend._init_metrics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNeo4jInitMetrics:
+    def test_init_creates_metric_instruments(self) -> None:
+        backend = Neo4jBackend("bolt://localhost:7687")
+        assert isinstance(backend._acquisition_histogram, _NoOpHistogram)
+        assert isinstance(backend._session_duration_histogram, _NoOpHistogram)
+        assert isinstance(backend._timeout_counter, _NoOpCounter)
+
+    def test_from_driver_creates_metric_instruments(self) -> None:
+        driver = MagicMock()
+        backend = Neo4jBackend.from_driver(driver)
+        assert isinstance(backend._acquisition_histogram, _NoOpHistogram)
+        assert isinstance(backend._session_duration_histogram, _NoOpHistogram)
+        assert isinstance(backend._timeout_counter, _NoOpCounter)
+
+
+# ---------------------------------------------------------------------------
+# Neo4jBackend._session context manager
+# ---------------------------------------------------------------------------
+
+
+def _make_neo4j_driver() -> tuple[MagicMock, AsyncMock]:
+    """Create a mock Neo4j driver with properly mocked session context manager."""
+    driver = MagicMock()
+    session = AsyncMock()
+
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    driver.session.return_value = ctx
+
+    return driver, session
+
+
+@pytest.mark.unit
+class TestSessionContextManager:
+    @pytest.mark.asyncio
+    async def test_records_acquisition_time(self) -> None:
+        """_session records acquisition time on the histogram."""
+        driver, session = _make_neo4j_driver()
+        backend = Neo4jBackend.from_driver(driver)
+
+        recorded: list[float] = []
+        backend._acquisition_histogram = MagicMock()
+        backend._acquisition_histogram.record = lambda v, **kw: recorded.append(v)
+        backend._session_duration_histogram = MagicMock()
+
+        async with backend._session() as s:
+            assert s is session
+
+        assert len(recorded) == 1
+        assert recorded[0] >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_records_session_duration(self) -> None:
+        """_session records total session duration on close."""
+        driver, session = _make_neo4j_driver()
+        backend = Neo4jBackend.from_driver(driver)
+
+        durations: list[float] = []
+        backend._acquisition_histogram = MagicMock()
+        backend._session_duration_histogram = MagicMock()
+        backend._session_duration_histogram.record = lambda v, **kw: durations.append(v)
+
+        async with backend._session():
+            pass
+
+        assert len(durations) == 1
+        assert durations[0] >= 0.0
+
+    @pytest.mark.asyncio
+    async def test_counts_acquisition_timeout(self) -> None:
+        """_session increments timeout counter on ConnectionAcquisitionTimeoutError."""
+        driver = MagicMock()
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(side_effect=ConnectionAcquisitionTimeoutError("pool exhausted"))
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        driver.session.return_value = ctx
+
+        backend = Neo4jBackend.from_driver(driver)
+
+        timeout_adds: list[int] = []
+        backend._timeout_counter = MagicMock()
+        backend._timeout_counter.add = lambda v, **kw: timeout_adds.append(v)
+
+        with pytest.raises(ConnectionAcquisitionTimeoutError):
+            async with backend._session():
+                pass
+
+        assert timeout_adds == [1]
+
+    @pytest.mark.asyncio
+    async def test_does_not_count_other_exceptions(self) -> None:
+        """_session does not increment timeout counter for non-timeout exceptions."""
+        driver = MagicMock()
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(side_effect=RuntimeError("something else"))
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        driver.session.return_value = ctx
+
+        backend = Neo4jBackend.from_driver(driver)
+
+        timeout_adds: list[int] = []
+        backend._timeout_counter = MagicMock()
+        backend._timeout_counter.add = lambda v, **kw: timeout_adds.append(v)
+
+        with pytest.raises(RuntimeError):
+            async with backend._session():
+                pass
+
+        assert timeout_adds == []
+
+    @pytest.mark.asyncio
+    async def test_reraises_original_exception(self) -> None:
+        """_session re-raises ConnectionAcquisitionTimeoutError (doesn't swallow it)."""
+        driver = MagicMock()
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(side_effect=ConnectionAcquisitionTimeoutError("pool exhausted"))
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        driver.session.return_value = ctx
+
+        backend = Neo4jBackend.from_driver(driver)
+        backend._timeout_counter = MagicMock()
+
+        with pytest.raises(ConnectionAcquisitionTimeoutError, match="pool exhausted"):
+            async with backend._session():
+                pass
+
+    @pytest.mark.asyncio
+    async def test_session_duration_gte_acquisition_time(self) -> None:
+        """Session duration should be >= acquisition time."""
+        driver, session = _make_neo4j_driver()
+        backend = Neo4jBackend.from_driver(driver)
+
+        acq_values: list[float] = []
+        dur_values: list[float] = []
+        backend._acquisition_histogram = MagicMock()
+        backend._acquisition_histogram.record = lambda v, **kw: acq_values.append(v)
+        backend._session_duration_histogram = MagicMock()
+        backend._session_duration_histogram.record = lambda v, **kw: dur_values.append(v)
+
+        async with backend._session():
+            pass
+
+        assert len(acq_values) == 1
+        assert len(dur_values) == 1
+        assert dur_values[0] >= acq_values[0]
+
+    @pytest.mark.asyncio
+    async def test_slow_acquisition_logs_warning(self) -> None:
+        """_session logs a warning when acquisition takes > 5s."""
+        driver, session = _make_neo4j_driver()
+        backend = Neo4jBackend.from_driver(driver)
+        backend._acquisition_histogram = MagicMock()
+        backend._session_duration_histogram = MagicMock()
+
+        # Patch time.monotonic to simulate slow acquisition
+        call_count = 0
+        original_monotonic_values = [0.0, 6.0, 6.0]  # t0=0, elapsed=6s, final=6s
+
+        def fake_monotonic():
+            nonlocal call_count
+            val = original_monotonic_values[min(call_count, len(original_monotonic_values) - 1)]
+            call_count += 1
+            return val
+
+        with patch("khora.storage.backends.neo4j._time") as mock_time:
+            mock_time.monotonic = fake_monotonic
+            with patch("khora.storage.backends.neo4j.logger") as mock_logger:
+                async with backend._session():
+                    pass
+
+                mock_logger.warning.assert_called_once()
+                assert "6.0s" in mock_logger.warning.call_args[0][0]
+
+
+# ---------------------------------------------------------------------------
+# Neo4jBackend._register_pool_metrics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRegisterPoolMetrics:
+    def test_skips_when_pool_not_accessible(self) -> None:
+        """_register_pool_metrics logs debug when _pool is None."""
+        driver = MagicMock(spec=[])  # No _pool attribute
+        backend = Neo4jBackend.from_driver(driver)
+
+        with patch("khora.storage.backends.neo4j.logger") as mock_logger:
+            backend._register_pool_metrics()
+            mock_logger.debug.assert_called_once()
+
+    def test_registers_five_gauges(self) -> None:
+        """_register_pool_metrics registers 5 gauge callbacks."""
+        driver = MagicMock()
+        driver._pool = MagicMock()
+        driver._pool.connections = {}
+        driver._pool.connections_reservations = {}
+
+        backend = Neo4jBackend.from_driver(driver)
+
+        with patch("khora.telemetry.metrics.metric_gauge_callback") as mock_gauge:
+            backend._register_pool_metrics()
+            assert mock_gauge.call_count == 5
+
+            names = [call.args[0] for call in mock_gauge.call_args_list]
+            assert "khora.neo4j.pool.connections.active" in names
+            assert "khora.neo4j.pool.connections.idle" in names
+            assert "khora.neo4j.pool.connections.total" in names
+            assert "khora.neo4j.pool.connections.creating" in names
+            assert "khora.neo4j.pool.utilization" in names
+
+
+def _make_mock_connection(in_use: bool = False) -> MagicMock:
+    conn = MagicMock()
+    conn.in_use = in_use
+    return conn
+
+
+def _capture_gauge_callbacks(driver: MagicMock, backend: Neo4jBackend) -> dict:
+    """Register pool metrics and capture the callback functions by name."""
+    captured: dict[str, object] = {}
+
+    def capture(name, callbacks, **kwargs):
+        captured[name] = callbacks[0]
+
+    with patch("khora.telemetry.metrics.metric_gauge_callback", side_effect=capture):
+        backend._register_pool_metrics()
+
+    return captured
+
+
+class _FakeObservation:
+    """Lightweight stand-in for opentelemetry.metrics.Observation."""
+
+    def __init__(self, value):
+        self.value = value
+
+
+def _invoke_gauge(callback) -> list[_FakeObservation]:
+    """Invoke a gauge callback with a mock Observation class injected."""
+    import sys
+    import types
+
+    # Build a minimal fake opentelemetry.metrics module
+    fake_mod = types.ModuleType("opentelemetry.metrics")
+    fake_mod.Observation = _FakeObservation  # type: ignore[attr-defined]
+
+    # Also need opentelemetry package module
+    fake_pkg = types.ModuleType("opentelemetry")
+
+    saved = {}
+    for key in ("opentelemetry", "opentelemetry.metrics"):
+        saved[key] = sys.modules.get(key)
+
+    sys.modules["opentelemetry"] = fake_pkg
+    sys.modules["opentelemetry.metrics"] = fake_mod
+    try:
+        return list(callback(None))
+    finally:
+        for key, val in saved.items():
+            if val is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = val
+
+
+@pytest.mark.unit
+class TestGaugeCallbackObservations:
+    """Tests that gauge callbacks return correct Observations from mock pool state."""
+
+    def test_active_count(self) -> None:
+        """Active gauge yields Observation with count of in_use=True connections."""
+        driver = MagicMock()
+        driver._pool = MagicMock()
+        driver._pool.connections = {
+            "addr1": deque([_make_mock_connection(in_use=True), _make_mock_connection(in_use=False)]),
+            "addr2": deque([_make_mock_connection(in_use=True)]),
+        }
+        driver._pool.connections_reservations = {}
+
+        backend = Neo4jBackend.from_driver(driver)
+        callbacks = _capture_gauge_callbacks(driver, backend)
+
+        obs = _invoke_gauge(callbacks["khora.neo4j.pool.connections.active"])
+        assert len(obs) == 1
+        assert obs[0].value == 2
+
+    def test_idle_count(self) -> None:
+        """Idle gauge yields Observation with count of in_use=False connections."""
+        driver = MagicMock()
+        driver._pool = MagicMock()
+        driver._pool.connections = {
+            "addr1": deque(
+                [
+                    _make_mock_connection(in_use=True),
+                    _make_mock_connection(in_use=False),
+                    _make_mock_connection(in_use=False),
+                ]
+            ),
+        }
+        driver._pool.connections_reservations = {}
+
+        backend = Neo4jBackend.from_driver(driver)
+        callbacks = _capture_gauge_callbacks(driver, backend)
+
+        obs = _invoke_gauge(callbacks["khora.neo4j.pool.connections.idle"])
+        assert len(obs) == 1
+        assert obs[0].value == 2
+
+    def test_total_count(self) -> None:
+        """Total gauge yields Observation with count of all connections."""
+        driver = MagicMock()
+        driver._pool = MagicMock()
+        driver._pool.connections = {
+            "addr1": deque([_make_mock_connection(), _make_mock_connection()]),
+            "addr2": deque([_make_mock_connection(), _make_mock_connection()]),
+        }
+        driver._pool.connections_reservations = {}
+
+        backend = Neo4jBackend.from_driver(driver)
+        callbacks = _capture_gauge_callbacks(driver, backend)
+
+        obs = _invoke_gauge(callbacks["khora.neo4j.pool.connections.total"])
+        assert len(obs) == 1
+        assert obs[0].value == 4
+
+    def test_creating_count(self) -> None:
+        """Creating gauge yields Observation with sum of connections_reservations."""
+        driver = MagicMock()
+        driver._pool = MagicMock()
+        driver._pool.connections = {}
+        driver._pool.connections_reservations = {"addr1": 2, "addr2": 3}
+
+        backend = Neo4jBackend.from_driver(driver)
+        callbacks = _capture_gauge_callbacks(driver, backend)
+
+        obs = _invoke_gauge(callbacks["khora.neo4j.pool.connections.creating"])
+        assert len(obs) == 1
+        assert obs[0].value == 5
+
+    def test_utilization_ratio(self) -> None:
+        """Utilization gauge yields Observation(active / max_pool_size)."""
+        driver = MagicMock()
+        driver._pool = MagicMock()
+        driver._pool.connections = {
+            "addr1": deque(
+                [
+                    _make_mock_connection(in_use=True),
+                    _make_mock_connection(in_use=True),
+                    _make_mock_connection(in_use=False),
+                ]
+            ),
+        }
+        driver._pool.connections_reservations = {}
+
+        backend = Neo4jBackend.from_driver(driver)
+        backend._max_connection_pool_size = 50
+        callbacks = _capture_gauge_callbacks(driver, backend)
+
+        obs = _invoke_gauge(callbacks["khora.neo4j.pool.utilization"])
+        assert len(obs) == 1
+        assert obs[0].value == pytest.approx(0.04)  # 2 active / 50 max
+
+    def test_empty_pool_returns_zeros(self) -> None:
+        """All gauge callbacks return zero observations when pool is empty."""
+        driver = MagicMock()
+        driver._pool = MagicMock()
+        driver._pool.connections = {}
+        driver._pool.connections_reservations = {}
+
+        backend = Neo4jBackend.from_driver(driver)
+        callbacks = _capture_gauge_callbacks(driver, backend)
+
+        obs = _invoke_gauge(callbacks["khora.neo4j.pool.connections.active"])
+        assert obs[0].value == 0
+
+        obs = _invoke_gauge(callbacks["khora.neo4j.pool.connections.idle"])
+        assert obs[0].value == 0
+
+        obs = _invoke_gauge(callbacks["khora.neo4j.pool.connections.total"])
+        assert obs[0].value == 0
+
+        obs = _invoke_gauge(callbacks["khora.neo4j.pool.utilization"])
+        assert obs[0].value == 0.0

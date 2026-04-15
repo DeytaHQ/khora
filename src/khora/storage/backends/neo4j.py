@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 
 from loguru import logger
 from neo4j import AsyncDriver, AsyncGraphDatabase, AsyncManagedTransaction, unit_of_work
-from neo4j.exceptions import ClientError
+from neo4j.exceptions import ClientError, ConnectionAcquisitionTimeoutError
 
 from khora.core.models import Entity, Episode, Relationship
 from khora.storage.backends.mixins import (
@@ -247,6 +247,26 @@ class Neo4jBackend(GraphBackendBase):
         self._owns_driver: bool = True
         self._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
         self._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
+        self._init_metrics()
+
+    def _init_metrics(self) -> None:
+        """Initialise OTel metric instruments (no-op when logfire absent)."""
+        from khora.telemetry.metrics import metric_counter, metric_histogram
+
+        self._acquisition_histogram = metric_histogram(
+            "khora.neo4j.pool.acquisition_time",
+            unit="s",
+            description="Time to acquire a connection from the Neo4j pool",
+        )
+        self._session_duration_histogram = metric_histogram(
+            "khora.neo4j.session.duration",
+            unit="s",
+            description="Total time a Neo4j session is held",
+        )
+        self._timeout_counter = metric_counter(
+            "khora.neo4j.pool.timeout",
+            description="Neo4j ConnectionAcquisitionTimeoutError occurrences",
+        )
 
     @classmethod
     def from_config(cls, config: Any) -> Neo4jBackend:
@@ -309,6 +329,7 @@ class Neo4jBackend(GraphBackendBase):
         instance._owns_driver = False
         instance._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
         instance._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
+        instance._init_metrics()
         return instance
 
     async def connect(self) -> None:
@@ -316,6 +337,7 @@ class Neo4jBackend(GraphBackendBase):
         if self._driver is not None:
             # Already connected (either by connect() or from_driver())
             await self._create_indexes()
+            self._register_pool_metrics()
             return
 
         logger.info(f"Connecting to Neo4j at {self._url}...")
@@ -334,6 +356,7 @@ class Neo4jBackend(GraphBackendBase):
 
         # Create indexes for performance
         await self._create_indexes()
+        self._register_pool_metrics()
         logger.info("Connected to Neo4j")
 
     async def disconnect(self) -> None:
@@ -475,7 +498,7 @@ class Neo4jBackend(GraphBackendBase):
             "CREATE INDEX rel_depends_created_at IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.created_at)",
         ]
 
-        async with self._driver.session(database=self._database) as session:
+        async with self._session() as session:
             for index in indexes:
                 try:
                     await session.run(index)
@@ -494,13 +517,107 @@ class Neo4jBackend(GraphBackendBase):
             raise RuntimeError("Backend not connected. Call connect() first.")
         return self._driver
 
+    @asynccontextmanager
+    async def _session(self) -> AsyncIterator[Any]:
+        """Acquire a Neo4j session with pool metrics instrumentation."""
+        t0 = _time.monotonic()
+        try:
+            async with self._get_driver().session(database=self._database) as session:
+                elapsed = _time.monotonic() - t0
+                self._acquisition_histogram.record(elapsed)
+                if elapsed > 5.0:
+                    logger.warning(f"Neo4j pool acquisition took {elapsed:.1f}s")
+                try:
+                    yield session
+                finally:
+                    self._session_duration_histogram.record(_time.monotonic() - t0)
+        except ConnectionAcquisitionTimeoutError:
+            self._timeout_counter.add(1)
+            raise
+
+    def _register_pool_metrics(self) -> None:
+        """Register OTel gauge callbacks for Neo4j connection pool state."""
+        from khora.telemetry.metrics import metric_gauge_callback
+
+        pool = getattr(self._driver, "_pool", None)
+        if pool is None:
+            logger.debug("Neo4j pool internals not accessible; skipping pool gauges")
+            return
+
+        max_size = self._max_connection_pool_size or 100
+
+        def _pool_snapshot() -> tuple[int, int, int, int]:
+            """Return (active, idle, total, creating) from the pool."""
+            conns = getattr(pool, "connections", {})
+            all_conns = [c for deq in conns.values() for c in deq]
+            active = sum(1 for c in all_conns if getattr(c, "in_use", False))
+            idle = len(all_conns) - active
+            creating = sum(getattr(pool, "connections_reservations", {}).values())
+            return active, idle, len(all_conns), creating
+
+        def _observe_active(_options: Any) -> Any:
+            from opentelemetry.metrics import Observation
+
+            active, _, _, _ = _pool_snapshot()
+            yield Observation(active)
+
+        def _observe_idle(_options: Any) -> Any:
+            from opentelemetry.metrics import Observation
+
+            _, idle, _, _ = _pool_snapshot()
+            yield Observation(idle)
+
+        def _observe_total(_options: Any) -> Any:
+            from opentelemetry.metrics import Observation
+
+            _, _, total, _ = _pool_snapshot()
+            yield Observation(total)
+
+        def _observe_creating(_options: Any) -> Any:
+            from opentelemetry.metrics import Observation
+
+            _, _, _, creating = _pool_snapshot()
+            yield Observation(creating)
+
+        def _observe_utilization(_options: Any) -> Any:
+            from opentelemetry.metrics import Observation
+
+            active, _, _, _ = _pool_snapshot()
+            yield Observation(active / max_size if max_size else 0.0)
+
+        metric_gauge_callback(
+            "khora.neo4j.pool.connections.active",
+            [_observe_active],
+            description="Neo4j connections currently in use",
+        )
+        metric_gauge_callback(
+            "khora.neo4j.pool.connections.idle",
+            [_observe_idle],
+            description="Neo4j connections idle in the pool",
+        )
+        metric_gauge_callback(
+            "khora.neo4j.pool.connections.total",
+            [_observe_total],
+            description="Total Neo4j connections in the pool",
+        )
+        metric_gauge_callback(
+            "khora.neo4j.pool.connections.creating",
+            [_observe_creating],
+            description="Neo4j connections currently being created",
+        )
+        metric_gauge_callback(
+            "khora.neo4j.pool.utilization",
+            [_observe_utilization],
+            description="Neo4j connection pool utilization ratio (active / max_pool_size)",
+        )
+
     # =========================================================================
     # Entity operations
     # =========================================================================
 
     async def create_entity(self, entity: Entity) -> Entity:
         """Create an entity node in the graph."""
-        driver = self._get_driver()
+
         params = _entity_to_cypher_params(entity)
 
         async def _create(tx: AsyncManagedTransaction) -> None:
@@ -527,16 +644,15 @@ class Neo4jBackend(GraphBackendBase):
             """
             await tx.run(query, **params)
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             await session.execute_write(_create)
 
         return entity
 
     async def get_entity(self, entity_id: UUID) -> Entity | None:
         """Get an entity by ID."""
-        driver = self._get_driver()
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(
                 "MATCH (e:Entity {id: $id}) RETURN e",
                 id=str(entity_id),
@@ -548,9 +664,8 @@ class Neo4jBackend(GraphBackendBase):
 
     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
         """Get an entity by name and type (for deduplication)."""
-        driver = self._get_driver()
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(
                 """
                 MATCH (e:Entity {namespace_id: $namespace_id, name: $name, entity_type: $entity_type})
@@ -578,10 +693,9 @@ class Neo4jBackend(GraphBackendBase):
         if not entity_ids:
             return {}
 
-        driver = self._get_driver()
         id_strings = [str(eid) for eid in entity_ids]
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(
                 """
                 MATCH (e:Entity)
@@ -595,7 +709,7 @@ class Neo4jBackend(GraphBackendBase):
 
     async def update_entity(self, entity: Entity) -> Entity:
         """Update an entity."""
-        driver = self._get_driver()
+
         params = _entity_to_cypher_params(entity)
 
         async def _update(tx: AsyncManagedTransaction) -> None:
@@ -615,14 +729,13 @@ class Neo4jBackend(GraphBackendBase):
             """
             await tx.run(query, **params)
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             await session.execute_write(_update)
 
         return entity
 
     async def delete_entity(self, entity_id: UUID) -> bool:
         """Delete an entity and its relationships."""
-        driver = self._get_driver()
 
         async def _delete(tx: AsyncManagedTransaction) -> int:
             result = await tx.run(
@@ -636,7 +749,7 @@ class Neo4jBackend(GraphBackendBase):
             record = await result.single()
             return record["deleted"] if record else 0
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             deleted = await session.execute_write(_delete)
             return deleted > 0
 
@@ -649,7 +762,6 @@ class Neo4jBackend(GraphBackendBase):
         offset: int = 0,
     ) -> list[Entity]:
         """List entities in a namespace."""
-        driver = self._get_driver()
 
         query = "MATCH (e:Entity {namespace_id: $namespace_id})"
         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
@@ -662,7 +774,7 @@ class Neo4jBackend(GraphBackendBase):
         params["offset"] = offset
         params["limit"] = limit
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(query, **params)
             records = await result.data()
             return [self._record_to_entity(r["e"]) for r in records]
@@ -704,7 +816,6 @@ class Neo4jBackend(GraphBackendBase):
             batch_size = _HIGH_DENSITY_ENTITY_BATCH_SIZE
             density_reduced = True
 
-        driver = self._get_driver()
         _total_gate_wait_ms = 0.0
         _total_prefetch_merge_ms = 0.0
         _total_versioning_ms = 0.0
@@ -826,7 +937,7 @@ class Neo4jBackend(GraphBackendBase):
                 async with self._entity_key_gate.acquire(batch, bypass=True):
                     _total_gate_wait_ms += (_time.perf_counter() - _gate_t0) * 1000
                     _merge_t0 = _time.perf_counter()
-                    async with driver.session(database=self._database) as session:
+                    async with self._session() as session:
                         records = await session.execute_write(_merge_only_tx)
                     _total_prefetch_merge_ms += (_time.perf_counter() - _merge_t0) * 1000
             else:
@@ -858,7 +969,7 @@ class Neo4jBackend(GraphBackendBase):
                     _total_gate_wait_ms += (_time.perf_counter() - _gate_t0) * 1000
 
                     _merge_t0 = _time.perf_counter()
-                    async with driver.session(database=self._database) as session:
+                    async with self._session() as session:
                         pre_existing, records = await session.execute_write(_prefetch_and_upsert_tx)
                     _total_prefetch_merge_ms += (_time.perf_counter() - _merge_t0) * 1000
 
@@ -917,7 +1028,7 @@ class Neo4jBackend(GraphBackendBase):
                         return await result.data()
 
                     _ver_t0 = _time.perf_counter()
-                    async with driver.session(database=self._database) as session:
+                    async with self._session() as session:
                         version_records = await session.execute_write(_version_tx)
                     _total_versioning_ms += (_time.perf_counter() - _ver_t0) * 1000
                     logger.debug(
@@ -1009,7 +1120,6 @@ class Neo4jBackend(GraphBackendBase):
             batch_size = _HIGH_DENSITY_REL_BATCH_SIZE
             rel_density_reduced = True
 
-        driver = self._get_driver()
         _per_type_ms: dict[str, float] = {}
 
         # Build inverse relationships upfront so they share the same pass,
@@ -1080,7 +1190,7 @@ class Neo4jBackend(GraphBackendBase):
                     record = await result.single()
                     return record["created"] if record else 0
 
-                async with driver.session(database=self._database) as session:
+                async with self._session() as session:
                     type_total += await session.execute_write(_tx)
             _per_type_ms[rel_type] = (_time.perf_counter() - _type_t0) * 1000
             return type_total
@@ -1202,7 +1312,7 @@ class Neo4jBackend(GraphBackendBase):
         new_types = relationship_types - self._indexed_rel_types
         if not new_types:
             return
-        async with self._driver.session(database=self._database) as session:
+        async with self._session() as session:
             for rel_type in new_types:
                 sanitized = _NEO4J_LABEL_RE.sub("_", rel_type).upper()
                 if not sanitized:
@@ -1254,7 +1364,7 @@ class Neo4jBackend(GraphBackendBase):
 
     async def create_relationship(self, relationship: Relationship) -> Relationship:
         """Create a relationship between entities."""
-        driver = self._get_driver()
+
         params = _relationship_to_cypher_params(relationship)
 
         rel_type = _sanitize_neo4j_label(relationship.relationship_type)
@@ -1289,16 +1399,15 @@ class Neo4jBackend(GraphBackendBase):
             """
             await tx.run(query, **params)
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             await session.execute_write(_create)
 
         return relationship
 
     async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
         """Get a relationship by ID."""
-        driver = self._get_driver()
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(
                 """
                 MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
@@ -1318,7 +1427,6 @@ class Neo4jBackend(GraphBackendBase):
 
     async def delete_relationship(self, relationship_id: UUID) -> bool:
         """Delete a relationship."""
-        driver = self._get_driver()
 
         async def _delete(tx: AsyncManagedTransaction) -> int:
             result = await tx.run(
@@ -1332,7 +1440,7 @@ class Neo4jBackend(GraphBackendBase):
             record = await result.single()
             return record["deleted"] if record else 0
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             deleted = await session.execute_write(_delete)
             return deleted > 0
 
@@ -1350,7 +1458,6 @@ class Neo4jBackend(GraphBackendBase):
         limit: int = 100,
     ) -> list[Relationship]:
         """Get relationships for an entity."""
-        driver = self._get_driver()
 
         # Build relationship type filter
         rel_filter = ""
@@ -1372,7 +1479,7 @@ class Neo4jBackend(GraphBackendBase):
         LIMIT $limit
         """
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(query, entity_id=str(entity_id), limit=limit)
             records = await result.data()
             return [
@@ -1411,7 +1518,6 @@ class Neo4jBackend(GraphBackendBase):
         offset: int = 0,
     ) -> list[Relationship]:
         """List all relationships in a namespace."""
-        driver = self._get_driver()
 
         # Build relationship type filter
         rel_filter = f":{_sanitize_neo4j_label(relationship_type)}" if relationship_type else ""
@@ -1425,7 +1531,7 @@ class Neo4jBackend(GraphBackendBase):
         LIMIT $limit
         """
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(
                 query,
                 namespace_id=str(namespace_id),
@@ -1444,7 +1550,6 @@ class Neo4jBackend(GraphBackendBase):
 
     async def create_episode(self, episode: Episode) -> Episode:
         """Create an episode node."""
-        driver = self._get_driver()
 
         async def _create(tx: AsyncManagedTransaction) -> None:
             query = """
@@ -1492,16 +1597,15 @@ class Neo4jBackend(GraphBackendBase):
                     entity_ids=[str(e) for e in episode.entity_ids],
                 )
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             await session.execute_write(_create)
 
         return episode
 
     async def get_episode(self, episode_id: UUID) -> Episode | None:
         """Get an episode by ID."""
-        driver = self._get_driver()
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(
                 "MATCH (ep:Episode {id: $id}) RETURN ep",
                 id=str(episode_id),
@@ -1520,7 +1624,6 @@ class Neo4jBackend(GraphBackendBase):
         limit: int = 100,
     ) -> list[Episode]:
         """List episodes in a time range."""
-        driver = self._get_driver()
 
         query = "MATCH (ep:Episode {namespace_id: $namespace_id})"
         params: dict[str, Any] = {"namespace_id": str(namespace_id)}
@@ -1539,7 +1642,7 @@ class Neo4jBackend(GraphBackendBase):
         query += " RETURN ep ORDER BY ep.occurred_at DESC LIMIT $limit"
         params["limit"] = limit
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(query, **params)
             records = await result.data()
             return [self._record_to_episode(r["ep"]) for r in records]
@@ -1580,7 +1683,6 @@ class Neo4jBackend(GraphBackendBase):
         relationship_types: list[str] | None = None,
     ) -> list[list[dict[str, Any]]]:
         """Find paths between two entities."""
-        driver = self._get_driver()
 
         rel_filter = ""
         if relationship_types:
@@ -1595,7 +1697,7 @@ class Neo4jBackend(GraphBackendBase):
         LIMIT 10
         """
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(
                 query,
                 source_id=str(source_entity_id),
@@ -1634,7 +1736,6 @@ class Neo4jBackend(GraphBackendBase):
 
         Returns ``{"entities": [], "relationships": []}`` on query timeout.
         """
-        driver = self._get_driver()
 
         rel_filter = ""
         if relationship_types:
@@ -1678,7 +1779,7 @@ class Neo4jBackend(GraphBackendBase):
         # installed) fall through to the fallback. Both paths feed the outer
         # catch which converts timeouts to empty results.
         try:
-            async with driver.session(database=self._database) as session:
+            async with self._session() as session:
                 try:
                     record = await session.execute_read(_work_apoc)
                 except ClientError as exc:
@@ -1749,7 +1850,6 @@ class Neo4jBackend(GraphBackendBase):
         if not entity_ids:
             return {}
 
-        driver = self._get_driver()
         id_strings = [str(eid) for eid in entity_ids]
 
         rel_filter = ""
@@ -1773,7 +1873,7 @@ class Neo4jBackend(GraphBackendBase):
             _work = self._timed_unit_of_work(_work)
 
         try:
-            async with driver.session(database=self._database) as session:
+            async with self._session() as session:
                 records = await session.execute_read(_work)
         except ClientError as exc:
             if exc.code in _NEO4J_TIMEOUT_CODES:
@@ -1836,7 +1936,6 @@ class Neo4jBackend(GraphBackendBase):
         Returns:
             List of neighbor entity property dicts
         """
-        driver = self._get_driver()
 
         params: dict[str, Any] = {
             "entity_id": str(entity_id),
@@ -1871,7 +1970,7 @@ class Neo4jBackend(GraphBackendBase):
             records = await result.data()
             return [r["props"] for r in records]
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             return await session.execute_read(_read)
 
     async def create_session_links(
@@ -1891,7 +1990,6 @@ class Neo4jBackend(GraphBackendBase):
         Returns:
             Number of NEXT_SESSION edges created
         """
-        driver = self._get_driver()
 
         # Step 1: Fetch all chunk IDs, timestamps, and metadata
         async def _fetch_chunks(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
@@ -1907,7 +2005,7 @@ class Neo4jBackend(GraphBackendBase):
             )
             return await result.data()
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             rows = await session.execute_read(_fetch_chunks)
 
         if not rows:
@@ -1957,7 +2055,7 @@ class Neo4jBackend(GraphBackendBase):
             record = await result.single()
             return record["created"] if record else 0
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             created = await session.execute_write(_create_links)
 
         logger.debug(f"Created {created} NEXT_SESSION edges for namespace {namespace_id}")
@@ -1972,7 +2070,6 @@ class Neo4jBackend(GraphBackendBase):
         limit: int = 100,
     ) -> list[Entity]:
         """Search entities by attribute value."""
-        driver = self._get_driver()
 
         query = """
         MATCH (e:Entity {namespace_id: $namespace_id})
@@ -1981,7 +2078,7 @@ class Neo4jBackend(GraphBackendBase):
         LIMIT $limit
         """
 
-        async with driver.session(database=self._database) as session:
+        async with self._session() as session:
             result = await session.run(
                 query,
                 namespace_id=str(namespace_id),

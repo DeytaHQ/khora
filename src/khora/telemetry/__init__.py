@@ -33,6 +33,7 @@ from .context import (
     start_usage_collection,
 )
 from .logfire_integration import trace_span
+from .metrics import metric_counter, metric_gauge_callback, metric_histogram
 from .noop import NoOpCollector
 from .trace_decorator import trace
 
@@ -54,6 +55,9 @@ __all__ = [
     "collect_usage",
     "trace_span",
     "trace",
+    "metric_counter",
+    "metric_gauge_callback",
+    "metric_histogram",
 ]
 
 _collector: TelemetryCollector | NoOpCollector = NoOpCollector()
