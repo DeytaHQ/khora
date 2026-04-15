@@ -389,7 +389,16 @@ class GraphRAGEngine:
         # Resolve relative dates ("last 7 days") to SQL-pushdown filter
         # for RECENCY / STATE_QUERY categories when no explicit filter exists.
         query_temporal_filter = temporal_filter  # may already be set by caller
-        if query_temporal_filter is None and temporal_signal is not None and temporal_signal.is_temporal:
+        if query_temporal_filter is not None:
+            # MemoryLake passes a SkeletonTemporalFilter (occurred_after/occurred_before).
+            # Convert to QueryTemporalFilter (start_time/end_time) expected by query engine.
+            # Only update if conversion succeeds — preserves already-query-shaped filters.
+            from khora.query.temporal_resolver import to_query_temporal_filter
+
+            _converted = to_query_temporal_filter(query_temporal_filter)
+            if _converted is not None:
+                query_temporal_filter = _converted
+        elif temporal_signal is not None and temporal_signal.is_temporal:
             from khora.query.temporal_resolver import resolve_temporal_filter, to_query_temporal_filter
 
             skeleton_filter = resolve_temporal_filter(query, temporal_signal)
