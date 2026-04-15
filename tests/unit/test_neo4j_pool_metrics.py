@@ -528,3 +528,21 @@ class TestGaugeCallbackObservations:
 
         obs = _invoke_gauge(callbacks["khora.neo4j.pool.utilization"])
         assert obs[0].value == 0.0
+
+    def test_utilization_zero_max_pool_size_falls_back(self) -> None:
+        """Utilization falls back to max_size=100 when _max_connection_pool_size is 0."""
+        driver = MagicMock()
+        driver._pool = MagicMock()
+        driver._pool.connections = {
+            "addr1": deque([_make_mock_connection(in_use=True)]),
+        }
+        driver._pool.connections_reservations = {}
+
+        backend = Neo4jBackend.from_driver(driver)
+        # from_driver sets _max_connection_pool_size=0; `or 100` fallback applies
+        assert backend._max_connection_pool_size == 0
+        callbacks = _capture_gauge_callbacks(driver, backend)
+
+        obs = _invoke_gauge(callbacks["khora.neo4j.pool.utilization"])
+        assert len(obs) == 1
+        assert obs[0].value == pytest.approx(0.01)  # 1 active / 100 fallback
