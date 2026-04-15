@@ -24,7 +24,17 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from loguru import logger
-from neo4j.exceptions import Neo4jError
+from neo4j.exceptions import (
+    ServiceUnavailable,
+    SessionExpired,
+    TransientError,
+)
+
+try:
+    from neo4j.exceptions import ConnectionAcquisitionTimeoutError, ConnectionPoolError
+except ImportError:
+    ConnectionAcquisitionTimeoutError = ServiceUnavailable  # type: ignore[misc,assignment]
+    ConnectionPoolError = ServiceUnavailable  # type: ignore[misc,assignment]
 
 from khora.core.models import Chunk, ChunkMetadata, Entity, Relationship
 from khora.telemetry import trace_span
@@ -54,6 +64,16 @@ if TYPE_CHECKING:
     from khora.extraction.embedders import EmbedderProtocol  # type: ignore[unresolved-import]
     from khora.query.reranking import CrossEncoderReranker, LLMReranker
     from khora.storage import StorageCoordinator
+
+# Transient Neo4j errors that trigger graceful degradation rather than
+# failing the entire request. Excludes ClientError (query bugs) and
+# generic Neo4jError.
+_NEO4J_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+    ServiceUnavailable,
+    ConnectionPoolError,
+    SessionExpired,
+    TransientError,
+)
 
 
 @dataclass
@@ -331,7 +351,7 @@ class VectorCypherRetriever:
                         temporal_params=params,
                         temporal_signal=temporal_signal,
                     )
-                except Neo4jError as e:
+                except _NEO4J_TRANSIENT_ERRORS as e:
                     logger.warning(f"Graph search failed, falling back to vector-only: {e}")
                     result = await self._vector_only_fallback(
                         query=query,
@@ -578,12 +598,24 @@ class VectorCypherRetriever:
         # Step 4: Cypher expand to find related entities
         # For temporal queries (STATE_QUERY/RECENCY/CHANGE), prefer currently-valid
         # entities by filtering out those whose valid_until has passed.
-        expanded_entities, entity_info_map = await self._cypher_expand(
-            entry_entity_ids=[e[0] for e in entry_entities],
-            namespace_id=namespace_id,
-            depth=depth,
-            prefer_current=_tp.temporal_sort,
-        )
+        graph_fallback = False
+        graph_error_msg: str | None = None
+        try:
+            expanded_entities, entity_info_map = await self._cypher_expand(
+                entry_entity_ids=[e[0] for e in entry_entities],
+                namespace_id=namespace_id,
+                depth=depth,
+                prefer_current=_tp.temporal_sort,
+            )
+        except _NEO4J_TRANSIENT_ERRORS as exc:
+            logger.warning(
+                f"Neo4j unavailable during cypher_expand for namespace={namespace_id}, "
+                f"falling back to vector-only results: {type(exc).__name__}: {exc}"
+            )
+            expanded_entities = {}
+            entity_info_map = {}
+            graph_fallback = True
+            graph_error_msg = type(exc).__name__
 
         # Step 4b: Bi-temporal version filtering
         # For EXPLICIT temporal queries with a parsed date, narrow entities to
@@ -598,29 +630,47 @@ class VectorCypherRetriever:
                 target_date = getattr(tf, "occurred_before", None) or getattr(tf, "occurred_after", None)
                 if target_date is not None:
                     with trace_span("khora.vectorcypher.version_filter", target_date=target_date.isoformat()):
-                        all_entity_ids = await self._version_filter_entities(
-                            entity_ids=all_entity_ids,
-                            namespace_id=namespace_id,
-                            target_date=target_date,
-                        )
+                        try:
+                            all_entity_ids = await self._version_filter_entities(
+                                entity_ids=all_entity_ids,
+                                namespace_id=namespace_id,
+                                target_date=target_date,
+                            )
+                        except _NEO4J_TRANSIENT_ERRORS as exc:
+                            logger.warning(
+                                f"Version filter failed for namespace={namespace_id}, "
+                                f"skipping: {type(exc).__name__}: {exc}"
+                            )
 
             elif temporal_signal.category == TemporalCategory.CHANGE:
                 # For CHANGE queries, fetch version history via SUPERSEDES edges
                 with trace_span("khora.vectorcypher.version_history", entity_count=len(all_entity_ids)):
-                    version_history = await self._fetch_version_history(
-                        entity_ids=all_entity_ids,
-                        namespace_id=namespace_id,
-                    )
+                    try:
+                        version_history = await self._fetch_version_history(
+                            entity_ids=all_entity_ids,
+                            namespace_id=namespace_id,
+                        )
+                    except _NEO4J_TRANSIENT_ERRORS as exc:
+                        logger.warning(
+                            f"Version history fetch failed for namespace={namespace_id}, "
+                            f"skipping: {type(exc).__name__}: {exc}"
+                        )
+                        version_history = None
 
         # Step 5: Fetch chunks from all entities
-        graph_chunks = await self._fetch_chunks_from_entities(
-            entity_ids=all_entity_ids,
-            namespace_id=namespace_id,
-            temporal_filter=temporal_filter,
-            limit=limit * 2,  # Fetch more for fusion
-            temporal_sort=_tp.temporal_sort,
-            prefer_current=_tp.temporal_sort,
-        )
+        # Skip when graph is unavailable — _fetch_chunks_from_entities uses
+        # Neo4j via DualNodeManager and would fail with the same error.
+        if graph_fallback:
+            graph_chunks: list[tuple[UUID, float, Chunk]] = []
+        else:
+            graph_chunks = await self._fetch_chunks_from_entities(
+                entity_ids=all_entity_ids,
+                namespace_id=namespace_id,
+                temporal_filter=temporal_filter,
+                limit=limit * 2,  # Fetch more for fusion
+                temporal_sort=_tp.temporal_sort,
+                prefer_current=_tp.temporal_sort,
+            )
 
         # Step 6: Wait for parallel vector chunk search to complete
         # This was started at the beginning and may already be done.
@@ -884,7 +934,9 @@ class VectorCypherRetriever:
         entity_ids_str = [str(eid) for eid, _ in all_entity_scores]
 
         # Start relationship fetch immediately (doesn't need full Entity objects)
-        if self._dual_nodes is not None:
+        # Skip Neo4j relationship fetch when graph is unavailable to avoid
+        # blocking on a second timeout.
+        if self._dual_nodes is not None and not graph_fallback:
             rels_task = asyncio.create_task(
                 self._dual_nodes.get_relationships_between(
                     entity_ids_str,
@@ -1025,6 +1077,8 @@ class VectorCypherRetriever:
                 "version_history": version_history,
                 # Search provenance: which method(s) found each chunk
                 "search_methods": search_methods,
+                "graph_fallback": graph_fallback,
+                **({"graph_error": graph_error_msg} if graph_error_msg else {}),
             },
         )
 
@@ -1068,6 +1122,7 @@ class VectorCypherRetriever:
         # Update metadata to indicate fallback was used
         result.metadata["fallback_mode"] = "vector_only"
         result.metadata["graph_unavailable"] = True
+        result.metadata["graph_fallback"] = True
 
         return result
 

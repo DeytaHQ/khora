@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -623,3 +624,316 @@ class TestSimpleRetrieveScoreNormalization:
         assert len(result.chunks) == 1
         # Single result: normalize_scores sets all-equal scores to 1.0
         assert result.chunks[0][1] == 1.0
+
+
+@pytest.mark.unit
+class TestGracefulDegradation:
+    """Tests for graceful degradation when Neo4j is unavailable."""
+
+    @pytest.fixture
+    def ns_id(self) -> UUID:
+        return uuid4()
+
+    @pytest.fixture
+    def retriever(self, ns_id: UUID) -> VectorCypherRetriever:
+        """Create a retriever with mocked dependencies for graph-path testing."""
+        vector_store = AsyncMock()
+        neo4j_driver = AsyncMock()
+        embedder = AsyncMock()
+        embedder.embed = AsyncMock(return_value=[0.1] * 1536)
+        embedder.model_name = "test-model"
+        embedder.dimension = 1536
+
+        # Mock vector store search — returns chunks for _vector_search_chunks
+        chunk_id = uuid4()
+        doc_id = uuid4()
+        mock_result = MagicMock()
+        mock_result.chunk = MagicMock()
+        mock_result.chunk.id = chunk_id
+        mock_result.chunk.namespace_id = ns_id
+        mock_result.chunk.content = "test chunk content"
+        mock_result.chunk.document_id = doc_id
+        mock_result.chunk.occurred_at = None
+        mock_result.chunk.created_at = None
+        mock_result.chunk.metadata = {}
+        mock_result.combined_score = 0.85
+        mock_result.similarity = 0.85
+        vector_store.search = AsyncMock(return_value=[mock_result])
+
+        # Storage coordinator for entity vector search
+        storage = AsyncMock()
+        entry_entity_id = uuid4()
+        storage.search_similar_entities = AsyncMock(return_value=[(entry_entity_id, 0.9)])
+        storage.get_entities_batch = AsyncMock(return_value={})
+
+        config = RetrieverConfig(query_cache_ttl_seconds=0)
+
+        retriever = VectorCypherRetriever(
+            vector_store=vector_store,
+            neo4j_driver=neo4j_driver,
+            embedder=embedder,
+            config=config,
+            storage=storage,
+        )
+
+        # Route to MODERATE/COMPLEX (use_graph=True) to exercise _vectorcypher_retrieve
+        retriever._router = MagicMock()
+        retriever._router.route = AsyncMock(
+            return_value=RoutingDecision(
+                complexity=QueryComplexity.MODERATE,
+                use_graph=True,
+                graph_depth=2,
+                confidence=0.8,
+                reasoning="moderate query",
+            )
+        )
+        retriever._router.compute_adaptive_depth = MagicMock(return_value=2)
+
+        return retriever
+
+    @pytest.mark.asyncio
+    async def test_retrieve_graceful_degradation_on_neo4j_timeout(
+        self, retriever: VectorCypherRetriever, ns_id: UUID
+    ) -> None:
+        """When _cypher_expand raises ConnectionAcquisitionTimeoutError, the
+        retriever returns valid results with graph_fallback metadata."""
+        from neo4j.exceptions import ServiceUnavailable
+
+        try:
+            from neo4j.exceptions import ConnectionAcquisitionTimeoutError as _CATE
+        except ImportError:
+            _CATE = ServiceUnavailable  # type: ignore[misc,assignment]
+
+        # _cypher_expand raises a transient timeout error
+        retriever._cypher_expand = AsyncMock(
+            side_effect=_CATE("failed to obtain a connection from the pool within 60.0s (timeout)")
+        )
+        # _fetch_chunks_from_entities should NOT be called when graph_fallback=True
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[])
+
+        result = await retriever.retrieve("What is Python?", ns_id)
+
+        assert isinstance(result, VectorCypherResult)
+        assert result.metadata["graph_fallback"] is True
+        # graph_error contains the exception type name
+        assert result.metadata.get("graph_error") in (
+            "ConnectionAcquisitionTimeoutError",
+            "ServiceUnavailable",  # fallback alias on older neo4j SDKs
+        )
+        # Should have chunks from vector search
+        assert len(result.chunks) > 0
+        # _fetch_chunks_from_entities must NOT have been called
+        retriever._fetch_chunks_from_entities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retrieve_does_not_swallow_client_error(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """ClientError from _cypher_expand is NOT caught — it propagates."""
+        from neo4j.exceptions import ClientError
+
+        retriever._cypher_expand = AsyncMock(side_effect=ClientError("Invalid Cypher query"))
+
+        with pytest.raises(ClientError, match="Invalid Cypher query"):
+            await retriever.retrieve("What is Python?", ns_id)
+
+    @pytest.mark.asyncio
+    async def test_version_filter_graceful_degradation(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """When _version_filter_entities raises ServiceUnavailable, the
+        retriever still returns valid results (keeps unfiltered entities)."""
+        from neo4j.exceptions import ServiceUnavailable
+
+        from khora.engines.vectorcypher.temporal_detection import (
+            TemporalCategory,
+            TemporalSignal,
+        )
+
+        # _cypher_expand succeeds
+        expanded_id = uuid4()
+        retriever._cypher_expand = AsyncMock(
+            return_value=(
+                {expanded_id: 0.7},
+                {str(expanded_id): {"name": "Test", "entity_type": "CONCEPT"}},
+            )
+        )
+        # _version_filter_entities raises a transient error
+        retriever._version_filter_entities = AsyncMock(side_effect=ServiceUnavailable("Connection refused"))
+        # _fetch_chunks_from_entities succeeds
+        chunk = Chunk(id=uuid4(), namespace_id=ns_id, document_id=uuid4(), content="graph chunk")
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[(chunk.id, 0.8, chunk)])
+
+        # Build temporal signal for EXPLICIT path (triggers _version_filter_entities)
+        from datetime import datetime
+
+        from khora.engines.skeleton.backends import TemporalFilter
+
+        tf = TemporalFilter(occurred_before=datetime(2025, 1, 1, tzinfo=UTC))
+        temporal_signal = TemporalSignal(
+            is_temporal=True,
+            category=TemporalCategory.EXPLICIT,
+            confidence=0.9,
+            source="dictionary",
+            temporal_filter=tf,
+        )
+
+        result = await retriever.retrieve(
+            "What happened before 2025?",
+            ns_id,
+            temporal_signal=temporal_signal,
+        )
+
+        assert isinstance(result, VectorCypherResult)
+        # Should complete without raising
+        assert len(result.chunks) > 0
+
+    @pytest.mark.asyncio
+    async def test_version_history_graceful_degradation(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """When _fetch_version_history raises ServiceUnavailable, the
+        retriever still returns valid results (version_history becomes None)."""
+        from neo4j.exceptions import ServiceUnavailable
+
+        from khora.engines.vectorcypher.temporal_detection import (
+            TemporalCategory,
+            TemporalSignal,
+        )
+
+        # _cypher_expand succeeds
+        expanded_id = uuid4()
+        retriever._cypher_expand = AsyncMock(
+            return_value=(
+                {expanded_id: 0.7},
+                {str(expanded_id): {"name": "Test", "entity_type": "CONCEPT"}},
+            )
+        )
+        # _fetch_version_history raises a transient error
+        retriever._fetch_version_history = AsyncMock(side_effect=ServiceUnavailable("Connection refused"))
+        # _fetch_chunks_from_entities succeeds
+        chunk = Chunk(id=uuid4(), namespace_id=ns_id, document_id=uuid4(), content="graph chunk")
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[(chunk.id, 0.8, chunk)])
+
+        # Build temporal signal for CHANGE path (triggers _fetch_version_history)
+        temporal_signal = TemporalSignal(
+            is_temporal=True,
+            category=TemporalCategory.CHANGE,
+            confidence=0.9,
+            source="dictionary",
+        )
+
+        result = await retriever.retrieve(
+            "How has the policy changed?",
+            ns_id,
+            temporal_signal=temporal_signal,
+        )
+
+        assert isinstance(result, VectorCypherResult)
+        # Should complete without raising
+        assert len(result.chunks) > 0
+        # version_history should be None due to the failure
+        assert result.metadata.get("version_history") is None
+
+    @pytest.mark.asyncio
+    async def test_graceful_degradation_on_session_expired(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """SessionExpired from _cypher_expand triggers graceful degradation."""
+        from neo4j.exceptions import SessionExpired
+
+        retriever._cypher_expand = AsyncMock(side_effect=SessionExpired("Session no longer valid"))
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[])
+
+        result = await retriever.retrieve("What is Python?", ns_id)
+
+        assert result.metadata["graph_fallback"] is True
+        assert result.metadata.get("graph_error") == "SessionExpired"
+        assert len(result.chunks) > 0
+        retriever._fetch_chunks_from_entities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_graceful_degradation_on_transient_error(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """TransientError from _cypher_expand triggers graceful degradation."""
+        from neo4j.exceptions import TransientError
+
+        retriever._cypher_expand = AsyncMock(side_effect=TransientError("Database unavailable"))
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[])
+
+        result = await retriever.retrieve("What is Python?", ns_id)
+
+        assert result.metadata["graph_fallback"] is True
+        assert result.metadata.get("graph_error") == "TransientError"
+        assert len(result.chunks) > 0
+        retriever._fetch_chunks_from_entities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cypher_expand_fallback_emits_warning(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """Warning log is emitted when _cypher_expand falls back."""
+        from unittest.mock import patch
+
+        from neo4j.exceptions import ServiceUnavailable
+
+        retriever._cypher_expand = AsyncMock(side_effect=ServiceUnavailable("Connection refused"))
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[])
+
+        with patch("khora.engines.vectorcypher.retriever.logger") as mock_logger:
+            await retriever.retrieve("What is Python?", ns_id)
+
+        warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+        assert any("Neo4j unavailable during cypher_expand" in c for c in warning_calls)
+
+    @pytest.mark.asyncio
+    async def test_version_filter_fallback_emits_warning(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """Warning log is emitted when _version_filter_entities falls back."""
+        from datetime import datetime
+        from unittest.mock import patch
+
+        from neo4j.exceptions import ServiceUnavailable
+
+        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.engines.vectorcypher.temporal_detection import (
+            TemporalCategory,
+            TemporalSignal,
+        )
+
+        expanded_id = uuid4()
+        retriever._cypher_expand = AsyncMock(
+            return_value=(
+                {expanded_id: 0.7},
+                {str(expanded_id): {"name": "Test", "entity_type": "CONCEPT"}},
+            )
+        )
+        retriever._version_filter_entities = AsyncMock(side_effect=ServiceUnavailable("Connection refused"))
+        chunk = Chunk(id=uuid4(), namespace_id=ns_id, document_id=uuid4(), content="graph chunk")
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[(chunk.id, 0.8, chunk)])
+
+        tf = TemporalFilter(occurred_before=datetime(2025, 1, 1, tzinfo=UTC))
+        temporal_signal = TemporalSignal(
+            is_temporal=True,
+            category=TemporalCategory.EXPLICIT,
+            confidence=0.9,
+            source="dictionary",
+            temporal_filter=tf,
+        )
+
+        with patch("khora.engines.vectorcypher.retriever.logger") as mock_logger:
+            await retriever.retrieve("What happened before 2025?", ns_id, temporal_signal=temporal_signal)
+
+        warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+        assert any("Version filter failed" in c for c in warning_calls)
+
+    @pytest.mark.asyncio
+    async def test_outer_fallback_on_fetch_chunks_failure(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """When _cypher_expand succeeds but _fetch_chunks_from_entities raises
+        a transient error, the outer catch in retrieve() fires and returns
+        vector-only results via _vector_only_fallback."""
+        from neo4j.exceptions import ServiceUnavailable
+
+        expanded_id = uuid4()
+        retriever._cypher_expand = AsyncMock(
+            return_value=(
+                {expanded_id: 0.7},
+                {str(expanded_id): {"name": "Test", "entity_type": "CONCEPT"}},
+            )
+        )
+        retriever._fetch_chunks_from_entities = AsyncMock(side_effect=ServiceUnavailable("Connection refused"))
+
+        result = await retriever.retrieve("What is Python?", ns_id)
+
+        assert isinstance(result, VectorCypherResult)
+        # Outer fallback sets these metadata keys
+        assert result.metadata.get("graph_fallback") is True
+        assert len(result.chunks) > 0
