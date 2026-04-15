@@ -285,6 +285,7 @@ class GraphRAGEngine:
             content=content,
             metadata=doc_metadata,
             extraction_config_hash=extraction_config_hash,
+            external_id=external_id,
         )
         document = await storage.create_document(document)
         timings["document_create_ms"] = (time.perf_counter() - start) * 1000
@@ -501,6 +502,8 @@ class GraphRAGEngine:
             }
             if extraction_config_hash is not None:
                 entry["extraction_config_hash"] = extraction_config_hash
+            if "external_id" in doc_data:
+                entry["external_id"] = doc_data["external_id"]
             doc_inputs.append(entry)
         timings["prepare_inputs_ms"] = (time.perf_counter() - start) * 1000
 

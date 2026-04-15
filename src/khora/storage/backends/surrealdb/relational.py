@@ -286,6 +286,7 @@ class SurrealDBRelationalAdapter:
             "entity_count = $entity_count, "
             "error_message = $error_message, "
             "extraction_config_hash = $extraction_config_hash, "
+            "external_id = $external_id, "
             "created_at = $created_at, "
             "updated_at = $updated_at, "
             "processed_at = $processed_at, "
@@ -308,6 +309,7 @@ class SurrealDBRelationalAdapter:
                 "entity_count": document.entity_count,
                 "error_message": document.error_message,
                 "extraction_config_hash": document.extraction_config_hash,
+                "external_id": document.external_id,
                 "created_at": document.created_at,
                 "updated_at": document.updated_at,
                 "processed_at": document.processed_at,
@@ -373,6 +375,7 @@ class SurrealDBRelationalAdapter:
             "entity_count = $entity_count, "
             "error_message = $error_message, "
             "extraction_config_hash = $extraction_config_hash, "
+            "external_id = $external_id, "
             "updated_at = $updated_at, "
             "processed_at = $processed_at, "
             "source_timestamp = $source_timestamp",
@@ -393,6 +396,7 @@ class SurrealDBRelationalAdapter:
                 "entity_count": document.entity_count,
                 "error_message": document.error_message,
                 "extraction_config_hash": document.extraction_config_hash,
+                "external_id": document.external_id,
                 "updated_at": datetime.now(UTC),
                 "processed_at": document.processed_at,
                 "source_timestamp": document.source_timestamp,
@@ -538,6 +542,7 @@ class SurrealDBRelationalAdapter:
             updated_at=_parse_dt(row.get("updated_at")) or datetime.now(UTC),
             processed_at=_parse_dt(row.get("processed_at")),
             source_timestamp=_parse_dt(row.get("source_timestamp")),
+            external_id=row.get("external_id"),
         )
 
     # ------------------------------------------------------------------

@@ -65,10 +65,12 @@ DEFINE FIELD IF NOT EXISTS created_at ON document TYPE datetime DEFAULT time::no
 DEFINE FIELD IF NOT EXISTS updated_at ON document TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS processed_at ON document TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS source_timestamp ON document TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS external_id ON document TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS idx_document_namespace ON document FIELDS namespace_id;
 -- Note: SurrealDB does not support partial indexes; full index used for dedup queries
 DEFINE INDEX IF NOT EXISTS idx_document_ns_checksum ON document FIELDS namespace_id, checksum;
 DEFINE INDEX IF NOT EXISTS idx_document_ns_status ON document FIELDS namespace_id, status;
+DEFINE INDEX IF NOT EXISTS idx_document_ns_external_id ON document FIELDS namespace_id, external_id;
 
 -- Chunk (with HNSW vector index and BM25 full-text index)
 DEFINE TABLE IF NOT EXISTS chunk SCHEMAFULL;

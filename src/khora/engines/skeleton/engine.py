@@ -258,6 +258,7 @@ class SkeletonConstructionEngine:
             content=content,
             metadata=doc_metadata,
             extraction_config_hash=extraction_config_hash,
+            external_id=external_id,
         )
         document = await storage.create_document(document)
 
@@ -763,6 +764,7 @@ class SkeletonConstructionEngine:
                     content=content,
                     metadata=doc_meta,
                     extraction_config_hash=extraction_config_hash,
+                    external_id=doc_data.get("external_id"),
                 )
                 try:
                     document = await storage.create_document(document)

@@ -86,6 +86,7 @@ def _document_row(
         "updated_at": now,
         "processed_at": None,
         "source_timestamp": None,
+        "external_id": None,
     }
 
 
@@ -868,6 +869,55 @@ class TestRelationalAdapterDocument:
         result = await adapter.count_documents(uuid4())
         assert result == 0
 
+    async def test_create_document_with_external_id(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        doc_id = uuid4()
+        ns_id = uuid4()
+        row = _document_row(doc_id, ns_id)
+        row["external_id"] = "ext-123"
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        doc = Document(
+            id=doc_id,
+            namespace_id=ns_id,
+            content="test content",
+            metadata=DocumentMetadata(title="Test Doc"),
+            external_id="ext-123",
+        )
+        result = await adapter.create_document(doc)
+
+        assert result.id == doc_id
+        assert result.external_id == "ext-123"
+        # Verify external_id was passed to the query
+        call_args = conn.query_one.call_args
+        assert call_args[0][1]["external_id"] == "ext-123"
+
+    async def test_create_document_without_external_id(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        doc_id = uuid4()
+        ns_id = uuid4()
+        row = _document_row(doc_id, ns_id)
+
+        conn = _make_mock_conn()
+        conn.query_one = AsyncMock(return_value=row)
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        doc = Document(
+            id=doc_id,
+            namespace_id=ns_id,
+            content="test content",
+            metadata=DocumentMetadata(title="Test Doc"),
+        )
+        result = await adapter.create_document(doc)
+
+        assert result.id == doc_id
+        assert result.external_id is None
+
     async def test_get_last_activity_at(self) -> None:
         from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
 
@@ -994,6 +1044,19 @@ class TestRelationalRowConversion:
         assert result.metadata.source_type == "file"
         assert result.metadata.title == "Test Doc"
         assert result.metadata.custom == {"key": "value"}
+        assert result.external_id is None
+
+    def test_row_to_document_with_external_id(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        conn = _make_mock_conn()
+        adapter = SurrealDBRelationalAdapter(conn)
+
+        row = _document_row()
+        row["external_id"] = "ext-populated"
+        result = adapter._row_to_document(row)
+
+        assert result.external_id == "ext-populated"
 
     def test_row_to_document_handles_completed_status(self) -> None:
         from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter

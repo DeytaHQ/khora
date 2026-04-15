@@ -65,11 +65,14 @@ CREATE TABLE IF NOT EXISTS documents (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     processed_at TEXT,
-    source_timestamp TEXT
+    source_timestamp TEXT,
+    external_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_docs_ns ON documents(namespace_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_docs_checksum
     ON documents(namespace_id, checksum) WHERE checksum != '';
+CREATE INDEX IF NOT EXISTS idx_docs_ns_external_id
+    ON documents(namespace_id, external_id) WHERE external_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS chunks (
     id TEXT PRIMARY KEY,
@@ -364,8 +367,8 @@ class SQLiteRelationalBackend:
             "(id, namespace_id, content, status, source, source_type, content_type, "
             "title, author, language, checksum, size_bytes, metadata_, "
             "chunk_count, entity_count, error_message, extraction_config_hash, "
-            "created_at, updated_at, processed_at, source_timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, updated_at, processed_at, source_timestamp, external_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(document.id),
                 str(document.namespace_id),
@@ -388,6 +391,7 @@ class SQLiteRelationalBackend:
                 _dt_to_str(document.updated_at) or now,
                 _dt_to_str(document.processed_at),
                 _dt_to_str(document.source_timestamp),
+                document.external_id,
             ),
         )
         await self._conn.commit()
@@ -431,7 +435,7 @@ class SQLiteRelationalBackend:
             "content = ?, status = ?, source = ?, source_type = ?, content_type = ?, "
             "title = ?, author = ?, language = ?, checksum = ?, size_bytes = ?, "
             "metadata_ = ?, chunk_count = ?, entity_count = ?, error_message = ?, "
-            "extraction_config_hash = ?, updated_at = ?, processed_at = ?, source_timestamp = ? "
+            "extraction_config_hash = ?, external_id = ?, updated_at = ?, processed_at = ?, source_timestamp = ? "
             "WHERE id = ?",
             (
                 document.content,
@@ -449,6 +453,7 @@ class SQLiteRelationalBackend:
                 document.entity_count,
                 document.error_message,
                 document.extraction_config_hash,
+                document.external_id,
                 now,
                 _dt_to_str(document.processed_at),
                 _dt_to_str(document.source_timestamp),
@@ -613,6 +618,7 @@ class SQLiteRelationalBackend:
             updated_at=_parse_dt(row["updated_at"]) or datetime.now(UTC),
             processed_at=_parse_dt(row["processed_at"]),
             source_timestamp=_parse_dt(row["source_timestamp"]),
+            external_id=row["external_id"],
         )
 
 
