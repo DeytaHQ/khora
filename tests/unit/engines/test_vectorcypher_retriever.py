@@ -715,9 +715,11 @@ class TestGracefulDegradation:
 
         assert isinstance(result, VectorCypherResult)
         assert result.metadata["graph_fallback"] is True
-        assert "ConnectionAcquisitionTimeoutError" in result.metadata.get(
-            "graph_error", ""
-        ) or "ServiceUnavailable" in result.metadata.get("graph_error", "")
+        # graph_error contains the exception type name
+        assert result.metadata.get("graph_error") in (
+            "ConnectionAcquisitionTimeoutError",
+            "ServiceUnavailable",  # fallback alias on older neo4j SDKs
+        )
         # Should have chunks from vector search
         assert len(result.chunks) > 0
         # _fetch_chunks_from_entities must NOT have been called
@@ -826,3 +828,112 @@ class TestGracefulDegradation:
         assert len(result.chunks) > 0
         # version_history should be None due to the failure
         assert result.metadata.get("version_history") is None
+
+    @pytest.mark.asyncio
+    async def test_graceful_degradation_on_session_expired(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """SessionExpired from _cypher_expand triggers graceful degradation."""
+        from neo4j.exceptions import SessionExpired
+
+        retriever._cypher_expand = AsyncMock(side_effect=SessionExpired("Session no longer valid"))
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[])
+
+        result = await retriever.retrieve("What is Python?", ns_id)
+
+        assert result.metadata["graph_fallback"] is True
+        assert result.metadata.get("graph_error") == "SessionExpired"
+        assert len(result.chunks) > 0
+        retriever._fetch_chunks_from_entities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_graceful_degradation_on_transient_error(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """TransientError from _cypher_expand triggers graceful degradation."""
+        from neo4j.exceptions import TransientError
+
+        retriever._cypher_expand = AsyncMock(side_effect=TransientError("Database unavailable"))
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[])
+
+        result = await retriever.retrieve("What is Python?", ns_id)
+
+        assert result.metadata["graph_fallback"] is True
+        assert result.metadata.get("graph_error") == "TransientError"
+        assert len(result.chunks) > 0
+        retriever._fetch_chunks_from_entities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cypher_expand_fallback_emits_warning(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """Warning log is emitted when _cypher_expand falls back."""
+        from unittest.mock import patch
+
+        from neo4j.exceptions import ServiceUnavailable
+
+        retriever._cypher_expand = AsyncMock(side_effect=ServiceUnavailable("Connection refused"))
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[])
+
+        with patch("khora.engines.vectorcypher.retriever.logger") as mock_logger:
+            await retriever.retrieve("What is Python?", ns_id)
+
+        warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+        assert any("Neo4j unavailable during cypher_expand" in c for c in warning_calls)
+
+    @pytest.mark.asyncio
+    async def test_version_filter_fallback_emits_warning(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """Warning log is emitted when _version_filter_entities falls back."""
+        from datetime import datetime
+        from unittest.mock import patch
+
+        from neo4j.exceptions import ServiceUnavailable
+
+        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.engines.vectorcypher.temporal_detection import (
+            TemporalCategory,
+            TemporalSignal,
+        )
+
+        expanded_id = uuid4()
+        retriever._cypher_expand = AsyncMock(
+            return_value=(
+                {expanded_id: 0.7},
+                {str(expanded_id): {"name": "Test", "entity_type": "CONCEPT"}},
+            )
+        )
+        retriever._version_filter_entities = AsyncMock(side_effect=ServiceUnavailable("Connection refused"))
+        chunk = Chunk(id=uuid4(), namespace_id=ns_id, document_id=uuid4(), content="graph chunk")
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[(chunk.id, 0.8, chunk)])
+
+        tf = TemporalFilter(occurred_before=datetime(2025, 1, 1, tzinfo=UTC))
+        temporal_signal = TemporalSignal(
+            is_temporal=True,
+            category=TemporalCategory.EXPLICIT,
+            confidence=0.9,
+            source="dictionary",
+            temporal_filter=tf,
+        )
+
+        with patch("khora.engines.vectorcypher.retriever.logger") as mock_logger:
+            await retriever.retrieve("What happened before 2025?", ns_id, temporal_signal=temporal_signal)
+
+        warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+        assert any("Version filter failed" in c for c in warning_calls)
+
+    @pytest.mark.asyncio
+    async def test_outer_fallback_on_fetch_chunks_failure(self, retriever: VectorCypherRetriever, ns_id: UUID) -> None:
+        """When _cypher_expand succeeds but _fetch_chunks_from_entities raises
+        a transient error, the outer catch in retrieve() fires and returns
+        vector-only results via _vector_only_fallback."""
+        from neo4j.exceptions import ServiceUnavailable
+
+        expanded_id = uuid4()
+        retriever._cypher_expand = AsyncMock(
+            return_value=(
+                {expanded_id: 0.7},
+                {str(expanded_id): {"name": "Test", "entity_type": "CONCEPT"}},
+            )
+        )
+        retriever._fetch_chunks_from_entities = AsyncMock(side_effect=ServiceUnavailable("Connection refused"))
+
+        result = await retriever.retrieve("What is Python?", ns_id)
+
+        assert isinstance(result, VectorCypherResult)
+        # Outer fallback sets these metadata keys
+        assert result.metadata.get("graph_fallback") is True
+        assert len(result.chunks) > 0

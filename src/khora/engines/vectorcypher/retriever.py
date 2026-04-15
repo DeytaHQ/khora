@@ -615,7 +615,7 @@ class VectorCypherRetriever:
             expanded_entities = {}
             entity_info_map = {}
             graph_fallback = True
-            graph_error_msg = f"{type(exc).__name__}: {str(exc)[:200]}"
+            graph_error_msg = type(exc).__name__
 
         # Step 4b: Bi-temporal version filtering
         # For EXPLICIT temporal queries with a parsed date, narrow entities to
@@ -934,7 +934,9 @@ class VectorCypherRetriever:
         entity_ids_str = [str(eid) for eid, _ in all_entity_scores]
 
         # Start relationship fetch immediately (doesn't need full Entity objects)
-        if self._dual_nodes is not None:
+        # Skip Neo4j relationship fetch when graph is unavailable to avoid
+        # blocking on a second timeout.
+        if self._dual_nodes is not None and not graph_fallback:
             rels_task = asyncio.create_task(
                 self._dual_nodes.get_relationships_between(
                     entity_ids_str,
@@ -1120,6 +1122,7 @@ class VectorCypherRetriever:
         # Update metadata to indicate fallback was used
         result.metadata["fallback_mode"] = "vector_only"
         result.metadata["graph_unavailable"] = True
+        result.metadata["graph_fallback"] = True
 
         return result
 
