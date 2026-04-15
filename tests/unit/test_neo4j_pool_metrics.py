@@ -46,7 +46,8 @@ class TestNoOpCounter:
         _NOOP_COUNTER.add(3.14, attributes={"key": "val"})
 
     def test_singleton_identity(self) -> None:
-        c = metric_counter("test.counter")
+        with patch("khora.telemetry.metrics._HAS_LOGFIRE", False):
+            c = metric_counter("test.counter")
         assert isinstance(c, _NoOpCounter)
 
 
@@ -59,7 +60,8 @@ class TestNoOpHistogram:
         _NOOP_HISTOGRAM.record(0.5, attributes={"op": "read"})
 
     def test_singleton_identity(self) -> None:
-        h = metric_histogram("test.histogram", unit="s")
+        with patch("khora.telemetry.metrics._HAS_LOGFIRE", False):
+            h = metric_histogram("test.histogram", unit="s")
         assert isinstance(h, _NoOpHistogram)
 
 
@@ -125,14 +127,16 @@ class TestMetricGaugeCallback:
 @pytest.mark.unit
 class TestNeo4jInitMetrics:
     def test_init_creates_metric_instruments(self) -> None:
-        backend = Neo4jBackend("bolt://localhost:7687")
+        with patch("khora.telemetry.metrics._HAS_LOGFIRE", False):
+            backend = Neo4jBackend("bolt://localhost:7687")
         assert isinstance(backend._acquisition_histogram, _NoOpHistogram)
         assert isinstance(backend._session_duration_histogram, _NoOpHistogram)
         assert isinstance(backend._timeout_counter, _NoOpCounter)
 
     def test_from_driver_creates_metric_instruments(self) -> None:
         driver = MagicMock()
-        backend = Neo4jBackend.from_driver(driver)
+        with patch("khora.telemetry.metrics._HAS_LOGFIRE", False):
+            backend = Neo4jBackend.from_driver(driver)
         assert isinstance(backend._acquisition_histogram, _NoOpHistogram)
         assert isinstance(backend._session_duration_histogram, _NoOpHistogram)
         assert isinstance(backend._timeout_counter, _NoOpCounter)
