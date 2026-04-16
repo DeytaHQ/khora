@@ -31,7 +31,7 @@ def _read_file_content(path: Path) -> tuple[str, str, dict[str, Any]]:
 
     binary_formats = {".pdf", ".xlsx", ".xls", ".docx", ".parquet"}
     if path.suffix.lower() in binary_formats:
-        from khora.discovery.extraction import extract_if_needed
+        from khora.extraction.binary_readers import extract_if_needed
 
         extracted = extract_if_needed(path)
         if extracted:

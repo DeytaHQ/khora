@@ -6,8 +6,12 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased] — Graph Backends, Temporal Precision, Discovery Agent Overhaul
 
-### Deprecated
-- `khora ontology` CLI subcommands — moved to the `khora-explorer` package (pip install khora-explorer). Will be removed in v0.8.0.
+### Removed
+- `khora ontology` CLI subcommands (moved to khora-explorer)
+- `khora.discovery` package (moved to khora-explorer)
+
+### Changed
+- `khora.discovery.extraction` → `khora.extraction.binary_readers` (binary file reader used by `khora extract`)
 
 ### New graph backends
 - AWS Neptune with Bolt protocol + IAM SigV4 auth (#272)

@@ -1,10 +1,12 @@
-"""Binary format extraction for discovery fetched files.
+"""Binary format extraction for ingestion.
 
-Converts PDF, Excel, and other binary formats to text/markdown for
-ingestion into the ontology pipeline.  All extractors are optional —
-they degrade gracefully with a warning when dependencies are missing.
+Converts PDF, Excel, Word, and Parquet binary formats to text/markdown so
+they can be fed into the standard text-ingest pipeline.  All extractors
+are optional — they degrade gracefully with a warning when dependencies
+are missing.
 
-Install: ``pip install khora[discovery]`` for pymupdf + openpyxl.
+Install: ``pip install khora[binary-readers]`` for pymupdf + openpyxl +
+python-docx, and ``pip install khora[parquet]`` for pyarrow.
 """
 
 from __future__ import annotations
