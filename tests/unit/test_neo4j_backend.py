@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -215,6 +216,27 @@ class TestNeo4jBackendGetNeighborhoodsBatchTimeout:
         assert excinfo.value.code == "Neo.ClientError.Statement.SyntaxError"
 
 
+def _make_rel_props(**overrides: Any) -> dict[str, Any]:
+    """Build a minimal post-fix relationship properties dict, with overrides."""
+    props: dict[str, Any] = {
+        "id": str(uuid4()),
+        "namespace_id": str(uuid4()),
+        "description": "default description",
+        "properties": "{}",
+        "source_document_ids": [],
+        "source_chunk_ids": [],
+        "valid_from": None,
+        "valid_until": None,
+        "confidence": 1.0,
+        "weight": 1.0,
+        "metadata": "{}",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-02T00:00:00+00:00",
+    }
+    props.update(overrides)
+    return props
+
+
 @pytest.mark.unit
 class TestNeo4jBackendGetEntityRelationships:
     """Tests for get_entity_relationships (DYT-2626)."""
@@ -229,21 +251,14 @@ class TestNeo4jBackendGetEntityRelationships:
         rel_id = uuid4()
         ns_id = uuid4()
 
-        rel_props = {
-            "id": str(rel_id),
-            "namespace_id": str(ns_id),
-            "description": "knows each other",
-            "properties": '{"since": "2024"}',
-            "source_document_ids": [],
-            "source_chunk_ids": [],
-            "valid_from": None,
-            "valid_until": None,
-            "confidence": 0.9,
-            "weight": 1.0,
-            "metadata": '{"k": "v"}',
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-02T00:00:00+00:00",
-        }
+        rel_props = _make_rel_props(
+            id=str(rel_id),
+            namespace_id=str(ns_id),
+            description="knows each other",
+            properties='{"since": "2024"}',
+            confidence=0.9,
+            metadata='{"k": "v"}',
+        )
         records = [
             {
                 "r": rel_props,
@@ -309,3 +324,152 @@ class TestNeo4jBackendGetEntityRelationships:
 
         with pytest.raises(TypeError, match="tuple indices"):
             await backend.get_entity_relationships(entity_id, direction="outgoing")
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_when_no_relationships(self) -> None:
+        """Empty-result path: ``.data()`` returns ``[]`` → method returns ``[]``."""
+        driver, session = _make_neo4j_driver()
+
+        result = MagicMock()
+        result.data = AsyncMock(return_value=[])
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+
+        got = await backend.get_entity_relationships(uuid4(), direction="outgoing")
+
+        assert got == []
+
+    @pytest.mark.asyncio
+    async def test_direction_incoming_swaps_cypher_pattern(self) -> None:
+        """``direction="incoming"`` generates ``(other)-[r]->(e)`` pattern."""
+        driver, session = _make_neo4j_driver()
+
+        result = MagicMock()
+        result.data = AsyncMock(return_value=[])
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+
+        await backend.get_entity_relationships(uuid4(), direction="incoming")
+
+        query = session.run.call_args.args[0]
+        assert "(other)-[r]->(e)" in query
+        # Negative check: outgoing arrow must not be present.
+        assert "(e)-[r]->(other)" not in query
+
+    @pytest.mark.asyncio
+    async def test_direction_both_uses_undirected_pattern(self) -> None:
+        """``direction="both"`` generates ``(e)-[r]-(other)`` (no arrow)."""
+        driver, session = _make_neo4j_driver()
+
+        result = MagicMock()
+        result.data = AsyncMock(return_value=[])
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+
+        await backend.get_entity_relationships(uuid4(), direction="both")
+
+        query = session.run.call_args.args[0]
+        assert "(e)-[r]-(other)" in query
+        # Negative checks: neither arrow form should appear for "both".
+        assert "(e)-[r]->(other)" not in query
+        assert "(other)-[r]->(e)" not in query
+
+    @pytest.mark.asyncio
+    async def test_relationship_types_filter_is_applied(self) -> None:
+        """``relationship_types`` is injected as ``:A|B`` into the Cypher pattern."""
+        driver, session = _make_neo4j_driver()
+
+        result = MagicMock()
+        result.data = AsyncMock(return_value=[])
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+
+        await backend.get_entity_relationships(
+            uuid4(),
+            direction="outgoing",
+            relationship_types=["KNOWS", "WORKS_WITH"],
+        )
+
+        query = session.run.call_args.args[0]
+        assert ":KNOWS|WORKS_WITH" in query
+
+    @pytest.mark.asyncio
+    async def test_handles_missing_optional_fields(self) -> None:
+        """Records missing valid_from/valid_until/metadata fall back to defaults."""
+        driver, session = _make_neo4j_driver()
+
+        entity_id = uuid4()
+        target_id = uuid4()
+        rel_id = uuid4()
+        ns_id = uuid4()
+
+        # Only required fields — no valid_from, valid_until, or metadata.
+        rel_props = {
+            "id": str(rel_id),
+            "namespace_id": str(ns_id),
+            "description": "minimal",
+            "properties": "{}",
+            "source_document_ids": [],
+            "source_chunk_ids": [],
+            "confidence": 0.8,
+            "weight": 0.7,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-02T00:00:00+00:00",
+        }
+        records = [
+            {
+                "r": rel_props,
+                "source_id": str(entity_id),
+                "target_id": str(target_id),
+                "rel_type": "KNOWS",
+            }
+        ]
+
+        result = MagicMock()
+        result.data = AsyncMock(return_value=records)
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+
+        got = await backend.get_entity_relationships(entity_id, direction="outgoing")
+
+        assert len(got) == 1
+        rel = got[0]
+        assert rel.valid_from is None
+        assert rel.valid_until is None
+        assert rel.metadata == {}
+
+    @pytest.mark.asyncio
+    async def test_returns_multiple_relationships(self) -> None:
+        """Multiple records each materialize into a distinct ``Relationship``."""
+        driver, session = _make_neo4j_driver()
+
+        entity_id = uuid4()
+        rel_ids = [uuid4(), uuid4(), uuid4()]
+        target_ids = [uuid4(), uuid4(), uuid4()]
+
+        records = [
+            {
+                "r": _make_rel_props(id=str(rel_ids[i])),
+                "source_id": str(entity_id),
+                "target_id": str(target_ids[i]),
+                "rel_type": "KNOWS",
+            }
+            for i in range(3)
+        ]
+
+        result = MagicMock()
+        result.data = AsyncMock(return_value=records)
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+
+        got = await backend.get_entity_relationships(entity_id, direction="outgoing")
+
+        assert len(got) == 3
+        assert all(isinstance(r, Relationship) for r in got)
+        assert {r.id for r in got} == set(rel_ids)
