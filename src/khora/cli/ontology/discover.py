@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import warnings
 from pathlib import Path
 
 import click
@@ -194,6 +195,13 @@ def discover(
     Fetched data is saved to OUTPUT_DIR and can be used with
     ``khora ontology construct --source OUTPUT_DIR``.
     """
+    warnings.warn(
+        "'khora ontology' is deprecated and will be removed in khora v0.8.0. "
+        "Install and use 'khora-explorer' instead: uv pip install khora-explorer",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
     from khora.discovery.ui import DiscoveryUI
 
     from .tui.console import print_header

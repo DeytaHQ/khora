@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import click
@@ -15,6 +16,15 @@ from .tui.panels import (
     render_ontology_tree,
     render_relationship_types_table,
 )
+
+_DEPRECATION_MESSAGE = (
+    "'khora ontology' is deprecated and will be removed in khora v0.8.0. "
+    "Install and use 'khora-explorer' instead: uv pip install khora-explorer"
+)
+
+
+def _warn_deprecated() -> None:
+    warnings.warn(_DEPRECATION_MESSAGE, DeprecationWarning, stacklevel=2)
 
 
 @click.group(name="ontology")
@@ -95,6 +105,7 @@ def construct(
     resume: str | None,
 ) -> None:
     """Construct an ontology from data sources using LLM analysis."""
+    _warn_deprecated()
     print_header()
 
     from .flow import run_construct
@@ -119,6 +130,7 @@ def construct(
 @click.argument("file", type=click.Path(exists=True))
 def validate(file: str) -> None:
     """Validate an ontology YAML file against ExpertiseConfig."""
+    _warn_deprecated()
     path = Path(file)
     console.print(f"Validating [bold]{path.name}[/] ...")
 
@@ -179,6 +191,7 @@ def validate(file: str) -> None:
 @click.argument("file", type=click.Path(exists=True))
 def preview(file: str) -> None:
     """Preview an ontology YAML file in a rich display."""
+    _warn_deprecated()
     path = Path(file)
 
     # Load YAML
