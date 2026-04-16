@@ -14,8 +14,8 @@ This structure enables efficient retrieval by:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from neo4j import AsyncDriver, AsyncSession
 
     from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter
+    from khora.storage.backends.neo4j import Neo4jBackend
 
 
 # Neo4j 5.x splits timeout errors into two codes depending on whether
@@ -89,7 +90,7 @@ class DualNodeManager:
         database: str = "neo4j",
         *,
         query_timeout: float | None = None,
-        session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
+        pool_backend: Neo4jBackend | None = None,
     ) -> None:
         """Initialize the manager.
 
@@ -99,19 +100,17 @@ class DualNodeManager:
             query_timeout: Optional per-transaction timeout in seconds,
                 applied to ``get_entity_neighborhoods`` to bound runaway
                 variable-length path queries. ``None`` disables the timeout.
-            session_factory: Optional zero-argument callable returning an
-                async context manager yielding an ``AsyncSession``. When
-                provided, :meth:`_session` uses it instead of calling
-                ``driver.session(database=...)`` directly, so pool metric
-                instrumentation from ``Neo4jBackend._session`` covers the
-                traversal paths driven by this manager. Falls back to the
-                raw driver session when ``None`` (e.g. tests or callers that
-                do not have a backend wired).
+            pool_backend: Optional ``Neo4jBackend`` instance. When provided,
+                :meth:`_session` delegates to ``pool_backend._session()`` so
+                pool metric instrumentation (timeout counter, acquire
+                duration) covers all traversal paths driven by this manager.
+                Falls back to the raw driver session when ``None`` (e.g.
+                tests or callers that do not have a backend wired).
         """
         self._driver = driver
         self._database = database
         self._query_timeout = query_timeout
-        self._session_factory = session_factory
+        self._pool_backend = pool_backend
         # Pre-bind the unit_of_work decorator once. The factory call is
         # cheap but non-zero and the produced decorator is fully reusable
         # — see neo4j.unit_of_work: it closes over (metadata, timeout) and
@@ -122,14 +121,14 @@ class DualNodeManager:
 
     @asynccontextmanager
     async def _session(self) -> AsyncIterator[AsyncSession]:
-        """Yield a Neo4j session, routed through ``session_factory`` if set.
+        """Yield a Neo4j session, routed through ``pool_backend`` if set.
 
         All Neo4j access from this class must go through this helper so that
         ``Neo4jBackend._session`` pool metrics (timeout counter, acquire
         duration) observe traversals driven by ``DualNodeManager``.
         """
-        if self._session_factory is not None:
-            async with self._session_factory() as session:
+        if self._pool_backend is not None:
+            async with self._pool_backend._session() as session:
                 yield session
         else:
             async with self._driver.session(database=self._database) as session:

@@ -232,15 +232,15 @@ class VectorCypherRetriever:
                 complex_depth=self._config.default_depth,
             )
         self._router = QueryComplexityRouter(router_config)
-        # Forward Neo4jBackend._session when available so pool metrics observe
+        # Forward Neo4jBackend when available so pool metrics observe
         # all traversals driven from the retriever (see DualNodeManager).
-        backend_session_factory = getattr(getattr(storage, "graph", None), "_session", None) if storage else None
+        pool_backend = getattr(storage, "graph", None) if storage else None
         self._dual_nodes = (
             DualNodeManager(
                 neo4j_driver,
                 database,
                 query_timeout=neo4j_query_timeout,
-                session_factory=backend_session_factory,
+                pool_backend=pool_backend,
             )
             if neo4j_driver
             else None
