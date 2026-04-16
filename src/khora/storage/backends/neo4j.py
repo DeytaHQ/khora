@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import re as _re
 import time as _time
+import weakref as _weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import copy
@@ -97,6 +98,120 @@ class _EntityKeyGate:
                 self._in_flight -= keys
                 self._active -= 1
                 self._condition.notify_all()
+
+
+def _cancel_sampler_task_on_gc(task: asyncio.Task[None]) -> None:
+    """Cancel a sampler task from a ``weakref.finalize`` callback.
+
+    Never raises: finalizers run at interpreter shutdown too, where logging
+    may no longer be available. If the loop is closed or the task is done,
+    silently no-op. Defense in depth — the primary cleanup path is
+    ``disconnect()``.
+    """
+    if task.done():
+        return
+    try:
+        task.cancel()
+    except Exception:  # pragma: no cover  # noqa: S110 — finalizer must never raise
+        pass
+
+
+class _InstrumentedSession:
+    """Proxy around an ``AsyncSession`` that records real pool acquire time.
+
+    ``AsyncDriver.session()`` is lazy — the pool connection is not bound
+    until the session calls its internal ``_connect`` method (invoked by
+    ``run``, ``_open_transaction``, and each *retry* inside
+    ``_run_transaction``). We wrap ``session._connect`` on the proxy
+    instance so each real pool acquire is one histogram observation — not
+    "session entry to first run", which would conflate query time + retry
+    sleeps with acquire latency.
+
+    **Why wrap ``_connect`` (not ``run`` / ``execute_read`` / ``execute_write``):**
+    ``execute_read`` / ``execute_write`` retry internally via
+    ``_run_transaction``, and each retry that hits a fresh connection
+    calls ``_connect`` again. Wrapping at the entry-method level would
+    fold those retries into the first acquire observation, inflating
+    ``acquire_duration`` by up to (retries × retry_sleep + query time).
+    Hooking ``_connect`` itself produces one observation per real pool
+    bind, which is the correct semantic.
+
+    The wrap lives on the instance's ``_connect`` attribute, not on the
+    class, so the original method is unaffected. The session is about to
+    be awaited and closed inside our ``async with``, so there is no
+    state-leak risk and no unpatch is needed.
+
+    All other attribute/method access is forwarded via ``__getattr__``.
+    """
+
+    __slots__ = (
+        "_inner",
+        "_acquire_histogram",
+        "_timeout_counter",
+        "counted_timeout",
+        "last_acquire",
+        "slow_acquire_threshold_exceeded",
+    )
+
+    _SLOW_ACQUIRE_THRESHOLD_S = 5.0
+
+    def __init__(
+        self,
+        inner: Any,
+        *,
+        acquire_histogram: Any,
+        timeout_counter: Any,
+    ) -> None:
+        self._inner = inner
+        self._acquire_histogram = acquire_histogram
+        self._timeout_counter = timeout_counter
+        self.counted_timeout = False
+        self.last_acquire = 0.0
+        self.slow_acquire_threshold_exceeded = False
+        self._install_connect_wrap()
+
+    def __getattr__(self, name: str) -> Any:  # pragma: no cover - passthrough
+        return getattr(self._inner, name)
+
+    def _install_connect_wrap(self) -> None:
+        """Patch ``_connect`` on the wrapped session instance only.
+
+        Each real pool acquire becomes one ``acquire_duration`` observation.
+        Timeouts increment the counter and are *not* recorded on the
+        histogram (to keep the latency distribution honest).
+        """
+        inner = self._inner
+        original_connect = getattr(inner, "_connect", None)
+        if original_connect is None or not callable(original_connect):
+            # Session stub / future SDK change — fall through; metrics stay
+            # zero for this session rather than crashing.
+            return
+
+        acquire_histogram = self._acquire_histogram
+        timeout_counter = self._timeout_counter
+        proxy = self
+
+        async def _timed_connect(*args: Any, **kwargs: Any) -> Any:
+            t0 = _time.monotonic()
+            try:
+                result = await original_connect(*args, **kwargs)
+            except ConnectionAcquisitionTimeoutError:
+                timeout_counter.add(1)
+                proxy.counted_timeout = True
+                raise
+            elapsed = _time.monotonic() - t0
+            acquire_histogram.record(elapsed, attributes={"status": "ok"})
+            proxy.last_acquire = elapsed
+            if elapsed > _InstrumentedSession._SLOW_ACQUIRE_THRESHOLD_S:
+                proxy.slow_acquire_threshold_exceeded = True
+            return result
+
+        try:
+            inner._connect = _timed_connect  # instance-level shadow
+        except (AttributeError, TypeError):
+            # Inner object disallowed attribute assignment (e.g. __slots__
+            # without _connect). Skip instrumentation for this session.
+            return
 
 
 # Bidirectional relationship types and their inverses
@@ -198,6 +313,40 @@ class Neo4jBackend(GraphBackendBase):
 
     Stores entities as nodes and relationships as edges in Neo4j,
     enabling efficient graph traversal and pattern matching.
+
+    Emitted metrics (all are no-ops unless ``logfire`` is installed):
+
+    * ``khora.neo4j.pool.acquire_duration`` (histogram, seconds) —
+      duration of each real pool acquire, recorded on every invocation
+      of the session's internal ``_connect`` (once per ``run``, once
+      per transaction open, and once per retry inside a managed
+      transaction). Successful acquires are tagged ``status=ok``;
+      timeouts are *not* recorded here — they increment the
+      ``khora.neo4j.pool.timeout`` counter only. This keeps the p99
+      tail free of ``connection_acquisition_timeout`` deadline
+      clusters. **Use for**: alerting on p99 acquire latency
+      regressions, sizing pool cap.
+    * ``khora.neo4j.pool.acquisition_time`` (histogram, seconds) —
+      *legacy* metric kept for backward compatibility. Recorded at
+      session construction (not after real acquire), so it captures
+      only driver object-allocation overhead. Prefer
+      ``acquire_duration`` for new dashboards and alerts.
+    * ``khora.neo4j.session.duration`` (histogram, seconds) — total
+      wall-clock time a session object was held. **Use for**:
+      investigation of slow queries holding connections.
+    * ``khora.neo4j.pool.timeout`` (counter) — every
+      ``ConnectionAcquisitionTimeoutError``. Incremented exactly once
+      per timeout event regardless of which entry method or retry
+      surfaced it. **Use for**: paging on pool saturation.
+    * ``khora.neo4j.pool.connections.{active,idle,total,creating}``
+      (OTel observable gauges) — sampled at the exporter's native
+      cadence (~60 s). **Use for**: long-term capacity planning.
+    * ``khora.neo4j.pool.utilization`` (gauge) — active / max ratio.
+    * ``khora.neo4j.pool.sampled.{active,idle,total,creating,utilization}``
+      (histograms) — emitted by the optional high-frequency sampler
+      (``pool_sampler_enabled=True``). Interval configurable via
+      ``pool_sampler_interval_ms`` (default 500 ms). **Use for**:
+      sub-minute ramp/burst investigation. Zero-cost when disabled.
     """
 
     def __init__(
@@ -215,6 +364,8 @@ class Neo4jBackend(GraphBackendBase):
         query_timeout: float | None = 5.0,
         entity_write_concurrency: int = _DEFAULT_ENTITY_WRITE_CONCURRENCY,
         relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
+        pool_sampler_enabled: bool = False,
+        pool_sampler_interval_ms: int = 500,
     ) -> None:
         """Initialize the Neo4j backend.
 
@@ -231,6 +382,12 @@ class Neo4jBackend(GraphBackendBase):
             query_timeout: Per-transaction timeout in seconds for bounded read queries (None disables)
             entity_write_concurrency: Max concurrent entity write transactions
             relationship_write_concurrency: Max concurrent relationship write transactions
+            pool_sampler_enabled: When True, start a background task that samples
+                Neo4j pool state every ``pool_sampler_interval_ms`` milliseconds
+                and records the observations on the
+                ``khora.neo4j.pool.sampled.*`` histograms. Zero cost when False.
+            pool_sampler_interval_ms: Sampler interval in milliseconds. Clamped to
+                [50, 60000]. Only relevant when ``pool_sampler_enabled`` is True.
         """
         self._url = url
         self._user = user
@@ -256,6 +413,11 @@ class Neo4jBackend(GraphBackendBase):
 
         apply_neo4j_log_level_from_env()
 
+        self._pool_sampler_enabled = pool_sampler_enabled
+        self._pool_sampler_interval_ms = max(50, min(60_000, pool_sampler_interval_ms))
+        self._sampler_task: asyncio.Task[None] | None = None
+        self._sampler_warned = False
+        self._sampler_finalizer: _weakref.finalize | None = None
         self._init_metrics()
 
     def _init_metrics(self) -> None:
@@ -263,10 +425,21 @@ class Neo4jBackend(GraphBackendBase):
         from khora.telemetry.metrics import metric_counter, metric_histogram
 
         self._pool_metrics_registered = False
+        # Legacy histogram — kept for backward compatibility. Recorded at
+        # session-object construction, which is lazy, so values are near
+        # zero. ``acquire_duration`` is the correct metric to monitor.
         self._acquisition_histogram = metric_histogram(
             "khora.neo4j.pool.acquisition_time",
             unit="s",
-            description="Time to acquire a connection from the Neo4j pool",
+            description="Time to construct a Neo4j session object (lazy, legacy).",
+        )
+        # Correct acquire-duration histogram — recorded on first
+        # run/execute_read/execute_write after the pool binds a real
+        # connection to the session.
+        self._acquire_duration_histogram = metric_histogram(
+            "khora.neo4j.pool.acquire_duration",
+            unit="s",
+            description="Time until a real Neo4j connection is bound to the session.",
         )
         self._session_duration_histogram = metric_histogram(
             "khora.neo4j.session.duration",
@@ -276,6 +449,27 @@ class Neo4jBackend(GraphBackendBase):
         self._timeout_counter = metric_counter(
             "khora.neo4j.pool.timeout",
             description="Neo4j ConnectionAcquisitionTimeoutError occurrences",
+        )
+        # High-frequency sampler histograms (opt-in).
+        self._sampled_active_histogram = metric_histogram(
+            "khora.neo4j.pool.sampled.active",
+            description="Active Neo4j connections, high-frequency sample.",
+        )
+        self._sampled_idle_histogram = metric_histogram(
+            "khora.neo4j.pool.sampled.idle",
+            description="Idle Neo4j connections, high-frequency sample.",
+        )
+        self._sampled_total_histogram = metric_histogram(
+            "khora.neo4j.pool.sampled.total",
+            description="Total Neo4j connections, high-frequency sample.",
+        )
+        self._sampled_creating_histogram = metric_histogram(
+            "khora.neo4j.pool.sampled.creating",
+            description="Neo4j connections being created, high-frequency sample.",
+        )
+        self._sampled_utilization_histogram = metric_histogram(
+            "khora.neo4j.pool.sampled.utilization",
+            description="Neo4j pool utilization (0.0-1.0), high-frequency sample.",
         )
 
     @classmethod
@@ -296,6 +490,8 @@ class Neo4jBackend(GraphBackendBase):
             relationship_write_concurrency=getattr(
                 config, "relationship_write_concurrency", _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY
             ),
+            pool_sampler_enabled=getattr(config, "pool_sampler_enabled", False),
+            pool_sampler_interval_ms=getattr(config, "pool_sampler_interval_ms", 500),
         )
 
     @classmethod
@@ -312,6 +508,15 @@ class Neo4jBackend(GraphBackendBase):
 
         The backend will NOT close the driver on disconnect, since
         it does not own it.
+
+        **Sampler note**: the high-frequency pool sampler is *not* started
+        by this constructor, even if the caller mutates
+        ``instance._pool_sampler_enabled`` afterwards. ``from_driver()`` is
+        typically used by shared-driver integrations (tests, fixtures,
+        connection-multiplexing setups) where the owner of the driver is
+        responsible for metric lifecycle. If you need the sampler on a
+        shared-driver backend, use the standard ``Neo4jBackend(...)``
+        constructor with a dedicated driver instead.
 
         Args:
             driver: An existing Neo4j async driver
@@ -339,6 +544,11 @@ class Neo4jBackend(GraphBackendBase):
         instance._owns_driver = False
         instance._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
         instance._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
+        instance._pool_sampler_enabled = False
+        instance._pool_sampler_interval_ms = 500
+        instance._sampler_task = None
+        instance._sampler_warned = False
+        instance._sampler_finalizer = None
         instance._init_metrics()
         return instance
 
@@ -348,6 +558,7 @@ class Neo4jBackend(GraphBackendBase):
             # Already connected (either by connect() or from_driver())
             await self._create_indexes()
             self._register_pool_metrics()
+            self._start_pool_sampler()
             return
 
         logger.info(f"Connecting to Neo4j at {self._url}...")
@@ -367,10 +578,12 @@ class Neo4jBackend(GraphBackendBase):
         # Create indexes for performance
         await self._create_indexes()
         self._register_pool_metrics()
+        self._start_pool_sampler()
         logger.info("Connected to Neo4j")
 
     async def disconnect(self) -> None:
         """Close Neo4j connections."""
+        await self._stop_pool_sampler()
         if self._driver is not None:
             if self._owns_driver:
                 logger.info("Disconnecting from Neo4j...")
@@ -531,21 +744,49 @@ class Neo4jBackend(GraphBackendBase):
     async def _session(self) -> AsyncIterator[Any]:
         """Acquire a Neo4j session with pool metrics instrumentation.
 
-        Overhead: 3x ``time.monotonic()`` calls (~8 µs total per session).
+        ``AsyncDriver.session()`` is lazy — no pool connection is bound
+        until the session's internal ``_connect`` is called (by ``run``,
+        ``_open_transaction``, or each retry inside ``_run_transaction``).
+        :class:`_InstrumentedSession` wraps ``_connect`` on the instance so
+        each real acquire is one ``khora.neo4j.pool.acquire_duration``
+        observation. Timeouts bump ``khora.neo4j.pool.timeout`` but are
+        excluded from the histogram to keep the latency tail honest.
+
+        The legacy ``khora.neo4j.pool.acquisition_time`` metric is still
+        recorded here for backward compatibility, but it only captures the
+        session-object construction time (near zero).
+
+        Overhead: a handful of ``time.monotonic()`` calls (~8 µs) per session
+        plus one attribute-lookup indirection per ``_connect`` call.
         """
         t0 = _time.monotonic()
+        instrumented: _InstrumentedSession | None = None
         try:
             async with self._get_driver().session(database=self._database) as session:
-                elapsed = _time.monotonic() - t0
-                self._acquisition_histogram.record(elapsed)
-                if elapsed > 5.0:
-                    logger.warning(f"Neo4j pool acquisition took {elapsed:.1f}s")
+                # Legacy histogram: records object-construction overhead.
+                legacy_elapsed = _time.monotonic() - t0
+                self._acquisition_histogram.record(legacy_elapsed)
+                instrumented = _InstrumentedSession(
+                    session,
+                    acquire_histogram=self._acquire_duration_histogram,
+                    timeout_counter=self._timeout_counter,
+                )
                 try:
-                    yield session
+                    yield instrumented
                 finally:
                     self._session_duration_histogram.record(_time.monotonic() - t0)
+                    if instrumented.slow_acquire_threshold_exceeded:
+                        logger.warning(f"Neo4j pool acquisition took {instrumented.last_acquire:.1f}s")
         except ConnectionAcquisitionTimeoutError:
-            self._timeout_counter.add(1)
+            # Only bump the counter here when the timeout came from a
+            # non-_connect path (e.g. a mocked driver raising from
+            # __aenter__). The _connect wrap already counted any real
+            # pool-acquire timeout. We never record the timeout on the
+            # acquire_duration histogram — counter is enough, and keeping
+            # the histogram tail free of 10–60s deadline clusters keeps p99
+            # honest without dashboard-side filtering.
+            if instrumented is None or not instrumented.counted_timeout:
+                self._timeout_counter.add(1)
             raise
 
     def _register_pool_metrics(self) -> None:
@@ -568,7 +809,16 @@ class Neo4jBackend(GraphBackendBase):
         max_size = self._max_connection_pool_size or 100
 
         def _pool_snapshot() -> tuple[int, int, int, int]:
-            """Return (active, idle, total, creating) from the pool."""
+            """Return (active, idle, total, creating) from the pool.
+
+            Best-effort read; the OTel exporter invokes gauge callbacks
+            synchronously so we cannot acquire ``pool.lock`` here (the
+            async-cooperative lock forbids await-while-held and the OTel
+            callback protocol is sync-only in some backends). A torn read
+            is acceptable at the ~60 s exporter cadence — prefer the
+            ``khora.neo4j.pool.sampled.*`` histograms (lock-exact) when
+            sub-second accuracy is required.
+            """
             conns = getattr(pool, "connections", {})
             all_conns = [c for deq in conns.values() for c in deq]
             active = sum(1 for c in all_conns if getattr(c, "in_use", False))
@@ -632,6 +882,145 @@ class Neo4jBackend(GraphBackendBase):
             description="Neo4j connection pool utilization ratio (active / max_pool_size)",
         )
         self._pool_metrics_registered = True
+
+    # =========================================================================
+    # High-frequency pool sampler
+    # =========================================================================
+
+    def _sample_pool_once(self) -> dict[str, float] | None:
+        """Return a single snapshot of pool state, or ``None`` if unavailable.
+
+        Takes ``pool.lock`` (an ``AsyncCooperativeRLock``, used by the driver
+        as a sync reentrant lock — no ``await`` permitted while held) so the
+        snapshot is consistent with driver mutations. The locked region is
+        kept tight: we copy the ``(address, deque)`` pairs and the
+        reservation counts under the lock, then release and compute derived
+        values outside it.
+        """
+        driver = self._driver
+        if driver is None:
+            return None
+        pool = getattr(driver, "_pool", None)
+        if pool is None:
+            return None
+        try:
+            in_use_fn = getattr(pool, "in_use_connection_count", None)
+            pool_lock = getattr(pool, "lock", None)
+
+            # Short critical section — read-only snapshot of the two maps
+            # and per-address in_use counts. No await inside the lock.
+            if pool_lock is not None:
+                with pool_lock:
+                    conns_snapshot: list[tuple[Any, list[Any]]] = [
+                        (addr, list(deq)) for addr, deq in getattr(pool, "connections", {}).items()
+                    ]
+                    reservations_snapshot = {
+                        addr: int(v) for addr, v in getattr(pool, "connections_reservations", {}).items()
+                    }
+                    in_use_counts: dict[Any, int] | None = None
+                    if in_use_fn is not None:
+                        in_use_counts = {}
+                        for addr, _deq in conns_snapshot:
+                            try:
+                                in_use_counts[addr] = int(in_use_fn(addr))
+                            except Exception:
+                                in_use_counts[addr] = -1  # sentinel → fall back below
+            else:
+                # Best-effort read without a lock (driver shape changed).
+                conns_snapshot = [(addr, list(deq)) for addr, deq in (getattr(pool, "connections", {}) or {}).items()]
+                reservations_snapshot = {
+                    addr: int(v) for addr, v in (getattr(pool, "connections_reservations", {}) or {}).items()
+                }
+                in_use_counts = None
+                if in_use_fn is not None:
+                    in_use_counts = {}
+                    for addr, _deq in conns_snapshot:
+                        try:
+                            in_use_counts[addr] = int(in_use_fn(addr))
+                        except Exception:
+                            in_use_counts[addr] = -1
+
+            active = 0
+            total = 0
+            for address, deq in conns_snapshot:
+                total += len(deq)
+                if in_use_counts is not None and in_use_counts.get(address, -1) >= 0:
+                    active += in_use_counts[address]
+                else:
+                    active += sum(1 for c in deq if getattr(c, "in_use", False))
+            # Clamp: driver state can be transiently inconsistent during churn.
+            idle = max(0, total - active)
+            creating = sum(reservations_snapshot.values())
+
+            pool_config = getattr(pool, "pool_config", None)
+            max_size = getattr(pool_config, "max_connection_pool_size", 0) or self._max_connection_pool_size
+            utilization = (active / max_size) if max_size and max_size > 0 else 0.0
+        except Exception as exc:
+            if not self._sampler_warned:
+                logger.warning(f"Neo4j pool sampler read failed; disabling further warnings: {exc}")
+                self._sampler_warned = True
+            return None
+        return {
+            "active": float(active),
+            "idle": float(idle),
+            "total": float(total),
+            "creating": float(creating),
+            "utilization": float(utilization),
+        }
+
+    async def _run_sampler(self) -> None:
+        """Sample pool state at configured cadence until cancelled."""
+        interval_s = self._pool_sampler_interval_ms / 1000.0
+        try:
+            while True:
+                sample = self._sample_pool_once()
+                if sample is not None:
+                    self._sampled_active_histogram.record(sample["active"])
+                    self._sampled_idle_histogram.record(sample["idle"])
+                    self._sampled_total_histogram.record(sample["total"])
+                    self._sampled_creating_histogram.record(sample["creating"])
+                    self._sampled_utilization_histogram.record(sample["utilization"])
+                await asyncio.sleep(interval_s)
+        except asyncio.CancelledError:
+            return
+
+    def _start_pool_sampler(self) -> None:
+        """Start the background sampler task if enabled and not already running.
+
+        Idempotent — calling ``connect()`` twice (or ``_start_pool_sampler``
+        directly) will not spawn a second task.
+        """
+        if not self._pool_sampler_enabled:
+            return
+        if self._sampler_task is not None and not self._sampler_task.done():
+            return
+        task = asyncio.create_task(self._run_sampler())
+        self._sampler_task = task
+        # Register a GC-triggered finalizer that cancels the task if the
+        # backend is dropped without an awaited ``disconnect()`` (crash path,
+        # test teardown). ``_cancel_sampler_task_on_gc`` swallows
+        # loop-closed / no-loop errors — it is defense in depth only.
+        if self._sampler_finalizer is not None:
+            self._sampler_finalizer.detach()
+        self._sampler_finalizer = _weakref.finalize(self, _cancel_sampler_task_on_gc, task)
+
+    async def _stop_pool_sampler(self) -> None:
+        """Cancel and await the sampler task, if any."""
+        task = self._sampler_task
+        if task is None:
+            return
+        self._sampler_task = None
+        if self._sampler_finalizer is not None:
+            self._sampler_finalizer.detach()
+            self._sampler_finalizer = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            # Sampler is instrumentation-only; never propagate cleanup errors.
+            logger.debug(f"Neo4j pool sampler shutdown raised: {exc}")
 
     # =========================================================================
     # Entity operations

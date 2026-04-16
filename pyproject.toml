@@ -130,11 +130,14 @@ addopts = [
     "--cov-branch",
     "--cov-report=term-missing",
     "--cov-fail-under=46",
+    "-m",
+    "not slow",
 ]
 markers = [
     "unit: Unit tests",
     "integration: Integration tests",
     "e2e: End-to-end tests",
+    "slow: Slow tests (skipped by default; run with -m slow)",
 ]
 asyncio_mode = "auto"
 

@@ -164,7 +164,12 @@ def _make_neo4j_driver() -> tuple[MagicMock, AsyncMock]:
 class TestSessionContextManager:
     @pytest.mark.asyncio
     async def test_records_acquisition_time(self) -> None:
-        """_session records acquisition time on the histogram."""
+        """_session records the legacy construction-time histogram.
+
+        NOTE: as of DYT-2624 the session is wrapped in ``_InstrumentedSession``;
+        the inner session is exposed via ``_inner`` for tests that need to
+        assert identity.
+        """
         driver, session = _make_neo4j_driver()
         backend = Neo4jBackend.from_driver(driver)
 
@@ -174,7 +179,7 @@ class TestSessionContextManager:
         backend._session_duration_histogram = MagicMock()
 
         async with backend._session() as s:
-            assert s is session
+            assert s._inner is session  # proxy wraps the raw AsyncSession
 
         assert len(recorded) == 1
         assert recorded[0] >= 0.0
@@ -279,27 +284,56 @@ class TestSessionContextManager:
 
     @pytest.mark.asyncio
     async def test_slow_acquisition_logs_warning(self) -> None:
-        """_session logs a warning when acquisition takes > 5s."""
-        driver, session = _make_neo4j_driver()
+        """_session logs a warning when a real pool acquire takes > 5s.
+
+        As of DYT-2624 the slow-acquire threshold is evaluated inside the
+        ``session._connect`` wrap (one observation per real pool bind), not
+        from session construction.
+        """
+        driver = MagicMock()
+        session = AsyncMock()
+        session._connection = None
+
+        async def slow_connect(*_a, **_k):  # type: ignore[no-untyped-def]
+            session._connection = object()
+
+        session._connect = slow_connect
+
+        async def run_through_connect(*_a, **_k):  # type: ignore[no-untyped-def]
+            if session._connection is None:
+                await session._connect()
+            return MagicMock()
+
+        session.run = AsyncMock(side_effect=run_through_connect)
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=session)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        driver.session.return_value = ctx
+
         backend = Neo4jBackend.from_driver(driver)
         backend._acquisition_histogram = MagicMock()
+        backend._acquire_duration_histogram = MagicMock()
         backend._session_duration_histogram = MagicMock()
 
-        # Patch time.monotonic to simulate slow acquisition
+        # Patch time.monotonic so the wrap measures a slow connect (6s).
+        # Call sequence inside backend._session + _timed_connect:
+        #   t0 = 0 (outer), legacy = 0 (proxy construction),
+        #   t0 in _timed_connect = 0, post-connect = 6, then final duration = 6.
+        values = [0.0, 0.0, 0.0, 6.0, 6.0]
         call_count = 0
-        original_monotonic_values = [0.0, 6.0, 6.0]  # t0=0, elapsed=6s, final=6s
 
-        def fake_monotonic():
+        def fake_monotonic():  # type: ignore[no-untyped-def]
             nonlocal call_count
-            val = original_monotonic_values[min(call_count, len(original_monotonic_values) - 1)]
+            val = values[min(call_count, len(values) - 1)]
             call_count += 1
             return val
 
         with patch("khora.storage.backends.neo4j._time") as mock_time:
             mock_time.monotonic = fake_monotonic
             with patch("khora.storage.backends.neo4j.logger") as mock_logger:
-                async with backend._session():
-                    pass
+                async with backend._session() as s:
+                    await s.run("RETURN 1")
 
                 mock_logger.warning.assert_called_once()
                 assert "6.0s" in mock_logger.warning.call_args[0][0]

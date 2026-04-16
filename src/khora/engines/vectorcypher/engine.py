@@ -399,12 +399,16 @@ class VectorCypherEngine:
         )
         self._embedder = LiteLLMEmbedder.from_config(llm_config)
 
-        # Initialize dual node manager (Neo4j only — SurrealDB uses graph adapter)
+        # Initialize dual node manager (Neo4j only — SurrealDB uses graph adapter).
+        # Route session acquisition through Neo4jBackend._session so pool
+        # metrics (timeout counter + acquire_duration) observe these paths.
         if not is_surrealdb:
+            neo4j_backend = self._storage.graph if self._storage is not None else None
             self._dual_nodes = DualNodeManager(
                 self._neo4j_driver,
                 neo4j_database,
                 query_timeout=neo4j_query_timeout,
+                pool_backend=neo4j_backend,
             )
             await self._dual_nodes.ensure_indexes()
 
