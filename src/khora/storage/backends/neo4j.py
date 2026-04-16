@@ -122,6 +122,7 @@ class _InstrumentedSession:
         "_timeout_counter",
         "_entered_at",
         "_recorded",
+        "counted_timeout",
         "last_acquire",
         "slow_acquire_threshold_exceeded",
     )
@@ -141,6 +142,7 @@ class _InstrumentedSession:
         self._timeout_counter = timeout_counter
         self._entered_at = entered_at
         self._recorded = False
+        self.counted_timeout = False
         self.last_acquire = 0.0
         self.slow_acquire_threshold_exceeded = False
 
@@ -161,6 +163,7 @@ class _InstrumentedSession:
             result = await self._inner.run(*args, **kwargs)
         except ConnectionAcquisitionTimeoutError:
             self._timeout_counter.add(1)
+            self.counted_timeout = True
             self._record_acquire(status="timeout")
             raise
         self._record_acquire(status="ok")
@@ -171,6 +174,7 @@ class _InstrumentedSession:
             result = await self._inner.execute_read(*args, **kwargs)
         except ConnectionAcquisitionTimeoutError:
             self._timeout_counter.add(1)
+            self.counted_timeout = True
             self._record_acquire(status="timeout")
             raise
         self._record_acquire(status="ok")
@@ -181,6 +185,7 @@ class _InstrumentedSession:
             result = await self._inner.execute_write(*args, **kwargs)
         except ConnectionAcquisitionTimeoutError:
             self._timeout_counter.add(1)
+            self.counted_timeout = True
             self._record_acquire(status="timeout")
             raise
         self._record_acquire(status="ok")
@@ -718,6 +723,7 @@ class Neo4jBackend(GraphBackendBase):
         plus one attribute-lookup indirection per run call.
         """
         t0 = _time.monotonic()
+        instrumented: _InstrumentedSession | None = None
         try:
             async with self._get_driver().session(database=self._database) as session:
                 # Legacy histogram: records object-construction overhead.
@@ -736,10 +742,13 @@ class Neo4jBackend(GraphBackendBase):
                     if instrumented.slow_acquire_threshold_exceeded:
                         logger.warning(f"Neo4j pool acquisition took {instrumented.last_acquire:.1f}s")
         except ConnectionAcquisitionTimeoutError:
-            # __aenter__ itself rarely raises (session() is lazy), but some
-            # driver versions/paths can trip it; keep the counter honest.
-            self._timeout_counter.add(1)
-            self._acquire_duration_histogram.record(_time.monotonic() - t0, attributes={"status": "timeout"})
+            # Only record here if the proxy didn't already (i.e. the timeout
+            # surfaced from __aenter__ before any run/execute_* call). This
+            # keeps the counter honest under the common case where
+            # run/execute_* re-raises after recording the timeout.
+            if instrumented is None or not instrumented.counted_timeout:
+                self._timeout_counter.add(1)
+                self._acquire_duration_histogram.record(_time.monotonic() - t0, attributes={"status": "timeout"})
             raise
 
     def _register_pool_metrics(self) -> None:
