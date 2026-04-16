@@ -247,6 +247,15 @@ class Neo4jBackend(GraphBackendBase):
         self._owns_driver: bool = True
         self._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
         self._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
+
+        # DYT-2625: apply operator-requested neo4j driver verbosity so services
+        # that configure their own loguru sinks (bypassing khora's
+        # setup_logging) still get driver logs when they build a backend.
+        # Imported lazily to avoid any import-cycle surprises.
+        from khora.logging_config import apply_neo4j_log_level_from_env
+
+        apply_neo4j_log_level_from_env()
+
         self._init_metrics()
 
     def _init_metrics(self) -> None:
