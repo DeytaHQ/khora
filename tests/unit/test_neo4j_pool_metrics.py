@@ -284,22 +284,46 @@ class TestSessionContextManager:
 
     @pytest.mark.asyncio
     async def test_slow_acquisition_logs_warning(self) -> None:
-        """_session logs a warning when real acquire (first run) takes > 5s.
+        """_session logs a warning when a real pool acquire takes > 5s.
 
-        As of DYT-2624 the slow-acquire threshold is evaluated from the real
-        pool bind (first run/execute_*), not from session construction.
+        As of DYT-2624 the slow-acquire threshold is evaluated inside the
+        ``session._connect`` wrap (one observation per real pool bind), not
+        from session construction.
         """
-        driver, session = _make_neo4j_driver()
+        driver = MagicMock()
+        session = AsyncMock()
+        session._connection = None
+
+        async def slow_connect(*_a, **_k):  # type: ignore[no-untyped-def]
+            session._connection = object()
+
+        session._connect = slow_connect
+
+        async def run_through_connect(*_a, **_k):  # type: ignore[no-untyped-def]
+            if session._connection is None:
+                await session._connect()
+            return MagicMock()
+
+        session.run = AsyncMock(side_effect=run_through_connect)
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=session)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        driver.session.return_value = ctx
+
         backend = Neo4jBackend.from_driver(driver)
         backend._acquisition_histogram = MagicMock()
         backend._acquire_duration_histogram = MagicMock()
         backend._session_duration_histogram = MagicMock()
 
-        # Patch time.monotonic: t0=0, proxy construction legacy=0, _record_acquire=6, final=6.
+        # Patch time.monotonic so the wrap measures a slow connect (6s).
+        # Call sequence inside backend._session + _timed_connect:
+        #   t0 = 0 (outer), legacy = 0 (proxy construction),
+        #   t0 in _timed_connect = 0, post-connect = 6, then final duration = 6.
+        values = [0.0, 0.0, 0.0, 6.0, 6.0]
         call_count = 0
-        values = [0.0, 0.0, 6.0, 6.0]
 
-        def fake_monotonic():
+        def fake_monotonic():  # type: ignore[no-untyped-def]
             nonlocal call_count
             val = values[min(call_count, len(values) - 1)]
             call_count += 1

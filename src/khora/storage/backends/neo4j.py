@@ -103,15 +103,17 @@ class _InstrumentedSession:
     """Proxy around an ``AsyncSession`` that records real pool acquire time.
 
     ``AsyncDriver.session()`` is lazy — the pool connection is not bound
-    until the first ``run`` / ``execute_read`` / ``execute_write`` call.
-    This proxy measures the wall-clock delta from session entry to that
-    first call (which includes any pool wait) and records it on the
-    ``khora.neo4j.pool.acquire_duration`` histogram.
+    until the session calls its internal ``_connect`` method (invoked by
+    ``run``, ``_open_transaction``, and each *retry* inside
+    ``_run_transaction``). We wrap ``session._connect`` on the proxy
+    instance so each real pool acquire is one histogram observation — not
+    "session entry to first run", which would conflate query time + retry
+    sleeps with acquire latency.
 
-    It also converts ``ConnectionAcquisitionTimeoutError`` raised from any
-    of the three entry methods into a ``khora.neo4j.pool.timeout`` counter
-    increment before re-raising, so the counter is honest regardless of
-    which method the caller used.
+    The wrap lives on the instance's ``_connect`` attribute, not on the
+    class, so the original method is unaffected. The session is about to
+    be awaited and closed inside our ``async with``, so there is no
+    state-leak risk and no unpatch is needed.
 
     All other attribute/method access is forwarded via ``__getattr__``.
     """
@@ -120,8 +122,6 @@ class _InstrumentedSession:
         "_inner",
         "_acquire_histogram",
         "_timeout_counter",
-        "_entered_at",
-        "_recorded",
         "counted_timeout",
         "last_acquire",
         "slow_acquire_threshold_exceeded",
@@ -135,61 +135,60 @@ class _InstrumentedSession:
         *,
         acquire_histogram: Any,
         timeout_counter: Any,
-        entered_at: float,
     ) -> None:
         self._inner = inner
         self._acquire_histogram = acquire_histogram
         self._timeout_counter = timeout_counter
-        self._entered_at = entered_at
-        self._recorded = False
         self.counted_timeout = False
         self.last_acquire = 0.0
         self.slow_acquire_threshold_exceeded = False
+        self._install_connect_wrap()
 
     def __getattr__(self, name: str) -> Any:  # pragma: no cover - passthrough
         return getattr(self._inner, name)
 
-    def _record_acquire(self, *, status: str) -> None:
-        elapsed = _time.monotonic() - self._entered_at
-        if not self._recorded:
-            self._acquire_histogram.record(elapsed, attributes={"status": status})
-            self._recorded = True
-            self.last_acquire = elapsed
-            if elapsed > self._SLOW_ACQUIRE_THRESHOLD_S:
-                self.slow_acquire_threshold_exceeded = True
+    def _install_connect_wrap(self) -> None:
+        """Patch ``_connect`` on the wrapped session instance only.
 
-    async def run(self, *args: Any, **kwargs: Any) -> Any:
-        try:
-            result = await self._inner.run(*args, **kwargs)
-        except ConnectionAcquisitionTimeoutError:
-            self._timeout_counter.add(1)
-            self.counted_timeout = True
-            self._record_acquire(status="timeout")
-            raise
-        self._record_acquire(status="ok")
-        return result
+        Each real pool acquire becomes one ``acquire_duration`` observation.
+        Timeouts increment the counter and are also recorded on the
+        histogram with ``status=timeout`` (pending filter cleanup in a
+        follow-up commit).
+        """
+        inner = self._inner
+        original_connect = getattr(inner, "_connect", None)
+        if original_connect is None or not callable(original_connect):
+            # Session stub / future SDK change — fall through; metrics stay
+            # zero for this session rather than crashing.
+            return
 
-    async def execute_read(self, *args: Any, **kwargs: Any) -> Any:
-        try:
-            result = await self._inner.execute_read(*args, **kwargs)
-        except ConnectionAcquisitionTimeoutError:
-            self._timeout_counter.add(1)
-            self.counted_timeout = True
-            self._record_acquire(status="timeout")
-            raise
-        self._record_acquire(status="ok")
-        return result
+        acquire_histogram = self._acquire_histogram
+        timeout_counter = self._timeout_counter
+        proxy = self
 
-    async def execute_write(self, *args: Any, **kwargs: Any) -> Any:
+        async def _timed_connect(*args: Any, **kwargs: Any) -> Any:
+            t0 = _time.monotonic()
+            try:
+                result = await original_connect(*args, **kwargs)
+            except ConnectionAcquisitionTimeoutError:
+                elapsed = _time.monotonic() - t0
+                timeout_counter.add(1)
+                proxy.counted_timeout = True
+                acquire_histogram.record(elapsed, attributes={"status": "timeout"})
+                raise
+            elapsed = _time.monotonic() - t0
+            acquire_histogram.record(elapsed, attributes={"status": "ok"})
+            proxy.last_acquire = elapsed
+            if elapsed > _InstrumentedSession._SLOW_ACQUIRE_THRESHOLD_S:
+                proxy.slow_acquire_threshold_exceeded = True
+            return result
+
         try:
-            result = await self._inner.execute_write(*args, **kwargs)
-        except ConnectionAcquisitionTimeoutError:
-            self._timeout_counter.add(1)
-            self.counted_timeout = True
-            self._record_acquire(status="timeout")
-            raise
-        self._record_acquire(status="ok")
-        return result
+            inner._connect = _timed_connect  # instance-level shadow
+        except (AttributeError, TypeError):
+            # Inner object disallowed attribute assignment (e.g. __slots__
+            # without _connect). Skip instrumentation for this session.
+            return
 
 
 # Bidirectional relationship types and their inverses
@@ -708,19 +707,19 @@ class Neo4jBackend(GraphBackendBase):
     async def _session(self) -> AsyncIterator[Any]:
         """Acquire a Neo4j session with pool metrics instrumentation.
 
-        ``AsyncDriver.session()`` is lazy — no connection is acquired until
-        the first ``run``/``execute_read``/``execute_write`` call. To measure
-        real pool acquire latency we return an :class:`_InstrumentedSession`
-        proxy that records ``khora.neo4j.pool.acquire_duration`` on that first
-        call and increments ``khora.neo4j.pool.timeout`` on any
-        ``ConnectionAcquisitionTimeoutError`` raised from any entry path.
+        ``AsyncDriver.session()`` is lazy — no pool connection is bound
+        until the session's internal ``_connect`` is called (by ``run``,
+        ``_open_transaction``, or each retry inside ``_run_transaction``).
+        :class:`_InstrumentedSession` wraps ``_connect`` on the instance so
+        each real acquire is one ``khora.neo4j.pool.acquire_duration``
+        observation.
 
         The legacy ``khora.neo4j.pool.acquisition_time`` metric is still
         recorded here for backward compatibility, but it only captures the
         session-object construction time (near zero).
 
         Overhead: a handful of ``time.monotonic()`` calls (~8 µs) per session
-        plus one attribute-lookup indirection per run call.
+        plus one attribute-lookup indirection per ``_connect`` call.
         """
         t0 = _time.monotonic()
         instrumented: _InstrumentedSession | None = None
@@ -733,7 +732,6 @@ class Neo4jBackend(GraphBackendBase):
                     session,
                     acquire_histogram=self._acquire_duration_histogram,
                     timeout_counter=self._timeout_counter,
-                    entered_at=t0,
                 )
                 try:
                     yield instrumented
@@ -743,9 +741,7 @@ class Neo4jBackend(GraphBackendBase):
                         logger.warning(f"Neo4j pool acquisition took {instrumented.last_acquire:.1f}s")
         except ConnectionAcquisitionTimeoutError:
             # Only record here if the proxy didn't already (i.e. the timeout
-            # surfaced from __aenter__ before any run/execute_* call). This
-            # keeps the counter honest under the common case where
-            # run/execute_* re-raises after recording the timeout.
+            # surfaced from __aenter__ before any ``_connect`` call).
             if instrumented is None or not instrumented.counted_timeout:
                 self._timeout_counter.add(1)
                 self._acquire_duration_histogram.record(_time.monotonic() - t0, attributes={"status": "timeout"})

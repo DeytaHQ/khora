@@ -73,14 +73,60 @@ def _make_driver_with_session(session: AsyncMock) -> MagicMock:
 # ---------------------------------------------------------------------------
 
 
+def _make_session_with_connect_hook(connect_delay: float = 0.0) -> AsyncMock:
+    """Build a mock AsyncSession whose ``_connect`` mimics a pool bind.
+
+    Each ``_connect`` call sleeps for ``connect_delay``, marks the session
+    "bound" by setting ``_connection`` to a sentinel, and returns None.
+    ``run``/``execute_*`` check ``_connection is None`` and invoke
+    ``_connect`` when needed (mirroring the real driver at
+    ``neo4j/_async/work/session.py:304``).
+    """
+    session = AsyncMock()
+    session._connection = None
+
+    async def fake_connect(*_args: Any, **_kwargs: Any) -> None:
+        if connect_delay > 0:
+            await asyncio.sleep(connect_delay)
+        session._connection = object()  # mark bound
+
+    session._connect = fake_connect
+
+    async def fake_run(*_args: Any, **_kwargs: Any) -> Any:
+        if session._connection is None:
+            await session._connect()
+        return MagicMock()
+
+    async def fake_execute_read(fn: Any = None, *_a: Any, **_kw: Any) -> Any:
+        if session._connection is None:
+            await session._connect()
+        return None
+
+    async def fake_execute_write(fn: Any = None, *_a: Any, **_kw: Any) -> Any:
+        if session._connection is None:
+            await session._connect()
+        return None
+
+    session.run = AsyncMock(side_effect=fake_run)
+    session.execute_read = AsyncMock(side_effect=fake_execute_read)
+    session.execute_write = AsyncMock(side_effect=fake_execute_write)
+    return session
+
+
 @pytest.mark.unit
 class TestAcquireDurationMetricIsReal:
-    """_InstrumentedSession records acquire_duration on first entry call, not before."""
+    """_InstrumentedSession records acquire_duration per pool acquire via ``_connect``."""
 
     @pytest.mark.asyncio
     async def test_not_recorded_when_session_is_entered_but_never_used(self) -> None:
         """No acquire_duration sample if no run/execute_* was called."""
         session = _make_session_mock()
+
+        # Give the mock a _connect that simply no-ops; nothing should call it.
+        async def _noop(*_a: Any, **_k: Any) -> None:
+            return None
+
+        session._connect = _noop
         driver = _make_driver_with_session(session)
         backend = Neo4jBackend.from_driver(driver)
 
@@ -94,16 +140,10 @@ class TestAcquireDurationMetricIsReal:
         assert samples == [], "acquire_duration should not record without a pool-binding call"
 
     @pytest.mark.asyncio
-    async def test_records_real_time_not_construction_time(self) -> None:
-        """acquire_duration reflects the wall-clock delta to the first real call."""
-        fake_run_delay = 0.05  # 50 ms
-
-        async def slow_run(*_a: Any, **_k: Any) -> Any:
-            await asyncio.sleep(fake_run_delay)
-            return MagicMock()
-
-        session = AsyncMock()
-        session.run = AsyncMock(side_effect=slow_run)
+    async def test_records_connect_time_not_total_run_time(self) -> None:
+        """acquire_duration reflects ``_connect`` duration, not full run wall-clock."""
+        connect_delay = 0.05  # 50 ms
+        session = _make_session_with_connect_hook(connect_delay=connect_delay)
         driver = _make_driver_with_session(session)
         backend = Neo4jBackend.from_driver(driver)
 
@@ -115,13 +155,12 @@ class TestAcquireDurationMetricIsReal:
             await s.run("RETURN 1")
 
         assert len(samples) == 1
-        # Should be at least ~40ms (leave slack for timer resolution / CI jitter)
         assert samples[0] >= 0.04, f"acquire_duration too low: {samples[0]}"
 
     @pytest.mark.asyncio
-    async def test_records_once_even_with_multiple_calls(self) -> None:
-        """Only the first entry call records acquire_duration."""
-        session = _make_session_mock()
+    async def test_records_once_per_connect_not_per_run(self) -> None:
+        """Multiple ``run`` calls on the same bound connection record exactly once."""
+        session = _make_session_with_connect_hook()
         driver = _make_driver_with_session(session)
         backend = Neo4jBackend.from_driver(driver)
 
@@ -134,7 +173,65 @@ class TestAcquireDurationMetricIsReal:
             await s.run("RETURN 2")
             await s.execute_read(lambda _tx: None)
 
+        assert len(samples) == 1, f"expected 1 record per bind, got {len(samples)}"
+
+    @pytest.mark.asyncio
+    async def test_records_again_after_reconnect(self) -> None:
+        """If the session rebinds (``_connection = None`` then another call),
+        the histogram records a second observation."""
+        session = _make_session_with_connect_hook()
+        driver = _make_driver_with_session(session)
+        backend = Neo4jBackend.from_driver(driver)
+
+        samples: list[float] = []
+        backend._acquire_duration_histogram = MagicMock()
+        backend._acquire_duration_histogram.record = lambda v, attributes=None, **_: samples.append(v)
+
+        async with backend._session() as s:
+            await s.run("RETURN 1")  # bind #1
+            # simulate retry / reconnect scenario: release the connection.
+            s._inner._connection = None
+            await s.run("RETURN 2")  # bind #2
+
+        assert len(samples) == 2, f"expected 2 records across 2 binds, got {len(samples)}"
+
+    @pytest.mark.asyncio
+    async def test_excludes_query_and_retry_time(self) -> None:
+        """Acquire is 10 ms; the query sleeps 100 ms after. The histogram must
+        record ~10 ms, not ~110 ms — slow-query time must not be conflated
+        with acquire time."""
+        session = AsyncMock()
+        session._connection = None
+
+        async def fake_connect(*_a: Any, **_k: Any) -> None:
+            await asyncio.sleep(0.01)  # 10ms "acquire"
+            session._connection = object()
+
+        session._connect = fake_connect
+
+        async def fake_run(*_a: Any, **_k: Any) -> Any:
+            if session._connection is None:
+                await session._connect()
+            await asyncio.sleep(0.1)  # 100ms "query"
+            return MagicMock()
+
+        session.run = AsyncMock(side_effect=fake_run)
+        driver = _make_driver_with_session(session)
+        backend = Neo4jBackend.from_driver(driver)
+
+        samples: list[float] = []
+        backend._acquire_duration_histogram = MagicMock()
+        backend._acquire_duration_histogram.record = lambda v, attributes=None, **_: samples.append(v)
+
+        async with backend._session() as s:
+            await s.run("RETURN 1")
+
         assert len(samples) == 1
+        # Must be closer to 10ms than to 110ms. Give generous CI slack: <60ms.
+        assert 0.005 <= samples[0] < 0.06, (
+            f"acquire_duration ({samples[0] * 1000:.1f} ms) conflates query time — "
+            f"should be near 10 ms, saw {samples[0] * 1000:.1f} ms"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -149,10 +246,24 @@ class TestTimeoutCounterUniversality:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("entry_method", ["run", "execute_read", "execute_write"])
     async def test_counter_increments_from_each_entry_method(self, entry_method: str) -> None:
+        """Pool timeout raised from the session's internal ``_connect`` (invoked by
+        ``run``/``execute_read``/``execute_write``) increments the counter exactly once."""
         err = ConnectionAcquisitionTimeoutError("pool exhausted")
         session = AsyncMock()
+        session._connection = None
+
+        async def failing_connect(*_a: Any, **_k: Any) -> None:
+            raise err
+
+        session._connect = failing_connect
+
+        async def run_through_connect(*_a: Any, **_k: Any) -> Any:
+            if session._connection is None:
+                await session._connect()
+            return MagicMock()
+
         for name in ("run", "execute_read", "execute_write"):
-            setattr(session, name, AsyncMock(side_effect=err if name == entry_method else None))
+            setattr(session, name, AsyncMock(side_effect=run_through_connect))
 
         driver = _make_driver_with_session(session)
         backend = Neo4jBackend.from_driver(driver)
@@ -192,8 +303,19 @@ class TestTimeoutCounterUniversality:
         """When DualNodeManager has session_factory=backend._session, its entry paths bump the counter."""
         err = ConnectionAcquisitionTimeoutError("pool exhausted")
         session = AsyncMock()
-        session.run = AsyncMock()
-        session.execute_read = AsyncMock(side_effect=err)
+        session._connection = None
+
+        async def failing_connect(*_a: Any, **_k: Any) -> None:
+            raise err
+
+        session._connect = failing_connect
+
+        async def execute_read_through_connect(*_a: Any, **_k: Any) -> Any:
+            await session._connect()
+            return []
+
+        session.run = AsyncMock(return_value=MagicMock())
+        session.execute_read = AsyncMock(side_effect=execute_read_through_connect)
         session.execute_write = AsyncMock()
 
         driver = _make_driver_with_session(session)
@@ -208,8 +330,8 @@ class TestTimeoutCounterUniversality:
         async def _work(_tx: Any) -> list[Any]:
             return []
 
-        # Use the _session() helper directly — exercises the whole chain:
-        # DualNodeManager._session -> backend._session -> _InstrumentedSession.execute_read.
+        # Exercises: DualNodeManager._session -> backend._session
+        # -> _InstrumentedSession -> session._connect raises.
         with pytest.raises(ConnectionAcquisitionTimeoutError):
             async with manager._session() as s:
                 await s.execute_read(_work)
@@ -218,14 +340,43 @@ class TestTimeoutCounterUniversality:
 
     @pytest.mark.asyncio
     async def test_counter_increments_twice_for_two_burst_timeouts(self) -> None:
-        """Two timeouts across both entry paths -> counter == 2 (was == 1 before DYT-2624)."""
-        err = ConnectionAcquisitionTimeoutError("pool exhausted")
-        session = AsyncMock()
-        session.run = AsyncMock(side_effect=err)
-        session.execute_read = AsyncMock(side_effect=err)
-        session.execute_write = AsyncMock()
+        """Two timeouts across both entry paths -> counter == 2.
 
-        driver = _make_driver_with_session(session)
+        Each ``driver.session()`` call returns a fresh session in the real
+        driver, so the proxy's ``_connect`` wrap does not nest. We emulate
+        that here by returning a new AsyncMock per ``driver.session()``.
+        """
+        err = ConnectionAcquisitionTimeoutError("pool exhausted")
+
+        def make_failing_session() -> AsyncMock:
+            session = AsyncMock()
+            session._connection = None
+
+            async def failing_connect(*_a: Any, **_k: Any) -> None:
+                raise err
+
+            session._connect = failing_connect
+
+            async def entry_through_connect(*_a: Any, **_k: Any) -> Any:
+                await session._connect()
+                return MagicMock()
+
+            session.run = AsyncMock(side_effect=entry_through_connect)
+            session.execute_read = AsyncMock(side_effect=entry_through_connect)
+            session.execute_write = AsyncMock()
+            return session
+
+        driver = MagicMock()
+
+        def new_session_ctx(*_a: Any, **_kw: Any) -> MagicMock:
+            session = make_failing_session()
+            ctx = MagicMock()
+            ctx.__aenter__ = AsyncMock(return_value=session)
+            ctx.__aexit__ = AsyncMock(return_value=False)
+            return ctx
+
+        driver.session.side_effect = new_session_ctx
+
         backend = Neo4jBackend.from_driver(driver)
         manager = DualNodeManager(driver, session_factory=backend._session)
 
