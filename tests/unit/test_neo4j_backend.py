@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from neo4j.exceptions import ClientError, Neo4jError
 
+from khora.core.models.entity import Relationship
 from khora.storage.backends.neo4j import _NEO4J_TIMEOUT_CODES, Neo4jBackend
 
 
@@ -212,3 +213,99 @@ class TestNeo4jBackendGetNeighborhoodsBatchTimeout:
             await backend.get_neighborhoods_batch([uuid4()])
 
         assert excinfo.value.code == "Neo.ClientError.Statement.SyntaxError"
+
+
+@pytest.mark.unit
+class TestNeo4jBackendGetEntityRelationships:
+    """Tests for get_entity_relationships (DYT-2626)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_relationships_from_properties_dict(self) -> None:
+        """Non-empty path: `r` arrives as a properties dict (post-fix shape)."""
+        driver, session = _make_neo4j_driver()
+
+        entity_id = uuid4()
+        target_id = uuid4()
+        rel_id = uuid4()
+        ns_id = uuid4()
+
+        rel_props = {
+            "id": str(rel_id),
+            "namespace_id": str(ns_id),
+            "description": "knows each other",
+            "properties": '{"since": "2024"}',
+            "source_document_ids": [],
+            "source_chunk_ids": [],
+            "valid_from": None,
+            "valid_until": None,
+            "confidence": 0.9,
+            "weight": 1.0,
+            "metadata": '{"k": "v"}',
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-02T00:00:00+00:00",
+        }
+        records = [
+            {
+                "r": rel_props,
+                "source_id": str(entity_id),
+                "target_id": str(target_id),
+                "rel_type": "KNOWS",
+            }
+        ]
+
+        result = MagicMock()
+        result.data = AsyncMock(return_value=records)
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+
+        got = await backend.get_entity_relationships(entity_id, direction="outgoing")
+
+        assert isinstance(got, list)
+        assert len(got) == 1
+        rel = got[0]
+        assert isinstance(rel, Relationship)
+        assert rel.id == rel_id
+        assert rel.namespace_id == ns_id
+        assert rel.source_entity_id == entity_id
+        assert rel.target_entity_id == target_id
+        assert rel.relationship_type == "KNOWS"
+        assert rel.description == "knows each other"
+        assert rel.properties == {"since": "2024"}
+        assert rel.metadata == {"k": "v"}
+        assert rel.confidence == 0.9
+        assert rel.weight == 1.0
+
+    @pytest.mark.asyncio
+    async def test_raises_typeerror_on_raw_relationship_tuple(self) -> None:
+        """Regression lock: raw relationship 3-tuple (pre-fix shape) must fail.
+
+        If the Cypher query ever regresses from ``RETURN properties(r) as r`` back
+        to ``RETURN r``, ``result.data()`` serializes the Relationship value as a
+        3-tuple (start_dict, rel_type, end_dict) and ``_record_to_relationship``
+        indexes it with string keys — raising TypeError. Pinning this prevents
+        the DYT-2626 regression from silently returning.
+        """
+        driver, session = _make_neo4j_driver()
+
+        entity_id = uuid4()
+
+        # Simulate the pre-fix shape: `r` is a 3-tuple, not a dict.
+        raw_tuple = ({"id": str(uuid4())}, "KNOWS", {"id": str(uuid4())})
+        records = [
+            {
+                "r": raw_tuple,
+                "source_id": str(entity_id),
+                "target_id": str(uuid4()),
+                "rel_type": "KNOWS",
+            }
+        ]
+
+        result = MagicMock()
+        result.data = AsyncMock(return_value=records)
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+
+        with pytest.raises(TypeError, match="tuple indices"):
+            await backend.get_entity_relationships(entity_id, direction="outgoing")

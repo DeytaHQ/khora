@@ -1497,7 +1497,7 @@ class Neo4jBackend(GraphBackendBase):
         query = f"""
         MATCH {pattern}
         WHERE e.id = $entity_id
-        RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
+        RETURN properties(r) as r, e.id as source_id, other.id as target_id, type(r) as rel_type
         LIMIT $limit
         """
 
