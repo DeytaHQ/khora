@@ -109,6 +109,24 @@ class Neo4jConfig(BaseModel):
     )
     entity_write_concurrency: int = Field(default=12, description="Max concurrent entity write transactions")
     relationship_write_concurrency: int = Field(default=8, description="Max concurrent relationship write transactions")
+    pool_sampler_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in high-frequency Neo4j pool sampler. When True, Khora starts a "
+            "background task that samples driver pool state at "
+            "``pool_sampler_interval_ms`` cadence and emits the observations on the "
+            "``khora.neo4j.pool.sampled.*`` histograms. Zero-cost when False."
+        ),
+    )
+    pool_sampler_interval_ms: int = Field(
+        default=500,
+        ge=50,
+        le=60_000,
+        description=(
+            "Interval in milliseconds between Neo4j pool samples when "
+            "``pool_sampler_enabled`` is True. Clamped to [50, 60000]."
+        ),
+    )
 
 
 class KuzuConfig(BaseModel):
