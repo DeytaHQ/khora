@@ -738,62 +738,6 @@ class QuerySettings(BaseSettings):
     )
 
 
-class DiscoverySettings(BaseSettings):
-    """Interactive datasource discovery configuration.
-
-    Controls the discovery agent that helps users find and pull
-    datasources from the internet when no --source is provided.
-
-    Env vars: ``KHORA_DISCOVERY_MAX_COST_USD``, ``KHORA_DISCOVERY_PERPLEXITY_MODEL``, etc.
-    """
-
-    model_config = SettingsConfigDict(env_prefix="KHORA_DISCOVERY_", case_sensitive=False)
-
-    # Perplexity search settings
-    perplexity_model: str = Field(default="sonar-pro", description="Perplexity model for source discovery")
-    perplexity_timeout: float = Field(default=45.0, description="Perplexity API request timeout in seconds")
-
-    # Firecrawl scraping settings
-    firecrawl_timeout: float = Field(default=60.0, description="Firecrawl API request timeout in seconds")
-    firecrawl_max_pages: int = Field(default=20, ge=1, le=100, description="Max pages per Firecrawl crawl job")
-
-    # Agent behavior
-    max_iterations: int = Field(default=5, ge=1, le=20, description="Max discovery-fetch-review cycles")
-    max_cost_usd: float = Field(default=2.0, ge=0.0, description="Max USD budget for discovery session")
-
-    # Script execution sandbox
-    script_execution_timeout: int = Field(
-        default=120, ge=10, le=600, description="Timeout for generated scripts (seconds)"
-    )
-    script_max_output_bytes: int = Field(
-        default=500 * 1024 * 1024,
-        description="Max output size from generated scripts (bytes)",
-    )
-
-    # LiteLLM config
-    litellm_config: str | None = Field(
-        default=None,
-        description="Path to LiteLLM YAML config for discovery models. Set via --litellm flag or KHORA_DISCOVERY_LITELLM_CONFIG.",
-    )
-
-    # Model selection per task
-    planning_model: str | None = Field(
-        default=None,
-        description="Model for query formulation and source classification. Set via litellm config or KHORA_DISCOVERY_PLANNING_MODEL.",
-    )
-    codegen_model: str | None = Field(
-        default=None,
-        description="Model for generating fetch scripts. Set via litellm config or KHORA_DISCOVERY_CODEGEN_MODEL.",
-    )
-    summarization_model: str | None = Field(
-        default=None,
-        description="Model for content summarization. Set via litellm config or KHORA_DISCOVERY_SUMMARIZATION_MODEL.",
-    )
-
-    # Search result caching
-    cache_ttl_seconds: int = Field(default=3600, ge=0, description="TTL for cached search results (0 to disable)")
-
-
 class KhoraConfig(BaseSettings):
     """Main application configuration."""
 
@@ -861,9 +805,6 @@ class KhoraConfig(BaseSettings):
 
     # Query pipeline configuration
     query: QuerySettings = Field(default_factory=QuerySettings)
-
-    # Discovery agent configuration
-    discovery: DiscoverySettings = Field(default_factory=DiscoverySettings)
 
     # Semantic hooks configuration
     hooks: Any = Field(default=None, description="Semantic hooks configuration (SemanticHooksConfig)")

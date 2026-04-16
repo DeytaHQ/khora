@@ -1162,6 +1162,11 @@ all-backends = [
     { name = "surrealdb" },
     { name = "weaviate-client" },
 ]
+binary-readers = [
+    { name = "openpyxl" },
+    { name = "pymupdf" },
+    { name = "python-docx" },
+]
 dev = [
     { name = "coverage" },
     { name = "prek" },
@@ -1171,11 +1176,6 @@ dev = [
     { name = "pytest-mock" },
     { name = "ruff" },
     { name = "ty" },
-]
-discovery = [
-    { name = "openpyxl" },
-    { name = "pymupdf" },
-    { name = "python-docx" },
 ]
 embedded = [
     { name = "surrealdb" },
@@ -1276,7 +1276,7 @@ requires-dist = [
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=6.1.0" },
     { name = "neo4j", marker = "extra == 'neptune'", specifier = ">=6.1.0" },
     { name = "neo4j", marker = "extra == 'neptune-iam'", specifier = ">=6.1.0" },
-    { name = "openpyxl", marker = "extra == 'discovery'", specifier = ">=3.1.0" },
+    { name = "openpyxl", marker = "extra == 'binary-readers'", specifier = ">=3.1.0" },
     { name = "pgvector", specifier = ">=0.4.2" },
     { name = "pgvector", marker = "extra == 'all-backends'", specifier = ">=0.4.2" },
     { name = "pgvector", marker = "extra == 'postgres'", specifier = ">=0.4.2" },
@@ -1284,12 +1284,12 @@ requires-dist = [
     { name = "pyarrow", marker = "extra == 'lancedb'", specifier = ">=18.0.0" },
     { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=18.0.0" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
-    { name = "pymupdf", marker = "extra == 'discovery'", specifier = ">=1.25.0" },
+    { name = "pymupdf", marker = "extra == 'binary-readers'", specifier = ">=1.25.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.3.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.15.1" },
-    { name = "python-docx", marker = "extra == 'discovery'", specifier = ">=1.1.0" },
+    { name = "python-docx", marker = "extra == 'binary-readers'", specifier = ">=1.1.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rapidfuzz", marker = "extra == 'accel'", specifier = ">=3.0.0" },
     { name = "rich", specifier = ">=14.3.3" },
@@ -1307,7 +1307,7 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'all-backends'", specifier = ">=4.20.1" },
     { name = "weaviate-client", marker = "extra == 'weaviate'", specifier = ">=4.20.1" },
 ]
-provides-extras = ["accel", "age", "all-backends", "dev", "discovery", "embedded", "graph-all", "kuzu", "lancedb", "logfire", "memgraph", "neo4j", "neptune", "neptune-iam", "nlp", "parquet", "postgres", "reranking", "rust", "sqlite", "surrealdb", "weaviate"]
+provides-extras = ["accel", "age", "all-backends", "binary-readers", "dev", "embedded", "graph-all", "kuzu", "lancedb", "logfire", "memgraph", "neo4j", "neptune", "neptune-iam", "nlp", "parquet", "postgres", "reranking", "rust", "sqlite", "surrealdb", "weaviate"]
 
 [package.metadata.requires-dev]
 dev = [

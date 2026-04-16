@@ -12,19 +12,18 @@ make format            # black, isort, ruff
 make lint              # ruff + ty typecheck
 make dev               # Start postgres + neo4j
 uv run alembic upgrade head                       # Run migrations
-uv run khora ontology construct --source <path>   # AI ontology generation
-uv run khora ontology validate <file.yaml>        # Validate ontology YAML
-uv run khora ontology preview <file.yaml>         # Rich preview
 uv run khora extract <file-or-dir>                # Ingest into knowledge graph
 uv run khora search "query" -n <namespace>        # Search knowledge graph
 ```
+
+Ontology tooling (construct / validate / preview) lives in the separate [khora-explorer](https://github.com/DeytaHQ/khora-explorer) package (`pip install khora-explorer`).
 
 ## Architecture
 
 - **Engines:** implement `MemoryEngineProtocol` in `engines/protocol.py`. Default engine is `vectorcypher`
 - **Graph backends:** Neo4j, SurrealDB, Memgraph, Kuzu, Neptune, AGE — implement `GraphBackend` in `storage/backends/base.py`
 - **SurrealDB:** unified backend (graph + vector + relational). Modes: `memory://`, `surrealkv://` (embedded), `ws://` (remote). Set `backend: surrealdb` in config
-- **Extraction skills:** YAML-defined in `extraction/skills/builtin/`. Generate with `khora ontology construct`
+- **Extraction skills:** YAML-defined in `extraction/skills/builtin/`. Generate with `khora-explorer construct` (separate package)
 - **Config:** env vars with `KHORA_` prefix and single underscore (e.g., `KHORA_QUERY_ENABLE_HYDE=true`, `KHORA_LLM_MODEL=gpt-4o`). Legacy `__` nesting also supported
 
 ### Key Entry Points
@@ -36,7 +35,7 @@ uv run khora search "query" -n <namespace>        # Search knowledge graph
 - `storage/backends/surrealdb/` — Unified SurrealDB backend
 - `db/models.py` — SQLAlchemy ORM (UUID columns use `as_uuid=True`)
 - `_accel.py` — Rust/NumPy acceleration (MMR, cosine, pagerank, entity resolution, community detection, temporal)
-- `cli/ontology/` — Ontology construction: `commands.py`, `flow.py`, `inference/`, `sources/`, `sampling/`
+- `extraction/binary_readers.py` — PDF/xlsx/docx/parquet readers used by `khora extract`
 - `pipelines/flows/ingest.py` — Document ingestion pipeline (3-phase: stage → enrich → expand)
 - `db/migrations/env.py` — Alembic with advisory locking
 - `config/schema.py` — `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
