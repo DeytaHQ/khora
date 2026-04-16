@@ -14,6 +14,8 @@ This structure enables efficient retrieval by:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -27,7 +29,7 @@ from khora.storage.backends.mixins import deserialize_dict, serialize_dict
 from khora.telemetry import trace, trace_span
 
 if TYPE_CHECKING:
-    from neo4j import AsyncDriver
+    from neo4j import AsyncDriver, AsyncSession
 
     from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter
 
@@ -87,6 +89,7 @@ class DualNodeManager:
         database: str = "neo4j",
         *,
         query_timeout: float | None = None,
+        session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
     ) -> None:
         """Initialize the manager.
 
@@ -96,10 +99,19 @@ class DualNodeManager:
             query_timeout: Optional per-transaction timeout in seconds,
                 applied to ``get_entity_neighborhoods`` to bound runaway
                 variable-length path queries. ``None`` disables the timeout.
+            session_factory: Optional zero-argument callable returning an
+                async context manager yielding an ``AsyncSession``. When
+                provided, :meth:`_session` uses it instead of calling
+                ``driver.session(database=...)`` directly, so pool metric
+                instrumentation from ``Neo4jBackend._session`` covers the
+                traversal paths driven by this manager. Falls back to the
+                raw driver session when ``None`` (e.g. tests or callers that
+                do not have a backend wired).
         """
         self._driver = driver
         self._database = database
         self._query_timeout = query_timeout
+        self._session_factory = session_factory
         # Pre-bind the unit_of_work decorator once. The factory call is
         # cheap but non-zero and the produced decorator is fully reusable
         # — see neo4j.unit_of_work: it closes over (metadata, timeout) and
@@ -107,6 +119,21 @@ class DualNodeManager:
         # transaction callables. Hoisting shaves an allocation per call
         # on the hot neighborhood lookup path.
         self._timed_unit_of_work = unit_of_work(timeout=query_timeout) if query_timeout is not None else None
+
+    @asynccontextmanager
+    async def _session(self) -> AsyncIterator[AsyncSession]:
+        """Yield a Neo4j session, routed through ``session_factory`` if set.
+
+        All Neo4j access from this class must go through this helper so that
+        ``Neo4jBackend._session`` pool metrics (timeout counter, acquire
+        duration) observe traversals driven by ``DualNodeManager``.
+        """
+        if self._session_factory is not None:
+            async with self._session_factory() as session:
+                yield session
+        else:
+            async with self._driver.session(database=self._database) as session:
+                yield session
 
     async def ensure_indexes(self) -> None:
         """Create indexes for Chunk and TimeNode nodes."""
@@ -126,7 +153,7 @@ class DualNodeManager:
             "CREATE INDEX timenode_namespace IF NOT EXISTS FOR (t:TimeNode) ON (t.namespace_id)",
         ]
 
-        async with self._driver.session(database=self._database) as session:
+        async with self._session() as session:
             for index in indexes:
                 try:
                     await session.run(index)
@@ -175,7 +202,7 @@ class DualNodeManager:
             metadata=serialize_dict(chunk.metadata or {}),
         )
 
-        async with self._driver.session(database=self._database) as session:
+        async with self._session() as session:
 
             async def _work(tx):
                 await tx.run(query, **params)
@@ -244,7 +271,7 @@ class DualNodeManager:
         })
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async with self._session() as session:
 
             async def _work(tx):
                 await tx.run(query, chunks=chunk_data)
@@ -278,7 +305,7 @@ class DualNodeManager:
         ON MATCH SET r.mention_count = r.mention_count + $mention_count
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async with self._session() as session:
 
             async def _work(tx):
                 await tx.run(
@@ -323,7 +350,7 @@ class DualNodeManager:
         ON MATCH SET r.mention_count = r.mention_count + link.mention_count
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async with self._session() as session:
 
             async def _work(tx):
                 await tx.run(query, links=link_data)
@@ -349,7 +376,7 @@ class DualNodeManager:
         MERGE (c)-[:AT_TIME]->(t)
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async with self._session() as session:
 
             async def _work(tx):
                 await tx.run(
@@ -383,7 +410,7 @@ class DualNodeManager:
         MERGE (c)-[:AT_TIME]->(t)
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async with self._session() as session:
 
             async def _work(tx):
                 await tx.run(query, links=link_data)
@@ -484,7 +511,7 @@ class DualNodeManager:
             _work = self._timed_unit_of_work(_work)
 
         try:
-            async with self._driver.session(database=self._database) as session:
+            async with self._session() as session:
                 records = await session.execute_read(_work)
         except ClientError as exc:
             if exc.code in _NEO4J_TIMEOUT_CODES:
@@ -618,7 +645,7 @@ class DualNodeManager:
             _work = self._timed_unit_of_work(_work)
 
         try:
-            async with self._driver.session(database=self._database) as session:
+            async with self._session() as session:
                 records = await session.execute_read(_work)
         except ClientError as exc:
             # Match only the two known transaction-timeout codes (explicit
@@ -715,7 +742,7 @@ class DualNodeManager:
             _work = self._timed_unit_of_work(_work)
 
         try:
-            async with self._driver.session(database=self._database) as session:
+            async with self._session() as session:
                 return await session.execute_read(_work)
         except ClientError as exc:
             if exc.code in _NEO4J_TIMEOUT_CODES:
@@ -820,7 +847,7 @@ class DualNodeManager:
             _work = self._timed_unit_of_work(_work)
 
         try:
-            async with self._driver.session(database=self._database) as session:
+            async with self._session() as session:
                 records = await session.execute_read(_work)
         except ClientError as exc:
             if exc.code in _NEO4J_TIMEOUT_CODES:
@@ -899,7 +926,7 @@ class DualNodeManager:
             _work = self._timed_unit_of_work(_work)
 
         try:
-            async with self._driver.session(database=self._database) as session:
+            async with self._session() as session:
                 channels = await session.execute_read(_work)
         except ClientError as exc:
             if exc.code in _NEO4J_TIMEOUT_CODES:
@@ -950,7 +977,7 @@ class DualNodeManager:
         RETURN count(c) AS deleted
         """
 
-        async with self._driver.session(database=self._database) as session:
+        async with self._session() as session:
 
             async def _work(tx):
                 result = await tx.run(

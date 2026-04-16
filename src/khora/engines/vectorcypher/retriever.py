@@ -208,7 +208,10 @@ class VectorCypherRetriever:
             database: Neo4j database name
             config: Retriever configuration
             router_config: Router configuration (optional, for LLM routing etc.)
-            storage: Storage coordinator for entity vector search via pgvector
+            storage: Storage coordinator for entity vector search via pgvector.
+                When ``storage.graph`` is a ``Neo4jBackend``, its ``_session``
+                helper is forwarded to ``DualNodeManager`` so pool metrics
+                observe every Neo4j session opened through this retriever.
             neo4j_query_timeout: Optional per-transaction timeout in seconds
                 forwarded to the underlying ``DualNodeManager`` to bound
                 ``get_entity_neighborhoods``. ``None`` disables the timeout.
@@ -229,8 +232,18 @@ class VectorCypherRetriever:
                 complex_depth=self._config.default_depth,
             )
         self._router = QueryComplexityRouter(router_config)
+        # Forward Neo4jBackend._session when available so pool metrics observe
+        # all traversals driven from the retriever (see DualNodeManager).
+        backend_session_factory = getattr(getattr(storage, "graph", None), "_session", None) if storage else None
         self._dual_nodes = (
-            DualNodeManager(neo4j_driver, database, query_timeout=neo4j_query_timeout) if neo4j_driver else None
+            DualNodeManager(
+                neo4j_driver,
+                database,
+                query_timeout=neo4j_query_timeout,
+                session_factory=backend_session_factory,
+            )
+            if neo4j_driver
+            else None
         )
 
         # Query result cache (LRU + TTL)
@@ -1788,7 +1801,7 @@ class VectorCypherRetriever:
                END AS id
         """
 
-        async with self._neo4j_driver.session(database=self._database) as session:
+        async with self._dual_nodes._session() as session:
 
             async def _work(tx):
                 result = await tx.run(
@@ -1846,7 +1859,7 @@ class VectorCypherRetriever:
         ORDER BY current.name, s.superseded_at DESC
         """
 
-        async with self._neo4j_driver.session(database=self._database) as session:
+        async with self._dual_nodes._session() as session:
 
             async def _work(tx):
                 result = await tx.run(
