@@ -539,3 +539,26 @@ class ExtractionSkill:
             min_relationship_confidence=data.get("min_relationship_confidence", 0.5),
             metadata=data.get("metadata", {}),
         )
+
+
+# Public API contract (ADR-022). Downstream consumers (khora-explorer,
+# genesis, khora-benchmarks) depend on these symbols. Changes to any class
+# listed here — renaming fields, removing fields, or changing field types —
+# require a major version bump and prior coordination. Additive changes
+# (new optional fields with defaults) are permitted in patch/minor releases
+# provided from_dict round-trips existing payloads.
+__all__ = [
+    # Stable expertise configuration (ADR-022)
+    "ExpertiseConfig",
+    "EntityTypeConfig",
+    "RelationshipTypeConfig",
+    "ConfidenceConfig",
+    "ExpansionConfig",
+    "CorrelationRule",
+    "InferenceRule",
+    # Supporting types (stable: InferenceCondition is a field of InferenceRule)
+    "InferenceCondition",
+    "ConfidenceLevel",
+    # Legacy pre-ADR-022 API (kept for backward compatibility)
+    "ExtractionSkill",
+]
