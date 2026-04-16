@@ -141,6 +141,17 @@ class QueryComplexityRouter:
         r"\b(due\s+to|owing\s+to|thanks\s+to)\b",
     ]
 
+    COUNTERFACTUAL_PATTERNS = [
+        r"\bif\b.*\bhad\s+not\b",
+        r"\bwhat\s+would\b",
+        r"\bwhat\s+if\b",
+        r"\bhypothetical\b",
+        r"\binstead\s+of\b",
+        r"\bwithout\s+(having|doing|being)\b",
+        r"\bhad\s+(they|he|she|it|we)\s+not\b",
+        r"\bdo\b.*\b(both|start|share|have\s+in\s+common)\b",
+    ]
+
     HIERARCHICAL_PATTERNS = [
         r"\b(parent|child|ancestor|descendant)\b",
         r"\b(belongs?\s+to|part\s+of|contains?|includes?)\b",
@@ -214,6 +225,7 @@ COMPLEX|Multi-hop query requiring graph traversal"""
         self._temporal_re = [re.compile(p, re.IGNORECASE) for p in self.TEMPORAL_PATTERNS]
         self._causal_re = [re.compile(p, re.IGNORECASE) for p in self.CAUSAL_PATTERNS]
         self._hierarchical_re = [re.compile(p, re.IGNORECASE) for p in self.HIERARCHICAL_PATTERNS]
+        self._counterfactual_re = [re.compile(p, re.IGNORECASE) for p in self.COUNTERFACTUAL_PATTERNS]
         self._simple_re = [re.compile(p, re.IGNORECASE) for p in self.SIMPLE_QUESTION_PATTERNS]
         self._factual_re = [re.compile(p, re.IGNORECASE) for p in self.FACTUAL_PATTERNS]
 
@@ -370,6 +382,13 @@ COMPLEX|Multi-hop query requiring graph traversal"""
             complexity_score += 0.35
             pattern_matches += 1
             reasons.append("causal keywords")
+
+        # Check counterfactual patterns (high complexity — needs both original
+        # state and change event, typically spanning multiple graph hops)
+        if any(p.search(query) for p in self._counterfactual_re):
+            complexity_score += 0.35
+            pattern_matches += 1
+            reasons.append("counterfactual keywords")
 
         # Check hierarchical patterns (moderate complexity indicator)
         if any(p.search(query) for p in self._hierarchical_re):
