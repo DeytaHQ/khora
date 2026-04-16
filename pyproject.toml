@@ -40,7 +40,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.0.2",
+    "pytest>=9.0.3",
     "pytest-cov>=7.0.0",
     "pytest-mock>=3.15.1",
     "pytest-asyncio>=1.3.0",
@@ -220,7 +220,7 @@ khora-accel = { path = "rust/khora-accel", editable = true }
 [dependency-groups]
 dev = [
     "prek>=0.3.3",
-    "pytest>=9.0.2",
+    "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",
     "ruff>=0.15.2",
