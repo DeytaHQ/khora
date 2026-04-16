@@ -772,7 +772,16 @@ class Neo4jBackend(GraphBackendBase):
         max_size = self._max_connection_pool_size or 100
 
         def _pool_snapshot() -> tuple[int, int, int, int]:
-            """Return (active, idle, total, creating) from the pool."""
+            """Return (active, idle, total, creating) from the pool.
+
+            Best-effort read; the OTel exporter invokes gauge callbacks
+            synchronously so we cannot acquire ``pool.lock`` here (the
+            async-cooperative lock forbids await-while-held and the OTel
+            callback protocol is sync-only in some backends). A torn read
+            is acceptable at the ~60 s exporter cadence — prefer the
+            ``khora.neo4j.pool.sampled.*`` histograms (lock-exact) when
+            sub-second accuracy is required.
+            """
             conns = getattr(pool, "connections", {})
             all_conns = [c for deq in conns.values() for c in deq]
             active = sum(1 for c in all_conns if getattr(c, "in_use", False))
@@ -842,7 +851,15 @@ class Neo4jBackend(GraphBackendBase):
     # =========================================================================
 
     def _sample_pool_once(self) -> dict[str, float] | None:
-        """Return a single snapshot of pool state, or ``None`` if unavailable."""
+        """Return a single snapshot of pool state, or ``None`` if unavailable.
+
+        Takes ``pool.lock`` (an ``AsyncCooperativeRLock``, used by the driver
+        as a sync reentrant lock — no ``await`` permitted while held) so the
+        snapshot is consistent with driver mutations. The locked region is
+        kept tight: we copy the ``(address, deque)`` pairs and the
+        reservation counts under the lock, then release and compute derived
+        values outside it.
+        """
         driver = self._driver
         if driver is None:
             return None
@@ -850,25 +867,53 @@ class Neo4jBackend(GraphBackendBase):
         if pool is None:
             return None
         try:
-            conns = getattr(pool, "connections", {}) or {}
-            reservations = getattr(pool, "connections_reservations", {}) or {}
             in_use_fn = getattr(pool, "in_use_connection_count", None)
+            pool_lock = getattr(pool, "lock", None)
+
+            # Short critical section — read-only snapshot of the two maps
+            # and per-address in_use counts. No await inside the lock.
+            if pool_lock is not None:
+                with pool_lock:
+                    conns_snapshot: list[tuple[Any, list[Any]]] = [
+                        (addr, list(deq)) for addr, deq in getattr(pool, "connections", {}).items()
+                    ]
+                    reservations_snapshot = {
+                        addr: int(v) for addr, v in getattr(pool, "connections_reservations", {}).items()
+                    }
+                    in_use_counts: dict[Any, int] | None = None
+                    if in_use_fn is not None:
+                        in_use_counts = {}
+                        for addr, _deq in conns_snapshot:
+                            try:
+                                in_use_counts[addr] = int(in_use_fn(addr))
+                            except Exception:
+                                in_use_counts[addr] = -1  # sentinel → fall back below
+            else:
+                # Best-effort read without a lock (driver shape changed).
+                conns_snapshot = [(addr, list(deq)) for addr, deq in (getattr(pool, "connections", {}) or {}).items()]
+                reservations_snapshot = {
+                    addr: int(v) for addr, v in (getattr(pool, "connections_reservations", {}) or {}).items()
+                }
+                in_use_counts = None
+                if in_use_fn is not None:
+                    in_use_counts = {}
+                    for addr, _deq in conns_snapshot:
+                        try:
+                            in_use_counts[addr] = int(in_use_fn(addr))
+                        except Exception:
+                            in_use_counts[addr] = -1
 
             active = 0
             total = 0
-            for address, deq in conns.items():
+            for address, deq in conns_snapshot:
                 total += len(deq)
-                if in_use_fn is not None:
-                    try:
-                        active += int(in_use_fn(address))
-                    except Exception:
-                        # Fall back to the in_use attribute per-connection.
-                        active += sum(1 for c in deq if getattr(c, "in_use", False))
+                if in_use_counts is not None and in_use_counts.get(address, -1) >= 0:
+                    active += in_use_counts[address]
                 else:
                     active += sum(1 for c in deq if getattr(c, "in_use", False))
             # Clamp: driver state can be transiently inconsistent during churn.
             idle = max(0, total - active)
-            creating = sum(int(v) for v in reservations.values())
+            creating = sum(reservations_snapshot.values())
 
             pool_config = getattr(pool, "pool_config", None)
             max_size = getattr(pool_config, "max_connection_pool_size", 0) or self._max_connection_pool_size

@@ -582,6 +582,41 @@ class TestPoolSampler:
         await backend._stop_pool_sampler()  # must not raise
         assert backend._sampler_task is None
 
+    def test_sampler_acquires_pool_lock(self) -> None:
+        """Each sample must take pool.lock so the snapshot is consistent with
+        driver mutations (pool.acquire / pool.release mutate inside the lock)."""
+        driver = MagicMock()
+        pool = MagicMock()
+
+        # Track lock enter/exit counts.
+        lock_enters = 0
+        lock_exits = 0
+
+        class TrackingLock:
+            def __enter__(self_lock) -> Any:  # noqa: N805
+                nonlocal lock_enters
+                lock_enters += 1
+                return self_lock
+
+            def __exit__(self_lock, *exc: Any) -> bool:  # noqa: N805
+                nonlocal lock_exits
+                lock_exits += 1
+                return False
+
+        pool.lock = TrackingLock()
+        pool.connections = {"addr1": deque([MagicMock()])}
+        pool.connections_reservations = {}
+        pool.in_use_connection_count = MagicMock(return_value=0)
+        pool.pool_config = MagicMock()
+        pool.pool_config.max_connection_pool_size = 10
+        driver._pool = pool
+
+        backend = Neo4jBackend.from_driver(driver)
+        sample = backend._sample_pool_once()
+        assert sample is not None
+        assert lock_enters == 1, f"expected 1 lock enter, got {lock_enters}"
+        assert lock_exits == 1, f"expected 1 lock exit, got {lock_exits}"
+
 
 # ---------------------------------------------------------------------------
 # Config: pool_sampler_enabled / pool_sampler_interval_ms plumbing
