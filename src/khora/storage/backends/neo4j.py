@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import re as _re
 import time as _time
+import weakref as _weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import copy
@@ -97,6 +98,22 @@ class _EntityKeyGate:
                 self._in_flight -= keys
                 self._active -= 1
                 self._condition.notify_all()
+
+
+def _cancel_sampler_task_on_gc(task: asyncio.Task[None]) -> None:
+    """Cancel a sampler task from a ``weakref.finalize`` callback.
+
+    Never raises: finalizers run at interpreter shutdown too, where logging
+    may no longer be available. If the loop is closed or the task is done,
+    silently no-op. Defense in depth — the primary cleanup path is
+    ``disconnect()``.
+    """
+    if task.done():
+        return
+    try:
+        task.cancel()
+    except Exception:  # pragma: no cover  # noqa: S110 — finalizer must never raise
+        pass
 
 
 class _InstrumentedSession:
@@ -391,6 +408,7 @@ class Neo4jBackend(GraphBackendBase):
         self._pool_sampler_interval_ms = max(50, min(60_000, pool_sampler_interval_ms))
         self._sampler_task: asyncio.Task[None] | None = None
         self._sampler_warned = False
+        self._sampler_finalizer: _weakref.finalize | None = None
         self._init_metrics()
 
     def _init_metrics(self) -> None:
@@ -482,6 +500,15 @@ class Neo4jBackend(GraphBackendBase):
         The backend will NOT close the driver on disconnect, since
         it does not own it.
 
+        **Sampler note**: the high-frequency pool sampler is *not* started
+        by this constructor, even if the caller mutates
+        ``instance._pool_sampler_enabled`` afterwards. ``from_driver()`` is
+        typically used by shared-driver integrations (tests, fixtures,
+        connection-multiplexing setups) where the owner of the driver is
+        responsible for metric lifecycle. If you need the sampler on a
+        shared-driver backend, use the standard ``Neo4jBackend(...)``
+        constructor with a dedicated driver instead.
+
         Args:
             driver: An existing Neo4j async driver
             database: Database name
@@ -512,6 +539,7 @@ class Neo4jBackend(GraphBackendBase):
         instance._pool_sampler_interval_ms = 500
         instance._sampler_task = None
         instance._sampler_warned = False
+        instance._sampler_finalizer = None
         instance._init_metrics()
         return instance
 
@@ -948,12 +976,24 @@ class Neo4jBackend(GraphBackendBase):
             return
 
     def _start_pool_sampler(self) -> None:
-        """Start the background sampler task if enabled and not already running."""
+        """Start the background sampler task if enabled and not already running.
+
+        Idempotent — calling ``connect()`` twice (or ``_start_pool_sampler``
+        directly) will not spawn a second task.
+        """
         if not self._pool_sampler_enabled:
             return
         if self._sampler_task is not None and not self._sampler_task.done():
             return
-        self._sampler_task = asyncio.create_task(self._run_sampler())
+        task = asyncio.create_task(self._run_sampler())
+        self._sampler_task = task
+        # Register a GC-triggered finalizer that cancels the task if the
+        # backend is dropped without an awaited ``disconnect()`` (crash path,
+        # test teardown). ``_cancel_sampler_task_on_gc`` swallows
+        # loop-closed / no-loop errors — it is defense in depth only.
+        if self._sampler_finalizer is not None:
+            self._sampler_finalizer.detach()
+        self._sampler_finalizer = _weakref.finalize(self, _cancel_sampler_task_on_gc, task)
 
     async def _stop_pool_sampler(self) -> None:
         """Cancel and await the sampler task, if any."""
@@ -961,6 +1001,9 @@ class Neo4jBackend(GraphBackendBase):
         if task is None:
             return
         self._sampler_task = None
+        if self._sampler_finalizer is not None:
+            self._sampler_finalizer.detach()
+            self._sampler_finalizer = None
         task.cancel()
         try:
             await task

@@ -617,6 +617,34 @@ class TestPoolSampler:
         assert lock_enters == 1, f"expected 1 lock enter, got {lock_enters}"
         assert lock_exits == 1, f"expected 1 lock exit, got {lock_exits}"
 
+    @pytest.mark.asyncio
+    async def test_sampler_task_does_not_leak_on_double_start(self) -> None:
+        """Calling _start_pool_sampler twice must not spawn a second task."""
+        driver = MagicMock()
+        pool = MagicMock()
+        pool.connections = {}
+        pool.connections_reservations = {}
+        pool.lock = MagicMock()
+        pool.lock.__enter__ = MagicMock(return_value=pool.lock)
+        pool.lock.__exit__ = MagicMock(return_value=False)
+        pool.pool_config = MagicMock()
+        pool.pool_config.max_connection_pool_size = 10
+        driver._pool = pool
+
+        backend = Neo4jBackend.from_driver(driver)
+        backend._pool_sampler_enabled = True
+        backend._pool_sampler_interval_ms = 50
+
+        backend._start_pool_sampler()
+        first_task = backend._sampler_task
+        assert first_task is not None
+
+        backend._start_pool_sampler()  # second call — must be a no-op
+        assert backend._sampler_task is first_task, "second _start_pool_sampler must reuse the first task"
+
+        await backend._stop_pool_sampler()
+        assert backend._sampler_task is None
+
 
 # ---------------------------------------------------------------------------
 # Config: pool_sampler_enabled / pool_sampler_interval_ms plumbing
