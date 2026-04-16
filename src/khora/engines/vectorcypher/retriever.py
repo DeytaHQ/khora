@@ -485,7 +485,7 @@ class VectorCypherRetriever:
             and self._dual_nodes is not None
             and temporal_signal
             and temporal_signal.is_temporal
-            and len(entry_entities) >= 2
+            and len(entry_entities) >= 1
         ):
             with trace_span(
                 "khora.vectorcypher.session_discovery",
