@@ -115,7 +115,8 @@ class Neo4jConfig(BaseModel):
             "Opt-in high-frequency Neo4j pool sampler. When True, Khora starts a "
             "background task that samples driver pool state at "
             "``pool_sampler_interval_ms`` cadence and emits the observations on the "
-            "``khora.neo4j.pool.sampled.*`` histograms. Zero-cost when False."
+            "``khora.neo4j.pool.sampled.*`` histograms. Zero-cost when False. "
+            "Set via env: KHORA_STORAGE__GRAPH__POOL_SAMPLER_ENABLED=true."
         ),
     )
     pool_sampler_interval_ms: int = Field(
@@ -124,7 +125,8 @@ class Neo4jConfig(BaseModel):
         le=60_000,
         description=(
             "Interval in milliseconds between Neo4j pool samples when "
-            "``pool_sampler_enabled`` is True. Clamped to [50, 60000]."
+            "``pool_sampler_enabled`` is True. Clamped to [50, 60000]. "
+            "Set via env: KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS=250."
         ),
     )
 
