@@ -151,9 +151,8 @@ class _InstrumentedSession:
         """Patch ``_connect`` on the wrapped session instance only.
 
         Each real pool acquire becomes one ``acquire_duration`` observation.
-        Timeouts increment the counter and are also recorded on the
-        histogram with ``status=timeout`` (pending filter cleanup in a
-        follow-up commit).
+        Timeouts increment the counter and are *not* recorded on the
+        histogram (to keep the latency distribution honest).
         """
         inner = self._inner
         original_connect = getattr(inner, "_connect", None)
@@ -171,10 +170,8 @@ class _InstrumentedSession:
             try:
                 result = await original_connect(*args, **kwargs)
             except ConnectionAcquisitionTimeoutError:
-                elapsed = _time.monotonic() - t0
                 timeout_counter.add(1)
                 proxy.counted_timeout = True
-                acquire_histogram.record(elapsed, attributes={"status": "timeout"})
                 raise
             elapsed = _time.monotonic() - t0
             acquire_histogram.record(elapsed, attributes={"status": "ok"})
@@ -294,11 +291,15 @@ class Neo4jBackend(GraphBackendBase):
     Emitted metrics (all are no-ops unless ``logfire`` is installed):
 
     * ``khora.neo4j.pool.acquire_duration`` (histogram, seconds) —
-      time from session entry until a real pool connection is bound,
-      recorded on the first ``run``/``execute_read``/``execute_write``
-      call. Measured on both success and timeout paths (attribute
-      ``status=ok`` or ``status=timeout``). **Use for**: alerting on
-      p99 acquire latency regressions, sizing pool cap.
+      duration of each real pool acquire, recorded on every invocation
+      of the session's internal ``_connect`` (once per ``run``, once
+      per transaction open, and once per retry inside a managed
+      transaction). Successful acquires are tagged ``status=ok``;
+      timeouts are *not* recorded here — they increment the
+      ``khora.neo4j.pool.timeout`` counter only. This keeps the p99
+      tail free of ``connection_acquisition_timeout`` deadline
+      clusters. **Use for**: alerting on p99 acquire latency
+      regressions, sizing pool cap.
     * ``khora.neo4j.pool.acquisition_time`` (histogram, seconds) —
       *legacy* metric kept for backward compatibility. Recorded at
       session construction (not after real acquire), so it captures
@@ -308,10 +309,9 @@ class Neo4jBackend(GraphBackendBase):
       wall-clock time a session object was held. **Use for**:
       investigation of slow queries holding connections.
     * ``khora.neo4j.pool.timeout`` (counter) — every
-      ``ConnectionAcquisitionTimeoutError`` from any of the three
-      session entry points (``run``/``execute_read``/``execute_write``)
-      plus the lazy ``__aenter__`` path. **Use for**: paging on pool
-      saturation.
+      ``ConnectionAcquisitionTimeoutError``. Incremented exactly once
+      per timeout event regardless of which entry method or retry
+      surfaced it. **Use for**: paging on pool saturation.
     * ``khora.neo4j.pool.connections.{active,idle,total,creating}``
       (OTel observable gauges) — sampled at the exporter's native
       cadence (~60 s). **Use for**: long-term capacity planning.
@@ -712,7 +712,8 @@ class Neo4jBackend(GraphBackendBase):
         ``_open_transaction``, or each retry inside ``_run_transaction``).
         :class:`_InstrumentedSession` wraps ``_connect`` on the instance so
         each real acquire is one ``khora.neo4j.pool.acquire_duration``
-        observation.
+        observation. Timeouts bump ``khora.neo4j.pool.timeout`` but are
+        excluded from the histogram to keep the latency tail honest.
 
         The legacy ``khora.neo4j.pool.acquisition_time`` metric is still
         recorded here for backward compatibility, but it only captures the
@@ -740,11 +741,15 @@ class Neo4jBackend(GraphBackendBase):
                     if instrumented.slow_acquire_threshold_exceeded:
                         logger.warning(f"Neo4j pool acquisition took {instrumented.last_acquire:.1f}s")
         except ConnectionAcquisitionTimeoutError:
-            # Only record here if the proxy didn't already (i.e. the timeout
-            # surfaced from __aenter__ before any ``_connect`` call).
+            # Only bump the counter here when the timeout came from a
+            # non-_connect path (e.g. a mocked driver raising from
+            # __aenter__). The _connect wrap already counted any real
+            # pool-acquire timeout. We never record the timeout on the
+            # acquire_duration histogram — counter is enough, and keeping
+            # the histogram tail free of 10–60s deadline clusters keeps p99
+            # honest without dashboard-side filtering.
             if instrumented is None or not instrumented.counted_timeout:
                 self._timeout_counter.add(1)
-                self._acquire_duration_histogram.record(_time.monotonic() - t0, attributes={"status": "timeout"})
             raise
 
     def _register_pool_metrics(self) -> None:

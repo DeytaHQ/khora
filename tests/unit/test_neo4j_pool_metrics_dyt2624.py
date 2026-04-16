@@ -401,6 +401,55 @@ class TestTimeoutCounterUniversality:
 
 
 # ---------------------------------------------------------------------------
+# Timeout histogram exclusion — pool-acquire p99 must not be polluted by
+# the connection-acquisition-timeout deadline.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestTimeoutHistogramExclusion:
+    """Timeouts count on the ``pool.timeout`` counter but never on the acquire histogram."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_does_not_record_acquire_duration_histogram(self) -> None:
+        """Raising ConnectionAcquisitionTimeoutError from _connect bumps the counter
+        exactly once; the acquire_duration histogram records zero observations."""
+        err = ConnectionAcquisitionTimeoutError("pool exhausted")
+        session = AsyncMock()
+        session._connection = None
+
+        async def failing_connect(*_a: Any, **_k: Any) -> None:
+            await asyncio.sleep(0.04)
+            raise err
+
+        session._connect = failing_connect
+
+        async def run_through_connect(*_a: Any, **_k: Any) -> Any:
+            await session._connect()
+            return MagicMock()
+
+        session.run = AsyncMock(side_effect=run_through_connect)
+        driver = _make_driver_with_session(session)
+        backend = Neo4jBackend.from_driver(driver)
+
+        counter_adds: list[int] = []
+        hist_records: list[tuple[float, dict[str, Any] | None]] = []
+        backend._timeout_counter = MagicMock()
+        backend._timeout_counter.add = lambda v, **_: counter_adds.append(v)
+        backend._acquire_duration_histogram = MagicMock()
+        backend._acquire_duration_histogram.record = lambda v, attributes=None, **_: hist_records.append(
+            (v, attributes)
+        )
+
+        with pytest.raises(ConnectionAcquisitionTimeoutError):
+            async with backend._session() as s:
+                await s.run("RETURN 1")
+
+        assert sum(counter_adds) == 1, "timeout counter should increment exactly once"
+        assert hist_records == [], f"acquire_duration histogram must not record on timeout; got {hist_records}"
+
+
+# ---------------------------------------------------------------------------
 # Problem 3: high-frequency pool sampler
 # ---------------------------------------------------------------------------
 
