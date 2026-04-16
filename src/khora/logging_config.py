@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -13,6 +14,39 @@ from loguru import logger
 # against re-registering logger.complete when setup_logging() is called more
 # than once (e.g. tests reconfiguring logging between cases).
 _drain_registered = False
+
+# Environment variable that, when set to a valid level name, raises the
+# verbosity of the ``neo4j`` stdlib logger at runtime. Added for DYT-2625 so
+# that operators can enable driver-internal DEBUG lines (pool acquire, TLS,
+# routing) without a code change. See README for accepted values.
+_NEO4J_LOG_LEVEL_ENV = "KHORA_NEO4J_LOG_LEVEL"
+_NEO4J_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+
+def apply_neo4j_log_level_from_env() -> None:
+    """Set the ``neo4j`` stdlib logger level from ``KHORA_NEO4J_LOG_LEVEL``.
+
+    No-op when the env var is unset, empty, or holds an unrecognised value
+    (an unrecognised value emits a single loguru WARNING then returns). Safe
+    to call repeatedly — ``Logger.setLevel`` is idempotent.
+
+    Driver log records are routed through khora's ``InterceptHandler`` into
+    loguru when ``setup_logging()`` has been called; downstream services that
+    keep stdlib logging handlers pick them up via their own sinks.
+    """
+    raw = os.environ.get(_NEO4J_LOG_LEVEL_ENV)
+    if not raw:
+        return
+    level = raw.strip().upper()
+    if level not in _NEO4J_LOG_LEVELS:
+        logger.warning(
+            "{} value {!r} is not one of {}; leaving the neo4j logger level unchanged",
+            _NEO4J_LOG_LEVEL_ENV,
+            raw,
+            sorted(_NEO4J_LOG_LEVELS),
+        )
+        return
+    logging.getLogger("neo4j").setLevel(level)
 
 
 class InterceptHandler(logging.Handler):
@@ -105,3 +139,7 @@ def setup_logging(
     # Suppress noisy third-party loggers
     for logger_name in ["httpx", "httpcore", "LiteLLM", "litellm"]:
         logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+    # Apply operator-requested neo4j driver verbosity after the intercept
+    # handler is wired up so the new level actually reaches loguru sinks.
+    apply_neo4j_log_level_from_env()

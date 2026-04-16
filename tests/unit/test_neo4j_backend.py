@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -53,6 +54,40 @@ class TestNeo4jBackendInit:
         backend = Neo4jBackend("bolt://localhost:7687")
         assert backend._query_timeout == 5.0
         assert backend._timed_unit_of_work is not None
+
+
+@pytest.mark.unit
+class TestNeo4jBackendLogLevelFromEnv:
+    """DYT-2625: Neo4jBackend.__init__ applies KHORA_NEO4J_LOG_LEVEL from env."""
+
+    @pytest.fixture
+    def _reset_neo4j_logger_level(self):
+        neo4j_logger = logging.getLogger("neo4j")
+        original = neo4j_logger.level
+        yield neo4j_logger
+        neo4j_logger.setLevel(original)
+
+    def test_init_applies_env_var(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _reset_neo4j_logger_level: logging.Logger,
+    ) -> None:
+        """Constructor raises the neo4j logger verbosity when env var is set."""
+        monkeypatch.setenv("KHORA_NEO4J_LOG_LEVEL", "DEBUG")
+        _reset_neo4j_logger_level.setLevel(logging.NOTSET)
+        Neo4jBackend("bolt://localhost:7687")
+        assert _reset_neo4j_logger_level.level == logging.DEBUG
+
+    def test_init_noop_when_env_unset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        _reset_neo4j_logger_level: logging.Logger,
+    ) -> None:
+        """Constructor does not touch the neo4j logger when env var is absent."""
+        monkeypatch.delenv("KHORA_NEO4J_LOG_LEVEL", raising=False)
+        _reset_neo4j_logger_level.setLevel(logging.NOTSET)
+        Neo4jBackend("bolt://localhost:7687")
+        assert _reset_neo4j_logger_level.level == logging.NOTSET
 
 
 @pytest.mark.unit

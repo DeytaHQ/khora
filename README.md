@@ -167,6 +167,7 @@ All settings use the `KHORA_` prefix (e.g., `KHORA_LLM_MODEL=gpt-4o`).
 | `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN` | Temporal SQL WHERE pushdown | `true` |
 | `KHORA_EXTRACTION_BATCH_SIZE` | Chunks per extraction LLM call | `5` |
 | `KHORA_DEBUG` | Debug logging | `false` |
+| `KHORA_NEO4J_LOG_LEVEL` | Neo4j driver log level (`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`, case-insensitive). No-op when unset | — |
 
 See [full configuration reference](docs/architecture/storage-backends.md) for all options.
 
