@@ -177,4 +177,5 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - `genesis` and `khora-benchmarks` depend on khora. `lake.storage` is a stable public API
 - **LLMUsage contract:** `LLMUsage` fields are consumed by Poros/Peras for cost tracking (DYT-645) — changes require coordination
 - **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination (consumed by khora-explorer, genesis, khora-benchmarks). See `docs/adrs/adr-022-extraction-skills-public-api.md`. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract
+- Stable public API is codified in ADR-024 (memory-lake surface) and ADR-022 (extraction skills). Any breaking change to symbols listed there requires coordinated release with genesis, khora-benchmarks, khora-explorer, khora-cli. See `docs/adrs/adr-024-memory-lake-public-api.md`; `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface
 - `scripts/` vendored from TTOJ — skip in audits

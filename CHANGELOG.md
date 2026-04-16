@@ -6,6 +6,9 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased] — Graph Backends, Temporal Precision, Discovery Agent Overhaul
 
+### Added
+- ADR-024 codifying the khora public API surface consumed by downstream packages (genesis, khora-benchmarks, khora-explorer, khora-cli). See `docs/adrs/adr-024-memory-lake-public-api.md`.
+
 ### Removed
 - `khora ontology` CLI subcommands (moved to khora-explorer)
 - `khora.discovery` package (moved to khora-explorer)
