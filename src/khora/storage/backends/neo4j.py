@@ -127,6 +127,15 @@ class _InstrumentedSession:
     "session entry to first run", which would conflate query time + retry
     sleeps with acquire latency.
 
+    **Why wrap ``_connect`` (not ``run`` / ``execute_read`` / ``execute_write``):**
+    ``execute_read`` / ``execute_write`` retry internally via
+    ``_run_transaction``, and each retry that hits a fresh connection
+    calls ``_connect`` again. Wrapping at the entry-method level would
+    fold those retries into the first acquire observation, inflating
+    ``acquire_duration`` by up to (retries × retry_sleep + query time).
+    Hooking ``_connect`` itself produces one observation per real pool
+    bind, which is the correct semantic.
+
     The wrap lives on the instance's ``_connect`` attribute, not on the
     class, so the original method is unaffected. The session is about to
     be awaited and closed inside our ``async with``, so there is no
