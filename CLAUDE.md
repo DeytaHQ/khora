@@ -10,11 +10,13 @@ make format            # black, isort, ruff
 make lint              # ruff + ty typecheck
 make dev               # Start postgres + neo4j
 uv run alembic upgrade head                       # Run migrations
-uv run khora ontology construct --source <path>   # AI ontology generation
-uv run khora ontology validate <file.yaml>        # Validate ontology YAML
-uv run khora ontology preview <file.yaml>         # Rich preview
 uv run khora extract <file-or-dir>                # Ingest into knowledge graph
 uv run khora search "query" -n <namespace>        # Search knowledge graph
+
+# Ontology tooling moved to khora-explorer (pip install khora-explorer):
+# uv run khora-explorer construct --source <path>
+# uv run khora-explorer validate <file.yaml>
+# uv run khora-explorer preview <file.yaml>
 ```
 
 ## Test Commands
@@ -32,7 +34,7 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 - **Engines:** implement `MemoryEngineProtocol` in `engines/protocol.py`. Default engine is `vectorcypher`
 - **Graph backends:** Neo4j, SurrealDB, Memgraph, Kuzu, Neptune, AGE — implement `GraphBackend` in `storage/backends/base.py`
 - **SurrealDB:** unified backend (graph + vector + relational). Modes: `memory://`, `surrealkv://` (embedded), `ws://` (remote). Set `backend: surrealdb` in config
-- **Extraction skills:** YAML-defined in `extraction/skills/builtin/`. Generate with `khora ontology construct`
+- **Extraction skills:** YAML-defined in `extraction/skills/builtin/`. Generate with `khora-explorer construct`
 - **Config:** env vars with `KHORA_` prefix and single underscore (e.g., `KHORA_QUERY_ENABLE_HYDE=true`, `KHORA_LLM_MODEL=gpt-4o`). Legacy `__` nesting also supported
 
 ### Key Entry Points
@@ -44,7 +46,7 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 - `storage/backends/surrealdb/` — Unified SurrealDB backend
 - `db/models.py` — SQLAlchemy ORM (UUID columns use `as_uuid=True`)
 - `_accel.py` — Rust/NumPy acceleration (MMR, cosine, pagerank, entity resolution, community detection, temporal)
-- `cli/ontology/` — Ontology construction: `commands.py`, `flow.py`, `inference/`, `sources/`, `sampling/`
+- `cli/ontology/` — Ontology construction: `commands.py`, `flow.py`, `inference/`, `sources/`, `sampling/` (**deprecated, moved to `khora-explorer`; removal scheduled for v0.8.0**)
 - `pipelines/flows/ingest.py` — Document ingestion pipeline (3-phase: stage → enrich → expand)
 - `db/migrations/env.py` — Alembic with advisory locking
 - `config/schema.py` — `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
