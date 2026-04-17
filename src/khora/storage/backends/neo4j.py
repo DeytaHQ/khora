@@ -2502,11 +2502,16 @@ class Neo4jBackend(GraphBackendBase):
 
     @trace("khora.neo4j.count_relationships", include={"namespace_id"})
     async def count_relationships(self, namespace_id: UUID) -> int:
-        """Count relationships in a namespace using sampling estimation."""
+        """Count relationships in a namespace using sampling estimation.
+
+        Samples up to 500 random entities, counts outbound relationships,
+        and extrapolates to the full namespace.  Exact when <500 entities.
+        Returns an approximate (non-deterministic) value for larger namespaces.
+        """
         query = """
         MATCH (e:Entity {namespace_id: $namespace_id})
         WITH e, rand() AS r ORDER BY r LIMIT 500
-        MATCH (e)-[out]->()
+        OPTIONAL MATCH (e)-[out]->()
         WITH count(out) AS sampled_out, count(DISTINCT e) AS sampled_n
         MATCH (all:Entity {namespace_id: $namespace_id})
         RETURN CASE WHEN sampled_n = 0 THEN 0
@@ -2516,7 +2521,7 @@ class Neo4jBackend(GraphBackendBase):
         async def _work(tx):
             result = await tx.run(query, namespace_id=str(namespace_id))
             record = await result.single()
-            return record["estimate"] if record else 0
+            return record["estimate"] or 0 if record else 0
 
         if self._timed_unit_of_work is not None:
             _work = self._timed_unit_of_work(_work)
