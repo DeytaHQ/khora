@@ -26,6 +26,10 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # SQLite: entity_type/relationship_type were already created as VARCHAR(64)
+    # in migration 000 (no enum types), so this migration is a no-op.
+    if op.get_bind().dialect.name != "postgresql":
+        return
     # Drop column defaults that reference the enum types before converting,
     # otherwise PostgreSQL refuses to DROP TYPE due to dependent defaults.
     op.execute("ALTER TABLE entities ALTER COLUMN entity_type DROP DEFAULT")
@@ -51,6 +55,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     # Recreate the enum types
     op.execute("""
         CREATE TYPE entity_type AS ENUM (

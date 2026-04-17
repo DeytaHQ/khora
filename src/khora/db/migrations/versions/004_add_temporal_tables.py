@@ -30,14 +30,22 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _is_postgres() -> bool:
+    return op.get_bind().dialect.name == "postgresql"
+
+
 def upgrade() -> None:
-    # Create time_nodes table
-    op.create_table(
-        "time_nodes",
-        sa.Column("id", UUID(as_uuid=False), primary_key=True),
+    is_postgres = _is_postgres()
+    uuid_t = UUID(as_uuid=False) if is_postgres else sa.String(36)
+    jsonb_t = JSONB if is_postgres else sa.JSON
+    uuid_arr_t = ARRAY(UUID(as_uuid=False)) if is_postgres else sa.JSON
+
+    # Create time_nodes table — summary_embedding is Postgres-only (pgvector).
+    time_node_columns = [
+        sa.Column("id", uuid_t, primary_key=True),
         sa.Column(
             "namespace_id",
-            UUID(as_uuid=False),
+            uuid_t,
             sa.ForeignKey("memory_namespaces.id", ondelete="CASCADE"),
             nullable=False,
             index=True,
@@ -47,23 +55,25 @@ def upgrade() -> None:
         sa.Column("end_time", sa.DateTime(timezone=True), nullable=False),
         sa.Column(
             "parent_id",
-            UUID(as_uuid=False),
+            uuid_t,
             sa.ForeignKey("time_nodes.id", ondelete="CASCADE"),
             nullable=True,
             index=True,
         ),
         sa.Column("name", sa.String(64), nullable=False),
         sa.Column("summary_text", sa.Text, nullable=True),
-        sa.Column("summary_embedding", Vector(1536), nullable=True),
         sa.Column("edge_count", sa.Integer, default=0),
         sa.Column("entity_count", sa.Integer, default=0),
-        sa.Column("metadata", JSONB, default=dict),
+        sa.Column("metadata", jsonb_t, default=dict),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), onupdate=sa.func.now()),
         sa.UniqueConstraint(
             "namespace_id", "granularity", "start_time", name="uq_time_node_namespace_granularity_start"
         ),
-    )
+    ]
+    if is_postgres:
+        time_node_columns.insert(8, sa.Column("summary_embedding", Vector(1536), nullable=True))
+    op.create_table("time_nodes", *time_node_columns)
 
     # Create index for range queries on time_nodes
     op.create_index(
@@ -75,24 +85,24 @@ def upgrade() -> None:
     # Create temporal_edges table
     op.create_table(
         "temporal_edges",
-        sa.Column("id", UUID(as_uuid=False), primary_key=True),
+        sa.Column("id", uuid_t, primary_key=True),
         sa.Column(
             "namespace_id",
-            UUID(as_uuid=False),
+            uuid_t,
             sa.ForeignKey("memory_namespaces.id", ondelete="CASCADE"),
             nullable=False,
             index=True,
         ),
         sa.Column(
             "source_entity_id",
-            UUID(as_uuid=False),
+            uuid_t,
             sa.ForeignKey("entities.id", ondelete="CASCADE"),
             nullable=False,
             index=True,
         ),
         sa.Column(
             "target_entity_id",
-            UUID(as_uuid=False),
+            uuid_t,
             sa.ForeignKey("entities.id", ondelete="CASCADE"),
             nullable=False,
             index=True,
@@ -106,24 +116,27 @@ def upgrade() -> None:
         sa.Column("is_valid", sa.Boolean, default=True, index=True),
         sa.Column(
             "invalidated_by_id",
-            UUID(as_uuid=False),
+            uuid_t,
             sa.ForeignKey("temporal_edges.id", ondelete="SET NULL"),
             nullable=True,
         ),
         sa.Column("invalidation_reason", sa.Text, nullable=True),
         sa.Column("confidence", sa.Float, default=1.0),
-        sa.Column("properties", JSONB, default=dict),
-        sa.Column("source_document_ids", ARRAY(UUID(as_uuid=False)), default=[]),
-        sa.Column("source_chunk_ids", ARRAY(UUID(as_uuid=False)), default=[]),
-        sa.Column("metadata", JSONB, default=dict),
+        sa.Column("properties", jsonb_t, default=dict),
+        sa.Column("source_document_ids", uuid_arr_t, default=list),
+        sa.Column("source_chunk_ids", uuid_arr_t, default=list),
+        sa.Column("metadata", jsonb_t, default=dict),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
 
-    # Create BRIN index for time-series optimization on temporal_edges
-    op.execute("""
-        CREATE INDEX ix_temporal_edges_occurred_brin
-        ON temporal_edges USING BRIN (occurred_at)
-        """)
+    # BRIN index is Postgres-only. SQLite gets a regular btree on the same column.
+    if is_postgres:
+        op.execute("""
+            CREATE INDEX ix_temporal_edges_occurred_brin
+            ON temporal_edges USING BRIN (occurred_at)
+            """)
+    else:
+        op.create_index("ix_temporal_edges_occurred_brin", "temporal_edges", ["occurred_at"])
 
     # Create composite index for entity pair + time queries
     op.create_index(
@@ -144,13 +157,13 @@ def upgrade() -> None:
         "time_edge_links",
         sa.Column(
             "time_node_id",
-            UUID(as_uuid=False),
+            uuid_t,
             sa.ForeignKey("time_nodes.id", ondelete="CASCADE"),
             primary_key=True,
         ),
         sa.Column(
             "edge_id",
-            UUID(as_uuid=False),
+            uuid_t,
             sa.ForeignKey("temporal_edges.id", ondelete="CASCADE"),
             primary_key=True,
         ),

@@ -24,12 +24,20 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     """Add external_id column and partial composite index."""
     op.add_column("documents", sa.Column("external_id", sa.String(512), nullable=True))
-    op.create_index(
-        "ix_documents_namespace_external_id",
-        "documents",
-        ["namespace_id", "external_id"],
-        postgresql_where=text("external_id IS NOT NULL"),
-    )
+    if op.get_bind().dialect.name == "postgresql":
+        op.create_index(
+            "ix_documents_namespace_external_id",
+            "documents",
+            ["namespace_id", "external_id"],
+            postgresql_where=text("external_id IS NOT NULL"),
+        )
+    else:
+        op.create_index(
+            "ix_documents_namespace_external_id",
+            "documents",
+            ["namespace_id", "external_id"],
+            sqlite_where=text("external_id IS NOT NULL"),
+        )
 
 
 def downgrade() -> None:

@@ -66,6 +66,10 @@ def _drop_invalid_index(index_name: str) -> None:
 
 
 def upgrade() -> None:
+    # Postgres-only: halfvec/HNSW are pgvector features. On SQLite, LanceDB
+    # owns embedding storage and indexing.
+    if op.get_bind().dialect.name != "postgresql":
+        return
     for idx in _INDEXES:
         name = idx["name"]
         table = idx["table"]
@@ -88,6 +92,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     for idx in _INDEXES:
         name = idx["name"]
         with op.get_context().autocommit_block():

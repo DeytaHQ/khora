@@ -26,6 +26,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Postgres-only: SQLite doesn't use ENUM types; status is stored as VARCHAR.
+    if op.get_bind().dialect.name != "postgresql":
+        return
     # ADD VALUE IF NOT EXISTS is idempotent — safe if values already present.
     # Must run outside a transaction block.
     op.execute("COMMIT")

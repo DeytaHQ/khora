@@ -36,6 +36,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Postgres-only: pgvector HNSW index tuning. No SQLite equivalent.
+    if op.get_bind().dialect.name != "postgresql":
+        return
     # Each index rebuild uses CREATE CONCURRENTLY (new name) then DROP CONCURRENTLY (old name).
     # CONCURRENTLY cannot run inside a transaction, so we use autocommit blocks.
 
@@ -92,6 +95,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     # --- chunks HNSW index ---
     with op.get_context().autocommit_block():
         op.execute(

@@ -22,49 +22,58 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # Find the actual FK constraint name — it varies depending on migration path:
-    #   - "memory_namespaces_previous_version_id_fkey" (auto-generated in 000)
-    #   - "fk_namespace_previous_version" (explicit name in 001)
     conn = op.get_bind()
-    result = conn.execute(
-        text(
-            "SELECT constraint_name FROM information_schema.table_constraints "
-            "WHERE table_name = 'memory_namespaces' "
-            "AND constraint_type = 'FOREIGN KEY' "
-            "AND constraint_name IN ("
-            "  'memory_namespaces_previous_version_id_fkey',"
-            "  'fk_namespace_previous_version'"
-            ")"
-        )
-    )
-    for row in result:
-        op.drop_constraint(row[0], "memory_namespaces", type_="foreignkey")
+    is_postgres = conn.dialect.name == "postgresql"
 
-    op.drop_column("memory_namespaces", "previous_version_id")
+    if is_postgres:
+        # Find the actual FK constraint name — it varies depending on migration path:
+        #   - "memory_namespaces_previous_version_id_fkey" (auto-generated in 000)
+        #   - "fk_namespace_previous_version" (explicit name in 001)
+        result = conn.execute(
+            text(
+                "SELECT constraint_name FROM information_schema.table_constraints "
+                "WHERE table_name = 'memory_namespaces' "
+                "AND constraint_type = 'FOREIGN KEY' "
+                "AND constraint_name IN ("
+                "  'memory_namespaces_previous_version_id_fkey',"
+                "  'fk_namespace_previous_version'"
+                ")"
+            )
+        )
+        for row in result:
+            op.drop_constraint(row[0], "memory_namespaces", type_="foreignkey")
+        op.drop_column("memory_namespaces", "previous_version_id")
+    else:
+        # SQLite: batch mode drops the column and its FK in one table rewrite.
+        with op.batch_alter_table("memory_namespaces") as batch:
+            batch.drop_column("previous_version_id")
 
 
 def downgrade() -> None:
+    is_postgres = op.get_bind().dialect.name == "postgresql"
+
     # Re-add nullable UUID column
     op.add_column(
         "memory_namespaces",
-        sa.Column("previous_version_id", UUID(as_uuid=True), nullable=True),
+        sa.Column("previous_version_id", UUID(as_uuid=True) if is_postgres else sa.String(36), nullable=True),
     )
 
-    # Recreate FK constraint
-    op.create_foreign_key(
-        "fk_namespace_previous_version",
-        "memory_namespaces",
-        "memory_namespaces",
-        ["previous_version_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
-
-    # Backfill using namespace_id + version
-    op.execute(
-        text(
-            "UPDATE memory_namespaces mn SET previous_version_id = prev.id "
-            "FROM memory_namespaces prev "
-            "WHERE prev.namespace_id = mn.namespace_id AND prev.version = mn.version - 1"
+    if is_postgres:
+        # Recreate FK constraint
+        op.create_foreign_key(
+            "fk_namespace_previous_version",
+            "memory_namespaces",
+            "memory_namespaces",
+            ["previous_version_id"],
+            ["id"],
+            ondelete="SET NULL",
         )
-    )
+
+        # Backfill using namespace_id + version (Postgres UPDATE ... FROM syntax)
+        op.execute(
+            text(
+                "UPDATE memory_namespaces mn SET previous_version_id = prev.id "
+                "FROM memory_namespaces prev "
+                "WHERE prev.namespace_id = mn.namespace_id AND prev.version = mn.version - 1"
+            )
+        )

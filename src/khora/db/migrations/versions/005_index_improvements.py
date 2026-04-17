@@ -23,6 +23,11 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Postgres-only: relies on GIN + HNSW indexes (pgvector). No SQLite equivalent;
+    # khora_chunks is a Postgres-specific skeleton-engine table.
+    if op.get_bind().dialect.name != "postgresql":
+        return
+
     # khora_chunks is created at runtime by the skeleton engine, not by migrations.
     # Only create indexes if the table already exists.
     conn = op.get_bind()
@@ -50,6 +55,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     op.execute("DROP INDEX IF EXISTS ix_khora_chunks_embedding_hnsw")
     op.execute(
         "CREATE INDEX ix_khora_chunks_embedding_hnsw "

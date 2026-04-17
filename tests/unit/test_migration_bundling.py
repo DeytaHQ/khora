@@ -813,6 +813,8 @@ class TestDoRunMigrationsAheadDetection:
           3. SELECT version_num              → fetchone() row/None  (only when table_exists)
         """
         conn = MagicMock()
+        # do_run_migrations branches on dialect.name — simulate Postgres.
+        conn.dialect.name = "postgresql"
 
         lock_result = MagicMock()
         lock_result.scalar.return_value = True
@@ -823,9 +825,8 @@ class TestDoRunMigrationsAheadDetection:
         if table_exists:
             version_result = MagicMock()
             if version_num is not None:
-                row = MagicMock()
-                row.__getitem__ = MagicMock(return_value=version_num)
-                version_result.fetchone.return_value = row
+                # Row behaves like a sequence/tuple: row[0] should return version_num.
+                version_result.fetchone.return_value = (version_num,)
             else:
                 version_result.fetchone.return_value = None
             conn.execute.side_effect = [lock_result, pg_catalog_result, version_result]
@@ -910,6 +911,7 @@ class TestDoRunMigrationsAheadDetection:
         """
         env = _load_env_functions()
         conn = MagicMock()
+        conn.dialect.name = "postgresql"
 
         lock_result = MagicMock()
         lock_result.scalar.return_value = True

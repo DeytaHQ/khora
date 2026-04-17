@@ -39,6 +39,8 @@ def upgrade() -> None:
         sa.Column("namespace_id", sa.UUID(), nullable=True),
     )
 
+    is_postgres = op.get_bind().dialect.name == "postgresql"
+
     # =========================================================================
     # Step 2: Backfill — traverse version chains, assign namespace_id from
     # the highest-version row in each chain.
@@ -47,39 +49,46 @@ def upgrade() -> None:
     # versions of the same logical namespace under one chain_root. Then picks
     # the id of the max-version row as the stable namespace_id for the group.
     # =========================================================================
-    op.execute(
-        text("""
-            WITH RECURSIVE chain AS (
-                -- Roots: rows with no parent (first version of each namespace)
-                SELECT id, id AS chain_root, version
-                FROM memory_namespaces
-                WHERE previous_version_id IS NULL
-                  AND namespace_id IS NULL
+    if is_postgres:
+        op.execute(
+            text("""
+                WITH RECURSIVE chain AS (
+                    -- Roots: rows with no parent (first version of each namespace)
+                    SELECT id, id AS chain_root, version
+                    FROM memory_namespaces
+                    WHERE previous_version_id IS NULL
+                      AND namespace_id IS NULL
 
-                UNION ALL
+                    UNION ALL
 
-                -- Walk forward: find rows whose parent is in the chain
-                SELECT mn.id, c.chain_root, mn.version
-                FROM memory_namespaces mn
-                JOIN chain c ON mn.previous_version_id = c.id
-                WHERE mn.namespace_id IS NULL
-            ),
-            -- For each chain, find the id of the row with the highest version
-            max_version_ids AS (
-                SELECT DISTINCT ON (chain_root)
-                    chain_root,
-                    id AS stable_id
-                FROM chain
-                ORDER BY chain_root, version DESC
-            )
-            UPDATE memory_namespaces mn
-            SET namespace_id = mv.stable_id
-            FROM chain c
-            JOIN max_version_ids mv ON c.chain_root = mv.chain_root
-            WHERE mn.id = c.id
-              AND mn.namespace_id IS NULL
-        """)
-    )
+                    -- Walk forward: find rows whose parent is in the chain
+                    SELECT mn.id, c.chain_root, mn.version
+                    FROM memory_namespaces mn
+                    JOIN chain c ON mn.previous_version_id = c.id
+                    WHERE mn.namespace_id IS NULL
+                ),
+                -- For each chain, find the id of the row with the highest version
+                max_version_ids AS (
+                    SELECT DISTINCT ON (chain_root)
+                        chain_root,
+                        id AS stable_id
+                    FROM chain
+                    ORDER BY chain_root, version DESC
+                )
+                UPDATE memory_namespaces mn
+                SET namespace_id = mv.stable_id
+                FROM chain c
+                JOIN max_version_ids mv ON c.chain_root = mv.chain_root
+                WHERE mn.id = c.id
+                  AND mn.namespace_id IS NULL
+            """)
+        )
+    else:
+        # SQLite: no DISTINCT ON, no UPDATE ... FROM. Fresh SQLite installs
+        # have no rows here, and sqlite_lance isn't used through the versioned-
+        # namespace workflow. For any rows that somehow exist, default each
+        # row's namespace_id to its own id (self-chained — no version history).
+        op.execute(text("UPDATE memory_namespaces SET namespace_id = id WHERE namespace_id IS NULL"))
 
     # Verify backfill completeness before enforcing NOT NULL
     conn = op.get_bind()
@@ -95,36 +104,54 @@ def upgrade() -> None:
 
     # =========================================================================
     # Step 3: ALTER COLUMN to NOT NULL
-    # =========================================================================
-    op.alter_column("memory_namespaces", "namespace_id", nullable=False)
-
-    # =========================================================================
     # Step 4: Add unique constraint (namespace_id, version)
     # =========================================================================
-    op.create_unique_constraint(
-        "uq_namespace_stable_id_version",
-        "memory_namespaces",
-        ["namespace_id", "version"],
-    )
+    if is_postgres:
+        op.alter_column("memory_namespaces", "namespace_id", nullable=False)
+        op.create_unique_constraint(
+            "uq_namespace_stable_id_version",
+            "memory_namespaces",
+            ["namespace_id", "version"],
+        )
+    else:
+        # SQLite: combine ALTER COLUMN and ADD CONSTRAINT into one batch to avoid
+        # multiple table rewrites.
+        with op.batch_alter_table("memory_namespaces") as batch:
+            batch.alter_column("namespace_id", nullable=False, existing_type=sa.UUID())
+            batch.create_unique_constraint("uq_namespace_stable_id_version", ["namespace_id", "version"])
 
     # =========================================================================
     # Step 5: Add partial index for fast active-version resolution
     # =========================================================================
-    op.create_index(
-        "idx_namespace_stable_active",
-        "memory_namespaces",
-        ["namespace_id"],
-        unique=True,
-        postgresql_where=sa.text("is_active = true"),
-    )
+    if is_postgres:
+        op.create_index(
+            "idx_namespace_stable_active",
+            "memory_namespaces",
+            ["namespace_id"],
+            unique=True,
+            postgresql_where=sa.text("is_active = true"),
+        )
+    else:
+        op.create_index(
+            "idx_namespace_stable_active",
+            "memory_namespaces",
+            ["namespace_id"],
+            unique=True,
+            sqlite_where=sa.text("is_active = 1"),
+        )
 
 
 def downgrade() -> None:
+    is_postgres = op.get_bind().dialect.name == "postgresql"
+
     # Reverse step 5: Drop partial index
     op.drop_index("idx_namespace_stable_active", table_name="memory_namespaces")
 
-    # Reverse step 4: Drop unique constraint
-    op.drop_constraint("uq_namespace_stable_id_version", "memory_namespaces", type_="unique")
-
-    # Reverse steps 1-3: Drop the column
-    op.drop_column("memory_namespaces", "namespace_id")
+    # Reverse step 4: Drop unique constraint and step 1-3: drop the column
+    if is_postgres:
+        op.drop_constraint("uq_namespace_stable_id_version", "memory_namespaces", type_="unique")
+        op.drop_column("memory_namespaces", "namespace_id")
+    else:
+        with op.batch_alter_table("memory_namespaces") as batch:
+            batch.drop_constraint("uq_namespace_stable_id_version", type_="unique")
+            batch.drop_column("namespace_id")
