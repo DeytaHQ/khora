@@ -2680,3 +2680,45 @@ RETURN current.id AS id
 
         async with self._session() as session:
             return await session.execute_read(_work)
+
+    async def remap_source_document_ids_batch(
+        self,
+        *,
+        entity_survivors: list[dict[str, str]],
+        relationship_survivors: list[dict[str, str]],
+    ) -> None:
+        """Remap source_document_ids for entities and relationships after dedup."""
+
+        if entity_survivors:
+
+            async def _remap_entities(tx: AsyncManagedTransaction) -> None:
+                query = """
+                UNWIND $survivors AS s
+                MATCH (e:Entity {id: s.entity_id})
+                WITH e, s, [x IN coalesce(e.source_document_ids, []) WHERE x <> s.old_doc_id] AS filtered
+                SET e.source_document_ids = CASE
+                  WHEN size(filtered) < size(coalesce(e.source_document_ids, [])) THEN filtered + [s.new_doc_id]
+                  ELSE coalesce(e.source_document_ids, [])
+                END
+                """
+                await tx.run(query, survivors=entity_survivors)
+
+            async with self._session() as session:
+                await session.execute_write(_remap_entities)
+
+        if relationship_survivors:
+
+            async def _remap_relationships(tx: AsyncManagedTransaction) -> None:
+                query = """
+                UNWIND $survivors AS s
+                MATCH ()-[rel {id: s.relationship_id}]-()
+                WITH rel, s, [x IN coalesce(rel.source_document_ids, []) WHERE x <> s.old_doc_id] AS filtered
+                SET rel.source_document_ids = CASE
+                  WHEN size(filtered) < size(coalesce(rel.source_document_ids, [])) THEN filtered + [s.new_doc_id]
+                  ELSE coalesce(rel.source_document_ids, [])
+                END
+                """
+                await tx.run(query, survivors=relationship_survivors)
+
+            async with self._session() as session:
+                await session.execute_write(_remap_relationships)
