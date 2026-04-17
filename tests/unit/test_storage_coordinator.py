@@ -417,6 +417,38 @@ class TestRelationshipOps:
             await coord.create_relationship(MagicMock())
 
 
+class TestCountRelationships:
+    """Tests for count_relationships delegation (DYT-2631)."""
+
+    @pytest.mark.asyncio
+    async def test_count_relationships_delegates_to_graph(self) -> None:
+        """count_relationships delegates to graph backend."""
+        ns_id = uuid4()
+        graph = MagicMock()
+        graph.count_relationships = AsyncMock(return_value=42)
+        coord = StorageCoordinator(graph=graph)
+        result = await coord.count_relationships(ns_id)
+        assert result == 42
+        graph.count_relationships.assert_awaited_once_with(ns_id)
+
+    @pytest.mark.asyncio
+    async def test_count_relationships_no_graph_returns_zero(self) -> None:
+        """count_relationships returns 0 when no graph backend configured."""
+        coord = StorageCoordinator()
+        result = await coord.count_relationships(uuid4())
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_count_relationships_propagates_not_implemented(self) -> None:
+        """count_relationships propagates NotImplementedError from graph."""
+        ns_id = uuid4()
+        graph = MagicMock()
+        graph.count_relationships = AsyncMock(side_effect=NotImplementedError)
+        coord = StorageCoordinator(graph=graph)
+        with pytest.raises(NotImplementedError):
+            await coord.count_relationships(ns_id)
+
+
 class TestGraphOps:
     """Tests for graph traversal operations."""
 

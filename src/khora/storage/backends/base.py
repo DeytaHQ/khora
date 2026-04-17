@@ -557,6 +557,10 @@ class GraphBackendProtocol(Protocol):
         """Count entities in a namespace."""
         ...
 
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        """Count relationships in a namespace."""
+        ...
+
     async def upsert_entities_batch(
         self,
         namespace_id: UUID,

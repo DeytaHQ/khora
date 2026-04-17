@@ -397,6 +397,9 @@ class NeptuneBackend(GraphBackendBase):
             record = await result.single()
             return record["cnt"] if record else 0
 
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        raise NotImplementedError
+
     # ------------------------------------------------------------------
     # Relationship operations
     # ------------------------------------------------------------------

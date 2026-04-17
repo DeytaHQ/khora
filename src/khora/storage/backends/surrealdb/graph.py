@@ -352,6 +352,9 @@ class SurrealDBGraphAdapter:
         row = await self._conn.query_one(sql, {"ns_rid": ns_rid})
         return int(row.get("cnt", 0)) if row else 0
 
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        raise NotImplementedError
+
     @trace(
         "khora.surrealdb.graph.upsert_entities_batch",
         include={"namespace_id"},
