@@ -19,6 +19,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 ### Changed
 - **Breaking**: khora is now a pure memory-lake library. `uv run khora ...` is no longer a valid command; use `uv pip install khora-cli` and `uv run khora-cli extract` / `search` instead.
 - `khora.discovery.extraction` → `khora.extraction.binary_readers` (binary file reader consumed by khora-cli)
+- Documentation rework post-extraction (DYT-2714): short, library-focused `README.md`; new `docs/README.md` index, `docs/configuration.md`, `docs/api-reference.md`, `docs/migrations.md`, and `docs/consumers.md`; removed stale `khora extract` / `khora search` / `khora ontology` references from the top-level docs in favour of pointers to `khora-cli` and `khora-explorer`.
 
 ### New graph backends
 - AWS Neptune with Bolt protocol + IAM SigV4 auth (#272)
