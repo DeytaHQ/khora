@@ -350,6 +350,19 @@ class TestVectorCypherStats:
         assert result.relationships == 0
         assert result.documents == 5
 
+    @pytest.mark.asyncio
+    async def test_stats_unexpected_error_degrades_to_zero(self) -> None:
+        """stats() degrades unexpected errors to 0 without breaking other counts."""
+        storage = _make_mock_storage()
+        storage.count_relationships = AsyncMock(side_effect=RuntimeError("pool exhausted"))
+        engine = self._make_engine(storage)
+
+        result = await engine.stats(uuid4())
+
+        assert result.relationships == 0
+        assert result.documents == 5
+        assert result.entities == 10
+
 
 # =========================================================================
 # Stats dataclass

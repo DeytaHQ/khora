@@ -868,3 +868,72 @@ class TestNeo4jBackendGetEntityRelationships:
         assert len(got) == 3
         assert all(isinstance(r, Relationship) for r in got)
         assert {r.id for r in got} == set(rel_ids)
+
+
+@pytest.mark.unit
+class TestNeo4jBackendCountRelationships:
+    """Tests for Neo4jBackend.count_relationships()."""
+
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_estimate(self) -> None:
+        """count_relationships returns the estimate from the Cypher query."""
+        driver, session = _make_neo4j_driver()
+
+        record = MagicMock()
+        record.__getitem__ = MagicMock(return_value=42)
+        result = AsyncMock()
+        result.single = AsyncMock(return_value=record)
+
+        async def _exec_read(fn):
+            return await fn(session)
+
+        session.execute_read = AsyncMock(side_effect=_exec_read)
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+        count = await backend.count_relationships(uuid4())
+
+        assert count == 42
+        session.run.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_namespace_returns_zero(self) -> None:
+        """count_relationships returns 0 when record is None (empty namespace)."""
+        driver, session = _make_neo4j_driver()
+
+        result = AsyncMock()
+        result.single = AsyncMock(return_value=None)
+
+        async def _exec_read(fn):
+            return await fn(session)
+
+        session.execute_read = AsyncMock(side_effect=_exec_read)
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=None)
+        count = await backend.count_relationships(uuid4())
+
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_timed_unit_of_work_wraps_query(self) -> None:
+        """When query_timeout is set, _timed_unit_of_work wraps the work function."""
+        driver, session = _make_neo4j_driver()
+
+        record = MagicMock()
+        record.__getitem__ = MagicMock(return_value=100)
+        result = AsyncMock()
+        result.single = AsyncMock(return_value=record)
+
+        async def _exec_read(fn):
+            return await fn(session)
+
+        session.execute_read = AsyncMock(side_effect=_exec_read)
+        session.run = AsyncMock(return_value=result)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=5.0)
+        assert backend._timed_unit_of_work is not None
+
+        count = await backend.count_relationships(uuid4())
+
+        assert count == 100

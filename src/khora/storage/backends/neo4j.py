@@ -2508,3 +2508,32 @@ class Neo4jBackend(GraphBackendBase):
             )
             records = await result.data()
             return [self._record_to_entity(r["e"]) for r in records]
+
+    @trace("khora.neo4j.count_relationships", include={"namespace_id"})
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        """Count relationships in a namespace using sampling estimation.
+
+        Counts total entities via index, then samples up to 1000 in storage
+        order and extrapolates outbound degree.  Exact when <=1000 entities.
+        """
+        query = """
+        MATCH (e:Entity {namespace_id: $namespace_id})
+        WITH count(e) AS total_n
+        MATCH (e2:Entity {namespace_id: $namespace_id})
+        WITH total_n, e2 LIMIT 1000
+        OPTIONAL MATCH (e2)-[out]->()
+        WITH total_n, count(out) AS sampled_out, count(DISTINCT e2) AS sampled_n
+        RETURN CASE WHEN sampled_n = 0 THEN 0
+               ELSE toInteger(total_n * (toFloat(sampled_out) / sampled_n)) END AS estimate
+        """
+
+        async def _work(tx):
+            result = await tx.run(query, namespace_id=str(namespace_id))
+            record = await result.single()
+            return record["estimate"] or 0 if record else 0
+
+        if self._timed_unit_of_work is not None:
+            _work = self._timed_unit_of_work(_work)
+
+        async with self._session() as session:
+            return await session.execute_read(_work)

@@ -95,6 +95,7 @@ class TestProtocolConformance:
             "get_entities_batch",
             "get_neighborhoods_batch",
             "count_entities",
+            "count_relationships",
         ]
         for method in required_methods:
             assert hasattr(backend, method), f"Missing method: {method}"

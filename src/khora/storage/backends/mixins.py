@@ -204,6 +204,10 @@ class GraphBackendBase:
         entities = await self.list_entities(namespace_id, limit=100_000)  # type: ignore[attr-defined]
         return len(entities)
 
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        """Default — subclasses should override."""
+        raise NotImplementedError
+
 
 # ---------------------------------------------------------------------------
 # VectorBackendBase

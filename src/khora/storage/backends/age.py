@@ -513,6 +513,9 @@ class AGEBackend(GraphBackendBase):
                     return rows[0].get("cnt", 0)
         return 0
 
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        raise NotImplementedError
+
     # ------------------------------------------------------------------
     # Relationship operations
     # ------------------------------------------------------------------

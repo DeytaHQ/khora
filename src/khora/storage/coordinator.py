@@ -599,6 +599,12 @@ class StorageCoordinator:
             return await self.graph.count_entities(namespace_id)
         return 0
 
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        """Count relationships in a namespace (graph-only)."""
+        if self.graph:
+            return await self.graph.count_relationships(namespace_id)
+        return 0
+
     # =========================================================================
     # Entity operations (cross-backend)
     # =========================================================================

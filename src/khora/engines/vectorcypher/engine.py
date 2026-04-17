@@ -2321,10 +2321,10 @@ class VectorCypherEngine:
             return_exceptions=True,
         )
 
-        # Re-raise unexpected errors — only suppress AttributeError/NotImplementedError
-        for result in (chunk_result, entity_result, rel_result):
+        # Degrade any failure to 0 — one broken counter must not block the rest
+        for name, result in [("chunks", chunk_result), ("entities", entity_result), ("relationships", rel_result)]:
             if isinstance(result, Exception) and not isinstance(result, (AttributeError, NotImplementedError)):
-                raise result
+                logger.warning("stats: count_{} failed, degrading to 0: {}", name, result)
 
         chunk_count = chunk_result if isinstance(chunk_result, int) else 0
         entity_count = entity_result if isinstance(entity_result, int) else 0

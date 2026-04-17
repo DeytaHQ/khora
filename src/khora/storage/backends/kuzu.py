@@ -442,6 +442,9 @@ class KuzuBackend(GraphBackendBase):
 
         return await asyncio.to_thread(_query)
 
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        raise NotImplementedError
+
     # ------------------------------------------------------------------
     # Relationship operations
     # ------------------------------------------------------------------
