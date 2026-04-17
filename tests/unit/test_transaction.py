@@ -212,3 +212,78 @@ class TestBackendSessionParam:
         mock_session.add.assert_called_once()
         mock_session.flush.assert_awaited_once()
         mock_session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pgvector_delete_chunks_by_document_with_session(self):
+        """delete_chunks_by_document uses provided session without committing."""
+        from uuid import uuid4
+
+        from khora.storage.backends.pgvector import PgVectorBackend
+
+        backend = PgVectorBackend("postgresql+asyncpg://test")
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.rowcount = 5
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        doc_id = uuid4()
+        count = await backend.delete_chunks_by_document(doc_id, session=mock_session)
+
+        assert count == 5
+        mock_session.execute.assert_awaited_once()
+        mock_session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pgvector_delete_chunks_by_document_without_session(self):
+        """delete_chunks_by_document opens own session and commits when no session provided."""
+        from uuid import uuid4
+
+        from khora.storage.backends.pgvector import PgVectorBackend
+
+        backend = PgVectorBackend("postgresql+asyncpg://test")
+
+        mock_result = MagicMock()
+        mock_result.rowcount = 3
+
+        mock_own_session = AsyncMock()
+        mock_own_session.execute = AsyncMock(return_value=mock_result)
+        mock_own_session.__aenter__ = AsyncMock(return_value=mock_own_session)
+        mock_own_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(backend, "_get_session", return_value=mock_own_session):
+            doc_id = uuid4()
+            count = await backend.delete_chunks_by_document(doc_id)
+
+        assert count == 3
+        mock_own_session.execute.assert_awaited_once()
+        mock_own_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_pgvector_delete_chunks_by_document_no_chunks(self):
+        """delete_chunks_by_document returns 0 when document has no chunks."""
+        from uuid import uuid4
+
+        from khora.storage.backends.pgvector import PgVectorBackend
+
+        backend = PgVectorBackend("postgresql+asyncpg://test")
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.rowcount = 0
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        count = await backend.delete_chunks_by_document(uuid4(), session=mock_session)
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_pgvector_delete_chunks_by_document_error_propagates(self):
+        """delete_chunks_by_document propagates execute errors."""
+        from uuid import uuid4
+
+        from khora.storage.backends.pgvector import PgVectorBackend
+
+        backend = PgVectorBackend("postgresql+asyncpg://test")
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(side_effect=RuntimeError("connection lost"))
+
+        with pytest.raises(RuntimeError, match="connection lost"):
+            await backend.delete_chunks_by_document(uuid4(), session=mock_session)
