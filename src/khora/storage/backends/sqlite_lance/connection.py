@@ -133,6 +133,8 @@ class EmbeddedStorageHandle:
         )
 
         self._sqlite = await aiosqlite.connect(sqlite_path)
+        # Enable dict-like row access so adapters can use row["col"].
+        self._sqlite.row_factory = aiosqlite.Row
         for pragma, value in _SQLITE_PRAGMAS:
             await self._sqlite.execute(f"PRAGMA {pragma}={value}")
         await self._sqlite.commit()
