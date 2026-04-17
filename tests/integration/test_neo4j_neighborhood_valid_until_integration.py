@@ -360,3 +360,184 @@ class TestDualNodeManagerValidUntilFiltering:
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_depth2_expired_intermediate_relationship_excluded(self) -> None:
+        """Depth>1: expired intermediate relationship blocks traversal to deeper nodes."""
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        manager = DualNodeManager(backend._driver)
+
+        namespace_id = uuid4()
+        entity_a = Entity(
+            namespace_id=namespace_id,
+            name=f"alpha-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            description="Alpha",
+        )
+        entity_b = Entity(
+            namespace_id=namespace_id,
+            name=f"bravo-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            description="Bravo",
+        )
+        entity_c = Entity(
+            namespace_id=namespace_id,
+            name=f"charlie-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            description="Charlie",
+        )
+
+        # A→B: current (no valid_until)
+        rel_ab = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=entity_a.id,
+            target_entity_id=entity_b.id,
+            relationship_type="KNOWS",
+            description="alpha knows bravo",
+            confidence=0.9,
+            weight=0.8,
+        )
+
+        # B→C: expired (valid_until in the past)
+        past_date = datetime.now(UTC) - timedelta(days=365)
+        rel_bc = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=entity_b.id,
+            target_entity_id=entity_c.id,
+            relationship_type="KNOWS",
+            description="bravo knows charlie",
+            valid_until=past_date,
+            confidence=0.9,
+            weight=0.8,
+        )
+
+        try:
+            await backend.create_entity(entity_a)
+            await backend.create_entity(entity_b)
+            await backend.create_entity(entity_c)
+            await backend.create_relationship(rel_ab)
+            await backend.create_relationship(rel_bc)
+
+            result = await manager.get_entity_neighborhoods(
+                [entity_a.id],
+                namespace_id,
+                depth=2,
+                prefer_current=True,
+            )
+
+            assert str(entity_a.id) in result
+            neighborhood = result[str(entity_a.id)]
+
+            neighbors_by_id = {ent.get("id"): ent for ent in neighborhood}
+
+            # B should appear at distance 1 (direct neighbor via current rel_ab)
+            assert str(entity_b.id) in neighbors_by_id, "entity_b should be reachable via current rel_ab"
+            assert neighbors_by_id[str(entity_b.id)].get("distance") == 1
+
+            # C should NOT appear (path A→B→C includes expired rel_bc)
+            assert str(entity_c.id) not in neighbors_by_id, (
+                "entity_c should NOT be reachable — intermediate rel_bc is expired"
+            )
+
+        finally:
+            for rel_id in (rel_ab.id, rel_bc.id):
+                try:
+                    await backend.delete_relationship(rel_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            for ent_id in (entity_a.id, entity_b.id, entity_c.id):
+                try:
+                    await backend.delete_entity(ent_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            await backend.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_multi_relationship_current_path_surfaces(self) -> None:
+        """Multiple relationships between same nodes: current path surfaces despite expired one."""
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        manager = DualNodeManager(backend._driver)
+
+        namespace_id = uuid4()
+        entity_a = Entity(
+            namespace_id=namespace_id,
+            name=f"delta-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            description="Delta",
+        )
+        entity_b = Entity(
+            namespace_id=namespace_id,
+            name=f"echo-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            description="Echo",
+        )
+
+        # rel1: A→B expired
+        past_date = datetime.now(UTC) - timedelta(days=365)
+        rel1 = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=entity_a.id,
+            target_entity_id=entity_b.id,
+            relationship_type="WORKED_WITH",
+            description="delta worked with echo (past)",
+            valid_until=past_date,
+            confidence=0.8,
+            weight=0.7,
+        )
+
+        # rel2: A→B current (no valid_until)
+        rel2 = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=entity_a.id,
+            target_entity_id=entity_b.id,
+            relationship_type="COLLABORATES_WITH",
+            description="delta collaborates with echo (current)",
+            confidence=0.9,
+            weight=0.8,
+        )
+
+        try:
+            await backend.create_entity(entity_a)
+            await backend.create_entity(entity_b)
+            await backend.create_relationship(rel1)
+            await backend.create_relationship(rel2)
+
+            result = await manager.get_entity_neighborhoods(
+                [entity_a.id],
+                namespace_id,
+                depth=1,
+                prefer_current=True,
+            )
+
+            assert str(entity_a.id) in result
+            neighborhood = result[str(entity_a.id)]
+
+            entity_b_ids = {ent.get("id") for ent in neighborhood}
+            assert str(entity_b.id) in entity_b_ids, (
+                "entity_b should be reachable via current rel2 despite expired rel1"
+            )
+
+        finally:
+            for rel_id in (rel1.id, rel2.id):
+                try:
+                    await backend.delete_relationship(rel_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            for ent_id in (entity_a.id, entity_b.id):
+                try:
+                    await backend.delete_entity(ent_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            await backend.disconnect()
