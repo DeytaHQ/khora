@@ -2267,12 +2267,16 @@ class Neo4jBackend(GraphBackendBase):
         if relationship_types:
             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
-        # Use UNWIND to process all entities in a single query
+        # Use UNWIND to process all entities in a single query.
+        # Project relationship properties in Cypher: [r*1..N] binds a list
+        # of relationships per path, so collect(r) yields list-of-lists.
+        # Projecting via list comprehension avoids raw Relationship objects
+        # that serialize as opaque tuples (DYT-2629).
         query = f"""
         UNWIND $entity_ids AS eid
         MATCH (center:Entity {{id: eid}})
         OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
-        With eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT r)[0..$limit] as rels
+        With eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT [rel IN r | {{props: properties(rel), type: type(rel)}}])[0..$limit] as rels
         RETURN eid, neighbors, rels
         """
 
@@ -2316,7 +2320,9 @@ class Neo4jBackend(GraphBackendBase):
                 if rel_list:
                     for r in rel_list if isinstance(rel_list, list) else [rel_list]:
                         if r:
-                            relationships.append(_element_to_dict(r))
+                            d = dict(r.get("props") or {})
+                            d["relationship_type"] = r.get("type")
+                            relationships.append(d)
             neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
 
         return neighborhoods
