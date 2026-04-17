@@ -1,15 +1,771 @@
-"""SQLite + LanceDB vector adapter — DYT-2730."""
+"""SQLite + LanceDB vector adapter.
+
+Implements :class:`VectorBackendProtocol` using a shared
+:class:`EmbeddedStorageHandle`:
+
+* Chunk/Entity metadata lives in SQLite (source of truth).
+* Embeddings live in LanceDB for ANN search.
+* Full-text search uses SQLite FTS5 (BM25).
+
+Vector writes to LanceDB happen after SQLite commits so SQLite remains
+consistent if the LanceDB write fails. Compensating deletes log warnings
+rather than raise, matching the sibling SurrealDB adapter's policy.
+
+This adapter requires the ``chunks``, ``entities`` and ``chunks_fts``
+SQLite tables to exist. DYT-2727 provides those via Alembic dialect-gated
+migrations; until then, callers (or tests) must create the tables
+themselves.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import asyncio
+import json
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
+
+import pyarrow as pa
+from loguru import logger
+
+from khora.core.models import Chunk, ChunkMetadata, Entity
+
+from ._helpers import from_json_text, to_json_text, uuid_to_text
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from .connection import EmbeddedStorageHandle
 
 
+# Lazy ANN-index kick-in threshold. Below this, LanceDB's brute-force
+# scan is faster than paying training cost.
+_ANN_INDEX_THRESHOLD = 5_000
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _dt_to_str(dt: datetime | None) -> str | None:
+    return None if dt is None else dt.isoformat()
+
+
+def _parse_dt(val: str | None) -> datetime | None:
+    if not val:
+        return None
+    return datetime.fromisoformat(val)
+
+
+def _uuid_list_dumps(uuids: list[UUID]) -> str:
+    return json.dumps([str(u) for u in uuids])
+
+
+def _uuid_list_loads(s: str | None) -> list[UUID]:
+    if not s:
+        return []
+    return [UUID(x) for x in json.loads(s)]
+
+
 class SQLiteLanceVectorAdapter:
-    """Placeholder. Methods implemented in DYT-2730."""
+    """Vector backend backed by SQLite (metadata) + LanceDB (embeddings)."""
 
     def __init__(self, handle: EmbeddedStorageHandle) -> None:
         self._handle = handle
+        # Cache table handles after first open (LanceDB async open is cheap
+        # but avoids the catalog round-trip on hot paths).
+        self._chunks_vec: Any = None
+        self._entities_vec: Any = None
+        # Track which tables already have an ANN index so we only pay the
+        # training cost once per process.
+        self._chunks_indexed = False
+        self._entities_indexed = False
+        self._index_lock = asyncio.Lock()
+        # LanceDB is a single-writer store — serialize concurrent writes
+        # (add/delete/create_index) per-table to avoid lost rows seen under
+        # asyncio.gather(create_chunk, ...).
+        self._lance_write_lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def connect(self) -> None:
+        await self._handle.connect()
+
+    async def disconnect(self) -> None:
+        await self._handle.disconnect()
+
+    async def is_healthy(self) -> bool:
+        return await self._handle.is_healthy()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def _sqlite(self) -> Any:
+        return self._handle.sqlite
+
+    @property
+    def _lance(self) -> Any:
+        return self._handle.lance
+
+    async def _chunks_table(self) -> Any:
+        if self._chunks_vec is None:
+            async with self._lance_write_lock:
+                if self._chunks_vec is None:
+                    self._chunks_vec = await self._lance.open_table("chunks_vec")
+        return self._chunks_vec
+
+    async def _entities_table(self) -> Any:
+        if self._entities_vec is None:
+            async with self._lance_write_lock:
+                if self._entities_vec is None:
+                    self._entities_vec = await self._lance.open_table("entities_vec")
+        return self._entities_vec
+
+    # ------------------------------------------------------------------
+    # Chunks
+    # ------------------------------------------------------------------
+
+    async def create_chunk(self, chunk: Chunk) -> Chunk:
+        return (await self.create_chunks_batch([chunk]))[0]
+
+    async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
+        if not chunks:
+            return []
+
+        now = _now_iso()
+        sqlite_rows = []
+        lance_rows: list[dict[str, Any]] = []
+        for c in chunks:
+            embedding_json = json.dumps(c.embedding) if c.embedding else None
+            sqlite_rows.append(
+                (
+                    uuid_to_text(c.id),
+                    uuid_to_text(c.namespace_id),
+                    uuid_to_text(c.document_id),
+                    c.content,
+                    c.metadata.chunk_index,
+                    c.metadata.start_char,
+                    c.metadata.end_char,
+                    c.metadata.token_count,
+                    to_json_text(c.metadata.custom or {}),
+                    embedding_json,
+                    c.embedding_model,
+                    _dt_to_str(c.created_at) or now,
+                    _dt_to_str(c.source_timestamp),
+                )
+            )
+            if c.embedding:
+                lance_rows.append(
+                    {
+                        "id": uuid_to_text(c.id),
+                        "namespace_id": uuid_to_text(c.namespace_id),
+                        "document_id": uuid_to_text(c.document_id),
+                        "created_at": c.created_at or datetime.now(UTC),
+                        "vector": list(c.embedding),
+                    }
+                )
+
+        # 1) SQLite: metadata + FTS5 index
+        await self._sqlite.executemany(
+            "INSERT INTO chunks "
+            "(id, namespace_id, document_id, content, chunk_index, start_char, "
+            "end_char, token_count, metadata_, embedding, embedding_model, "
+            "created_at, source_timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            sqlite_rows,
+        )
+        for c in chunks:
+            await self._fts_insert(c)
+        await self._sqlite.commit()
+
+        # 2) LanceDB: embeddings (compensation on failure — SQLite is
+        # already committed; log and re-raise so callers can clean up).
+        if lance_rows:
+            tbl = await self._chunks_table()
+            schema = await tbl.schema()
+            arrow_tbl = pa.Table.from_pylist(lance_rows, schema=schema)
+            try:
+                async with self._lance_write_lock:
+                    await tbl.add(arrow_tbl)
+            except Exception:
+                logger.exception(
+                    "LanceDB add failed after SQLite commit for {} chunks — "
+                    "SQLite metadata retained; caller should reconcile",
+                    len(lance_rows),
+                )
+                raise
+
+        return chunks
+
+    async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
+        cur = await self._sqlite.execute("SELECT * FROM chunks WHERE id = ?", (uuid_to_text(chunk_id),))
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_chunk(row)
+
+    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join("?" for _ in chunk_ids)
+        cur = await self._sqlite.execute(
+            f"SELECT * FROM chunks WHERE id IN ({placeholders})",  # noqa: S608
+            [uuid_to_text(c) for c in chunk_ids],
+        )
+        rows = await cur.fetchall()
+        result: dict[UUID, Chunk] = {}
+        for row in rows:
+            chunk = self._row_to_chunk(row)
+            result[chunk.id] = chunk
+        return result
+
+    async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+        cur = await self._sqlite.execute(
+            "SELECT * FROM chunks WHERE document_id = ? ORDER BY chunk_index",
+            (uuid_to_text(document_id),),
+        )
+        rows = await cur.fetchall()
+        return [self._row_to_chunk(r) for r in rows]
+
+    async def delete_chunks_by_document(self, document_id: UUID, *, session: AsyncSession | None = None) -> int:
+        """Delete chunks by document.
+
+        The ``session`` parameter is part of the protocol contract but the
+        SQLite+LanceDB backend never participates in a SQLAlchemy session —
+        if one is passed we treat it as a caller-managed transaction
+        signal: we do NOT commit the SQLite side (caller will) and we
+        skip the LanceDB compensation until they do.  With no session,
+        we commit immediately and run the LanceDB delete as compensation.
+        """
+        doc_text = uuid_to_text(document_id)
+
+        # First, enumerate chunks so we can purge FTS + LanceDB
+        cur = await self._sqlite.execute("SELECT id FROM chunks WHERE document_id = ?", (doc_text,))
+        rows = await cur.fetchall()
+        count = len(rows)
+
+        for r in rows:
+            await self._fts_delete(r["id"])
+
+        cur = await self._sqlite.execute("DELETE FROM chunks WHERE document_id = ?", (doc_text,))
+        rowcount = cur.rowcount
+
+        if session is None:
+            await self._sqlite.commit()
+            # Compensation delete on LanceDB — SQLite is already committed,
+            # so we log failures but don't re-raise to keep metadata/vector
+            # consistency under eventual convergence (next compact/rewrite
+            # will re-sync).
+            if count > 0:
+                try:
+                    tbl = await self._chunks_table()
+                    async with self._lance_write_lock:
+                        await tbl.delete(f"document_id = '{doc_text}'")
+                except Exception:
+                    logger.warning(
+                        "LanceDB delete for document {} failed — orphaned vectors remain until next compaction",
+                        doc_text,
+                    )
+
+        return rowcount if rowcount is not None else count
+
+    async def count_chunks(self, namespace_id: UUID) -> int:
+        cur = await self._sqlite.execute(
+            "SELECT COUNT(*) AS cnt FROM chunks WHERE namespace_id = ?",
+            (uuid_to_text(namespace_id),),
+        )
+        row = await cur.fetchone()
+        return row["cnt"] if row else 0
+
+    async def list_chunks(
+        self,
+        namespace_id: UUID,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Chunk]:
+        cur = await self._sqlite.execute(
+            "SELECT * FROM chunks WHERE namespace_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (uuid_to_text(namespace_id), limit, offset),
+        )
+        rows = await cur.fetchall()
+        return [self._row_to_chunk(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Chunk search
+    # ------------------------------------------------------------------
+
+    async def search_similar(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float],
+        *,
+        limit: int = 10,
+        min_similarity: float = 0.0,
+        filter_document_ids: list[UUID] | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> list[tuple[Chunk, float]]:
+        """ANN search over chunks.
+
+        Cosine distance on LanceDB; scores are converted to similarity
+        (``1 - distance``) and filtered by ``min_similarity``.
+        """
+        tbl = await self._chunks_table()
+
+        # Build LanceDB where clause — SQL-ish subset
+        where = [f"namespace_id = '{uuid_to_text(namespace_id)}'"]
+        if filter_document_ids:
+            ids = ", ".join(f"'{uuid_to_text(d)}'" for d in filter_document_ids)
+            where.append(f"document_id IN ({ids})")
+        if created_after is not None:
+            # LanceDB stores timestamps as microseconds since epoch; use the
+            # ISO form since LanceDB's SQL parser accepts timestamp literals.
+            where.append(f"created_at >= timestamp '{created_after.isoformat()}'")
+        if created_before is not None:
+            where.append(f"created_at <= timestamp '{created_before.isoformat()}'")
+        where_sql = " AND ".join(where)
+
+        await self._maybe_build_chunks_index()
+
+        q = (await tbl.search(list(query_embedding))).distance_type("cosine").where(where_sql).limit(max(limit, 1) * 2)
+        results = await q.to_list()
+        if not results:
+            return []
+
+        # Map to SQLite metadata. Preserve order.
+        id_order: list[str] = [r["id"] for r in results]
+        sims: dict[str, float] = {r["id"]: 1.0 - float(r.get("_distance", 0.0)) for r in results}
+
+        placeholders = ",".join("?" for _ in id_order)
+        cur = await self._sqlite.execute(
+            f"SELECT * FROM chunks WHERE id IN ({placeholders})",  # noqa: S608
+            id_order,
+        )
+        rows = await cur.fetchall()
+        by_id = {row["id"]: row for row in rows}
+
+        out: list[tuple[Chunk, float]] = []
+        for cid in id_order:
+            sim = sims[cid]
+            if sim < min_similarity:
+                continue
+            row = by_id.get(cid)
+            if row is None:
+                # LanceDB row orphaned (SQLite metadata missing) — skip.
+                continue
+            out.append((self._row_to_chunk(row), sim))
+            if len(out) >= limit:
+                break
+        return out
+
+    async def search_fulltext(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+        language: str = "english",  # noqa: ARG002 — accepted for protocol parity
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> list[tuple[Chunk, float]]:
+        """FTS5 BM25 ranking.
+
+        SQLite's ``bm25()`` returns lower-is-better; we negate it so the
+        return value matches the "higher is better" semantics used by
+        the pgvector and SurrealDB siblings.
+        """
+        safe_query = query_text.replace('"', '""')
+        sql_parts = [
+            "SELECT c.*, bm25(chunks_fts) AS bm FROM chunks_fts "
+            "JOIN chunks c ON c.id = chunks_fts.chunk_id "
+            "WHERE chunks_fts MATCH ? AND chunks_fts.namespace_id = ?"
+        ]
+        params: list[Any] = [safe_query, uuid_to_text(namespace_id)]
+        if created_after is not None:
+            sql_parts.append("AND COALESCE(c.source_timestamp, c.created_at) >= ?")
+            params.append(_dt_to_str(created_after))
+        if created_before is not None:
+            sql_parts.append("AND COALESCE(c.source_timestamp, c.created_at) <= ?")
+            params.append(_dt_to_str(created_before))
+        sql_parts.append("ORDER BY bm ASC LIMIT ?")
+        params.append(limit)
+
+        cur = await self._sqlite.execute(" ".join(sql_parts), params)
+        rows = await cur.fetchall()
+        return [(self._row_to_chunk(r), -float(r["bm"])) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Entities
+    # ------------------------------------------------------------------
+
+    async def create_entity(self, entity: Entity) -> None:
+        now = _now_iso()
+        embedding_json = json.dumps(entity.embedding) if entity.embedding else None
+        await self._sqlite.execute(
+            "INSERT OR REPLACE INTO entities "
+            "(id, namespace_id, name, entity_type, description, attributes, "
+            "source_tool, source_document_ids, source_chunk_ids, mention_count, "
+            "embedding, embedding_model, valid_from, valid_until, confidence, "
+            "metadata_, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                uuid_to_text(entity.id),
+                uuid_to_text(entity.namespace_id),
+                entity.name,
+                entity.entity_type,
+                entity.description,
+                to_json_text(entity.attributes),
+                entity.source_tool,
+                _uuid_list_dumps(entity.source_document_ids),
+                _uuid_list_dumps(entity.source_chunk_ids),
+                entity.mention_count,
+                embedding_json,
+                entity.embedding_model,
+                _dt_to_str(entity.valid_from),
+                _dt_to_str(entity.valid_until),
+                entity.confidence,
+                to_json_text(entity.metadata),
+                _dt_to_str(entity.created_at) or now,
+                _dt_to_str(entity.updated_at) or now,
+            ),
+        )
+        await self._sqlite.commit()
+
+        if entity.embedding:
+            await self._upsert_entity_vector(entity.id, entity.namespace_id, entity.embedding)
+
+    async def update_entity(self, entity: Entity) -> None:
+        now = _now_iso()
+        embedding_json = json.dumps(entity.embedding) if entity.embedding else None
+        await self._sqlite.execute(
+            "UPDATE entities SET "
+            "name = ?, entity_type = ?, description = ?, attributes = ?, "
+            "source_tool = ?, source_document_ids = ?, source_chunk_ids = ?, "
+            "mention_count = ?, embedding = ?, embedding_model = ?, "
+            "valid_from = ?, valid_until = ?, confidence = ?, metadata_ = ?, updated_at = ? "
+            "WHERE id = ?",
+            (
+                entity.name,
+                entity.entity_type,
+                entity.description,
+                to_json_text(entity.attributes),
+                entity.source_tool,
+                _uuid_list_dumps(entity.source_document_ids),
+                _uuid_list_dumps(entity.source_chunk_ids),
+                entity.mention_count,
+                embedding_json,
+                entity.embedding_model,
+                _dt_to_str(entity.valid_from),
+                _dt_to_str(entity.valid_until),
+                entity.confidence,
+                to_json_text(entity.metadata),
+                now,
+                uuid_to_text(entity.id),
+            ),
+        )
+        await self._sqlite.commit()
+
+        if entity.embedding:
+            await self._upsert_entity_vector(entity.id, entity.namespace_id, entity.embedding)
+
+    async def entity_exists(self, entity_id: UUID) -> bool:
+        cur = await self._sqlite.execute("SELECT 1 FROM entities WHERE id = ?", (uuid_to_text(entity_id),))
+        row = await cur.fetchone()
+        return row is not None
+
+    async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
+        now = _now_iso()
+        # Look up namespace so we can write the LanceDB row (required column).
+        cur = await self._sqlite.execute(
+            "SELECT namespace_id FROM entities WHERE id = ?",
+            (uuid_to_text(entity_id),),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise ValueError(f"Entity {entity_id} not found")
+        namespace_id = UUID(row["namespace_id"])
+
+        await self._sqlite.execute(
+            "UPDATE entities SET embedding = ?, embedding_model = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(embedding), model, now, uuid_to_text(entity_id)),
+        )
+        await self._sqlite.commit()
+
+        await self._upsert_entity_vector(entity_id, namespace_id, embedding)
+
+    async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
+        if not updates:
+            return 0
+        now = _now_iso()
+
+        # Fetch namespace_ids in one query so we can write LanceDB rows.
+        ids_text = [uuid_to_text(u) for u, _, _ in updates]
+        placeholders = ",".join("?" for _ in ids_text)
+        cur = await self._sqlite.execute(
+            f"SELECT id, namespace_id FROM entities WHERE id IN ({placeholders})",  # noqa: S608
+            ids_text,
+        )
+        rows = await cur.fetchall()
+        ns_by_id = {r["id"]: r["namespace_id"] for r in rows}
+
+        params = [(json.dumps(emb), model, now, uuid_to_text(eid)) for eid, emb, model in updates]
+        await self._sqlite.executemany(
+            "UPDATE entities SET embedding = ?, embedding_model = ?, updated_at = ? WHERE id = ?",
+            params,
+        )
+        await self._sqlite.commit()
+
+        # Upsert LanceDB side: batch delete + batch add.
+        tbl = await self._entities_table()
+        existing = [uuid_to_text(eid) for eid, _, _ in updates if uuid_to_text(eid) in ns_by_id]
+        async with self._lance_write_lock:
+            if existing:
+                in_list = ", ".join(f"'{x}'" for x in existing)
+                try:
+                    await tbl.delete(f"id IN ({in_list})")
+                except Exception:
+                    logger.debug("LanceDB entity delete failed during batch upsert (may be first write)")
+
+            schema = await tbl.schema()
+            lance_rows: list[dict[str, Any]] = []
+            for eid, emb, _ in updates:
+                eid_text = uuid_to_text(eid)
+                ns = ns_by_id.get(eid_text)
+                if ns is None:
+                    # Unknown entity — SQLite UPDATE already no-op'd for it.
+                    continue
+                lance_rows.append(
+                    {
+                        "id": eid_text,
+                        "namespace_id": ns,
+                        "vector": list(emb),
+                    }
+                )
+            if lance_rows:
+                arrow_tbl = pa.Table.from_pylist(lance_rows, schema=schema)
+                await tbl.add(arrow_tbl)
+
+        return len(updates)
+
+    async def search_similar_entities(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float],
+        *,
+        limit: int = 10,
+        min_similarity: float = 0.0,
+    ) -> list[tuple[UUID, float]]:
+        tbl = await self._entities_table()
+        await self._maybe_build_entities_index()
+        q = (
+            (await tbl.search(list(query_embedding)))
+            .distance_type("cosine")
+            .where(f"namespace_id = '{uuid_to_text(namespace_id)}'")
+            .limit(max(limit, 1) * 2)
+        )
+        rows = await q.to_list()
+        out: list[tuple[UUID, float]] = []
+        for r in rows:
+            sim = 1.0 - float(r.get("_distance", 0.0))
+            if sim < min_similarity:
+                continue
+            out.append((UUID(r["id"]), sim))
+            if len(out) >= limit:
+                break
+        return out
+
+    # ------------------------------------------------------------------
+    # LanceDB helpers
+    # ------------------------------------------------------------------
+
+    async def _upsert_entity_vector(self, entity_id: UUID, namespace_id: UUID, embedding: list[float]) -> None:
+        """Upsert a single row into ``entities_vec``.
+
+        LanceDB has no in-place vector update, so we delete any existing
+        row with the same id and then add.
+        """
+        tbl = await self._entities_table()
+        eid_text = uuid_to_text(entity_id)
+        async with self._lance_write_lock:
+            try:
+                await tbl.delete(f"id = '{eid_text}'")
+            except Exception:
+                # Table may be empty on first write — ignore.
+                logger.debug("LanceDB entities_vec delete pre-upsert failed (may be empty)")
+            schema = await tbl.schema()
+            arrow_tbl = pa.Table.from_pylist(
+                [
+                    {
+                        "id": eid_text,
+                        "namespace_id": uuid_to_text(namespace_id),
+                        "vector": list(embedding),
+                    }
+                ],
+                schema=schema,
+            )
+            await tbl.add(arrow_tbl)
+
+    async def _maybe_build_chunks_index(self) -> None:
+        if self._chunks_indexed:
+            return
+        async with self._index_lock:
+            if self._chunks_indexed:
+                return
+            await self._build_index(await self._chunks_table(), "chunks_vec")
+            self._chunks_indexed = True
+
+    async def _maybe_build_entities_index(self) -> None:
+        if self._entities_indexed:
+            return
+        async with self._index_lock:
+            if self._entities_indexed:
+                return
+            await self._build_index(await self._entities_table(), "entities_vec")
+            self._entities_indexed = True
+
+    async def _build_index(self, tbl: Any, label: str) -> None:
+        """Create an ANN index following the handle's ``lance_index`` policy.
+
+        - ``"brute"``: skip index creation entirely (brute-force scans).
+        - ``"hnsw"``: build an HNSW index unconditionally.
+        - ``"auto"`` / ``"ivf_pq"``: build IVF_PQ only once the table has
+          at least ``_ANN_INDEX_THRESHOLD`` rows; below that LanceDB's
+          brute-force scan is faster than paying training cost.
+        """
+        mode = self._handle.config.lance_index
+        if mode == "brute":
+            return
+
+        try:
+            rows = await tbl.count_rows()
+        except Exception:
+            rows = 0
+
+        async with self._lance_write_lock:
+            try:
+                if mode == "hnsw":
+                    from lancedb.index import HnswSq
+
+                    await tbl.create_index(
+                        column="vector",
+                        config=HnswSq(
+                            distance_type="cosine",
+                            m=self._handle.config.hnsw_m,
+                        ),
+                        replace=True,
+                    )
+                    logger.info("Created HNSW index on {} ({} rows)", label, rows)
+                    return
+
+                # auto / ivf_pq
+                if rows < _ANN_INDEX_THRESHOLD:
+                    return
+
+                from lancedb.index import IvfPq
+
+                dim = self._handle.config.embedding_dimension
+                partitions = self._handle.config.ivf_partitions or max(1, rows // _ANN_INDEX_THRESHOLD)
+                sub_vectors = min(96, max(1, dim // 16))
+                await tbl.create_index(
+                    column="vector",
+                    config=IvfPq(
+                        distance_type="cosine",
+                        num_partitions=partitions,
+                        num_sub_vectors=sub_vectors,
+                    ),
+                    replace=True,
+                )
+                logger.info(
+                    "Created IVF_PQ index on {} (rows={}, partitions={}, sub_vectors={})",
+                    label,
+                    rows,
+                    partitions,
+                    sub_vectors,
+                )
+            except Exception as exc:
+                logger.warning("Failed to build ANN index on {}: {}", label, exc)
+
+    # ------------------------------------------------------------------
+    # FTS5 helpers
+    # ------------------------------------------------------------------
+
+    async def _fts_insert(self, chunk: Chunk) -> None:
+        try:
+            await self._sqlite.execute(
+                "INSERT INTO chunks_fts(content, chunk_id, namespace_id) VALUES (?, ?, ?)",
+                (chunk.content, uuid_to_text(chunk.id), uuid_to_text(chunk.namespace_id)),
+            )
+        except Exception:
+            logger.debug("FTS5 insert failed (may be unsupported)")
+
+    async def _fts_delete(self, chunk_id: str) -> None:
+        try:
+            await self._sqlite.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (chunk_id,))
+        except Exception:
+            logger.debug("FTS5 delete failed (may be unsupported)")
+
+    # ------------------------------------------------------------------
+    # Row → domain helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_chunk(row: Any) -> Chunk:
+        raw_embedding = row["embedding"]
+        embedding: list[float] | None = None
+        if raw_embedding:
+            embedding = json.loads(raw_embedding)
+
+        return Chunk(
+            id=UUID(row["id"]),
+            namespace_id=UUID(row["namespace_id"]),
+            document_id=UUID(row["document_id"]),
+            content=row["content"] or "",
+            metadata=ChunkMetadata(
+                document_id=UUID(row["document_id"]),
+                chunk_index=row["chunk_index"] or 0,
+                start_char=row["start_char"] or 0,
+                end_char=row["end_char"] or 0,
+                token_count=row["token_count"] or 0,
+                custom=from_json_text(row["metadata_"]) if row["metadata_"] else {},
+            ),
+            embedding=embedding,
+            embedding_model=row["embedding_model"] or "",
+            created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
+            source_timestamp=_parse_dt(row["source_timestamp"]),
+        )
+
+    @staticmethod
+    def _row_to_entity(row: Any) -> Entity:
+        raw_embedding = row["embedding"]
+        embedding: list[float] | None = None
+        if raw_embedding:
+            embedding = json.loads(raw_embedding)
+
+        return Entity(
+            id=UUID(row["id"]),
+            namespace_id=UUID(row["namespace_id"]),
+            name=row["name"] or "",
+            entity_type=row["entity_type"] or "CONCEPT",
+            description=row["description"] or "",
+            attributes=from_json_text(row["attributes"]) if row["attributes"] else {},
+            source_tool=row["source_tool"] or "",
+            source_document_ids=_uuid_list_loads(row["source_document_ids"]),
+            source_chunk_ids=_uuid_list_loads(row["source_chunk_ids"]),
+            mention_count=row["mention_count"] or 1,
+            embedding=embedding,
+            embedding_model=row["embedding_model"] or "",
+            valid_from=_parse_dt(row["valid_from"]),
+            valid_until=_parse_dt(row["valid_until"]),
+            confidence=row["confidence"] if row["confidence"] is not None else 1.0,
+            metadata=from_json_text(row["metadata_"]) if row["metadata_"] else {},
+            created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
+            updated_at=_parse_dt(row["updated_at"]) or datetime.now(UTC),
+        )
+
+
+__all__ = ["SQLiteLanceVectorAdapter"]
