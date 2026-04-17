@@ -220,6 +220,349 @@ class TestNeo4jBackendGetNeighborhoodsBatchTimeout:
         assert excinfo.value.code == "Neo.ClientError.Statement.SyntaxError"
 
 
+@pytest.mark.unit
+class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
+    """Tests for get_neighborhoods_batch relationship data handling (DYT-2629)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_dict_for_empty_entity_ids(self) -> None:
+        """get_neighborhoods_batch returns {} when passed an empty list."""
+        driver, session = _make_neo4j_driver()
+        backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+
+        result = await backend.get_neighborhoods_batch([])
+
+        assert result == {}
+        session.execute_read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_returns_structure_with_entities_and_relationships(self) -> None:
+        """Returns dict with {entity_id: {'entities': [...], 'relationships': [...]}}."""
+        driver, session = _make_neo4j_driver()
+
+        entity_id = uuid4()
+        neighbor_id = uuid4()
+        rel_id = uuid4()
+        rel_type = "KNOWS"
+
+        # Simulate Cypher result shape: list-of-lists (one per path)
+        # This is what [rel IN r | {props: properties(rel), type: type(rel)}]
+        # returns when [r*1..N] produces multiple relationships per path
+        rel_data = {
+            "props": {
+                "id": str(rel_id),
+                "namespace_id": str(uuid4()),
+                "source_entity_id": str(entity_id),
+                "target_entity_id": str(neighbor_id),
+                "description": "test rel",
+                "properties": "{}",
+                "source_document_ids": [],
+                "source_chunk_ids": [],
+                "valid_from": None,
+                "valid_until": None,
+                "confidence": 0.9,
+                "weight": 0.8,
+                "metadata": "{}",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            "type": rel_type,
+        }
+
+        neighbor_data = {"id": str(neighbor_id), "name": "neighbor"}
+
+        # Simulate result from Cypher: list of records
+        async def mock_work(tx):
+            return [
+                {
+                    "eid": str(entity_id),
+                    "neighbors": [neighbor_data],
+                    "rels": [[rel_data]],  # List of rel lists (one per path)
+                }
+            ]
+
+        session.execute_read = AsyncMock(side_effect=mock_work)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+        result = await backend.get_neighborhoods_batch([entity_id])
+
+        assert entity_id in result
+        assert "entities" in result[entity_id]
+        assert "relationships" in result[entity_id]
+        assert len(result[entity_id]["entities"]) == 1
+        assert len(result[entity_id]["relationships"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_preserves_relationship_properties(self) -> None:
+        """Relationship properties and type are correctly extracted and included."""
+        driver, session = _make_neo4j_driver()
+
+        entity_id = uuid4()
+        neighbor_id = uuid4()
+        rel_id = uuid4()
+        rel_type = "WORKS_WITH"
+
+        rel_data = {
+            "props": {
+                "id": str(rel_id),
+                "namespace_id": str(uuid4()),
+                "source_entity_id": str(entity_id),
+                "target_entity_id": str(neighbor_id),
+                "description": "colleague",
+                "properties": '{"department": "eng"}',
+                "source_document_ids": ["doc1"],
+                "source_chunk_ids": ["chunk1"],
+                "valid_from": "2026-01-01T00:00:00+00:00",
+                "valid_until": None,
+                "confidence": 0.95,
+                "weight": 0.5,
+                "metadata": '{"source": "org"}',
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            "type": rel_type,
+        }
+
+        neighbor_data = {"id": str(neighbor_id), "name": "colleague"}
+
+        async def mock_work(tx):
+            return [
+                {
+                    "eid": str(entity_id),
+                    "neighbors": [neighbor_data],
+                    "rels": [[rel_data]],
+                }
+            ]
+
+        session.execute_read = AsyncMock(side_effect=mock_work)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+        result = await backend.get_neighborhoods_batch([entity_id])
+
+        rel = result[entity_id]["relationships"][0]
+        # Verify all properties from props are included
+        assert rel["id"] == str(rel_id)
+        assert rel["namespace_id"] == rel_data["props"]["namespace_id"]
+        assert rel["description"] == "colleague"
+        assert rel["confidence"] == 0.95
+        assert rel["weight"] == 0.5
+        # Verify type is added
+        assert rel["relationship_type"] == rel_type
+
+    @pytest.mark.asyncio
+    async def test_handles_multiple_entities(self) -> None:
+        """Correctly handles batch of multiple entity IDs."""
+        driver, session = _make_neo4j_driver()
+
+        entity_id_1 = uuid4()
+        entity_id_2 = uuid4()
+        neighbor_id_1 = uuid4()
+        neighbor_id_2 = uuid4()
+
+        rel_data_1 = {
+            "props": {
+                "id": str(uuid4()),
+                "namespace_id": str(uuid4()),
+                "description": "rel1",
+                "properties": "{}",
+                "source_document_ids": [],
+                "source_chunk_ids": [],
+                "valid_from": None,
+                "valid_until": None,
+                "confidence": 0.9,
+                "weight": 0.8,
+                "metadata": "{}",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            "type": "KNOWS",
+        }
+
+        rel_data_2 = {
+            "props": {
+                "id": str(uuid4()),
+                "namespace_id": str(uuid4()),
+                "description": "rel2",
+                "properties": "{}",
+                "source_document_ids": [],
+                "source_chunk_ids": [],
+                "valid_from": None,
+                "valid_until": None,
+                "confidence": 0.8,
+                "weight": 0.7,
+                "metadata": "{}",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            "type": "COLLABORATES_WITH",
+        }
+
+        async def mock_work(tx):
+            return [
+                {
+                    "eid": str(entity_id_1),
+                    "neighbors": [{"id": str(neighbor_id_1), "name": "n1"}],
+                    "rels": [[rel_data_1]],
+                },
+                {
+                    "eid": str(entity_id_2),
+                    "neighbors": [{"id": str(neighbor_id_2), "name": "n2"}],
+                    "rels": [[rel_data_2]],
+                },
+            ]
+
+        session.execute_read = AsyncMock(side_effect=mock_work)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+        result = await backend.get_neighborhoods_batch([entity_id_1, entity_id_2])
+
+        assert len(result) == 2
+        assert entity_id_1 in result
+        assert entity_id_2 in result
+        assert result[entity_id_1]["relationships"][0]["relationship_type"] == "KNOWS"
+        assert result[entity_id_2]["relationships"][0]["relationship_type"] == "COLLABORATES_WITH"
+
+    @pytest.mark.asyncio
+    async def test_handles_no_neighbors(self) -> None:
+        """Entity with no neighbors returns empty entities and relationships lists."""
+        driver, session = _make_neo4j_driver()
+
+        entity_id = uuid4()
+
+        async def mock_work(tx):
+            return [
+                {
+                    "eid": str(entity_id),
+                    "neighbors": [],
+                    "rels": [],
+                }
+            ]
+
+        session.execute_read = AsyncMock(side_effect=mock_work)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+        result = await backend.get_neighborhoods_batch([entity_id])
+
+        assert entity_id in result
+        assert result[entity_id]["entities"] == []
+        assert result[entity_id]["relationships"] == []
+
+    @pytest.mark.asyncio
+    async def test_handles_multiple_relationships_per_path(self) -> None:
+        """Entity with multiple relationships per path (depth > 1) are flattened correctly."""
+        driver, session = _make_neo4j_driver()
+
+        entity_id = uuid4()
+        neighbor_id = uuid4()
+        rel_id_1 = uuid4()
+        rel_id_2 = uuid4()
+
+        rel_data_1 = {
+            "props": {
+                "id": str(rel_id_1),
+                "namespace_id": str(uuid4()),
+                "description": "rel1",
+                "properties": "{}",
+                "source_document_ids": [],
+                "source_chunk_ids": [],
+                "valid_from": None,
+                "valid_until": None,
+                "confidence": 0.9,
+                "weight": 0.8,
+                "metadata": "{}",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            "type": "KNOWS",
+        }
+
+        rel_data_2 = {
+            "props": {
+                "id": str(rel_id_2),
+                "namespace_id": str(uuid4()),
+                "description": "rel2",
+                "properties": "{}",
+                "source_document_ids": [],
+                "source_chunk_ids": [],
+                "valid_from": None,
+                "valid_until": None,
+                "confidence": 0.85,
+                "weight": 0.75,
+                "metadata": "{}",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            "type": "COLLABORATES_WITH",
+        }
+
+        async def mock_work(tx):
+            return [
+                {
+                    "eid": str(entity_id),
+                    "neighbors": [{"id": str(neighbor_id), "name": "neighbor"}],
+                    # Two relationships on the same path (depth=2)
+                    "rels": [[rel_data_1, rel_data_2]],
+                }
+            ]
+
+        session.execute_read = AsyncMock(side_effect=mock_work)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+        result = await backend.get_neighborhoods_batch([entity_id])
+
+        rels = result[entity_id]["relationships"]
+        assert len(rels) == 2
+        assert rels[0]["id"] == str(rel_id_1)
+        assert rels[1]["id"] == str(rel_id_2)
+        assert rels[0]["relationship_type"] == "KNOWS"
+        assert rels[1]["relationship_type"] == "COLLABORATES_WITH"
+
+    @pytest.mark.asyncio
+    async def test_handles_none_relationship_values(self) -> None:
+        """None/falsy relationship values are skipped safely."""
+        driver, session = _make_neo4j_driver()
+
+        entity_id = uuid4()
+
+        rel_data = {
+            "props": {
+                "id": str(uuid4()),
+                "namespace_id": str(uuid4()),
+                "description": "rel",
+                "properties": "{}",
+                "source_document_ids": [],
+                "source_chunk_ids": [],
+                "valid_from": None,
+                "valid_until": None,
+                "confidence": 0.9,
+                "weight": 0.8,
+                "metadata": "{}",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            "type": "KNOWS",
+        }
+
+        async def mock_work(tx):
+            return [
+                {
+                    "eid": str(entity_id),
+                    "neighbors": [{"id": str(uuid4()), "name": "n"}],
+                    # Include a valid rel and then None/falsy values
+                    "rels": [[rel_data, None], None, []],
+                }
+            ]
+
+        session.execute_read = AsyncMock(side_effect=mock_work)
+
+        backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+        result = await backend.get_neighborhoods_batch([entity_id])
+
+        # Only the valid rel should be in the result
+        assert len(result[entity_id]["relationships"]) == 1
+        assert result[entity_id]["relationships"][0]["relationship_type"] == "KNOWS"
+
+
 def _make_rel_props(**overrides: Any) -> dict[str, Any]:
     """Build a minimal post-fix relationship properties dict, with overrides."""
     props: dict[str, Any] = {
