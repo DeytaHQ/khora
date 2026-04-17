@@ -2726,12 +2726,19 @@ RETURN current.id AS id
                 await session.execute_write(_remap_relationships)
 
     async def fetch_document_extraction_state(
-        self, document_id: UUID
+        self, document_id: UUID, *, namespace_id: UUID
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Fetch the entity and relationship state linked to a document.
 
         Used by ``StorageCoordinator.replace_document_extraction()`` to compute
         retirement / survivor sets in Python before issuing graph mutations.
+        Namespace-scoped to match the rest of the backend's traversal helpers
+        and to keep reads on the namespace-partitioned indexes.
+
+        ``relationship_type`` in the result is the Cypher-sanitized label
+        (``_sanitize_neo4j_label`` — upper-cased, non-alphanumerics →
+        underscore), not the raw Python string.  Callers that compare against
+        ``Relationship.relationship_type`` must apply the same sanitizer.
 
         Returns:
             (entities, relationships) where each record carries the identity
@@ -2739,11 +2746,12 @@ RETURN current.id AS id
             apply the ADR-056 §3/§4 retirement filter.
         """
         doc_id_str = str(document_id)
+        ns_id_str = str(namespace_id)
 
         async def _fetch_entities(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
             result = await tx.run(
                 """
-                MATCH (e:Entity)
+                MATCH (e:Entity {namespace_id: $namespace_id})
                 WHERE $doc_id IN e.source_document_ids
                 RETURN e.id AS id,
                        e.name AS name,
@@ -2752,13 +2760,14 @@ RETURN current.id AS id
                        size(e.source_document_ids) AS source_document_count
                 """,
                 doc_id=doc_id_str,
+                namespace_id=ns_id_str,
             )
             return await result.data()
 
         async def _fetch_relationships(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
             result = await tx.run(
                 """
-                MATCH (src:Entity)-[rel]->(tgt:Entity)
+                MATCH (src:Entity {namespace_id: $namespace_id})-[rel]->(tgt:Entity {namespace_id: $namespace_id})
                 WHERE $doc_id IN rel.source_document_ids
                 RETURN rel.id AS id,
                        src.id AS source_entity_id,
@@ -2767,6 +2776,7 @@ RETURN current.id AS id
                        size(rel.source_document_ids) AS source_document_count
                 """,
                 doc_id=doc_id_str,
+                namespace_id=ns_id_str,
             )
             return await result.data()
 

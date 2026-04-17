@@ -492,20 +492,35 @@ class StorageCoordinator:
                 old_entity_records: list[dict[str, Any]] = []
                 old_relationship_records: list[dict[str, Any]] = []
             else:
-                old_entity_records, old_relationship_records = await fetch(old_document_id)
+                old_entity_records, old_relationship_records = await fetch(old_document_id, namespace_id=namespace_id)
+
+            # Relationship types in Neo4j are stored sanitized (upper-case,
+            # non-alphanumerics → underscore) — see ``_sanitize_neo4j_label``
+            # in ``storage/backends/neo4j.py``.  The prefetch returns the
+            # stored (sanitized) label via ``type(rel)``, so we apply the same
+            # sanitizer to ``Relationship.relationship_type`` before building
+            # the comparison key.  Lazy import keeps this coordinator free of
+            # Neo4j-specific imports at module load time.
+            from khora.storage.backends.neo4j import _sanitize_neo4j_label
 
             new_entity_keys = {(e.name, e.entity_type) for e in new_entities}
             new_relationship_keys = {
-                (r.source_entity_id, r.target_entity_id, r.relationship_type) for r in new_relationships
+                (r.source_entity_id, r.target_entity_id, _sanitize_neo4j_label(r.relationship_type))
+                for r in new_relationships
             }
             old_doc_str = str(old_document_id)
             new_doc_str = str(new_document.id)
             retired_at_iso = datetime.now(UTC).isoformat()
+            retired_at = datetime.now(UTC)
 
             entity_retirement_rows: list[dict[str, str]] = []
             entity_survivor_keys: set[tuple[str, str]] = set()
             entity_survivor_remap_rows: list[dict[str, str]] = []
             for rec in old_entity_records:
+                # Belt-and-suspenders: skip cross-namespace leaks even though
+                # the prefetch Cypher is already namespace-scoped.
+                if rec.get("namespace_id") != str(namespace_id):
+                    continue
                 name = rec["name"]
                 entity_type = rec["entity_type"]
                 key = (name, entity_type)
@@ -528,13 +543,12 @@ class StorageCoordinator:
                         }
                     )
 
-            # For relationships, identity is (src_entity, tgt_entity, type) —
-            # Cypher stores ``type(rel)`` after label sanitization, but the
-            # Relationship model preserves the original string, so we match
-            # on raw ``relationship_type`` against the prefetched records.
+            # For relationships, identity is (src_entity, tgt_entity,
+            # sanitized_type).  Both sides of the comparison are now
+            # sanitized, so mixed-case / punctuated rel types classify
+            # correctly as survivors instead of leaking into net-new + retire.
             relationship_retirement_rows: list[dict[str, Any]] = []
             relationship_survivor_remap_rows: list[dict[str, str]] = []
-            net_new_relationship_ids: set[UUID] = {r.id for r in new_relationships}
             for rec in old_relationship_records:
                 rel_id = rec["id"]
                 rel_key = (
@@ -555,7 +569,7 @@ class StorageCoordinator:
                         {
                             "relationship_id": UUID(rel_id),
                             "old_doc_id": old_document_id,
-                            "retired_at": datetime.now(UTC),
+                            "retired_at": retired_at,
                         }
                     )
 
@@ -610,14 +624,14 @@ class StorageCoordinator:
             net_new_relationships = [
                 r
                 for r in new_relationships
-                if (r.source_entity_id, r.target_entity_id, r.relationship_type) not in old_relationship_keys
+                if (r.source_entity_id, r.target_entity_id, _sanitize_neo4j_label(r.relationship_type))
+                not in old_relationship_keys
             ]
             relationships_created = 0
             if net_new_relationships:
                 relationships_created = await self.create_relationships_batch(net_new_relationships)
             # Survivor relationships are accounted for implicitly via remap;
             # their id is preserved from the old graph state.
-            _ = net_new_relationship_ids  # silence unused — retained for future accounting
 
             new_document.mark_completed(len(new_chunks), len(new_entities))
             await self.relational.update_document(new_document)

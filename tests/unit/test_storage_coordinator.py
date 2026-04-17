@@ -892,6 +892,82 @@ class TestReplaceDocumentExtraction:
         assert new_doc.error_message == "pg-constraint-violation"
 
     @pytest.mark.asyncio
+    async def test_relationship_type_sanitization_classifies_survivor_correctly(self) -> None:
+        """Mixed-case / punctuated rel types on new_relationships must sanitize to match Cypher storage.
+
+        Regression guard: the Neo4j backend stores the sanitized (upper-case,
+        alphanumerics+underscore) label, so the coordinator's survivor/orphan
+        filter must sanitize the Python-side value or the relationship will
+        be misclassified as both orphan (retire) and net-new (create).
+        """
+        namespace_id = uuid4()
+        old_doc_id = uuid4()
+        new_doc = Document(namespace_id=namespace_id, content="b")
+        new_chunks: list[Chunk] = []
+
+        src_id = uuid4()
+        tgt_id = uuid4()
+        rel_id = uuid4()
+
+        # Neo4j stores "KNOWS" (upper); caller passes "Knows" (mixed case).
+        new_rel = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=src_id,
+            target_entity_id=tgt_id,
+            relationship_type="Knows",  # sanitizes to "KNOWS"
+            source_document_ids=[new_doc.id],
+        )
+
+        rel_backend = MagicMock()
+        rel_backend.update_document = AsyncMock(return_value=new_doc)
+
+        vec_backend = MagicMock()
+        vec_backend.delete_chunks_by_document = AsyncMock(return_value=0)
+        vec_backend.create_chunks_batch = AsyncMock(return_value=new_chunks)
+        del vec_backend.upsert_entities_batch
+
+        graph_backend = MagicMock()
+        graph_backend.fetch_document_extraction_state = AsyncMock(
+            return_value=(
+                [],
+                [
+                    {
+                        "id": str(rel_id),
+                        "source_entity_id": str(src_id),
+                        "target_entity_id": str(tgt_id),
+                        "relationship_type": "KNOWS",  # sanitized form from Cypher
+                        "source_document_count": 2,
+                    }
+                ],
+            )
+        )
+        graph_backend.retire_orphaned_entities_batch = AsyncMock(return_value=0)
+        graph_backend.retire_orphaned_relationships_batch = AsyncMock(return_value=0)
+        graph_backend.remap_source_document_ids_batch = AsyncMock()
+        graph_backend.upsert_entities_batch = AsyncMock(return_value=[])
+        graph_backend.create_relationships_batch = AsyncMock(return_value=0)
+
+        coord, _ = _make_coordinator_with_fake_txn(relational=rel_backend, vector=vec_backend, graph=graph_backend)
+
+        result = await coord.replace_document_extraction(
+            namespace_id=namespace_id,
+            old_document_id=old_doc_id,
+            new_document=new_doc,
+            new_chunks=new_chunks,
+            new_entities=[],
+            new_relationships=[new_rel],
+        )
+
+        # Classified as SURVIVOR → remap called, not retire, not create.
+        graph_backend.retire_orphaned_relationships_batch.assert_not_awaited()
+        graph_backend.create_relationships_batch.assert_not_awaited()
+        remap_kwargs = graph_backend.remap_source_document_ids_batch.await_args.kwargs
+        assert len(remap_kwargs["relationship_survivors"]) == 1
+        assert remap_kwargs["relationship_survivors"][0]["relationship_id"] == str(rel_id)
+        assert result.relationships_retired == 0
+        assert result.relationships_created == 0
+
+    @pytest.mark.asyncio
     async def test_no_prefetch_state_skips_retire_and_remap(self) -> None:
         """When there is no old graph state, only PG work + net-new upsert run."""
         namespace_id = uuid4()
