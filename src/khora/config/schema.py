@@ -189,6 +189,38 @@ class SurrealDBConfig(BaseModel):
     sync_data: bool = Field(default=True, description="Enable SURREAL_SYNC_DATA for crash-safe writes")
 
 
+class SQLiteLanceConfig(BaseModel):
+    """SQLite + LanceDB embedded unified backend configuration (DYT-2724).
+
+    Pairs an on-disk SQLite database (graph + relational + event store)
+    with a sibling LanceDB directory (vector search). Zero infrastructure —
+    both backends run in-process.
+    """
+
+    backend: Literal["sqlite_lance"] = "sqlite_lance"
+    db_path: str = Field(default="./khora.db", description="SQLite database path")
+    lance_path: str | None = Field(
+        default=None,
+        description="LanceDB directory path. When None, derived from db_path (sibling .lance dir).",
+    )
+    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+    use_halfvec: bool = Field(
+        default=False,
+        description="Store embeddings as float16 to halve index size (minor recall loss).",
+    )
+    lance_index: Literal["auto", "ivf_pq", "hnsw", "brute"] = Field(
+        default="auto",
+        description="Vector index type. 'auto' picks based on table size.",
+    )
+    ivf_partitions: int | None = Field(
+        default=None,
+        description="IVF partition count (ivf_pq only). None = auto from row count.",
+    )
+    hnsw_m: int = Field(default=16, description="HNSW M parameter (max connections per layer)")
+
+    model_config = {"extra": "forbid"}
+
+
 class AGEConfig(BaseModel):
     """PostgreSQL AGE graph backend configuration.
 
@@ -303,6 +335,12 @@ class StorageSettings(BaseSettings):
     surrealdb: SurrealDBConfig | None = Field(
         default=None,
         description="SurrealDB unified backend configuration (used when backend='surrealdb')",
+    )
+
+    # SQLite + LanceDB unified backend config (used when backend='sqlite_lance')
+    sqlite_lance: SQLiteLanceConfig | None = Field(
+        default=None,
+        description="SQLite + LanceDB unified backend configuration (used when backend='sqlite_lance')",
     )
 
     # PostgreSQL (relational)
