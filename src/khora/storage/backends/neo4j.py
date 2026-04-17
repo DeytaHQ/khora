@@ -2724,3 +2724,53 @@ RETURN current.id AS id
 
             async with self._session() as session:
                 await session.execute_write(_remap_relationships)
+
+    async def fetch_document_extraction_state(
+        self, document_id: UUID
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Fetch the entity and relationship state linked to a document.
+
+        Used by ``StorageCoordinator.replace_document_extraction()`` to compute
+        retirement / survivor sets in Python before issuing graph mutations.
+
+        Returns:
+            (entities, relationships) where each record carries the identity
+            fields and the current ``source_document_ids`` length sufficient to
+            apply the ADR-056 §3/§4 retirement filter.
+        """
+        doc_id_str = str(document_id)
+
+        async def _fetch_entities(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+            result = await tx.run(
+                """
+                MATCH (e:Entity)
+                WHERE $doc_id IN e.source_document_ids
+                RETURN e.id AS id,
+                       e.name AS name,
+                       e.entity_type AS entity_type,
+                       e.namespace_id AS namespace_id,
+                       size(e.source_document_ids) AS source_document_count
+                """,
+                doc_id=doc_id_str,
+            )
+            return await result.data()
+
+        async def _fetch_relationships(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+            result = await tx.run(
+                """
+                MATCH (src:Entity)-[rel]->(tgt:Entity)
+                WHERE $doc_id IN rel.source_document_ids
+                RETURN rel.id AS id,
+                       src.id AS source_entity_id,
+                       tgt.id AS target_entity_id,
+                       type(rel) AS relationship_type,
+                       size(rel.source_document_ids) AS source_document_count
+                """,
+                doc_id=doc_id_str,
+            )
+            return await result.data()
+
+        async with self._session() as session:
+            entities = await session.execute_read(_fetch_entities)
+            relationships = await session.execute_read(_fetch_relationships)
+        return entities, relationships

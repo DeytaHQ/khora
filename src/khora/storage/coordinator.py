@@ -13,9 +13,9 @@ import time as _time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -110,6 +110,26 @@ class TransactionContext:
         """
         async with self.session.begin_nested():
             yield self
+
+
+@dataclass(frozen=True)
+class ReplaceResult:
+    """Outcome of ``StorageCoordinator.replace_document_extraction()``.
+
+    Per ADR-056 §API Contracts: counts describe the write footprint of a
+    successful document-replacement lifecycle — chunks hard-replaced in
+    pgvector, new entities/relationships persisted to the graph, and
+    orphaned/surviving graph state retired or remapped.
+    """
+
+    document_id: UUID
+    chunks_deleted: int
+    chunks_created: int
+    entities_created: int
+    entities_updated: int
+    entities_retired: int
+    relationships_created: int
+    relationships_retired: int
 
 
 @dataclass
@@ -410,6 +430,222 @@ class StorageCoordinator:
             await self.vector.delete_chunks_by_document(document_id)
 
         return await self.relational.delete_document(document_id)
+
+    @_record_storage_op("replace_document_extraction", "coordinator")
+    async def replace_document_extraction(
+        self,
+        *,
+        namespace_id: UUID,
+        old_document_id: UUID,
+        new_document: Document,
+        new_chunks: list[Chunk],
+        new_entities: list[Entity],
+        new_relationships: list[Relationship],
+    ) -> ReplaceResult:
+        """Replace the extraction footprint of a document (ADR-056).
+
+        Orchestrates the document-replacement lifecycle:
+
+        1. Inside a single pgvector transaction: update the document row,
+           hard-delete old chunks, and insert the new pre-embedded chunks.
+           Embedding is assumed to have happened before this call.
+        2. After Postgres commits, run graph-side retirement / remap against
+           the graph backend — best-effort, not part of the PG transaction.
+           Orphaned entities (ADR-056 §3) are snapshotted into
+           ``:EntityVersion``; orphaned relationships (§4) get ``valid_until``
+           stamped in place; survivors (§5) have their ``source_document_ids``
+           arrays swapped from old to new doc UUID. Net-new entities and
+           relationships are upserted/created via the existing MERGE paths.
+        3. On success the document is marked ``COMPLETED``; on any exception
+           it is marked ``FAILED`` with the error string and the exception is
+           re-raised unwrapped, mirroring ``remember()`` (``ingest.py:1356``).
+           A ``FAILED`` document self-heals on the next successful replace
+           against the same ``external_id`` per ADR §Decision #8.
+
+        Args:
+            namespace_id: Namespace owning the document.
+            old_document_id: The document being replaced (its chunks are
+                deleted and its graph footprint is retired / remapped).
+            new_document: The updated ``Document`` row. The same ``id`` may
+                be reused across replacements; the row is updated in place.
+            new_chunks: Pre-embedded chunks for the replacement content.
+            new_entities: Entities extracted from the replacement content.
+            new_relationships: Relationships extracted from the replacement
+                content.
+
+        Returns:
+            A ``ReplaceResult`` with the write-footprint counts.
+        """
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        if not self.vector:
+            raise RuntimeError("Vector backend not configured")
+        if not self.graph:
+            raise RuntimeError("Graph backend not configured")
+
+        try:
+            # 1. Prefetch old graph state and compute retire / survive sets
+            #    BEFORE mutating anything.  Doing this up front keeps the
+            #    Python-side filter aligned with the Cypher in DYT-2668/2669.
+            fetch = getattr(self.graph, "fetch_document_extraction_state", None)
+            if fetch is None:
+                old_entity_records: list[dict[str, Any]] = []
+                old_relationship_records: list[dict[str, Any]] = []
+            else:
+                old_entity_records, old_relationship_records = await fetch(old_document_id)
+
+            new_entity_keys = {(e.name, e.entity_type) for e in new_entities}
+            new_relationship_keys = {
+                (r.source_entity_id, r.target_entity_id, r.relationship_type) for r in new_relationships
+            }
+            old_doc_str = str(old_document_id)
+            new_doc_str = str(new_document.id)
+            retired_at_iso = datetime.now(UTC).isoformat()
+
+            entity_retirement_rows: list[dict[str, str]] = []
+            entity_survivor_keys: set[tuple[str, str]] = set()
+            entity_survivor_remap_rows: list[dict[str, str]] = []
+            for rec in old_entity_records:
+                name = rec["name"]
+                entity_type = rec["entity_type"]
+                key = (name, entity_type)
+                if key in new_entity_keys:
+                    entity_survivor_keys.add(key)
+                    entity_survivor_remap_rows.append(
+                        {
+                            "entity_id": rec["id"],
+                            "old_doc_id": old_doc_str,
+                            "new_doc_id": new_doc_str,
+                        }
+                    )
+                elif rec["source_document_count"] == 1:
+                    entity_retirement_rows.append(
+                        {
+                            "current_id": rec["id"],
+                            "snapshot_id": str(uuid4()),
+                            "namespace_id": rec["namespace_id"],
+                            "retired_at": retired_at_iso,
+                        }
+                    )
+
+            # For relationships, identity is (src_entity, tgt_entity, type) —
+            # Cypher stores ``type(rel)`` after label sanitization, but the
+            # Relationship model preserves the original string, so we match
+            # on raw ``relationship_type`` against the prefetched records.
+            relationship_retirement_rows: list[dict[str, Any]] = []
+            relationship_survivor_remap_rows: list[dict[str, str]] = []
+            net_new_relationship_ids: set[UUID] = {r.id for r in new_relationships}
+            for rec in old_relationship_records:
+                rel_id = rec["id"]
+                rel_key = (
+                    UUID(rec["source_entity_id"]),
+                    UUID(rec["target_entity_id"]),
+                    rec["relationship_type"],
+                )
+                if rel_key in new_relationship_keys:
+                    relationship_survivor_remap_rows.append(
+                        {
+                            "relationship_id": rel_id,
+                            "old_doc_id": old_doc_str,
+                            "new_doc_id": new_doc_str,
+                        }
+                    )
+                elif rec["source_document_count"] == 1:
+                    relationship_retirement_rows.append(
+                        {
+                            "relationship_id": UUID(rel_id),
+                            "old_doc_id": old_document_id,
+                            "retired_at": datetime.now(UTC),
+                        }
+                    )
+
+            # 2. Postgres transaction: atomic chunk hard-replace.
+            #    Embedding (OpenAI roundtrip) happened before this block — the
+            #    transaction deliberately wraps only DB work (ADR §Performance).
+            async with self.transaction() as txn:
+                await self.relational.update_document(new_document, session=txn.session)  # type: ignore[unresolved-attribute]
+                chunks_deleted = await self.vector.delete_chunks_by_document(old_document_id, session=txn.session)
+                await self.vector.create_chunks_batch(new_chunks, session=txn.session)  # type: ignore[unresolved-attribute]
+
+            # 3. Graph-side retirement / remap (after PG commits).  Order:
+            #    retire -> remap -> upsert.  Retirement snapshots the current
+            #    source_document_ids before we change them; remap cleanly
+            #    swaps old->new on survivors before upsert would append
+            #    new_doc_id a second time.  Net-new entities/relationships
+            #    are those with keys absent from the old extraction.
+            entities_retired = 0
+            if entity_retirement_rows:
+                entities_retired = await self.graph.retire_orphaned_entities_batch(  # type: ignore[unresolved-attribute]
+                    entity_retirement_rows
+                )
+
+            relationships_retired = 0
+            if relationship_retirement_rows:
+                relationships_retired = await self.graph.retire_orphaned_relationships_batch(  # type: ignore[unresolved-attribute]
+                    relationship_retirement_rows
+                )
+
+            if entity_survivor_remap_rows or relationship_survivor_remap_rows:
+                await self.graph.remap_source_document_ids_batch(  # type: ignore[unresolved-attribute]
+                    entity_survivors=entity_survivor_remap_rows,
+                    relationship_survivors=relationship_survivor_remap_rows,
+                )
+
+            net_new_entities = [e for e in new_entities if (e.name, e.entity_type) not in entity_survivor_keys]
+            entities_created = 0
+            entities_updated = len(entity_survivor_remap_rows)
+            if net_new_entities:
+                upsert_results = await self.upsert_entities_batch(namespace_id, net_new_entities)
+                entities_created = sum(1 for _, is_new in upsert_results if is_new)
+                entities_updated += sum(1 for _, is_new in upsert_results if not is_new)
+
+            old_relationship_keys = {
+                (
+                    UUID(rec["source_entity_id"]),
+                    UUID(rec["target_entity_id"]),
+                    rec["relationship_type"],
+                )
+                for rec in old_relationship_records
+            }
+            net_new_relationships = [
+                r
+                for r in new_relationships
+                if (r.source_entity_id, r.target_entity_id, r.relationship_type) not in old_relationship_keys
+            ]
+            relationships_created = 0
+            if net_new_relationships:
+                relationships_created = await self.create_relationships_batch(net_new_relationships)
+            # Survivor relationships are accounted for implicitly via remap;
+            # their id is preserved from the old graph state.
+            _ = net_new_relationship_ids  # silence unused — retained for future accounting
+
+            new_document.mark_completed(len(new_chunks), len(new_entities))
+            await self.relational.update_document(new_document)
+
+            return ReplaceResult(
+                document_id=new_document.id,
+                chunks_deleted=chunks_deleted,
+                chunks_created=len(new_chunks),
+                entities_created=entities_created,
+                entities_updated=entities_updated,
+                entities_retired=entities_retired,
+                relationships_created=relationships_created,
+                relationships_retired=relationships_retired,
+            )
+
+        except Exception as e:
+            # Mirrors remember() (pipelines/flows/ingest.py:1356-1359):
+            # mark FAILED with error string and re-raise unwrapped so the
+            # caller observes the original exception and the next successful
+            # replace can self-heal the row (ADR §Decision #8).
+            new_document.mark_failed(str(e))
+            try:
+                await self.relational.update_document(new_document)
+            except Exception as persist_error:
+                logger.error(
+                    f"Failed to persist FAILED status after replace_document_extraction error: {persist_error}"
+                )
+            raise
 
     async def count_documents(self, namespace_id: UUID) -> int:
         """Count documents in a namespace.
