@@ -27,15 +27,27 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    with op.get_context().autocommit_block():
+    if op.get_bind().dialect.name == "postgresql":
+        with op.get_context().autocommit_block():
+            op.execute(
+                text(
+                    "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_chunks_ns_temporal "
+                    "ON chunks (namespace_id, (COALESCE(source_timestamp, created_at)))"
+                )
+            )
+    else:
+        # SQLite supports expression indexes but not CONCURRENTLY.
         op.execute(
             text(
-                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_chunks_ns_temporal "
-                "ON chunks (namespace_id, (COALESCE(source_timestamp, created_at)))"
+                "CREATE INDEX IF NOT EXISTS ix_chunks_ns_temporal "
+                "ON chunks (namespace_id, COALESCE(source_timestamp, created_at))"
             )
         )
 
 
 def downgrade() -> None:
-    with op.get_context().autocommit_block():
-        op.execute(text("DROP INDEX CONCURRENTLY IF EXISTS ix_chunks_ns_temporal"))
+    if op.get_bind().dialect.name == "postgresql":
+        with op.get_context().autocommit_block():
+            op.execute(text("DROP INDEX CONCURRENTLY IF EXISTS ix_chunks_ns_temporal"))
+    else:
+        op.execute(text("DROP INDEX IF EXISTS ix_chunks_ns_temporal"))

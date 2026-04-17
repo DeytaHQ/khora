@@ -21,28 +21,53 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.alter_column(
-        "documents",
-        "extraction_config_hash",
-        existing_type=sa.String(64),
-        type_=sa.String(255),
-        existing_nullable=True,
-    )
+    if op.get_bind().dialect.name == "postgresql":
+        op.alter_column(
+            "documents",
+            "extraction_config_hash",
+            existing_type=sa.String(64),
+            type_=sa.String(255),
+            existing_nullable=True,
+        )
+    else:
+        # SQLite ignores VARCHAR length anyway (stored as TEXT), but batch mode
+        # keeps the migration consistent with Alembic's expectations.
+        with op.batch_alter_table("documents") as batch:
+            batch.alter_column(
+                "extraction_config_hash",
+                existing_type=sa.String(64),
+                type_=sa.String(255),
+                existing_nullable=True,
+            )
 
 
 def downgrade() -> None:
-    # Truncate any hashes longer than 64 chars before shrinking the column,
-    # so the ALTER doesn't fail or silently truncate on strict databases.
-    op.execute(
-        sa.text(
+    # SQLite lacks LEFT(); use SUBSTR. Run the truncate on either dialect.
+    if op.get_bind().dialect.name == "postgresql":
+        truncate_sql = (
             "UPDATE documents SET extraction_config_hash = LEFT(extraction_config_hash, 64) "
             "WHERE LENGTH(extraction_config_hash) > 64"
         )
-    )
-    op.alter_column(
-        "documents",
-        "extraction_config_hash",
-        existing_type=sa.String(255),
-        type_=sa.String(64),
-        existing_nullable=True,
-    )
+    else:
+        truncate_sql = (
+            "UPDATE documents SET extraction_config_hash = SUBSTR(extraction_config_hash, 1, 64) "
+            "WHERE LENGTH(extraction_config_hash) > 64"
+        )
+    op.execute(sa.text(truncate_sql))
+
+    if op.get_bind().dialect.name == "postgresql":
+        op.alter_column(
+            "documents",
+            "extraction_config_hash",
+            existing_type=sa.String(255),
+            type_=sa.String(64),
+            existing_nullable=True,
+        )
+    else:
+        with op.batch_alter_table("documents") as batch:
+            batch.alter_column(
+                "extraction_config_hash",
+                existing_type=sa.String(255),
+                type_=sa.String(64),
+                existing_nullable=True,
+            )

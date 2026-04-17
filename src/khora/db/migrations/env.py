@@ -42,11 +42,24 @@ def _get_url() -> str:
     # Programmatic mode: URL injected via config attribute
     url = config.attributes.get("database_url", "")
     if not url:
+        # CLI mode: check sqlalchemy.url (set via alembic.ini or Config.set_main_option)
+        url = config.get_main_option("sqlalchemy.url") or ""
+        # Ignore the placeholder used in alembic.ini
+        if url.startswith("driver://"):
+            url = ""
+    if not url:
         # CLI mode: fall back to env var
         url = os.getenv("KHORA_DATABASE_URL", "")
     if not url:
         raise ValueError("No database URL. Set KHORA_DATABASE_URL or pass database_url to run_migrations().")
-    # Already normalized — nothing to do
+
+    # SQLite: normalize to aiosqlite for async engine
+    if url.startswith("sqlite+aiosqlite://"):
+        return url
+    if url.startswith("sqlite://"):
+        return url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+
+    # Postgres: already normalized — nothing to do
     if "+asyncpg" in url:
         return url
     # Normalize to asyncpg
@@ -99,29 +112,38 @@ def _acquire_advisory_lock(
 
 
 def do_run_migrations(connection: Connection) -> None:
-    """Run migrations with advisory lock."""
+    """Run migrations with advisory lock (Postgres only)."""
+    dialect_name = connection.dialect.name
+    is_postgres = dialect_name == "postgresql"
+    is_sqlite = dialect_name == "sqlite"
+
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
         version_table=VERSION_TABLE,
+        # SQLite requires batch mode for ALTER operations that involve FKs/constraints
+        render_as_batch=is_sqlite,
     )
 
     with context.begin_transaction():
-        _acquire_advisory_lock(connection)
+        if is_postgres:
+            _acquire_advisory_lock(connection)
 
         # Ahead-detection: skip if DB is at a revision this version doesn't know.
         # Use information_schema.tables (SQL-standard, respects search_path) to check
         # existence before querying the version table. Querying a missing table inside
         # an explicit transaction puts PostgreSQL into ABORTED state, preventing
         # context.run_migrations() from running (InFailedSQLTransactionError). (DYT-1447)
-        #
-        # Note: a SAVEPOINT-based approach (SAVEPOINT + SELECT + ROLLBACK TO SAVEPOINT on
-        # failure) is an alternative that avoids the existence check entirely and would
-        # reduce the call count by one. Consider as a future simplification.
-        table_exists = connection.execute(
-            text("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = :table)"),
-            {"table": VERSION_TABLE},
-        ).scalar()
+        if is_sqlite:
+            table_exists = connection.execute(
+                text("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=:table)"),
+                {"table": VERSION_TABLE},
+            ).scalar()
+        else:
+            table_exists = connection.execute(
+                text("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = :table)"),
+                {"table": VERSION_TABLE},
+            ).scalar()
 
         current_rev = None
         if table_exists:
@@ -171,7 +193,17 @@ async def run_async_migrations() -> None:
     connectable = create_async_engine(url, poolclass=pool.NullPool)
 
     async with connectable.connect() as connection:
+        # SQLite: enable foreign keys so FK constraints behave consistently
+        # with Postgres during batch ALTER operations.
+        if connection.dialect.name == "sqlite":
+            await connection.execute(text("PRAGMA foreign_keys = ON"))
         await connection.run_sync(do_run_migrations)
+        # Explicitly commit — Alembic's "non-transactional DDL" path on SQLite
+        # doesn't issue COMMIT, and SQLAlchemy's async connection does not
+        # auto-commit on close. Without this, all DDL is lost. Safe on Postgres:
+        # the surrounding context.begin_transaction() already commits, and this
+        # is a no-op after commit.
+        await connection.commit()
 
     await connectable.dispose()
 

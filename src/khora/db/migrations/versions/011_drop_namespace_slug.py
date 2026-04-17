@@ -27,32 +27,39 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _is_postgres() -> bool:
+    return op.get_bind().dialect.name == "postgresql"
+
+
 def upgrade() -> None:
-    # =========================================================================
-    # Step 1: Drop slug unique constraint (created in migration 010)
-    # =========================================================================
-    op.drop_constraint("uq_namespace_slug_version", "memory_namespaces", type_="unique")
+    is_postgres = _is_postgres()
 
     # =========================================================================
     # Step 2: Drop slug partial index (created in migration 010)
     # =========================================================================
     op.drop_index("idx_namespace_slug_active", table_name="memory_namespaces")
 
-    # =========================================================================
-    # Step 3: Drop the slug column
-    # =========================================================================
-    # Drop the auto-created index on slug first, then the column.
+    # Step 3a: Drop auto-created index on slug before dropping constraint/column
     op.drop_index("ix_memory_namespaces_slug", table_name="memory_namespaces")
-    op.drop_column("memory_namespaces", "slug")
 
-    # =========================================================================
-    # Step 4: Drop name and description columns
-    # =========================================================================
-    op.drop_column("memory_namespaces", "name")
-    op.drop_column("memory_namespaces", "description")
+    if is_postgres:
+        op.drop_constraint("uq_namespace_slug_version", "memory_namespaces", type_="unique")
+        op.drop_column("memory_namespaces", "slug")
+        op.drop_column("memory_namespaces", "name")
+        op.drop_column("memory_namespaces", "description")
+    else:
+        # SQLite: batch mode rewrites the table; drop constraint + all three
+        # columns in one pass to avoid multiple table rewrites.
+        with op.batch_alter_table("memory_namespaces") as batch:
+            batch.drop_constraint("uq_namespace_slug_version", type_="unique")
+            batch.drop_column("slug")
+            batch.drop_column("name")
+            batch.drop_column("description")
 
 
 def downgrade() -> None:
+    if not _is_postgres():
+        return
     # Reverse step 4: Re-add name and description columns
     op.add_column(
         "memory_namespaces",

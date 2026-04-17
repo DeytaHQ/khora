@@ -29,13 +29,21 @@ def upgrade() -> None:
     op.add_column("chunks", Column("source_timestamp", DateTime(timezone=True), nullable=True))
     op.add_column("documents", Column("source_timestamp", DateTime(timezone=True), nullable=True))
 
-    # Index for source_timestamp temporal queries
-    op.create_index(
-        "ix_chunks_source_ts",
-        "chunks",
-        ["namespace_id", "source_timestamp"],
-        postgresql_where=text("source_timestamp IS NOT NULL"),
-    )
+    # Index for source_timestamp temporal queries (partial index on both dialects)
+    if op.get_bind().dialect.name == "postgresql":
+        op.create_index(
+            "ix_chunks_source_ts",
+            "chunks",
+            ["namespace_id", "source_timestamp"],
+            postgresql_where=text("source_timestamp IS NOT NULL"),
+        )
+    else:
+        op.create_index(
+            "ix_chunks_source_ts",
+            "chunks",
+            ["namespace_id", "source_timestamp"],
+            sqlite_where=text("source_timestamp IS NOT NULL"),
+        )
 
 
 def downgrade() -> None:

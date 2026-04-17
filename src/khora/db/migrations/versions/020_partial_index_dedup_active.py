@@ -22,12 +22,20 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     """Add partial index for dedup excluding failed docs."""
-    op.create_index(
-        "ix_documents_namespace_checksum_active",
-        "documents",
-        ["namespace_id", "checksum"],
-        postgresql_where=text("status != 'failed'"),
-    )
+    if op.get_bind().dialect.name == "postgresql":
+        op.create_index(
+            "ix_documents_namespace_checksum_active",
+            "documents",
+            ["namespace_id", "checksum"],
+            postgresql_where=text("status != 'failed'"),
+        )
+    else:
+        op.create_index(
+            "ix_documents_namespace_checksum_active",
+            "documents",
+            ["namespace_id", "checksum"],
+            sqlite_where=text("status != 'failed'"),
+        )
 
 
 def downgrade() -> None:

@@ -39,7 +39,35 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _is_postgres() -> bool:
+    return op.get_bind().dialect.name == "postgresql"
+
+
 def upgrade() -> None:
+    is_postgres = _is_postgres()
+
+    if not is_postgres:
+        # SQLite: on fresh install there are no duplicates to dedup (array_agg
+        # + unnest are Postgres-only). Just enforce the unique constraint and
+        # skip the khora_chunks table (Postgres skeleton engine only).
+        op.drop_index("ix_entities_namespace_name_type", table_name="entities", if_exists=True)
+        with op.batch_alter_table("entities") as batch:
+            batch.create_unique_constraint("uq_entities_namespace_name_type", ["namespace_id", "name", "entity_type"])
+        # Partial indexes for entity temporal filters
+        op.create_index(
+            "ix_entities_valid_from",
+            "entities",
+            ["valid_from"],
+            sqlite_where=text("valid_from IS NOT NULL"),
+        )
+        op.create_index(
+            "ix_entities_valid_until",
+            "entities",
+            ["valid_until"],
+            sqlite_where=text("valid_until IS NOT NULL"),
+        )
+        return
+
     # =========================================================================
     # D-4: Entity deduplication
     # =========================================================================
@@ -182,15 +210,22 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    is_postgres = _is_postgres()
+
     # Drop temporal partial indexes
     op.execute(text("DROP INDEX IF EXISTS ix_entities_valid_until"))
     op.execute(text("DROP INDEX IF EXISTS ix_entities_valid_from"))
 
-    # Drop khora_chunks composite index
-    op.execute(text("DROP INDEX IF EXISTS ix_khora_chunks_ns_doc"))
+    # Drop khora_chunks composite index (Postgres-only table)
+    if is_postgres:
+        op.execute(text("DROP INDEX IF EXISTS ix_khora_chunks_ns_doc"))
 
     # Drop unique constraint and restore the non-unique index
-    op.drop_constraint("uq_entities_namespace_name_type", "entities", type_="unique")
+    if is_postgres:
+        op.drop_constraint("uq_entities_namespace_name_type", "entities", type_="unique")
+    else:
+        with op.batch_alter_table("entities") as batch:
+            batch.drop_constraint("uq_entities_namespace_name_type", type_="unique")
     op.create_index(
         "ix_entities_namespace_name_type",
         "entities",

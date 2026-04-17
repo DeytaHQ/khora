@@ -33,7 +33,13 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _is_postgres() -> bool:
+    return op.get_bind().dialect.name == "postgresql"
+
+
 def upgrade() -> None:
+    is_postgres = _is_postgres()
+
     # =========================================================================
     # Step 1: Pre-check for duplicate slugs across workspaces
     # =========================================================================
@@ -63,33 +69,46 @@ def upgrade() -> None:
     # =========================================================================
     # Step 3: Drop inherited_from columns from permissions
     # =========================================================================
-    op.drop_column("permissions", "inherited_from_type")
-    op.drop_column("permissions", "inherited_from_id")
+    if is_postgres:
+        op.drop_column("permissions", "inherited_from_type")
+        op.drop_column("permissions", "inherited_from_id")
+    else:
+        with op.batch_alter_table("permissions") as batch:
+            batch.drop_column("inherited_from_type")
+            batch.drop_column("inherited_from_id")
 
     # =========================================================================
     # Step 4: Drop old indexes on memory_namespaces that reference workspace_id
     # =========================================================================
     # Partial index: idx_namespace_active ON (workspace_id, slug) WHERE is_active
     op.drop_index("idx_namespace_active", table_name="memory_namespaces")
-    # Unique constraint: uq_namespace_workspace_slug_version ON (workspace_id, slug, version)
-    op.drop_constraint("uq_namespace_workspace_slug_version", "memory_namespaces", type_="unique")
-    # Auto-created index on workspace_id column
-    op.drop_index("ix_memory_namespaces_workspace_id", table_name="memory_namespaces")
 
-    # =========================================================================
-    # Step 5: Remove workspace_id FK and column from memory_namespaces
-    # =========================================================================
-    op.drop_constraint("memory_namespaces_workspace_id_fkey", "memory_namespaces", type_="foreignkey")
-    op.drop_column("memory_namespaces", "workspace_id")
+    if is_postgres:
+        # Unique constraint: uq_namespace_workspace_slug_version ON (workspace_id, slug, version)
+        op.drop_constraint("uq_namespace_workspace_slug_version", "memory_namespaces", type_="unique")
+        # Auto-created index on workspace_id column
+        op.drop_index("ix_memory_namespaces_workspace_id", table_name="memory_namespaces")
+        # Step 5: Remove workspace_id FK and column
+        op.drop_constraint("memory_namespaces_workspace_id_fkey", "memory_namespaces", type_="foreignkey")
+        op.drop_column("memory_namespaces", "workspace_id")
+    else:
+        # SQLite: batch mode rewrites the table and lets us drop constraint/FK/column together.
+        op.drop_index("ix_memory_namespaces_workspace_id", table_name="memory_namespaces")
+        with op.batch_alter_table("memory_namespaces") as batch:
+            batch.drop_constraint("uq_namespace_workspace_slug_version", type_="unique")
+            batch.drop_column("workspace_id")
 
     # =========================================================================
     # Step 6: Add tenancy_mode column
     # =========================================================================
+    tenancy_type = (
+        postgresql.ENUM("shared", "isolated", name="tenancy_mode", create_type=False) if is_postgres else sa.String(64)
+    )
     op.add_column(
         "memory_namespaces",
         sa.Column(
             "tenancy_mode",
-            postgresql.ENUM("shared", "isolated", name="tenancy_mode", create_type=False),
+            tenancy_type,
             server_default="shared",
             nullable=False,
         ),
@@ -98,17 +117,29 @@ def upgrade() -> None:
     # =========================================================================
     # Step 7: Add new unique constraint UNIQUE(slug, version)
     # =========================================================================
-    op.create_unique_constraint("uq_namespace_slug_version", "memory_namespaces", ["slug", "version"])
+    if is_postgres:
+        op.create_unique_constraint("uq_namespace_slug_version", "memory_namespaces", ["slug", "version"])
+    else:
+        with op.batch_alter_table("memory_namespaces") as batch:
+            batch.create_unique_constraint("uq_namespace_slug_version", ["slug", "version"])
 
     # =========================================================================
     # Step 8: Add new partial index
     # =========================================================================
-    op.create_index(
-        "idx_namespace_slug_active",
-        "memory_namespaces",
-        ["slug"],
-        postgresql_where=sa.text("is_active = true"),
-    )
+    if is_postgres:
+        op.create_index(
+            "idx_namespace_slug_active",
+            "memory_namespaces",
+            ["slug"],
+            postgresql_where=sa.text("is_active = true"),
+        )
+    else:
+        op.create_index(
+            "idx_namespace_slug_active",
+            "memory_namespaces",
+            ["slug"],
+            sqlite_where=sa.text("is_active = 1"),
+        )
 
     # =========================================================================
     # Step 9: Drop workspaces table
@@ -126,6 +157,12 @@ def downgrade() -> None:
     # Repeated downgrade->upgrade cycles may produce inconsistent state because
     # the upgrade deletes org/workspace permission rows and drops the tables,
     # and the downgrade creates synthetic defaults that won't match original data.
+    #
+    # SQLite path: only the table/column/index operations run; JSONB/ENUM on
+    # SQLite are substituted by JSON/VARCHAR, but we don't bother reconstructing
+    # the emergency state.
+    if not _is_postgres():
+        return
 
     # Reverse step 10: Recreate organizations table
     op.create_table(
