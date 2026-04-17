@@ -1503,6 +1503,89 @@ class Neo4jBackend(GraphBackendBase):
         )
         return results
 
+    async def retire_orphaned_entities_batch(
+        self,
+        retirement_rows: list[dict[str, str]],
+    ) -> int:
+        """Snapshot orphaned entities into :EntityVersion nodes on document replacement.
+
+        Each dict in *retirement_rows* must contain keys ``current_id``
+        (str UUID of the live :Entity), ``namespace_id`` (str UUID of the
+        namespace), ``snapshot_id`` (str UUID for the new :EntityVersion
+        node), and ``retired_at`` (ISO-8601 datetime string).
+
+        Unlike ``_VERSION_CYPHER`` (which snapshots *pre-fetch* values on
+        attribute change), this copies the *current* node properties — correct
+        for document replacement where the entity itself hasn't changed, only
+        its source document is being replaced.
+
+        .. note::
+           This method does **not** acquire ``_entity_key_gate``.  The
+           coordinator (``replace_document_extraction``) must serialize
+           retirement with concurrent ``upsert_entities_batch`` calls on
+           overlapping entity keys.
+
+        Returns the number of entities retired (may be less than
+        ``len(retirement_rows)`` if some ``current_id`` values don't match).
+        """
+        if not retirement_rows:
+            return 0
+
+        _RETIRE_CYPHER = """\
+UNWIND $retirement_rows AS r
+MATCH (current:Entity {id: r.current_id, namespace_id: r.namespace_id})
+CREATE (old:EntityVersion {
+    id: r.snapshot_id,
+    namespace_id: current.namespace_id,
+    name: current.name,
+    entity_type: current.entity_type,
+    description: current.description,
+    attributes: current.attributes,
+    source_document_ids: current.source_document_ids,
+    source_chunk_ids: current.source_chunk_ids,
+    mention_count: current.mention_count,
+    valid_from: current.valid_from,
+    valid_until: current.valid_until,
+    confidence: current.confidence,
+    metadata: current.metadata,
+    created_at: current.created_at,
+    updated_at: r.retired_at,
+    version_valid_from: coalesce(current.version_valid_from, r.retired_at),
+    version_valid_to: r.retired_at,
+    retirement_reason: 'document_replaced'
+})
+CREATE (current)-[:SUPERSEDES {
+    superseded_at: r.retired_at,
+    reason: 'document_replaced'
+}]->(old)
+SET current.valid_until = r.retired_at,
+    current.version_valid_to = r.retired_at,
+    current.updated_at = r.retired_at
+RETURN current.id AS id
+"""
+
+        async def _retire_tx(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+            result = await tx.run(_RETIRE_CYPHER, retirement_rows=retirement_rows)
+            return await result.data()
+
+        _t0 = _time.perf_counter()
+        async with self._session() as session:
+            records = await session.execute_write(_retire_tx)
+        _elapsed_ms = (_time.perf_counter() - _t0) * 1000
+
+        retired_count = len(records)
+        with trace_span(
+            "khora.neo4j.retire_orphaned_entities_batch",
+            input_count=len(retirement_rows),
+            retired_count=retired_count,
+            elapsed_ms=round(_elapsed_ms, 2),
+        ):
+            pass
+        logger.debug(
+            f"Retired {retired_count} orphaned entities ({len(retirement_rows)} requested, {_elapsed_ms:.0f}ms)"
+        )
+        return retired_count
+
     async def create_relationships_batch(
         self,
         relationships: list[Relationship],
