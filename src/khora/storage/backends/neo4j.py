@@ -656,6 +656,8 @@ class Neo4jBackend(GraphBackendBase):
         #          LLM prompt examples, expansion modules (relationship_inferrer,
         #          cross_tool_unifier).
         rel_indexes = [
+            # type-independent relationship id index (used by remap, get, delete)
+            "CREATE INDEX rel_id IF NOT EXISTS FOR ()-[r]-() ON (r.id)",
             # --- namespace_id on all known relationship types ---
             # Core / general
             "CREATE INDEX rel_namespace IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.namespace_id)",

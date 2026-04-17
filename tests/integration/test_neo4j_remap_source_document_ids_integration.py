@@ -133,6 +133,132 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             await backend.disconnect()
 
     @pytest.mark.asyncio
+    async def test_entity_remap_deduplicates_old_doc_id(self) -> None:
+        """Remap removes all occurrences of old_doc_id and appends one new_doc_id."""
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        namespace_id = uuid4()
+        doc_a, doc_b, doc_c = uuid4(), uuid4(), uuid4()
+        entity = Entity(
+            namespace_id=namespace_id,
+            name=f"entity-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            description="test entity",
+            source_document_ids=[doc_a, doc_a, doc_b],
+        )
+
+        try:
+            await backend.create_entity(entity)
+
+            await backend.remap_source_document_ids_batch(
+                entity_survivors=[
+                    {
+                        "entity_id": str(entity.id),
+                        "old_doc_id": str(doc_a),
+                        "new_doc_id": str(doc_c),
+                    }
+                ],
+                relationship_survivors=[],
+            )
+
+            got = await backend.get_entity(entity.id)
+            assert got is not None
+            doc_ids = got.source_document_ids
+            assert len(doc_ids) == 2
+            assert doc_b in doc_ids
+            assert doc_c in doc_ids
+            assert doc_a not in doc_ids
+        finally:
+            try:
+                await backend.delete_entity(entity.id)
+            except Exception:  # noqa: BLE001
+                pass
+            await backend.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_entity_remap_multiple_survivors_in_batch(self) -> None:
+        """Remap handles multiple survivors in a single batch call."""
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        namespace_id = uuid4()
+        doc_a, doc_b, doc_c, doc_d, doc_e, doc_f = (
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            uuid4(),
+            uuid4(),
+        )
+        entity_1 = Entity(
+            namespace_id=namespace_id,
+            name=f"entity-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            description="test entity 1",
+            source_document_ids=[doc_a, doc_b],
+        )
+        entity_2 = Entity(
+            namespace_id=namespace_id,
+            name=f"entity-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            description="test entity 2",
+            source_document_ids=[doc_c, doc_d],
+        )
+
+        try:
+            await backend.create_entity(entity_1)
+            await backend.create_entity(entity_2)
+
+            await backend.remap_source_document_ids_batch(
+                entity_survivors=[
+                    {
+                        "entity_id": str(entity_1.id),
+                        "old_doc_id": str(doc_a),
+                        "new_doc_id": str(doc_e),
+                    },
+                    {
+                        "entity_id": str(entity_2.id),
+                        "old_doc_id": str(doc_c),
+                        "new_doc_id": str(doc_f),
+                    },
+                ],
+                relationship_survivors=[],
+            )
+
+            got_1 = await backend.get_entity(entity_1.id)
+            assert got_1 is not None
+            doc_ids_1 = got_1.source_document_ids
+            assert len(doc_ids_1) == 2
+            assert doc_b in doc_ids_1
+            assert doc_e in doc_ids_1
+
+            got_2 = await backend.get_entity(entity_2.id)
+            assert got_2 is not None
+            doc_ids_2 = got_2.source_document_ids
+            assert len(doc_ids_2) == 2
+            assert doc_d in doc_ids_2
+            assert doc_f in doc_ids_2
+        finally:
+            try:
+                await backend.delete_entity(entity_1.id)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await backend.delete_entity(entity_2.id)
+            except Exception:  # noqa: BLE001
+                pass
+            await backend.disconnect()
+
+    @pytest.mark.asyncio
     async def test_relationship_remap_happy_path(self) -> None:
         """Remap replaces old_doc_id with new_doc_id in relationship source_document_ids."""
         url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
