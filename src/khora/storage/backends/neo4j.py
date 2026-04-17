@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import copy
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypedDict
 from uuid import UUID, uuid4
 
 from loguru import logger
@@ -1855,13 +1855,20 @@ class Neo4jBackend(GraphBackendBase):
             deleted = await session.execute_write(_delete)
             return deleted > 0
 
+    class RetirementRow(TypedDict):
+        """A row for retire_orphaned_relationships_batch()."""
+
+        relationship_id: UUID
+        old_doc_id: UUID
+        retired_at: datetime
+
     @trace(
         "khora.neo4j.retire_orphaned_relationships_batch",
         result=lambda r: {"retired_count": r},
     )
     async def retire_orphaned_relationships_batch(
         self,
-        retirement_rows: list[dict[str, Any]],
+        retirement_rows: list[RetirementRow],
     ) -> int:
         """Soft-retire orphaned relationships by stamping valid_until in-place.
 
@@ -1873,6 +1880,10 @@ class Neo4jBackend(GraphBackendBase):
             relationship_id: UUID — the relationship to retire
             old_doc_id: UUID — the document being replaced
             retired_at: datetime — timestamp for valid_until / updated_at
+
+        Returns:
+            Number of relationships actually retired (sole-sourced matches only),
+            not the number of rows attempted.
         """
         if not retirement_rows:
             return 0

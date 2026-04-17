@@ -95,8 +95,8 @@ class TestNeo4jRetireOrphanedRelationshipsBatch:
             rel = await backend.get_relationship(relationship.id)
             assert rel is not None
             assert rel.valid_until is not None
-            assert rel.valid_until.isoformat() == retired_at.isoformat()
-            assert rel.updated_at.isoformat() == retired_at.isoformat()
+            assert rel.valid_until == retired_at
+            assert rel.updated_at == retired_at
             # Other properties must be unchanged
             assert rel.description == "alice knows bob"
             assert rel.confidence == 0.9
@@ -246,6 +246,130 @@ class TestNeo4jRetireOrphanedRelationshipsBatch:
             rel = await backend.get_relationship(relationship.id)
             assert rel is not None
             assert rel.valid_until is None
+        finally:
+            try:
+                await backend.delete_relationship(relationship.id)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await backend.delete_entity(entity_a.id)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await backend.delete_entity(entity_b.id)
+            except Exception:  # noqa: BLE001
+                pass
+            await backend.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_empty_batch_returns_zero(self) -> None:
+        """An empty batch should return 0 without touching Neo4j."""
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        try:
+            count = await backend.retire_orphaned_relationships_batch([])
+            assert count == 0
+        finally:
+            await backend.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_relationship_id_returns_zero(self) -> None:
+        """A non-existent relationship ID should silently return 0."""
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        try:
+            count = await backend.retire_orphaned_relationships_batch(
+                [
+                    {
+                        "relationship_id": uuid4(),
+                        "old_doc_id": uuid4(),
+                        "retired_at": datetime.now(UTC),
+                    }
+                ]
+            )
+            assert count == 0
+        finally:
+            await backend.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_already_retired_relationship_is_restamped(self) -> None:
+        """Re-retiring an already-retired relationship updates the timestamp."""
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        namespace_id = uuid4()
+        doc_id = uuid4()
+        entity_a = Entity(
+            namespace_id=namespace_id,
+            name=f"grace-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            description="Grace",
+        )
+        entity_b = Entity(
+            namespace_id=namespace_id,
+            name=f"heidi-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            description="Heidi",
+        )
+        relationship = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=entity_a.id,
+            target_entity_id=entity_b.id,
+            relationship_type="MENTORS",
+            description="grace mentors heidi",
+            source_document_ids=[doc_id],
+            confidence=0.85,
+            weight=0.7,
+        )
+
+        try:
+            await backend.create_entity(entity_a)
+            await backend.create_entity(entity_b)
+            await backend.create_relationship(relationship)
+
+            # First retirement
+            first_retired_at = datetime.now(UTC)
+            count1 = await backend.retire_orphaned_relationships_batch(
+                [
+                    {
+                        "relationship_id": relationship.id,
+                        "old_doc_id": doc_id,
+                        "retired_at": first_retired_at,
+                    }
+                ]
+            )
+            assert count1 == 1
+
+            # Second retirement with later timestamp
+            second_retired_at = datetime.now(UTC)
+            count2 = await backend.retire_orphaned_relationships_batch(
+                [
+                    {
+                        "relationship_id": relationship.id,
+                        "old_doc_id": doc_id,
+                        "retired_at": second_retired_at,
+                    }
+                ]
+            )
+            assert count2 == 1
+
+            rel = await backend.get_relationship(relationship.id)
+            assert rel is not None
+            assert rel.valid_until == second_retired_at
         finally:
             try:
                 await backend.delete_relationship(relationship.id)
