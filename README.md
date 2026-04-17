@@ -101,21 +101,24 @@ async def main():
 asyncio.run(main())
 ```
 
-## CLI Commands
+## CLI Tools
 
-```bash
-# Extract files into the knowledge graph
-khora extract report.pdf
-khora extract ./docs/ --namespace <uuid>
-cat data.json | khora extract -
+khora is a pure library — CLI tooling lives in separate packages:
 
-# Search the knowledge graph
-khora search "Who worked on the API design?" -n <namespace-id>
-echo "revenue trends" | khora search -n <namespace-id> --format json
-khora search "team changes" -n <ns> --mode vector --limit 5
-```
+- **[khora-cli](https://github.com/DeytaHQ/khora-cli)** — `extract` and `search` commands for ingesting files into the knowledge graph and querying it.
 
-Both commands output JSON when piped, text when interactive. See `khora extract --help` and `khora search --help`.
+  ```bash
+  uv pip install khora-cli
+  uv run khora-cli extract report.pdf
+  uv run khora-cli search "Who worked on the API design?" -n <namespace-id>
+  ```
+
+- **[khora-explorer](https://github.com/DeytaHQ/khora-explorer)** — ontology construction (`construct` / `validate` / `preview`) from local files.
+
+  ```bash
+  uv pip install khora-explorer
+  uv run khora-explorer construct --source <path>
+  ```
 
 ## Pluggable Engines
 
