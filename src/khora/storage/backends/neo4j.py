@@ -2504,18 +2504,18 @@ class Neo4jBackend(GraphBackendBase):
     async def count_relationships(self, namespace_id: UUID) -> int:
         """Count relationships in a namespace using sampling estimation.
 
-        Samples up to 500 random entities, counts outbound relationships,
-        and extrapolates to the full namespace.  Exact when <500 entities.
-        Returns an approximate (non-deterministic) value for larger namespaces.
+        Counts total entities via index, then samples up to 1000 in storage
+        order and extrapolates outbound degree.  Exact when <=1000 entities.
         """
         query = """
         MATCH (e:Entity {namespace_id: $namespace_id})
-        WITH e, rand() AS r ORDER BY r LIMIT 500
-        OPTIONAL MATCH (e)-[out]->()
-        WITH count(out) AS sampled_out, count(DISTINCT e) AS sampled_n
-        MATCH (all:Entity {namespace_id: $namespace_id})
+        WITH count(e) AS total_n
+        MATCH (e2:Entity {namespace_id: $namespace_id})
+        WITH total_n, e2 LIMIT 1000
+        OPTIONAL MATCH (e2)-[out]->()
+        WITH total_n, count(out) AS sampled_out, count(DISTINCT e2) AS sampled_n
         RETURN CASE WHEN sampled_n = 0 THEN 0
-               ELSE toInteger(count(all) * (toFloat(sampled_out) / sampled_n)) END AS estimate
+               ELSE toInteger(total_n * (toFloat(sampled_out) / sampled_n)) END AS estimate
         """
 
         async def _work(tx):
