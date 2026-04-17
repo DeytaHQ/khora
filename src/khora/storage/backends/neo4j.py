@@ -2689,19 +2689,32 @@ RETURN current.id AS id
         entity_survivors: list[dict[str, str]],
         relationship_survivors: list[dict[str, str]],
     ) -> None:
-        """Remap source_document_ids for entities and relationships after dedup."""
+        """Remap source_document_ids for entities and relationships after dedup.
+
+        Idempotent on repeated application against the same
+        ``(old_doc_id, new_doc_id)`` pair: if ``new_doc_id`` is already
+        present in the array, the append is suppressed so a retry never
+        duplicates it. ADR-056 §Decision #8 self-heal can retry the
+        replace lifecycle and the caller's remap payload will re-include
+        surviving entity/relationship rows, so this method must be
+        safe to run repeatedly.
+        """
 
         if entity_survivors:
 
             async def _remap_entities(tx: AsyncManagedTransaction) -> None:
+                # Single-branch, tolerant form:
+                #   filtered = array with every occurrence of old_doc_id removed
+                #   append new_doc_id only if not already present
+                # Idempotent on retry AND tolerant of pre-existing duplicates
+                # (e.g. ``[old, old, new]`` from a partially-written prior run
+                # collapses cleanly to ``[new]`` instead of ``[new, new]``).
                 query = """
                 UNWIND $survivors AS s
                 MATCH (e:Entity {id: s.entity_id})
                 WITH e, s, [x IN coalesce(e.source_document_ids, []) WHERE x <> s.old_doc_id] AS filtered
-                SET e.source_document_ids = CASE
-                  WHEN size(filtered) < size(coalesce(e.source_document_ids, [])) THEN filtered + [s.new_doc_id]
-                  ELSE coalesce(e.source_document_ids, [])
-                END
+                SET e.source_document_ids = filtered +
+                    CASE WHEN s.new_doc_id IN filtered THEN [] ELSE [s.new_doc_id] END
                 """
                 await tx.run(query, survivors=entity_survivors)
 
@@ -2711,16 +2724,80 @@ RETURN current.id AS id
         if relationship_survivors:
 
             async def _remap_relationships(tx: AsyncManagedTransaction) -> None:
+                # Same idempotent/tolerant shape as the entity variant.
+                # ``WITH DISTINCT rel`` protects self-loops: an undirected
+                # ``()-[rel]-()`` match returns the same edge twice when
+                # source == target, which without DISTINCT would apply the
+                # SET twice and duplicate ``new_doc_id``.
                 query = """
                 UNWIND $survivors AS s
                 MATCH ()-[rel {id: s.relationship_id}]-()
+                WITH DISTINCT rel, s
                 WITH rel, s, [x IN coalesce(rel.source_document_ids, []) WHERE x <> s.old_doc_id] AS filtered
-                SET rel.source_document_ids = CASE
-                  WHEN size(filtered) < size(coalesce(rel.source_document_ids, [])) THEN filtered + [s.new_doc_id]
-                  ELSE coalesce(rel.source_document_ids, [])
-                END
+                SET rel.source_document_ids = filtered +
+                    CASE WHEN s.new_doc_id IN filtered THEN [] ELSE [s.new_doc_id] END
                 """
                 await tx.run(query, survivors=relationship_survivors)
 
             async with self._session() as session:
                 await session.execute_write(_remap_relationships)
+
+    async def fetch_document_extraction_state(
+        self, document_id: UUID, *, namespace_id: UUID
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Fetch the entity and relationship state linked to a document.
+
+        Used by ``StorageCoordinator.replace_document_extraction()`` to compute
+        retirement / survivor sets in Python before issuing graph mutations.
+        Namespace-scoped to match the rest of the backend's traversal helpers
+        and to keep reads on the namespace-partitioned indexes.
+
+        ``relationship_type`` in the result is the Cypher-sanitized label
+        (``_sanitize_neo4j_label`` — upper-cased, non-alphanumerics →
+        underscore), not the raw Python string.  Callers that compare against
+        ``Relationship.relationship_type`` must apply the same sanitizer.
+
+        Returns:
+            (entities, relationships) where each record carries the identity
+            fields and the current ``source_document_ids`` length sufficient to
+            apply the ADR-056 §3/§4 retirement filter.
+        """
+        doc_id_str = str(document_id)
+        ns_id_str = str(namespace_id)
+
+        async def _fetch_entities(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+            result = await tx.run(
+                """
+                MATCH (e:Entity {namespace_id: $namespace_id})
+                WHERE $doc_id IN e.source_document_ids
+                RETURN e.id AS id,
+                       e.name AS name,
+                       e.entity_type AS entity_type,
+                       e.namespace_id AS namespace_id,
+                       size(e.source_document_ids) AS source_document_count
+                """,
+                doc_id=doc_id_str,
+                namespace_id=ns_id_str,
+            )
+            return await result.data()
+
+        async def _fetch_relationships(tx: AsyncManagedTransaction) -> list[dict[str, Any]]:
+            result = await tx.run(
+                """
+                MATCH (src:Entity {namespace_id: $namespace_id})-[rel]->(tgt:Entity {namespace_id: $namespace_id})
+                WHERE $doc_id IN rel.source_document_ids
+                RETURN rel.id AS id,
+                       src.id AS source_entity_id,
+                       tgt.id AS target_entity_id,
+                       type(rel) AS relationship_type,
+                       size(rel.source_document_ids) AS source_document_count
+                """,
+                doc_id=doc_id_str,
+                namespace_id=ns_id_str,
+            )
+            return await result.data()
+
+        async with self._session() as session:
+            entities = await session.execute_read(_fetch_entities)
+            relationships = await session.execute_read(_fetch_relationships)
+        return entities, relationships

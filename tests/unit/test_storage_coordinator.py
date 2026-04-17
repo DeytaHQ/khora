@@ -8,7 +8,8 @@ from uuid import uuid4
 import pytest
 
 from khora.core.models import Chunk, Document, Entity, MemoryEvent, Relationship
-from khora.storage.coordinator import StorageCoordinator, StorageHealth
+from khora.core.models.document import DocumentStatus
+from khora.storage.coordinator import ReplaceResult, StorageCoordinator, StorageHealth
 
 
 class TestStorageHealth:
@@ -574,3 +575,445 @@ class TestDocumentSourcesBatch:
 
         assert result == {}
         rel.get_document_sources_batch.assert_not_awaited()
+
+
+class _FakeTxnSession:
+    """Stand-in for an AsyncSession owned by TransactionContext in tests."""
+
+    def __init__(self) -> None:
+        self.committed = False
+        self.rolled_back = False
+        self.closed = False
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _make_coordinator_with_fake_txn(
+    *,
+    relational: MagicMock,
+    vector: MagicMock,
+    graph: MagicMock,
+) -> tuple[StorageCoordinator, _FakeTxnSession]:
+    session = _FakeTxnSession()
+    # The coordinator resolves a session factory from the first SQL backend
+    # that exposes ``_session_factory``.  Hand it ours so ``transaction()``
+    # yields a TransactionContext wrapping our fake session.
+    relational._session_factory = lambda: session  # type: ignore[attr-defined]
+    coord = StorageCoordinator(relational=relational, vector=vector, graph=graph)
+    return coord, session
+
+
+class TestReplaceDocumentExtraction:
+    """Unit tests for StorageCoordinator.replace_document_extraction (DYT-2673)."""
+
+    @pytest.mark.asyncio
+    async def test_happy_path_mixed_retire_survive_net_new(self) -> None:
+        """Mixed old state: one orphan entity retires, one survivor remaps, one net-new is upserted.
+
+        Relationship counterpart: one sole-sourced orphan retires, one survivor
+        remaps, one net-new is created.
+        """
+        namespace_id = uuid4()
+        old_doc_id = uuid4()
+        new_doc = Document(namespace_id=namespace_id, content="new body")
+
+        survivor_entity_id = uuid4()
+        orphan_entity_id = uuid4()
+        new_entity_survivor = Entity(
+            namespace_id=namespace_id,
+            name="alice",
+            entity_type="PERSON",
+            source_document_ids=[new_doc.id],
+        )
+        new_entity_net_new = Entity(
+            namespace_id=namespace_id,
+            name="carol",
+            entity_type="PERSON",
+            source_document_ids=[new_doc.id],
+        )
+
+        survivor_rel_id = uuid4()
+        orphan_rel_id = uuid4()
+        new_rel_survivor = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=uuid4(),
+            target_entity_id=uuid4(),
+            relationship_type="KNOWS",
+            source_document_ids=[new_doc.id],
+        )
+        # Align survivor rel identity with the prefetched old relationship
+        survivor_rel_src = new_rel_survivor.source_entity_id
+        survivor_rel_tgt = new_rel_survivor.target_entity_id
+
+        new_rel_net_new = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=uuid4(),
+            target_entity_id=uuid4(),
+            relationship_type="WORKS_WITH",
+            source_document_ids=[new_doc.id],
+        )
+
+        new_chunks = [Chunk(namespace_id=namespace_id, document_id=new_doc.id, content=f"chunk-{i}") for i in range(3)]
+
+        rel_backend = MagicMock()
+        rel_backend.update_document = AsyncMock(return_value=new_doc)
+
+        vec_backend = MagicMock()
+        vec_backend.delete_chunks_by_document = AsyncMock(return_value=7)
+        vec_backend.create_chunks_batch = AsyncMock(return_value=new_chunks)
+        # Strip optional vector-side entity writer so the coordinator's
+        # parallel gather path uses the graph-only branch below.
+        del vec_backend.upsert_entities_batch
+
+        graph_backend = MagicMock()
+        # Prefetch: one survivor, one orphan, each for entities + relationships.
+        graph_backend.fetch_document_extraction_state = AsyncMock(
+            return_value=(
+                [
+                    {
+                        "id": str(survivor_entity_id),
+                        "name": "alice",
+                        "entity_type": "PERSON",
+                        "namespace_id": str(namespace_id),
+                        "source_document_count": 2,
+                    },
+                    {
+                        "id": str(orphan_entity_id),
+                        "name": "bob",
+                        "entity_type": "PERSON",
+                        "namespace_id": str(namespace_id),
+                        "source_document_count": 1,
+                    },
+                ],
+                [
+                    {
+                        "id": str(survivor_rel_id),
+                        "source_entity_id": str(survivor_rel_src),
+                        "target_entity_id": str(survivor_rel_tgt),
+                        "relationship_type": "KNOWS",
+                        "source_document_count": 2,
+                    },
+                    {
+                        "id": str(orphan_rel_id),
+                        "source_entity_id": str(uuid4()),
+                        "target_entity_id": str(uuid4()),
+                        "relationship_type": "CITES",
+                        "source_document_count": 1,
+                    },
+                ],
+            )
+        )
+        graph_backend.retire_orphaned_entities_batch = AsyncMock(return_value=1)
+        graph_backend.retire_orphaned_relationships_batch = AsyncMock(return_value=1)
+        graph_backend.remap_source_document_ids_batch = AsyncMock(return_value=None)
+        # upsert_entities_batch returns (entity, is_new) tuples
+        graph_backend.upsert_entities_batch = AsyncMock(return_value=[(new_entity_net_new, True)])
+        graph_backend.create_relationships_batch = AsyncMock(return_value=1)
+
+        coord, session = _make_coordinator_with_fake_txn(
+            relational=rel_backend, vector=vec_backend, graph=graph_backend
+        )
+
+        result = await coord.replace_document_extraction(
+            namespace_id=namespace_id,
+            old_document_id=old_doc_id,
+            new_document=new_doc,
+            new_chunks=new_chunks,
+            new_entities=[new_entity_survivor, new_entity_net_new],
+            new_relationships=[new_rel_survivor, new_rel_net_new],
+        )
+
+        # PG transaction committed once
+        assert session.committed is True
+        assert session.rolled_back is False
+
+        # PG ops were issued against the txn session
+        rel_backend.update_document.assert_any_await(new_doc, session=session)
+        vec_backend.delete_chunks_by_document.assert_awaited_with(old_doc_id, session=session)
+        vec_backend.create_chunks_batch.assert_awaited_with(new_chunks, session=session)
+
+        # Retirement: orphan entity and orphan relationship only
+        retire_ents_call = graph_backend.retire_orphaned_entities_batch.await_args.args[0]
+        assert len(retire_ents_call) == 1
+        assert retire_ents_call[0]["current_id"] == str(orphan_entity_id)
+        assert retire_ents_call[0]["namespace_id"] == str(namespace_id)
+
+        retire_rels_call = graph_backend.retire_orphaned_relationships_batch.await_args.args[0]
+        assert len(retire_rels_call) == 1
+        assert retire_rels_call[0]["relationship_id"] == orphan_rel_id
+        assert retire_rels_call[0]["old_doc_id"] == old_doc_id
+
+        # Remap: survivor entity + survivor relationship
+        remap_kwargs = graph_backend.remap_source_document_ids_batch.await_args.kwargs
+        assert len(remap_kwargs["entity_survivors"]) == 1
+        assert remap_kwargs["entity_survivors"][0]["entity_id"] == str(survivor_entity_id)
+        assert remap_kwargs["entity_survivors"][0]["old_doc_id"] == str(old_doc_id)
+        assert remap_kwargs["entity_survivors"][0]["new_doc_id"] == str(new_doc.id)
+        assert len(remap_kwargs["relationship_survivors"]) == 1
+        assert remap_kwargs["relationship_survivors"][0]["relationship_id"] == str(survivor_rel_id)
+
+        # Upsert is called with net-new entities ONLY (survivor excluded)
+        upsert_args = graph_backend.upsert_entities_batch.await_args.args
+        assert upsert_args[0] == namespace_id
+        assert len(upsert_args[1]) == 1
+        assert upsert_args[1][0].name == "carol"
+
+        # create_relationships_batch is called with net-new rel ONLY
+        create_rel_args = graph_backend.create_relationships_batch.await_args.args
+        assert len(create_rel_args[0]) == 1
+        assert create_rel_args[0][0].relationship_type == "WORKS_WITH"
+
+        # Result counts line up
+        assert isinstance(result, ReplaceResult)
+        assert result.document_id == new_doc.id
+        assert result.chunks_deleted == 7
+        assert result.chunks_created == 3
+        assert result.entities_retired == 1
+        assert result.entities_created == 1  # carol
+        assert result.entities_updated == 1  # alice (survivor)
+        assert result.relationships_retired == 1
+        assert result.relationships_created == 1
+
+        # Document was marked COMPLETED
+        assert new_doc.status == DocumentStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_graph_side_failure_marks_document_failed_and_reraises(self) -> None:
+        """On graph-side failure: PG is committed, doc is marked FAILED, exception is re-raised unwrapped."""
+        namespace_id = uuid4()
+        old_doc_id = uuid4()
+        new_doc = Document(namespace_id=namespace_id, content="new body")
+        new_chunks = [Chunk(namespace_id=namespace_id, document_id=new_doc.id)]
+
+        rel_backend = MagicMock()
+        rel_backend.update_document = AsyncMock(return_value=new_doc)
+
+        vec_backend = MagicMock()
+        vec_backend.delete_chunks_by_document = AsyncMock(return_value=0)
+        vec_backend.create_chunks_batch = AsyncMock(return_value=new_chunks)
+
+        graph_backend = MagicMock()
+        graph_backend.fetch_document_extraction_state = AsyncMock(
+            return_value=(
+                [
+                    {
+                        "id": str(uuid4()),
+                        "name": "bob",
+                        "entity_type": "PERSON",
+                        "namespace_id": str(namespace_id),
+                        "source_document_count": 1,
+                    }
+                ],
+                [],
+            )
+        )
+        boom = RuntimeError("neo4j down")
+        graph_backend.retire_orphaned_entities_batch = AsyncMock(side_effect=boom)
+        graph_backend.retire_orphaned_relationships_batch = AsyncMock()
+        graph_backend.remap_source_document_ids_batch = AsyncMock()
+        graph_backend.upsert_entities_batch = AsyncMock(return_value=[])
+        graph_backend.create_relationships_batch = AsyncMock(return_value=0)
+
+        coord, session = _make_coordinator_with_fake_txn(
+            relational=rel_backend, vector=vec_backend, graph=graph_backend
+        )
+
+        with pytest.raises(RuntimeError, match="neo4j down"):
+            await coord.replace_document_extraction(
+                namespace_id=namespace_id,
+                old_document_id=old_doc_id,
+                new_document=new_doc,
+                new_chunks=new_chunks,
+                new_entities=[],
+                new_relationships=[],
+            )
+
+        # PG is committed even though the graph step raised
+        assert session.committed is True
+        # Document was marked FAILED with the error string
+        assert new_doc.status == DocumentStatus.FAILED
+        assert new_doc.error_message == "neo4j down"
+        # update_document was called at least twice — once in txn, once to persist FAILED
+        assert rel_backend.update_document.await_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_pg_failure_rolls_back_and_skips_graph(self) -> None:
+        """If the PG transaction raises, graph-side work is skipped and the exception is re-raised."""
+        namespace_id = uuid4()
+        old_doc_id = uuid4()
+        new_doc = Document(namespace_id=namespace_id, content="new body")
+
+        rel_backend = MagicMock()
+        pg_error = RuntimeError("pg-constraint-violation")
+        rel_backend.update_document = AsyncMock(side_effect=pg_error)
+
+        vec_backend = MagicMock()
+        vec_backend.delete_chunks_by_document = AsyncMock()
+        vec_backend.create_chunks_batch = AsyncMock()
+
+        graph_backend = MagicMock()
+        graph_backend.fetch_document_extraction_state = AsyncMock(return_value=([], []))
+        graph_backend.retire_orphaned_entities_batch = AsyncMock()
+        graph_backend.retire_orphaned_relationships_batch = AsyncMock()
+        graph_backend.remap_source_document_ids_batch = AsyncMock()
+        graph_backend.upsert_entities_batch = AsyncMock()
+        graph_backend.create_relationships_batch = AsyncMock()
+
+        coord, session = _make_coordinator_with_fake_txn(
+            relational=rel_backend, vector=vec_backend, graph=graph_backend
+        )
+
+        with pytest.raises(RuntimeError, match="pg-constraint-violation"):
+            await coord.replace_document_extraction(
+                namespace_id=namespace_id,
+                old_document_id=old_doc_id,
+                new_document=new_doc,
+                new_chunks=[],
+                new_entities=[],
+                new_relationships=[],
+            )
+
+        assert session.committed is False
+        assert session.rolled_back is True
+        # Graph work was never issued
+        graph_backend.retire_orphaned_entities_batch.assert_not_awaited()
+        graph_backend.retire_orphaned_relationships_batch.assert_not_awaited()
+        graph_backend.remap_source_document_ids_batch.assert_not_awaited()
+        graph_backend.upsert_entities_batch.assert_not_awaited()
+        # Document was still marked FAILED (persisted via fallback update_document call)
+        assert new_doc.status == DocumentStatus.FAILED
+        assert new_doc.error_message == "pg-constraint-violation"
+
+    @pytest.mark.asyncio
+    async def test_relationship_type_sanitization_classifies_survivor_correctly(self) -> None:
+        """Mixed-case / punctuated rel types on new_relationships must sanitize to match Cypher storage.
+
+        Regression guard: the Neo4j backend stores the sanitized (upper-case,
+        alphanumerics+underscore) label, so the coordinator's survivor/orphan
+        filter must sanitize the Python-side value or the relationship will
+        be misclassified as both orphan (retire) and net-new (create).
+        """
+        namespace_id = uuid4()
+        old_doc_id = uuid4()
+        new_doc = Document(namespace_id=namespace_id, content="b")
+        new_chunks: list[Chunk] = []
+
+        src_id = uuid4()
+        tgt_id = uuid4()
+        rel_id = uuid4()
+
+        # Neo4j stores "KNOWS" (upper); caller passes "Knows" (mixed case).
+        new_rel = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=src_id,
+            target_entity_id=tgt_id,
+            relationship_type="Knows",  # sanitizes to "KNOWS"
+            source_document_ids=[new_doc.id],
+        )
+
+        rel_backend = MagicMock()
+        rel_backend.update_document = AsyncMock(return_value=new_doc)
+
+        vec_backend = MagicMock()
+        vec_backend.delete_chunks_by_document = AsyncMock(return_value=0)
+        vec_backend.create_chunks_batch = AsyncMock(return_value=new_chunks)
+        del vec_backend.upsert_entities_batch
+
+        graph_backend = MagicMock()
+        graph_backend.fetch_document_extraction_state = AsyncMock(
+            return_value=(
+                [],
+                [
+                    {
+                        "id": str(rel_id),
+                        "source_entity_id": str(src_id),
+                        "target_entity_id": str(tgt_id),
+                        "relationship_type": "KNOWS",  # sanitized form from Cypher
+                        "source_document_count": 2,
+                    }
+                ],
+            )
+        )
+        graph_backend.retire_orphaned_entities_batch = AsyncMock(return_value=0)
+        graph_backend.retire_orphaned_relationships_batch = AsyncMock(return_value=0)
+        graph_backend.remap_source_document_ids_batch = AsyncMock()
+        graph_backend.upsert_entities_batch = AsyncMock(return_value=[])
+        graph_backend.create_relationships_batch = AsyncMock(return_value=0)
+
+        coord, _ = _make_coordinator_with_fake_txn(relational=rel_backend, vector=vec_backend, graph=graph_backend)
+
+        result = await coord.replace_document_extraction(
+            namespace_id=namespace_id,
+            old_document_id=old_doc_id,
+            new_document=new_doc,
+            new_chunks=new_chunks,
+            new_entities=[],
+            new_relationships=[new_rel],
+        )
+
+        # Classified as SURVIVOR → remap called, not retire, not create.
+        graph_backend.retire_orphaned_relationships_batch.assert_not_awaited()
+        graph_backend.create_relationships_batch.assert_not_awaited()
+        remap_kwargs = graph_backend.remap_source_document_ids_batch.await_args.kwargs
+        assert len(remap_kwargs["relationship_survivors"]) == 1
+        assert remap_kwargs["relationship_survivors"][0]["relationship_id"] == str(rel_id)
+        assert result.relationships_retired == 0
+        assert result.relationships_created == 0
+
+    @pytest.mark.asyncio
+    async def test_no_prefetch_state_skips_retire_and_remap(self) -> None:
+        """When there is no old graph state, only PG work + net-new upsert run."""
+        namespace_id = uuid4()
+        new_doc = Document(namespace_id=namespace_id, content="fresh")
+        new_chunks = [Chunk(namespace_id=namespace_id, document_id=new_doc.id)]
+
+        rel_backend = MagicMock()
+        rel_backend.update_document = AsyncMock(return_value=new_doc)
+
+        vec_backend = MagicMock()
+        vec_backend.delete_chunks_by_document = AsyncMock(return_value=0)
+        vec_backend.create_chunks_batch = AsyncMock(return_value=new_chunks)
+        del vec_backend.upsert_entities_batch
+
+        graph_backend = MagicMock()
+        graph_backend.fetch_document_extraction_state = AsyncMock(return_value=([], []))
+        graph_backend.retire_orphaned_entities_batch = AsyncMock(return_value=0)
+        graph_backend.retire_orphaned_relationships_batch = AsyncMock(return_value=0)
+        graph_backend.remap_source_document_ids_batch = AsyncMock()
+        entity = Entity(
+            namespace_id=namespace_id,
+            name="dana",
+            entity_type="PERSON",
+            source_document_ids=[new_doc.id],
+        )
+        graph_backend.upsert_entities_batch = AsyncMock(return_value=[(entity, True)])
+        graph_backend.create_relationships_batch = AsyncMock(return_value=0)
+
+        coord, session = _make_coordinator_with_fake_txn(
+            relational=rel_backend, vector=vec_backend, graph=graph_backend
+        )
+
+        result = await coord.replace_document_extraction(
+            namespace_id=namespace_id,
+            old_document_id=uuid4(),
+            new_document=new_doc,
+            new_chunks=new_chunks,
+            new_entities=[entity],
+            new_relationships=[],
+        )
+
+        assert session.committed is True
+        # Empty retirement rows → no call issued
+        graph_backend.retire_orphaned_entities_batch.assert_not_awaited()
+        graph_backend.retire_orphaned_relationships_batch.assert_not_awaited()
+        graph_backend.remap_source_document_ids_batch.assert_not_awaited()
+        assert result.entities_created == 1
+        assert result.entities_updated == 0
+        assert result.entities_retired == 0
