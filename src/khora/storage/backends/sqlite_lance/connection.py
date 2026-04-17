@@ -76,6 +76,17 @@ class EmbeddedStorageHandle:
         self._lance: LanceAsyncConnection | None = None
         self._connected = False
         self._schema_initialized = False
+        # Serializes connect / disconnect so concurrent adapter lifecycle
+        # calls (via ``StorageCoordinator.connect()`` / ``disconnect()``
+        # ``asyncio.gather``) don't double-open or double-close. Created
+        # lazily on first use so the handle can be instantiated outside
+        # an event loop.
+        self._lifecycle_lock: asyncio.Lock | None = None
+
+    def _get_lifecycle_lock(self) -> asyncio.Lock:
+        if self._lifecycle_lock is None:
+            self._lifecycle_lock = asyncio.Lock()
+        return self._lifecycle_lock
 
     @property
     def config(self) -> EmbeddedStorageHandleConfig:
@@ -118,58 +129,72 @@ class EmbeddedStorageHandle:
     async def connect(self) -> None:
         """Open aiosqlite + LanceDB connections and initialize schema.
 
-        Idempotent — subsequent calls are no-ops.
+        Idempotent — subsequent calls are no-ops. Safe to call
+        concurrently from multiple adapters; the lifecycle lock
+        serializes the open.
         """
-        if self._connected:
-            return
+        async with self._get_lifecycle_lock():
+            if self._connected:
+                return
 
-        import aiosqlite
-        import lancedb
+            import aiosqlite
+            import lancedb
 
-        sqlite_path = self._config.db_path
-        lance_path = self._resolve_lance_path()
-        logger.info(
-            f"Opening embedded storage: sqlite={sqlite_path} lance={lance_path}",
-        )
+            sqlite_path = self._config.db_path
+            lance_path = self._resolve_lance_path()
+            logger.info(
+                f"Opening embedded storage: sqlite={sqlite_path} lance={lance_path}",
+            )
 
-        self._sqlite = await aiosqlite.connect(sqlite_path)
-        # Enable dict-like row access so adapters can use row["col"].
-        self._sqlite.row_factory = aiosqlite.Row
-        for pragma, value in _SQLITE_PRAGMAS:
-            await self._sqlite.execute(f"PRAGMA {pragma}={value}")
-        await self._sqlite.commit()
+            self._sqlite = await aiosqlite.connect(sqlite_path)
+            # Enable dict-like row access so adapters can use row["col"].
+            self._sqlite.row_factory = aiosqlite.Row
+            for pragma, value in _SQLITE_PRAGMAS:
+                await self._sqlite.execute(f"PRAGMA {pragma}={value}")
+            await self._sqlite.commit()
 
-        self._lance = await lancedb.connect_async(lance_path)
+            self._lance = await lancedb.connect_async(lance_path)
 
-        self._connected = True
+            self._connected = True
 
-        if not self._schema_initialized:
-            async with _schema_init_lock:
-                if not self._schema_initialized:
-                    await ensure_lance_tables(
-                        self._lance,
-                        self._config.embedding_dimension,
-                        self._config.use_halfvec,
-                    )
-                    self._schema_initialized = True
+            if not self._schema_initialized:
+                async with _schema_init_lock:
+                    if not self._schema_initialized:
+                        await ensure_lance_tables(
+                            self._lance,
+                            self._config.embedding_dimension,
+                            self._config.use_halfvec,
+                        )
+                        self._schema_initialized = True
 
-        logger.info("Embedded storage connected")
+            logger.info("Embedded storage connected")
 
     async def disconnect(self) -> None:
-        """Close both connections. Safe to call multiple times."""
-        if self._sqlite is not None:
-            try:
-                await self._sqlite.close()
-            except Exception:
-                logger.debug("Error closing aiosqlite connection (may already be closed)")
-            self._sqlite = None
+        """Close both connections. Safe to call concurrently and multiple times.
 
-        # LanceDB AsyncConnection doesn't expose an explicit close in current
-        # versions; dropping the reference releases native resources.
-        self._lance = None
+        When the coordinator disconnects all four adapters in parallel,
+        several of them call ``handle.disconnect()`` at once. Without
+        this lock, both callers can enter ``_sqlite.close()`` before
+        either sets ``_sqlite = None``, which double-closes the aiosqlite
+        connection and hangs its worker thread.
+        """
+        async with self._get_lifecycle_lock():
+            if not self._connected and self._sqlite is None and self._lance is None:
+                return
 
-        self._connected = False
-        logger.info("Embedded storage disconnected")
+            if self._sqlite is not None:
+                try:
+                    await self._sqlite.close()
+                except Exception:
+                    logger.debug("Error closing aiosqlite connection (may already be closed)")
+                self._sqlite = None
+
+            # LanceDB AsyncConnection doesn't expose an explicit close in current
+            # versions; dropping the reference releases native resources.
+            self._lance = None
+
+            self._connected = False
+            logger.info("Embedded storage disconnected")
 
     async def is_healthy(self) -> bool:
         """Ping both backends. Returns True only if both respond."""

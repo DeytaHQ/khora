@@ -184,10 +184,17 @@ class StorageCoordinator:
             await self._hook_dispatcher.dispatch(event)
 
     def __post_init__(self) -> None:
-        # Detect if graph and vector share a SurrealDB connection (unified backend)
+        # Detect if graph and vector share a SurrealDB connection (unified backend).
+        # Some adapters (e.g. SQLiteLance) expose ``_conn`` as a property that
+        # raises when the underlying connection isn't open yet — treat any
+        # error as "not unified" since the probe is advisory.
         if self.graph is not None and self.vector is not None:
-            graph_conn = getattr(self.graph, "_conn", None)
-            vector_conn = getattr(self.vector, "_conn", None)
+            try:
+                graph_conn = getattr(self.graph, "_conn", None)
+                vector_conn = getattr(self.vector, "_conn", None)
+            except Exception:
+                graph_conn = None
+                vector_conn = None
             if graph_conn is not None and graph_conn is vector_conn:
                 self._is_unified_backend = True
                 logger.info("Detected unified SurrealDB backend — entity dual-writes will be collapsed")
