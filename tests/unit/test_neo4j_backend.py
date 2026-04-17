@@ -562,6 +562,54 @@ class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
         assert len(result[entity_id]["relationships"]) == 1
         assert result[entity_id]["relationships"][0]["relationship_type"] == "KNOWS"
 
+    @pytest.mark.asyncio
+    async def test_raw_tuples_raise_attributeerror_regression(self) -> None:
+        """Regression lock: pre-fix raw tuples must raise, not silently corrupt.
+
+        If the Cypher query ever regresses to returning raw Relationship objects,
+        ``result.data()`` serializes them as 3-tuples. The consumer calls
+        ``r.get("props")``, which raises ``AttributeError`` on a tuple — surfacing
+        the regression instead of silently losing data.
+        """
+        driver, session = _make_neo4j_driver()
+        entity_id = uuid4()
+
+        pre_fix_tuple = ({"id": str(uuid4())}, "Relationship", {"id": str(uuid4())})
+
+        async def mock_work(tx):
+            return [
+                {
+                    "eid": str(entity_id),
+                    "neighbors": [],
+                    "rels": [[pre_fix_tuple]],
+                }
+            ]
+
+        session.execute_read = AsyncMock(side_effect=mock_work)
+        backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+
+        with pytest.raises(AttributeError, match="get"):
+            await backend.get_neighborhoods_batch([entity_id])
+
+    @pytest.mark.asyncio
+    async def test_relationship_types_filter_completes_without_error(self) -> None:
+        """``relationship_types`` is accepted and the method completes."""
+        driver, session = _make_neo4j_driver()
+
+        async def mock_work(tx):
+            return []
+
+        session.execute_read = AsyncMock(side_effect=mock_work)
+        backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+
+        result = await backend.get_neighborhoods_batch(
+            [uuid4()],
+            relationship_types=["KNOWS", "WORKS_WITH"],
+        )
+
+        assert result == {}
+        session.execute_read.assert_called_once()
+
 
 def _make_rel_props(**overrides: Any) -> dict[str, Any]:
     """Build a minimal post-fix relationship properties dict, with overrides."""

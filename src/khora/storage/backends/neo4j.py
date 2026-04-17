@@ -2166,7 +2166,7 @@ class Neo4jBackend(GraphBackendBase):
         # Fallback query if APOC is not available
         fallback_query = f"""
         MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
-        RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
+        RETURN collect(DISTINCT other) as nodes, collect(DISTINCT [rel IN r | {{props: properties(rel), type: type(rel)}}]) as relationships
         LIMIT $limit
         """
 
@@ -2228,7 +2228,12 @@ class Neo4jBackend(GraphBackendBase):
 
         if record:
             nodes = [_element_to_dict(n) for n in record.get("nodes", [])]
-            relationships = [_element_to_dict(r) for r in record.get("relationships", [])]
+            relationships = []
+            for rel_list in record.get("relationships", []):
+                if rel_list:
+                    for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+                        if r:
+                            relationships.append({**r.get("props", {}), "relationship_type": r.get("type")})
             return {"entities": nodes, "relationships": relationships}
 
         return {"entities": [], "relationships": []}
@@ -2320,9 +2325,7 @@ class Neo4jBackend(GraphBackendBase):
                 if rel_list:
                     for r in rel_list if isinstance(rel_list, list) else [rel_list]:
                         if r:
-                            d = dict(r.get("props") or {})
-                            d["relationship_type"] = r.get("type")
-                            relationships.append(d)
+                            relationships.append({**r.get("props", {}), "relationship_type": r.get("type")})
             neighborhoods[eid] = {"entities": nodes, "relationships": relationships}
 
         return neighborhoods
