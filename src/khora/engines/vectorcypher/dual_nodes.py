@@ -574,9 +574,9 @@ class DualNodeManager:
             namespace_id: Namespace constraint
             depth: Maximum traversal depth (1-4)
             limit_per_entity: Max related entities per starting entity
-            prefer_current: When True, filter out entities whose valid_until
+            prefer_current: When True, filter out entities and relationships whose valid_until
                 has passed (for STATE_QUERY/RECENCY/CHANGE temporal categories).
-                Entities without valid_until are kept (NULL = still valid).
+                Entities and relationships without valid_until are kept (NULL = still valid).
 
         Returns:
             Dict mapping entity_id -> list of related entity info
@@ -586,11 +586,18 @@ class DualNodeManager:
 
         depth = min(max(1, depth), 4)  # Clamp to 1-4
 
-        # When prefer_current is set, exclude entities whose validity has expired.
-        # Entities with NULL valid_until are kept (NULL = no known end = still valid).
+        # When prefer_current is set, exclude entities and relationships whose
+        # validity has expired. NULL valid_until is kept (no known end = still valid).
+        # Hoist datetime() into a WITH clause so it is evaluated once per row,
+        # not once per relationship in the all() predicate.
+        temporal_preamble = ""
         temporal_clause = ""
         if prefer_current:
-            temporal_clause = "AND (related.valid_until IS NULL OR related.valid_until > datetime())"
+            temporal_preamble = "WITH e, datetime() AS _now"
+            temporal_clause = (
+                "AND (related.valid_until IS NULL OR related.valid_until > _now)"
+                "\n          AND all(r IN relationships(path) WHERE r.valid_until IS NULL OR r.valid_until > _now)"
+            )
 
         # OPTIMIZATION: Single query fetches all neighborhoods in batch
         # Uses UNWIND internally via IN clause + collect() aggregation
@@ -598,6 +605,7 @@ class DualNodeManager:
         query = f"""
         UNWIND $entity_ids AS eid
         MATCH (e:Entity {{id: eid, namespace_id: $namespace_id}})
+        {temporal_preamble}
         OPTIONAL MATCH path = (e)-[*1..{depth}]-(related:Entity)
         WHERE related.namespace_id = $namespace_id
           AND related.id <> e.id
