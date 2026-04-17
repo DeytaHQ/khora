@@ -32,6 +32,7 @@ _GRAPH_REGISTRY: dict[str, tuple[str, str]] = {
     "memgraph": ("khora.storage.backends.memgraph", "MemgraphBackend"),
     "neptune": ("khora.storage.backends.neptune", "NeptuneBackend"),
     "surrealdb": ("khora.storage.backends.surrealdb.graph", "SurrealDBGraphAdapter"),
+    "sqlite_lance": ("khora.storage.backends.sqlite_lance", "SQLiteLanceGraphAdapter"),
     "age": ("khora.storage.backends.age", "AGEBackend"),
 }
 
@@ -39,10 +40,16 @@ _VECTOR_REGISTRY: dict[str, tuple[str, str]] = {
     "pgvector": ("khora.storage.backends.pgvector", "PgVectorBackend"),
     "surrealdb": ("khora.storage.backends.surrealdb.vector", "SurrealDBVectorAdapter"),
     "sqlite": ("khora.storage.backends.sqlite", "SQLiteVectorBackend"),
+    "sqlite_lance": ("khora.storage.backends.sqlite_lance", "SQLiteLanceVectorAdapter"),
 }
 
 _RELATIONAL_REGISTRY: dict[str, tuple[str, str]] = {
     "sqlite": ("khora.storage.backends.sqlite", "SQLiteRelationalBackend"),
+    "sqlite_lance": ("khora.storage.backends.sqlite_lance", "SQLiteLanceRelationalAdapter"),
+}
+
+_EVENT_STORE_REGISTRY: dict[str, tuple[str, str]] = {
+    "sqlite_lance": ("khora.storage.backends.sqlite_lance", "SQLiteLanceEventStoreAdapter"),
 }
 
 
@@ -90,8 +97,9 @@ class StorageConfig:
     vector_config: Any = None  # VectorConfig union type
 
     # Unified backend selector
-    backend: str = "postgres"  # "postgres" (traditional) or "surrealdb" (unified)
+    backend: str = "postgres"  # "postgres" (traditional), "surrealdb", or "sqlite_lance"
     surrealdb_config: Any = None  # SurrealDBConfig from config/schema.py
+    sqlite_lance_config: Any = None  # SQLiteLanceConfig from config/schema.py
 
     # Event store configuration (uses PostgreSQL by default)
     event_store_url: str | None = None
@@ -417,11 +425,73 @@ class StorageFactory:
         if self.config.backend == "sqlite":
             return self._create_sqlite_coordinator()
 
+        if self.config.backend == "sqlite_lance":
+            return self._create_sqlite_lance_coordinator()
+
         return StorageCoordinator(
             relational=self.create_relational_backend(),
             vector=self.create_vector_backend(),
             graph=self.create_graph_backend(),
             event_store=self.create_event_store(),
+        )
+
+    def _create_sqlite_lance_coordinator(self) -> StorageCoordinator:
+        """Create a coordinator using the SQLite + LanceDB embedded unified backend.
+
+        Builds a single ``EmbeddedStorageHandle`` shared by all four adapters
+        (relational, graph, vector, event_store). The handle owns the aiosqlite
+        connection (used by graph/vector/event_store) and LanceDB connection.
+        The relational adapter opens its *own* SQLAlchemy async engine against
+        the same SQLite file — this is required so the coordinator's
+        ``transaction()`` path can pick up ``_session_factory`` from it. The
+        dual SQLite connections coexist safely because WAL mode is enabled on
+        both (see :class:`SQLiteLanceRelationalAdapter` and
+        :class:`EmbeddedStorageHandle`).
+
+        Unlike the SurrealDB path, this is NOT flagged as ``_is_unified_backend``
+        — SQLite and LanceDB are two engines, so parallel entity writes to both
+        are correct (not duplicate).
+        """
+        config = self.config.sqlite_lance_config
+        if config is None:
+            raise ValueError("sqlite_lance backend selected but sqlite_lance_config is not set")
+
+        try:
+            from .backends.sqlite_lance import (
+                SQLiteLanceEventStoreAdapter,
+                SQLiteLanceGraphAdapter,
+                SQLiteLanceRelationalAdapter,
+                SQLiteLanceVectorAdapter,
+            )
+            from .backends.sqlite_lance.connection import (
+                EmbeddedStorageHandle,
+                EmbeddedStorageHandleConfig,
+            )
+        except ImportError as e:
+            raise ValueError(
+                "sqlite_lance backend selected but aiosqlite/lancedb are not installed. "
+                "Install with: pip install khora[sqlite_lance]"
+            ) from e
+
+        handle_config = EmbeddedStorageHandleConfig(
+            db_path=getattr(config, "db_path", "./khora.db"),
+            lance_path=getattr(config, "lance_path", None),
+            embedding_dimension=getattr(config, "embedding_dimension", 1536),
+            use_halfvec=getattr(config, "use_halfvec", False),
+            lance_index=getattr(config, "lance_index", "auto"),
+            ivf_partitions=getattr(config, "ivf_partitions", None),
+            hnsw_m=getattr(config, "hnsw_m", 16),
+        )
+        handle = EmbeddedStorageHandle(handle_config)
+
+        # Relational is constructed first so it's the canonical owner of the
+        # SQLAlchemy engine used by StorageCoordinator.transaction(); graph /
+        # vector / event_store share the aiosqlite+LanceDB handle.
+        return StorageCoordinator(
+            relational=SQLiteLanceRelationalAdapter(handle),
+            graph=SQLiteLanceGraphAdapter(handle),
+            vector=SQLiteLanceVectorAdapter(handle),
+            event_store=SQLiteLanceEventStoreAdapter(handle),
         )
 
     def _create_sqlite_coordinator(self) -> StorageCoordinator:

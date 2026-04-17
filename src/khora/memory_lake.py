@@ -235,7 +235,18 @@ class MemoryLake:
         if self._run_migrations:
             from khora.db.session import run_migrations as _run_migrations
 
-            db_url = self._config.database_url
+            # For the sqlite_lance embedded backend, derive a sqlite+aiosqlite URL
+            # from the configured db_path so Alembic migrations target the same
+            # file the adapters use. DYT-2727 made the migrations dialect-aware.
+            db_url: str | None
+            if (
+                getattr(self._config.storage, "backend", "postgres") == "sqlite_lance"
+                and self._config.storage.sqlite_lance is not None
+            ):
+                db_path = self._config.storage.sqlite_lance.db_path
+                db_url = f"sqlite+aiosqlite:///{db_path}"
+            else:
+                db_url = self._config.database_url
             result = await _run_migrations(db_url)
             if not result.success:
                 raise RuntimeError(f"Database migration failed: {result.error}")

@@ -42,6 +42,14 @@ def build_storage_config(config: KhoraConfig, *, skip_graph: bool = False) -> St
             postgresql_url=None,
         )
 
+    # --- SQLite + LanceDB embedded unified backend ---
+    if getattr(config.storage, "backend", "postgres") == "sqlite_lance":
+        return StorageConfig(
+            backend="sqlite_lance",
+            sqlite_lance_config=config.storage.sqlite_lance,
+            postgresql_url=None,
+        )
+
     # --- Traditional PostgreSQL + graph backend ---
     postgresql_url = config.get_postgresql_url()
     graph_config = None if skip_graph else config.get_graph_config()
