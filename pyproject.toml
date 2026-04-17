@@ -71,6 +71,8 @@ all-backends = [
     "weaviate-client>=4.20.1",
     "surrealdb>=2.0.0a1",
     "aiosqlite>=0.20.0",
+    "lancedb>=0.17.0",
+    "pyarrow>=18.0.0",
 ]
 # Neural reranking
 reranking = [
@@ -99,6 +101,8 @@ embedded = ["surrealdb>=2.0.0a1"]
 sqlite = ["aiosqlite>=0.20.0"]
 # LanceDB embedded vector store (Chronicle engine, zero-infrastructure)
 lancedb = ["lancedb>=0.17.0", "pyarrow>=18.0.0"]
+# SQLite + LanceDB embedded backend (relational via aiosqlite + vector via LanceDB)
+sqlite-lance = ["lancedb>=0.17.0", "aiosqlite>=0.20.0", "pyarrow>=18.0.0"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
