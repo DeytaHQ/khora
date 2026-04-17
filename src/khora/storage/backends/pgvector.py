@@ -356,11 +356,19 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             return [self._chunk_model_to_domain(m) for m in result.scalars().all()]
 
-    async def delete_chunks_by_document(self, document_id: UUID) -> int:
-        """Delete all chunks for a document."""
-        async with self._get_session() as session:
+    async def delete_chunks_by_document(self, document_id: UUID, *, session: AsyncSession | None = None) -> int:
+        """Delete all chunks for a document.
+
+        When *session* is provided the caller owns the transaction —
+        no commit is issued.  When ``None``, a private session is used
+        and committed automatically.
+        """
+        if session is not None:
             result = await session.execute(delete(ChunkModel).where(ChunkModel.document_id == document_id))
-            await session.commit()
+            return result.rowcount  # type: ignore[unresolved-attribute]
+        async with self._get_session() as own_session:
+            result = await own_session.execute(delete(ChunkModel).where(ChunkModel.document_id == document_id))
+            await own_session.commit()
             return result.rowcount  # type: ignore[unresolved-attribute]
 
     def _cosine_similarity(self, embedding_col, query_embedding: list[float]):

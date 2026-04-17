@@ -15,6 +15,8 @@ from uuid import UUID
 T = TypeVar("T")
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from khora.core.models import (
         Chunk,
         Document,
@@ -278,8 +280,13 @@ class VectorBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def delete_chunks_by_document(self, document_id: UUID) -> int:
-        """Delete all chunks for a document."""
+    async def delete_chunks_by_document(self, document_id: UUID, *, session: AsyncSession | None = None) -> int:
+        """Delete all chunks for a document.
+
+        When *session* is provided the caller owns the transaction —
+        no commit is issued.  When ``None``, a private session is used
+        and committed automatically.
+        """
         ...
 
     @abstractmethod
