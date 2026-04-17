@@ -124,6 +124,10 @@ def _percentile(values: list[float], p: float) -> float:
 def _build_mock_graph() -> MagicMock:
     """Mock graph backend — retirement/remap are not part of the parity bar."""
     graph = MagicMock()
+    graph.connect = AsyncMock(return_value=None)
+    graph.disconnect = AsyncMock(return_value=None)
+    graph.is_healthy = AsyncMock(return_value=True)
+    graph._conn = None  # disable unified-backend detection
     graph.fetch_document_extraction_state = AsyncMock(return_value=([], []))
     graph.retire_orphaned_entities_batch = AsyncMock(return_value=0)
     graph.retire_orphaned_relationships_batch = AsyncMock(return_value=0)

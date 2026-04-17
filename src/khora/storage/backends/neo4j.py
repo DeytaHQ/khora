@@ -2689,19 +2689,32 @@ RETURN current.id AS id
         entity_survivors: list[dict[str, str]],
         relationship_survivors: list[dict[str, str]],
     ) -> None:
-        """Remap source_document_ids for entities and relationships after dedup."""
+        """Remap source_document_ids for entities and relationships after dedup.
+
+        Idempotent on repeated application against the same
+        ``(old_doc_id, new_doc_id)`` pair: if ``new_doc_id`` is already
+        present in the array, the append is suppressed so a retry never
+        duplicates it. ADR-056 §Decision #8 self-heal can retry the
+        replace lifecycle and the caller's remap payload will re-include
+        surviving entity/relationship rows, so this method must be
+        safe to run repeatedly.
+        """
 
         if entity_survivors:
 
             async def _remap_entities(tx: AsyncManagedTransaction) -> None:
+                # Single-branch, tolerant form:
+                #   filtered = array with every occurrence of old_doc_id removed
+                #   append new_doc_id only if not already present
+                # Idempotent on retry AND tolerant of pre-existing duplicates
+                # (e.g. ``[old, old, new]`` from a partially-written prior run
+                # collapses cleanly to ``[new]`` instead of ``[new, new]``).
                 query = """
                 UNWIND $survivors AS s
                 MATCH (e:Entity {id: s.entity_id})
                 WITH e, s, [x IN coalesce(e.source_document_ids, []) WHERE x <> s.old_doc_id] AS filtered
-                SET e.source_document_ids = CASE
-                  WHEN size(filtered) < size(coalesce(e.source_document_ids, [])) THEN filtered + [s.new_doc_id]
-                  ELSE coalesce(e.source_document_ids, [])
-                END
+                SET e.source_document_ids = filtered +
+                    CASE WHEN s.new_doc_id IN filtered THEN [] ELSE [s.new_doc_id] END
                 """
                 await tx.run(query, survivors=entity_survivors)
 
@@ -2711,14 +2724,18 @@ RETURN current.id AS id
         if relationship_survivors:
 
             async def _remap_relationships(tx: AsyncManagedTransaction) -> None:
+                # Same idempotent/tolerant shape as the entity variant.
+                # ``WITH DISTINCT rel`` protects self-loops: an undirected
+                # ``()-[rel]-()`` match returns the same edge twice when
+                # source == target, which without DISTINCT would apply the
+                # SET twice and duplicate ``new_doc_id``.
                 query = """
                 UNWIND $survivors AS s
                 MATCH ()-[rel {id: s.relationship_id}]-()
+                WITH DISTINCT rel, s
                 WITH rel, s, [x IN coalesce(rel.source_document_ids, []) WHERE x <> s.old_doc_id] AS filtered
-                SET rel.source_document_ids = CASE
-                  WHEN size(filtered) < size(coalesce(rel.source_document_ids, [])) THEN filtered + [s.new_doc_id]
-                  ELSE coalesce(rel.source_document_ids, [])
-                END
+                SET rel.source_document_ids = filtered +
+                    CASE WHEN s.new_doc_id IN filtered THEN [] ELSE [s.new_doc_id] END
                 """
                 await tx.run(query, survivors=relationship_survivors)
 

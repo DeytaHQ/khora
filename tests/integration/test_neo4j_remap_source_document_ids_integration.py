@@ -398,3 +398,162 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_entity_remap_idempotent_on_retry(self) -> None:
+        """Running the same remap twice must not duplicate new_doc_id.
+
+        Regression: ADR-056 §Decision #8 self-heal can retry the replace
+        lifecycle, so the remap Cypher must be safe to re-apply.
+        """
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        namespace_id = uuid4()
+        doc_a, doc_b, doc_c = uuid4(), uuid4(), uuid4()
+        entity = Entity(
+            namespace_id=namespace_id,
+            name=f"entity-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            source_document_ids=[doc_a, doc_b],
+        )
+
+        try:
+            await backend.create_entity(entity)
+            row = {
+                "entity_id": str(entity.id),
+                "old_doc_id": str(doc_a),
+                "new_doc_id": str(doc_c),
+            }
+
+            # First application: swap doc_a → doc_c
+            await backend.remap_source_document_ids_batch(entity_survivors=[row], relationship_survivors=[])
+            # Retry the same row — caller payload is unchanged on self-heal
+            await backend.remap_source_document_ids_batch(entity_survivors=[row], relationship_survivors=[])
+
+            got = await backend.get_entity(entity.id)
+            assert got is not None
+            doc_ids = got.source_document_ids
+            # No duplicates; old is gone; new appears exactly once
+            assert len(doc_ids) == 2
+            assert doc_ids.count(doc_c) == 1
+            assert doc_b in doc_ids
+            assert doc_a not in doc_ids
+        finally:
+            try:
+                await backend.delete_entity(entity.id)
+            except Exception:  # noqa: BLE001
+                pass
+            await backend.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_entity_remap_tolerates_mixed_duplicates_in_array(self) -> None:
+        """Array like [old, old, new] must collapse to [new], not [new, new]."""
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        namespace_id = uuid4()
+        doc_a, doc_c = uuid4(), uuid4()
+        # Pre-existing mixed state: old_doc_id twice + new_doc_id once.
+        entity = Entity(
+            namespace_id=namespace_id,
+            name=f"entity-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+            source_document_ids=[doc_a, doc_a, doc_c],
+        )
+
+        try:
+            await backend.create_entity(entity)
+            await backend.remap_source_document_ids_batch(
+                entity_survivors=[
+                    {
+                        "entity_id": str(entity.id),
+                        "old_doc_id": str(doc_a),
+                        "new_doc_id": str(doc_c),
+                    }
+                ],
+                relationship_survivors=[],
+            )
+
+            got = await backend.get_entity(entity.id)
+            assert got is not None
+            doc_ids = got.source_document_ids
+            # All occurrences of old removed, new_doc_id stays exactly once
+            assert len(doc_ids) == 1
+            assert doc_ids.count(doc_c) == 1
+            assert doc_a not in doc_ids
+        finally:
+            try:
+                await backend.delete_entity(entity.id)
+            except Exception:  # noqa: BLE001
+                pass
+            await backend.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_relationship_remap_self_loop_not_double_applied(self) -> None:
+        """Self-loop relationships must only get remapped once despite undirected MATCH."""
+        url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
+        password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
+
+        backend = Neo4jBackend(url, user=user, password=password)
+        await backend.connect()
+
+        namespace_id = uuid4()
+        doc_a, doc_b, doc_c = uuid4(), uuid4(), uuid4()
+        entity = Entity(
+            namespace_id=namespace_id,
+            name=f"entity-{uuid4().hex[:8]}",
+            entity_type="PERSON",
+        )
+        # Self-loop: src == tgt. The `()-[rel]-()` match would return the
+        # same edge twice without DISTINCT.
+        relationship = Relationship(
+            namespace_id=namespace_id,
+            source_entity_id=entity.id,
+            target_entity_id=entity.id,
+            relationship_type="REFERS_TO_SELF",
+            source_document_ids=[doc_a, doc_b],
+        )
+
+        try:
+            await backend.create_entity(entity)
+            await backend.create_relationship(relationship)
+
+            await backend.remap_source_document_ids_batch(
+                entity_survivors=[],
+                relationship_survivors=[
+                    {
+                        "relationship_id": str(relationship.id),
+                        "old_doc_id": str(doc_a),
+                        "new_doc_id": str(doc_c),
+                    }
+                ],
+            )
+
+            got = await backend.get_relationship(relationship.id)
+            assert got is not None
+            doc_ids = got.source_document_ids
+            # No duplicate new_doc_id despite self-loop double-match
+            assert len(doc_ids) == 2
+            assert doc_ids.count(doc_c) == 1
+            assert doc_b in doc_ids
+            assert doc_a not in doc_ids
+        finally:
+            try:
+                await backend.delete_relationship(relationship.id)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await backend.delete_entity(entity.id)
+            except Exception:  # noqa: BLE001
+                pass
+            await backend.disconnect()
