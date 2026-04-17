@@ -12,15 +12,11 @@ dependencies = [
     "pydantic-settings>=2.13.1",
     "pyyaml>=6.0.3",
     "jinja2>=3.1.6",
-    # CLI
-    "click>=8.3.1",
     # Async support
     "asyncpg>=0.31.0",
     # Database
     "sqlalchemy[asyncio]>=2.0.47",
     "alembic>=1.18.4",
-    # Terminal UI
-    "rich>=14.3.3",
     "loguru>=0.7.3",
     # LLM Access (unified interface)
     "litellm>=1.81.15",
@@ -80,9 +76,9 @@ all-backends = [
 reranking = [
     "sentence-transformers>=3.0.0",
 ]
-# Binary file readers for `khora extract`: PDF, Excel, and Word text extraction
+# Binary file readers (PDF, Excel, Word text extraction) — used by khora-cli and downstream consumers
 binary-readers = ["pymupdf>=1.25.0", "openpyxl>=3.1.0", "python-docx>=1.1.0"]
-# Parquet file support for `khora extract`
+# Parquet file support (used by khora-cli and downstream consumers)
 parquet = ["pyarrow>=18.0.0"]
 # Accelerated CPU operations (numpy for cosine sim, rapidfuzz for string matching)
 accel = [
@@ -103,9 +99,6 @@ embedded = ["surrealdb>=2.0.0a1"]
 sqlite = ["aiosqlite>=0.20.0"]
 # LanceDB embedded vector store (Chronicle engine, zero-infrastructure)
 lancedb = ["lancedb>=0.17.0", "pyarrow>=18.0.0"]
-
-[project.scripts]
-khora = "khora:main"
 
 [build-system]
 requires = ["hatchling", "hatch-vcs"]

@@ -181,8 +181,8 @@ change to the rest of the chat API in the CHANGELOG under
 ### Support modules
 
 - `khora.extraction.binary_readers.extract_if_needed(path: Path) -> Path | None` —
-  used by `khora extract` CLI and the forthcoming `khora-cli` to run
-  PDF/Excel/Word/Parquet readers before text ingestion.
+  used by `khora-cli` to run PDF/Excel/Word/Parquet readers before
+  text ingestion.
 - `khora.logging_config.setup_logging(level: str = "INFO", json_logs: bool = False, log_file: Path | None = None) -> None` —
   library consumers should call this (or configure loguru with
   `enqueue=True` themselves; see CLAUDE.md § Logging).

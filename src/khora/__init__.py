@@ -45,7 +45,6 @@ Example usage:
         result = await lake.recall("Who did Alice meet?", namespace=ns.namespace_id)
 """
 
-from .cli import main
 from .config import KhoraConfig
 from .core.models.document import DocumentSource
 from .core.models.event import EventType
@@ -59,7 +58,6 @@ from .query import SearchMode
 __version__ = __import__("importlib").metadata.version("khora")
 
 __all__ = [
-    "main",
     "KhoraError",
     "MemoryLake",
     "LLMUsage",

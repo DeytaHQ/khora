@@ -10,11 +10,15 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 - ADR-024 codifying the khora public API surface consumed by downstream packages (genesis, khora-benchmarks, khora-explorer, khora-cli). See `docs/adrs/adr-024-memory-lake-public-api.md`.
 
 ### Removed
+- `khora` console script and CLI subcommands (`extract`, `search`) — moved to [khora-cli](https://github.com/DeytaHQ/khora-cli). Install with `uv pip install khora-cli` and run `uv run khora-cli extract` / `uv run khora-cli search`.
 - `khora ontology` CLI subcommands (moved to khora-explorer)
 - `khora.discovery` package (moved to khora-explorer)
+- `khora.cli` package (entire subtree — `extract`, `search`, `_common`)
+- `click` and `rich` dropped from core dependencies (only the CLI used them)
 
 ### Changed
-- `khora.discovery.extraction` → `khora.extraction.binary_readers` (binary file reader used by `khora extract`)
+- **Breaking**: khora is now a pure memory-lake library. `uv run khora ...` is no longer a valid command; use `uv pip install khora-cli` and `uv run khora-cli extract` / `search` instead.
+- `khora.discovery.extraction` → `khora.extraction.binary_readers` (binary file reader consumed by khora-cli)
 
 ### New graph backends
 - AWS Neptune with Bolt protocol + IAM SigV4 auth (#272)

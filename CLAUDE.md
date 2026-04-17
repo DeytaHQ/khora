@@ -10,11 +10,9 @@ make format            # black, isort, ruff
 make lint              # ruff + ty typecheck
 make dev               # Start postgres + neo4j
 uv run alembic upgrade head                       # Run migrations
-uv run khora extract <file-or-dir>                # Ingest into knowledge graph
-uv run khora search "query" -n <namespace>        # Search knowledge graph
 ```
 
-Ontology tooling (construct / validate / preview) lives in the separate [khora-explorer](https://github.com/DeytaHQ/khora-explorer) package (`pip install khora-explorer`).
+CLI tooling (`extract`, `search`) lives in the separate [khora-cli](https://github.com/DeytaHQ/khora-cli) package (`uv pip install khora-cli`). Ontology tooling (construct / validate / preview) lives in [khora-explorer](https://github.com/DeytaHQ/khora-explorer) (`uv pip install khora-explorer`). khora itself is a pure memory-lake library.
 
 ## Test Commands
 
@@ -43,7 +41,7 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 - `storage/backends/surrealdb/` — Unified SurrealDB backend
 - `db/models.py` — SQLAlchemy ORM (UUID columns use `as_uuid=True`)
 - `_accel.py` — Rust/NumPy acceleration (MMR, cosine, pagerank, entity resolution, community detection, temporal)
-- `extraction/binary_readers.py` — PDF/xlsx/docx/parquet readers used by `khora extract`
+- `extraction/binary_readers.py` — PDF/xlsx/docx/parquet readers consumed by khora-cli (stable boundary)
 - `pipelines/flows/ingest.py` — Document ingestion pipeline (3-phase: stage → enrich → expand)
 - `db/migrations/env.py` — Alembic with advisory locking
 - `config/schema.py` — `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
