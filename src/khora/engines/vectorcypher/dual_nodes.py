@@ -574,9 +574,9 @@ class DualNodeManager:
             namespace_id: Namespace constraint
             depth: Maximum traversal depth (1-4)
             limit_per_entity: Max related entities per starting entity
-            prefer_current: When True, filter out entities whose valid_until
+            prefer_current: When True, filter out entities and relationships whose valid_until
                 has passed (for STATE_QUERY/RECENCY/CHANGE temporal categories).
-                Entities without valid_until are kept (NULL = still valid).
+                Entities and relationships without valid_until are kept (NULL = still valid).
 
         Returns:
             Dict mapping entity_id -> list of related entity info
@@ -590,7 +590,10 @@ class DualNodeManager:
         # Entities with NULL valid_until are kept (NULL = no known end = still valid).
         temporal_clause = ""
         if prefer_current:
-            temporal_clause = "AND (related.valid_until IS NULL OR related.valid_until > datetime())"
+            temporal_clause = (
+                "AND (related.valid_until IS NULL OR related.valid_until > datetime())"
+                "\n          AND all(r IN relationships(path) WHERE r.valid_until IS NULL OR r.valid_until > datetime())"
+            )
 
         # OPTIMIZATION: Single query fetches all neighborhoods in batch
         # Uses UNWIND internally via IN clause + collect() aggregation
