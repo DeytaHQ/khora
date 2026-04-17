@@ -1510,8 +1510,9 @@ class Neo4jBackend(GraphBackendBase):
         """Snapshot orphaned entities into :EntityVersion nodes on document replacement.
 
         Each dict in *retirement_rows* must contain keys ``current_id``
-        (str UUID of the live :Entity), ``snapshot_id`` (str UUID for the new
-        :EntityVersion node), and ``retired_at`` (ISO-8601 datetime string).
+        (str UUID of the live :Entity), ``namespace_id`` (str UUID of the
+        namespace), ``snapshot_id`` (str UUID for the new :EntityVersion
+        node), and ``retired_at`` (ISO-8601 datetime string).
 
         Unlike ``_VERSION_CYPHER`` (which snapshots *pre-fetch* values on
         attribute change), this copies the *current* node properties — correct
@@ -1532,7 +1533,7 @@ class Neo4jBackend(GraphBackendBase):
 
         _RETIRE_CYPHER = """\
 UNWIND $retirement_rows AS r
-MATCH (current:Entity {id: r.current_id})
+MATCH (current:Entity {id: r.current_id, namespace_id: r.namespace_id})
 CREATE (old:EntityVersion {
     id: r.snapshot_id,
     namespace_id: current.namespace_id,
