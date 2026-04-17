@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from copy import copy
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypedDict
 from uuid import UUID, uuid4
 
 from loguru import logger
@@ -1937,6 +1937,66 @@ RETURN current.id AS id
         async with self._session() as session:
             deleted = await session.execute_write(_delete)
             return deleted > 0
+
+    class RetirementRow(TypedDict):
+        """A row for retire_orphaned_relationships_batch()."""
+
+        relationship_id: UUID
+        old_doc_id: UUID
+        retired_at: datetime
+
+    @trace(
+        "khora.neo4j.retire_orphaned_relationships_batch",
+        result=lambda r: {"retired_count": r},
+    )
+    async def retire_orphaned_relationships_batch(
+        self,
+        retirement_rows: list[RetirementRow],
+    ) -> int:
+        """Soft-retire orphaned relationships by stamping valid_until in-place.
+
+        Only mutates relationships whose sole source was the replaced document
+        (size(source_document_ids) = 1). Multi-sourced relationships are left
+        untouched for separate survivor cleanup.
+
+        Each row must contain:
+            relationship_id: UUID — the relationship to retire
+            old_doc_id: UUID — the document being replaced
+            retired_at: datetime — timestamp for valid_until / updated_at
+
+        Returns:
+            Number of relationships actually retired (sole-sourced matches only),
+            not the number of rows attempted.
+        """
+        if not retirement_rows:
+            return 0
+        rows = [
+            {
+                "relationship_id": str(r["relationship_id"]),
+                "old_doc_id": str(r["old_doc_id"]),
+                "retired_at": r["retired_at"].isoformat(),
+            }
+            for r in retirement_rows
+        ]
+
+        async def _retire(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                """
+                UNWIND $retirement_rows AS r
+                MATCH ()-[rel {id: r.relationship_id}]-()
+                WHERE size(rel.source_document_ids) = 1
+                  AND r.old_doc_id IN rel.source_document_ids
+                SET rel.valid_until = r.retired_at,
+                    rel.updated_at = r.retired_at
+                RETURN count(DISTINCT rel) AS retired
+                """,
+                retirement_rows=rows,
+            )
+            record = await result.single()
+            return record["retired"] if record else 0
+
+        async with self._session() as session:
+            return await session.execute_write(_retire)
 
     @trace(
         "khora.neo4j.get_entity_relationships",
