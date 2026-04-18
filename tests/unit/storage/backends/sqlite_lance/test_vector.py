@@ -24,121 +24,53 @@ from khora.core.models.entity import Entity
 pytestmark = pytest.mark.skipif(not _HAS_LANCEDB, reason="lancedb not installed")
 
 if _HAS_LANCEDB:
+    from khora.db.session import run_migrations
     from khora.storage.backends.sqlite_lance.connection import (
         EmbeddedStorageHandle,
         EmbeddedStorageHandleConfig,
     )
+    from khora.storage.backends.sqlite_lance.graph import SQLiteLanceGraphAdapter
     from khora.storage.backends.sqlite_lance.vector import SQLiteLanceVectorAdapter
 
 
 # ---------------------------------------------------------------------------
-# Schema DDL — mirrors the SQLite tables the relational backend creates.
-# Inline here while DYT-2727 (Alembic dialect-gated migrations) is in flight.
+# Fixtures — back the handle with the real Alembic-migrated schema so the
+# adapter's raw SQL is validated against the production table shape.
 # ---------------------------------------------------------------------------
 
-_SCHEMA_SQL = """\
-CREATE TABLE IF NOT EXISTS chunks (
-    id TEXT PRIMARY KEY,
-    namespace_id TEXT NOT NULL,
-    document_id TEXT NOT NULL,
-    content TEXT NOT NULL,
-    chunk_index INTEGER DEFAULT 0,
-    start_char INTEGER DEFAULT 0,
-    end_char INTEGER DEFAULT 0,
-    token_count INTEGER DEFAULT 0,
-    metadata_ TEXT DEFAULT '{}',
-    embedding TEXT,
-    embedding_model TEXT DEFAULT '',
-    created_at TEXT NOT NULL,
-    source_timestamp TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_chunks_ns ON chunks(namespace_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(document_id);
 
-CREATE TABLE IF NOT EXISTS entities (
-    id TEXT PRIMARY KEY,
-    namespace_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    entity_type TEXT NOT NULL DEFAULT 'CONCEPT',
-    description TEXT DEFAULT '',
-    attributes TEXT DEFAULT '{}',
-    source_tool TEXT DEFAULT '',
-    source_document_ids TEXT DEFAULT '[]',
-    source_chunk_ids TEXT DEFAULT '[]',
-    mention_count INTEGER DEFAULT 1,
-    embedding TEXT,
-    embedding_model TEXT DEFAULT '',
-    valid_from TEXT,
-    valid_until TEXT,
-    confidence REAL DEFAULT 1.0,
-    metadata_ TEXT DEFAULT '{}',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_entities_ns ON entities(namespace_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_unique
-    ON entities(namespace_id, name, entity_type);
-"""
+async def _build_handle(tmp_path: Path, *, use_halfvec: bool) -> EmbeddedStorageHandle:
+    db_path = tmp_path / "k.db"
+    lance_path = tmp_path / "k.lance"
+    result = await run_migrations(f"sqlite+aiosqlite:///{db_path}")
+    assert result.success, result.error
 
-_FTS5_SQL = """\
-CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    content,
-    chunk_id UNINDEXED,
-    namespace_id UNINDEXED
-);
-"""
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
+    cfg = EmbeddedStorageHandleConfig(
+        db_path=str(db_path),
+        lance_path=str(lance_path),
+        embedding_dimension=8,
+        use_halfvec=use_halfvec,
+    )
+    h = EmbeddedStorageHandle(cfg)
+    await h.connect()
+    # Tests use bare namespace/document UUIDs without seeding
+    # ``memory_namespaces`` / ``documents`` rows — FKs are out of scope
+    # for this adapter's unit tests and are exercised in integration.
+    await h.sqlite.execute("PRAGMA foreign_keys = OFF")
+    await h.sqlite.commit()
+    return h
 
 
 @pytest.fixture
 async def handle(tmp_path: Path):
-    cfg = EmbeddedStorageHandleConfig(
-        db_path=str(tmp_path / "k.db"),
-        lance_path=str(tmp_path / "k.lance"),
-        embedding_dimension=8,
-        use_halfvec=False,
-    )
-    h = EmbeddedStorageHandle(cfg)
-    await h.connect()
-
-    # Inline DDL — see module docstring: migrations land in DYT-2727.
-    for stmt in _SCHEMA_SQL.split(";"):
-        s = stmt.strip()
-        if s:
-            await h.sqlite.execute(s)
-    try:
-        await h.sqlite.executescript(_FTS5_SQL)
-    except Exception:
-        pass
-    await h.sqlite.commit()
-
+    h = await _build_handle(tmp_path, use_halfvec=False)
     yield h
     await h.disconnect()
 
 
 @pytest.fixture
 async def halfvec_handle(tmp_path: Path):
-    cfg = EmbeddedStorageHandleConfig(
-        db_path=str(tmp_path / "k.db"),
-        lance_path=str(tmp_path / "k.lance"),
-        embedding_dimension=8,
-        use_halfvec=True,
-    )
-    h = EmbeddedStorageHandle(cfg)
-    await h.connect()
-    for stmt in _SCHEMA_SQL.split(";"):
-        s = stmt.strip()
-        if s:
-            await h.sqlite.execute(s)
-    try:
-        await h.sqlite.executescript(_FTS5_SQL)
-    except Exception:
-        pass
-    await h.sqlite.commit()
+    h = await _build_handle(tmp_path, use_halfvec=True)
     yield h
     await h.disconnect()
 
@@ -146,6 +78,20 @@ async def halfvec_handle(tmp_path: Path):
 @pytest.fixture
 async def adapter(handle):
     return SQLiteLanceVectorAdapter(handle)
+
+
+@pytest.fixture
+async def graph(handle):
+    """Graph adapter against the same handle — owner of entities SQLite rows.
+
+    The vector adapter's entity operations (``create_entity``,
+    ``update_entity``, ``update_entity_embedding``) only touch LanceDB;
+    the SQLite ``entities`` row is owned by the graph adapter.  Entity
+    tests that exercise ``entity_exists`` / ``update_entity_embedding``
+    must seed the row through the graph adapter first — this mirrors how
+    ``StorageCoordinator`` wires the two adapters together.
+    """
+    return SQLiteLanceGraphAdapter(handle)
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +181,9 @@ class TestChunkCRUD:
         assert fetched is not None
         assert fetched.id == c.id
         assert fetched.content == c.content
-        assert fetched.embedding == c.embedding
+        # Embedding lives in LanceDB only — get_chunk reads from SQLite
+        # which has no ``embedding`` column (LanceDB owns vectors).
+        assert fetched.embedding is None
 
     async def test_create_without_embedding_skips_lance(self, adapter: SQLiteLanceVectorAdapter):
         ns, doc = uuid4(), uuid4()
@@ -438,28 +386,34 @@ class TestSearchFulltext:
 
 
 class TestEntities:
-    async def test_create_and_exists(self, adapter: SQLiteLanceVectorAdapter):
+    async def test_create_and_exists(self, adapter: SQLiteLanceVectorAdapter, graph):
         ns = uuid4()
         e = _make_entity(ns, embedding=_unit(8, 0))
+        # Entity SQLite row is graph-owned; vector adapter writes only
+        # the LanceDB embedding.
+        await graph.create_entity(e)
         await adapter.create_entity(e)
         assert await adapter.entity_exists(e.id) is True
         assert await adapter.entity_exists(uuid4()) is False
 
-    async def test_update_entity(self, adapter: SQLiteLanceVectorAdapter):
+    async def test_update_entity(self, adapter: SQLiteLanceVectorAdapter, graph):
         ns = uuid4()
         e = _make_entity(ns, embedding=_unit(8, 0))
+        await graph.create_entity(e)
         await adapter.create_entity(e)
 
         e.description = "updated"
+        await graph.update_entity(e)
         await adapter.update_entity(e)
 
         # Search should still find it (upsert preserves vector row).
         results = await adapter.search_similar_entities(ns, _unit(8, 0), limit=5)
         assert any(eid == e.id for eid, _ in results)
 
-    async def test_update_entity_embedding(self, adapter: SQLiteLanceVectorAdapter):
+    async def test_update_entity_embedding(self, adapter: SQLiteLanceVectorAdapter, graph):
         ns = uuid4()
         e = _make_entity(ns, embedding=_unit(8, 0))
+        await graph.create_entity(e)
         await adapter.create_entity(e)
 
         # Change the embedding to point in a different direction.
@@ -474,10 +428,11 @@ class TestEntities:
         with pytest.raises(ValueError, match="not found"):
             await adapter.update_entity_embedding(uuid4(), _unit(8, 0), "m")
 
-    async def test_update_entity_embeddings_batch(self, adapter: SQLiteLanceVectorAdapter):
+    async def test_update_entity_embeddings_batch(self, adapter: SQLiteLanceVectorAdapter, graph):
         ns = uuid4()
         entities = [_make_entity(ns, name=f"e{i}", embedding=_unit(8, 0)) for i in range(3)]
         for e in entities:
+            await graph.create_entity(e)
             await adapter.create_entity(e)
 
         updates = [(e.id, _unit(8, 7), "v2") for e in entities]
@@ -491,10 +446,14 @@ class TestEntities:
     async def test_update_entity_embeddings_batch_empty(self, adapter: SQLiteLanceVectorAdapter):
         assert await adapter.update_entity_embeddings_batch([]) == 0
 
-    async def test_search_similar_entities_min_similarity(self, adapter: SQLiteLanceVectorAdapter):
+    async def test_search_similar_entities_min_similarity(self, adapter: SQLiteLanceVectorAdapter, graph):
         ns = uuid4()
-        await adapter.create_entity(_make_entity(ns, name="a", embedding=_unit(8, 0)))
-        await adapter.create_entity(_make_entity(ns, name="b", embedding=_unit(8, 1)))
+        a = _make_entity(ns, name="a", embedding=_unit(8, 0))
+        b = _make_entity(ns, name="b", embedding=_unit(8, 1))
+        await graph.create_entity(a)
+        await graph.create_entity(b)
+        await adapter.create_entity(a)
+        await adapter.create_entity(b)
 
         # Only the self-match clears a 0.5 threshold.
         results = await adapter.search_similar_entities(ns, _unit(8, 0), min_similarity=0.5)

@@ -85,52 +85,17 @@ if _HAS_EMBEDDED:
 # ---------------------------------------------------------------------------
 
 
-# The Alembic migration creates schemas via SQLAlchemy ORM — column names
-# match the ORM attribute names (e.g. ``metadata``, no ``metadata_`` alias).
-# The relational adapter is SQLAlchemy-based so this is fine; the graph /
-# vector / event-store adapters speak raw aiosqlite and expect the column
-# shape from ``sqlite.py`` (the older standalone backend they were adapted
-# from). This helper reshapes the migrated schema to match.
-#
-# The additions:
-# * ``chunks.metadata_`` / ``chunks.embedding`` — raw vector adapter reads.
-# * ``entities.metadata_`` / ``entities.embedding`` / ``entities.source_tool``.
-# * ``chunks_fts`` swap from the migration's external-content shape
-#   (driven by triggers) to the adapter's manual-insert shape
-#   ``(content, chunk_id UNINDEXED, namespace_id UNINDEXED)``.
-_ADAPTER_SCHEMA_RESHAPE = [
-    "DROP TRIGGER IF EXISTS chunks_au",
-    "DROP TRIGGER IF EXISTS chunks_ad",
-    "DROP TRIGGER IF EXISTS chunks_ai",
-    "DROP TABLE IF EXISTS chunks_fts",
-    ("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(content, chunk_id UNINDEXED, namespace_id UNINDEXED)"),
-    "ALTER TABLE chunks ADD COLUMN metadata_ TEXT DEFAULT '{}'",
-    "ALTER TABLE chunks ADD COLUMN embedding TEXT",
-    "ALTER TABLE entities ADD COLUMN metadata_ TEXT DEFAULT '{}'",
-    "ALTER TABLE entities ADD COLUMN embedding TEXT",
-    "ALTER TABLE entities ADD COLUMN source_tool TEXT DEFAULT ''",
-]
+async def _migrate(db_path: Path) -> None:
+    """Run Alembic migrations against ``db_path``.
 
-
-async def _migrate_and_reshape(db_path: Path) -> None:
-    """Run migrations then reshape the schema for raw-SQL adapters."""
+    The adapters speak the exact schema the migrations produce
+    (``chunks.metadata``, no ``embedding`` column on ``chunks`` /
+    ``entities``, external-content FTS5 with triggers, 32-char UUID
+    hex) after DYT-2749 — no reshape shim required.
+    """
     url = f"sqlite+aiosqlite:///{db_path}"
     result = await run_migrations(url)
     assert result.success, f"migrations failed: {result.error}"
-
-    async with aiosqlite.connect(str(db_path)) as conn:
-        for stmt in _ADAPTER_SCHEMA_RESHAPE:
-            try:
-                await conn.execute(stmt)
-            except Exception:
-                # Migrations evolve; tolerate columns that already exist
-                # so the test self-heals across schema changes.
-                pass
-        # Tests use bare namespace/document UUIDs without creating
-        # ``memory_namespaces`` or ``documents`` rows. FKs are orthogonal
-        # to protocol compliance checks here and are covered in integration.
-        await conn.execute("PRAGMA foreign_keys=OFF")
-        await conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -140,10 +105,10 @@ async def _migrate_and_reshape(db_path: Path) -> None:
 
 @pytest.fixture
 async def sqlite_lance_handle(tmp_path: Path) -> AsyncIterator[EmbeddedStorageHandle]:
-    """Shared embedded handle with fully-migrated schema + adapter-shape FTS."""
+    """Shared embedded handle backed by the real Alembic-migrated schema."""
     db_path = tmp_path / "compliance.db"
     lance_path = tmp_path / "compliance.lance"
-    await _migrate_and_reshape(db_path)
+    await _migrate(db_path)
 
     cfg = EmbeddedStorageHandleConfig(
         db_path=str(db_path),
@@ -153,9 +118,11 @@ async def sqlite_lance_handle(tmp_path: Path) -> AsyncIterator[EmbeddedStorageHa
     )
     handle = EmbeddedStorageHandle(cfg)
     await handle.connect()
-    # Keep FKs off on the handle's own connection as well — both connections
-    # open the same DB file, but the pragma is per-connection.
-    await handle.sqlite.execute("PRAGMA foreign_keys=OFF")
+    # Protocol tests use bare namespace/document UUIDs without seeding
+    # the parent rows.  FK enforcement is exercised in integration tests
+    # (test_sqlite_lance_ingest.py / _fk_enforcement) against a coordinator
+    # that creates namespaces through the relational adapter.
+    await handle.sqlite.execute("PRAGMA foreign_keys = OFF")
     await handle.sqlite.commit()
     try:
         yield handle
@@ -246,6 +213,25 @@ async def vector_backend(
     if request.param == "sqlite_lance":
         return sqlite_lance_vector
     raise AssertionError(f"unknown backend: {request.param}")  # pragma: no cover
+
+
+@pytest.fixture
+async def entity_seeder(vector_backend, sqlite_lance_graph: SQLiteLanceGraphAdapter):
+    """Factory that seeds an entity through both graph and vector adapters.
+
+    On sqlite_lance, entity SQLite rows are graph-owned; the vector
+    adapter only writes the LanceDB embedding.  ``entity_exists`` /
+    ``update_entity_embedding`` read SQLite, so the protocol tests that
+    call ``vector.create_entity`` and then expect the row to exist must
+    seed via the graph adapter too.  On unified or entity-owning
+    backends (e.g. pgvector), the graph call is a harmless duplicate.
+    """
+
+    async def _seed(entity):
+        await sqlite_lance_graph.create_entity(entity)
+        await vector_backend.create_entity(entity)
+
+    return _seed
 
 
 @pytest.fixture(params=["sqlite_lance"])
@@ -833,7 +819,11 @@ class TestVectorProtocol:
 
         fetched = await vector_backend.get_chunk(c.id)
         assert fetched is not None
-        assert fetched.embedding == c.embedding
+        # Backends where metadata and embedding live in separate stores
+        # (e.g. sqlite_lance — SQLite for metadata, LanceDB for vectors)
+        # return ``embedding=None`` from metadata reads; the vector shows
+        # up through similarity search.
+        assert fetched.embedding in (None, c.embedding)
 
         assert await vector_backend.get_chunk(uuid4()) is None
 
@@ -945,10 +935,10 @@ class TestVectorProtocol:
         assert "quick" in matched.content
         assert score != 0.0  # Non-trivial rank.
 
-    async def test_entity_embedding_crud(self, vector_backend):
+    async def test_entity_embedding_crud(self, vector_backend, entity_seeder):
         ns = uuid4()
         e = _make_entity(ns, name="Alice", embedding=_unit(8, 0))
-        await vector_backend.create_entity(e)
+        await entity_seeder(e)
 
         assert await vector_backend.entity_exists(e.id) is True
         assert await vector_backend.entity_exists(uuid4()) is False
@@ -959,20 +949,20 @@ class TestVectorProtocol:
         hits = await vector_backend.search_similar_entities(ns, _unit(8, 0), limit=5)
         assert any(eid == e.id for eid, _ in hits)
 
-    async def test_update_entity_embedding(self, vector_backend):
+    async def test_update_entity_embedding(self, vector_backend, entity_seeder):
         ns = uuid4()
         e = _make_entity(ns, name="Alice", embedding=_unit(8, 0))
-        await vector_backend.create_entity(e)
+        await entity_seeder(e)
 
         await vector_backend.update_entity_embedding(e.id, _unit(8, 3), "new-model")
         hits = await vector_backend.search_similar_entities(ns, _unit(8, 3), limit=5)
         assert hits
         assert hits[0][0] == e.id
 
-    async def test_search_similar_entities(self, vector_backend):
+    async def test_search_similar_entities(self, vector_backend, entity_seeder):
         ns = uuid4()
-        await vector_backend.create_entity(_make_entity(ns, name="a", embedding=_unit(8, 0)))
-        await vector_backend.create_entity(_make_entity(ns, name="b", embedding=_unit(8, 1)))
+        await entity_seeder(_make_entity(ns, name="a", embedding=_unit(8, 0)))
+        await entity_seeder(_make_entity(ns, name="b", embedding=_unit(8, 1)))
 
         # min_similarity keeps only the self-match on orthogonal basis.
         hits = await vector_backend.search_similar_entities(ns, _unit(8, 0), min_similarity=0.5)

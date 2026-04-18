@@ -201,3 +201,31 @@ class TestSQLiteLanceIngest:
             assert await coord.graph.count_entities(ns.id) == 2  # type: ignore[union-attr]
         finally:
             await coord.disconnect()
+
+    async def test_chunk_insert_with_unknown_document_id_fails(self, tmp_path: Path) -> None:
+        """FKs must be enforced: a chunk pointing at a non-existent document
+        cannot be inserted.  After the DYT-2749 drift fix, UUIDs on both
+        sides (``chunks.document_id`` and ``documents.id``) share the same
+        format (32-char hex) and SQLite's FK checker can compare them.
+        """
+        from uuid import uuid4
+
+        import aiosqlite
+
+        coord = await build_sqlite_lance_coordinator(tmp_path)
+        try:
+            ns = await coord.create_namespace(MemoryNamespace())
+
+            # Craft a chunk row that references a document that was never
+            # created.  Use the same storage format the adapter uses so
+            # the failure must come from FK enforcement, not a format
+            # mismatch that silently passes.
+            bogus_doc = uuid4()
+            chunk = _make_chunk(ns.id, bogus_doc, idx=0, content="orphan")
+
+            with pytest.raises((aiosqlite.IntegrityError, Exception)) as excinfo:
+                await coord.create_chunks_batch([chunk])
+            # Make sure the failure is FK-related, not a generic error.
+            assert "FOREIGN KEY" in str(excinfo.value).upper() or "foreign key" in str(excinfo.value).lower()
+        finally:
+            await coord.disconnect()
