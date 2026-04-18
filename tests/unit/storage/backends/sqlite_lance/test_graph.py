@@ -36,13 +36,13 @@ if _HAS_LANCEDB:
 
 @pytest.fixture
 async def handle(tmp_path: Path):
-    """Connect a handle backed by Alembic-created tables.
+    """Connect a handle backed by the real Alembic-migrated schema.
 
-    The graph adapter requires the ``entities``, ``relationships`` and
-    ``episodes`` tables (and their indexes) that the khora Alembic chain
-    produces.  We run migrations against the temporary SQLite file, then
-    toggle ``foreign_keys = OFF`` for the test session so the tests don't
-    have to create ``memory_namespaces`` rows just to satisfy FKs.
+    Unit tests here exercise graph semantics (CRUD, traversal, merge),
+    not cross-table integrity; FKs are disabled so the tests don't have
+    to seed ``memory_namespaces`` / ``entities`` parent rows for every
+    relationship.  FK enforcement is exercised end-to-end in
+    ``tests/integration/test_sqlite_lance_ingest.py``.
     """
     db_path = tmp_path / "graph.db"
     lance_path = tmp_path / "graph.lance"
@@ -58,8 +58,6 @@ async def handle(tmp_path: Path):
     )
     h = EmbeddedStorageHandle(cfg)
     await h.connect()
-    # Disable FKs — tests never exercise cross-table integrity and this
-    # removes the need to create namespace rows per test.
     await h.sqlite.execute("PRAGMA foreign_keys = OFF")
     await h.sqlite.commit()
     yield h

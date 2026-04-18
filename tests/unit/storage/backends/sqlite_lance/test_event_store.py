@@ -21,6 +21,7 @@ from khora.core.models.event import EventType, MemoryEvent
 pytestmark = pytest.mark.skipif(not _HAS_DEPS, reason="aiosqlite/lancedb not installed")
 
 if _HAS_DEPS:
+    from khora.db.session import run_migrations
     from khora.storage.backends.sqlite_lance.connection import (
         EmbeddedStorageHandle,
         EmbeddedStorageHandleConfig,
@@ -31,55 +32,29 @@ if _HAS_DEPS:
 
 
 # ---------------------------------------------------------------------------
-# Inline DDL mirrors the ``memory_events`` table produced by Alembic
-# migration ``000_initial_schema`` under the SQLite dialect gate.  DYT-2727
-# lands the full migration; tests here keep the surface minimal to isolate
-# the event-store adapter from migration churn.
-# ---------------------------------------------------------------------------
-
-_EVENTS_DDL = """\
-CREATE TABLE IF NOT EXISTS memory_events (
-    id TEXT PRIMARY KEY,
-    namespace_id TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    timestamp TEXT,
-    resource_type TEXT NOT NULL,
-    resource_id TEXT NOT NULL,
-    data TEXT,
-    previous_data TEXT,
-    actor_id TEXT,
-    actor_type TEXT DEFAULT 'system',
-    correlation_id TEXT,
-    version INTEGER DEFAULT 1,
-    metadata TEXT
-);
-CREATE INDEX IF NOT EXISTS ix_events_resource ON memory_events(resource_type, resource_id);
-CREATE INDEX IF NOT EXISTS ix_events_namespace_timestamp ON memory_events(namespace_id, timestamp);
-"""
-
-
-# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 async def handle(tmp_path: Path):
+    db_path = tmp_path / "events.db"
+    migration_result = await run_migrations(f"sqlite+aiosqlite:///{db_path}")
+    assert migration_result.success, migration_result.error
+
     cfg = EmbeddedStorageHandleConfig(
-        db_path=str(tmp_path / "events.db"),
+        db_path=str(db_path),
         lance_path=str(tmp_path / "events.lance"),
         embedding_dimension=8,
         use_halfvec=False,
     )
     h = EmbeddedStorageHandle(cfg)
     await h.connect()
-    # FK checks would require a memory_namespaces row; skip for this adapter's
-    # append-only tests (the real schema enforces FK at the DB layer).
-    await h.sqlite.execute("PRAGMA foreign_keys=OFF")
-    for stmt in _EVENTS_DDL.split(";"):
-        s = stmt.strip()
-        if s:
-            await h.sqlite.execute(s)
+    # Event-store tests append events against bare namespace UUIDs without
+    # seeding ``memory_namespaces`` — FK enforcement is covered in
+    # integration.  FKs are per-connection so we set the pragma on the
+    # handle's own aiosqlite connection.
+    await h.sqlite.execute("PRAGMA foreign_keys = OFF")
     await h.sqlite.commit()
     try:
         yield h

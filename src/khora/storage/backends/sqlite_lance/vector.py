@@ -3,24 +3,27 @@
 Implements :class:`VectorBackendProtocol` using a shared
 :class:`EmbeddedStorageHandle`:
 
-* Chunk/Entity metadata lives in SQLite (source of truth).
-* Embeddings live in LanceDB for ANN search.
-* Full-text search uses SQLite FTS5 (BM25).
+* Chunk metadata lives in SQLite.  The ``chunks`` / ``entities`` /
+  ``chunks_fts`` tables are created by the Alembic dialect-gated
+  migrations.
+* Embeddings live in LanceDB for ANN search — there is no ``embedding``
+  column on the SQLite side.
+* Full-text search uses SQLite FTS5 (BM25).  ``chunks_fts`` is an
+  external-content virtual table linked to ``chunks`` by rowid, with
+  ``AFTER INSERT / UPDATE / DELETE`` triggers keeping it in sync (see
+  migration 002).  This adapter inserts into ``chunks`` only; the
+  trigger handles FTS5.
+* Entity SQLite rows are owned by :class:`SQLiteLanceGraphAdapter`;
+  this adapter stores only the entity embedding vector in LanceDB.
 
 Vector writes to LanceDB happen after SQLite commits so SQLite remains
 consistent if the LanceDB write fails. Compensating deletes log warnings
 rather than raise, matching the sibling SurrealDB adapter's policy.
-
-This adapter requires the ``chunks``, ``entities`` and ``chunks_fts``
-SQLite tables to exist. DYT-2727 provides those via Alembic dialect-gated
-migrations; until then, callers (or tests) must create the tables
-themselves.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -55,16 +58,6 @@ def _parse_dt(val: str | None) -> datetime | None:
     if not val:
         return None
     return datetime.fromisoformat(val)
-
-
-def _uuid_list_dumps(uuids: list[UUID]) -> str:
-    return json.dumps([str(u) for u in uuids])
-
-
-def _uuid_list_loads(s: str | None) -> list[UUID]:
-    if not s:
-        return []
-    return [UUID(x) for x in json.loads(s)]
 
 
 class SQLiteLanceVectorAdapter:
@@ -140,7 +133,6 @@ class SQLiteLanceVectorAdapter:
         sqlite_rows = []
         lance_rows: list[dict[str, Any]] = []
         for c in chunks:
-            embedding_json = json.dumps(c.embedding) if c.embedding else None
             sqlite_rows.append(
                 (
                     uuid_to_text(c.id),
@@ -152,7 +144,6 @@ class SQLiteLanceVectorAdapter:
                     c.metadata.end_char,
                     c.metadata.token_count,
                     to_json_text(c.metadata.custom or {}),
-                    embedding_json,
                     c.embedding_model,
                     _dt_to_str(c.created_at) or now,
                     _dt_to_str(c.source_timestamp),
@@ -169,17 +160,17 @@ class SQLiteLanceVectorAdapter:
                     }
                 )
 
-        # 1) SQLite: metadata + FTS5 index
+        # 1) SQLite: chunk metadata.  FTS5 is kept in sync by the AFTER-INSERT
+        # trigger created by migration 002 — we do NOT insert into chunks_fts
+        # directly.  LanceDB owns the embedding vector (no SQLite column).
         await self._sqlite.executemany(
             "INSERT INTO chunks "
             "(id, namespace_id, document_id, content, chunk_index, start_char, "
-            "end_char, token_count, metadata_, embedding, embedding_model, "
+            "end_char, token_count, metadata, embedding_model, "
             "created_at, source_timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             sqlite_rows,
         )
-        for c in chunks:
-            await self._fts_insert(c)
         await self._sqlite.commit()
 
         # 2) LanceDB: embeddings (compensation on failure — SQLite is
@@ -243,13 +234,12 @@ class SQLiteLanceVectorAdapter:
         """
         doc_text = uuid_to_text(document_id)
 
-        # First, enumerate chunks so we can purge FTS + LanceDB
+        # Enumerate before delete so we know whether LanceDB compensation is
+        # needed.  FTS5 is kept in sync by the AFTER-DELETE trigger on
+        # ``chunks`` — no manual ``chunks_fts`` delete needed.
         cur = await self._sqlite.execute("SELECT id FROM chunks WHERE document_id = ?", (doc_text,))
         rows = await cur.fetchall()
         count = len(rows)
-
-        for r in rows:
-            await self._fts_delete(r["id"])
 
         cur = await self._sqlite.execute("DELETE FROM chunks WHERE document_id = ?", (doc_text,))
         rowcount = cur.rowcount
@@ -375,6 +365,12 @@ class SQLiteLanceVectorAdapter:
     ) -> list[tuple[Chunk, float]]:
         """FTS5 BM25 ranking.
 
+        Migration 002 creates ``chunks_fts`` as an external-content FTS5
+        table linked to ``chunks`` by rowid (``content='chunks'``,
+        ``content_rowid='rowid'``) with triggers keeping them in sync.
+        We join on ``chunks_fts.rowid = chunks.rowid`` and filter by
+        ``namespace_id`` on the chunks side.
+
         SQLite's ``bm25()`` returns lower-is-better; we negate it so the
         return value matches the "higher is better" semantics used by
         the pgvector and SurrealDB siblings.
@@ -382,8 +378,8 @@ class SQLiteLanceVectorAdapter:
         safe_query = query_text.replace('"', '""')
         sql_parts = [
             "SELECT c.*, bm25(chunks_fts) AS bm FROM chunks_fts "
-            "JOIN chunks c ON c.id = chunks_fts.chunk_id "
-            "WHERE chunks_fts MATCH ? AND chunks_fts.namespace_id = ?"
+            "JOIN chunks c ON c.rowid = chunks_fts.rowid "
+            "WHERE chunks_fts MATCH ? AND c.namespace_id = ?"
         ]
         params: list[Any] = [safe_query, uuid_to_text(namespace_id)]
         if created_after is not None:
@@ -404,72 +400,23 @@ class SQLiteLanceVectorAdapter:
     # ------------------------------------------------------------------
 
     async def create_entity(self, entity: Entity) -> None:
-        now = _now_iso()
-        embedding_json = json.dumps(entity.embedding) if entity.embedding else None
-        await self._sqlite.execute(
-            "INSERT OR REPLACE INTO entities "
-            "(id, namespace_id, name, entity_type, description, attributes, "
-            "source_tool, source_document_ids, source_chunk_ids, mention_count, "
-            "embedding, embedding_model, valid_from, valid_until, confidence, "
-            "metadata_, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                uuid_to_text(entity.id),
-                uuid_to_text(entity.namespace_id),
-                entity.name,
-                entity.entity_type,
-                entity.description,
-                to_json_text(entity.attributes),
-                entity.source_tool,
-                _uuid_list_dumps(entity.source_document_ids),
-                _uuid_list_dumps(entity.source_chunk_ids),
-                entity.mention_count,
-                embedding_json,
-                entity.embedding_model,
-                _dt_to_str(entity.valid_from),
-                _dt_to_str(entity.valid_until),
-                entity.confidence,
-                to_json_text(entity.metadata),
-                _dt_to_str(entity.created_at) or now,
-                _dt_to_str(entity.updated_at) or now,
-            ),
-        )
-        await self._sqlite.commit()
+        """Persist the entity's embedding to LanceDB.
 
+        The SQLite ``entities`` row is owned by :class:`SQLiteLanceGraphAdapter`
+        — the coordinator calls ``graph.create_entity`` and
+        ``vector.create_entity`` in parallel, so this adapter must only
+        touch LanceDB (writing to SQLite here would race the graph write
+        and also conflict on the primary key).
+        """
         if entity.embedding:
             await self._upsert_entity_vector(entity.id, entity.namespace_id, entity.embedding)
 
     async def update_entity(self, entity: Entity) -> None:
-        now = _now_iso()
-        embedding_json = json.dumps(entity.embedding) if entity.embedding else None
-        await self._sqlite.execute(
-            "UPDATE entities SET "
-            "name = ?, entity_type = ?, description = ?, attributes = ?, "
-            "source_tool = ?, source_document_ids = ?, source_chunk_ids = ?, "
-            "mention_count = ?, embedding = ?, embedding_model = ?, "
-            "valid_from = ?, valid_until = ?, confidence = ?, metadata_ = ?, updated_at = ? "
-            "WHERE id = ?",
-            (
-                entity.name,
-                entity.entity_type,
-                entity.description,
-                to_json_text(entity.attributes),
-                entity.source_tool,
-                _uuid_list_dumps(entity.source_document_ids),
-                _uuid_list_dumps(entity.source_chunk_ids),
-                entity.mention_count,
-                embedding_json,
-                entity.embedding_model,
-                _dt_to_str(entity.valid_from),
-                _dt_to_str(entity.valid_until),
-                entity.confidence,
-                to_json_text(entity.metadata),
-                now,
-                uuid_to_text(entity.id),
-            ),
-        )
-        await self._sqlite.commit()
+        """Refresh the entity's embedding in LanceDB.
 
+        See :meth:`create_entity` — SQLite entity metadata belongs to
+        the graph adapter.
+        """
         if entity.embedding:
             await self._upsert_entity_vector(entity.id, entity.namespace_id, entity.embedding)
 
@@ -478,9 +425,8 @@ class SQLiteLanceVectorAdapter:
         row = await cur.fetchone()
         return row is not None
 
-    async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-        now = _now_iso()
-        # Look up namespace so we can write the LanceDB row (required column).
+    async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:  # noqa: ARG002 — model is tracked on the graph row, not in LanceDB
+        # Look up namespace from the authoritative SQLite row (graph-owned).
         cur = await self._sqlite.execute(
             "SELECT namespace_id FROM entities WHERE id = ?",
             (uuid_to_text(entity_id),),
@@ -490,20 +436,15 @@ class SQLiteLanceVectorAdapter:
             raise ValueError(f"Entity {entity_id} not found")
         namespace_id = UUID(row["namespace_id"])
 
-        await self._sqlite.execute(
-            "UPDATE entities SET embedding = ?, embedding_model = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(embedding), model, now, uuid_to_text(entity_id)),
-        )
-        await self._sqlite.commit()
-
         await self._upsert_entity_vector(entity_id, namespace_id, embedding)
 
     async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
         if not updates:
             return 0
-        now = _now_iso()
 
-        # Fetch namespace_ids in one query so we can write LanceDB rows.
+        # Fetch namespace_ids from SQLite so we can write LanceDB rows.
+        # The ``embedding_model`` is not persisted in LanceDB (it's a SQLite
+        # column on ``entities``, managed by the graph adapter / ORM).
         ids_text = [uuid_to_text(u) for u, _, _ in updates]
         placeholders = ",".join("?" for _ in ids_text)
         cur = await self._sqlite.execute(
@@ -512,13 +453,6 @@ class SQLiteLanceVectorAdapter:
         )
         rows = await cur.fetchall()
         ns_by_id = {r["id"]: r["namespace_id"] for r in rows}
-
-        params = [(json.dumps(emb), model, now, uuid_to_text(eid)) for eid, emb, model in updates]
-        await self._sqlite.executemany(
-            "UPDATE entities SET embedding = ?, embedding_model = ?, updated_at = ? WHERE id = ?",
-            params,
-        )
-        await self._sqlite.commit()
 
         # Upsert LanceDB side: batch delete + batch add.
         tbl = await self._entities_table()
@@ -537,7 +471,7 @@ class SQLiteLanceVectorAdapter:
                 eid_text = uuid_to_text(eid)
                 ns = ns_by_id.get(eid_text)
                 if ns is None:
-                    # Unknown entity — SQLite UPDATE already no-op'd for it.
+                    # Unknown entity — nothing to vector-store for it.
                     continue
                 lance_rows.append(
                     {
@@ -691,35 +625,14 @@ class SQLiteLanceVectorAdapter:
                 logger.warning("Failed to build ANN index on {}: {}", label, exc)
 
     # ------------------------------------------------------------------
-    # FTS5 helpers
-    # ------------------------------------------------------------------
-
-    async def _fts_insert(self, chunk: Chunk) -> None:
-        try:
-            await self._sqlite.execute(
-                "INSERT INTO chunks_fts(content, chunk_id, namespace_id) VALUES (?, ?, ?)",
-                (chunk.content, uuid_to_text(chunk.id), uuid_to_text(chunk.namespace_id)),
-            )
-        except Exception:
-            logger.debug("FTS5 insert failed (may be unsupported)")
-
-    async def _fts_delete(self, chunk_id: str) -> None:
-        try:
-            await self._sqlite.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (chunk_id,))
-        except Exception:
-            logger.debug("FTS5 delete failed (may be unsupported)")
-
-    # ------------------------------------------------------------------
     # Row → domain helpers
     # ------------------------------------------------------------------
 
     @staticmethod
     def _row_to_chunk(row: Any) -> Chunk:
-        raw_embedding = row["embedding"]
-        embedding: list[float] | None = None
-        if raw_embedding:
-            embedding = json.loads(raw_embedding)
-
+        # Embeddings live in LanceDB — not in the SQLite ``chunks`` table.
+        # Callers that need the vector should fetch it from LanceDB; the
+        # search paths return it indirectly via similarity results.
         return Chunk(
             id=UUID(row["id"]),
             namespace_id=UUID(row["namespace_id"]),
@@ -731,40 +644,12 @@ class SQLiteLanceVectorAdapter:
                 start_char=row["start_char"] or 0,
                 end_char=row["end_char"] or 0,
                 token_count=row["token_count"] or 0,
-                custom=from_json_text(row["metadata_"]) if row["metadata_"] else {},
+                custom=from_json_text(row["metadata"]) if row["metadata"] else {},
             ),
-            embedding=embedding,
+            embedding=None,
             embedding_model=row["embedding_model"] or "",
             created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
             source_timestamp=_parse_dt(row["source_timestamp"]),
-        )
-
-    @staticmethod
-    def _row_to_entity(row: Any) -> Entity:
-        raw_embedding = row["embedding"]
-        embedding: list[float] | None = None
-        if raw_embedding:
-            embedding = json.loads(raw_embedding)
-
-        return Entity(
-            id=UUID(row["id"]),
-            namespace_id=UUID(row["namespace_id"]),
-            name=row["name"] or "",
-            entity_type=row["entity_type"] or "CONCEPT",
-            description=row["description"] or "",
-            attributes=from_json_text(row["attributes"]) if row["attributes"] else {},
-            source_tool=row["source_tool"] or "",
-            source_document_ids=_uuid_list_loads(row["source_document_ids"]),
-            source_chunk_ids=_uuid_list_loads(row["source_chunk_ids"]),
-            mention_count=row["mention_count"] or 1,
-            embedding=embedding,
-            embedding_model=row["embedding_model"] or "",
-            valid_from=_parse_dt(row["valid_from"]),
-            valid_until=_parse_dt(row["valid_until"]),
-            confidence=row["confidence"] if row["confidence"] is not None else 1.0,
-            metadata=from_json_text(row["metadata_"]) if row["metadata_"] else {},
-            created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
-            updated_at=_parse_dt(row["updated_at"]) or datetime.now(UTC),
         )
 
 
