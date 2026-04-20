@@ -66,4 +66,6 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 
-Copyright (c) 2024-2026 Deyta. All rights reserved.
+Copyright 2026 AllTheData Inc.
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
