@@ -6,7 +6,11 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [
-    { name = "AllTheData Inc." }
+    { name = "AllTheData Inc." },
+    { name = "Igor Bogicevic", email = "igor.bogicevic@gmail.com" },
+    { name = "Filip Petrovic", email = "filip@allthedata.ai" },
+    { name = "Mladen Srdic", email = "m.s.qubits@gmail.com" },
+    { name = "Sasa Ranisavljevic", email = "sasa.ranisavljevic@gmail.com" },
 ]
 requires-python = ">=3.13"
 dependencies = [
