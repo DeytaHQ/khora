@@ -4,6 +4,8 @@ version = "0.8.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Rust-accelerated operations for Khora memory lake"
+authors = ["AllTheData Inc."]
+license = "Apache-2.0"
 
 
 [lib]
