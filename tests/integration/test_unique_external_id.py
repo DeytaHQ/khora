@@ -116,7 +116,7 @@ class TestUniqueExternalId:
                 ns = await _create_namespace(session)
                 ext_id = f"dup-{uuid4().hex[:8]}"
                 await _insert_document(session, ns.id, external_id=ext_id)
-                with pytest.raises(IntegrityError):
+                with pytest.raises(IntegrityError, match=r"ix_documents_namespace_external_id_unique"):
                     await _insert_document(session, ns.id, external_id=ext_id)
 
     async def test_concurrent_insert_same_external_id_raises(
@@ -176,7 +176,7 @@ class TestUniqueExternalId:
             async with session.begin():
                 ns = await _create_namespace(session)
                 await _insert_document(session, ns.id, external_id="")
-                with pytest.raises(IntegrityError):
+                with pytest.raises(IntegrityError, match=r"ix_documents_namespace_external_id_unique"):
                     await _insert_document(session, ns.id, external_id="")
 
     async def test_same_external_id_different_namespace_allowed(
