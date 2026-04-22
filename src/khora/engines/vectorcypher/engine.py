@@ -1909,14 +1909,28 @@ class VectorCypherEngine:
         # same existing row and calls coordinator.replace_document_extraction.
         # Unmatched / absent external_id docs fall through to the streaming
         # pipeline below, unchanged.
+        #
+        # Batch the existence lookup: one ``get_documents_by_external_ids``
+        # call replaces N serial ``get_document_by_external_id`` round-trips.
         external_id_handled: set[int] = set()
+        ext_id_to_idx: dict[str, int] = {}
         for idx, doc_data in enumerate(documents):
             ext_id = doc_data.get("external_id")
-            if ext_id is None:
+            if ext_id is None or not isinstance(ext_id, str) or not ext_id.strip():
                 continue
-            existing_by_ext = await storage.get_document_by_external_id(namespace_id, ext_id)
+            # Keep the last-seen idx if an external_id repeats in the batch —
+            # earlier duplicates fall through to Stage 0 checksum dedup.
+            ext_id_to_idx[ext_id] = idx
+
+        existing_by_ext_map: dict[str, Any] = {}
+        if ext_id_to_idx:
+            existing_by_ext_map = await storage.get_documents_by_external_ids(namespace_id, list(ext_id_to_idx.keys()))
+
+        for ext_id, idx in ext_id_to_idx.items():
+            existing_by_ext = existing_by_ext_map.get(ext_id)
             if existing_by_ext is None:
                 continue
+            doc_data = documents[idx]
             try:
                 doc_metadata = doc_data.get("metadata", {})
                 occurred_at = (

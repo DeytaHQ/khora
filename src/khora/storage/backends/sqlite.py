@@ -541,6 +541,27 @@ class SQLiteRelationalBackend:
             result[doc.id] = doc
         return result
 
+    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+        """Batch lookup by ``(namespace_id, external_id)`` — ADR-056.
+
+        Status is NOT filtered (self-heal contract). Skips empty / None entries.
+        """
+        filtered = [e for e in external_ids if e]
+        if not filtered:
+            return {}
+        placeholders = ",".join("?" for _ in filtered)
+        cursor = await self._conn.execute(
+            f"SELECT * FROM documents WHERE namespace_id = ? AND external_id IN ({placeholders})",  # noqa: S608
+            [str(namespace_id), *filtered],
+        )
+        rows = await cursor.fetchall()
+        result: dict[str, Document] = {}
+        for r in rows:
+            doc = self._row_to_document(r)
+            if doc.external_id:
+                result[doc.external_id] = doc
+        return result
+
     async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
         if not document_ids:
             return {}

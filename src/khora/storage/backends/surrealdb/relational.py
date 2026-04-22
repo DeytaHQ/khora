@@ -509,6 +509,23 @@ class SurrealDBRelationalAdapter:
         )
         return {_parse_uuid(r["id"]): self._row_to_document(r) for r in rows}
 
+    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+        """Batch lookup by ``(namespace_id, external_id)`` — ADR-056. Status-agnostic."""
+        filtered = [e for e in external_ids if e]
+        if not filtered:
+            return {}
+        ns_str = str(namespace_id)
+        rows = await self._conn.query(
+            "SELECT * FROM document WHERE namespace_id = $ns AND external_id IN $external_ids",
+            {"ns": ns_str, "external_ids": filtered},
+        )
+        result: dict[str, Document] = {}
+        for r in rows:
+            ext = r.get("external_id")
+            if ext:
+                result[ext] = self._row_to_document(r)
+        return result
+
     async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
         """Fetch lightweight document metadata for source attribution."""
         if not document_ids:

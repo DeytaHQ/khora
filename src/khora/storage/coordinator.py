@@ -724,6 +724,16 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.get_document_by_external_id(namespace_id, external_id)
 
+    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+        """Batch variant of :meth:`get_document_by_external_id`.
+
+        Collapses N serial lookups into one query for ``remember_batch`` replace
+        dispatch. Status-agnostic like the single lookup.
+        """
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.get_documents_by_external_ids(namespace_id, external_ids)
+
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
 

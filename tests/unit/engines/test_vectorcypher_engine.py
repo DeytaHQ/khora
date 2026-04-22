@@ -975,7 +975,11 @@ class TestVectorCypherEngineRemember:
         async def _ext_lookup(_ns, ext_id):
             return existing if ext_id == "ext-a" else None
 
+        async def _ext_batch(_ns, ext_ids):
+            return {e: existing for e in ext_ids if e == "ext-a"}
+
         connected_engine._storage.get_document_by_external_id = AsyncMock(side_effect=_ext_lookup)
+        connected_engine._storage.get_documents_by_external_ids = AsyncMock(side_effect=_ext_batch)
         connected_engine._storage.get_documents_by_checksums = AsyncMock(return_value={})
 
         # Replace returns a RememberResult directly via patched self.remember().
@@ -1038,7 +1042,11 @@ class TestVectorCypherEngineRemember:
         async def _ext_lookup(_ns, ext_id):
             return existing if ext_id == "ext-a" else None
 
+        async def _ext_batch(_ns, ext_ids):
+            return {e: existing for e in ext_ids if e == "ext-a"}
+
         connected_engine._storage.get_document_by_external_id = AsyncMock(side_effect=_ext_lookup)
+        connected_engine._storage.get_documents_by_external_ids = AsyncMock(side_effect=_ext_batch)
         connected_engine._storage.get_documents_by_checksums = AsyncMock(return_value={})
 
         async def _fake_remember(*args, **kwargs):
@@ -1072,8 +1080,11 @@ class TestVectorCypherEngineRemember:
         assert mock_remember.await_args.kwargs.get("external_id") == "ext-a"
         # Streaming pipeline was short-circuited — no create_document calls.
         connected_engine._storage.create_document.assert_not_called()
-        # Matched doc was looked up via external_id.
-        connected_engine._storage.get_document_by_external_id.assert_awaited_once_with(namespace_id, "ext-a")
+        # Single batch lookup for all matched external_ids — not N serial calls.
+        connected_engine._storage.get_documents_by_external_ids.assert_awaited_once()
+        call_args = connected_engine._storage.get_documents_by_external_ids.await_args
+        assert call_args.args[0] == namespace_id
+        assert list(call_args.args[1]) == ["ext-a"]
         assert result.total == 1
         assert result.processed == 1
         assert result.chunks == 2

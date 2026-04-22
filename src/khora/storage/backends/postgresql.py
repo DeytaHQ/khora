@@ -526,6 +526,30 @@ class PostgreSQLBackend(AsyncSessionMixin):
             models = result.scalars().all()
             return {m.id: self._document_model_to_domain(m) for m in models}
 
+    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+        """Batch lookup for ``(namespace_id, external_id)`` — ADR-056.
+
+        Unlike ``get_documents_by_checksums``, does NOT filter by status so
+        FAILED / PROCESSING rows are returned too (self-heal contract). The
+        partial UNIQUE index ``ix_documents_namespace_external_id_unique``
+        guarantees at most one row per ``(namespace_id, external_id)``.
+
+        Skips ``None`` / empty strings in ``external_ids``.
+        """
+        filtered = [e for e in external_ids if e]
+        if not filtered:
+            return {}
+
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.namespace_id == namespace_id,
+                    DocumentModel.external_id.in_(filtered),
+                )
+            )
+            models = result.scalars().all()
+            return {m.external_id: self._document_model_to_domain(m) for m in models if m.external_id}
+
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
 
