@@ -26,6 +26,7 @@ from uuid import UUID
 
 from loguru import logger
 from neo4j import AsyncGraphDatabase
+from sqlalchemy.exc import IntegrityError
 
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import (
@@ -635,7 +636,38 @@ class VectorCypherEngine:
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
         )
-        document = await storage.create_document(document)
+        try:
+            document = await storage.create_document(document)
+        except IntegrityError:
+            # Concurrent race on `(namespace_id, external_id)`: another caller
+            # inserted the same external_id between our lookup and this
+            # create. The partial UNIQUE index ``ix_documents_namespace_external_id_unique``
+            # (DYT-2672) converts the race into a deterministic conflict.
+            # Retry the lookup and route to replace so the loser still
+            # succeeds against the winner's row (ADR-056 §Decision #9).
+            if external_id is None:
+                raise
+            existing_after_race = await storage.get_document_by_external_id(namespace_id, external_id)
+            if existing_after_race is None:
+                raise
+            return await self._remember_via_replace(
+                existing=existing_after_race,
+                content=content,
+                checksum=checksum,
+                namespace_id=namespace_id,
+                title=title,
+                source=source,
+                metadata=metadata,
+                skill_name=skill_name,
+                expertise=expertise,
+                extraction_model=extraction_model,
+                occurred_at=occurred_at or datetime.now(UTC),
+                entity_types=entity_types,
+                relationship_types=relationship_types,
+                extraction_config_hash=extraction_config_hash,
+                chunk_strategy=chunk_strategy,
+                external_id=external_id,
+            )
 
         # Process document
         chunks_created, entities_extracted, relationships_created = await self._process_document(
@@ -1167,11 +1199,31 @@ class VectorCypherEngine:
     ) -> RememberResult:
         """Dispatch an ``external_id``-matched remember() to the replace path.
 
-        Builds chunks/entities/relationships in-memory (no persistence) and
-        hands the batch to ``coordinator.replace_document_extraction``. The
-        new ``Document`` reuses ``existing.id`` per ADR-056 §API Contracts
-        ("The same id may be reused across replacements; the row is updated
-        in place"), preserving ``created_at`` from the existing row.
+        Builds chunks / entities / relationships in-memory, then performs the
+        full VectorCypher storage-side replace that ``replace_document_extraction``
+        alone does not cover. The coordinator primitive (DYT-2673) handles the
+        ``chunks`` table + Neo4j entity / relationship retire / remap / upsert,
+        but VectorCypher also owns ``khora_chunks`` (via ``TemporalVectorStore``)
+        and Neo4j ``:Chunk`` nodes (via ``DualNodeManager``). This method:
+
+        1. Reuses ``existing.id`` per ADR-056 §API Contracts ("The same id may
+           be reused across replacements; the row is updated in place") and
+           preserves ``created_at`` / ``source_timestamp`` / ``processed_at``.
+        2. Chunks + embeds + extracts in-memory (mirrors the create path but
+           defers all persistence).
+        3. Wipes old ``khora_chunks`` rows and old ``:Chunk`` nodes, writes
+           new ones with refreshed embeddings / content / metadata — BEFORE
+           the coordinator call so a failure mid-wipe marks the doc FAILED
+           and the next replace self-heals (ADR-056 §Decision #8).
+        4. Delegates to ``coordinator.replace_document_extraction`` for
+           atomic PG transaction + graph retire / remap / upsert.
+        5. Rebuilds ``MENTIONED_IN`` edges from upserted entities to the
+           new ``:Chunk`` nodes. Without this, retired entities would still
+           reference old chunks via stale edges.
+
+        Any exception in steps 3 or 5 marks the document FAILED, best-effort
+        persists the status, and re-raises unwrapped — mirroring the
+        coordinator's own failure handling.
         """
         from khora.extraction.chunkers import create_chunker
         from khora.pipelines.tasks.extract import extract_entities
@@ -1198,6 +1250,8 @@ class VectorCypherEngine:
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
             created_at=existing.created_at,
+            source_timestamp=existing.source_timestamp,
+            processed_at=existing.processed_at,
         )
 
         # 2. Chunk + embed in-memory (no persistence).
