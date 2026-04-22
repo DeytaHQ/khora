@@ -376,6 +376,10 @@ class TestReplaceViaRememberIntegration:
         assert bob_supersedes[0]["reason"] == "document_replaced"
         assert bob_supersedes[0]["current_valid_until"] is not None
         assert bob_supersedes[0]["superseded_at"] is not None
+        # SUPERSEDES edge must point at the EntityVersion snapshot — not a
+        # different (or missing) row. Guards against a producer bug that
+        # creates one without the other.
+        assert bob_supersedes[0]["old_id"] == bob_versions[0]["id"]
 
         # alice survives and has been remapped off the old document id.
         # v1 and v2 share the same document id (in-place replace), so the
