@@ -143,3 +143,15 @@ def setup_logging(
     # Apply operator-requested neo4j driver verbosity after the intercept
     # handler is wired up so the new level actually reaches loguru sinks.
     apply_neo4j_log_level_from_env()
+
+    # Forward neo4j stdlib DEBUG records to Logfire (DYT-2904). The main
+    # loguru sink filters at INFO, so records must be routed directly via
+    # a dedicated ``LogfireLoggingHandler`` on the ``neo4j`` logger. The
+    # try/except is belt-and-suspenders for logfire SDK-level bugs — a
+    # handler install failure must not prevent the process from logging.
+    try:
+        from khora.telemetry.logfire_integration import install_neo4j_logfire_handler
+
+        install_neo4j_logfire_handler()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to install neo4j Logfire handler: {}", exc)

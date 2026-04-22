@@ -16,6 +16,11 @@ import pytest
 
 from khora import logging_config
 from khora.logging_config import apply_neo4j_log_level_from_env, setup_logging
+from khora.telemetry import logfire_integration
+from khora.telemetry.logfire_integration import (
+    _NEO4J_LOGFIRE_HANDLER_MARK,
+    install_neo4j_logfire_handler,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -223,3 +228,113 @@ def test_setup_logging_atexit_not_reregistered_after_first_call():
 
         setup_logging(level="WARNING", log_file=Path("/tmp/khora-test.log"))
         assert mock_register.call_count == 1
+
+
+def _marked_neo4j_handlers() -> list[logging.Handler]:
+    return [h for h in logging.getLogger("neo4j").handlers if getattr(h, _NEO4J_LOGFIRE_HANDLER_MARK, False)]
+
+
+@pytest.fixture
+def _reset_neo4j_handlers():
+    """Strip khora-marked neo4j logfire handlers around each test.
+
+    Runs before AND after the test body to defend against leftover handlers
+    from other test modules that may have called ``setup_logging()`` or
+    ``install_neo4j_logfire_handler()`` at import time.
+    """
+    neo4j_logger = logging.getLogger("neo4j")
+    for h in list(neo4j_logger.handlers):
+        if getattr(h, _NEO4J_LOGFIRE_HANDLER_MARK, False):
+            neo4j_logger.removeHandler(h)
+    yield
+    for h in list(neo4j_logger.handlers):
+        if getattr(h, _NEO4J_LOGFIRE_HANDLER_MARK, False):
+            neo4j_logger.removeHandler(h)
+
+
+def test_install_neo4j_logfire_handler_attaches_when_env_set_and_logfire_available(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_neo4j_handlers: None,
+) -> None:
+    """With the env var set and logfire installed, a marked handler is attached."""
+    from logfire.integrations.logging import LogfireLoggingHandler
+
+    monkeypatch.setenv("KHORA_NEO4J_LOG_LEVEL", "DEBUG")
+    assert install_neo4j_logfire_handler() is True
+    marked = _marked_neo4j_handlers()
+    assert len(marked) == 1
+    assert isinstance(marked[0], LogfireLoggingHandler)
+
+
+def test_install_neo4j_logfire_handler_noop_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_neo4j_handlers: None,
+) -> None:
+    """Unset env var → no handler attached, returns False."""
+    monkeypatch.delenv("KHORA_NEO4J_LOG_LEVEL", raising=False)
+    assert install_neo4j_logfire_handler() is False
+    assert _marked_neo4j_handlers() == []
+
+
+def test_install_neo4j_logfire_handler_noop_when_env_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_neo4j_handlers: None,
+) -> None:
+    """Empty env var is treated as unset."""
+    monkeypatch.setenv("KHORA_NEO4J_LOG_LEVEL", "")
+    assert install_neo4j_logfire_handler() is False
+    assert _marked_neo4j_handlers() == []
+
+
+def test_install_neo4j_logfire_handler_noop_when_logfire_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_neo4j_handlers: None,
+) -> None:
+    """When logfire is unavailable, the helper short-circuits cleanly."""
+    monkeypatch.setattr(logfire_integration, "_HAS_LOGFIRE", False)
+    monkeypatch.setenv("KHORA_NEO4J_LOG_LEVEL", "DEBUG")
+    assert install_neo4j_logfire_handler() is False
+    assert _marked_neo4j_handlers() == []
+
+
+def test_install_neo4j_logfire_handler_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_neo4j_handlers: None,
+) -> None:
+    """Repeated calls must not stack duplicate marked handlers."""
+    monkeypatch.setenv("KHORA_NEO4J_LOG_LEVEL", "DEBUG")
+    install_neo4j_logfire_handler()
+    install_neo4j_logfire_handler()
+    assert len(_marked_neo4j_handlers()) == 1
+
+
+def test_setup_logging_installs_neo4j_logfire_handler_when_env_set(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_neo4j_logger_level: logging.Logger,
+    _reset_neo4j_handlers: None,
+) -> None:
+    """setup_logging() wires the Logfire handler onto the neo4j logger."""
+    monkeypatch.setenv("KHORA_NEO4J_LOG_LEVEL", "DEBUG")
+    with (
+        patch("khora.logging_config.logger"),
+        patch("khora.logging_config.atexit.register"),
+        patch("khora.logging_config.logging.basicConfig"),
+    ):
+        setup_logging(level="INFO")
+    assert len(_marked_neo4j_handlers()) == 1
+
+
+def test_setup_logging_does_not_install_neo4j_logfire_handler_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_neo4j_logger_level: logging.Logger,
+    _reset_neo4j_handlers: None,
+) -> None:
+    """Without the env var, setup_logging() must not attach a Logfire handler."""
+    monkeypatch.delenv("KHORA_NEO4J_LOG_LEVEL", raising=False)
+    with (
+        patch("khora.logging_config.logger"),
+        patch("khora.logging_config.atexit.register"),
+        patch("khora.logging_config.logging.basicConfig"),
+    ):
+        setup_logging(level="INFO")
+    assert _marked_neo4j_handlers() == []
