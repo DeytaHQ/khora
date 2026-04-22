@@ -745,6 +745,170 @@ class TestVectorCypherEngineRemember:
         assert connected_engine._storage.replace_document_extraction.await_args_list[0] is not None
 
     @pytest.mark.asyncio
+    async def test_remember_via_replace_resets_entity_source_chunk_ids(
+        self, connected_engine: VectorCypherEngine
+    ) -> None:
+        """DYT-2674 / review H4: after coordinator, engine calls the graph backend's
+        reset_entity_source_chunk_ids_batch so survivor/net-new entities' source_chunk_ids
+        reflect ONLY the new extraction (not the Neo4j MERGE append-with-tail behavior)."""
+        from khora.core.models import Entity
+        from khora.storage.coordinator import ReplaceResult
+
+        namespace_id = uuid4()
+        old_doc_id = uuid4()
+        entity_id = uuid4()
+        chunk_id_a = uuid4()
+        chunk_id_b = uuid4()
+
+        existing = MagicMock()
+        existing.id = old_doc_id
+        existing.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+        connected_engine._storage.get_document_by_external_id = AsyncMock(return_value=existing)
+        connected_engine._storage.get_document_by_checksum = AsyncMock()
+        connected_engine._storage.replace_document_extraction = AsyncMock(
+            return_value=ReplaceResult(
+                document_id=old_doc_id,
+                chunks_deleted=0,
+                chunks_created=1,
+                entities_created=0,
+                entities_updated=1,
+                entities_retired=0,
+                relationships_created=0,
+                relationships_retired=0,
+            )
+        )
+        connected_engine._storage.update_document = AsyncMock()
+
+        # Wire a graph backend with the new reset method.
+        reset_mock = AsyncMock(return_value=1)
+        connected_engine._storage.graph = MagicMock()
+        connected_engine._storage.graph.reset_entity_source_chunk_ids_batch = reset_mock
+
+        async def _create_chunks_batch(chunks):
+            return list(chunks)
+
+        connected_engine._temporal_store.delete_chunks_by_document = AsyncMock(return_value=0)
+        connected_engine._temporal_store.create_chunks_batch = AsyncMock(side_effect=_create_chunks_batch)
+        connected_engine._dual_nodes.delete_chunks_by_document = AsyncMock(return_value=0)
+        connected_engine._dual_nodes.create_chunk_nodes_batch = AsyncMock(return_value=[])
+        connected_engine._dual_nodes.link_entities_to_chunks_batch = AsyncMock()
+
+        entity = Entity(
+            id=entity_id,
+            namespace_id=namespace_id,
+            name="Alice",
+            entity_type="PERSON",
+            source_chunk_ids=[chunk_id_a, chunk_id_b],
+        )
+
+        raw_chunks = [MagicMock(content="new content", start_char=0, end_char=11)]
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = raw_chunks
+
+        connected_engine._embedder.embed_batch = AsyncMock(return_value=[[0.1] * 4])
+        connected_engine._embedder.model_name = "text-embedding-3-small"
+
+        with (
+            patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker),
+            patch(
+                "khora.pipelines.tasks.extract.extract_entities",
+                new_callable=AsyncMock,
+                return_value=([entity], []),
+            ),
+        ):
+            await connected_engine.remember(
+                "new content",
+                namespace_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                external_id="ext-1",
+            )
+
+        reset_mock.assert_awaited_once()
+        call_ns, call_rows = reset_mock.await_args.args
+        assert call_ns == namespace_id
+        assert len(call_rows) == 1
+        row = call_rows[0]
+        assert row["name"] == "Alice"
+        assert row["entity_type"] == "PERSON"
+        assert set(row["source_chunk_ids"]) == {str(chunk_id_a), str(chunk_id_b)}
+
+    @pytest.mark.asyncio
+    async def test_remember_via_replace_skips_reset_when_graph_has_no_method(
+        self, connected_engine: VectorCypherEngine
+    ) -> None:
+        """Backends without reset_entity_source_chunk_ids_batch (e.g. SurrealDB) are skipped cleanly."""
+        from khora.core.models import Entity
+        from khora.storage.coordinator import ReplaceResult
+
+        namespace_id = uuid4()
+        old_doc_id = uuid4()
+
+        existing = MagicMock()
+        existing.id = old_doc_id
+        existing.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+        connected_engine._storage.get_document_by_external_id = AsyncMock(return_value=existing)
+        connected_engine._storage.get_document_by_checksum = AsyncMock()
+        connected_engine._storage.replace_document_extraction = AsyncMock(
+            return_value=ReplaceResult(
+                document_id=old_doc_id,
+                chunks_deleted=0,
+                chunks_created=1,
+                entities_created=1,
+                entities_updated=0,
+                entities_retired=0,
+                relationships_created=0,
+                relationships_retired=0,
+            )
+        )
+        connected_engine._storage.update_document = AsyncMock()
+
+        # Graph backend without the reset method.
+        class _GraphStub:
+            pass
+
+        connected_engine._storage.graph = _GraphStub()
+
+        async def _create_chunks_batch(chunks):
+            return list(chunks)
+
+        connected_engine._temporal_store.delete_chunks_by_document = AsyncMock(return_value=0)
+        connected_engine._temporal_store.create_chunks_batch = AsyncMock(side_effect=_create_chunks_batch)
+        connected_engine._dual_nodes.delete_chunks_by_document = AsyncMock(return_value=0)
+        connected_engine._dual_nodes.create_chunk_nodes_batch = AsyncMock(return_value=[])
+        connected_engine._dual_nodes.link_entities_to_chunks_batch = AsyncMock()
+
+        entity = Entity(
+            id=uuid4(), namespace_id=namespace_id, name="Bob", entity_type="PERSON", source_chunk_ids=[uuid4()]
+        )
+        raw_chunks = [MagicMock(content="x", start_char=0, end_char=1)]
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = raw_chunks
+        connected_engine._embedder.embed_batch = AsyncMock(return_value=[[0.1] * 4])
+        connected_engine._embedder.model_name = "text-embedding-3-small"
+
+        with (
+            patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker),
+            patch(
+                "khora.pipelines.tasks.extract.extract_entities",
+                new_callable=AsyncMock,
+                return_value=([entity], []),
+            ),
+        ):
+            result = await connected_engine.remember(
+                "content",
+                namespace_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                external_id="ext-1",
+            )
+
+        # Did not raise despite the stub graph lacking the reset method.
+        assert result.metadata is not None and result.metadata.get("replaced") is True
+
+    @pytest.mark.asyncio
     async def test_remember_via_replace_marks_failed_on_temporal_store_error(
         self, connected_engine: VectorCypherEngine
     ) -> None:

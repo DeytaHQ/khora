@@ -1457,6 +1457,32 @@ class VectorCypherEngine:
                         )
                     raise
 
+        # 7. Overwrite ``source_chunk_ids`` to the current extraction's chunk
+        #    UUIDs. ADR-056 decomposes the replace into
+        #    ``upsert_entities_batch`` (net-new only; ON MATCH *appends*
+        #    source_chunk_ids[-250..]) + ``remap_source_document_ids_batch``
+        #    (survivors; source_document_ids only). Neither replaces
+        #    source_chunk_ids, so without this step survivor entities keep
+        #    retired chunk UUIDs and net-new entities accumulate stale UUIDs
+        #    from prior documents. Downstream consumers that read
+        #    ``len(entity.source_chunk_ids)`` as a mention count (Poros /
+        #    Peras per DYT-645; genesis analytics) would double-count across
+        #    replaces. SET is idempotent; safe for both survivors and net-new.
+        graph = storage.graph
+        reset_source_chunk_ids = getattr(graph, "reset_entity_source_chunk_ids_batch", None) if graph else None
+        if reset_source_chunk_ids is not None and new_entities:
+            reset_rows = [
+                {
+                    "name": e.name,
+                    "entity_type": e.entity_type,
+                    "source_chunk_ids": [str(c) for c in e.source_chunk_ids],
+                }
+                for e in new_entities
+                if e.name and e.entity_type
+            ]
+            if reset_rows:
+                await reset_source_chunk_ids(namespace_id, reset_rows)
+
         return RememberResult(
             document_id=replace_result.document_id,
             namespace_id=namespace_id,
