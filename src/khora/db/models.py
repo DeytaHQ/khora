@@ -179,9 +179,10 @@ class DocumentModel(Base):
         Index("ix_documents_namespace_source_type", "namespace_id", "source_type"),
         Index("ix_documents_namespace_created_at", "namespace_id", "created_at"),
         Index(
-            "ix_documents_namespace_external_id",
+            "ix_documents_namespace_external_id_unique",
             "namespace_id",
             "external_id",
+            unique=True,
             postgresql_where=text("external_id IS NOT NULL"),
         ),
     )
