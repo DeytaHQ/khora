@@ -1483,6 +1483,40 @@ class VectorCypherEngine:
             if reset_rows:
                 await reset_source_chunk_ids(namespace_id, reset_rows)
 
+        # 8. Same append-with-tail concern for relationships: Neo4j's
+        #    create_relationships_batch ON MATCH clause appends
+        #    source_chunk_ids[-250..]. Match relationships by entity name+type
+        #    (MERGE-stable across replaces) rather than UUID — survivor
+        #    entities keep their persisted Neo4j id, which differs from the
+        #    fresh extraction's uuid.
+        reset_rel_source_chunk_ids = (
+            getattr(graph, "reset_relationship_source_chunk_ids_batch", None) if graph else None
+        )
+        if reset_rel_source_chunk_ids is not None and new_relationships and new_entities:
+            from khora.storage.backends.neo4j import _sanitize_neo4j_label
+
+            entity_key_by_id: dict[UUID, tuple[str, str]] = {
+                e.id: (e.name, e.entity_type) for e in new_entities if e.name and e.entity_type
+            }
+            rel_reset_rows: list[dict[str, Any]] = []
+            for r in new_relationships:
+                src_key = entity_key_by_id.get(r.source_entity_id)
+                tgt_key = entity_key_by_id.get(r.target_entity_id)
+                if src_key is None or tgt_key is None:
+                    continue
+                rel_reset_rows.append(
+                    {
+                        "source_name": src_key[0],
+                        "source_type": src_key[1],
+                        "target_name": tgt_key[0],
+                        "target_type": tgt_key[1],
+                        "rel_type": _sanitize_neo4j_label(r.relationship_type),
+                        "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
+                    }
+                )
+            if rel_reset_rows:
+                await reset_rel_source_chunk_ids(namespace_id, rel_reset_rows)
+
         return RememberResult(
             document_id=replace_result.document_id,
             namespace_id=namespace_id,

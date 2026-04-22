@@ -1637,6 +1637,59 @@ RETURN count(e) AS updated
         logger.debug(f"Reset source_chunk_ids on {count} entities in namespace {namespace_id}")
         return count
 
+    async def reset_relationship_source_chunk_ids_batch(
+        self,
+        namespace_id: UUID,
+        rows: list[dict[str, Any]],
+    ) -> int:
+        """Overwrite ``source_chunk_ids`` on relationships to the supplied values.
+
+        Sibling to :meth:`reset_entity_source_chunk_ids_batch` for the
+        relationship side of the ADR-056 replace lifecycle. Same
+        ``(old + new)[-250..]`` append issue at ``create_relationships_batch``'s
+        ``ON MATCH`` clause (see ``neo4j.py`` relationship MERGE).
+
+        Matching is by entity name+type (not entity UUID) so survivor
+        relationships whose endpoints are survivor entities still resolve
+        correctly — Neo4j MERGE keys entities on ``(namespace_id, name,
+        entity_type)``, so name+type is stable across replaces while the
+        entity UUID may not be.
+
+        Each row must contain:
+        - ``source_name`` / ``source_type`` (str): source entity key
+        - ``target_name`` / ``target_type`` (str): target entity key
+        - ``rel_type`` (str): already-sanitized Neo4j relationship type
+        - ``source_chunk_ids`` (list[str]): the authoritative new chunk UUIDs
+
+        Returns the number of relationships whose ``source_chunk_ids`` were updated.
+        """
+        if not rows:
+            return 0
+
+        _RESET_CYPHER = """\
+UNWIND $rows AS row
+MATCH (s:Entity {namespace_id: $namespace_id, name: row.source_name, entity_type: row.source_type})
+MATCH (t:Entity {namespace_id: $namespace_id, name: row.target_name, entity_type: row.target_type})
+MATCH (s)-[r {namespace_id: $namespace_id}]->(t)
+WHERE type(r) = row.rel_type
+SET r.source_chunk_ids = row.source_chunk_ids,
+    r.updated_at = $updated_at
+RETURN count(r) AS updated
+"""
+
+        updated_at = datetime.now(UTC).isoformat()
+        ns_str = str(namespace_id)
+
+        async def _reset_tx(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(_RESET_CYPHER, rows=rows, namespace_id=ns_str, updated_at=updated_at)
+            record = await result.single()
+            return record["updated"] if record else 0
+
+        async with self._session() as session:
+            count = await session.execute_write(_reset_tx)
+        logger.debug(f"Reset source_chunk_ids on {count} relationships in namespace {namespace_id}")
+        return count
+
     async def create_relationships_batch(
         self,
         relationships: list[Relationship],
