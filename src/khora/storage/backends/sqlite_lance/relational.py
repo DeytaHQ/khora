@@ -430,6 +430,24 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             model = result.scalars().first()
             return self._document_model_to_domain(model) if model else None
 
+    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+
+        Status is NOT filtered so FAILED rows can self-heal on the next
+        successful replace (ADR-056 §Decision #8).
+        """
+        if external_id is None:
+            return None
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.namespace_id == namespace_id,
+                    DocumentModel.external_id == external_id,
+                )
+            )
+            model = result.scalars().first()
+            return self._document_model_to_domain(model) if model else None
+
     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
         if not document_ids:
             return {}
@@ -451,6 +469,21 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             )
             models = result.scalars().all()
             return {m.checksum: self._document_model_to_domain(m) for m in models}
+
+    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+        """Batch lookup by ``(namespace_id, external_id)`` — ADR-056. Status-agnostic."""
+        filtered = [e for e in external_ids if e]
+        if not filtered:
+            return {}
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.namespace_id == namespace_id,
+                    DocumentModel.external_id.in_(filtered),
+                )
+            )
+            models = result.scalars().all()
+            return {m.external_id: self._document_model_to_domain(m) for m in models if m.external_id}
 
     async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
         if not document_ids:
