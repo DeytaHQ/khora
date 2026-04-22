@@ -30,6 +30,7 @@ from neo4j import AsyncGraphDatabase
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import (
     Chunk,
+    ChunkMetadata,
     Document,
     DocumentMetadata,
     Entity,
@@ -579,6 +580,32 @@ class VectorCypherEngine:
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
         storage = self._get_storage()
 
+        # ADR-056: external_id dispatch — route to replace_document_extraction
+        # when the caller supplied an external_id that already exists in the
+        # namespace. Lookup is status-agnostic (COMPLETED / PROCESSING / FAILED)
+        # so the replace path self-heals previously failed rows.
+        if external_id is not None:
+            existing_by_ext = await storage.get_document_by_external_id(namespace_id, external_id)
+            if existing_by_ext is not None:
+                return await self._remember_via_replace(
+                    existing=existing_by_ext,
+                    content=content,
+                    checksum=checksum,
+                    namespace_id=namespace_id,
+                    title=title,
+                    source=source,
+                    metadata=metadata,
+                    skill_name=skill_name,
+                    expertise=expertise,
+                    extraction_model=extraction_model,
+                    occurred_at=occurred_at or datetime.now(UTC),
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
+                    extraction_config_hash=extraction_config_hash,
+                    chunk_strategy=chunk_strategy,
+                    external_id=external_id,
+                )
+
         # Check for duplicate
         existing = await storage.get_document_by_checksum(namespace_id, checksum)
         if existing:
@@ -1118,6 +1145,273 @@ class VectorCypherEngine:
 
         return len(stored_chunks), entities, relationships, entity_chunk_links
 
+    async def _remember_via_replace(
+        self,
+        *,
+        existing: Document,
+        content: str,
+        checksum: str,
+        namespace_id: UUID,
+        title: str,
+        source: str,
+        metadata: dict[str, Any] | None,
+        skill_name: str,
+        expertise: ExpertiseConfig | str | None,
+        extraction_model: str | None,
+        occurred_at: datetime,
+        entity_types: list[str],
+        relationship_types: list[str],
+        extraction_config_hash: str | None,
+        chunk_strategy: ChunkStrategy | None,
+        external_id: str,
+    ) -> RememberResult:
+        """Dispatch an ``external_id``-matched remember() to the replace path.
+
+        Builds chunks/entities/relationships in-memory (no persistence) and
+        hands the batch to ``coordinator.replace_document_extraction``. The
+        new ``Document`` reuses ``existing.id`` per ADR-056 §API Contracts
+        ("The same id may be reused across replacements; the row is updated
+        in place"), preserving ``created_at`` from the existing row.
+        """
+        from khora.extraction.chunkers import create_chunker
+        from khora.pipelines.tasks.extract import extract_entities
+
+        storage = self._get_storage()
+        embedder = self._get_embedder()
+
+        # 1. Build the replacement Document row. Reuse existing.id; refresh
+        #    content/checksum/metadata/external_id/extraction_config_hash.
+        #    Preserve created_at from the existing row.
+        new_metadata = DocumentMetadata(
+            title=title,
+            source=source,
+            source_type="api",
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            custom=metadata or {},
+        )
+        new_document = Document(
+            id=existing.id,
+            namespace_id=namespace_id,
+            content=content,
+            metadata=new_metadata,
+            extraction_config_hash=extraction_config_hash,
+            external_id=external_id,
+            created_at=existing.created_at,
+        )
+
+        # 2. Chunk + embed in-memory (no persistence).
+        strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
+        chunker = create_chunker(
+            strategy=strategy,
+            chunk_size=self._config.pipeline.chunk_size,
+            chunk_overlap=self._config.pipeline.chunk_overlap,
+        )
+        raw_chunks = await asyncio.to_thread(chunker.chunk, content)
+
+        new_chunks: list[Chunk] = []
+        if raw_chunks:
+            embed_texts = [c.content for c in raw_chunks]
+            embeddings = await embedder.embed_batch(embed_texts)
+            doc_custom = new_metadata.custom
+            now = datetime.now(UTC)
+            for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
+                chunk_meta = ChunkMetadata(
+                    document_id=new_document.id,
+                    chunk_index=i,
+                    start_char=getattr(raw_chunk, "start_char", 0),
+                    end_char=getattr(raw_chunk, "end_char", len(raw_chunk.content)),
+                    custom={**doc_custom, "chunk_index": i},
+                )
+                new_chunks.append(
+                    Chunk(
+                        namespace_id=namespace_id,
+                        document_id=new_document.id,
+                        content=raw_chunk.content,
+                        metadata=chunk_meta,
+                        embedding=embedding,
+                        embedding_model=embedder.model_name,
+                        created_at=now,
+                        source_timestamp=occurred_at,
+                    )
+                )
+
+        # 3. Extract entities + relationships from core chunks (skeleton),
+        #    exactly as the create path does — but deferred (no storage).
+        new_entities: list[Entity] = []
+        new_relationships: list[Relationship] = []
+        if new_chunks and self._config.pipeline.extract_entities:
+            if len(new_chunks) <= 2:
+                core_chunks = new_chunks
+            else:
+                skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
+                skeleton_input = [
+                    TemporalChunk(
+                        id=c.id,
+                        namespace_id=c.namespace_id,
+                        document_id=c.document_id,
+                        content=c.content,
+                        embedding=c.embedding,
+                        occurred_at=occurred_at,
+                        created_at=c.created_at,
+                    )
+                    for c in new_chunks
+                ]
+                skeleton.add_chunks_batch(skeleton_input)
+                core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+                core_chunks = [c for c in new_chunks if c.id in core_ids]
+
+            if core_chunks:
+                model = extraction_model or self._config.llm.model
+                extracted_entities, extracted_relationships = await extract_entities(
+                    core_chunks,
+                    skill_name=skill_name,
+                    expertise=expertise,
+                    model=model,
+                    max_concurrent=self._vc_config.max_concurrent_extractions,
+                    timeout=self._config.llm.timeout,
+                    max_tokens=self._config.llm.max_tokens,
+                    extraction_batch_size=self._vc_config.extraction_batch_size,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
+                    store_events=self._vc_config.store_events,
+                )
+
+                if extracted_entities:
+                    entity_texts = [
+                        f"{e.name}: {e.description}" if e.description else e.name for e in extracted_entities
+                    ]
+                    entity_embeddings = await embedder.embed_batch(entity_texts)
+                    for entity, emb in zip(extracted_entities, entity_embeddings):
+                        entity.embedding = emb
+                        entity.embedding_model = embedder.model_name
+
+                    new_entities = list(extracted_entities)
+                    new_relationships = list(extracted_relationships)
+
+                    cooccurrence_rels = _build_cooccurrence_relationships(new_entities, namespace_id, new_relationships)
+                    if cooccurrence_rels:
+                        new_relationships.extend(cooccurrence_rels)
+
+        # 4. Wipe/write VectorCypher-owned stores (khora_chunks + :Chunk nodes)
+        #    BEFORE the coordinator call. The coordinator only owns the
+        #    `chunks` table + graph entities/relationships; it does NOT know
+        #    about `khora_chunks` (via TemporalVectorStore) or :Chunk nodes
+        #    (via DualNodeManager), which VectorCypher's create path writes
+        #    directly (see `_process_document`). Without this, after a
+        #    replace, retrieval returns stale content because khora_chunks
+        #    still holds the old chunks and :Chunk nodes still reference
+        #    old document content, with MENTIONED_IN edges pointing from
+        #    retired entities to old chunks.
+        temporal_store = self._get_temporal_store()
+        dual_nodes = self._get_dual_nodes()
+        doc_metadata = new_metadata.custom
+
+        new_temporal_chunks: list[TemporalChunk] = []
+        for i, c in enumerate(new_chunks):
+            new_temporal_chunks.append(
+                TemporalChunk(
+                    id=c.id,
+                    namespace_id=c.namespace_id,
+                    document_id=c.document_id,
+                    content=c.content,
+                    embedding=c.embedding,
+                    occurred_at=occurred_at,
+                    created_at=datetime.now(UTC),
+                    source_system=doc_metadata.get("source_system"),
+                    author=doc_metadata.get("author"),
+                    channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
+                    tags=_ensure_tags(doc_metadata.get("tags", [])),
+                    confidence=1.0,
+                    metadata={
+                        **doc_metadata,
+                        "chunk_index": i,
+                        "start_char": c.metadata.start_char if c.metadata else 0,
+                        "end_char": c.metadata.end_char if c.metadata else len(c.content),
+                    },
+                )
+            )
+
+        try:
+            # Wipe old VectorCypher-owned state.
+            await temporal_store.delete_chunks_by_document(existing.id, namespace_id)
+            if dual_nodes is not None:
+                await dual_nodes.delete_chunks_by_document(existing.id, namespace_id)
+
+            # Write new chunks (khora_chunks + :Chunk nodes).
+            if new_temporal_chunks:
+                stored_temporal = await temporal_store.create_chunks_batch(new_temporal_chunks)
+                # Propagate any assigned ids back so the coordinator, which
+                # writes to `chunks` below, uses the same uuids as
+                # khora_chunks / :Chunk nodes.
+                for tc, stored, chunk in zip(new_temporal_chunks, stored_temporal, new_chunks):
+                    tc.id = stored.id
+                    chunk.id = stored.id
+                if dual_nodes is not None:
+                    await dual_nodes.create_chunk_nodes_batch(new_temporal_chunks, namespace_id)
+        except Exception as e:
+            # Mirror coordinator's ADR-056 §Decision #8 self-heal semantics:
+            # mark FAILED and re-raise unwrapped so the next successful
+            # replace against the same external_id heals the row.
+            new_document.mark_failed(str(e))
+            try:
+                await storage.update_document(new_document)
+            except Exception as update_err:
+                logger.warning(
+                    f"Failed to mark document {new_document.id} FAILED during "
+                    f"_remember_via_replace error handling: {update_err}"
+                )
+            raise
+
+        # 5. Hand off to the coordinator — it owns the Postgres transaction,
+        #    graph retire / remap / upsert, and FAILED-on-exception handling.
+        replace_result = await storage.replace_document_extraction(
+            namespace_id=namespace_id,
+            old_document_id=existing.id,
+            new_document=new_document,
+            new_chunks=new_chunks,
+            new_entities=new_entities,
+            new_relationships=new_relationships,
+        )
+
+        # 6. After the coordinator has (re)written graph entities (retire /
+        #    remap / upsert), relink entities → chunks via MENTIONED_IN for
+        #    Neo4j-backed deployments. Mirrors `_run_skeleton_extraction`
+        #    lines ~901-915. Skipped when dual_nodes is None (SurrealDB
+        #    unified — its graph adapter owns entity↔chunk linkage).
+        if dual_nodes is not None and new_entities:
+            entity_chunk_links: list[EntityChunkLink] = []
+            for entity in new_entities:
+                for chunk_id in entity.source_chunk_ids:
+                    entity_chunk_links.append(
+                        EntityChunkLink(
+                            entity_id=entity.id,
+                            chunk_id=chunk_id,
+                        )
+                    )
+            if entity_chunk_links:
+                try:
+                    await dual_nodes.link_entities_to_chunks_batch(entity_chunk_links)
+                except Exception as e:
+                    new_document.mark_failed(str(e))
+                    try:
+                        await storage.update_document(new_document)
+                    except Exception as update_err:
+                        logger.warning(
+                            f"Failed to mark document {new_document.id} FAILED "
+                            f"during MENTIONED_IN linking error handling: {update_err}"
+                        )
+                    raise
+
+        return RememberResult(
+            document_id=replace_result.document_id,
+            namespace_id=namespace_id,
+            chunks_created=replace_result.chunks_created,
+            entities_extracted=replace_result.entities_created + replace_result.entities_updated,
+            relationships_created=replace_result.relationships_created,
+            metadata={"replaced": True, "old_document_id": str(existing.id)},
+        )
+
     def _validate_recall_results(
         self,
         chunks: list[tuple[Chunk, float]],
@@ -1529,6 +1823,51 @@ class VectorCypherEngine:
                 progress_count += n
                 on_progress(progress_count, total)
 
+        # ── Stage 0a: external_id dispatch (ADR-056) ────────────────────
+        # Docs with an external_id that already exists in the namespace are
+        # routed to the replace path via self.remember() — which detects the
+        # same existing row and calls coordinator.replace_document_extraction.
+        # Unmatched / absent external_id docs fall through to the streaming
+        # pipeline below, unchanged.
+        external_id_handled: set[int] = set()
+        for idx, doc_data in enumerate(documents):
+            ext_id = doc_data.get("external_id")
+            if ext_id is None:
+                continue
+            existing_by_ext = await storage.get_document_by_external_id(namespace_id, ext_id)
+            if existing_by_ext is None:
+                continue
+            try:
+                doc_metadata = doc_data.get("metadata", {})
+                occurred_at = (
+                    self._parse_datetime(doc_metadata["occurred_at"]) if "occurred_at" in doc_metadata else None
+                )
+                result = await self.remember(
+                    doc_data.get("content", ""),
+                    namespace_id,
+                    title=doc_data.get("title", ""),
+                    source=doc_data.get("source", ""),
+                    metadata=doc_metadata,
+                    skill_name=skill_name,
+                    expertise=expertise,
+                    extraction_model=extraction_model,
+                    occurred_at=occurred_at,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
+                    extraction_config_hash=extraction_config_hash,
+                    chunk_strategy=chunk_strategy,
+                    external_id=ext_id,
+                )
+                results["processed"] += 1
+                results["chunks"] += result.chunks_created
+                results["entities"] += result.entities_extracted
+                results["relationships"] += result.relationships_created
+            except Exception as e:
+                logger.error(f"Failed to replace document external_id={ext_id!r}: {e}")
+                results["failed"] += 1
+            external_id_handled.add(idx)
+            _report_progress()
+
         # ── Stage 0: Dedup ──────────────────────────────────────────────
         _stage0_t0 = _time.perf_counter()
         doc_checksums = [hashlib.sha256(d.get("content", "").encode("utf-8")).hexdigest() for d in documents]
@@ -1536,10 +1875,13 @@ class VectorCypherEngine:
         if deduplicate:
             existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
 
-        # Filter to non-duplicate documents, preserving original index
+        # Filter to non-duplicate documents, preserving original index.
+        # Docs already dispatched via external_id above are excluded here.
         checksums_seen: set[str] = set()
         active_indices: list[int] = []
         for idx, checksum in enumerate(doc_checksums):
+            if idx in external_id_handled:
+                continue
             if checksum in checksums_seen or (deduplicate and checksum in existing_docs):
                 results["skipped"] += 1
                 _report_progress()
@@ -2063,6 +2405,7 @@ class VectorCypherEngine:
                         relationship_types=relationship_types,
                         extraction_config_hash=extraction_config_hash,
                         chunk_strategy=chunk_strategy,
+                        external_id=doc_data.get("external_id"),
                     )
                     async with results_lock:
                         if result.metadata.get("duplicate"):

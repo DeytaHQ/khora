@@ -509,6 +509,23 @@ class SQLiteRelationalBackend:
             return None
         return self._row_to_document(row)
 
+    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+
+        Status is NOT filtered so FAILED rows can self-heal on the next
+        successful replace (ADR-056 §Decision #8).
+        """
+        if external_id is None:
+            return None
+        cursor = await self._conn.execute(
+            "SELECT * FROM documents WHERE namespace_id = ? AND external_id = ? LIMIT 1",
+            (str(namespace_id), external_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_document(row)
+
     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
         if not document_ids:
             return {}

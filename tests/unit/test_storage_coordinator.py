@@ -229,6 +229,41 @@ class TestDocumentOps:
         with pytest.raises(RuntimeError, match="Relational backend not configured"):
             await coord.create_document(MagicMock())
 
+    @pytest.mark.asyncio
+    async def test_get_document_by_external_id_delegates(self) -> None:
+        """get_document_by_external_id delegates to relational."""
+        ns_id = uuid4()
+        doc = MagicMock(spec=Document)
+        rel = MagicMock()
+        rel.get_document_by_external_id = AsyncMock(return_value=doc)
+        coord = StorageCoordinator(relational=rel)
+
+        result = await coord.get_document_by_external_id(ns_id, "ext-1")
+
+        assert result is doc
+        rel.get_document_by_external_id.assert_awaited_once_with(ns_id, "ext-1")
+
+    @pytest.mark.asyncio
+    async def test_get_document_by_external_id_missing_relational(self) -> None:
+        """get_document_by_external_id without relational raises RuntimeError."""
+        coord = StorageCoordinator()
+        with pytest.raises(RuntimeError, match="Relational backend not configured"):
+            await coord.get_document_by_external_id(uuid4(), "ext-1")
+
+    @pytest.mark.asyncio
+    async def test_get_document_by_external_id_none_short_circuits(self) -> None:
+        """Passing external_id=None still delegates to the backend (which guards)."""
+        # The coordinator wrapper forwards unconditionally; backend-level guards
+        # return None without a DB roundtrip. Verify delegation and return value.
+        rel = MagicMock()
+        rel.get_document_by_external_id = AsyncMock(return_value=None)
+        coord = StorageCoordinator(relational=rel)
+
+        result = await coord.get_document_by_external_id(uuid4(), None)
+
+        assert result is None
+        rel.get_document_by_external_id.assert_awaited_once()
+
 
 class TestChunkOps:
     """Tests for chunk operations (delegated to vector)."""

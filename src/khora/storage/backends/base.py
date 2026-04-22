@@ -187,6 +187,19 @@ class RelationalBackendProtocol(Protocol):
         """Get a document by its content checksum (for deduplication)."""
         ...
 
+    @abstractmethod
+    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+        """Get a document by its caller-supplied external_id (ADR-056).
+
+        Unlike ``get_document_by_checksum``, this lookup does NOT filter by
+        status — it returns ``COMPLETED``, ``PROCESSING``, and ``FAILED`` rows
+        so callers can self-heal a failed extraction on the next replace
+        against the same ``external_id``.
+
+        Returns ``None`` immediately if ``external_id`` is ``None`` (guard).
+        """
+        ...
+
     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
         """Fetch multiple documents in a single query.
 

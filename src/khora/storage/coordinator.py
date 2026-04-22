@@ -713,6 +713,17 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.get_document_by_checksum(namespace_id, checksum)
 
+    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+
+        Unlike ``get_document_by_checksum``, this lookup returns documents in
+        any status (including ``FAILED`` and ``PROCESSING``) so callers can
+        self-heal on the next successful replace (ADR-056 §Decision #8).
+        """
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.get_document_by_external_id(namespace_id, external_id)
+
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
 
