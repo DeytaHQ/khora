@@ -84,7 +84,8 @@ jobs:
       - name: Dependency vulnerability scan (pip-audit)
         run: |
           uv export --no-dev --no-hashes > /tmp/pip-audit-requirements.txt
-          uvx pip-audit -r /tmp/pip-audit-requirements.txt --progress-spinner off
+          uvx pip-audit -r /tmp/pip-audit-requirements.txt --progress-spinner off \
+            --ignore-vuln GHSA-xqmj-j6mv-4862  # litellm SSTI in /prompts/test — proxy-only, not exploitable via SDK
         continue-on-error: false
 
   # ============================================================================
