@@ -46,6 +46,7 @@ class TestVectorCypherConfig:
         assert config.lazy_entity_expansion is True
         assert config.fusion_hybrid_alpha == 0.7
         assert config.retriever_min_entity_similarity == 0.3
+        assert config.max_chunks_in_flight is None
 
     def test_custom_values(self) -> None:
         """Test custom configuration values."""

@@ -349,17 +349,18 @@ def _make_chunk(
 def _make_event(
     namespace_id: UUID,
     *,
-    event_type: EventType = EventType.DOCUMENT_CREATED,
+    event_type: EventType | None = None,
     resource_id: UUID | None = None,
     timestamp: datetime | None = None,
     data: dict | None = None,
 ) -> MemoryEvent:
+    et = event_type if event_type is not None else EventType.DOCUMENT_CREATED
     return MemoryEvent(
         id=uuid4(),
         namespace_id=namespace_id,
-        event_type=event_type,
+        event_type=et,
         timestamp=timestamp or datetime.now(UTC),
-        resource_type=event_type.value.split(".")[0],
+        resource_type=et.value.split(".")[0],
         resource_id=resource_id or uuid4(),
         data=data or {"k": "v"},
     )
