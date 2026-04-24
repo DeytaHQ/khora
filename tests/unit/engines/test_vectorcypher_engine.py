@@ -1751,3 +1751,230 @@ class TestVectorCypherEngineParseDatetime:
 
         with pytest.raises(ValueError, match="Cannot parse datetime"):
             engine._parse_datetime(12345)
+
+
+class TestVectorCypherConfigWindowing:
+    """Tests for VectorCypherConfig windowing validation."""
+
+    def test_max_chunks_in_flight_default_is_none(self) -> None:
+        config = VectorCypherConfig()
+        assert config.max_chunks_in_flight is None
+
+    def test_max_chunks_in_flight_positive_value(self) -> None:
+        config = VectorCypherConfig(max_chunks_in_flight=100)
+        assert config.max_chunks_in_flight == 100
+
+    def test_max_chunks_in_flight_one_is_valid(self) -> None:
+        config = VectorCypherConfig(max_chunks_in_flight=1)
+        assert config.max_chunks_in_flight == 1
+
+    def test_max_chunks_in_flight_zero_raises(self) -> None:
+        with pytest.raises(ValueError, match="max_chunks_in_flight must be >= 1, got 0"):
+            VectorCypherConfig(max_chunks_in_flight=0)
+
+    def test_max_chunks_in_flight_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="max_chunks_in_flight must be >= 1, got -5"):
+            VectorCypherConfig(max_chunks_in_flight=-5)
+
+    def test_enable_session_aware_search_default_true(self) -> None:
+        config = VectorCypherConfig()
+        assert config.enable_session_aware_search is True
+
+
+class TestProcessDocumentWindowing:
+    """Tests for windowed chunk processing in _process_document."""
+
+    @pytest.fixture()
+    def engine(self) -> VectorCypherEngine:
+        config = MagicMock()
+        config.get_postgresql_url.return_value = "postgresql://localhost/test"
+        config.get_neo4j_url.return_value = "bolt://localhost:7687"
+        config.get_neo4j_user.return_value = "neo4j"
+        config.get_neo4j_password.return_value = "password"
+        config.get_neo4j_database.return_value = "neo4j"
+        config.get_graph_config.return_value = MagicMock()
+        config.get_vector_config.return_value = MagicMock()
+        config.storage.postgresql_pool_size = 5
+        config.storage.postgresql_max_overflow = 10
+        config.storage.embedding_dimension = 1536
+        config.pipeline.extract_entities = False
+        config.pipeline.chunking_strategy = "recursive"
+        config.pipeline.chunk_size = 512
+        config.pipeline.chunk_overlap = 50
+        engine = VectorCypherEngine(config)
+        engine._connected = True
+        engine._storage = AsyncMock()
+        engine._temporal_store = AsyncMock()
+        engine._embedder = AsyncMock()
+        engine._dual_nodes = AsyncMock()
+        engine._retriever = AsyncMock()
+        engine._router = MagicMock()
+        engine._neo4j_driver = AsyncMock()
+        return engine
+
+    def _make_raw_chunk(self, content: str) -> MagicMock:
+        chunk = MagicMock()
+        chunk.content = content
+        chunk.start_char = 0
+        chunk.end_char = len(content)
+        return chunk
+
+    @pytest.mark.asyncio
+    async def test_single_window_when_none(self, engine: VectorCypherEngine) -> None:
+        """When max_chunks_in_flight is None, all chunks in one window."""
+        engine._vc_config = VectorCypherConfig(max_chunks_in_flight=None)
+
+        raw_chunks = [self._make_raw_chunk(f"chunk {i}") for i in range(5)]
+        doc = MagicMock()
+        doc.id = uuid4()
+        doc.namespace_id = uuid4()
+        doc.content = "test content"
+        doc.metadata = MagicMock()
+        doc.metadata.custom = {}
+
+        # Mock chunker to return our raw chunks
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = raw_chunks
+
+        # Mock embedder to return one embedding per text
+        engine._embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536] * len(texts))
+
+        # Mock temporal store — return stored chunks with IDs
+        def make_stored(chunks):
+            result = []
+            for c in chunks:
+                s = MagicMock()
+                s.id = uuid4()
+                result.append(s)
+            return result
+
+        engine._temporal_store.create_chunks_batch = AsyncMock(side_effect=make_stored)
+
+        with patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker):
+            total_chunks, ents, rels = await engine._process_document(
+                doc,
+                skill_name="default",
+                occurred_at=datetime.now(UTC),
+                entity_types=[],
+                relationship_types=[],
+            )
+
+        assert total_chunks == 5
+        # All 5 chunks embedded in one call
+        engine._embedder.embed_batch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_exact_window_boundary(self, engine: VectorCypherEngine) -> None:
+        """Document with exactly max_chunks_in_flight chunks → one window."""
+        engine._vc_config = VectorCypherConfig(max_chunks_in_flight=4)
+
+        raw_chunks = [self._make_raw_chunk(f"chunk {i}") for i in range(4)]
+        doc = MagicMock()
+        doc.id = uuid4()
+        doc.namespace_id = uuid4()
+        doc.content = "test"
+        doc.metadata = MagicMock()
+        doc.metadata.custom = {}
+
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = raw_chunks
+        engine._embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536] * len(texts))
+
+        def make_stored(chunks):
+            return [MagicMock(id=uuid4()) for _ in chunks]
+
+        engine._temporal_store.create_chunks_batch = AsyncMock(side_effect=make_stored)
+
+        with patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker):
+            total_chunks, _, _ = await engine._process_document(
+                doc,
+                skill_name="default",
+                occurred_at=datetime.now(UTC),
+                entity_types=[],
+                relationship_types=[],
+            )
+
+        assert total_chunks == 4
+        # Exactly one embed_batch call (single window)
+        engine._embedder.embed_batch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_window_split(self, engine: VectorCypherEngine) -> None:
+        """Document with max_chunks_in_flight + 1 chunks → two windows."""
+        engine._vc_config = VectorCypherConfig(max_chunks_in_flight=3)
+
+        raw_chunks = [self._make_raw_chunk(f"chunk {i}") for i in range(4)]
+        doc = MagicMock()
+        doc.id = uuid4()
+        doc.namespace_id = uuid4()
+        doc.content = "test"
+        doc.metadata = MagicMock()
+        doc.metadata.custom = {}
+
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = raw_chunks
+        engine._embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536] * len(texts))
+
+        def make_stored(chunks):
+            return [MagicMock(id=uuid4()) for _ in chunks]
+
+        engine._temporal_store.create_chunks_batch = AsyncMock(side_effect=make_stored)
+
+        with patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker):
+            total_chunks, _, _ = await engine._process_document(
+                doc,
+                skill_name="default",
+                occurred_at=datetime.now(UTC),
+                entity_types=[],
+                relationship_types=[],
+            )
+
+        assert total_chunks == 4
+        # Two embed_batch calls: window of 3, window of 1
+        assert engine._embedder.embed_batch.call_count == 2
+        call_args = engine._embedder.embed_batch.call_args_list
+        assert len(call_args[0][0][0]) == 3  # first window: 3 texts
+        assert len(call_args[1][0][0]) == 1  # second window: 1 text
+
+    @pytest.mark.asyncio
+    async def test_chunk_index_continuity_across_windows(self, engine: VectorCypherEngine) -> None:
+        """chunk_index in metadata must be continuous across windows."""
+        engine._vc_config = VectorCypherConfig(max_chunks_in_flight=2)
+
+        raw_chunks = [self._make_raw_chunk(f"chunk {i}") for i in range(5)]
+        doc = MagicMock()
+        doc.id = uuid4()
+        doc.namespace_id = uuid4()
+        doc.content = "test"
+        doc.metadata = MagicMock()
+        doc.metadata.custom = {}
+
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = raw_chunks
+        engine._embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536] * len(texts))
+
+        # Capture the temporal chunks passed to create_chunks_batch
+        all_temporal_chunks = []
+
+        def capture_stored(chunks):
+            all_temporal_chunks.extend(chunks)
+            return [MagicMock(id=uuid4()) for _ in chunks]
+
+        engine._temporal_store.create_chunks_batch = AsyncMock(side_effect=capture_stored)
+
+        with patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker):
+            total_chunks, _, _ = await engine._process_document(
+                doc,
+                skill_name="default",
+                occurred_at=datetime.now(UTC),
+                entity_types=[],
+                relationship_types=[],
+            )
+
+        assert total_chunks == 5
+        # 3 windows: [2, 2, 1]
+        assert engine._embedder.embed_batch.call_count == 3
+
+        # Verify chunk_index is 0, 1, 2, 3, 4 across all windows
+        indices = [tc.metadata["chunk_index"] for tc in all_temporal_chunks]
+        assert indices == [0, 1, 2, 3, 4]
