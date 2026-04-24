@@ -21,7 +21,7 @@ dependencies = [
     "alembic>=1.18.4",
     "loguru>=0.7.3",
     # LLM Access (unified interface)
-    "litellm>=1.81.15",
+    "litellm>=1.83.7",
     # Graph database
     "neo4j>=6.1.0",
     # Vector database
