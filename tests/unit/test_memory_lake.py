@@ -1661,6 +1661,7 @@ def _make_lake_with_staged_support(ns_id):
         return doc
 
     lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create_document)
+    lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
 
     async def _fake_process_staged(doc, **kwargs):
         return (2, 1, 0)  # chunks, entities, rels
@@ -1853,6 +1854,7 @@ class TestSubmitBatch:
             return doc
 
         lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
 
         async def _failing_process(doc, **kwargs):
             raise RuntimeError("embedding service unavailable")
@@ -1887,6 +1889,7 @@ class TestSubmitBatch:
             return doc
 
         lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
         # Engine has no process_staged_document attribute
         if hasattr(lake._engine, "process_staged_document"):
             del lake._engine.process_staged_document
@@ -1972,3 +1975,98 @@ class TestSubmitBatch:
         assert results[0].chunks_created == 5
         assert results[0].entities_extracted == 3
         assert results[0].relationships_created == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_document_updates_storage_status(self) -> None:
+        """When process_staged_document raises, the document is marked FAILED in storage."""
+        from khora.core.models.document import DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        async def _fake_create(doc):
+            return doc
+
+        updated_docs = []
+
+        async def _fake_update(doc):
+            updated_docs.append(doc)
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+        lake._engine._storage.update_document = AsyncMock(side_effect=_fake_update)
+
+        async def _failing_process(doc, **kwargs):
+            raise RuntimeError("extraction failed")
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_failing_process)
+
+        handle = await lake.submit_batch(
+            [{"content": "will fail"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(updated_docs) == 1
+        assert updated_docs[0].status == DocumentStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_on_result_exception_does_not_hang(self) -> None:
+        """If on_result raises, handle.wait() still completes."""
+        import asyncio
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        def _bad_callback(completed, total, result):
+            raise ValueError("callback exploded")
+
+        handle = await lake.submit_batch(
+            [{"content": "doc"}],
+            on_result=_bad_callback,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        # Must complete within 5 seconds; if deadlocked, this raises TimeoutError.
+        await asyncio.wait_for(handle.wait(), timeout=5.0)
+        assert handle.is_done
+
+    @pytest.mark.asyncio
+    async def test_external_id_collision_produces_error_result(self) -> None:
+        """If create_document raises (e.g. IntegrityError), on_result receives success=False."""
+        from sqlalchemy.exc import IntegrityError
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        def _raise_integrity(doc):
+            raise IntegrityError("INSERT", {}, Exception("unique constraint"))
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_raise_integrity)
+
+        async def _fake_process(doc, **kwargs):
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "duplicate", "external_id": "ext-123"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert handle.failed == 1

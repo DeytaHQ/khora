@@ -294,6 +294,7 @@ class MemoryLake:
         self._run_migrations = run_migrations
         self._engine: MemoryEngineProtocol | None = None
         self._connected = False
+        self._bg_tasks: set[asyncio.Task] = set()
 
     async def connect(self) -> None:
         """Connect to all storage backends."""
@@ -678,6 +679,8 @@ class MemoryLake:
         # This satisfies the durability contract — if the process crashes after
         # submit_batch() returns, the PENDING records survive for recovery.
         pending_docs: list[Document] = []
+        pending_doc_data: list[dict[str, Any]] = []
+        pre_failed_docs: list[tuple[Document, str]] = []
         for doc_data in documents:
             content = doc_data.get("content", "")
             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -695,15 +698,24 @@ class MemoryLake:
                 extraction_config_hash=extraction_config_hash,
                 external_id=doc_data.get("external_id"),
             )
-            doc = await storage.create_document(doc)
-            pending_docs.append(doc)
+            try:
+                doc = await storage.create_document(doc)
+                pending_docs.append(doc)
+                pending_doc_data.append(doc_data)
+            except Exception as exc:
+                logger.warning(
+                    f"submit_batch: could not create document record "
+                    f"(external_id={doc_data.get('external_id')!r}): {exc}"
+                )
+                pre_failed_docs.append((doc, str(exc)))
 
-        handle = BatchHandle(batch_id=uuid4(), total=len(documents))
-        asyncio.create_task(
+        handle = BatchHandle(batch_id=uuid4(), total=len(pending_docs) + len(pre_failed_docs))
+        task = asyncio.create_task(
             self._submit_batch_worker(
                 handle,
                 pending_docs,
-                documents,
+                pending_doc_data,
+                pre_failed_docs,
                 on_result,
                 namespace_id=namespace_id,
                 skill_name=skill_name,
@@ -716,6 +728,8 @@ class MemoryLake:
                 max_concurrent=max_concurrent,
             )
         )
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
         return handle
 
     async def _submit_batch_worker(
@@ -723,6 +737,7 @@ class MemoryLake:
         handle: BatchHandle,
         pending_docs: list[Document],
         doc_data_list: list[dict[str, Any]],
+        pre_failed_docs: list[tuple[Document, str]],
         on_result: Callable[[int, int, DocumentResult], None],
         *,
         namespace_id: UUID,
@@ -736,20 +751,45 @@ class MemoryLake:
         max_concurrent: int,
     ) -> None:
         """Background worker that processes pre-staged PENDING documents."""
-        engine = self._get_engine()
-        process_fn = getattr(engine, "process_staged_document", None)
-        if process_fn is None:
-            # Fire error results for all documents and mark handle done
-            for doc in pending_docs:
-                result = DocumentResult(
+        storage = self.storage
+
+        def _fire_result(result: DocumentResult) -> None:
+            handle._record_result(result)
+            try:
+                on_result(handle.completed, handle.total, result)
+            except Exception as cb_exc:
+                logger.warning(f"submit_batch: on_result callback raised: {cb_exc}")
+
+        # Fire error results for documents that failed to be created (e.g. external_id collision).
+        for doc, err in pre_failed_docs:
+            _fire_result(
+                DocumentResult(
                     document_id=doc.id,
                     namespace_id=namespace_id,
                     success=False,
-                    error=f"Engine {type(engine).__name__!r} does not support submit_batch "
-                    "(requires process_staged_document method)",
+                    error=err,
                 )
-                handle._record_result(result)
-                on_result(handle.completed, handle.total, result)
+            )
+
+        engine = self._get_engine()
+        process_fn = getattr(engine, "process_staged_document", None)
+        if process_fn is None:
+            # Engine doesn't support staged processing — mark all PENDING docs as FAILED.
+            err_msg = f"Engine {type(engine).__name__!r} does not support submit_batch (requires process_staged_document method)"
+            for doc in pending_docs:
+                doc.mark_failed(err_msg)
+                try:
+                    await storage.update_document(doc)
+                except Exception as upd_exc:
+                    logger.warning(f"submit_batch: could not update document status: {upd_exc}")
+                _fire_result(
+                    DocumentResult(
+                        document_id=doc.id,
+                        namespace_id=namespace_id,
+                        success=False,
+                        error=err_msg,
+                    )
+                )
             handle._mark_done()
             return
 
@@ -787,17 +827,23 @@ class MemoryLake:
                     )
                 except Exception as exc:
                     logger.error(f"submit_batch: failed to process document {doc.id}: {exc}")
+                    doc.mark_failed(str(exc))
+                    try:
+                        await storage.update_document(doc)
+                    except Exception as upd_exc:
+                        logger.warning(f"submit_batch: could not update document status: {upd_exc}")
                     result = DocumentResult(
                         document_id=doc.id,
                         namespace_id=namespace_id,
                         success=False,
                         error=str(exc),
                     )
-                handle._record_result(result)
-                on_result(handle.completed, handle.total, result)
+                _fire_result(result)
 
-        await asyncio.gather(*[_process_one(doc, data) for doc, data in zip(pending_docs, doc_data_list)])
-        handle._mark_done()
+        try:
+            await asyncio.gather(*[_process_one(doc, data) for doc, data in zip(pending_docs, doc_data_list)])
+        finally:
+            handle._mark_done()
 
     async def recall(
         self,
