@@ -2075,8 +2075,7 @@ class VectorCypherEngine:
             if _win:
                 windows.append(_win)
             logger.debug(
-                f"Windowed processing: {len(ok_states)} docs → {len(windows)} windows "
-                f"(max_chunks_in_flight={max_cif})"
+                f"Windowed processing: {len(ok_states)} docs → {len(windows)} windows (max_chunks_in_flight={max_cif})"
             )
 
         # Accumulated timing across windows
@@ -2139,7 +2138,9 @@ class VectorCypherEngine:
                             **doc_metadata,
                             "chunk_index": ci,
                             "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-                            "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+                            "end_char": raw_chunk.end_char
+                            if hasattr(raw_chunk, "end_char")
+                            else len(raw_chunk.content),
                         },
                     )
                     all_temporal_chunks.append(tc)
@@ -2256,7 +2257,10 @@ class VectorCypherEngine:
                                 )
 
                         extraction_results = await asyncio.gather(
-                            *[_extract_one_doc(cks, doc_occurred_at.get(doc_id)) for doc_id, cks in doc_chunks_map.items()]
+                            *[
+                                _extract_one_doc(cks, doc_occurred_at.get(doc_id))
+                                for doc_id, cks in doc_chunks_map.items()
+                            ]
                         )
                         for ents, rels in extraction_results:
                             per_doc_entities.extend(ents)
@@ -2292,7 +2296,9 @@ class VectorCypherEngine:
                                 all_entity_chunk_links.append(EntityChunkLink(entity_id=entity.id, chunk_id=chunk_id))
 
                         # Co-occurrence relationships
-                        cooccurrence_rels = _build_cooccurrence_relationships(all_entities, namespace_id, all_relationships)
+                        cooccurrence_rels = _build_cooccurrence_relationships(
+                            all_entities, namespace_id, all_relationships
+                        )
                         if cooccurrence_rels:
                             all_relationships.extend(cooccurrence_rels)
 
@@ -2380,7 +2386,9 @@ class VectorCypherEngine:
                 chunks_created = end - start
                 # Count entities from this document's chunks
                 doc_chunk_ids = {all_temporal_chunks[i].id for i in range(start, end)}
-                doc_entity_count = sum(1 for e in all_entities if any(cid in doc_chunk_ids for cid in e.source_chunk_ids))
+                doc_entity_count = sum(
+                    1 for e in all_entities if any(cid in doc_chunk_ids for cid in e.source_chunk_ids)
+                )
                 doc.mark_completed(chunks_created, doc_entity_count)
                 await storage.update_document(doc)
                 results["processed"] += 1
