@@ -196,6 +196,12 @@ class VectorCypherConfig:
     # requirements and avoid timeouts with strict JSON schema constrained decoding.
     extraction_batch_size: int = 5
 
+    # Maximum number of chunks processed through stages 2–6 simultaneously.
+    # Primary memory control surface: chunks are ~2 KB each (512 tokens), so chunk
+    # count directly correlates with peak memory. None = process all chunks at once
+    # (current behavior, backward-compatible).
+    max_chunks_in_flight: int | None = None
+
     # Streaming pipeline (A-1: batch entity storage across documents)
     streaming_pipeline: bool = True
     enable_smart_resolution: bool = True
