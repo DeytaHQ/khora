@@ -710,6 +710,7 @@ class VectorCypherEngine:
         entity_types: list[str],
         relationship_types: list[str],
         chunk_strategy: ChunkStrategy | None = None,
+        max_chunks_in_flight: int | None = None,
     ) -> tuple[int, int, int]:
         """Process a document into chunks with skeleton-based entity extraction.
 
@@ -754,8 +755,11 @@ class VectorCypherEngine:
             # Extract metadata (computed once, not per window)
             doc_metadata = document.metadata.custom if document.metadata else {}
 
-            # Split into windows when max_chunks_in_flight is set; otherwise one window
-            window_size = self._vc_config.max_chunks_in_flight
+            # Split into windows when max_chunks_in_flight is set; otherwise one window.
+            # Per-call override takes precedence over the engine config.
+            window_size = (
+                max_chunks_in_flight if max_chunks_in_flight is not None else self._vc_config.max_chunks_in_flight
+            )
             windows = (
                 [raw_chunks[i : i + window_size] for i in range(0, len(raw_chunks), window_size)]
                 if window_size is not None
@@ -841,6 +845,56 @@ class VectorCypherEngine:
             span.set_attribute("entities_extracted", entities_extracted)
             span.set_attribute("relationships_created", relationships_created)
             return total_chunks_created, entities_extracted, relationships_created
+
+    async def process_staged_document(
+        self,
+        document: Document,
+        *,
+        skill_name: str,
+        occurred_at: datetime,
+        entity_types: list[str],
+        relationship_types: list[str],
+        expertise: ExpertiseConfig | str | None = None,
+        extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
+        max_chunks_in_flight: int | None = None,
+    ) -> tuple[int, int, int]:
+        """Process a pre-staged PENDING document through the VectorCypher pipeline.
+
+        Called by MemoryLake.submit_batch() for documents that were already
+        persisted to the DB with PENDING status before this call. Delegates
+        to _process_document; does NOT create a new document record.
+
+        Args:
+            document: Pre-created PENDING Document from storage.
+            skill_name: Extraction skill to use.
+            occurred_at: Temporal anchor for chunks and entities.
+            entity_types: Entity types to extract.
+            relationship_types: Relationship types to extract.
+            expertise: Optional domain-specific extraction config.
+            extraction_config_hash: Optional hash for change detection.
+            chunk_strategy: Override chunking strategy.
+            max_chunks_in_flight: Maximum chunks per processing window.
+
+        Returns:
+            Tuple of (chunks_created, entities_extracted, relationships_created).
+        """
+        # Update the document's extraction_config_hash if provided, so it is
+        # persisted when mark_completed() writes the record back.
+        if extraction_config_hash is not None and document.extraction_config_hash != extraction_config_hash:
+            document.extraction_config_hash = extraction_config_hash
+
+        return await self._process_document(
+            document,
+            skill_name=skill_name,
+            expertise=expertise,
+            extraction_model=None,
+            occurred_at=occurred_at,
+            entity_types=entity_types,
+            relationship_types=relationship_types,
+            chunk_strategy=chunk_strategy,
+            max_chunks_in_flight=max_chunks_in_flight,
+        )
 
     async def _run_skeleton_extraction(
         self,

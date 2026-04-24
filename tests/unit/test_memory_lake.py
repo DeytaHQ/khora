@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
+from khora.memory_lake import BatchHandle, BatchResult, DocumentResult, MemoryLake, RecallResult, RememberResult, Stats
 
 from .helpers import RESOLVE_ROW_ID as _RESOLVE_ROW_ID
 from .helpers import make_lake as _make_lake
@@ -1637,3 +1637,436 @@ class TestIncludeSources:
         # No doc IDs to fetch, so get_document_sources_batch should NOT be called
         lake._engine._storage.get_document_sources_batch.assert_not_awaited()
         assert result.entities[0][0].source_documents is None
+
+
+# ---------------------------------------------------------------------------
+# submit_batch
+# ---------------------------------------------------------------------------
+
+
+def _make_staged_doc(ns_id):
+    """Build a minimal mock Document as returned by storage.create_document."""
+    from khora.core.models.document import Document
+
+    doc = Document(namespace_id=ns_id, content="test content")
+    return doc
+
+
+def _make_lake_with_staged_support(ns_id):
+    """Make a lake whose engine exposes process_staged_document."""
+    lake = _make_lake(connected=True)
+    lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+    async def _fake_create_document(doc):
+        return doc
+
+    lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create_document)
+    lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+    async def _fake_process_staged(doc, **kwargs):
+        return (2, 1, 0)  # chunks, entities, rels
+
+    lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process_staged)
+    return lake
+
+
+class TestBatchHandleDataclass:
+    """Tests for BatchHandle dataclass."""
+
+    def test_initial_state(self) -> None:
+        from uuid import uuid4
+
+        handle = BatchHandle(batch_id=uuid4(), total=5)
+        assert handle.total == 5
+        assert handle.completed == 0
+        assert handle.failed == 0
+        assert not handle.is_done
+
+    def test_record_result_increments_completed(self) -> None:
+        handle = BatchHandle(batch_id=uuid4(), total=2)
+        r = DocumentResult(document_id=uuid4(), namespace_id=uuid4(), success=True)
+        handle._record_result(r)
+        assert handle.completed == 1
+        assert handle.failed == 0
+
+    def test_record_result_tracks_failures(self) -> None:
+        handle = BatchHandle(batch_id=uuid4(), total=2)
+        r = DocumentResult(document_id=uuid4(), namespace_id=uuid4(), success=False, error="oops")
+        handle._record_result(r)
+        assert handle.completed == 1
+        assert handle.failed == 1
+
+    def test_mark_done_sets_is_done(self) -> None:
+        handle = BatchHandle(batch_id=uuid4(), total=1)
+        assert not handle.is_done
+        handle._mark_done()
+        assert handle.is_done
+
+    @pytest.mark.asyncio
+    async def test_wait_returns_when_done(self) -> None:
+        import asyncio
+
+        handle = BatchHandle(batch_id=uuid4(), total=1)
+
+        async def _setter():
+            await asyncio.sleep(0)
+            handle._mark_done()
+
+        asyncio.create_task(_setter())
+        await handle.wait()
+        assert handle.is_done
+
+
+class TestDocumentResultDataclass:
+    """Tests for DocumentResult dataclass."""
+
+    def test_success_fields(self) -> None:
+        r = DocumentResult(
+            document_id=uuid4(),
+            namespace_id=uuid4(),
+            success=True,
+            chunks_created=3,
+            entities_extracted=2,
+            relationships_created=1,
+        )
+        assert r.success is True
+        assert r.error is None
+        assert r.chunks_created == 3
+
+    def test_failure_fields(self) -> None:
+        r = DocumentResult(
+            document_id=uuid4(),
+            namespace_id=uuid4(),
+            success=False,
+            error="embedding failed",
+        )
+        assert r.success is False
+        assert r.error == "embedding failed"
+        assert r.chunks_created == 0
+
+
+class TestSubmitBatch:
+    """Tests for MemoryLake.submit_batch()."""
+
+    @pytest.mark.asyncio
+    async def test_empty_documents_returns_done_handle(self) -> None:
+        """submit_batch with empty list returns a done handle immediately."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        handle = await lake.submit_batch(
+            [],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert handle.total == 0
+        assert handle.is_done
+
+    @pytest.mark.asyncio
+    async def test_returns_handle_before_processing(self) -> None:
+        """submit_batch returns handle immediately; create_document called before return."""
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        docs = [{"content": "hello"}]
+        called_before_return = []
+
+        orig_create = lake._engine._storage.create_document.side_effect
+
+        async def _spy_create(doc):
+            called_before_return.append(True)
+            return await orig_create(doc)
+
+        lake._engine._storage.create_document.side_effect = _spy_create
+
+        handle = await lake.submit_batch(
+            docs,
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        # create_document was called synchronously before handle was returned
+        assert called_before_return, "storage.create_document must be called before submit_batch returns"
+        assert handle.total == 1
+
+    @pytest.mark.asyncio
+    async def test_on_result_fires_per_document(self) -> None:
+        """on_result callback fires once per document with correct args."""
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        docs = [{"content": f"doc {i}"} for i in range(3)]
+        results: list[DocumentResult] = []
+        calls: list[tuple[int, int]] = []
+
+        def _on_result(completed, total, doc_result):
+            results.append(doc_result)
+            calls.append((completed, total))
+
+        handle = await lake.submit_batch(
+            docs,
+            on_result=_on_result,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 3
+        assert all(r.success for r in results)
+        assert calls[-1] == (3, 3)
+
+    @pytest.mark.asyncio
+    async def test_handle_is_done_after_wait(self) -> None:
+        """BatchHandle.is_done is True after wait() returns."""
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        handle = await lake.submit_batch(
+            [{"content": "x"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert handle.is_done
+        assert handle.completed == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_document_fires_on_result_with_error(self) -> None:
+        """If process_staged_document raises, on_result receives success=False."""
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        async def _failing_process(doc, **kwargs):
+            raise RuntimeError("embedding service unavailable")
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_failing_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "will fail"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "embedding service unavailable" in results[0].error
+        assert handle.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_engine_without_process_staged_fires_error(self) -> None:
+        """Engine lacking process_staged_document fires error result for each doc."""
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+        # Engine has no process_staged_document attribute
+        if hasattr(lake._engine, "process_staged_document"):
+            del lake._engine.process_staged_document
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "doc"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert handle.is_done
+
+    @pytest.mark.asyncio
+    async def test_multiple_concurrent_batches_dont_interfere(self) -> None:
+        """Two concurrent submit_batch calls produce independent handles."""
+        import asyncio
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        results_a: list[DocumentResult] = []
+        results_b: list[DocumentResult] = []
+
+        handle_a = await lake.submit_batch(
+            [{"content": "a1"}, {"content": "a2"}],
+            on_result=lambda c, t, r: results_a.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        handle_b = await lake.submit_batch(
+            [{"content": "b1"}],
+            on_result=lambda c, t, r: results_b.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        await asyncio.gather(handle_a.wait(), handle_b.wait())
+
+        assert handle_a.total == 2
+        assert handle_b.total == 1
+        assert len(results_a) == 2
+        assert len(results_b) == 1
+        assert handle_a.batch_id != handle_b.batch_id
+
+    @pytest.mark.asyncio
+    async def test_document_result_carries_stats(self) -> None:
+        """DocumentResult contains chunks/entities/rels from process_staged_document."""
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+
+        async def _process_with_stats(doc, **kwargs):
+            return (5, 3, 2)  # chunks, entities, rels
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_stats)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "rich doc"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert results[0].chunks_created == 5
+        assert results[0].entities_extracted == 3
+        assert results[0].relationships_created == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_document_updates_storage_status(self) -> None:
+        """When process_staged_document raises, the document is marked FAILED in storage."""
+        from khora.core.models.document import DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        async def _fake_create(doc):
+            return doc
+
+        updated_docs = []
+
+        async def _fake_update(doc):
+            updated_docs.append(doc)
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+        lake._engine._storage.update_document = AsyncMock(side_effect=_fake_update)
+
+        async def _failing_process(doc, **kwargs):
+            raise RuntimeError("extraction failed")
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_failing_process)
+
+        handle = await lake.submit_batch(
+            [{"content": "will fail"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(updated_docs) == 1
+        assert updated_docs[0].status == DocumentStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_on_result_exception_does_not_hang(self) -> None:
+        """If on_result raises, handle.wait() still completes."""
+        import asyncio
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        def _bad_callback(completed, total, result):
+            raise ValueError("callback exploded")
+
+        handle = await lake.submit_batch(
+            [{"content": "doc"}],
+            on_result=_bad_callback,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        # Must complete within 5 seconds; if deadlocked, this raises TimeoutError.
+        await asyncio.wait_for(handle.wait(), timeout=5.0)
+        assert handle.is_done
+
+    @pytest.mark.asyncio
+    async def test_external_id_collision_produces_error_result(self) -> None:
+        """If create_document raises (e.g. IntegrityError), on_result receives success=False."""
+        from sqlalchemy.exc import IntegrityError
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        def _raise_integrity(doc):
+            raise IntegrityError("INSERT", {}, Exception("unique constraint"))
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_raise_integrity)
+
+        async def _fake_process(doc, **kwargs):
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "duplicate", "external_id": "ext-123"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert handle.failed == 1
