@@ -2,7 +2,7 @@
 
 Memory Lake library: knowledge graphs + vector search + PostgreSQL for unified knowledge storage. **Library, not an application.**
 
-## Commands
+## Project Config
 
 ```bash
 make test              # pytest, coverage ≥30%
@@ -11,6 +11,26 @@ make lint              # ruff + ty typecheck
 make dev               # Start postgres + neo4j
 uv run alembic upgrade head                       # Run migrations
 ```
+LINEAR_TEAM: {TEAM_KEY}
+```
+
+<!-- LINEAR_TEAM: the Linear team key used for branch names and issue refs (e.g., ENG) -->
+
+## Project Overview
+
+<!-- Replace with 2-3 sentences describing what this project does, who it serves, -->
+<!-- and any critical context an agent or new contributor needs up front.          -->
+
+## Tech Stack
+
+<!-- Replace with the actual stack. Add or remove lines as needed. -->
+
+- **Language:** {e.g., TypeScript, Python, Go}
+- **Framework:** {e.g., Next.js, FastAPI, Gin}
+- **Database:** {e.g., PostgreSQL, DynamoDB}
+- **ORM / Query layer:** {e.g., Prisma, SQLAlchemy, raw SQL}
+- **Package manager:** {e.g., pnpm, uv, go modules}
+- **Infra / Hosting:** {e.g., Vercel, AWS, Fly.io}
 
 CLI tooling (`extract`, `search`) lives in the separate [khora-cli](https://github.com/DeytaHQ/khora-cli) package (`uv pip install khora-cli`). Ontology tooling (construct / validate / preview) lives in [khora-explorer](https://github.com/DeytaHQ/khora-explorer) (`uv pip install khora-explorer`). khora itself is a pure memory-lake library.
 
@@ -121,6 +141,14 @@ For multi-step tasks, state a brief plan:
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
 These principles are working if: fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## Conventions
+
+<!-- Replace with project-specific coding conventions. Examples:              -->
+<!-- - All API responses use a standard envelope: { data, error, meta }      -->
+<!-- - Prefer named exports over default exports                             -->
+<!-- - Database migrations must be backwards-compatible (expand-and-contract)-->
+<!-- - Error messages are user-facing; keep them clear and actionable        -->
 
 ## Gotchas
 
