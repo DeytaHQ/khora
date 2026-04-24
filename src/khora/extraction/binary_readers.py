@@ -1,12 +1,16 @@
 """Binary format extraction for ingestion.
 
-Converts PDF, Excel, Word, and Parquet binary formats to text/markdown so
-they can be fed into the standard text-ingest pipeline.  All extractors
-are optional — they degrade gracefully with a warning when dependencies
-are missing.
+Converts Excel, Word, and Parquet binary formats to text/markdown so they
+can be fed into the standard text-ingest pipeline.  Extractors degrade
+gracefully with a warning when optional dependencies are missing.
 
-Install: ``pip install khora[binary-readers]`` for pymupdf + openpyxl +
-python-docx, and ``pip install khora[parquet]`` for pyarrow.
+PDF extraction was removed from khora to eliminate an AGPL-3.0 dependency
+(PyMuPDF).  Callers passing a ``.pdf`` path to :func:`extract_if_needed`
+get a :class:`NotImplementedError` — preprocess PDFs upstream or use
+``khora-cli``'s PDF preprocessing.
+
+Install: ``pip install khora[binary-readers]`` for openpyxl + python-docx,
+and ``pip install khora[parquet]`` for pyarrow.
 """
 
 from __future__ import annotations
@@ -20,14 +24,6 @@ from loguru import logger
 # ---------------------------------------------------------------------------
 # Optional dependency detection
 # ---------------------------------------------------------------------------
-
-_HAS_PYMUPDF = False
-try:
-    import pymupdf  # noqa: F401
-
-    _HAS_PYMUPDF = True
-except ImportError:
-    pass
 
 _HAS_OPENPYXL = False
 try:
@@ -55,47 +51,27 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Extractors
+# PDF sentinel
 # ---------------------------------------------------------------------------
 
+_PDF_REMOVED_MESSAGE = (
+    "khora no longer includes PDF parsing. "
+    "Preprocess PDFs upstream (e.g. extract text to a .txt or .md file) "
+    "or use khora-cli's PDF preprocessing, then pass the extracted text to remember()."
+)
 
-def extract_pdf_text(path: Path) -> str:
-    """Extract text content from a PDF file.
 
-    Uses pymupdf (PyMuPDF) for fast text extraction.
-    Returns empty string if pymupdf is not installed.
+def _pdf_not_supported(path: Path) -> str:
+    """Stub raised when a caller dispatches a ``.pdf`` path.
+
+    PDF parsing was removed from khora; see module docstring.
     """
-    if not _HAS_PYMUPDF:
-        logger.warning(f"pymupdf not installed — cannot extract text from {path.name}. Install: pip install pymupdf")
-        return ""
+    raise NotImplementedError(_PDF_REMOVED_MESSAGE)
 
-    import pymupdf
 
-    try:
-        doc = pymupdf.open(str(path))
-        pages: list[str] = []
-        for page in doc:
-            text = page.get_text()
-            if text.strip():
-                pages.append(text)
-        page_count = doc.page_count
-        doc.close()
-
-        full_text = "\n\n---\n\n".join(pages)
-
-        # Check for scanned PDFs (very little text per page)
-        if page_count > 0:
-            chars_per_page = len(full_text) / page_count
-            if chars_per_page < 50:
-                logger.warning(
-                    f"{path.name}: ~{chars_per_page:.0f} chars/page — "
-                    "possibly a scanned PDF (OCR not supported, text may be incomplete)"
-                )
-
-        return full_text
-    except Exception as e:
-        logger.error(f"PDF extraction failed for {path.name}: {e}")
-        return ""
+# ---------------------------------------------------------------------------
+# Extractors
+# ---------------------------------------------------------------------------
 
 
 def extract_xlsx_text(path: Path) -> str:
@@ -200,7 +176,7 @@ def extract_parquet_text(path: Path) -> str:
 
 #: Map of file extensions to extraction functions
 _EXTRACTORS: dict[str, callable] = {
-    ".pdf": extract_pdf_text,
+    ".pdf": _pdf_not_supported,
     ".xlsx": extract_xlsx_text,
     ".xls": extract_xls_text,
     ".docx": extract_docx_text,
@@ -215,8 +191,8 @@ def get_extraction_warning(path: Path) -> str | None:
     given file extension.  Returns ``None`` when everything looks fine.
     """
     ext = path.suffix.lower()
-    if ext == ".pdf" and not _HAS_PYMUPDF:
-        return f"Cannot extract text from {path.name} — install pymupdf: pip install pymupdf"
+    if ext == ".pdf":
+        return f"Cannot extract text from {path.name} — {_PDF_REMOVED_MESSAGE}"
     if ext in (".xlsx", ".xls") and not _HAS_OPENPYXL:
         return f"Cannot extract text from {path.name} — install openpyxl: pip install openpyxl"
     if ext == ".docx" and not _HAS_DOCX:
@@ -232,6 +208,9 @@ def extract_if_needed(path: Path) -> Path | None:
     If extraction succeeds, writes a `{name}_extracted.md` file alongside
     the original and returns the path to it.  Returns None if no
     extraction was needed or if it failed.
+
+    Raises :class:`NotImplementedError` for ``.pdf`` inputs: PDF parsing
+    was removed from khora; preprocess PDFs upstream.
     """
     ext = path.suffix.lower()
     extractor = _EXTRACTORS.get(ext)

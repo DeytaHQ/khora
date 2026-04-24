@@ -52,7 +52,7 @@ Programmatic values take priority over environment variables.
 | `weaviate` | Weaviate vector store | `weaviate-client>=4.20.1` |
 | `sqlite` | SQLite embedded relational + vector | `aiosqlite>=0.20.0` |
 | `lancedb` | LanceDB embedded vector store | `lancedb>=0.17.0`, `pyarrow` |
-| `binary-readers` | PDF / docx / xlsx readers (used by khora-cli and downstream ingestors) | `pymupdf`, `openpyxl`, `python-docx` |
+| `binary-readers` | docx / xlsx readers (used by khora-cli and downstream ingestors). PDF extraction was removed — preprocess PDFs upstream. | `openpyxl`, `python-docx` |
 | `parquet` | Parquet readers | `pyarrow>=18.0.0` |
 | `nlp` | spaCy-based sentence splitting | `spacy>=3.8` |
 | `logfire` | Logfire integration + Neo4j pool OTel metrics | `logfire>=4.0` |
