@@ -31,7 +31,7 @@ import asyncio
 import os
 from contextlib import contextmanager
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from loguru import logger
@@ -55,16 +55,11 @@ _EXTRACTION_REGISTRY: dict[str, ExtractionResult] = {}
 def _plan_extraction(marker: str, entities: list[tuple[str, str]]) -> None:
     """Stage an entity extraction result for texts containing ``marker``."""
     _EXTRACTION_REGISTRY[marker] = ExtractionResult(
-        entities=[
-            ExtractedEntity(name=n, entity_type=t, confidence=0.99)
-            for n, t in entities
-        ],
+        entities=[ExtractedEntity(name=n, entity_type=t, confidence=0.99) for n, t in entities],
     )
 
 
-async def _stub_extract_multi(
-    self: Any, texts: list[str], **_kwargs: Any
-) -> list[ExtractionResult]:
+async def _stub_extract_multi(self: Any, texts: list[str], **_kwargs: Any) -> list[ExtractionResult]:
     out = []
     for text in texts:
         matched = next(
@@ -178,10 +173,7 @@ class TestWindowedProcessingIntegration:
             ns_id = ns.namespace_id
             ext = uuid4().hex[:8]
 
-            docs = [
-                {"content": _short_content(i), "external_id": f"winsplit-{ext}-{i}"}
-                for i in range(3)
-            ]
+            docs = [{"content": _short_content(i), "external_id": f"winsplit-{ext}-{i}"} for i in range(3)]
 
             with _capture_loguru("DEBUG") as messages:
                 result = await lake.remember_batch(
@@ -195,10 +187,9 @@ class TestWindowedProcessingIntegration:
             assert result.processed == 3, f"expected 3 processed, got {result.processed}"
             assert result.failed == 0, f"unexpected failures: {result.failed}"
             # 3 docs, max 2 per window → 2 windows logged
-            assert any(
-                "Windowed processing: 3 docs" in m and "2 windows" in m
-                for m in messages
-            ), f"expected windowed-processing debug log; got:\n" + "\n".join(messages)
+            assert any("Windowed processing: 3 docs" in m and "2 windows" in m for m in messages), (
+                "expected windowed-processing debug log; got:\n" + "\n".join(messages)
+            )
         finally:
             await lake.disconnect()
 
@@ -233,11 +224,8 @@ class TestWindowedProcessingIntegration:
             assert result.processed == 1, f"expected 1 processed, got {result.processed}"
             assert result.failed == 0, f"unexpected failures: {result.failed}"
             assert any(
-                "exceeds" in m
-                and "max_chunks_in_flight" in m
-                and "single-document window" in m
-                for m in messages
-            ), f"expected single-document-window warning; got:\n" + "\n".join(messages)
+                "exceeds" in m and "max_chunks_in_flight" in m and "single-document window" in m for m in messages
+            ), "expected single-document-window warning; got:\n" + "\n".join(messages)
         finally:
             await lake.disconnect()
 
@@ -258,10 +246,7 @@ class TestWindowedProcessingIntegration:
             ns_id = ns.namespace_id
             ext = uuid4().hex[:8]
 
-            docs = [
-                {"content": _short_content(i), "external_id": f"nowin-{ext}-{i}"}
-                for i in range(3)
-            ]
+            docs = [{"content": _short_content(i), "external_id": f"nowin-{ext}-{i}"} for i in range(3)]
 
             result = await lake.remember_batch(
                 docs,
@@ -382,10 +367,7 @@ class TestSubmitBatchIntegration:
             call_args.append((completed, total))
 
         ext = uuid4().hex[:8]
-        docs = [
-            {"content": _short_content(i), "external_id": f"cb-{ext}-{i}"}
-            for i in range(3)
-        ]
+        docs = [{"content": _short_content(i), "external_id": f"cb-{ext}-{i}"} for i in range(3)]
 
         handle = await lake.submit_batch(
             docs,
@@ -440,9 +422,7 @@ class TestSubmitBatchIntegration:
             chunk_strategy="fixed",
         )
 
-        await asyncio.wait_for(
-            asyncio.gather(handle_a.wait(), handle_b.wait()), timeout=120.0
-        )
+        await asyncio.wait_for(asyncio.gather(handle_a.wait(), handle_b.wait()), timeout=120.0)
 
         assert handle_a.total == 2
         assert handle_b.total == 1
@@ -472,7 +452,7 @@ class TestSubmitBatchIntegration:
         try:
             docs = [{"content": _short_content(0), "external_id": ext_id}]
 
-            handle = await lake.submit_batch(
+            await lake.submit_batch(
                 docs,
                 on_result=lambda c, t, r: None,
                 namespace=stable_ns_id,
@@ -545,6 +525,4 @@ class TestSubmitBatchIntegration:
         graph = lake.storage.graph
         assert graph is not None, "graph backend required for entity count check"
         entity_count = await graph.count_entities(row_ns_id)
-        assert entity_count == 1, (
-            f"expected 1 entity (Alice deduplicated), got {entity_count}"
-        )
+        assert entity_count == 1, f"expected 1 entity (Alice deduplicated), got {entity_count}"
