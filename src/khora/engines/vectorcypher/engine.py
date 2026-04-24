@@ -202,6 +202,10 @@ class VectorCypherConfig:
     # (current behavior, backward-compatible).
     max_chunks_in_flight: int | None = None
 
+    def __post_init__(self) -> None:
+        if self.max_chunks_in_flight is not None and self.max_chunks_in_flight < 1:
+            raise ValueError(f"max_chunks_in_flight must be >= 1, got {self.max_chunks_in_flight}")
+
     # Streaming pipeline (A-1: batch entity storage across documents)
     streaming_pipeline: bool = True
     enable_smart_resolution: bool = True
@@ -747,78 +751,94 @@ class VectorCypherEngine:
                 span.set_attribute("chunk_count", 0)
                 return 0, 0, 0
 
-            # Embed chunks in batch
-            with trace_span("khora.vectorcypher.embed_batch", chunk_count=len(raw_chunks)):
-                chunk_texts = [c.content for c in raw_chunks]
-                embeddings = await embedder.embed_batch(chunk_texts)
-
-            # Extract metadata
+            # Extract metadata (computed once, not per window)
             doc_metadata = document.metadata.custom if document.metadata else {}
 
-            # Create temporal chunks
-            temporal_chunks = []
-            for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
-                temporal_chunk = TemporalChunk(
-                    id=None,
-                    namespace_id=document.namespace_id,
-                    document_id=document.id,
-                    content=raw_chunk.content,
-                    embedding=embedding,
-                    occurred_at=occurred_at,
-                    created_at=datetime.now(UTC),
-                    source_system=doc_metadata.get("source_system"),
-                    author=doc_metadata.get("author"),
-                    channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                    tags=_ensure_tags(doc_metadata.get("tags", [])),
-                    confidence=1.0,
-                    metadata={
-                        **doc_metadata,
-                        "chunk_index": i,
-                        "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-                        "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-                    },
-                )
-                temporal_chunks.append(temporal_chunk)
+            # Split into windows when max_chunks_in_flight is set; otherwise one window
+            window_size = self._vc_config.max_chunks_in_flight
+            windows = (
+                [raw_chunks[i : i + window_size] for i in range(0, len(raw_chunks), window_size)]
+                if window_size is not None
+                else [raw_chunks]
+            )
 
-            # Store in pgvector
-            stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
-
-            # Update temporal_chunks with assigned IDs
-            for i, stored in enumerate(stored_chunks):
-                temporal_chunks[i].id = stored.id
-
-            # Create Chunk nodes in Neo4j (skipped for SurrealDB — chunks in temporal store)
-            if dual_nodes is not None:
-                await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
-
-            # Skeleton-based entity extraction (for core chunks only)
+            total_chunks_created = 0
             entities_extracted = 0
             relationships_created = 0
+            chunk_index_offset = 0
 
-            if self._config.pipeline.extract_entities:
-                entities_extracted, relationships_created = await self._run_skeleton_extraction(
-                    temporal_chunks,
-                    document.namespace_id,
-                    skill_name=skill_name,
-                    expertise=expertise,
-                    extraction_model=extraction_model,
-                    entity_types=entity_types,
-                    relationship_types=relationship_types,
-                )
+            for window in windows:
+                # Embed window chunks in batch
+                with trace_span("khora.vectorcypher.embed_batch", chunk_count=len(window)):
+                    chunk_texts = [c.content for c in window]
+                    embeddings = await embedder.embed_batch(chunk_texts)
+
+                # Create temporal chunks
+                temporal_chunks = []
+                for i, (raw_chunk, embedding) in enumerate(zip(window, embeddings)):
+                    temporal_chunk = TemporalChunk(
+                        id=None,
+                        namespace_id=document.namespace_id,
+                        document_id=document.id,
+                        content=raw_chunk.content,
+                        embedding=embedding,
+                        occurred_at=occurred_at,
+                        created_at=datetime.now(UTC),
+                        source_system=doc_metadata.get("source_system"),
+                        author=doc_metadata.get("author"),
+                        channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
+                        tags=_ensure_tags(doc_metadata.get("tags", [])),
+                        confidence=1.0,
+                        metadata={
+                            **doc_metadata,
+                            "chunk_index": chunk_index_offset + i,
+                            "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+                            "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+                        },
+                    )
+                    temporal_chunks.append(temporal_chunk)
+
+                # Store in pgvector
+                stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+
+                # Update temporal_chunks with assigned IDs
+                for i, stored in enumerate(stored_chunks):
+                    temporal_chunks[i].id = stored.id
+
+                # Create Chunk nodes in Neo4j (skipped for SurrealDB — chunks in temporal store)
+                if dual_nodes is not None:
+                    await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+
+                # Skeleton-based entity extraction (for core chunks only)
+                if self._config.pipeline.extract_entities:
+                    ents, rels = await self._run_skeleton_extraction(
+                        temporal_chunks,
+                        document.namespace_id,
+                        skill_name=skill_name,
+                        expertise=expertise,
+                        extraction_model=extraction_model,
+                        entity_types=entity_types,
+                        relationship_types=relationship_types,
+                    )
+                    entities_extracted += ents
+                    relationships_created += rels
+
+                total_chunks_created += len(stored_chunks)
+                chunk_index_offset += len(window)
 
             # Update document status
-            document.mark_completed(len(stored_chunks), entities_extracted)
+            document.mark_completed(total_chunks_created, entities_extracted)
             await storage.update_document(document)
 
             logger.debug(
-                f"Processed document {document.id}: {len(stored_chunks)} chunks, "
+                f"Processed document {document.id}: {total_chunks_created} chunks, "
                 f"{entities_extracted} entities, {relationships_created} relationships"
             )
 
-            span.set_attribute("chunk_count", len(stored_chunks))
+            span.set_attribute("chunk_count", total_chunks_created)
             span.set_attribute("entities_extracted", entities_extracted)
             span.set_attribute("relationships_created", relationships_created)
-            return len(stored_chunks), entities_extracted, relationships_created
+            return total_chunks_created, entities_extracted, relationships_created
 
     async def _run_skeleton_extraction(
         self,
@@ -1121,67 +1141,85 @@ class VectorCypherEngine:
             await storage.update_document(document)
             return 0, [], [], []
 
-        # WS3: Use enriched text for embedding if provided (conversation context),
-        # but store original content in the chunk for answer_accuracy matching.
-        if embedding_text_override:
-            embed_texts = [embedding_text_override]
-        else:
-            embed_texts = [c.content for c in raw_chunks]
-        embeddings = await embedder.embed_batch(embed_texts)
         doc_metadata = document.metadata.custom if document.metadata else {}
 
-        temporal_chunks = []
-        for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
-            temporal_chunk = TemporalChunk(
-                id=None,
-                namespace_id=document.namespace_id,
-                document_id=document.id,
-                content=raw_chunk.content,
-                embedding=embedding,
-                occurred_at=occurred_at,
-                created_at=datetime.now(UTC),
-                source_system=doc_metadata.get("source_system"),
-                author=doc_metadata.get("author"),
-                channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                tags=_ensure_tags(doc_metadata.get("tags", [])),
-                confidence=1.0,
-                metadata={
-                    **doc_metadata,
-                    "chunk_index": i,
-                    "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-                    "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-                },
-            )
-            temporal_chunks.append(temporal_chunk)
+        # Split into windows when max_chunks_in_flight is set; otherwise one window
+        window_size = self._vc_config.max_chunks_in_flight
+        windows = (
+            [raw_chunks[i : i + window_size] for i in range(0, len(raw_chunks), window_size)]
+            if window_size is not None
+            else [raw_chunks]
+        )
 
-        # Store chunks in pgvector
-        stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
-        for i, stored in enumerate(stored_chunks):
-            temporal_chunks[i].id = stored.id
-
-        # Create Chunk nodes in Neo4j (skipped for SurrealDB)
-        if dual_nodes is not None:
-            await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
-
-        # Deferred skeleton extraction — returns entities instead of storing
+        total_chunks_created = 0
         entities: list[Entity] = []
         relationships: list[Relationship] = []
         entity_chunk_links: list[EntityChunkLink] = []
+        chunk_index_offset = 0
 
-        if self._config.pipeline.extract_entities:
-            entities, relationships, entity_chunk_links = await self._run_skeleton_extraction_deferred(
-                temporal_chunks,
-                document.namespace_id,
-                skill_name=skill_name,
-                expertise=expertise,
-                extraction_model=extraction_model,
-                entity_types=entity_types,
-                relationship_types=relationship_types,
-                skeleton_ratio_override=skeleton_ratio_override,
-                is_conversation=skeleton_ratio_override is not None,
-            )
+        for window in windows:
+            # WS3: Use enriched text for embedding if provided (conversation context),
+            # but store original content in the chunk for answer_accuracy matching.
+            if embedding_text_override:
+                embed_texts = [embedding_text_override]
+            else:
+                embed_texts = [c.content for c in window]
+            embeddings = await embedder.embed_batch(embed_texts)
 
-        return len(stored_chunks), entities, relationships, entity_chunk_links
+            temporal_chunks = []
+            for i, (raw_chunk, embedding) in enumerate(zip(window, embeddings)):
+                temporal_chunk = TemporalChunk(
+                    id=None,
+                    namespace_id=document.namespace_id,
+                    document_id=document.id,
+                    content=raw_chunk.content,
+                    embedding=embedding,
+                    occurred_at=occurred_at,
+                    created_at=datetime.now(UTC),
+                    source_system=doc_metadata.get("source_system"),
+                    author=doc_metadata.get("author"),
+                    channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
+                    tags=_ensure_tags(doc_metadata.get("tags", [])),
+                    confidence=1.0,
+                    metadata={
+                        **doc_metadata,
+                        "chunk_index": chunk_index_offset + i,
+                        "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+                        "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
+                    },
+                )
+                temporal_chunks.append(temporal_chunk)
+
+            # Store chunks in pgvector
+            stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+            for i, stored in enumerate(stored_chunks):
+                temporal_chunks[i].id = stored.id
+
+            # Create Chunk nodes in Neo4j (skipped for SurrealDB)
+            if dual_nodes is not None:
+                await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+
+            # Deferred skeleton extraction — returns entities instead of storing
+            if self._config.pipeline.extract_entities:
+                window_entities, window_rels, window_links = await self._run_skeleton_extraction_deferred(
+                    temporal_chunks,
+                    document.namespace_id,
+                    skill_name=skill_name,
+                    expertise=expertise,
+                    extraction_model=extraction_model,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
+                    skeleton_ratio_override=skeleton_ratio_override,
+                    is_conversation=skeleton_ratio_override is not None,
+                )
+                entities.extend(window_entities)
+                relationships.extend(window_rels)
+                entity_chunk_links.extend(window_links)
+
+            total_chunks_created += len(stored_chunks)
+            chunk_index_offset += len(window)
+
+        return total_chunks_created, entities, relationships, entity_chunk_links
 
     async def _remember_via_replace(
         self,
