@@ -1096,133 +1096,6 @@ class VectorCypherEngine:
 
         return entities, relationships, entity_chunk_links
 
-    async def _process_document_streaming(
-        self,
-        document: Document,
-        *,
-        skill_name: str,
-        expertise: ExpertiseConfig | str | None = None,
-        extraction_model: str | None = None,
-        occurred_at: datetime,
-        embedding_text_override: str | None = None,
-        entity_types: list[str],
-        relationship_types: list[str],
-        skeleton_ratio_override: float | None = None,
-        chunk_strategy: ChunkStrategy | None = None,
-    ) -> tuple[int, list[Entity], list[Relationship], list[EntityChunkLink]]:
-        """Process a document, returning entities for deferred batch storage.
-
-        Same as _process_document but returns entities/rels/links instead of
-        storing them, allowing the caller to batch across documents.
-
-        Args:
-            embedding_text_override: If provided, use this text for embedding
-                instead of the raw chunk content. The original content is still
-                stored in the chunk (preserves substring-based metrics).
-
-        Returns:
-            Tuple of (chunks_created, entities, relationships, entity_chunk_links)
-        """
-        from khora.extraction.chunkers import create_chunker
-
-        storage = self._get_storage()
-        embedder = self._get_embedder()
-        temporal_store = self._get_temporal_store()
-        dual_nodes = self._get_dual_nodes()
-
-        strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
-        chunker = create_chunker(
-            strategy=strategy,
-            chunk_size=self._config.pipeline.chunk_size,
-            chunk_overlap=self._config.pipeline.chunk_overlap,
-        )
-        raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
-
-        if not raw_chunks:
-            document.mark_completed(0, 0)
-            await storage.update_document(document)
-            return 0, [], [], []
-
-        doc_metadata = document.metadata.custom if document.metadata else {}
-
-        # Split into windows when max_chunks_in_flight is set; otherwise one window
-        window_size = self._vc_config.max_chunks_in_flight
-        windows = (
-            [raw_chunks[i : i + window_size] for i in range(0, len(raw_chunks), window_size)]
-            if window_size is not None
-            else [raw_chunks]
-        )
-
-        total_chunks_created = 0
-        entities: list[Entity] = []
-        relationships: list[Relationship] = []
-        entity_chunk_links: list[EntityChunkLink] = []
-        chunk_index_offset = 0
-
-        for window in windows:
-            # WS3: Use enriched text for embedding if provided (conversation context),
-            # but store original content in the chunk for answer_accuracy matching.
-            if embedding_text_override:
-                embed_texts = [embedding_text_override]
-            else:
-                embed_texts = [c.content for c in window]
-            embeddings = await embedder.embed_batch(embed_texts)
-
-            temporal_chunks = []
-            for i, (raw_chunk, embedding) in enumerate(zip(window, embeddings)):
-                temporal_chunk = TemporalChunk(
-                    id=None,
-                    namespace_id=document.namespace_id,
-                    document_id=document.id,
-                    content=raw_chunk.content,
-                    embedding=embedding,
-                    occurred_at=occurred_at,
-                    created_at=datetime.now(UTC),
-                    source_system=doc_metadata.get("source_system"),
-                    author=doc_metadata.get("author"),
-                    channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                    tags=_ensure_tags(doc_metadata.get("tags", [])),
-                    confidence=1.0,
-                    metadata={
-                        **doc_metadata,
-                        "chunk_index": chunk_index_offset + i,
-                        "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-                        "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-                    },
-                )
-                temporal_chunks.append(temporal_chunk)
-
-            # Store chunks in pgvector
-            stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
-            for i, stored in enumerate(stored_chunks):
-                temporal_chunks[i].id = stored.id
-
-            # Create Chunk nodes in Neo4j (skipped for SurrealDB)
-            if dual_nodes is not None:
-                await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
-
-            # Deferred skeleton extraction — returns entities instead of storing
-            if self._config.pipeline.extract_entities:
-                window_entities, window_rels, window_links = await self._run_skeleton_extraction_deferred(
-                    temporal_chunks,
-                    document.namespace_id,
-                    skill_name=skill_name,
-                    expertise=expertise,
-                    extraction_model=extraction_model,
-                    entity_types=entity_types,
-                    relationship_types=relationship_types,
-                    skeleton_ratio_override=skeleton_ratio_override,
-                    is_conversation=skeleton_ratio_override is not None,
-                )
-                entities.extend(window_entities)
-                relationships.extend(window_rels)
-                entity_chunk_links.extend(window_links)
-
-            total_chunks_created += len(stored_chunks)
-            chunk_index_offset += len(window)
-
-        return total_chunks_created, entities, relationships, entity_chunk_links
-
     async def _remember_via_replace(
         self,
         *,
@@ -2473,6 +2346,16 @@ class VectorCypherEngine:
                 _t0 = _time.perf_counter()
                 await storage.upsert_entities_batch(namespace_id, all_entities)
                 _stage6_upsert_ms += (_time.perf_counter() - _t0) * 1000
+
+                # Rebuild entity-chunk links after upsert: upsert_entities_batch()
+                # mutates entity.id in-place to the DB's canonical UUID when the entity
+                # already exists (e.g., cross-window collision).  Links built before this
+                # call carry pre-mutation UUIDs and cause silent MENTIONED_IN edge loss.
+                all_entity_chunk_links = [
+                    EntityChunkLink(entity_id=entity.id, chunk_id=chunk_id)
+                    for entity in all_entities
+                    for chunk_id in entity.source_chunk_ids
+                ]
 
                 if all_relationships:
                     _t0 = _time.perf_counter()
