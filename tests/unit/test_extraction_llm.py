@@ -783,21 +783,15 @@ class TestBisectionOnTruncation:
             mock_multi.return_value = [transient_error for _ in texts]
 
             # First call: 1 failure
-            await extractor.extract_multi(
-                texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
-            )
+            await extractor.extract_multi(texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50)
             assert extractor._consecutive_batch_failures == 1
 
             # Second call: hits threshold, circuit breaker trips
-            await extractor.extract_multi(
-                texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
-            )
+            await extractor.extract_multi(texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50)
             assert extractor._consecutive_batch_failures == 2
 
             # Third call: circuit breaker is tripped — _extract_multi_batch must NOT be called again
-            await extractor.extract_multi(
-                texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
-            )
+            await extractor.extract_multi(texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50)
             # Still 2 calls total: third invocation skipped batch mode entirely
             assert mock_multi.call_count == 2
 
