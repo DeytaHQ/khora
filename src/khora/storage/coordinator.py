@@ -1337,6 +1337,83 @@ class StorageCoordinator:
         )
 
     # =========================================================================
+    # Chronicle event / fact operations (delegated to vector backend)
+    #
+    # Schema lives in chronicle_events / memory_facts (migration 024). Writes
+    # for now go through the pgvector backend because it owns the embedding
+    # column on chronicle_events. Engine wiring (EventExtractor / FactExtractor)
+    # arrives in Chronicle #2/#3.
+    # =========================================================================
+
+    async def write_events(
+        self,
+        events: list[Any],
+        *,
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Persist Chronicle events to the chronicle_events table.
+
+        Returns the list of inserted event IDs in input order.
+        """
+        if not events:
+            return []
+        if not self.vector or not hasattr(self.vector, "write_events"):
+            raise RuntimeError("Vector backend does not support chronicle event writes")
+        return await self.vector.write_events(events, namespace_id=namespace_id)
+
+    async def write_facts(
+        self,
+        facts: list[Any],
+        *,
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Persist memory facts to the memory_facts table.
+
+        Returns the list of inserted fact IDs in input order.
+        """
+        if not facts:
+            return []
+        if not self.vector or not hasattr(self.vector, "write_facts"):
+            raise RuntimeError("Vector backend does not support chronicle fact writes")
+        return await self.vector.write_facts(facts, namespace_id=namespace_id)
+
+    async def query_events(
+        self,
+        namespace_id: UUID,
+        *,
+        subject: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Any]:
+        """Query chronicle_events filtered by subject and ``referenced_date`` range."""
+        if not self.vector or not hasattr(self.vector, "query_events"):
+            raise RuntimeError("Vector backend does not support chronicle event queries")
+        return await self.vector.query_events(
+            namespace_id,
+            subject=subject,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+
+    async def query_active_facts_for_subject(
+        self,
+        namespace_id: UUID,
+        subject: str,
+    ) -> list[Any]:
+        """Return all active (not superseded) memory facts for a subject."""
+        if not self.vector or not hasattr(self.vector, "query_active_facts_for_subject"):
+            raise RuntimeError("Vector backend does not support chronicle fact queries")
+        return await self.vector.query_active_facts_for_subject(namespace_id, subject)
+
+    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID) -> None:
+        """Mark a fact inactive and record the replacement fact ID."""
+        if not self.vector or not hasattr(self.vector, "supersede_fact"):
+            raise RuntimeError("Vector backend does not support chronicle fact supersession")
+        await self.vector.supersede_fact(fact_id, superseded_by)
+
+    # =========================================================================
     # Sync checkpoint operations (delegated to relational)
     # =========================================================================
 

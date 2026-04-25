@@ -753,3 +753,119 @@ class TimeEdgeLinkModel(Base):
 
     def __repr__(self) -> str:
         return f"<TimeEdgeLink(time_node_id={self.time_node_id!r}, edge_id={self.edge_id!r})>"
+
+
+# =============================================================================
+# Chronicle Engine Models (events + atomic facts)
+# =============================================================================
+
+
+class ChronicleEventModel(Base):
+    """Structured event extracted from chunks for the Chronicle engine.
+
+    Events are SVO (subject-verb-object) tuples with bi-temporal information:
+    ``observation_date`` (when ingested) and ``referenced_date`` (when the
+    event occurred per source text). Used for high-precision temporal
+    reasoning queries (Chronos pattern, 95.6% LongMemEval).
+    """
+
+    __tablename__ = "chronicle_events"
+
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    chunk_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    # SVO triple. ``object`` is reserved-ish in SQL grammars; the Python attr
+    # is ``object_`` but the column is named ``object`` for natural querying.
+    subject: Mapped[str] = mapped_column(String(512), nullable=False)
+    verb: Mapped[str] = mapped_column(String(255), nullable=False)
+    object_: Mapped[str | None] = mapped_column("object", String(512), nullable=True)
+
+    # Bi-temporal timestamps
+    observation_date: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False
+    )
+    referenced_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    relative_offset: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Metadata
+    confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    source_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+    # Embedding for event-channel similarity (pgvector)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    # Relationships
+    namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel")
+
+    __table_args__ = (
+        Index("ix_chronicle_events_namespace_referenced_date", "namespace_id", "referenced_date"),
+        Index("ix_chronicle_events_namespace_subject", "namespace_id", "subject"),
+        Index(
+            "ix_chronicle_events_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": 16, "ef_construction": 64},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ChronicleEvent(id={self.id!r}, {self.subject} {self.verb} {self.object_})>"
+
+
+class MemoryFactModel(Base):
+    """Atomic memory fact extracted from chunks for the Chronicle engine.
+
+    Each fact is a self-contained SVO claim that can be independently
+    verified, superseded, or deleted (EMem EDU pattern, 84.9% LongMemEval).
+    Contradiction resolution sets ``is_active=False`` and points
+    ``superseded_by`` at the replacement fact.
+    """
+
+    __tablename__ = "memory_facts"
+
+    id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    namespace_id: Mapped[UUIDType] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_namespaces.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    # Atomic SVO claim
+    subject: Mapped[str] = mapped_column(String(512), nullable=False)
+    predicate: Mapped[str] = mapped_column(String(255), nullable=False)
+    object_: Mapped[str] = mapped_column("object", String(512), nullable=False)
+    fact_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    confidence: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+
+    # Supersession tracking
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    superseded_by: Mapped[UUIDType | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("memory_facts.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # Source tracking
+    source_chunk_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
+    )
+
+    # Relationships
+    namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel")
+    superseding_fact: Mapped[MemoryFactModel | None] = relationship("MemoryFactModel", remote_side=[id])
+
+    __table_args__ = (
+        Index("ix_memory_facts_namespace_subject_active", "namespace_id", "subject", "is_active"),
+        Index("ix_memory_facts_superseded_by", "superseded_by"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<MemoryFact(id={self.id!r}, {self.subject} {self.predicate} {self.object_})>"
