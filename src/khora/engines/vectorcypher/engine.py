@@ -712,7 +712,7 @@ class VectorCypherEngine:
         relationship_types: list[str],
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
-        chunk_semaphore: "_GlobalChunkSemaphore | None" = None,
+        chunk_semaphore: _GlobalChunkSemaphore | None = None,
     ) -> tuple[int, int, int]:
         """Process a document into chunks with skeleton-based entity extraction.
 
@@ -871,7 +871,7 @@ class VectorCypherEngine:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
-        chunk_semaphore: "_GlobalChunkSemaphore | None" = None,
+        chunk_semaphore: _GlobalChunkSemaphore | None = None,
     ) -> tuple[int, int, int]:
         """Process a pre-staged PENDING document through the VectorCypher pipeline.
 

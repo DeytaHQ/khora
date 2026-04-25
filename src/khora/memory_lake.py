@@ -62,9 +62,7 @@ class _GlobalChunkSemaphore:
         """Release n tokens and wake any waiters."""
         async with self._condition:
             if self._in_flight < n:
-                raise RuntimeError(
-                    f"Semaphore release({n}) would underflow _in_flight={self._in_flight}"
-                )
+                raise RuntimeError(f"Semaphore release({n}) would underflow _in_flight={self._in_flight}")
             self._in_flight -= n
             self._condition.notify_all()
 

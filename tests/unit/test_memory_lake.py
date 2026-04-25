@@ -3114,7 +3114,6 @@ class TestProcessDocumentSemaphore:
     @pytest.mark.asyncio
     async def test_semaphore_released_on_embed_failure(self) -> None:
         """release() is called in finally even when embed_batch raises (M-3 fix)."""
-        import asyncio
         from datetime import UTC, datetime
         from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -3148,7 +3147,6 @@ class TestProcessDocumentSemaphore:
     @pytest.mark.asyncio
     async def test_semaphore_released_after_success(self) -> None:
         """Semaphore tokens return to 0 after a successful window (M-4 coverage)."""
-        import asyncio
         from datetime import UTC, datetime
         from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -3181,7 +3179,6 @@ class TestProcessDocumentSemaphore:
     @pytest.mark.asyncio
     async def test_semaphore_clamped_acquire_releases_correctly(self) -> None:
         """When n > capacity, acquire clamps and release uses the clamped value (H-1 fix)."""
-        import asyncio
         from datetime import UTC, datetime
         from unittest.mock import AsyncMock, MagicMock, patch
 
