@@ -629,6 +629,7 @@ class MemoryLake:
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
         max_concurrent: int = 1,
+        reprocess_archived: bool = False,
     ) -> BatchHandle:
         """Submit documents for deferred background processing.
 
@@ -661,6 +662,10 @@ class MemoryLake:
                 memory usage during background processing. None = unbounded.
             max_concurrent: Maximum documents to process concurrently in background
                 (default: 1 — sequential processing).
+            reprocess_archived: If True, ARCHIVED documents are reset to PENDING
+                and re-processed like FAILED documents. If False (default), ARCHIVED
+                documents are skipped with a warning — preserving intentional
+                archival semantics.
 
         Returns:
             BatchHandle with batch_id, completion status, and wait() method.
@@ -686,9 +691,12 @@ class MemoryLake:
         #
         # ADR-068 Decision 1 — self-healing for existing documents:
         # Instead of failing on duplicate external_id, detect and dispatch:
-        #   PENDING   → skip insert, re-queue for processing (self-heal stalled docs)
-        #   COMPLETED → skip entirely, report success (already done)
-        #   FAILED    → reset to PENDING + update content, re-queue for processing
+        #   PENDING    → skip insert, re-queue for processing (self-heal stalled docs)
+        #   COMPLETED  → skip entirely, report success (already done)
+        #   FAILED     → reset to PENDING + update content, re-queue for processing
+        #   ARCHIVED   → skip by default (preserves intentional archival); set
+        #                reprocess_archived=True to re-activate explicitly (DYT-3077)
+        #   PROCESSING → skip to avoid race with active worker (M1)
         pending_docs: list[Document] = []
         pending_doc_data: list[dict[str, Any]] = []
         pre_failed_docs: list[tuple[Document, str]] = []
@@ -747,7 +755,17 @@ class MemoryLake:
                     pre_completed_docs.append(existing)
                     continue
 
-                # PENDING, FAILED, or ARCHIVED: reset to PENDING and re-process.
+                # ARCHIVED: skip by default to preserve intentional archival semantics.
+                # Callers must explicitly pass reprocess_archived=True to re-activate.
+                if existing.status == DocumentStatus.ARCHIVED and not reprocess_archived:
+                    logger.warning(
+                        f"submit_batch: ARCHIVED document skipped — pass reprocess_archived=True "
+                        f"to re-activate (external_id={external_id!r}, doc_id={existing.id})"
+                    )
+                    pre_completed_docs.append(existing)
+                    continue
+
+                # PENDING, FAILED, or ARCHIVED (reprocess_archived=True): reset to PENDING and re-process.
                 # Update content + metadata so the re-run uses the latest submitted values
                 # (fixes empty-source issue observed in soak test — DYT-3075).
                 prior_status = existing.status

@@ -2513,3 +2513,105 @@ class TestSubmitBatch:
         lake._engine._storage.create_document.assert_called_once()
         assert len(results) == 1
         assert results[0].success is True
+
+    @pytest.mark.asyncio
+    async def test_archived_external_id_skipped_by_default(self) -> None:
+        """ARCHIVED document with same external_id is skipped by default (DYT-3077).
+
+        ARCHIVED means 'not actively used'. Silently re-activating it on any
+        batch submission that includes its external_id violates that semantic.
+        By default, submit_batch skips ARCHIVED docs and fires a skipped result.
+        """
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="archived content", external_id="ext-archived")
+        existing_doc.status = DocumentStatus.ARCHIVED
+        existing_doc.chunk_count = 4
+        existing_doc.entity_count = 2
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(
+            return_value={"ext-archived": existing_doc}
+        )
+
+        async def _fake_process(doc, **kwargs):
+            return (1, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "new content", "external_id": "ext-archived"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # ARCHIVED doc skipped — not re-processed, not created
+        lake._engine.process_staged_document.assert_not_called()
+        lake._engine._storage.create_document.assert_not_called()
+        lake._engine._storage.update_document.assert_not_called()
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is True
+        assert results[0].chunks_created == 4
+        assert results[0].entities_extracted == 2
+        assert handle.failed == 0
+
+    @pytest.mark.asyncio
+    async def test_archived_external_id_reprocessed_when_flag_set(self) -> None:
+        """ARCHIVED document is reset to PENDING and re-processed when reprocess_archived=True (DYT-3077)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="archived content", external_id="ext-archived-reprocess")
+        existing_doc.status = DocumentStatus.ARCHIVED
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(
+            return_value={"ext-archived-reprocess": existing_doc}
+        )
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        async def _fake_process(doc, **kwargs):
+            return (3, 2, 1)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "refreshed content", "external_id": "ext-archived-reprocess", "source": "refresh"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            reprocess_archived=True,
+        )
+        await handle.wait()
+
+        # update_document called to reset status and update content
+        lake._engine._storage.update_document.assert_called_once()
+        updated = lake._engine._storage.update_document.call_args[0][0]
+        assert updated.status == DocumentStatus.PENDING
+        assert updated.content == "refreshed content"
+        assert updated.metadata.source == "refresh"
+        assert updated.error_message is None
+
+        # Document was re-processed
+        lake._engine.process_staged_document.assert_called_once()
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is False
+        assert results[0].chunks_created == 3
+        assert handle.failed == 0
