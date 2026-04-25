@@ -2029,6 +2029,100 @@ class TestSubmitBatch:
         assert ops == {"embedding", "entity_extraction"}
 
     @pytest.mark.asyncio
+    async def test_failed_document_result_carries_partial_llm_usage(self) -> None:
+        """Failed DocumentResult includes any LLM usage recorded before the exception."""
+        from khora.memory_lake import LLMUsage
+        from khora.telemetry.context import record_usage
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        lake._engine._storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        async def _process_with_usage_then_fail(doc, **kwargs):
+            record_usage(
+                LLMUsage(
+                    operation="embedding",
+                    model="text-embedding-3-small",
+                    prompt_tokens=10,
+                    completion_tokens=0,
+                    total_tokens=10,
+                    latency_ms=5.0,
+                )
+            )
+            raise RuntimeError("graph write failed")
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_usage_then_fail)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "will fail after llm call"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert len(results[0].llm_usage) == 1
+        assert results[0].llm_usage[0].operation == "embedding"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_documents_llm_usage_isolation(self) -> None:
+        """Each document's llm_usage contains only its own recorded entries."""
+        from khora.memory_lake import LLMUsage
+        from khora.telemetry.context import record_usage
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        lake._engine._storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+
+        call_count = 0
+
+        async def _process_with_distinct_usage(doc, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            op = f"embedding_{call_count}"
+            record_usage(
+                LLMUsage(
+                    operation=op,
+                    model="text-embedding-3-small",
+                    prompt_tokens=call_count * 10,
+                    completion_tokens=0,
+                    total_tokens=call_count * 10,
+                    latency_ms=float(call_count),
+                )
+            )
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_distinct_usage)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "doc A"}, {"content": "doc B"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_concurrent=2,
+        )
+        await handle.wait()
+
+        assert len(results) == 2
+        # Each result must have exactly one usage entry, not two
+        for r in results:
+            assert len(r.llm_usage) == 1
+        # The two results must have distinct operation names (no cross-contamination)
+        ops = {r.llm_usage[0].operation for r in results}
+        assert len(ops) == 2
+
+    @pytest.mark.asyncio
     async def test_failed_document_updates_storage_status(self) -> None:
         """When process_staged_document raises, the document is marked FAILED in storage."""
         from khora.core.models.document import DocumentStatus

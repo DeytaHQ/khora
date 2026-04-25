@@ -831,7 +831,7 @@ class MemoryLake:
                         llm_usage=collect_usage(),
                     )
                 except Exception as exc:
-                    collect_usage()  # drain on error path — discard partial usage
+                    partial_usage = collect_usage()
                     logger.error(f"submit_batch: failed to process document {doc.id}: {exc}")
                     doc.mark_failed(str(exc))
                     try:
@@ -843,6 +843,7 @@ class MemoryLake:
                         namespace_id=namespace_id,
                         success=False,
                         error=str(exc),
+                        llm_usage=partial_usage,
                     )
                 _fire_result(result)
 
