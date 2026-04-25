@@ -626,7 +626,7 @@ class VectorCypherEngine:
                 namespace_id=namespace_id,
                 chunks_created=existing.chunk_count,
                 entities_extracted=existing.entity_count,
-                relationships_created=0,
+                relationships_created=existing.relationship_count,
                 metadata={"duplicate": True, "status": str(existing.status)},
             )
 
@@ -833,7 +833,7 @@ class VectorCypherEngine:
                 chunk_index_offset += len(window)
 
             # Update document status
-            document.mark_completed(total_chunks_created, entities_extracted)
+            document.mark_completed(total_chunks_created, entities_extracted, relationships_created)
             await storage.update_document(document)
 
             logger.debug(
@@ -2469,7 +2469,10 @@ class VectorCypherEngine:
                 doc_entity_count = sum(
                     1 for e in all_entities if any(cid in doc_chunk_ids for cid in e.source_chunk_ids)
                 )
-                doc.mark_completed(chunks_created, doc_entity_count)
+                doc_relationship_count = sum(
+                    1 for r in all_relationships if any(cid in doc_chunk_ids for cid in r.source_chunk_ids)
+                )
+                doc.mark_completed(chunks_created, doc_entity_count, doc_relationship_count)
                 await storage.update_document(doc)
                 results["processed"] += 1
                 results["chunks"] += chunks_created

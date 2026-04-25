@@ -50,7 +50,10 @@ class TestDocument:
         assert doc.status == DocumentStatus.COMPLETED
         assert doc.chunk_count == 5
         assert doc.entity_count == 3
+        assert doc.relationship_count == 0
         assert doc.is_processed
+        doc.mark_completed(5, 3, 7)
+        assert doc.relationship_count == 7
 
     def test_document_mark_failed(self) -> None:
         """Test marking document as failed."""

@@ -1978,3 +1978,54 @@ class TestProcessDocumentWindowing:
         # Verify chunk_index is 0, 1, 2, 3, 4 across all windows
         indices = [tc.metadata["chunk_index"] for tc in all_temporal_chunks]
         assert indices == [0, 1, 2, 3, 4]
+
+    @pytest.mark.asyncio
+    async def test_process_document_persists_relationship_count(self, engine: VectorCypherEngine) -> None:
+        """update_document is called with relationship_count == relationships_created."""
+        from khora.core.models.document import Document
+        from khora.core.models.entity import Relationship
+
+        engine._vc_config = VectorCypherConfig(max_chunks_in_flight=None)
+
+        raw_chunks = [self._make_raw_chunk("chunk one"), self._make_raw_chunk("chunk two")]
+        doc = Document(content="test content", namespace_id=uuid4())
+
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = raw_chunks
+
+        chunk_id = uuid4()
+
+        def make_stored(chunks):
+            stored = MagicMock()
+            stored.id = chunk_id
+            return [stored] * len(chunks)
+
+        engine._embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536] * len(texts))
+        engine._temporal_store.create_chunks_batch = AsyncMock(side_effect=make_stored)
+        engine._storage.update_document = AsyncMock(side_effect=lambda d: d)
+
+        # Two relationships, both sourced from our chunk
+        rel1 = MagicMock(spec=Relationship)
+        rel1.source_chunk_ids = [chunk_id]
+        rel2 = MagicMock(spec=Relationship)
+        rel2.source_chunk_ids = [chunk_id]
+
+        with (
+            patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker),
+            patch(
+                "khora.pipelines.tasks.extract.extract_entities",
+                new_callable=AsyncMock,
+                return_value=([], [rel1, rel2]),
+            ),
+        ):
+            _, _, rels = await engine._process_document(
+                doc,
+                skill_name="default",
+                occurred_at=datetime.now(UTC),
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        engine._storage.update_document.assert_awaited_once()
+        persisted_doc = engine._storage.update_document.await_args.args[0]
+        assert persisted_doc.relationship_count == rels

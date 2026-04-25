@@ -75,6 +75,7 @@ class Document:
     # Processing info
     chunk_count: int = 0
     entity_count: int = 0
+    relationship_count: int = 0
     error_message: str | None = None
 
     # Extraction config tracking (max 255 chars; accommodates compound keys)
@@ -116,11 +117,12 @@ class Document:
         self.status = DocumentStatus.PROCESSING
         self.updated_at = datetime.now(UTC)
 
-    def mark_completed(self, chunk_count: int, entity_count: int) -> None:
+    def mark_completed(self, chunk_count: int, entity_count: int, relationship_count: int = 0) -> None:
         """Mark the document as successfully processed."""
         self.status = DocumentStatus.COMPLETED
         self.chunk_count = chunk_count
         self.entity_count = entity_count
+        self.relationship_count = relationship_count
         self.processed_at = datetime.now(UTC)
         self.updated_at = datetime.now(UTC)
         self.error_message = None

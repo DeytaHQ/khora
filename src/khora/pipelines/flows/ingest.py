@@ -1338,7 +1338,7 @@ async def process_document(
         _phase_times["entity_embed+rel_storage"] = _time.perf_counter() - _t0
 
         # Mark as completed
-        document.mark_completed(len(chunks), len(entities))
+        document.mark_completed(len(chunks), len(entities), stored_count)
         await storage.update_document(document)
 
         return {

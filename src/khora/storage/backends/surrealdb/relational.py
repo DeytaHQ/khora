@@ -284,6 +284,7 @@ class SurrealDBRelationalAdapter:
             "metadata_ = $metadata_, "
             "chunk_count = $chunk_count, "
             "entity_count = $entity_count, "
+            "relationship_count = $relationship_count, "
             "error_message = $error_message, "
             "extraction_config_hash = $extraction_config_hash, "
             "external_id = $external_id, "
@@ -307,6 +308,7 @@ class SurrealDBRelationalAdapter:
                 "metadata_": document.metadata.custom or {},
                 "chunk_count": document.chunk_count,
                 "entity_count": document.entity_count,
+                "relationship_count": document.relationship_count,
                 "error_message": document.error_message,
                 "extraction_config_hash": document.extraction_config_hash,
                 "external_id": document.external_id,
@@ -373,6 +375,7 @@ class SurrealDBRelationalAdapter:
             "metadata_ = $metadata_, "
             "chunk_count = $chunk_count, "
             "entity_count = $entity_count, "
+            "relationship_count = $relationship_count, "
             "error_message = $error_message, "
             "extraction_config_hash = $extraction_config_hash, "
             "external_id = $external_id, "
@@ -394,6 +397,7 @@ class SurrealDBRelationalAdapter:
                 "metadata_": document.metadata.custom or {},
                 "chunk_count": document.chunk_count,
                 "entity_count": document.entity_count,
+                "relationship_count": document.relationship_count,
                 "error_message": document.error_message,
                 "extraction_config_hash": document.extraction_config_hash,
                 "external_id": document.external_id,
@@ -570,6 +574,7 @@ class SurrealDBRelationalAdapter:
             ),
             chunk_count=row.get("chunk_count", 0),
             entity_count=row.get("entity_count", 0),
+            relationship_count=row.get("relationship_count", 0),
             error_message=row.get("error_message"),
             extraction_config_hash=row.get("extraction_config_hash"),
             created_at=_parse_dt(row.get("created_at")) or datetime.now(UTC),

@@ -409,13 +409,13 @@ class TestMigrationPackageStructure:
 
     @pytest.mark.unit
     def test_versions_dir_has_23_files(self):
-        """versions/ directory contains 23 migration files."""
+        """versions/ directory contains 24 migration files."""
         versions_dir = _MIGRATIONS_DIR / "versions"
         migration_files = sorted(versions_dir.glob("*.py"))
         # Filter out __pycache__ and __init__
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
-        assert len(migration_files) == 23, (
-            f"Expected 23 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
+        assert len(migration_files) == 24, (
+            f"Expected 24 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
         )
 
     @pytest.mark.unit
