@@ -250,6 +250,7 @@ class LLMEntityExtractor(EntityExtractor):
         "claude-3-haiku": 5,
     }
     DEFAULT_INPUT_MULTIPLIER = 3  # Fallback for unknown models
+    _BATCH_FAILURE_THRESHOLD = 2  # Circuit breaker trips after this many consecutive batch failures
 
     def __init__(
         self,
@@ -281,6 +282,8 @@ class LLMEntityExtractor(EntityExtractor):
         self._retry_wait = retry_wait
         self._max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        # Persists across extract_batch calls so the circuit breaker can actually trip
+        self._consecutive_batch_failures = 0
 
         # Register litellm failure callback to log 429 rate-limit responses
         self._register_rate_limit_callback()
@@ -1388,19 +1391,68 @@ class LLMEntityExtractor(EntityExtractor):
         system_prompt = self._render_system_prompt(expertise, context)
         tool_context = self._build_tool_context(expertise, context)
 
-        # Circuit breaker: after consecutive batch failures, skip batch mode entirely
-        _consecutive_batch_failures = 0
-        _BATCH_FAILURE_THRESHOLD = 2
+        def _is_truncated(r: ExtractionResult) -> bool:
+            return r.metadata.get("error") == "truncated_response"
+
+        async def _bisect_and_extract(batch: list[str]) -> list[ExtractionResult]:
+            """Recursively bisect a batch when output truncation is detected.
+
+            Returns unfiltered results; filtering is applied by the caller.
+            Complexity: O(log2(N)) depth, at most 2N LLM calls worst-case.
+            """
+            if len(batch) == 1:
+                # Floor: can't split further — use single-doc extraction
+                logger.debug("Bisection floor: extracting single text individually")
+                result = await self.extract(
+                    batch[0],
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
+                    expertise=expertise,
+                    context=context,
+                )
+                return [result]
+
+            mid = len(batch) // 2
+            left_batch, right_batch = batch[:mid], batch[mid:]
+            logger.info(
+                "Bisecting batch of {} → [{}, {}] to resolve output truncation",
+                len(batch),
+                len(left_batch),
+                len(right_batch),
+            )
+
+            async def _process_half(half: list[str]) -> list[ExtractionResult]:
+                half_results = await self._extract_multi_batch(
+                    half,
+                    entity_types,
+                    litellm,
+                    system_prompt=system_prompt,
+                    tool_context=tool_context,
+                    expertise=expertise,
+                    context=context,
+                    relationship_types=relationship_types,
+                )
+                if any(_is_truncated(r) for r in half_results):
+                    return await _bisect_and_extract(half)
+                return half_results
+
+            left_results, right_results = await asyncio.gather(
+                _process_half(left_batch),
+                _process_half(right_batch),
+            )
+            return left_results + right_results
+
+        # Circuit breaker: after consecutive batch failures, skip batch mode entirely.
+        # _consecutive_batch_failures is an instance attribute so it persists across
+        # extract_batch invocations, making the circuit breaker actually reachable.
 
         async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
-            nonlocal _consecutive_batch_failures
-
             # Circuit breaker tripped — go straight to single-doc extraction
-            if _consecutive_batch_failures >= _BATCH_FAILURE_THRESHOLD and len(batch) > 1:
+            if self._consecutive_batch_failures >= self._BATCH_FAILURE_THRESHOLD and len(batch) > 1:
                 logger.warning(
                     "Circuit breaker active: skipping batch mode after {} consecutive failures, "
                     "extracting {} texts individually",
-                    _consecutive_batch_failures,
+                    self._consecutive_batch_failures,
                     len(batch),
                 )
                 single_results = []
@@ -1428,17 +1480,44 @@ class LLMEntityExtractor(EntityExtractor):
                 relationship_types=relationship_types,
             )
 
-            # Check if batch failed (all results have errors) - fallback to single extraction
+            # --- Truncation handling: bisect instead of falling back to single-doc ---
+            truncated_indices = [i for i, r in enumerate(results) if _is_truncated(r)]
+            if truncated_indices:
+                if len(truncated_indices) == len(batch):
+                    # All results truncated
+                    if len(batch) == 1:
+                        # Floor: single-doc extraction
+                        result = await self.extract(
+                            batch[0],
+                            entity_types=entity_types,
+                            relationship_types=relationship_types,
+                            expertise=expertise,
+                            context=context,
+                        )
+                        results = [result]
+                    else:
+                        results = await _bisect_and_extract(batch)
+                else:
+                    # Partial: keep successes, bisect only the truncated texts
+                    failed_texts = [batch[i] for i in truncated_indices]
+                    bisected = await _bisect_and_extract(failed_texts)
+                    for new_i, orig_i in enumerate(truncated_indices):
+                        results[orig_i] = bisected[new_i]
+                # Truncation is not a batch failure — don't touch the circuit breaker
+                if expertise:
+                    results = [self._filter_by_confidence(r, expertise) for r in results]
+                return results
+
+            # --- Non-truncation failure handling: circuit breaker + single-doc fallback ---
             all_failed = all(r.metadata.get("error") for r in results)
             if all_failed and len(batch) > 1:
-                _consecutive_batch_failures += 1
+                self._consecutive_batch_failures += 1
                 logger.info(
                     "Batch extraction failed for {} texts (consecutive failures: {}), "
                     "falling back to single-document extraction",
                     len(batch),
-                    _consecutive_batch_failures,
+                    self._consecutive_batch_failures,
                 )
-                # Extract documents one at a time
                 single_results = []
                 for text in batch:
                     result = await self.extract(
@@ -1451,8 +1530,8 @@ class LLMEntityExtractor(EntityExtractor):
                     single_results.append(result)
                 results = single_results
             else:
-                # Reset on success
-                _consecutive_batch_failures = 0
+                # Successful batch — reset circuit breaker
+                self._consecutive_batch_failures = 0
 
             if expertise:
                 results = [self._filter_by_confidence(r, expertise) for r in results]
@@ -1465,7 +1544,7 @@ class LLMEntityExtractor(EntityExtractor):
         # API calls in the wave where the first failure occurs.
         wave_size = 4
         for wave_start in range(0, len(batches), wave_size):
-            if _consecutive_batch_failures >= _BATCH_FAILURE_THRESHOLD:
+            if self._consecutive_batch_failures >= self._BATCH_FAILURE_THRESHOLD:
                 # Circuit breaker tripped between waves — remaining batches
                 # go through single-doc extraction via _run_batch's own check.
                 for batch in batches[wave_start:]:
@@ -1677,13 +1756,28 @@ Return ONLY valid JSON, no other text."""
                     try:
                         data = json.loads(_strip_json_fences(content))
                     except json.JSONDecodeError as json_err:
-                        # Log details to help diagnose the issue
+                        # "Unterminated string" = output token limit hit mid-JSON (deterministic).
+                        # Retrying will produce the same result — return truncation error so the
+                        # caller can bisect the batch instead.
+                        if "Unterminated string" in str(json_err):
+                            logger.warning(
+                                f"LLM response truncated (Unterminated string, "
+                                f"finish_reason={finish_reason}) in batch extraction. "
+                                f"Model: {model_used}, batch_size: {len(texts)}. "
+                                f"Bisection will handle this."
+                            )
+                            return [
+                                ExtractionResult(
+                                    metadata={"error": "truncated_response", "finish_reason": finish_reason}
+                                )
+                                for _ in texts
+                            ]
+                        # Other JSON errors — log and retry (model may produce valid JSON next attempt)
                         logger.warning(
                             f"JSON parse error in batch extraction (finish_reason={finish_reason}): {json_err}. "
                             f"Model: {model_used}, content_length: {len(content)}, "
                             f"content_preview: {content[:200]}..."
                         )
-                        # Raise to trigger retry - model may produce valid JSON on next attempt
                         raise
 
                     if not isinstance(data, dict):
