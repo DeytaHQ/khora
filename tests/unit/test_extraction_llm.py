@@ -793,3 +793,50 @@ class TestBisectionOnTruncation:
                 texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
             )
             assert extractor._consecutive_batch_failures == 2
+
+            # Third call: circuit breaker is tripped — _extract_multi_batch must NOT be called again
+            await extractor.extract_multi(
+                texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
+            )
+            # Still 2 calls total: third invocation skipped batch mode entirely
+            assert mock_multi.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_extract_multi_batch_detects_truncation_via_json_decode_error(self) -> None:
+        """_extract_multi_batch returns truncated_response when JSON is cut off mid-string."""
+        extractor = self._make_extractor()
+        texts = ["text one", "text two"]
+
+        # Simulate a response whose JSON is truncated mid-string (as happens when the
+        # LLM hits its max_tokens limit without finishing output).
+        truncated_json = '{"sections": [{"entities": [{"name": "incomplet'
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = truncated_json
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+        mock_response.model = "test-model"
+
+        import litellm as _litellm
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+            patch("khora.telemetry.context.record_usage"),
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            results = await extractor._extract_multi_batch(
+                texts,
+                ["PERSON"],
+                _litellm,
+                system_prompt=None,
+                tool_context=None,
+                expertise=None,
+                context=None,
+                relationship_types=None,
+            )
+
+        assert len(results) == 2
+        for r in results:
+            assert r.metadata.get("error") == "truncated_response"

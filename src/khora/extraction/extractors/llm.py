@@ -1465,6 +1465,7 @@ class LLMEntityExtractor(EntityExtractor):
                         context=context,
                     )
                     single_results.append(result)
+                self._consecutive_batch_failures = 0  # Reset: single-doc fallback succeeded
                 if expertise:
                     single_results = [self._filter_by_confidence(r, expertise) for r in single_results]
                 return single_results
@@ -1503,7 +1504,7 @@ class LLMEntityExtractor(EntityExtractor):
                     bisected = await _bisect_and_extract(failed_texts)
                     for new_i, orig_i in enumerate(truncated_indices):
                         results[orig_i] = bisected[new_i]
-                # Truncation is not a batch failure — don't touch the circuit breaker
+                self._consecutive_batch_failures = 0  # Bisection succeeded — clear failure streak
                 if expertise:
                     results = [self._filter_by_confidence(r, expertise) for r in results]
                 return results
