@@ -2237,9 +2237,7 @@ class TestSubmitBatch:
         existing_doc = Document(namespace_id=ns_id, content="old content", external_id="ext-pending")
         existing_doc.status = DocumentStatus.PENDING
 
-        lake._engine._storage.get_documents_by_external_ids = AsyncMock(
-            return_value={"ext-pending": existing_doc}
-        )
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-pending": existing_doc})
         lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
 
         async def _fake_process(doc, **kwargs):
@@ -2287,9 +2285,7 @@ class TestSubmitBatch:
         existing_doc.chunk_count = 5
         existing_doc.entity_count = 3
 
-        lake._engine._storage.get_documents_by_external_ids = AsyncMock(
-            return_value={"ext-done": existing_doc}
-        )
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-done": existing_doc})
 
         async def _fake_process(doc, **kwargs):
             return (1, 1, 0)
@@ -2332,9 +2328,7 @@ class TestSubmitBatch:
         existing_doc.status = DocumentStatus.FAILED
         existing_doc.error_message = "previous error"
 
-        lake._engine._storage.get_documents_by_external_ids = AsyncMock(
-            return_value={"ext-failed": existing_doc}
-        )
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-failed": existing_doc})
         lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
 
         async def _fake_process(doc, **kwargs):
@@ -2367,3 +2361,155 @@ class TestSubmitBatch:
         assert results[0].success is True
         assert results[0].skipped is False
         assert handle.failed == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_external_id_clears_prior_state_before_reprocess(self) -> None:
+        """For a FAILED doc, clear_document_extraction_state is called before re-processing (H1)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="bad content", external_id="ext-failed-h1")
+        existing_doc.status = DocumentStatus.FAILED
+        existing_doc.error_message = "previous error"
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-failed-h1": existing_doc})
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        clear_calls: list[tuple] = []
+
+        async def _fake_clear(doc_id, ns_id_arg):
+            clear_calls.append((doc_id, ns_id_arg))
+
+        lake._engine.clear_document_extraction_state = AsyncMock(side_effect=_fake_clear)
+
+        async def _fake_process(doc, **kwargs):
+            return (2, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        handle = await lake.submit_batch(
+            [{"content": "fixed content", "external_id": "ext-failed-h1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # Cleanup was called before re-processing
+        lake._engine.clear_document_extraction_state.assert_called_once_with(existing_doc.id, ns_id)
+        # Document was re-processed
+        lake._engine.process_staged_document.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_processing_external_id_skipped_to_avoid_race(self) -> None:
+        """PROCESSING document with same external_id is skipped to avoid race condition (M1)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="in progress", external_id="ext-proc")
+        existing_doc.status = DocumentStatus.PROCESSING
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-proc": existing_doc})
+
+        async def _fake_process(doc, **kwargs):
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "new content", "external_id": "ext-proc"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # PROCESSING doc skipped — not re-processed and not created
+        lake._engine.process_staged_document.assert_not_called()
+        lake._engine._storage.create_document.assert_not_called()
+        lake._engine._storage.update_document.assert_not_called()
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is True
+
+    @pytest.mark.asyncio
+    async def test_lookup_failure_falls_back_to_create(self) -> None:
+        """If get_documents_by_external_ids raises, submit_batch treats all docs as new inserts (M2)."""
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(side_effect=RuntimeError("DB timeout"))
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+
+        async def _fake_process(doc, **kwargs):
+            return (2, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "new doc", "external_id": "ext-new-m2"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # Falls back to create path
+        lake._engine._storage.create_document.assert_called_once()
+        assert len(results) == 1
+        assert results[0].success is True
+
+    @pytest.mark.asyncio
+    async def test_duplicate_external_id_in_batch_skips_second(self) -> None:
+        """When the same external_id appears twice in a batch, the second is skipped (M4)."""
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={})
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+
+        async def _fake_process(doc, **kwargs):
+            return (2, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [
+                {"content": "first content", "external_id": "ext-dup"},
+                {"content": "second content", "external_id": "ext-dup"},  # duplicate
+            ],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # Only one document created (second was skipped)
+        lake._engine._storage.create_document.assert_called_once()
+        assert len(results) == 1
+        assert results[0].success is True

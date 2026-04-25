@@ -698,12 +698,34 @@ class MemoryLake:
         all_external_ids = [d.get("external_id") for d in documents if d.get("external_id")]
         existing_by_ext_id: dict[str, Document] = {}
         if all_external_ids:
-            existing_by_ext_id = await storage.get_documents_by_external_ids(namespace_id, all_external_ids)
+            try:
+                existing_by_ext_id = await storage.get_documents_by_external_ids(namespace_id, all_external_ids)
+            except Exception as exc:
+                # M2: Fall through to the normal insert path if the lookup fails.
+                logger.warning(
+                    f"submit_batch: could not look up existing documents by external_id "
+                    f"({exc}); treating all as new inserts"
+                )
+                existing_by_ext_id = {}
+
+        seen_external_ids: set[str] = set()
+        pre_failed_doc_ids: set[UUID] = set()
 
         for doc_data in documents:
             content = doc_data.get("content", "")
             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
             external_id = doc_data.get("external_id")
+
+            # M4: Skip duplicate external_ids within the same batch.
+            if external_id:
+                if external_id in seen_external_ids:
+                    logger.warning(
+                        f"submit_batch: duplicate external_id in batch, skipping subsequent occurrence "
+                        f"(external_id={external_id!r})"
+                    )
+                    continue
+                seen_external_ids.add(external_id)
+
             existing = existing_by_ext_id.get(external_id) if external_id else None
 
             if existing is not None:
@@ -716,10 +738,23 @@ class MemoryLake:
                     pre_completed_docs.append(existing)
                     continue
 
-                # PENDING, FAILED, PROCESSING, or ARCHIVED: reset to PENDING and re-process.
+                # M1: PROCESSING means an active worker holds this doc — skip to avoid race.
+                if existing.status == DocumentStatus.PROCESSING:
+                    logger.warning(
+                        f"submit_batch: document is PROCESSING, skipping re-queue to avoid race "
+                        f"(external_id={external_id!r}, doc_id={existing.id})"
+                    )
+                    pre_completed_docs.append(existing)
+                    continue
+
+                # PENDING, FAILED, or ARCHIVED: reset to PENDING and re-process.
                 # Update content + metadata so the re-run uses the latest submitted values
                 # (fixes empty-source issue observed in soak test — DYT-3075).
                 prior_status = existing.status
+                # H1: Track FAILED docs — they may have partial extraction state that
+                # must be cleared before re-processing to prevent duplicate chunks.
+                if prior_status == DocumentStatus.FAILED:
+                    pre_failed_doc_ids.add(existing.id)
                 existing.content = content
                 existing.metadata = DocumentMetadata(
                     title=doc_data.get("title", ""),
@@ -742,8 +777,7 @@ class MemoryLake:
                     pending_doc_data.append(doc_data)
                 except Exception as exc:
                     logger.warning(
-                        f"submit_batch: could not update document record "
-                        f"(external_id={external_id!r}): {exc}"
+                        f"submit_batch: could not update document record (external_id={external_id!r}): {exc}"
                     )
                     pre_failed_docs.append((existing, str(exc)))
                 continue
@@ -795,6 +829,7 @@ class MemoryLake:
                 chunk_strategy=chunk_strategy,
                 max_chunks_in_flight=max_chunks_in_flight,
                 max_concurrent=max_concurrent,
+                pre_failed_doc_ids=pre_failed_doc_ids,
             )
         )
         self._bg_tasks.add(task)
@@ -819,6 +854,7 @@ class MemoryLake:
         chunk_strategy: ChunkStrategy | None,
         max_chunks_in_flight: int | None,
         max_concurrent: int,
+        pre_failed_doc_ids: set[UUID],
     ) -> None:
         """Background worker that processes pre-staged PENDING documents."""
         storage = self.storage
@@ -882,6 +918,21 @@ class MemoryLake:
             from khora.telemetry.context import collect_usage, start_usage_collection
 
             async with sem:
+                # H1: Clear partial extraction state for previously-FAILED documents
+                # before re-processing to prevent duplicate chunks/entities on retry.
+                if doc.id in pre_failed_doc_ids:
+                    if storage.vector is not None:
+                        try:
+                            await storage.vector.delete_chunks_by_document(doc.id)
+                        except Exception as exc:
+                            logger.warning(f"submit_batch: could not clear chunks table for {doc.id}: {exc}")
+                    clear_fn = getattr(engine, "clear_document_extraction_state", None)
+                    if clear_fn is not None:
+                        try:
+                            await clear_fn(doc.id, namespace_id)
+                        except Exception as exc:
+                            logger.warning(f"submit_batch: could not clear extraction state for {doc.id}: {exc}")
+
                 start_usage_collection()
                 try:
                     doc_metadata = doc_data.get("metadata") or {}

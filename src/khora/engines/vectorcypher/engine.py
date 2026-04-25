@@ -896,6 +896,27 @@ class VectorCypherEngine:
             max_chunks_in_flight=max_chunks_in_flight,
         )
 
+    async def clear_document_extraction_state(self, document_id: UUID, namespace_id: UUID) -> None:
+        """Clear partial extraction state (khora_chunks + :Chunk nodes) for a FAILED document.
+
+        Called by submit_batch before re-queuing a previously-FAILED document to prevent
+        duplicate chunks accumulating on retry (ADR-068 self-heal path, H1 fix).
+
+        Best-effort: logs and ignores storage errors so that cleanup failures do not
+        block re-processing.
+        """
+        temporal_store = self._get_temporal_store()
+        dual_nodes = self._get_dual_nodes()
+        try:
+            await temporal_store.delete_chunks_by_document(document_id, namespace_id)
+        except Exception as exc:
+            logger.warning(f"submit_batch cleanup: could not clear khora_chunks for document {document_id}: {exc}")
+        if dual_nodes is not None:
+            try:
+                await dual_nodes.delete_chunks_by_document(document_id, namespace_id)
+            except Exception as exc:
+                logger.warning(f"submit_batch cleanup: could not clear :Chunk nodes for document {document_id}: {exc}")
+
     async def _run_skeleton_extraction(
         self,
         chunks: list[TemporalChunk],
