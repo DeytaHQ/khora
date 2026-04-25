@@ -215,6 +215,13 @@ class SQLiteRelationalBackend:
             stmt = statement.strip()
             if stmt:
                 await self._conn.execute(stmt)
+        # Idempotent migration: add relationship_count to existing databases.
+        try:
+            await self._conn.execute(
+                "ALTER TABLE documents ADD COLUMN relationship_count INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass  # Column already exists
         await self._conn.commit()
 
     async def disconnect(self) -> None:
@@ -706,6 +713,13 @@ class SQLiteVectorBackend:
             stmt = statement.strip()
             if stmt:
                 await self._conn.execute(stmt)
+        # Idempotent migration: add relationship_count to existing databases.
+        try:
+            await self._conn.execute(
+                "ALTER TABLE documents ADD COLUMN relationship_count INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass  # Column already exists
         # FTS5 virtual table
         try:
             await self._conn.executescript(_FTS5_SQL)

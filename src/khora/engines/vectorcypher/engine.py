@@ -2469,7 +2469,10 @@ class VectorCypherEngine:
                 doc_entity_count = sum(
                     1 for e in all_entities if any(cid in doc_chunk_ids for cid in e.source_chunk_ids)
                 )
-                doc.mark_completed(chunks_created, doc_entity_count)
+                doc_relationship_count = sum(
+                    1 for r in all_relationships if any(cid in doc_chunk_ids for cid in r.source_chunk_ids)
+                )
+                doc.mark_completed(chunks_created, doc_entity_count, doc_relationship_count)
                 await storage.update_document(doc)
                 results["processed"] += 1
                 results["chunks"] += chunks_created
