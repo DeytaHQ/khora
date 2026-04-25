@@ -1400,6 +1400,9 @@ class LLMEntityExtractor(EntityExtractor):
             Returns unfiltered results; filtering is applied by the caller.
             Complexity: O(log2(N)) depth, at most 2N LLM calls worst-case.
             """
+            if len(batch) == 0:
+                return []
+
             if len(batch) == 1:
                 # Floor: can't split further — use single-doc extraction
                 logger.debug("Bisection floor: extracting single text individually")
