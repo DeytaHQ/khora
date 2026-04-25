@@ -115,6 +115,10 @@ class DocumentResult:
     """True when re-processing was skipped. Set for documents in COMPLETED, PROCESSING,
     or ARCHIVED state (unless reprocess_archived=True). Callers should not treat skipped
     results as errors."""
+    external_id: str | None = None
+    """Caller-supplied opaque identifier from Document.external_id.
+    Allows the caller to map each result back to its source row without
+    a separate database lookup (e.g. for incremental checkpoint advancement)."""
 
 
 @dataclass
@@ -895,6 +899,7 @@ class MemoryLake:
                     namespace_id=namespace_id,
                     success=False,
                     error=err,
+                    external_id=doc.external_id,
                 )
             )
 
@@ -909,6 +914,7 @@ class MemoryLake:
                     chunks_created=doc.chunk_count,
                     entities_extracted=doc.entity_count,
                     relationships_created=doc.relationship_count,
+                    external_id=doc.external_id,
                 )
             )
 
@@ -929,6 +935,7 @@ class MemoryLake:
                         namespace_id=namespace_id,
                         success=False,
                         error=err_msg,
+                        external_id=doc.external_id,
                     )
                 )
             handle._mark_done()
@@ -984,6 +991,7 @@ class MemoryLake:
                         entities_extracted=entities,
                         relationships_created=rels,
                         llm_usage=collect_usage(),
+                        external_id=doc.external_id,
                     )
                 except Exception as exc:
                     partial_usage = collect_usage()
@@ -999,6 +1007,7 @@ class MemoryLake:
                         success=False,
                         error=str(exc),
                         llm_usage=partial_usage,
+                        external_id=doc.external_id,
                     )
                 _fire_result(result)
 
