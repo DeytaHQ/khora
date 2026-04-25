@@ -2144,7 +2144,7 @@ class VectorCypherEngine:
         # Track unique entity keys across windows to avoid double-counting entities
         # that appear in multiple windows (upsert_entities_batch ensures a single DB
         # row, so BatchResult.entities must reflect unique persisted cardinality).
-        _seen_entity_keys: set[str] = set()
+        _seen_entity_keys: set[tuple[str, str]] = set()
 
         for window_states in windows:
             # ── Stage 2: Batch-embed ALL chunk texts ────────────────────────
@@ -2456,7 +2456,7 @@ class VectorCypherEngine:
 
             new_entity_count = 0
             for _e in all_entities:
-                _key = f"{_e.name}:{_e.entity_type}"
+                _key = (_e.name, _e.entity_type)
                 if _key not in _seen_entity_keys:
                     _seen_entity_keys.add(_key)
                     new_entity_count += 1

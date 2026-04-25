@@ -393,13 +393,13 @@ class TestCrossWindowEntityCountInflation:
         ]
 
         # Replicate the fix's counting algorithm
-        seen_entity_keys: set[str] = set()
+        seen_entity_keys: set[tuple[str, str]] = set()
         total_entity_count = 0
 
         for all_entities in window_entities:
             new_entity_count = 0
             for _e in all_entities:
-                _key = f"{_e.name}:{_e.entity_type}"
+                _key = (_e.name, _e.entity_type)
                 if _key not in seen_entity_keys:
                     seen_entity_keys.add(_key)
                     new_entity_count += 1
@@ -424,13 +424,13 @@ class TestCrossWindowEntityCountInflation:
             [_FakeEntity("Carol", "ORG")],
         ]
 
-        seen_entity_keys: set[str] = set()
+        seen_entity_keys: set[tuple[str, str]] = set()
         total_entity_count = 0
 
         for all_entities in window_entities:
             new_entity_count = 0
             for _e in all_entities:
-                _key = f"{_e.name}:{_e.entity_type}"
+                _key = (_e.name, _e.entity_type)
                 if _key not in seen_entity_keys:
                     seen_entity_keys.add(_key)
                     new_entity_count += 1
