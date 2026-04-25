@@ -11,6 +11,7 @@ No ORM — raw SQL throughout. The PostgreSQL ORM models use PG-specific types
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -217,10 +218,8 @@ class SQLiteRelationalBackend:
                 await self._conn.execute(stmt)
         # Idempotent migration: add relationship_count to existing databases.
         try:
-            await self._conn.execute(
-                "ALTER TABLE documents ADD COLUMN relationship_count INTEGER DEFAULT 0"
-            )
-        except Exception:
+            await self._conn.execute("ALTER TABLE documents ADD COLUMN relationship_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
             pass  # Column already exists
         await self._conn.commit()
 
@@ -715,10 +714,8 @@ class SQLiteVectorBackend:
                 await self._conn.execute(stmt)
         # Idempotent migration: add relationship_count to existing databases.
         try:
-            await self._conn.execute(
-                "ALTER TABLE documents ADD COLUMN relationship_count INTEGER DEFAULT 0"
-            )
-        except Exception:
+            await self._conn.execute("ALTER TABLE documents ADD COLUMN relationship_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
             pass  # Column already exists
         # FTS5 virtual table
         try:
