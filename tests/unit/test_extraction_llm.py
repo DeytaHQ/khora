@@ -834,3 +834,16 @@ class TestBisectionOnTruncation:
         assert len(results) == 2
         for r in results:
             assert r.metadata.get("error") == "truncated_response"
+
+    @pytest.mark.asyncio
+    async def test_bisect_and_extract_empty_batch_returns_empty_list(self) -> None:
+        """Empty batch passed to _bisect_and_extract returns [] without calling LLM."""
+        extractor = self._make_extractor()
+
+        with patch.object(extractor, "_extract_multi_batch", new_callable=AsyncMock) as mock_multi:
+            results = await extractor.extract_multi(
+                [], entity_types=["PERSON"], tiered_extraction=False, batch_size=50
+            )
+
+        assert results == []
+        mock_multi.assert_not_called()
