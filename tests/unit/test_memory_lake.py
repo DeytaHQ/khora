@@ -1734,6 +1734,7 @@ class TestDocumentResultDataclass:
         assert r.success is True
         assert r.error is None
         assert r.chunks_created == 3
+        assert r.external_id is None
 
     def test_failure_fields(self) -> None:
         r = DocumentResult(
@@ -1745,6 +1746,16 @@ class TestDocumentResultDataclass:
         assert r.success is False
         assert r.error == "embedding failed"
         assert r.chunks_created == 0
+        assert r.external_id is None
+
+    def test_external_id_field(self) -> None:
+        r = DocumentResult(
+            document_id=uuid4(),
+            namespace_id=uuid4(),
+            success=True,
+            external_id="ext-abc",
+        )
+        assert r.external_id == "ext-abc"
 
 
 class TestSubmitBatch:
@@ -2315,6 +2326,7 @@ class TestSubmitBatch:
         assert results[0].chunks_created == 5
         assert results[0].entities_extracted == 3
         assert results[0].relationships_created == 7
+        assert results[0].external_id == "ext-done"
         assert handle.failed == 0
 
     @pytest.mark.asyncio
@@ -2362,6 +2374,7 @@ class TestSubmitBatch:
         assert len(results) == 1
         assert results[0].success is True
         assert results[0].skipped is False
+        assert results[0].external_id == "ext-failed"
         assert handle.failed == 0
 
     @pytest.mark.asyncio
