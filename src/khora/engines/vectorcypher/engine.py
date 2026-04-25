@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
+    from khora.memory_lake import _GlobalChunkSemaphore
     from khora.storage import StorageCoordinator
 
 
@@ -711,6 +712,7 @@ class VectorCypherEngine:
         relationship_types: list[str],
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
+        chunk_semaphore: _GlobalChunkSemaphore | None = None,
     ) -> tuple[int, int, int]:
         """Process a document into chunks with skeleton-based entity extraction.
 
@@ -772,65 +774,76 @@ class VectorCypherEngine:
             chunk_index_offset = 0
 
             for window in windows:
-                # Embed window chunks in batch
-                with trace_span("khora.vectorcypher.embed_batch", chunk_count=len(window)):
-                    chunk_texts = [c.content for c in window]
-                    embeddings = await embedder.embed_batch(chunk_texts)
+                # Acquire global chunk semaphore before processing this window.
+                # This bounds total chunks in flight across all concurrent
+                # submit_batch calls to max_chunks_in_flight process-wide.
+                n_window = len(window)
+                n_acquired = n_window
+                if chunk_semaphore is not None:
+                    n_acquired = await chunk_semaphore.acquire(n_window)
+                try:
+                    # Embed window chunks in batch
+                    with trace_span("khora.vectorcypher.embed_batch", chunk_count=len(window)):
+                        chunk_texts = [c.content for c in window]
+                        embeddings = await embedder.embed_batch(chunk_texts)
 
-                # Create temporal chunks
-                temporal_chunks = []
-                for i, (raw_chunk, embedding) in enumerate(zip(window, embeddings)):
-                    temporal_chunk = TemporalChunk(
-                        id=None,
-                        namespace_id=document.namespace_id,
-                        document_id=document.id,
-                        content=raw_chunk.content,
-                        embedding=embedding,
-                        occurred_at=occurred_at,
-                        created_at=datetime.now(UTC),
-                        source_system=doc_metadata.get("source_system"),
-                        author=doc_metadata.get("author"),
-                        channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                        tags=_ensure_tags(doc_metadata.get("tags", [])),
-                        confidence=1.0,
-                        metadata={
-                            **doc_metadata,
-                            "chunk_index": chunk_index_offset + i,
-                            "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-                            "end_char": raw_chunk.end_char
-                            if hasattr(raw_chunk, "end_char")
-                            else len(raw_chunk.content),
-                        },
-                    )
-                    temporal_chunks.append(temporal_chunk)
+                    # Create temporal chunks
+                    temporal_chunks = []
+                    for i, (raw_chunk, embedding) in enumerate(zip(window, embeddings)):
+                        temporal_chunk = TemporalChunk(
+                            id=None,
+                            namespace_id=document.namespace_id,
+                            document_id=document.id,
+                            content=raw_chunk.content,
+                            embedding=embedding,
+                            occurred_at=occurred_at,
+                            created_at=datetime.now(UTC),
+                            source_system=doc_metadata.get("source_system"),
+                            author=doc_metadata.get("author"),
+                            channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
+                            tags=_ensure_tags(doc_metadata.get("tags", [])),
+                            confidence=1.0,
+                            metadata={
+                                **doc_metadata,
+                                "chunk_index": chunk_index_offset + i,
+                                "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+                                "end_char": raw_chunk.end_char
+                                if hasattr(raw_chunk, "end_char")
+                                else len(raw_chunk.content),
+                            },
+                        )
+                        temporal_chunks.append(temporal_chunk)
 
-                # Store in pgvector
-                stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+                    # Store in pgvector
+                    stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
 
-                # Update temporal_chunks with assigned IDs
-                for i, stored in enumerate(stored_chunks):
-                    temporal_chunks[i].id = stored.id
+                    # Update temporal_chunks with assigned IDs
+                    for i, stored in enumerate(stored_chunks):
+                        temporal_chunks[i].id = stored.id
 
-                # Create Chunk nodes in Neo4j (skipped for SurrealDB — chunks in temporal store)
-                if dual_nodes is not None:
-                    await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+                    # Create Chunk nodes in Neo4j (skipped for SurrealDB — chunks in temporal store)
+                    if dual_nodes is not None:
+                        await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
 
-                # Skeleton-based entity extraction (for core chunks only)
-                if self._config.pipeline.extract_entities:
-                    ents, rels = await self._run_skeleton_extraction(
-                        temporal_chunks,
-                        document.namespace_id,
-                        skill_name=skill_name,
-                        expertise=expertise,
-                        extraction_model=extraction_model,
-                        entity_types=entity_types,
-                        relationship_types=relationship_types,
-                    )
-                    entities_extracted += ents
-                    relationships_created += rels
+                    # Skeleton-based entity extraction (for core chunks only)
+                    if self._config.pipeline.extract_entities:
+                        ents, rels = await self._run_skeleton_extraction(
+                            temporal_chunks,
+                            document.namespace_id,
+                            skill_name=skill_name,
+                            expertise=expertise,
+                            extraction_model=extraction_model,
+                            entity_types=entity_types,
+                            relationship_types=relationship_types,
+                        )
+                        entities_extracted += ents
+                        relationships_created += rels
 
-                total_chunks_created += len(stored_chunks)
-                chunk_index_offset += len(window)
+                    total_chunks_created += len(stored_chunks)
+                    chunk_index_offset += len(window)
+                finally:
+                    if chunk_semaphore is not None:
+                        await chunk_semaphore.release(n_acquired)
 
             # Update document status
             document.mark_completed(total_chunks_created, entities_extracted, relationships_created)
@@ -858,6 +871,7 @@ class VectorCypherEngine:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
+        chunk_semaphore: _GlobalChunkSemaphore | None = None,
     ) -> tuple[int, int, int]:
         """Process a pre-staged PENDING document through the VectorCypher pipeline.
 
@@ -875,6 +889,9 @@ class VectorCypherEngine:
             extraction_config_hash: Optional hash for change detection.
             chunk_strategy: Override chunking strategy.
             max_chunks_in_flight: Maximum chunks per processing window.
+            chunk_semaphore: Optional global chunk semaphore (from MemoryLake)
+                shared across concurrent submit_batch calls to bound total
+                chunks in flight process-wide.
 
         Returns:
             Tuple of (chunks_created, entities_extracted, relationships_created).
@@ -894,6 +911,7 @@ class VectorCypherEngine:
             relationship_types=relationship_types,
             chunk_strategy=chunk_strategy,
             max_chunks_in_flight=max_chunks_in_flight,
+            chunk_semaphore=chunk_semaphore,
         )
 
     async def clear_document_extraction_state(self, document_id: UUID, namespace_id: UUID) -> None:

@@ -25,6 +25,48 @@ from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
 from khora.telemetry import trace_span
 
+
+class _GlobalChunkSemaphore:
+    """Counting semaphore supporting bulk acquire/release for chunk windowing.
+
+    asyncio.Semaphore only supports acquire/release of 1 unit at a time.
+    This uses asyncio.Condition to support acquiring N tokens at once,
+    ensuring total chunks in flight across all concurrent submit_batch
+    calls stay within the global limit.
+
+    If n > capacity in acquire(), n is clamped to capacity to avoid
+    permanent deadlock. This can occur when per-call max_chunks_in_flight
+    exceeds the semaphore capacity (i.e. conflicting values across calls).
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        self._in_flight = 0
+        self._condition = asyncio.Condition()
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    async def acquire(self, n: int) -> int:
+        """Block until n tokens are available, then acquire them. Returns tokens acquired."""
+        # Clamp to capacity to avoid permanent deadlock when n > capacity.
+        n = min(n, self._capacity)
+        async with self._condition:
+            while self._in_flight + n > self._capacity:
+                await self._condition.wait()
+            self._in_flight += n
+        return n
+
+    async def release(self, n: int) -> None:
+        """Release n tokens and wake any waiters."""
+        async with self._condition:
+            if self._in_flight < n:
+                raise RuntimeError(f"Semaphore release({n}) would underflow _in_flight={self._in_flight}")
+            self._in_flight -= n
+            self._condition.notify_all()
+
+
 if TYPE_CHECKING:
     from khora.core.models import Relationship
     from khora.engines.protocol import MemoryEngineProtocol
@@ -304,6 +346,9 @@ class MemoryLake:
         self._engine: MemoryEngineProtocol | None = None
         self._connected = False
         self._bg_tasks: set[asyncio.Task] = set()
+        # Global chunk semaphore shared across all concurrent submit_batch calls.
+        # Initialized on first submit_batch call that sets max_chunks_in_flight.
+        self._chunk_semaphore: _GlobalChunkSemaphore | None = None
 
     async def connect(self) -> None:
         """Connect to all storage backends."""
@@ -833,6 +878,19 @@ class MemoryLake:
                 )
                 pre_failed_docs.append((doc, str(exc)))
 
+        # Initialize (or validate) the global chunk semaphore.
+        # The first call that sets max_chunks_in_flight establishes the semaphore capacity.
+        # Subsequent calls with a different value log a warning — the first value wins.
+        if max_chunks_in_flight is not None:
+            if self._chunk_semaphore is None:
+                self._chunk_semaphore = _GlobalChunkSemaphore(max_chunks_in_flight)
+            elif self._chunk_semaphore.capacity != max_chunks_in_flight:
+                logger.warning(
+                    f"submit_batch: max_chunks_in_flight={max_chunks_in_flight} conflicts with "
+                    f"existing semaphore capacity={self._chunk_semaphore.capacity}; "
+                    f"first value wins — using {self._chunk_semaphore.capacity}"
+                )
+
         handle = BatchHandle(
             batch_id=uuid4(),
             total=len(pending_docs) + len(pre_failed_docs) + len(pre_completed_docs),
@@ -855,6 +913,7 @@ class MemoryLake:
                 max_chunks_in_flight=max_chunks_in_flight,
                 max_concurrent=max_concurrent,
                 pre_failed_doc_ids=pre_failed_doc_ids,
+                chunk_semaphore=self._chunk_semaphore if max_chunks_in_flight is not None else None,
             )
         )
         self._bg_tasks.add(task)
@@ -880,6 +939,7 @@ class MemoryLake:
         max_chunks_in_flight: int | None,
         max_concurrent: int,
         pre_failed_doc_ids: set[UUID],
+        chunk_semaphore: _GlobalChunkSemaphore | None = None,
     ) -> None:
         """Background worker that processes pre-staged PENDING documents."""
         storage = self.storage
@@ -982,6 +1042,7 @@ class MemoryLake:
                         extraction_config_hash=extraction_config_hash,
                         chunk_strategy=chunk_strategy,
                         max_chunks_in_flight=max_chunks_in_flight,
+                        chunk_semaphore=chunk_semaphore,
                     )
                     result = DocumentResult(
                         document_id=doc.id,
