@@ -111,6 +111,8 @@ class DocumentResult:
     entities_extracted: int = 0
     relationships_created: int = 0
     llm_usage: list[LLMUsage] = field(default_factory=list)
+    skipped: bool = False
+    """True when the document was already COMPLETED and re-processing was skipped."""
 
 
 @dataclass
@@ -673,18 +675,114 @@ class MemoryLake:
             handle._mark_done()
             return handle
 
+        from khora.core.models.document import DocumentStatus
+
         namespace_id = await self._resolve_namespace(namespace)
         storage = self.storage
 
         # Persist all documents as PENDING before returning the handle.
         # This satisfies the durability contract — if the process crashes after
         # submit_batch() returns, the PENDING records survive for recovery.
+        #
+        # ADR-068 Decision 1 — self-healing for existing documents:
+        # Instead of failing on duplicate external_id, detect and dispatch:
+        #   PENDING   → skip insert, re-queue for processing (self-heal stalled docs)
+        #   COMPLETED → skip entirely, report success (already done)
+        #   FAILED    → reset to PENDING + update content, re-queue for processing
         pending_docs: list[Document] = []
         pending_doc_data: list[dict[str, Any]] = []
         pre_failed_docs: list[tuple[Document, str]] = []
+        pre_completed_docs: list[Document] = []
+
+        # Batch-lookup existing documents by external_id to avoid N serial queries.
+        all_external_ids = [d.get("external_id") for d in documents if d.get("external_id")]
+        existing_by_ext_id: dict[str, Document] = {}
+        if all_external_ids:
+            try:
+                existing_by_ext_id = await storage.get_documents_by_external_ids(namespace_id, all_external_ids)
+            except Exception as exc:
+                # M2: Fall through to the normal insert path if the lookup fails.
+                logger.warning(
+                    f"submit_batch: could not look up existing documents by external_id "
+                    f"({exc}); treating all as new inserts"
+                )
+                existing_by_ext_id = {}
+
+        seen_external_ids: set[str] = set()
+        pre_failed_doc_ids: set[UUID] = set()
+
         for doc_data in documents:
             content = doc_data.get("content", "")
             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            external_id = doc_data.get("external_id")
+
+            # M4: Skip duplicate external_ids within the same batch.
+            if external_id:
+                if external_id in seen_external_ids:
+                    logger.warning(
+                        f"submit_batch: duplicate external_id in batch, skipping subsequent occurrence "
+                        f"(external_id={external_id!r})"
+                    )
+                    continue
+                seen_external_ids.add(external_id)
+
+            existing = existing_by_ext_id.get(external_id) if external_id else None
+
+            if existing is not None:
+                if existing.status == DocumentStatus.COMPLETED:
+                    # Already fully processed — skip re-insertion, report as skipped.
+                    logger.debug(
+                        f"submit_batch: document already COMPLETED, skipping "
+                        f"(external_id={external_id!r}, doc_id={existing.id})"
+                    )
+                    pre_completed_docs.append(existing)
+                    continue
+
+                # M1: PROCESSING means an active worker holds this doc — skip to avoid race.
+                if existing.status == DocumentStatus.PROCESSING:
+                    logger.warning(
+                        f"submit_batch: document is PROCESSING, skipping re-queue to avoid race "
+                        f"(external_id={external_id!r}, doc_id={existing.id})"
+                    )
+                    pre_completed_docs.append(existing)
+                    continue
+
+                # PENDING, FAILED, or ARCHIVED: reset to PENDING and re-process.
+                # Update content + metadata so the re-run uses the latest submitted values
+                # (fixes empty-source issue observed in soak test — DYT-3075).
+                prior_status = existing.status
+                # H1: Track FAILED docs — they may have partial extraction state that
+                # must be cleared before re-processing to prevent duplicate chunks.
+                if prior_status == DocumentStatus.FAILED:
+                    pre_failed_doc_ids.add(existing.id)
+                existing.content = content
+                existing.metadata = DocumentMetadata(
+                    title=doc_data.get("title", ""),
+                    source=doc_data.get("source", ""),
+                    source_type="api",
+                    checksum=checksum,
+                    size_bytes=len(content.encode("utf-8")),
+                    custom=doc_data.get("metadata") or {},
+                )
+                existing.status = DocumentStatus.PENDING
+                existing.extraction_config_hash = extraction_config_hash
+                existing.error_message = None
+                logger.debug(
+                    f"submit_batch: re-queuing existing {prior_status.value} document "
+                    f"(external_id={external_id!r}, doc_id={existing.id})"
+                )
+                try:
+                    await storage.update_document(existing)
+                    pending_docs.append(existing)
+                    pending_doc_data.append(doc_data)
+                except Exception as exc:
+                    logger.warning(
+                        f"submit_batch: could not update document record (external_id={external_id!r}): {exc}"
+                    )
+                    pre_failed_docs.append((existing, str(exc)))
+                continue
+
+            # No existing document — normal insert path.
             doc = Document(
                 namespace_id=namespace_id,
                 content=content,
@@ -697,7 +795,7 @@ class MemoryLake:
                     custom=doc_data.get("metadata") or {},
                 ),
                 extraction_config_hash=extraction_config_hash,
-                external_id=doc_data.get("external_id"),
+                external_id=external_id,
             )
             try:
                 doc = await storage.create_document(doc)
@@ -710,13 +808,17 @@ class MemoryLake:
                 )
                 pre_failed_docs.append((doc, str(exc)))
 
-        handle = BatchHandle(batch_id=uuid4(), total=len(pending_docs) + len(pre_failed_docs))
+        handle = BatchHandle(
+            batch_id=uuid4(),
+            total=len(pending_docs) + len(pre_failed_docs) + len(pre_completed_docs),
+        )
         task = asyncio.create_task(
             self._submit_batch_worker(
                 handle,
                 pending_docs,
                 pending_doc_data,
                 pre_failed_docs,
+                pre_completed_docs,
                 on_result,
                 namespace_id=namespace_id,
                 skill_name=skill_name,
@@ -727,6 +829,7 @@ class MemoryLake:
                 chunk_strategy=chunk_strategy,
                 max_chunks_in_flight=max_chunks_in_flight,
                 max_concurrent=max_concurrent,
+                pre_failed_doc_ids=pre_failed_doc_ids,
             )
         )
         self._bg_tasks.add(task)
@@ -739,6 +842,7 @@ class MemoryLake:
         pending_docs: list[Document],
         doc_data_list: list[dict[str, Any]],
         pre_failed_docs: list[tuple[Document, str]],
+        pre_completed_docs: list[Document],
         on_result: Callable[[int, int, DocumentResult], None],
         *,
         namespace_id: UUID,
@@ -750,6 +854,7 @@ class MemoryLake:
         chunk_strategy: ChunkStrategy | None,
         max_chunks_in_flight: int | None,
         max_concurrent: int,
+        pre_failed_doc_ids: set[UUID],
     ) -> None:
         """Background worker that processes pre-staged PENDING documents."""
         storage = self.storage
@@ -769,6 +874,19 @@ class MemoryLake:
                     namespace_id=namespace_id,
                     success=False,
                     error=err,
+                )
+            )
+
+        # Fire skipped results for documents already COMPLETED (ADR-068 self-heal).
+        for doc in pre_completed_docs:
+            _fire_result(
+                DocumentResult(
+                    document_id=doc.id,
+                    namespace_id=namespace_id,
+                    success=True,
+                    skipped=True,
+                    chunks_created=doc.chunk_count,
+                    entities_extracted=doc.entity_count,
                 )
             )
 
@@ -800,6 +918,21 @@ class MemoryLake:
             from khora.telemetry.context import collect_usage, start_usage_collection
 
             async with sem:
+                # H1: Clear partial extraction state for previously-FAILED documents
+                # before re-processing to prevent duplicate chunks/entities on retry.
+                if doc.id in pre_failed_doc_ids:
+                    if storage.vector is not None:
+                        try:
+                            await storage.vector.delete_chunks_by_document(doc.id)
+                        except Exception as exc:
+                            logger.warning(f"submit_batch: could not clear chunks table for {doc.id}: {exc}")
+                    clear_fn = getattr(engine, "clear_document_extraction_state", None)
+                    if clear_fn is not None:
+                        try:
+                            await clear_fn(doc.id, namespace_id)
+                        except Exception as exc:
+                            logger.warning(f"submit_batch: could not clear extraction state for {doc.id}: {exc}")
+
                 start_usage_collection()
                 try:
                     doc_metadata = doc_data.get("metadata") or {}
