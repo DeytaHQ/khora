@@ -841,9 +841,7 @@ class TestBisectionOnTruncation:
         extractor = self._make_extractor()
 
         with patch.object(extractor, "_extract_multi_batch", new_callable=AsyncMock) as mock_multi:
-            results = await extractor.extract_multi(
-                [], entity_types=["PERSON"], tiered_extraction=False, batch_size=50
-            )
+            results = await extractor.extract_multi([], entity_types=["PERSON"], tiered_extraction=False, batch_size=50)
 
         assert results == []
         mock_multi.assert_not_called()
