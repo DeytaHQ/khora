@@ -1977,6 +1977,58 @@ class TestSubmitBatch:
         assert results[0].relationships_created == 2
 
     @pytest.mark.asyncio
+    async def test_document_result_carries_llm_usage(self) -> None:
+        """DocumentResult.llm_usage is populated from usage recorded during processing."""
+        from khora.memory_lake import LLMUsage
+        from khora.telemetry.context import record_usage
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        lake._engine._storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+
+        async def _process_with_usage(doc, **kwargs):
+            record_usage(
+                LLMUsage(
+                    operation="embedding",
+                    model="text-embedding-3-small",
+                    prompt_tokens=10,
+                    completion_tokens=0,
+                    total_tokens=10,
+                    latency_ms=5.0,
+                )
+            )
+            record_usage(
+                LLMUsage(
+                    operation="entity_extraction",
+                    model="gpt-4o",
+                    prompt_tokens=100,
+                    completion_tokens=50,
+                    total_tokens=150,
+                    latency_ms=200.0,
+                )
+            )
+            return (2, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_usage)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "doc with llm calls"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert results[0].success is True
+        assert len(results[0].llm_usage) == 2
+        ops = {u.operation for u in results[0].llm_usage}
+        assert ops == {"embedding", "entity_extraction"}
+
+    @pytest.mark.asyncio
     async def test_failed_document_updates_storage_status(self) -> None:
         """When process_staged_document raises, the document is marked FAILED in storage."""
         from khora.core.models.document import DocumentStatus
