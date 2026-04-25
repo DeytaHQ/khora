@@ -2533,9 +2533,7 @@ class TestSubmitBatch:
         existing_doc.chunk_count = 4
         existing_doc.entity_count = 2
 
-        lake._engine._storage.get_documents_by_external_ids = AsyncMock(
-            return_value={"ext-archived": existing_doc}
-        )
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-archived": existing_doc})
 
         async def _fake_process(doc, **kwargs):
             return (1, 1, 0)
