@@ -437,6 +437,5 @@ class TestCrossWindowEntityCountInflation:
             total_entity_count += new_entity_count
 
         assert total_entity_count == 3, (
-            f"Expected 3 unique entities, got {total_entity_count}. "
-            "Counting is wrong even when entities are distinct."
+            f"Expected 3 unique entities, got {total_entity_count}. Counting is wrong even when entities are distinct."
         )
