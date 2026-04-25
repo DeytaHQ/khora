@@ -2141,6 +2141,11 @@ class VectorCypherEngine:
         _stage6_rels_ms = 0.0
         _stage6_links_ms = 0.0
 
+        # Track unique entity keys across windows to avoid double-counting entities
+        # that appear in multiple windows (upsert_entities_batch ensures a single DB
+        # row, so BatchResult.entities must reflect unique persisted cardinality).
+        _seen_entity_keys: set[tuple[str, str]] = set()
+
         for window_states in windows:
             # ── Stage 2: Batch-embed ALL chunk texts ────────────────────────
             _t0 = _time.perf_counter()
@@ -2449,7 +2454,13 @@ class VectorCypherEngine:
                 results["chunks"] += chunks_created
                 _report_progress()
 
-            results["entities"] += len(all_entities)
+            new_entity_count = 0
+            for _e in all_entities:
+                _key = (_e.name, _e.entity_type)
+                if _key not in _seen_entity_keys:
+                    _seen_entity_keys.add(_key)
+                    new_entity_count += 1
+            results["entities"] += new_entity_count
             results["relationships"] += len(all_relationships)
             # end of window loop
 

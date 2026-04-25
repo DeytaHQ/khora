@@ -230,6 +230,59 @@ class TestWindowedProcessingIntegration:
             await lake.disconnect()
 
     # ------------------------------------------------------------------
+    # 9. Cross-window entity count not inflated (DYT-3064)
+    # ------------------------------------------------------------------
+
+    async def test_cross_window_entity_count_not_inflated(self) -> None:
+        """BatchResult.entities must not double-count shared entities across windows.
+
+        With max_chunks_in_flight=1, three 1-chunk documents are processed in
+        three separate windows.  Two of the documents extract the same entity
+        ("Alice").  upsert_entities_batch() ensures a single DB row, so
+        BatchResult.entities must be 2 (Alice + unique entity from doc 0),
+        not 3 (naive per-window count that double-counts Alice).
+        """
+        config = _make_config()
+        vc_config = VectorCypherConfig(max_chunks_in_flight=1, enable_smart_resolution=False)
+
+        lake = MemoryLake(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
+        await lake.connect()
+        try:
+            ns = await lake.create_namespace()
+            ns_id = ns.namespace_id
+            ext = uuid4().hex[:8]
+
+            # Three docs; doc 0 extracts "UniqueEntity", docs 1 and 2 both extract "Alice"
+            marker_unique = f"unique-entity-{ext}"
+            marker_alice = f"alice-shared-{ext}"
+            _plan_extraction(marker_unique, entities=[("UniqueEntity", "CONCEPT")])
+            _plan_extraction(marker_alice, entities=[("Alice", "PERSON")])
+
+            docs = [
+                {"content": f"{marker_unique} only in doc 0", "external_id": f"cw-{ext}-0"},
+                {"content": f"{marker_alice} first time", "external_id": f"cw-{ext}-1"},
+                {"content": f"{marker_alice} second time", "external_id": f"cw-{ext}-2"},
+            ]
+
+            result = await lake.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON", "CONCEPT"],
+                relationship_types=["KNOWS"],
+                chunk_strategy="fixed",
+            )
+
+            assert result.processed == 3, f"expected 3 processed, got {result.processed}"
+            assert result.failed == 0, f"unexpected failures: {result.failed}"
+            # 2 unique entities extracted (UniqueEntity + Alice), not 3
+            assert result.entities == 2, (
+                f"expected 2 unique entities (UniqueEntity + Alice), got {result.entities}. "
+                "Cross-window entity count inflation not fixed (DYT-3064)."
+            )
+        finally:
+            await lake.disconnect()
+
+    # ------------------------------------------------------------------
     # 3. Window=None preserves current behavior
     # ------------------------------------------------------------------
 
