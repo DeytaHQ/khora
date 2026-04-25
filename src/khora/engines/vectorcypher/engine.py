@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
+    from khora.memory_lake import _GlobalChunkSemaphore
     from khora.storage import StorageCoordinator
 
 
@@ -711,7 +712,7 @@ class VectorCypherEngine:
         relationship_types: list[str],
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
-        chunk_semaphore: Any = None,
+        chunk_semaphore: "_GlobalChunkSemaphore | None" = None,
     ) -> tuple[int, int, int]:
         """Process a document into chunks with skeleton-based entity extraction.
 
@@ -777,8 +778,9 @@ class VectorCypherEngine:
                 # This bounds total chunks in flight across all concurrent
                 # submit_batch calls to max_chunks_in_flight process-wide.
                 n_window = len(window)
+                n_acquired = n_window
                 if chunk_semaphore is not None:
-                    await chunk_semaphore.acquire(n_window)
+                    n_acquired = await chunk_semaphore.acquire(n_window)
                 try:
                     # Embed window chunks in batch
                     with trace_span("khora.vectorcypher.embed_batch", chunk_count=len(window)):
@@ -841,7 +843,7 @@ class VectorCypherEngine:
                     chunk_index_offset += len(window)
                 finally:
                     if chunk_semaphore is not None:
-                        await chunk_semaphore.release(n_window)
+                        await chunk_semaphore.release(n_acquired)
 
             # Update document status
             document.mark_completed(total_chunks_created, entities_extracted, relationships_created)
@@ -869,7 +871,7 @@ class VectorCypherEngine:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
-        chunk_semaphore: Any = None,
+        chunk_semaphore: "_GlobalChunkSemaphore | None" = None,
     ) -> tuple[int, int, int]:
         """Process a pre-staged PENDING document through the VectorCypher pipeline.
 

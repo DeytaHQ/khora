@@ -3004,3 +3004,211 @@ class TestSubmitBatchGlobalSemaphore:
         )
         await h2.wait()
         assert h2.failed == 0, "second call should succeed after first failed"
+
+    @pytest.mark.asyncio
+    async def test_none_max_chunks_after_prior_semaphore_does_not_inherit(self) -> None:
+        """submit_batch(None) after a prior semaphored call passes no semaphore (H-2 fix)."""
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        received_semaphores: list[object] = []
+
+        async def _capturing_process(doc, **kwargs):
+            received_semaphores.append(kwargs.get("chunk_semaphore"))
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_capturing_process)
+
+        # First call establishes a semaphore.
+        h1 = await lake.submit_batch(
+            [{"content": "doc1", "external_id": "h2a"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=50,
+        )
+        await h1.wait()
+
+        # Second call opts out (None = unbounded) — must NOT inherit the semaphore.
+        h2 = await lake.submit_batch(
+            [{"content": "doc2", "external_id": "h2b"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=None,
+        )
+        await h2.wait()
+
+        assert isinstance(received_semaphores[0], _GlobalChunkSemaphore), "first call gets semaphore"
+        assert received_semaphores[1] is None, "second call with None must receive no semaphore"
+
+
+# ---------------------------------------------------------------------------
+# Tests for acquire/release in _process_document (DYT-3111 M-3/M-4)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessDocumentSemaphore:
+    """Tests that exercise the actual acquire/release path in engine._process_document.
+
+    These tests complement TestSubmitBatchGlobalSemaphore, which mocks out
+    process_staged_document entirely.  Here we call _process_document directly
+    with mocked I/O so that the semaphore acquire/release in engine.py:779-844
+    is actually executed.
+    """
+
+    @staticmethod
+    def _make_minimal_engine():
+        """Return a VectorCypherEngine with all I/O mocked — no connect() needed."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from khora.engines.vectorcypher.engine import VectorCypherConfig, VectorCypherEngine
+
+        # Bypass __init__ (requires full config + Neo4j/storage setup).
+        engine = object.__new__(VectorCypherEngine)
+
+        cfg = MagicMock()
+        cfg.pipeline.chunking_strategy = None
+        cfg.pipeline.chunk_size = 512
+        cfg.pipeline.chunk_overlap = 50
+        cfg.pipeline.extract_entities = False  # skip LLM extraction
+
+        engine._config = cfg
+        engine._vc_config = VectorCypherConfig()
+
+        storage = MagicMock()
+        storage.update_document = AsyncMock()
+        engine._storage = storage
+
+        embedder = MagicMock()
+        embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 8 for _ in texts])
+        engine._embedder = embedder
+
+        async def _create_chunks_batch(chunks):
+            for c in chunks:
+                c.id = uuid4()
+            return chunks
+
+        temporal_store = MagicMock()
+        temporal_store.create_chunks_batch = AsyncMock(side_effect=_create_chunks_batch)
+        engine._temporal_store = temporal_store
+        engine._dual_nodes = None
+
+        return engine
+
+    @staticmethod
+    def _mock_raw_chunk(content: str = "test chunk"):
+        """Return a mock raw chunk with the attributes _process_document reads."""
+        from unittest.mock import MagicMock
+
+        chunk = MagicMock()
+        chunk.content = content
+        chunk.start_char = 0
+        chunk.end_char = len(content)
+        return chunk
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_on_embed_failure(self) -> None:
+        """release() is called in finally even when embed_batch raises (M-3 fix)."""
+        import asyncio
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from khora.core.models.document import Document
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        engine = self._make_minimal_engine()
+        engine._embedder.embed_batch = AsyncMock(side_effect=RuntimeError("embed failure"))
+
+        sem = _GlobalChunkSemaphore(100)
+        doc = Document(namespace_id=uuid4(), content="some content")
+        mock_chunk = self._mock_raw_chunk()
+
+        with patch("khora.extraction.chunkers.create_chunker") as mock_cc:
+            mock_cc.return_value = MagicMock()
+            with patch("asyncio.to_thread", new=AsyncMock(return_value=[mock_chunk])):
+                with pytest.raises(RuntimeError, match="embed failure"):
+                    await engine._process_document(
+                        doc,
+                        skill_name="default",
+                        expertise=None,
+                        extraction_model=None,
+                        occurred_at=datetime.now(UTC),
+                        entity_types=["PERSON"],
+                        relationship_types=["KNOWS"],
+                        chunk_semaphore=sem,
+                    )
+
+        assert sem._in_flight == 0, "semaphore must be fully released after embed_batch failure"
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_after_success(self) -> None:
+        """Semaphore tokens return to 0 after a successful window (M-4 coverage)."""
+        import asyncio
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from khora.core.models.document import Document
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        engine = self._make_minimal_engine()
+
+        sem = _GlobalChunkSemaphore(100)
+        doc = Document(namespace_id=uuid4(), content="some content")
+        mock_chunk = self._mock_raw_chunk()
+
+        with patch("khora.extraction.chunkers.create_chunker") as mock_cc:
+            mock_cc.return_value = MagicMock()
+            with patch("asyncio.to_thread", new=AsyncMock(return_value=[mock_chunk])):
+                result = await engine._process_document(
+                    doc,
+                    skill_name="default",
+                    expertise=None,
+                    extraction_model=None,
+                    occurred_at=datetime.now(UTC),
+                    entity_types=["PERSON"],
+                    relationship_types=["KNOWS"],
+                    chunk_semaphore=sem,
+                )
+
+        assert sem._in_flight == 0, "semaphore must be fully released after success"
+        assert result[0] == 1  # 1 chunk created
+
+    @pytest.mark.asyncio
+    async def test_semaphore_clamped_acquire_releases_correctly(self) -> None:
+        """When n > capacity, acquire clamps and release uses the clamped value (H-1 fix)."""
+        import asyncio
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from khora.core.models.document import Document
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        engine = self._make_minimal_engine()
+
+        # Semaphore capacity=3; window will have 1 chunk.
+        # With the H-1 fix, acquire(1) returns 1 and release(1) is called — no underflow.
+        sem = _GlobalChunkSemaphore(3)
+        doc = Document(namespace_id=uuid4(), content="chunk content")
+        mock_chunk = self._mock_raw_chunk()
+
+        with patch("khora.extraction.chunkers.create_chunker") as mock_cc:
+            mock_cc.return_value = MagicMock()
+            with patch("asyncio.to_thread", new=AsyncMock(return_value=[mock_chunk])):
+                await engine._process_document(
+                    doc,
+                    skill_name="default",
+                    expertise=None,
+                    extraction_model=None,
+                    occurred_at=datetime.now(UTC),
+                    entity_types=["PERSON"],
+                    relationship_types=["KNOWS"],
+                    max_chunks_in_flight=10,  # > semaphore capacity
+                    chunk_semaphore=sem,
+                )
+
+        assert sem._in_flight == 0, "release must use clamped acquire count — no underflow"

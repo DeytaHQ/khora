@@ -48,18 +48,23 @@ class _GlobalChunkSemaphore:
     def capacity(self) -> int:
         return self._capacity
 
-    async def acquire(self, n: int) -> None:
-        """Block until n tokens are available, then acquire them."""
+    async def acquire(self, n: int) -> int:
+        """Block until n tokens are available, then acquire them. Returns tokens acquired."""
         # Clamp to capacity to avoid permanent deadlock when n > capacity.
         n = min(n, self._capacity)
         async with self._condition:
             while self._in_flight + n > self._capacity:
                 await self._condition.wait()
             self._in_flight += n
+        return n
 
     async def release(self, n: int) -> None:
         """Release n tokens and wake any waiters."""
         async with self._condition:
+            if self._in_flight < n:
+                raise RuntimeError(
+                    f"Semaphore release({n}) would underflow _in_flight={self._in_flight}"
+                )
             self._in_flight -= n
             self._condition.notify_all()
 
@@ -910,7 +915,7 @@ class MemoryLake:
                 max_chunks_in_flight=max_chunks_in_flight,
                 max_concurrent=max_concurrent,
                 pre_failed_doc_ids=pre_failed_doc_ids,
-                chunk_semaphore=self._chunk_semaphore,
+                chunk_semaphore=self._chunk_semaphore if max_chunks_in_flight is not None else None,
             )
         )
         self._bg_tasks.add(task)
