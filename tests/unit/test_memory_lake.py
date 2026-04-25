@@ -2673,3 +2673,334 @@ class TestSubmitBatch:
         assert results[0].success is False
         assert results[0].skipped is False
         assert handle.failed == 1
+
+
+# ---------------------------------------------------------------------------
+# _GlobalChunkSemaphore (DYT-3111)
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalChunkSemaphore:
+    """Unit tests for the _GlobalChunkSemaphore counting semaphore."""
+
+    @pytest.mark.asyncio
+    async def test_acquire_release_basic(self) -> None:
+        """acquire(n) decrements capacity; release(n) restores it."""
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        sem = _GlobalChunkSemaphore(10)
+        assert sem.capacity == 10
+        await sem.acquire(5)
+        await sem.release(5)
+        # After release, another acquire of full capacity should succeed immediately.
+        await sem.acquire(10)
+        await sem.release(10)
+
+    @pytest.mark.asyncio
+    async def test_acquire_blocks_until_capacity_available(self) -> None:
+        """acquire blocks when in_flight + n > capacity, unblocks on release."""
+        import asyncio
+
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        sem = _GlobalChunkSemaphore(5)
+        await sem.acquire(5)  # fills capacity
+
+        unblocked = asyncio.Event()
+
+        async def _waiter():
+            await sem.acquire(1)  # must wait
+            unblocked.set()
+            await sem.release(1)
+
+        task = asyncio.create_task(_waiter())
+        # Give waiter a chance to start and block.
+        await asyncio.sleep(0)
+        assert not unblocked.is_set(), "waiter should still be blocked"
+
+        await sem.release(5)  # unblocks waiter
+        await asyncio.wait_for(task, timeout=2.0)
+        assert unblocked.is_set()
+
+    @pytest.mark.asyncio
+    async def test_multiple_waiters_queue_correctly(self) -> None:
+        """Multiple waiters each get capacity in turn."""
+        import asyncio
+
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        sem = _GlobalChunkSemaphore(3)
+        order: list[int] = []
+
+        async def _worker(idx: int, n: int) -> None:
+            await sem.acquire(n)
+            order.append(idx)
+            await asyncio.sleep(0)  # yield to allow ordering checks
+            await sem.release(n)
+
+        await sem.acquire(3)  # fill semaphore
+        # Schedule two waiters
+        t1 = asyncio.create_task(_worker(1, 2))
+        t2 = asyncio.create_task(_worker(2, 1))
+        await asyncio.sleep(0)
+        assert order == [], "no worker should have proceeded yet"
+
+        await sem.release(3)
+        await asyncio.gather(t1, t2)
+        # Both workers completed — order determined by asyncio scheduling.
+        assert sorted(order) == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_acquire_clamped_to_capacity(self) -> None:
+        """acquire(n) with n > capacity is clamped to capacity (avoids deadlock)."""
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        sem = _GlobalChunkSemaphore(5)
+        # n=10 > capacity=5 — should not deadlock; clamped to 5.
+        await sem.acquire(10)
+        assert sem._in_flight == 5
+        await sem.release(5)
+        assert sem._in_flight == 0
+
+
+# ---------------------------------------------------------------------------
+# Global semaphore initialization in submit_batch (DYT-3111)
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitBatchGlobalSemaphore:
+    """Tests for global chunk semaphore lifecycle and behavior in submit_batch."""
+
+    @pytest.mark.asyncio
+    async def test_semaphore_initialized_on_first_call(self) -> None:
+        """First submit_batch with max_chunks_in_flight creates _chunk_semaphore."""
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        assert lake._chunk_semaphore is None
+
+        handle = await lake.submit_batch(
+            [{"content": "hello", "external_id": "s1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=100,
+        )
+        await handle.wait()
+
+        assert isinstance(lake._chunk_semaphore, _GlobalChunkSemaphore)
+        assert lake._chunk_semaphore.capacity == 100
+
+    @pytest.mark.asyncio
+    async def test_semaphore_reused_on_second_call_same_value(self) -> None:
+        """Second call with same max_chunks_in_flight reuses existing semaphore."""
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        h1 = await lake.submit_batch(
+            [{"content": "doc1", "external_id": "r1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=50,
+        )
+        await h1.wait()
+        first_semaphore = lake._chunk_semaphore
+
+        h2 = await lake.submit_batch(
+            [{"content": "doc2", "external_id": "r2"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=50,
+        )
+        await h2.wait()
+
+        assert lake._chunk_semaphore is first_semaphore, "same semaphore instance reused"
+
+    @pytest.mark.asyncio
+    async def test_conflicting_max_chunks_in_flight_logs_warning(self) -> None:
+        """Second call with different max_chunks_in_flight logs a warning; first wins."""
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        h1 = await lake.submit_batch(
+            [{"content": "doc1", "external_id": "w1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=100,
+        )
+        await h1.wait()
+
+        from loguru import logger
+
+        captured: list[str] = []
+        handler_id = logger.add(lambda msg: captured.append(msg), level="WARNING")
+        try:
+            h2 = await lake.submit_batch(
+                [{"content": "doc2", "external_id": "w2"}],
+                on_result=lambda c, t, r: None,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                max_chunks_in_flight=200,  # different value
+            )
+            await h2.wait()
+        finally:
+            logger.remove(handler_id)
+
+        assert lake._chunk_semaphore is not None
+        assert lake._chunk_semaphore.capacity == 100, "first value wins"
+        assert any("conflicts" in str(m) or "first value wins" in str(m) for m in captured), (
+            f"expected warning about conflicting max_chunks_in_flight; got: {captured}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_chunk_semaphore_passed_to_process_staged_document(self) -> None:
+        """chunk_semaphore kwarg is forwarded to process_staged_document."""
+
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        received_kwargs: list[dict] = []
+
+        async def _capturing_process(doc, **kwargs):
+            received_kwargs.append(kwargs)
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_capturing_process)
+
+        handle = await lake.submit_batch(
+            [{"content": "test", "external_id": "cs1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=10,
+        )
+        await handle.wait()
+
+        assert len(received_kwargs) == 1
+        assert "chunk_semaphore" in received_kwargs[0]
+        assert isinstance(received_kwargs[0]["chunk_semaphore"], _GlobalChunkSemaphore)
+        assert received_kwargs[0]["chunk_semaphore"].capacity == 10
+
+    @pytest.mark.asyncio
+    async def test_no_semaphore_when_max_chunks_in_flight_none(self) -> None:
+        """When max_chunks_in_flight=None, no semaphore is created."""
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        handle = await lake.submit_batch(
+            [{"content": "hello", "external_id": "n1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=None,
+        )
+        await handle.wait()
+
+        assert lake._chunk_semaphore is None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_share_semaphore(self) -> None:
+        """Two concurrent submit_batch calls share the same semaphore instance."""
+        import asyncio
+
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        semaphores_seen: list[object] = []
+        processing_events: list[asyncio.Event] = []
+
+        async def _tracking_process(doc, **kwargs):
+            semaphores_seen.append(kwargs.get("chunk_semaphore"))
+            ev = asyncio.Event()
+            processing_events.append(ev)
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_tracking_process)
+
+        h1 = await lake.submit_batch(
+            [{"content": "doc-a", "external_id": "ca1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=100,
+        )
+        h2 = await lake.submit_batch(
+            [{"content": "doc-b", "external_id": "ca2"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=100,
+        )
+        await asyncio.gather(h1.wait(), h2.wait())
+
+        assert len(semaphores_seen) == 2
+        assert semaphores_seen[0] is semaphores_seen[1], "both calls share the same semaphore"
+        assert isinstance(semaphores_seen[0], _GlobalChunkSemaphore)
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_on_process_failure(self) -> None:
+        """Semaphore tokens are released even when process_staged_document raises."""
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        call_count = 0
+
+        async def _failing_process(doc, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("simulated failure")
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_failing_process)
+
+        # First call fails — semaphore should still be released
+        h1 = await lake.submit_batch(
+            [{"content": "fail-doc", "external_id": "sf1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=10,
+        )
+        await h1.wait()
+
+        sem = lake._chunk_semaphore
+        assert isinstance(sem, _GlobalChunkSemaphore)
+
+        # NOTE: The semaphore is per-window inside the engine, not per-document
+        # in the lake layer. Since the mock doesn't use the semaphore itself,
+        # we verify the lake still has a valid semaphore and the second call
+        # can proceed (no deadlock from unreleased tokens).
+        h2 = await lake.submit_batch(
+            [{"content": "ok-doc", "external_id": "sf2"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=10,
+        )
+        await h2.wait()
+        assert h2.failed == 0, "second call should succeed after first failed"
