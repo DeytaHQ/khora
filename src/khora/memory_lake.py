@@ -110,6 +110,7 @@ class DocumentResult:
     chunks_created: int = 0
     entities_extracted: int = 0
     relationships_created: int = 0
+    llm_usage: list[LLMUsage] = field(default_factory=list)
 
 
 @dataclass
@@ -796,7 +797,10 @@ class MemoryLake:
         sem = asyncio.Semaphore(max_concurrent)
 
         async def _process_one(doc: Document, doc_data: dict[str, Any]) -> None:
+            from khora.telemetry.context import collect_usage, start_usage_collection
+
             async with sem:
+                start_usage_collection()
                 try:
                     doc_metadata = doc_data.get("metadata") or {}
                     occurred_at_raw = doc_metadata.get("occurred_at")
@@ -824,8 +828,10 @@ class MemoryLake:
                         chunks_created=chunks,
                         entities_extracted=entities,
                         relationships_created=rels,
+                        llm_usage=collect_usage(),
                     )
                 except Exception as exc:
+                    partial_usage = collect_usage()
                     logger.error(f"submit_batch: failed to process document {doc.id}: {exc}")
                     doc.mark_failed(str(exc))
                     try:
@@ -837,6 +843,7 @@ class MemoryLake:
                         namespace_id=namespace_id,
                         success=False,
                         error=str(exc),
+                        llm_usage=partial_usage,
                     )
                 _fire_result(result)
 
