@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS documents (
     metadata_ TEXT DEFAULT '{}',
     chunk_count INTEGER DEFAULT 0,
     entity_count INTEGER DEFAULT 0,
+    relationship_count INTEGER DEFAULT 0,
     error_message TEXT,
     extraction_config_hash TEXT,
     created_at TEXT NOT NULL,
@@ -366,9 +367,9 @@ class SQLiteRelationalBackend:
             "INSERT INTO documents "
             "(id, namespace_id, content, status, source, source_type, content_type, "
             "title, author, language, checksum, size_bytes, metadata_, "
-            "chunk_count, entity_count, error_message, extraction_config_hash, "
+            "chunk_count, entity_count, relationship_count, error_message, extraction_config_hash, "
             "created_at, updated_at, processed_at, source_timestamp, external_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(document.id),
                 str(document.namespace_id),
@@ -385,6 +386,7 @@ class SQLiteRelationalBackend:
                 _json_dumps(document.metadata.custom),
                 document.chunk_count,
                 document.entity_count,
+                document.relationship_count,
                 document.error_message,
                 document.extraction_config_hash,
                 _dt_to_str(document.created_at) or now,
@@ -434,7 +436,7 @@ class SQLiteRelationalBackend:
             "UPDATE documents SET "
             "content = ?, status = ?, source = ?, source_type = ?, content_type = ?, "
             "title = ?, author = ?, language = ?, checksum = ?, size_bytes = ?, "
-            "metadata_ = ?, chunk_count = ?, entity_count = ?, error_message = ?, "
+            "metadata_ = ?, chunk_count = ?, entity_count = ?, relationship_count = ?, error_message = ?, "
             "extraction_config_hash = ?, external_id = ?, updated_at = ?, processed_at = ?, source_timestamp = ? "
             "WHERE id = ?",
             (
@@ -451,6 +453,7 @@ class SQLiteRelationalBackend:
                 _json_dumps(document.metadata.custom),
                 document.chunk_count,
                 document.entity_count,
+                document.relationship_count,
                 document.error_message,
                 document.extraction_config_hash,
                 document.external_id,
@@ -650,6 +653,7 @@ class SQLiteRelationalBackend:
             ),
             chunk_count=row["chunk_count"] or 0,
             entity_count=row["entity_count"] or 0,
+            relationship_count=row["relationship_count"] or 0,
             error_message=row["error_message"],
             extraction_config_hash=row["extraction_config_hash"],
             created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),

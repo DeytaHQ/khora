@@ -626,7 +626,7 @@ class VectorCypherEngine:
                 namespace_id=namespace_id,
                 chunks_created=existing.chunk_count,
                 entities_extracted=existing.entity_count,
-                relationships_created=0,
+                relationships_created=existing.relationship_count,
                 metadata={"duplicate": True, "status": str(existing.status)},
             )
 
@@ -833,7 +833,7 @@ class VectorCypherEngine:
                 chunk_index_offset += len(window)
 
             # Update document status
-            document.mark_completed(total_chunks_created, entities_extracted)
+            document.mark_completed(total_chunks_created, entities_extracted, relationships_created)
             await storage.update_document(document)
 
             logger.debug(

@@ -908,6 +908,7 @@ class MemoryLake:
                     skipped=True,
                     chunks_created=doc.chunk_count,
                     entities_extracted=doc.entity_count,
+                    relationships_created=doc.relationship_count,
                 )
             )
 

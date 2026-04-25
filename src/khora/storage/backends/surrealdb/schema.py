@@ -58,6 +58,7 @@ DEFINE FIELD IF NOT EXISTS checksum ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS size_bytes ON document TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS chunk_count ON document TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS entity_count ON document TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS relationship_count ON document TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS error_message ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS extraction_config_hash ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS metadata_ ON document FLEXIBLE TYPE option<object>;

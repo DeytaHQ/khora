@@ -2284,6 +2284,7 @@ class TestSubmitBatch:
         existing_doc.status = DocumentStatus.COMPLETED
         existing_doc.chunk_count = 5
         existing_doc.entity_count = 3
+        existing_doc.relationship_count = 7
 
         lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-done": existing_doc})
 
@@ -2313,6 +2314,7 @@ class TestSubmitBatch:
         assert results[0].skipped is True
         assert results[0].chunks_created == 5
         assert results[0].entities_extracted == 3
+        assert results[0].relationships_created == 7
         assert handle.failed == 0
 
     @pytest.mark.asyncio

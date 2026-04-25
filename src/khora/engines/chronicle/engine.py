@@ -386,7 +386,7 @@ class ChronicleEngine:
                 namespace_id=namespace_id,
                 chunks_created=existing.chunk_count,
                 entities_extracted=existing.entity_count,
-                relationships_created=0,
+                relationships_created=existing.relationship_count,
                 metadata={"duplicate": True, "status": str(existing.status), "timings": timings},
             )
 

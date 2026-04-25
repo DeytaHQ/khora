@@ -149,6 +149,7 @@ class DocumentModel(Base):
     # Processing info
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     entity_count: Mapped[int] = mapped_column(Integer, default=0)
+    relationship_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Ontology-aware re-extraction (ADR-018)

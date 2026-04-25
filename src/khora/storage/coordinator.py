@@ -640,7 +640,7 @@ class StorageCoordinator:
             # Survivor relationships are accounted for implicitly via remap;
             # their id is preserved from the old graph state.
 
-            new_document.mark_completed(len(new_chunks), len(new_entities))
+            new_document.mark_completed(len(new_chunks), len(new_entities), relationships_created)
             await self.relational.update_document(new_document)
 
             return ReplaceResult(
