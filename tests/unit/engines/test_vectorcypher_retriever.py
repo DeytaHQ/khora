@@ -937,3 +937,88 @@ class TestGracefulDegradation:
         # Outer fallback sets these metadata keys
         assert result.metadata.get("graph_fallback") is True
         assert len(result.chunks) > 0
+
+
+@pytest.mark.unit
+class TestLLMRerankConfidenceGate:
+    """Tests for the LLM rerank confidence gate (Sprint 1 — multihop regression).
+
+    The gate is a small predicate that decides whether to skip the LLM rerank
+    step after cross-encoder scoring. Two independent conditions trigger a
+    skip; either one is sufficient. We test the predicate directly because
+    the call sites (graph + simple paths) both delegate to it.
+    """
+
+    def _make_retriever(self, config: RetrieverConfig) -> VectorCypherRetriever:
+        return VectorCypherRetriever(
+            vector_store=AsyncMock(),
+            neo4j_driver=AsyncMock(),
+            embedder=AsyncMock(),
+            config=config,
+        )
+
+    def test_skips_on_legacy_gap_gate(self) -> None:
+        """Large gap alone is enough to skip — preserves prior behavior."""
+        retriever = self._make_retriever(
+            RetrieverConfig(
+                llm_reranking_confidence_threshold=0.1,
+                llm_reranking_min_top_score=0.7,
+                llm_reranking_decisive_gap=0.1,
+            )
+        )
+        # gap=0.2 > confidence_threshold=0.1 → skip even with low top_score
+        assert retriever._should_skip_llm_rerank(top_score=0.4, gap=0.2) is True
+
+    def test_skips_on_decisive_winner_gate(self) -> None:
+        """High top_score + meaningful gap → skip even when gap < legacy threshold."""
+        retriever = self._make_retriever(
+            RetrieverConfig(
+                # Set legacy threshold above the gap so ONLY the new gate can fire.
+                llm_reranking_confidence_threshold=0.5,
+                llm_reranking_min_top_score=0.7,
+                llm_reranking_decisive_gap=0.1,
+            )
+        )
+        # top_score=0.85 ≥ 0.7, gap=0.15 ≥ 0.1, gap < legacy 0.5 → decisive gate fires
+        assert retriever._should_skip_llm_rerank(top_score=0.85, gap=0.15) is True
+
+    def test_does_not_skip_when_top_score_below_threshold(self) -> None:
+        """Low top_score → LLM rerank is needed even if gap is OK."""
+        retriever = self._make_retriever(
+            RetrieverConfig(
+                llm_reranking_confidence_threshold=0.5,
+                llm_reranking_min_top_score=0.7,
+                llm_reranking_decisive_gap=0.1,
+            )
+        )
+        # top_score=0.6 < 0.7 → decisive gate does NOT fire; gap=0.15 < 0.5 → legacy doesn't either
+        assert retriever._should_skip_llm_rerank(top_score=0.6, gap=0.15) is False
+
+    def test_does_not_skip_when_gap_too_small(self) -> None:
+        """Small gap (uncertain ranking) → run the LLM rerank, even with high top_score."""
+        retriever = self._make_retriever(
+            RetrieverConfig(
+                llm_reranking_confidence_threshold=0.5,
+                llm_reranking_min_top_score=0.7,
+                llm_reranking_decisive_gap=0.1,
+            )
+        )
+        # top_score=0.9 high, but gap=0.05 < decisive_gap=0.1 AND < legacy 0.5
+        assert retriever._should_skip_llm_rerank(top_score=0.9, gap=0.05) is False
+
+    def test_decisive_gate_thresholds_are_tunable(self) -> None:
+        """Both new thresholds must be exposed on RetrieverConfig and forwarded."""
+        config = RetrieverConfig(
+            # Hold the legacy gate inert so the decisive-winner gate is the only one in play.
+            llm_reranking_confidence_threshold=0.5,
+            llm_reranking_min_top_score=0.85,
+            llm_reranking_decisive_gap=0.2,
+        )
+        assert config.llm_reranking_min_top_score == 0.85
+        assert config.llm_reranking_decisive_gap == 0.2
+
+        retriever = self._make_retriever(config)
+        # top=0.8 < 0.85, gap=0.25 < legacy 0.5 → neither gate fires
+        assert retriever._should_skip_llm_rerank(top_score=0.8, gap=0.25) is False
+        # top=0.9 ≥ 0.85 AND gap=0.25 ≥ 0.2 → decisive gate fires
+        assert retriever._should_skip_llm_rerank(top_score=0.9, gap=0.25) is True
