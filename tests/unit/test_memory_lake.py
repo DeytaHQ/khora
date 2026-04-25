@@ -2581,6 +2581,8 @@ class TestSubmitBatch:
             return_value={"ext-archived-reprocess": existing_doc}
         )
         lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+        lake._engine._storage.vector.delete_chunks_by_document = AsyncMock()
+        lake._engine.clear_document_extraction_state = AsyncMock()
 
         async def _fake_process(doc, **kwargs):
             return (3, 2, 1)
@@ -2607,6 +2609,10 @@ class TestSubmitBatch:
         assert updated.metadata.source == "refresh"
         assert updated.error_message is None
 
+        # Prior extraction state was cleared before re-processing (H1)
+        lake._engine._storage.vector.delete_chunks_by_document.assert_called_once_with(existing_doc.id)
+        lake._engine.clear_document_extraction_state.assert_called_once_with(existing_doc.id, ns_id)
+
         # Document was re-processed
         lake._engine.process_staged_document.assert_called_once()
 
@@ -2614,4 +2620,43 @@ class TestSubmitBatch:
         assert results[0].success is True
         assert results[0].skipped is False
         assert results[0].chunks_created == 3
+        assert results[0].entities_extracted == 2
         assert handle.failed == 0
+
+    @pytest.mark.asyncio
+    async def test_archived_reprocess_update_document_failure_goes_to_failed(self) -> None:
+        """When reprocess_archived=True and update_document raises, the doc goes to pre_failed_docs (DYT-3077)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="archived content", external_id="ext-archived-fail")
+        existing_doc.status = DocumentStatus.ARCHIVED
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(
+            return_value={"ext-archived-fail": existing_doc}
+        )
+        lake._engine._storage.update_document = AsyncMock(side_effect=RuntimeError("DB write error"))
+        lake._engine.process_staged_document = AsyncMock()
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "refreshed content", "external_id": "ext-archived-fail"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            reprocess_archived=True,
+        )
+        await handle.wait()
+
+        # Document was not re-processed — went to failed path
+        lake._engine.process_staged_document.assert_not_called()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].skipped is False
+        assert handle.failed == 1

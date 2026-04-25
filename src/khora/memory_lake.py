@@ -112,7 +112,9 @@ class DocumentResult:
     relationships_created: int = 0
     llm_usage: list[LLMUsage] = field(default_factory=list)
     skipped: bool = False
-    """True when the document was already COMPLETED and re-processing was skipped."""
+    """True when re-processing was skipped. Set for documents in COMPLETED, PROCESSING,
+    or ARCHIVED state (unless reprocess_archived=True). Callers should not treat skipped
+    results as errors."""
 
 
 @dataclass
@@ -769,9 +771,10 @@ class MemoryLake:
                 # Update content + metadata so the re-run uses the latest submitted values
                 # (fixes empty-source issue observed in soak test — DYT-3075).
                 prior_status = existing.status
-                # H1: Track FAILED docs — they may have partial extraction state that
-                # must be cleared before re-processing to prevent duplicate chunks.
-                if prior_status == DocumentStatus.FAILED:
+                # H1: Track FAILED and ARCHIVED docs — they may have prior extraction
+                # state (chunks, graph entities) that must be cleared before re-processing
+                # to prevent duplicate chunks/entities on retry.
+                if prior_status in (DocumentStatus.FAILED, DocumentStatus.ARCHIVED):
                     pre_failed_doc_ids.add(existing.id)
                 existing.content = content
                 existing.metadata = DocumentMetadata(
