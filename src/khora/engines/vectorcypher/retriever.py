@@ -152,6 +152,15 @@ class RetrieverConfig:
     llm_reranking_model: str = "gpt-4o-mini"
     llm_reranking_top_n: int = 5
     llm_reranking_confidence_threshold: float = 0.1  # Skip LLM reranking when cross-encoder gap >= this
+    # "Decisive winner" gate (Sprint 1 — multihop latency regression).
+    # Skip LLM rerank when the cross-encoder's #1 result is BOTH high-scoring
+    # AND well-separated from #2 — the LLM call adds 200–400 ms and rarely
+    # changes the ranking when the cross-encoder is already confident.
+    # Both conditions must hold to skip:
+    #   top_score      >= llm_reranking_min_top_score
+    #   top - second   >= llm_reranking_decisive_gap
+    llm_reranking_min_top_score: float = 0.7
+    llm_reranking_decisive_gap: float = 0.1
 
     # Session-aware parallel retrieval for cross-session temporal queries.
     # When enabled AND the query is temporal AND entry entities span multiple
@@ -823,13 +832,10 @@ class VectorCypherRetriever:
                 _skip_llm = True
                 logger.debug("Skipping LLM reranking: no version metadata in results (conversational data)")
             elif len(fused_results) >= 2:
-                gap = fused_results[0].rrf_score - fused_results[1].rrf_score
-                if gap >= self._config.llm_reranking_confidence_threshold:
+                top_score = fused_results[0].rrf_score
+                gap = top_score - fused_results[1].rrf_score
+                if self._should_skip_llm_rerank(top_score, gap):
                     _skip_llm = True
-                    logger.debug(
-                        f"Skipping LLM reranking: cross-encoder gap {gap:.4f} >= "
-                        f"threshold {self._config.llm_reranking_confidence_threshold}"
-                    )
             if not _skip_llm:
                 with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused_results)):
                     fused_results = await self._apply_llm_reranking(query, fused_results, limit)
@@ -1227,6 +1233,39 @@ class VectorCypherRetriever:
             logger.warning(f"Cross-encoder reranking failed, keeping original order: {e}")
             return fused_results
 
+    def _should_skip_llm_rerank(self, top_score: float, gap: float) -> bool:
+        """Decide whether to skip the LLM rerank step.
+
+        The LLM rerank call adds 200–400 ms per query. Two independent gates
+        let us skip when the cross-encoder ranking is already trustworthy:
+
+        1. ``gap`` gate (legacy): the cross-encoder's #1 vs #2 gap is large
+           enough that LLM scoring is unlikely to flip them. Tunable via
+           ``llm_reranking_confidence_threshold``.
+
+        2. ``decisive winner`` gate (Sprint 1): the cross-encoder's #1 has a
+           high absolute score AND a meaningful gap to #2. This catches the
+           common case where #1 is a clear answer (top_score ~ 0.85) with a
+           solid lead (gap ~ 0.15) — the legacy gap-only gate may have a
+           threshold low enough that we still pay LLM cost on these.
+
+        Returns ``True`` when EITHER gate fires.
+        """
+        if gap >= self._config.llm_reranking_confidence_threshold:
+            logger.debug(
+                f"Skipping LLM reranking: cross-encoder gap {gap:.4f} >= "
+                f"threshold {self._config.llm_reranking_confidence_threshold}"
+            )
+            return True
+        if top_score >= self._config.llm_reranking_min_top_score and gap >= self._config.llm_reranking_decisive_gap:
+            logger.debug(
+                f"Skipping LLM reranking: decisive winner "
+                f"(top={top_score:.4f} >= {self._config.llm_reranking_min_top_score}, "
+                f"gap={gap:.4f} >= {self._config.llm_reranking_decisive_gap})"
+            )
+            return True
+        return False
+
     async def _apply_llm_reranking(
         self,
         query: str,
@@ -1442,8 +1481,9 @@ class VectorCypherRetriever:
                 if not _has_versions_simple:
                     _skip_llm_simple = True
                 elif len(chunk_results) >= 2:
-                    _gap = chunk_results[0][1] - chunk_results[1][1]
-                    if _gap >= self._config.llm_reranking_confidence_threshold:
+                    _top_score = chunk_results[0][1]
+                    _gap = _top_score - chunk_results[1][1]
+                    if self._should_skip_llm_rerank(_top_score, _gap):
                         _skip_llm_simple = True
                 if not _skip_llm_simple:
                     fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
