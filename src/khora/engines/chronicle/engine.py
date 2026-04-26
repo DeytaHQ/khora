@@ -233,17 +233,31 @@ class ChronicleEngine:
         config: KhoraConfig,
         *,
         storage_config: StorageConfig | None = None,
+        abstention_min_chunks: int = 1,
+        abstention_min_top_score: float = 0.3,
+        abstention_combined_threshold: float = 0.5,
     ) -> None:
         """Initialize the Chronicle engine.
 
         Args:
             config: KhoraConfig instance
             storage_config: Storage configuration (derived from config if None) - deprecated
+            abstention_min_chunks: Minimum chunk count below which the
+                ``chunks_below_min`` abstention flag fires.
+            abstention_min_top_score: Top-chunk score below which the
+                ``top_score_low`` abstention flag fires.
+            abstention_combined_threshold: Combined-score threshold at or above
+                which ``should_abstain`` becomes True. See
+                ``_compute_abstention_signals`` for the weighting scheme.
         """
         self._config = config
 
         # Build storage config — skip graph backend (chronicle is PostgreSQL + pgvector only)
         self._storage_config = storage_config or build_storage_config(config, skip_graph=True)
+
+        self._abstention_min_chunks = abstention_min_chunks
+        self._abstention_min_top_score = abstention_min_top_score
+        self._abstention_combined_threshold = abstention_combined_threshold
 
         self._storage: StorageCoordinator | None = None
         self._embedder: LiteLLMEmbedder | None = None
@@ -725,6 +739,12 @@ class ChronicleEngine:
         context_parts = [chunk.content for chunk, _score in chunks_with_scores]
         context_text = "\n\n---\n\n".join(context_parts[:limit])
 
+        # ── Abstention signals (DYT-3145) ───────────────────────────────
+        # Passive metadata for downstream consumers (LLM answer-generation)
+        # to decide whether to refuse vs answer.  Does NOT alter retrieval.
+        entity_hits: list[tuple[Entity, float]] = []  # Phase 2: entity-level results
+        abstention_signals = self._compute_abstention_signals(chunks_with_scores, entity_hits)
+
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
         logger.debug(
@@ -738,7 +758,7 @@ class ChronicleEngine:
             query=query,
             namespace_id=namespace_id,
             chunks=chunks_with_scores,
-            entities=[],  # Phase 2: entity-level results
+            entities=entity_hits,
             context_text=context_text,
             metadata={
                 "engine": "chronicle",
@@ -750,9 +770,42 @@ class ChronicleEngine:
                 },
                 "decay_weight": decay_weight,
                 "max_raw_vector_score": max_raw_cosine,
+                "abstention_signals": abstention_signals,
                 "timings": timings,
             },
         )
+
+    def _compute_abstention_signals(
+        self,
+        chunks: list[tuple[Chunk, float]],
+        entities: list[tuple[Entity, float]],
+    ) -> dict[str, Any]:
+        """Compute passive abstention signals for downstream answer-generation.
+
+        Returns a dict with four boolean flags, a combined float score, and
+        a convenience ``should_abstain`` flag derived from the configured
+        threshold.  Pure function over ``chunks`` and ``entities`` — does
+        not touch storage.  See ``ChronicleEngine.__init__`` for the
+        tunable thresholds.
+        """
+        entities_empty = len(entities) == 0
+        chunks_empty = len(chunks) == 0
+        chunks_below_min = len(chunks) < self._abstention_min_chunks
+        top_score = chunks[0][1] if chunks else 0.0
+        top_score_low = top_score < self._abstention_min_top_score
+
+        # Weighted boolean signals: any one fires → 0.3-0.4; all three → 1.0.
+        # chunks_below_min is weighted highest because zero/few chunks is the
+        # strongest signal that retrieval failed.
+        combined = 0.3 * float(entities_empty) + 0.4 * float(chunks_below_min) + 0.3 * float(top_score_low)
+        return {
+            "entities_empty": entities_empty,
+            "chunks_empty": chunks_empty,
+            "chunks_below_min": chunks_below_min,
+            "top_score_low": top_score_low,
+            "combined_score": combined,
+            "should_abstain": combined >= self._abstention_combined_threshold,
+        }
 
     # ------------------------------------------------------------------
     # Retrieval channels (Phase 2)

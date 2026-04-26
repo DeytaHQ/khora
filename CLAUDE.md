@@ -155,6 +155,7 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **Selective extraction** — KET-RAG style: scores chunk importance, sends top 70% to LLM, rest get co-occurrence edges only
 - **Entity resolution** — multi-strategy dedup with per-type thresholds (PERSON 0.92, DATE 0.95, default 0.85)
 - **Semantic expansion** — optional cross-tool entity unification + relationship inference (4 modes: smart/batch/incremental/none)
+- **Chronicle abstention signals** — `RecallResult.metadata["abstention_signals"]` exposes 4 boolean flags (`entities_empty`, `chunks_empty`, `chunks_below_min`, `top_score_low`), a weighted `combined_score` (0.0 high-confidence → 1.0 should-abstain), and a `should_abstain` convenience flag for downstream LLM answer-generation. Passive signals — chronicle still returns chunks even when they trip. Tunable via `ChronicleEngine` kwargs `abstention_min_chunks`, `abstention_min_top_score`, `abstention_combined_threshold`.
 
 ### Optional Dependencies
 - **spaCy:** `_HAS_SPACY` flag, falls back to regex sentence splitting
