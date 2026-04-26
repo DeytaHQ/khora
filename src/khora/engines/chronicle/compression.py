@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
@@ -38,44 +38,49 @@ class FactOperation(str, Enum):
 
 @dataclass(slots=True)
 class MemoryFact:
-    """An atomic fact extracted from conversation memory.
+    """An atomic SVO fact extracted from conversation memory.
 
-    Represents the smallest unit of retrievable knowledge — a single
-    statement that can be independently verified, updated, or deleted.
-    Based on EMem's Elementary Discourse Units (84.9% LongMemEval).
+    Matches the ``memory_facts`` schema introduced in Chronicle #1
+    (migration 024): subject/predicate/object_/fact_text plus supersession
+    tracking. ``fact_text`` is the natural-language form used for display
+    and retrieval; the SVO triple powers structured queries and reconciliation.
     """
 
+    # Identity
     id: UUID = field(default_factory=uuid4)
     namespace_id: UUID | None = None
-    chunk_id: UUID | None = None
 
-    # The fact itself
-    content: str = ""
+    # Atomic SVO claim (matches memory_facts table)
+    subject: str = ""
+    predicate: str = ""
+    object_: str = ""
+    fact_text: str = ""
 
-    # Subject and category for dedup
-    subject: str = ""  # Primary entity this fact is about
-    category: str = ""  # Topic category (preference, fact, event, opinion)
-
-    # Temporal
-    observation_date: datetime | None = None
-    referenced_date: datetime | None = None
-
-    # State
-    is_active: bool = True  # False = superseded or deleted
-    superseded_by: UUID | None = None  # ID of the fact that replaced this
+    # Confidence
     confidence: float = 1.0
 
-    # Source tracking
-    source_text: str = ""
+    # Supersession tracking
+    is_active: bool = True
+    superseded_by: UUID | None = None
+
+    # Source tracking — list of chunk IDs that contributed to this fact
+    source_chunk_ids: list[UUID] = field(default_factory=list)
+
+    # Timestamps (set by DB on insert; optional in-memory)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": str(self.id),
-            "content": self.content,
             "subject": self.subject,
-            "category": self.category,
-            "is_active": self.is_active,
+            "predicate": self.predicate,
+            "object": self.object_,
+            "fact_text": self.fact_text,
             "confidence": self.confidence,
+            "is_active": self.is_active,
+            "superseded_by": str(self.superseded_by) if self.superseded_by else None,
+            "source_chunk_ids": [str(cid) for cid in self.source_chunk_ids],
         }
 
 
@@ -102,17 +107,17 @@ class CompressionResult:
 # ---------------------------------------------------------------------------
 
 _FACT_EXTRACTION_SYSTEM = """\
-You are a precise fact extractor. Given a text, extract atomic facts — \
-each fact should be a single, self-contained statement that can be \
-independently verified.
+You are a precise fact extractor. Given a text, extract atomic SVO facts — \
+each fact is a (subject, predicate, object) triple expressing a single \
+self-contained claim that can be independently verified.
 
 Return a JSON array:
 [
   {
-    "content": "The complete atomic fact as a clear statement",
     "subject": "Primary entity this fact is about",
-    "category": "preference | fact | event | opinion | state",
-    "referenced_date": "ISO date if mentioned, or null",
+    "predicate": "relation or attribute (e.g. works_at, lives_in, prefers, is)",
+    "object": "value or related entity",
+    "fact_text": "Natural-language form of the fact",
     "confidence": 0.0-1.0
   }
 ]
@@ -121,8 +126,8 @@ Rules:
 - Each fact must be self-contained (understandable without context)
 - Resolve pronouns to actual names
 - One fact per statement — don't combine multiple facts
-- Categories: preference (likes/dislikes), fact (verifiable), event (happened),
-  opinion (belief/view), state (current status/condition)
+- ``predicate`` should be a short relation token (snake_case preferred)
+- ``fact_text`` is the natural sentence a human would read
 - Return [] if no facts can be extracted"""
 
 _CONTRADICTION_SYSTEM = """\
@@ -133,8 +138,7 @@ Return a JSON object:
 {
   "operation": "add | update | delete | noop",
   "target_id": "ID of the existing fact to update/delete, or null for add",
-  "reasoning": "Brief explanation",
-  "updated_content": "New content if operation is update, or null"
+  "reasoning": "Brief explanation"
 }
 
 Rules:
@@ -152,11 +156,11 @@ Rules:
 
 
 class FactExtractor:
-    """Extracts atomic facts from text and manages contradiction resolution.
+    """Extracts atomic SVO facts from text.
 
-    Two-phase operation:
-    1. Extract: Break text into atomic facts (EDUs)
-    2. Reconcile: Check each fact against existing facts for contradictions
+    Single-purpose: text → list[MemoryFact]. Reconciliation (ADD/UPDATE/
+    DELETE/NOOP) lives on ``MemoryCompressor.reconcile_fact`` so the
+    extractor stays a thin wrapper around the LLM call.
     """
 
     def __init__(self, model: str = "gpt-4o-mini") -> None:
@@ -173,16 +177,14 @@ class FactExtractor:
 
         Args:
             text: Source text to extract facts from.
-            chunk_id: Optional chunk ID for linking.
+            chunk_id: Optional chunk ID — recorded in ``source_chunk_ids``.
             namespace_id: Optional namespace for scoping.
 
         Returns:
-            List of MemoryFact objects.
+            List of MemoryFact objects. Returns [] on LLM failure.
         """
         if not text.strip():
             return []
-
-        now = datetime.now(UTC)
 
         try:
             response = await litellm.acompletion(
@@ -200,107 +202,54 @@ class FactExtractor:
             logger.debug("Fact extraction failed, returning empty")
             return []
 
-        facts = []
+        facts: list[MemoryFact] = []
         for raw in raw_facts:
             if not isinstance(raw, dict):
                 continue
-            fact_content = raw.get("content", "")
-            if not fact_content:
-                continue
+            subject = (raw.get("subject") or "").strip()
+            predicate = (raw.get("predicate") or "").strip()
+            obj = (raw.get("object") or "").strip()
+            fact_text = (raw.get("fact_text") or "").strip()
 
-            ref_date = None
-            ref_str = raw.get("referenced_date")
-            if ref_str and isinstance(ref_str, str):
-                try:
-                    ref_date = datetime.fromisoformat(ref_str.replace("Z", "+00:00"))
-                except (ValueError, TypeError):
-                    pass
+            # Require at minimum a subject and predicate; if fact_text is
+            # missing, synthesise it from the triple so downstream consumers
+            # always have a readable form.
+            if not subject or not predicate:
+                continue
+            if not fact_text:
+                fact_text = " ".join(p for p in (subject, predicate, obj) if p)
 
             facts.append(
                 MemoryFact(
-                    chunk_id=chunk_id,
                     namespace_id=namespace_id,
-                    content=fact_content,
-                    subject=raw.get("subject", ""),
-                    category=raw.get("category", "fact"),
-                    observation_date=now,
-                    referenced_date=ref_date,
+                    subject=subject,
+                    predicate=predicate,
+                    object_=obj,
+                    fact_text=fact_text,
                     confidence=float(raw.get("confidence", 0.8)),
-                    source_text=text[:500],
+                    source_chunk_ids=[chunk_id] if chunk_id else [],
                 )
             )
 
         logger.debug(f"Extracted {len(facts)} atomic facts from {len(text)} chars")
         return facts
 
-    async def reconcile_fact(
-        self,
-        new_fact: MemoryFact,
-        existing_facts: list[MemoryFact],
-    ) -> tuple[FactOperation, UUID | None, str | None]:
-        """Check a new fact against existing facts for contradictions.
-
-        Args:
-            new_fact: The newly extracted fact.
-            existing_facts: Existing facts about the same subject.
-
-        Returns:
-            Tuple of (operation, target_fact_id, updated_content).
-        """
-        if not existing_facts:
-            return FactOperation.ADD, None, None
-
-        # Build context for LLM
-        existing_list = "\n".join(
-            f"  [{f.id}] {f.content} (category: {f.category})"
-            for f in existing_facts[:10]  # Cap for token efficiency
-        )
-
-        prompt = (
-            f"NEW FACT: {new_fact.content}\n"
-            f"Subject: {new_fact.subject}\n"
-            f"Category: {new_fact.category}\n\n"
-            f"EXISTING FACTS about '{new_fact.subject}':\n{existing_list}"
-        )
-
-        try:
-            response = await litellm.acompletion(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _CONTRADICTION_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.0,
-                max_tokens=300,
-            )
-            content = response.choices[0].message.content or "{}"
-            result = _parse_json_object(content)
-        except Exception:
-            logger.debug("Contradiction check failed, defaulting to ADD")
-            return FactOperation.ADD, None, None
-
-        op_str = result.get("operation", "add").lower()
-        try:
-            operation = FactOperation(op_str)
-        except ValueError:
-            operation = FactOperation.ADD
-
-        target_id = None
-        target_str = result.get("target_id")
-        if target_str and isinstance(target_str, str):
-            try:
-                target_id = UUID(target_str)
-            except ValueError:
-                pass
-
-        updated_content = result.get("updated_content")
-
-        return operation, target_id, updated_content
-
 
 # ---------------------------------------------------------------------------
 # Memory compressor
 # ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class ReconcileAction:
+    """Result of comparing a new fact against existing facts.
+
+    ``op`` is the action to take. ``target`` is the existing fact to
+    supersede when ``op`` is UPDATE or DELETE; ``None`` for ADD/NOOP.
+    """
+
+    op: FactOperation
+    target: MemoryFact | None = None
 
 
 class MemoryCompressor:
@@ -310,10 +259,9 @@ class MemoryCompressor:
     - Observer: extracts atomic facts from recent memories
     - Reflector: consolidates older facts into summaries
 
-    The compression ratio increases with memory age:
-    - < 1 day: full text (no compression)
-    - 1-7 days: atomic facts (3-5x compression)
-    - > 7 days: consolidated summaries (5-10x compression)
+    Also exposes ``reconcile_fact`` — the ADD/UPDATE/DELETE/NOOP rule that
+    decides what to do with a freshly extracted fact given the active
+    facts already on disk for the same subject.
     """
 
     def __init__(self, model: str = "gpt-4o-mini") -> None:
@@ -326,21 +274,13 @@ class MemoryCompressor:
         *,
         namespace_id: UUID | None = None,
     ) -> tuple[list[MemoryFact], CompressionResult]:
-        """Compress a batch of chunks into atomic facts.
-
-        Args:
-            chunks: List of Chunk objects to compress.
-            namespace_id: Namespace for scoping.
-
-        Returns:
-            Tuple of (extracted_facts, compression_result).
-        """
+        """Compress a batch of chunks into atomic facts."""
         result = CompressionResult()
 
         all_facts: list[MemoryFact] = []
         for chunk in chunks:
             content = getattr(chunk, "content", str(chunk))
-            result.tokens_before += len(content) // 4  # Rough token estimate
+            result.tokens_before += len(content) // 4
 
             facts = await self._fact_extractor.extract_facts(
                 content,
@@ -350,12 +290,89 @@ class MemoryCompressor:
             all_facts.extend(facts)
             result.facts_extracted += len(facts)
 
-        # Estimate compressed token count
         for fact in all_facts:
-            result.tokens_after += len(fact.content) // 4
+            result.tokens_after += len(fact.fact_text) // 4
 
         result.facts_added = len(all_facts)
         return all_facts, result
+
+    async def reconcile_fact(
+        self,
+        existing_facts: list[MemoryFact],
+        new_fact: MemoryFact,
+    ) -> ReconcileAction:
+        """Decide ADD/UPDATE/DELETE/NOOP for a new fact.
+
+        Args:
+            existing_facts: Active facts already stored for the new fact's subject.
+            new_fact: Newly extracted fact.
+
+        Returns:
+            ReconcileAction with the operation and (for UPDATE/DELETE) the
+            target existing fact to supersede.
+        """
+        if not existing_facts:
+            return ReconcileAction(op=FactOperation.ADD)
+
+        # Cheap pre-check: identical (subject, predicate, object_) triple
+        # already exists → NOOP without spending an LLM call.
+        for f in existing_facts:
+            if f.subject == new_fact.subject and f.predicate == new_fact.predicate and f.object_ == new_fact.object_:
+                return ReconcileAction(op=FactOperation.NOOP, target=f)
+
+        existing_list = "\n".join(
+            f"  [{f.id}] {f.fact_text} (predicate: {f.predicate}, object: {f.object_})" for f in existing_facts[:10]
+        )
+
+        prompt = (
+            f"NEW FACT: {new_fact.fact_text}\n"
+            f"Subject: {new_fact.subject}\n"
+            f"Predicate: {new_fact.predicate}\n"
+            f"Object: {new_fact.object_}\n\n"
+            f"EXISTING FACTS about '{new_fact.subject}':\n{existing_list}"
+        )
+
+        try:
+            response = await litellm.acompletion(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": _CONTRADICTION_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=200,
+            )
+            content = response.choices[0].message.content or "{}"
+            result = _parse_json_object(content)
+        except Exception:
+            logger.debug("Contradiction check failed, defaulting to ADD")
+            return ReconcileAction(op=FactOperation.ADD)
+
+        op_str = str(result.get("operation", "add")).lower()
+        try:
+            operation = FactOperation(op_str)
+        except ValueError:
+            operation = FactOperation.ADD
+
+        target: MemoryFact | None = None
+        target_str = result.get("target_id")
+        if target_str and isinstance(target_str, str):
+            try:
+                target_id = UUID(target_str)
+            except ValueError:
+                target_id = None
+            if target_id is not None:
+                for f in existing_facts:
+                    if f.id == target_id:
+                        target = f
+                        break
+
+        # Defensive: UPDATE/DELETE/NOOP require a target. Without one, the
+        # safe action is ADD (treat as a new fact) so we never lose data.
+        if operation in (FactOperation.UPDATE, FactOperation.DELETE, FactOperation.NOOP) and target is None:
+            operation = FactOperation.ADD
+
+        return ReconcileAction(op=operation, target=target)
 
 
 # ---------------------------------------------------------------------------

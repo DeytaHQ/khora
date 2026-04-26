@@ -25,7 +25,7 @@ Usage:
 
 from __future__ import annotations
 
-from .compression import FactExtractor, FactOperation, MemoryCompressor, MemoryFact
+from .compression import FactExtractor, FactOperation, MemoryCompressor, MemoryFact, ReconcileAction
 from .engine import ChronicleEngine, ChronicleStorageBackend
 from .events import ChronicleEvent, EventExtractor
 from .lancedb_store import build_lancedb_coordinator
@@ -39,5 +39,6 @@ __all__ = [
     "FactOperation",
     "MemoryCompressor",
     "MemoryFact",
+    "ReconcileAction",
     "build_lancedb_coordinator",
 ]

@@ -37,6 +37,12 @@ from loguru import logger
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import Chunk, Document, DocumentMetadata, Entity, MemoryNamespace
 from khora.engines._storage_config import build_storage_config
+from khora.engines.chronicle.compression import (
+    FactExtractor,
+    FactOperation,
+    MemoryCompressor,
+    MemoryFact,
+)
 from khora.engines.chronicle.events import ChronicleEvent, EventExtractor
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
@@ -295,9 +301,12 @@ class ChronicleEngine:
         self._storage: StorageCoordinator | None = None
         self._embedder: LiteLLMEmbedder | None = None
         self._event_extractor: EventExtractor | None = None
-        # Soft cap on concurrent LLM event extractions per remember/remember_batch.
-        # Event extraction is one LLM call per chunk; without a cap, large
-        # batches would fan out unboundedly.
+        self._fact_extractor: FactExtractor | None = None
+        self._compressor: MemoryCompressor | None = None
+        # Soft cap on concurrent LLM extractions per remember/remember_batch.
+        # Both event and fact extraction are one LLM call per chunk; the
+        # same semaphore caps the combined fan-out — they share the LLM
+        # provider as a single resource pool.
         self._max_concurrent_extractions: int = 10
         self._connected = False
 
@@ -557,6 +566,219 @@ class ChronicleEngine:
         return len(events)
 
     # =========================================================================
+    # Fact extraction wiring (Chronicle #3)
+    # =========================================================================
+
+    @staticmethod
+    def _facts_enabled(namespace: MemoryNamespace | None, expertise: ExpertiseConfig | None) -> bool:
+        """Resolve the ``facts.enabled`` flag.
+
+        Per-namespace ``config_overrides["facts"]["enabled"]`` beats
+        ``expertise.facts.enabled``; both default to True (default-on) when
+        absent. Mirrors ``_events_enabled``.
+        """
+        if namespace is not None and namespace.config_overrides:
+            ns_facts = namespace.config_overrides.get("facts")
+            if isinstance(ns_facts, dict) and "enabled" in ns_facts:
+                return bool(ns_facts["enabled"])
+        if expertise is not None:
+            return bool(expertise.facts.enabled)
+        return True
+
+    def _get_fact_extractor(self, expertise: ExpertiseConfig | None) -> FactExtractor:
+        """Lazily construct the FactExtractor.
+
+        The model comes from ``expertise.facts.model`` when available, falling
+        back to ``config.llm.extraction_model`` and finally ``config.llm.model``.
+        """
+        if self._fact_extractor is None:
+            model = (
+                (expertise.facts.model if expertise is not None else None)
+                or self._config.llm.extraction_model
+                or self._config.llm.model
+            )
+            self._fact_extractor = FactExtractor(model=model)
+        return self._fact_extractor
+
+    def _get_compressor(self, expertise: ExpertiseConfig | None) -> MemoryCompressor:
+        """Lazily construct the MemoryCompressor (used for reconciliation)."""
+        if self._compressor is None:
+            model = (
+                (expertise.facts.model if expertise is not None else None)
+                or self._config.llm.extraction_model
+                or self._config.llm.model
+            )
+            self._compressor = MemoryCompressor(model=model)
+        return self._compressor
+
+    async def _extract_facts_for_chunk(
+        self,
+        chunk: Chunk,
+        namespace_id: UUID,
+        extractor: FactExtractor,
+        sem: asyncio.Semaphore,
+    ) -> list[MemoryFact]:
+        """Run the fact extractor on a single chunk, swallowing per-chunk failures."""
+        async with sem:
+            try:
+                facts = await extractor.extract_facts(
+                    chunk.content,
+                    chunk_id=chunk.id,
+                    namespace_id=namespace_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Fact extraction failed for chunk %s: %s",
+                    chunk.id,
+                    exc,
+                )
+                return []
+        # Defensive: stamp namespace_id and chunk linkage in case the
+        # extractor was replaced with a stub that doesn't set them.
+        for f in facts:
+            f.namespace_id = namespace_id
+            if chunk.id not in f.source_chunk_ids:
+                f.source_chunk_ids.append(chunk.id)
+        return facts
+
+    async def _reconcile_facts(
+        self,
+        new_facts: list[MemoryFact],
+        namespace_id: UUID,
+        expertise: ExpertiseConfig | None,
+    ) -> int:
+        """Apply ADD/UPDATE/DELETE/NOOP reconciliation and persist results.
+
+        Strategy:
+          1. Group new facts by subject.
+          2. Cache active facts per subject (one query per subject).
+          3. For each new fact, ask the compressor what to do:
+             - ADD     → queue for write
+             - UPDATE  → queue for write + supersede the target
+             - DELETE  → supersede only (no write)
+             - NOOP    → skip
+          4. After processing a subject, append accepted facts to its in-memory
+             cache so subsequent new facts about the same subject reconcile
+             against everything we just decided to keep — prevents within-batch
+             thrashing when two sentences contain the same fact.
+
+        Returns the number of new facts effectively persisted (ADD + UPDATE).
+        """
+        if not new_facts:
+            return 0
+
+        compressor = self._get_compressor(expertise)
+        storage = self._get_storage()
+
+        # Cache of active facts per subject — populated lazily.
+        active_by_subject: dict[str, list[MemoryFact]] = {}
+
+        facts_to_write: list[MemoryFact] = []
+        # Pairs of (old_fact_id, new_fact_id) for supersede calls. We resolve
+        # the new ID *after* write_facts so the new fact has a real DB id.
+        pending_supersedes: list[tuple[UUID, MemoryFact]] = []
+        # DELETE only — supersede pointing at *no* new fact (NULL) — done now
+        # because no write is needed.
+        deletes: list[UUID] = []
+
+        for new_fact in new_facts:
+            subject = new_fact.subject
+            if subject not in active_by_subject:
+                try:
+                    existing = await storage.query_active_facts_for_subject(namespace_id, subject)
+                except Exception as exc:
+                    logger.warning(
+                        "query_active_facts_for_subject failed for subject %r: %s — falling back to ADD",
+                        subject,
+                        exc,
+                    )
+                    existing = []
+                active_by_subject[subject] = list(existing)
+
+            existing_for_subject = active_by_subject[subject]
+            action = await compressor.reconcile_fact(existing_for_subject, new_fact)
+
+            if action.op is FactOperation.ADD:
+                facts_to_write.append(new_fact)
+                active_by_subject[subject].append(new_fact)
+            elif action.op is FactOperation.UPDATE:
+                facts_to_write.append(new_fact)
+                if action.target is not None:
+                    pending_supersedes.append((action.target.id, new_fact))
+                    # Drop the old fact from the in-memory cache so subsequent
+                    # reconciliations within this batch don't see it as active.
+                    active_by_subject[subject] = [f for f in active_by_subject[subject] if f.id != action.target.id]
+                active_by_subject[subject].append(new_fact)
+            elif action.op is FactOperation.DELETE:
+                if action.target is not None:
+                    deletes.append(action.target.id)
+                    active_by_subject[subject] = [f for f in active_by_subject[subject] if f.id != action.target.id]
+            # NOOP: skip — nothing to do.
+
+        # Persist new ADDs/UPDATEs first so we have stable IDs to point at.
+        if facts_to_write:
+            try:
+                await storage.write_facts(facts_to_write, namespace_id=namespace_id)
+            except Exception as exc:
+                logger.warning("write_facts failed during reconciliation: %s", exc)
+                return 0
+
+        # Supersede old → new for UPDATEs.
+        for old_id, new_fact in pending_supersedes:
+            try:
+                await storage.supersede_fact(old_id, new_fact.id)
+            except Exception as exc:
+                logger.warning("supersede_fact failed for %s -> %s: %s", old_id, new_fact.id, exc)
+
+        # DELETE: mark the old fact inactive without a replacement. The
+        # storage contract takes a UUID for ``superseded_by``; passing the
+        # fact's own id keeps the row marked inactive while leaving a
+        # self-reference as the "tombstone" pointer.
+        for old_id in deletes:
+            try:
+                await storage.supersede_fact(old_id, old_id)
+            except Exception as exc:
+                logger.warning("supersede_fact (delete) failed for %s: %s", old_id, exc)
+
+        return len(facts_to_write)
+
+    async def _extract_and_persist_facts(
+        self,
+        chunks: list[Chunk],
+        namespace_id: UUID,
+        expertise: ExpertiseConfig | None,
+    ) -> int:
+        """Extract facts from chunks, reconcile, persist, and return count.
+
+        Returns the number of facts effectively persisted (ADD + UPDATE).
+        Resolution of the ``facts.enabled`` flag is the caller's responsibility.
+        """
+        if not chunks:
+            return 0
+        extractor = self._get_fact_extractor(expertise)
+        sem = asyncio.Semaphore(self._max_concurrent_extractions)
+        per_chunk = await asyncio.gather(
+            *(self._extract_facts_for_chunk(c, namespace_id, extractor, sem) for c in chunks),
+            return_exceptions=False,
+        )
+        new_facts: list[MemoryFact] = [f for sub in per_chunk for f in sub]
+        if not new_facts:
+            return 0
+
+        reconcile = expertise.facts.reconcile if expertise is not None else True
+        if reconcile:
+            return await self._reconcile_facts(new_facts, namespace_id, expertise)
+
+        # Fast path: no reconciliation, write everything as ADD.
+        try:
+            await self._get_storage().write_facts(new_facts, namespace_id=namespace_id)
+        except Exception as exc:
+            logger.warning("write_facts failed (skipping fact persistence): %s", exc)
+            return 0
+        logger.debug("Persisted %d memory facts across %d chunks (no reconcile)", len(new_facts), len(chunks))
+        return len(new_facts)
+
+    # =========================================================================
     # Core API: remember, recall, forget
     # =========================================================================
 
@@ -663,29 +885,40 @@ class ChronicleEngine:
         result = await process_document(document, storage, **kwargs)
         timings["pipeline_ms"] = (time.perf_counter() - start) * 1000
 
-        # Chronicle #2: extract SVO events from each persisted chunk and
-        # write them to chronicle_events. Default-on per ExpertiseConfig,
-        # per-namespace override via ``namespace.config_overrides["events"]``.
+        # Chronicle #2/#3: extract SVO events + atomic facts from every
+        # persisted chunk. Default-on per ExpertiseConfig with per-namespace
+        # overrides via ``namespace.config_overrides[{"events"|"facts"}]``.
+        # Both share the same chunk fetch and per-chunk semaphore.
         events_extracted = 0
+        facts_extracted = 0
         try:
             namespace = await storage.get_namespace(namespace_id)
         except Exception:
             namespace = None
-        if self._events_enabled(namespace, expertise):
+
+        run_events = self._events_enabled(namespace, expertise)
+        run_facts = self._facts_enabled(namespace, expertise)
+
+        if run_events or run_facts:
             chunk_ids = result.get("chunk_ids", []) or []
             if chunk_ids:
-                start = time.perf_counter()
                 chunks_map = await storage.get_chunks_batch(list(chunk_ids))
                 chunks = [chunks_map[cid] for cid in chunk_ids if cid in chunks_map]
-                events_extracted = await self._extract_and_persist_events(chunks, namespace_id, expertise)
-                timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
+                if run_events:
+                    start = time.perf_counter()
+                    events_extracted = await self._extract_and_persist_events(chunks, namespace_id, expertise)
+                    timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
+                if run_facts:
+                    start = time.perf_counter()
+                    facts_extracted = await self._extract_and_persist_facts(chunks, namespace_id, expertise)
+                    timings["fact_extraction_ms"] = (time.perf_counter() - start) * 1000
 
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
         logger.debug(
             f"remember() completed: {result['chunks']} chunks, {result['entities']} entities, "
-            f"{result['relationships']} relationships, {events_extracted} events "
-            f"in {timings['total_ms']:.1f}ms"
+            f"{result['relationships']} relationships, {events_extracted} events, "
+            f"{facts_extracted} facts in {timings['total_ms']:.1f}ms"
         )
 
         return RememberResult(
@@ -694,7 +927,11 @@ class ChronicleEngine:
             chunks_created=result["chunks"],
             entities_extracted=result["entities"],
             relationships_created=result["relationships"],
-            metadata={"timings": timings, "events_extracted": events_extracted},
+            metadata={
+                "timings": timings,
+                "events_extracted": events_extracted,
+                "facts_extracted": facts_extracted,
+            },
         )
 
     @trace("khora.chronicle.recall")
@@ -1457,25 +1694,35 @@ class ChronicleEngine:
         result = await ingest_documents(namespace_id, doc_inputs, self._get_storage(), **ingest_kwargs)
         timings["ingest_pipeline_ms"] = (time.perf_counter() - start) * 1000
 
-        # Chronicle #2: extract events for every chunk created across the
-        # batch.  We collect all chunk_ids (preserving per-document grouping
-        # is not required because events stand alone, linked back via
-        # ``chunk_id``).
+        # Chronicle #2/#3: extract events + facts for every chunk created
+        # across the batch.  Both helpers iterate the full chunk set
+        # produced by the ingest pipeline; they share the per-chunk
+        # extraction semaphore.
         events_extracted = 0
+        facts_extracted = 0
         try:
             namespace = await self._get_storage().get_namespace(namespace_id)
         except Exception:
             namespace = None
-        if self._events_enabled(namespace, expertise):
+
+        run_events = self._events_enabled(namespace, expertise)
+        run_facts = self._facts_enabled(namespace, expertise)
+
+        if run_events or run_facts:
             all_chunk_ids: list[UUID] = []
             for per_doc in result.get("per_document_results", []):
                 all_chunk_ids.extend(per_doc.get("chunk_ids", []) or [])
             if all_chunk_ids:
-                start = time.perf_counter()
                 chunks_map = await self._get_storage().get_chunks_batch(all_chunk_ids)
                 chunks = [chunks_map[cid] for cid in all_chunk_ids if cid in chunks_map]
-                events_extracted = await self._extract_and_persist_events(chunks, namespace_id, expertise)
-                timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
+                if run_events:
+                    start = time.perf_counter()
+                    events_extracted = await self._extract_and_persist_events(chunks, namespace_id, expertise)
+                    timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
+                if run_facts:
+                    start = time.perf_counter()
+                    facts_extracted = await self._extract_and_persist_facts(chunks, namespace_id, expertise)
+                    timings["fact_extraction_ms"] = (time.perf_counter() - start) * 1000
 
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
@@ -1487,7 +1734,7 @@ class ChronicleEngine:
         logger.info(
             f"remember_batch() completed: {processed}/{len(documents)} docs, "
             f"{result.get('total_chunks', 0)} chunks, {result.get('total_entities', 0)} entities, "
-            f"{events_extracted} events in {timings['total_ms']:.1f}ms "
+            f"{events_extracted} events, {facts_extracted} facts in {timings['total_ms']:.1f}ms "
             f"({timings.get('docs_per_second', 0):.1f} docs/sec)"
         )
 
@@ -1505,7 +1752,11 @@ class ChronicleEngine:
             chunks=result.get("total_chunks", 0),
             entities=result.get("total_entities", 0),
             relationships=result.get("total_relationships", 0) + result.get("total_inferred_relationships", 0),
-            metadata={"timings": timings, "events_extracted": events_extracted},
+            metadata={
+                "timings": timings,
+                "events_extracted": events_extracted,
+                "facts_extracted": facts_extracted,
+            },
         )
 
     # =========================================================================

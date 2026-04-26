@@ -939,9 +939,9 @@ class PgVectorBackend(AsyncSessionMixin):
     ) -> list[UUID]:
         """Insert memory_facts rows; returns inserted IDs in input order.
 
-        Adapts the existing ``MemoryFact`` dataclass (subject/category/content)
-        to the SVO schema: predicate <- category, object <- subject (placeholder
-        until Chronicle #3 reshapes the dataclass), fact_text <- content.
+        Maps ``MemoryFact`` (subject/predicate/object_/fact_text) directly to
+        the ``memory_facts`` table — Chronicle #3 reshaped the dataclass so
+        the placeholder adapter from Chronicle #1 is no longer needed.
         """
         if not facts:
             return []
@@ -950,17 +950,13 @@ class PgVectorBackend(AsyncSessionMixin):
                 id=getattr(f, "id", None),
                 namespace_id=namespace_id,
                 subject=f.subject or "",
-                # ``predicate`` and ``object_`` arrive once Chronicle #3 reshapes
-                # the dataclass; until then we stash the category as predicate
-                # and the subject as object placeholder so the row remains
-                # round-trippable. Engine wiring will replace this.
-                predicate=getattr(f, "predicate", None) or getattr(f, "category", "") or "fact",
-                object_=getattr(f, "object", None) or getattr(f, "object_", None) or f.subject or "",
-                fact_text=getattr(f, "fact_text", None) or getattr(f, "content", "") or "",
+                predicate=f.predicate or "",
+                object_=f.object_ or "",
+                fact_text=f.fact_text or "",
                 confidence=float(f.confidence),
                 is_active=bool(getattr(f, "is_active", True)),
                 superseded_by=getattr(f, "superseded_by", None),
-                source_chunk_ids=[f.chunk_id] if getattr(f, "chunk_id", None) else [],
+                source_chunk_ids=list(getattr(f, "source_chunk_ids", []) or []),
             )
             for f in facts
         ]
