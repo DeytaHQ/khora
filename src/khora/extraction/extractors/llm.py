@@ -765,6 +765,8 @@ class LLMEntityExtractor(EntityExtractor):
                         effective_max_tokens = self._max_tokens
 
                         with trace_span("khora.extraction.llm_call", model=self._model, call_type="single"):
+                            from khora.config.llm import get_shared_session
+
                             response = await litellm.acompletion(
                                 model=self._model,
                                 messages=[
@@ -776,6 +778,7 @@ class LLMEntityExtractor(EntityExtractor):
                                 timeout=self._timeout,
                                 num_retries=0,
                                 response_format=self._get_response_format(),
+                                shared_session=get_shared_session(),
                             )
                         _latency = (_time.perf_counter() - _t0) * 1000
                         self._log_rate_limit_headers(response)
@@ -909,6 +912,8 @@ class LLMEntityExtractor(EntityExtractor):
 
                 _t0 = _time.perf_counter()
                 with trace_span("khora.extraction.llm_call", model=self._model, call_type="relationship_second_pass"):
+                    from khora.config.llm import get_shared_session
+
                     response = await litellm.acompletion(
                         model=self._model,
                         messages=[
@@ -919,6 +924,7 @@ class LLMEntityExtractor(EntityExtractor):
                         max_tokens=self._max_tokens,
                         timeout=self._timeout,
                         response_format=self._get_response_format(),
+                        shared_session=get_shared_session(),
                     )
                 _latency = (_time.perf_counter() - _t0) * 1000
                 self._log_rate_limit_headers(response)
@@ -1675,6 +1681,8 @@ Return ONLY valid JSON, no other text."""
                             call_type="multi_batch",
                             batch_size=len(texts),
                         ):
+                            from khora.config.llm import get_shared_session
+
                             response = await litellm.acompletion(
                                 model=self._model,
                                 messages=[
@@ -1686,6 +1694,7 @@ Return ONLY valid JSON, no other text."""
                                 timeout=self._timeout,
                                 num_retries=0,
                                 response_format=self._get_multi_response_format(),
+                                shared_session=get_shared_session(),
                             )
                         _latency = (_time.perf_counter() - _t0) * 1000
                         self._log_rate_limit_headers(response)

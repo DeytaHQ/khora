@@ -163,6 +163,9 @@ class LiteLLMConfig(BaseModel):
         return key
 
 
+_shared_aiohttp_session: Any = None
+
+
 def configure_litellm(config: LiteLLMConfig | None = None) -> None:
     """Configure LiteLLM with the given configuration.
 
@@ -172,6 +175,8 @@ def configure_litellm(config: LiteLLMConfig | None = None) -> None:
     Args:
         config: LiteLLM configuration (uses defaults if None)
     """
+    global _shared_aiohttp_session
+
     try:
         import litellm
     except ImportError:
@@ -200,7 +205,36 @@ def configure_litellm(config: LiteLLMConfig | None = None) -> None:
         elif "gemini" in config.model.lower():
             os.environ.setdefault("GOOGLE_API_KEY", api_key)
 
+    # Create a shared aiohttp session to prevent connection pool leak.
+    # litellm.aclient_session / global overrides are ignored by actual call paths;
+    # the only reliable mechanism is passing shared_session per call.
+    try:
+        import aiohttp
+
+        connector = aiohttp.TCPConnector(limit=20, limit_per_host=10, keepalive_timeout=30)
+        _shared_aiohttp_session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=600),
+        )
+        logger.debug("Shared aiohttp session created for litellm calls")
+    except ImportError:
+        logger.debug("aiohttp not available, skipping shared session creation")
+
     logger.info(f"LiteLLM configured with model: {config.model}")
+
+
+def get_shared_session() -> Any:
+    """Return the shared aiohttp session for litellm calls, or None if not initialised."""
+    return _shared_aiohttp_session
+
+
+async def close_shared_session() -> None:
+    """Close the shared aiohttp session. Call on engine/app shutdown."""
+    global _shared_aiohttp_session
+    if _shared_aiohttp_session is not None:
+        await _shared_aiohttp_session.close()
+        _shared_aiohttp_session = None
+        logger.debug("Shared aiohttp session closed")
 
 
 def create_litellm_router(config: LiteLLMConfig) -> Any:

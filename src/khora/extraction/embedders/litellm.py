@@ -399,11 +399,14 @@ class LiteLLMEmbedder(Embedder):
                     req_span.set_attribute("timeout", self._timeout)
 
                     _t0 = _time.perf_counter()
+                    from khora.config.llm import get_shared_session
+
                     response = await litellm.aembedding(
                         model=self._model,
                         input=sanitized,
                         timeout=self._timeout,
                         dimensions=self._dimension,
+                        shared_session=get_shared_session(),
                     )
                     _latency = (_time.perf_counter() - _t0) * 1000
                     req_span.set_attribute("latency_ms", round(_latency, 2))

@@ -410,6 +410,9 @@ class VectorCypherEngine:
             timeout=self._config.llm.timeout,
             max_retries=self._config.llm.max_retries,
         )
+        from khora.config.llm import configure_litellm
+
+        configure_litellm(llm_config)
         self._embedder = LiteLLMEmbedder.from_config(llm_config)
 
         # Initialize dual node manager (Neo4j only — SurrealDB uses graph adapter).
@@ -497,6 +500,11 @@ class VectorCypherEngine:
             return
 
         logger.info("Disconnecting VectorCypher engine...")
+
+        # Close shared aiohttp session used by litellm calls
+        from khora.config.llm import close_shared_session
+
+        await close_shared_session()
 
         # Shutdown telemetry
         from khora.telemetry import shutdown_telemetry
