@@ -413,13 +413,16 @@ class StorageCoordinator:
         namespace_id: UUID,
         *,
         status: str | None = None,
+        updated_before: datetime | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Document]:
         """List documents in a namespace."""
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.list_documents(namespace_id, status=status, limit=limit, offset=offset)
+        return await self.relational.list_documents(
+            namespace_id, status=status, updated_before=updated_before, limit=limit, offset=offset
+        )
 
     async def update_document(self, document: Document) -> Document:
         """Update a document."""

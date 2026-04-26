@@ -338,23 +338,25 @@ class SurrealDBRelationalAdapter:
         namespace_id: UUID,
         *,
         status: str | None = None,
+        updated_before: datetime | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Document]:
         """List documents in a namespace, newest first."""
         ns_str = str(namespace_id)
+        conditions = ["namespace_id = $ns"]
+        params: dict = {"ns": ns_str, "lim": limit, "off": offset}
         if status:
-            rows = await self._conn.query(
-                "SELECT * FROM document "
-                "WHERE namespace_id = $ns AND status = $status "
-                "ORDER BY created_at DESC LIMIT $lim START $off",
-                {"ns": ns_str, "status": status, "lim": limit, "off": offset},
-            )
-        else:
-            rows = await self._conn.query(
-                "SELECT * FROM document WHERE namespace_id = $ns ORDER BY created_at DESC LIMIT $lim START $off",
-                {"ns": ns_str, "lim": limit, "off": offset},
-            )
+            conditions.append("status = $status")
+            params["status"] = status
+        if updated_before is not None:
+            conditions.append("updated_at < $updated_before")
+            params["updated_before"] = updated_before.isoformat()
+        where = " AND ".join(conditions)
+        rows = await self._conn.query(
+            f"SELECT * FROM document WHERE {where} ORDER BY created_at DESC LIMIT $lim START $off",
+            params,
+        )
         return [self._row_to_document(r) for r in rows]
 
     async def update_document(self, document: Document) -> Document:

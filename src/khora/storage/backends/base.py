@@ -131,6 +131,7 @@ class RelationalBackendProtocol(Protocol):
         namespace_id: UUID,
         *,
         status: str | None = None,
+        updated_before: datetime | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Document]:

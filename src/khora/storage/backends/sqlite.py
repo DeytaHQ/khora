@@ -417,21 +417,25 @@ class SQLiteRelationalBackend:
         namespace_id: UUID,
         *,
         status: str | None = None,
+        updated_before: datetime | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Document]:
         ns = str(namespace_id)
+        conditions = ["namespace_id = ?"]
+        params: list = [ns]
         if status:
-            cursor = await self._conn.execute(
-                "SELECT * FROM documents WHERE namespace_id = ? AND status = ? "
-                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (ns, status, limit, offset),
-            )
-        else:
-            cursor = await self._conn.execute(
-                "SELECT * FROM documents WHERE namespace_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (ns, limit, offset),
-            )
+            conditions.append("status = ?")
+            params.append(status)
+        if updated_before is not None:
+            conditions.append("updated_at < ?")
+            params.append(updated_before.isoformat())
+        where = " AND ".join(conditions)
+        params.extend([limit, offset])
+        cursor = await self._conn.execute(
+            f"SELECT * FROM documents WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            params,
+        )
         rows = await cursor.fetchall()
         return [self._row_to_document(r) for r in rows]
 

@@ -511,6 +511,19 @@ class PipelineSettings(BaseSettings):
         "mention_count <= this value. Set to 0 to skip all single-mention entities of these types.",
     )
 
+    # Stale PENDING document recovery (DYT-3125)
+    pending_recovery_enabled: bool = Field(
+        default=True,
+        description="Enable automatic recovery of stale PENDING documents on MemoryLake.connect(). "
+        "Documents stuck in PENDING for longer than pending_recovery_grace_period_minutes are "
+        "re-queued through the processing pipeline as a background task.",
+    )
+    pending_recovery_grace_period_minutes: int = Field(
+        default=5,
+        description="Minimum age (minutes) a PENDING document must have before it is eligible for "
+        "recovery. Avoids racing with active submit_batch workers from the previous process.",
+    )
+
 
 class TenancySettings(BaseSettings):
     """Multi-tenancy configuration settings.
