@@ -62,6 +62,9 @@ class TestSqliteMigrations:
                         "time_nodes",
                         "temporal_edges",
                         "time_edge_links",
+                        # Chronicle engine tables (024)
+                        "chronicle_events",
+                        "memory_facts",
                         # FTS5 virtual table from migration 002
                         "chunks_fts",
                         # Alembic version table
@@ -77,7 +80,7 @@ class TestSqliteMigrations:
                     # Version table must point at head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
                     version = result.scalar()
-                    assert version == "023_add_document_relationship_count"
+                    assert version == "024_chronicle_events_and_facts"
             finally:
                 await engine.dispose()
 
@@ -166,6 +169,8 @@ class TestSqliteMigrations:
                         "entities",
                         "relationships",
                         "episodes",
+                        "chronicle_events",
+                        "memory_facts",
                     }
                     leftover = core & tables
                     assert not leftover, f"Downgrade left core tables behind: {leftover}"

@@ -230,6 +230,64 @@ class ConfidenceConfig:
 
 
 @dataclass
+class EventExtractionConfig:
+    """Configuration for Chronicle event extraction.
+
+    Events are SVO (subject-verb-object) tuples with temporal information,
+    extracted by the Chronicle engine for high-precision temporal reasoning.
+    """
+
+    enabled: bool = True
+    model: str = "gpt-4o-mini"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary representation."""
+        return {
+            "enabled": self.enabled,
+            "model": self.model,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> EventExtractionConfig:
+        """Create from dictionary."""
+        return cls(
+            enabled=data.get("enabled", True),
+            model=data.get("model", "gpt-4o-mini"),
+        )
+
+
+@dataclass
+class FactExtractionConfig:
+    """Configuration for Chronicle atomic fact extraction.
+
+    Facts are atomic, self-contained statements (EDUs) extracted from text.
+    With ``reconcile=True`` they are checked against existing facts to detect
+    contradictions and supersede outdated information.
+    """
+
+    enabled: bool = True
+    model: str = "gpt-4o-mini"
+    reconcile: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary representation."""
+        return {
+            "enabled": self.enabled,
+            "model": self.model,
+            "reconcile": self.reconcile,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> FactExtractionConfig:
+        """Create from dictionary."""
+        return cls(
+            enabled=data.get("enabled", True),
+            model=data.get("model", "gpt-4o-mini"),
+            reconcile=data.get("reconcile", True),
+        )
+
+
+@dataclass
 class ExpansionConfig:
     """Configuration for semantic expansion."""
 
@@ -327,6 +385,10 @@ class ExpertiseConfig:
     # Expansion settings
     expansion: ExpansionConfig = field(default_factory=ExpansionConfig)
 
+    # Chronicle engine: event/fact extraction (defaults ON)
+    events: EventExtractionConfig = field(default_factory=EventExtractionConfig)
+    facts: FactExtractionConfig = field(default_factory=FactExtractionConfig)
+
     # Additional metadata
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -368,6 +430,8 @@ class ExpertiseConfig:
             "inference_rules": [ir.to_dict() for ir in self.inference_rules],
             "confidence": self.confidence.to_dict(),
             "expansion": self.expansion.to_dict(),
+            "events": self.events.to_dict(),
+            "facts": self.facts.to_dict(),
             "metadata": self.metadata,
         }
 
@@ -396,6 +460,12 @@ class ExpertiseConfig:
         expansion_data = data.get("expansion", {})
         expansion = ExpansionConfig.from_dict(expansion_data) if isinstance(expansion_data, dict) else expansion_data
 
+        events_data = data.get("events", {})
+        events = EventExtractionConfig.from_dict(events_data) if isinstance(events_data, dict) else events_data
+
+        facts_data = data.get("facts", {})
+        facts = FactExtractionConfig.from_dict(facts_data) if isinstance(facts_data, dict) else facts_data
+
         return cls(
             name=data.get("name", "custom"),
             version=data.get("version", "1.0.0"),
@@ -410,6 +480,8 @@ class ExpertiseConfig:
             inference_rules=inference_rules,
             confidence=confidence if isinstance(confidence, ConfidenceConfig) else ConfidenceConfig(),
             expansion=expansion if isinstance(expansion, ExpansionConfig) else ExpansionConfig(),
+            events=events if isinstance(events, EventExtractionConfig) else EventExtractionConfig(),
+            facts=facts if isinstance(facts, FactExtractionConfig) else FactExtractionConfig(),
             metadata=data.get("metadata", {}),
         )
 
@@ -556,6 +628,9 @@ __all__ = [
     "ExpansionConfig",
     "CorrelationRule",
     "InferenceRule",
+    # Chronicle engine extraction toggles (added Chronicle #1)
+    "EventExtractionConfig",
+    "FactExtractionConfig",
     # Supporting types (stable: InferenceCondition is a field of InferenceRule)
     "InferenceCondition",
     "ConfidenceLevel",

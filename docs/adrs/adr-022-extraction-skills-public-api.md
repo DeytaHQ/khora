@@ -1,7 +1,7 @@
 # ADR-022: Extraction Skills Public API
 
 - **Status:** Accepted
-- **Date:** 2026-04-16 (extended from original 2025 decision)
+- **Date:** 2026-04-16 (extended Chronicle #1: events/facts toggles)
 - **Deciders:** Khora architecture team
 
 ## Context
@@ -37,7 +37,7 @@ LLMUsage) established the same pattern.
 
 ## Decision
 
-The following seven dataclasses in `khora.extraction.skills.base` are the
+The following nine dataclasses in `khora.extraction.skills.base` are the
 **stable public API** for extraction expertise configuration:
 
 1. `ExpertiseConfig` — top-level domain knowledge definition
@@ -47,6 +47,8 @@ The following seven dataclasses in `khora.extraction.skills.base` are the
 5. `ExpansionConfig` — semantic expansion settings (mode, depth, batch size)
 6. `CorrelationRule` — cross-tool entity correlation rule
 7. `InferenceRule` — relationship inference rule
+8. `EventExtractionConfig` — Chronicle SVO event extraction toggle (added Chronicle #1)
+9. `FactExtractionConfig` — Chronicle atomic fact extraction toggle (added Chronicle #1)
 
 `InferenceCondition` is a supporting type (a field of `InferenceRule.when`)
 and is also part of the stable surface. `ConfidenceLevel` (enum) and
@@ -65,6 +67,8 @@ from khora.extraction.skills import (
     CorrelationRule,
     InferenceRule,
     InferenceCondition,
+    EventExtractionConfig,
+    FactExtractionConfig,
 )
 ```
 
