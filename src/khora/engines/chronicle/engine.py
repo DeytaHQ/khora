@@ -47,7 +47,7 @@ from khora.engines.chronicle.events import ChronicleEvent, EventExtractor
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
-from khora.query.fusion import reciprocal_rank_fusion
+from khora.query.router import QueryComplexity, QueryComplexityRouter, RouterConfig
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
 from khora.telemetry import trace
 
@@ -303,6 +303,69 @@ _CROSS_SESSION_INTENT = re.compile(
 )
 
 
+def _weighted_normalized_rrf_multi(
+    ranked_lists: dict[str, list[tuple[Chunk, float]]],
+    weights: dict[str, float],
+    *,
+    k: int = 60,
+) -> list[tuple[Chunk, float]]:
+    """N-channel weighted RRF with per-channel min-max score normalization.
+
+    Replaces the rank-only ``khora.query.fusion.reciprocal_rank_fusion`` call
+    with a fusion that also blends in normalized raw scores. Each channel's
+    raw scores are min-max normalized to [0, 1] independently — this neutralises
+    the BM25-vs-cosine score-scale mismatch that ``reciprocal_rank_fusion``
+    cannot detect (rank-only fusion treats rank-1 BM25 == rank-1 cosine).
+
+    Score per chunk:
+
+        sum_over_channels( w_c * (1 / (k + rank_c) + 0.01 * normalized_score_c) )
+
+    The 0.01 factor keeps the normalized score subordinate to RRF (it acts as
+    a tiebreaker / signal-preservation nudge, not the dominant signal).
+    Mirrors :func:`khora.engines.vectorcypher.fusion.weighted_rrf_normalized`
+    but extends it to N channels in a single pass — pairwise folding on top
+    of that helper would re-normalise accumulator scores at every fold step
+    and break the score-scale invariant.
+
+    Args:
+        ranked_lists: Channel name -> list of (Chunk, raw_score) tuples.
+        weights: Channel name -> weight. Channels missing from ``weights``
+            default to 1.0; channels missing from ``ranked_lists`` are skipped.
+        k: RRF constant (default 60).
+
+    Returns:
+        List of (Chunk, fused_score) sorted by fused score descending.
+    """
+    if not ranked_lists:
+        return []
+
+    fused_scores: dict[Any, float] = {}
+    chunk_by_id: dict[Any, Chunk] = {}
+
+    for channel, results in ranked_lists.items():
+        if not results:
+            continue
+        weight = weights.get(channel, 1.0)
+        raw_scores = [score for _chunk, score in results]
+        s_min = min(raw_scores)
+        s_max = max(raw_scores)
+        s_range = s_max - s_min
+        for rank, (chunk, raw_score) in enumerate(results, start=1):
+            cid = chunk.id
+            chunk_by_id[cid] = chunk
+            if s_range > 0:
+                norm = (raw_score - s_min) / s_range
+            else:
+                norm = 1.0
+            contribution = weight * (1.0 / (k + rank) + 0.01 * norm)
+            fused_scores[cid] = fused_scores.get(cid, 0.0) + contribution
+
+    fused = [(chunk_by_id[cid], score) for cid, score in fused_scores.items()]
+    fused.sort(key=lambda pair: pair[1], reverse=True)
+    return fused
+
+
 class ChronicleEngine:
     """Chronicle engine — temporal-semantic memory for benchmark-optimized recall.
 
@@ -348,6 +411,7 @@ class ChronicleEngine:
         temporal_use_events: bool = True,
         temporal_event_cosine_weight: float = 0.5,
         entity_limit: int = 20,
+        router_enabled: bool = True,
     ) -> None:
         """Initialize the Chronicle engine.
 
@@ -381,6 +445,12 @@ class ChronicleEngine:
                 ``RecallResult.entities``. The fused list combines direct entity-channel
                 hits (full score) with event-derived entities (score attenuated by
                 ``0.5``) and is sorted by score before truncation. Defaults to 20.
+            router_enabled: When True (default), classify queries via
+                ``QueryComplexityRouter`` and skip the BM25 + entity channels for
+                SIMPLE queries. The temporal channel is always preserved (chronicle's
+                differentiator) — temporal queries that the router would otherwise
+                classify SIMPLE keep the temporal channel via ``temporal_signal``.
+                When False, all four channels run on every query (legacy behaviour).
         """
         self._config = config
         self._storage_backend: ChronicleStorageBackend | None = storage_backend
@@ -388,6 +458,10 @@ class ChronicleEngine:
         self._temporal_use_events = temporal_use_events
         self._temporal_event_cosine_weight = temporal_event_cosine_weight
         self._entity_limit = entity_limit
+        self._router_enabled = router_enabled
+        # Router is cheap (regex + dataclass); construct eagerly. Disabling
+        # via ``router_enabled=False`` short-circuits at the ``recall()`` site.
+        self._router: QueryComplexityRouter = QueryComplexityRouter(RouterConfig(enabled=router_enabled))
 
         if storage_config is not None:
             self._storage_config = storage_config
@@ -1111,14 +1185,46 @@ class ChronicleEngine:
                     resolved.confidence,
                 )
 
+        # ── Query routing (Chronicle #6) ──────────────────────────────
+        # Classify SIMPLE / MODERATE / COMPLEX. SIMPLE chronicle queries skip
+        # BM25 + entity channels (~50ms each) but ALWAYS keep the temporal
+        # channel — temporal scoring is chronicle's differentiator. Temporal
+        # signal is wired into the routing decision so dateparser-resolved
+        # temporal queries are forced to MODERATE (matches vectorcypher).
+        # Failures fall back to running all 4 channels (no behavioural skip).
+        run_bm25 = True
+        run_entity = True
+        force_temporal = temporal_filter is not None
+        routing_complexity: str = "disabled"
+        if self._router_enabled:
+            try:
+                from khora.query.temporal_detection import TemporalCategory, TemporalSignal
+
+                temporal_signal = TemporalSignal(
+                    is_temporal=force_temporal,
+                    category=TemporalCategory.EXPLICIT if force_temporal else TemporalCategory.NONE,
+                    confidence=0.9 if force_temporal else 1.0,
+                    source="resolver" if force_temporal else "none",
+                    temporal_filter=temporal_filter,
+                )
+                routing = await self._router.route(query, temporal_signal=temporal_signal)
+                routing_complexity = routing.complexity.value
+                if routing.complexity == QueryComplexity.SIMPLE:
+                    run_bm25 = False
+                    run_entity = False
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Chronicle router failed, running all channels: %s", exc)
+                routing_complexity = "fallback"
+
         # ── Phase 1: Embed query + BM25 in parallel ───────────────────
         # BM25 needs only the query text (no embedding), so start it
         # concurrently with embedding to save one round-trip of latency.
+        # Skipped entirely when the router classifies SIMPLE.
         query_embedding: list[float] | None = None
         bm25_results: list[tuple[Chunk, float]] = []
 
         bm25_task: asyncio.Task[list[tuple[Chunk, float]]] | None = None
-        if mode in (SearchMode.HYBRID, SearchMode.ALL):
+        if run_bm25 and mode in (SearchMode.HYBRID, SearchMode.ALL):
             bm25_task = asyncio.create_task(
                 storage.search_fulltext_chunks(
                     namespace_id,
@@ -1196,7 +1302,7 @@ class ChronicleEngine:
                 )
             )
 
-        if mode in (SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
+        if run_entity and mode in (SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
             channel_coros.append(
                 (
                     "entity",
@@ -1234,10 +1340,13 @@ class ChronicleEngine:
         # Capture max raw cosine similarity for abstention signals
         max_raw_cosine = max((score for _, score in semantic_results), default=0.0) if semantic_results else 0.0
 
-        # ── Fusion via Reciprocal Rank Fusion ────────────────────────────
+        # ── Fusion via weighted RRF with per-channel score normalization ─
+        # Channels skipped by the router contribute empty lists; the helper
+        # ignores them. Per-channel min-max normalisation neutralises the
+        # BM25-vs-cosine score-scale mismatch (Chronicle #6).
         start = time.perf_counter()
 
-        ranked_lists: dict[str, list[tuple[Any, float]]] = {}
+        ranked_lists: dict[str, list[tuple[Chunk, float]]] = {}
         weights: dict[str, float] = {}
 
         if semantic_results:
@@ -1253,15 +1362,10 @@ class ChronicleEngine:
             ranked_lists["entity"] = entity_results
             weights["entity"] = _rrf_w_entity
 
+        chunks_with_scores: list[tuple[Chunk, float]]
         if ranked_lists:
-            fused: list[tuple[Any, float]] = reciprocal_rank_fusion(
-                ranked_lists,
-                weights=weights,
-                id_extractor=lambda chunk: chunk.id,
-            )
-            chunks_with_scores: list[tuple[Chunk, float]] = fused[:overfetch_limit]
+            chunks_with_scores = _weighted_normalized_rrf_multi(ranked_lists, weights)[:overfetch_limit]
         elif semantic_results:
-            # Fallback: only one channel had results
             chunks_with_scores = semantic_results[:overfetch_limit]
         elif bm25_results:
             chunks_with_scores = bm25_results[:overfetch_limit]
@@ -1356,6 +1460,7 @@ class ChronicleEngine:
                     "temporal": len(temporal_results),
                     "entity": len(entity_results),
                 },
+                "routing": routing_complexity,
                 "decay_weight": decay_weight,
                 "max_raw_vector_score": max_raw_cosine,
                 "timings": timings,
