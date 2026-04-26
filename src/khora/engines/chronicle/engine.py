@@ -37,6 +37,7 @@ from loguru import logger
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import Chunk, Document, DocumentMetadata, Entity, MemoryNamespace
 from khora.engines._storage_config import build_storage_config
+from khora.engines.chronicle.events import ChronicleEvent, EventExtractor
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
@@ -225,6 +226,20 @@ class ChronicleEngine:
     - Reciprocal Rank Fusion for multi-channel result merging
     - Ebbinghaus temporal decay scoring
     - No graph database required — PostgreSQL + pgvector only
+    - Event extraction (Chronicle #2): every persisted chunk is decomposed
+      into SVO ``ChronicleEvent`` rows by ``EventExtractor`` and written to
+      ``chronicle_events`` after the ingest pipeline finishes.
+
+    Event-extraction toggle resolution order (highest priority first):
+
+    1. ``namespace.config_overrides["events"]["enabled"]`` — runtime override
+       on the namespace, useful for opt-out without changing the global expertise.
+    2. ``expertise.events.enabled`` — the ``ExpertiseConfig`` default
+       (``True`` per ADR-022 unless overridden).
+
+    When neither is set the extractor runs (default-on). Per-chunk extraction
+    failures are swallowed with a warning so a single bad LLM call cannot
+    take down the whole ``remember()``.
 
     Usage:
         engine = ChronicleEngine(config)
@@ -279,6 +294,11 @@ class ChronicleEngine:
 
         self._storage: StorageCoordinator | None = None
         self._embedder: LiteLLMEmbedder | None = None
+        self._event_extractor: EventExtractor | None = None
+        # Soft cap on concurrent LLM event extractions per remember/remember_batch.
+        # Event extraction is one LLM call per chunk; without a cap, large
+        # batches would fan out unboundedly.
+        self._max_concurrent_extractions: int = 10
         self._connected = False
 
     @staticmethod
@@ -413,6 +433,130 @@ class ChronicleEngine:
         return self._embedder
 
     # =========================================================================
+    # Event extraction wiring (Chronicle #2)
+    # =========================================================================
+
+    @staticmethod
+    def _events_enabled(namespace: MemoryNamespace | None, expertise: ExpertiseConfig | None) -> bool:
+        """Resolve the events.enabled flag.
+
+        Per-namespace ``config_overrides["events"]["enabled"]`` beats
+        ``expertise.events.enabled``; both default to True (default-on) when
+        absent, mirroring ADR-022.
+        """
+        if namespace is not None and namespace.config_overrides:
+            ns_events = namespace.config_overrides.get("events")
+            if isinstance(ns_events, dict) and "enabled" in ns_events:
+                return bool(ns_events["enabled"])
+        if expertise is not None:
+            return bool(expertise.events.enabled)
+        return True
+
+    def _get_event_extractor(self, expertise: ExpertiseConfig | None) -> EventExtractor:
+        """Lazily construct the EventExtractor.
+
+        The model comes from ``expertise.events.model`` when available, falling
+        back to ``config.llm.extraction_model`` and finally ``config.llm.model``.
+        Constructed once per engine instance — one extractor handles all
+        remember/remember_batch calls.
+        """
+        if self._event_extractor is None:
+            model = (
+                (expertise.events.model if expertise is not None else None)
+                or self._config.llm.extraction_model
+                or self._config.llm.model
+            )
+            self._event_extractor = EventExtractor(model=model)
+        return self._event_extractor
+
+    async def _extract_events_for_chunk(
+        self,
+        chunk: Chunk,
+        namespace_id: UUID,
+        extractor: EventExtractor,
+        sem: asyncio.Semaphore,
+    ) -> list[ChronicleEvent]:
+        """Run the extractor on a single chunk, swallowing per-chunk failures.
+
+        Returns an empty list if extraction raises so a single bad LLM call
+        cannot fail the whole ``remember()``. The chunk_id and namespace_id
+        are stamped onto every returned event so callers can pass the list
+        straight to ``coordinator.write_events``.
+        """
+        async with sem:
+            try:
+                events = await extractor.extract_events(
+                    chunk.content,
+                    chunk_id=chunk.id,
+                    namespace_id=namespace_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Event extraction failed for chunk %s: %s",
+                    chunk.id,
+                    exc,
+                )
+                return []
+        # The extractor already sets chunk_id/namespace_id, but be defensive
+        # in case a downstream replacement breaks that contract.
+        for ev in events:
+            ev.chunk_id = chunk.id
+            ev.namespace_id = namespace_id
+        return events
+
+    async def _embed_events(self, events: list[ChronicleEvent]) -> None:
+        """Populate ``event.embedding`` using the chronicle embedder.
+
+        Embedded in a single batch call to amortize the API round-trip.
+        Skips events whose summary is empty. Embedding failures are
+        swallowed (events still persist with ``embedding=None``).
+        """
+        if not events:
+            return
+        embedder = self._get_embedder()
+        targets = [ev for ev in events if ev.summary.strip()]
+        if not targets:
+            return
+        try:
+            vectors = await embedder.embed_batch([ev.summary for ev in targets])
+        except Exception as exc:
+            logger.warning("Event summary embedding failed: %s", exc)
+            return
+        for ev, vec in zip(targets, vectors):
+            ev.embedding = vec
+
+    async def _extract_and_persist_events(
+        self,
+        chunks: list[Chunk],
+        namespace_id: UUID,
+        expertise: ExpertiseConfig | None,
+    ) -> int:
+        """Extract events from chunks, embed summaries, persist, and return count.
+
+        Resolution of the enable flag is the caller's responsibility — this
+        helper assumes events are already enabled and unconditionally runs.
+        """
+        if not chunks:
+            return 0
+        extractor = self._get_event_extractor(expertise)
+        sem = asyncio.Semaphore(self._max_concurrent_extractions)
+        per_chunk = await asyncio.gather(
+            *(self._extract_events_for_chunk(c, namespace_id, extractor, sem) for c in chunks),
+            return_exceptions=False,
+        )
+        events: list[ChronicleEvent] = [ev for sub in per_chunk for ev in sub]
+        if not events:
+            return 0
+        await self._embed_events(events)
+        try:
+            await self._get_storage().write_events(events, namespace_id=namespace_id)
+        except Exception as exc:
+            logger.warning("write_events failed (skipping event persistence): %s", exc)
+            return 0
+        logger.debug("Persisted %d chronicle events across %d chunks", len(events), len(chunks))
+        return len(events)
+
+    # =========================================================================
     # Core API: remember, recall, forget
     # =========================================================================
 
@@ -518,11 +662,30 @@ class ChronicleEngine:
             kwargs["chunk_strategy"] = chunk_strategy
         result = await process_document(document, storage, **kwargs)
         timings["pipeline_ms"] = (time.perf_counter() - start) * 1000
+
+        # Chronicle #2: extract SVO events from each persisted chunk and
+        # write them to chronicle_events. Default-on per ExpertiseConfig,
+        # per-namespace override via ``namespace.config_overrides["events"]``.
+        events_extracted = 0
+        try:
+            namespace = await storage.get_namespace(namespace_id)
+        except Exception:
+            namespace = None
+        if self._events_enabled(namespace, expertise):
+            chunk_ids = result.get("chunk_ids", []) or []
+            if chunk_ids:
+                start = time.perf_counter()
+                chunks_map = await storage.get_chunks_batch(list(chunk_ids))
+                chunks = [chunks_map[cid] for cid in chunk_ids if cid in chunks_map]
+                events_extracted = await self._extract_and_persist_events(chunks, namespace_id, expertise)
+                timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
+
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
         logger.debug(
             f"remember() completed: {result['chunks']} chunks, {result['entities']} entities, "
-            f"{result['relationships']} relationships in {timings['total_ms']:.1f}ms"
+            f"{result['relationships']} relationships, {events_extracted} events "
+            f"in {timings['total_ms']:.1f}ms"
         )
 
         return RememberResult(
@@ -531,7 +694,7 @@ class ChronicleEngine:
             chunks_created=result["chunks"],
             entities_extracted=result["entities"],
             relationships_created=result["relationships"],
-            metadata={"timings": timings},
+            metadata={"timings": timings, "events_extracted": events_extracted},
         )
 
     @trace("khora.chronicle.recall")
@@ -1293,6 +1456,27 @@ class ChronicleEngine:
             ingest_kwargs["extraction_max_tokens"] = extraction_max_tokens
         result = await ingest_documents(namespace_id, doc_inputs, self._get_storage(), **ingest_kwargs)
         timings["ingest_pipeline_ms"] = (time.perf_counter() - start) * 1000
+
+        # Chronicle #2: extract events for every chunk created across the
+        # batch.  We collect all chunk_ids (preserving per-document grouping
+        # is not required because events stand alone, linked back via
+        # ``chunk_id``).
+        events_extracted = 0
+        try:
+            namespace = await self._get_storage().get_namespace(namespace_id)
+        except Exception:
+            namespace = None
+        if self._events_enabled(namespace, expertise):
+            all_chunk_ids: list[UUID] = []
+            for per_doc in result.get("per_document_results", []):
+                all_chunk_ids.extend(per_doc.get("chunk_ids", []) or [])
+            if all_chunk_ids:
+                start = time.perf_counter()
+                chunks_map = await self._get_storage().get_chunks_batch(all_chunk_ids)
+                chunks = [chunks_map[cid] for cid in all_chunk_ids if cid in chunks_map]
+                events_extracted = await self._extract_and_persist_events(chunks, namespace_id, expertise)
+                timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
+
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
         processed = result.get("processed_documents", 0)
@@ -1302,8 +1486,9 @@ class ChronicleEngine:
 
         logger.info(
             f"remember_batch() completed: {processed}/{len(documents)} docs, "
-            f"{result.get('total_chunks', 0)} chunks, {result.get('total_entities', 0)} entities "
-            f"in {timings['total_ms']:.1f}ms ({timings.get('docs_per_second', 0):.1f} docs/sec)"
+            f"{result.get('total_chunks', 0)} chunks, {result.get('total_entities', 0)} entities, "
+            f"{events_extracted} events in {timings['total_ms']:.1f}ms "
+            f"({timings.get('docs_per_second', 0):.1f} docs/sec)"
         )
 
         if on_progress:
@@ -1320,7 +1505,7 @@ class ChronicleEngine:
             chunks=result.get("total_chunks", 0),
             entities=result.get("total_entities", 0),
             relationships=result.get("total_relationships", 0) + result.get("total_inferred_relationships", 0),
-            metadata={"timings": timings},
+            metadata={"timings": timings, "events_extracted": events_extracted},
         )
 
     # =========================================================================

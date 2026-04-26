@@ -48,6 +48,11 @@ class ChronicleEvent:
     confidence: float = 1.0
     source_text: str = ""  # The sentence this was extracted from
 
+    # Embedding of the SVO summary, populated at persistence time so the
+    # event-similarity channel can query chronicle_events directly. Optional
+    # because the sqlite_lance / LanceDB path does not store vectors here.
+    embedding: list[float] | None = None
+
     @property
     def summary(self) -> str:
         """One-line summary of the event."""
