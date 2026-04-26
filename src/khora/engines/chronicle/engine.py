@@ -347,6 +347,7 @@ class ChronicleEngine:
         lancedb_path: str | None = None,
         temporal_use_events: bool = True,
         temporal_event_cosine_weight: float = 0.5,
+        entity_limit: int = 20,
     ) -> None:
         """Initialize the Chronicle engine.
 
@@ -376,12 +377,17 @@ class ChronicleEngine:
                 and temporal-proximity scores in the events path. ``0.5`` weights
                 them equally; higher values bias toward semantic match, lower toward
                 temporal anchoring.
+            entity_limit: Cap on the number of entities surfaced in
+                ``RecallResult.entities``. The fused list combines direct entity-channel
+                hits (full score) with event-derived entities (score attenuated by
+                ``0.5``) and is sorted by score before truncation. Defaults to 20.
         """
         self._config = config
         self._storage_backend: ChronicleStorageBackend | None = storage_backend
         self._lancedb_path = lancedb_path
         self._temporal_use_events = temporal_use_events
         self._temporal_event_cosine_weight = temporal_event_cosine_weight
+        self._entity_limit = entity_limit
 
         if storage_config is not None:
             self._storage_config = storage_config
@@ -1142,6 +1148,10 @@ class ChronicleEngine:
         semantic_results: list[tuple[Chunk, float]] = []
         temporal_results: list[tuple[Chunk, float]] = []
         entity_results: list[tuple[Chunk, float]] = []
+        # Side-channel accumulators populated by _temporal_channel and
+        # _entity_channel — read after gather to build RecallResult.entities.
+        temporal_subject_scores: dict[str, float] = {}
+        entity_channel_hits: dict[UUID, tuple[Entity, float]] = {}
 
         # chronicle_temporal_window_days semantics:
         #   -1  = disable temporal channel entirely
@@ -1181,6 +1191,7 @@ class ChronicleEngine:
                         query_embedding,
                         overfetch_limit,
                         temporal_filter,
+                        subject_scores=temporal_subject_scores,
                     ),
                 )
             )
@@ -1194,6 +1205,7 @@ class ChronicleEngine:
                         query,
                         query_embedding,
                         overfetch_limit,
+                        entity_hits=entity_channel_hits,
                     ),
                 )
             )
@@ -1307,6 +1319,16 @@ class ChronicleEngine:
         # Trim to requested limit
         chunks_with_scores = chunks_with_scores[:limit]
 
+        # ── Surface entity hits (Chronicle #5) ──────────────────────────
+        start = time.perf_counter()
+        entity_hits = await self._collect_entities(
+            namespace_id=namespace_id,
+            entity_channel_hits=entity_channel_hits,
+            temporal_event_subjects=temporal_subject_scores,
+            limit=self._entity_limit,
+        )
+        timings["entity_collect_ms"] = (time.perf_counter() - start) * 1000
+
         # ── Build context text ───────────────────────────────────────────
         context_parts = [chunk.content for chunk, _score in chunks_with_scores]
         context_text = "\n\n---\n\n".join(context_parts[:limit])
@@ -1314,7 +1336,7 @@ class ChronicleEngine:
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
         logger.debug(
-            f"recall() completed: {len(chunks_with_scores)} chunks "
+            f"recall() completed: {len(chunks_with_scores)} chunks, {len(entity_hits)} entities "
             f"(semantic={len(semantic_results)}, bm25={len(bm25_results)}, "
             f"temporal={len(temporal_results)}, entity={len(entity_results)}) "
             f"in {timings['total_ms']:.1f}ms"
@@ -1324,7 +1346,7 @@ class ChronicleEngine:
             query=query,
             namespace_id=namespace_id,
             chunks=chunks_with_scores,
-            entities=[],  # Phase 2: entity-level results
+            entities=entity_hits,
             context_text=context_text,
             metadata={
                 "engine": "chronicle",
@@ -1351,6 +1373,7 @@ class ChronicleEngine:
         query_embedding: list[float] | None,
         limit: int,
         temporal_filter: Any | None,
+        subject_scores: dict[str, float] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Channel 3: Time-scoped chunk retrieval.
 
@@ -1370,6 +1393,13 @@ class ChronicleEngine:
            query raises. Runs ``search_similar_chunks`` with ``created_at``
            bounds and applies an Ebbinghaus 72h decay — preserves the original
            behaviour pre Chronicle #4.
+
+        When ``subject_scores`` is provided, the events path also records the
+        subject of each scored event there (max combined score wins per
+        subject). The recall fusion site uses these to surface entities
+        mentioned in temporally-relevant chunks via
+        ``RecallResult.entities``. Only the events path populates this — the
+        chunk-fallback path operates without per-event subjects.
         """
         # Extract bounds once — both paths use them.
         start, end = _extract_temporal_bounds(temporal_filter)
@@ -1457,6 +1487,15 @@ class ChronicleEngine:
             prev = per_chunk_score.get(chunk_id)
             if prev is None or combined > prev:
                 per_chunk_score[chunk_id] = combined
+
+            # Stash the event subject (entity name) so recall() can resolve
+            # it back to an Entity record. Max combined score wins per subject.
+            if subject_scores is not None:
+                subject = (getattr(ev, "subject", "") or "").strip()
+                if subject:
+                    prev_subj = subject_scores.get(subject)
+                    if prev_subj is None or combined > prev_subj:
+                        subject_scores[subject] = combined
 
         if not per_chunk_score:
             logger.debug("temporal channel: events produced no usable scores; falling back to chunks")
@@ -1574,12 +1613,17 @@ class ChronicleEngine:
         query: str,
         query_embedding: list[float],
         limit: int,
+        entity_hits: dict[UUID, tuple[Entity, float]] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Channel 4: Entity co-occurrence retrieval.
 
         Finds entities similar to the query, then retrieves chunks that
         mention those entities. Provides a "follow the entities" signal
         complementary to pure semantic search.
+
+        When ``entity_hits`` is provided, the resolved Entity records are also
+        recorded there (keyed by entity id) along with their similarity score
+        so the recall fusion site can surface them in ``RecallResult.entities``.
         """
         storage = self._get_storage()
 
@@ -1611,6 +1655,16 @@ class ChronicleEngine:
             return []
 
         logger.debug("Entity channel: resolved %d/%d entities", len(entities), len(entity_ids))
+
+        # Surface resolved entities for the recall fusion site so consumers
+        # can see *which* entities the channel matched, not just the chunks
+        # that mention them. Highest score wins on dedup.
+        if entity_hits is not None:
+            for eid, ent in entities.items():
+                escore = entity_scores.get(eid, 0.0)
+                prev = entity_hits.get(eid)
+                if prev is None or escore > prev[1]:
+                    entity_hits[eid] = (ent, escore)
 
         # Collect chunk IDs from entity sources, weighted by entity similarity
         chunk_scores: dict[UUID, float] = {}
@@ -1673,6 +1727,59 @@ class ChronicleEngine:
 
         logger.debug("Entity channel: returning %d chunks (after relevance gate)", len(results))
         return results
+
+    async def _collect_entities(
+        self,
+        *,
+        namespace_id: UUID,
+        entity_channel_hits: dict[UUID, tuple[Entity, float]],
+        temporal_event_subjects: dict[str, float],
+        limit: int,
+    ) -> list[tuple[Entity, float]]:
+        """Merge entity-channel hits with event-subject lookups for RecallResult.
+
+        Two sources contribute to ``RecallResult.entities``:
+
+        1. **Direct entity-channel hits** — already resolved Entity records
+           with similarity scores in ``[0, 1]``. Highest signal; kept at full
+           score.
+        2. **Temporal-channel event subjects** — string subjects that we look
+           up by name. Resolved entities receive their event score attenuated
+           by ``0.5`` so direct hits outrank derived ones on ties.
+
+        Dedupe by ``entity.id`` (max-score wins). Sort by score desc and
+        truncate at ``limit``. Returns ``[]`` when both sources are empty
+        — preserves the pre-#5 behaviour of ``RecallResult.entities=[]``.
+        """
+        # Start from a fresh dedup map; entity_channel_hits is the priority
+        # source (full scores).
+        merged: dict[UUID, tuple[Entity, float]] = dict(entity_channel_hits)
+
+        # Resolve event subjects we don't already have. Skip names that match
+        # an entity already in `merged` *by name* — saves a DB roundtrip and
+        # avoids attenuating an entity that the entity-channel already scored
+        # at full strength.
+        already_named = {ent.name for ent, _ in merged.values()}
+        unresolved_subjects = [s for s in temporal_event_subjects if s not in already_named]
+
+        if unresolved_subjects:
+            try:
+                resolved = await self._get_storage().get_entities_by_names_batch(namespace_id, unresolved_subjects)
+            except Exception as exc:
+                logger.debug("collect_entities: get_entities_by_names_batch failed (%s)", exc)
+                resolved = {}
+            for name, entity in resolved.items():
+                event_score = temporal_event_subjects.get(name, 0.0)
+                attenuated = event_score * 0.5
+                prev = merged.get(entity.id)
+                if prev is None or attenuated > prev[1]:
+                    merged[entity.id] = (entity, attenuated)
+
+        if not merged:
+            return []
+
+        ordered = sorted(merged.values(), key=lambda pair: pair[1], reverse=True)
+        return ordered[:limit]
 
     async def _cross_session_expand(
         self,
