@@ -128,6 +128,86 @@ def _apply_temporal_decay(
 
 
 # ---------------------------------------------------------------------------
+# Temporal-channel helpers (Chronicle #4)
+# ---------------------------------------------------------------------------
+
+
+def _to_utc(dt: datetime | None) -> datetime | None:
+    """Normalize a datetime to a tz-aware UTC datetime (or pass through None)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _extract_temporal_bounds(temporal_filter: Any | None) -> tuple[datetime | None, datetime | None]:
+    """Pull (start, end) UTC bounds out of a TemporalFilter-shaped object.
+
+    Accepts ``occurred_after``/``occurred_before`` and ``start_time``/``end_time``
+    attribute spellings to stay compatible with both Skeleton and Chronicle
+    filters.
+    """
+    if temporal_filter is None:
+        return None, None
+    start = getattr(temporal_filter, "occurred_after", None) or getattr(temporal_filter, "start_time", None)
+    end = getattr(temporal_filter, "occurred_before", None) or getattr(temporal_filter, "end_time", None)
+    return _to_utc(start), _to_utc(end)
+
+
+def _temporal_proximity(
+    referenced_date: datetime | None,
+    start: datetime | None,
+    end: datetime | None,
+) -> float | None:
+    """Score how close ``referenced_date`` is to the query's temporal window.
+
+    * ``None`` is returned when the event has no temporal anchor — callers
+      should fall back to cosine-only scoring.
+    * In-range events score 1.0.
+    * Out-of-range events decay exponentially with distance from the nearest
+      bound (1-week half-life ≈ ``exp(-days_outside / 7)``).
+    * When only a single instant is supplied (start == end, or only one of
+      them set), proximity is ``exp(-|days_diff| / 7)`` from that focal date.
+    """
+    if referenced_date is None:
+        return None
+
+    ref = _to_utc(referenced_date)
+    assert ref is not None  # _to_utc only returns None for None input
+    start_utc = _to_utc(start)
+    end_utc = _to_utc(end)
+
+    if start_utc is None and end_utc is None:
+        # Caller shouldn't reach here (channel checks signal first), but be
+        # safe and return a neutral score.
+        return 0.5
+
+    # Single focal date: |days_diff| with 1-week half-life.
+    focal: datetime | None = None
+    if start_utc is not None and end_utc is not None and start_utc == end_utc:
+        focal = start_utc
+    elif start_utc is None:
+        focal = end_utc
+    elif end_utc is None:
+        focal = start_utc
+
+    if focal is not None:
+        days_diff = abs((ref - focal).total_seconds()) / 86400.0
+        return math.exp(-days_diff / 7.0)
+
+    # Range case: in-range = 1.0; outside = decay from the nearest bound.
+    assert start_utc is not None and end_utc is not None
+    if start_utc <= ref <= end_utc:
+        return 1.0
+    if ref < start_utc:
+        days_outside = (start_utc - ref).total_seconds() / 86400.0
+    else:
+        days_outside = (ref - end_utc).total_seconds() / 86400.0
+    return math.exp(-days_outside / 7.0)
+
+
+# ---------------------------------------------------------------------------
 # Version-aware scoring helpers
 # ---------------------------------------------------------------------------
 
@@ -265,6 +345,8 @@ class ChronicleEngine:
         storage_config: StorageConfig | None = None,
         storage_backend: ChronicleStorageBackend | None = None,
         lancedb_path: str | None = None,
+        temporal_use_events: bool = True,
+        temporal_event_cosine_weight: float = 0.5,
     ) -> None:
         """Initialize the Chronicle engine.
 
@@ -284,10 +366,22 @@ class ChronicleEngine:
                 file (the LanceDB directory is the sibling ``.lance`` path). Defaults
                 to ``./chronicle.db`` if neither this nor ``config.storage.sqlite_lance``
                 is provided.
+            temporal_use_events: When True (default), the temporal channel queries
+                ``chronicle_events`` and ranks by ``referenced_date`` (the date the
+                source text refers to) plus event-summary cosine. When False (or when
+                the events table is empty / the query has no temporal signal), the
+                channel falls back to chunk semantic search with Ebbinghaus decay on
+                ``chunks.created_at``.
+            temporal_event_cosine_weight: Blend factor between event-summary cosine
+                and temporal-proximity scores in the events path. ``0.5`` weights
+                them equally; higher values bias toward semantic match, lower toward
+                temporal anchoring.
         """
         self._config = config
         self._storage_backend: ChronicleStorageBackend | None = storage_backend
         self._lancedb_path = lancedb_path
+        self._temporal_use_events = temporal_use_events
+        self._temporal_event_cosine_weight = temporal_event_cosine_weight
 
         if storage_config is not None:
             self._storage_config = storage_config
@@ -1260,9 +1354,140 @@ class ChronicleEngine:
     ) -> list[tuple[Chunk, float]]:
         """Channel 3: Time-scoped chunk retrieval.
 
-        Searches for chunks within a temporal window and scores them by
-        both semantic relevance and temporal proximity to the query's
-        referenced time.
+        Two paths share this channel:
+
+        1. **Events path (default)**: queries ``chronicle_events`` filtered by
+           ``referenced_date`` (the date the source text refers to, NOT ingest
+           time). Each candidate event is scored by a blend of cosine similarity
+           between its SVO summary embedding and the query embedding, and a
+           temporal-proximity score against the query's temporal window.
+           Events are deduped by ``chunk_id`` (max score per chunk) and the
+           output unit of the channel remains a chunk.
+        2. **Legacy chunk-fallback path**: kicks in when (a) the events path is
+           disabled via ``temporal_use_events=False``, (b) there is no temporal
+           signal at all (no filter, no configured window), (c) the events
+           table returns zero candidates for the namespace, or (d) the events
+           query raises. Runs ``search_similar_chunks`` with ``created_at``
+           bounds and applies an Ebbinghaus 72h decay — preserves the original
+           behaviour pre Chronicle #4.
+        """
+        # Extract bounds once — both paths use them.
+        start, end = _extract_temporal_bounds(temporal_filter)
+        has_signal = start is not None or end is not None
+
+        if not self._temporal_use_events or not has_signal:
+            logger.debug(
+                "temporal channel: chunk_fallback (use_events=%s, has_signal=%s)",
+                self._temporal_use_events,
+                has_signal,
+            )
+            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+
+        storage = self._get_storage()
+
+        # Over-fetch events so re-ranking has more headroom.
+        try:
+            events = await storage.query_events(
+                namespace_id,
+                since=start,
+                until=end,
+                limit=max(limit * 4, 1),
+            )
+        except Exception as exc:
+            logger.debug("temporal channel: query_events failed (%s); falling back to chunks", exc)
+            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+
+        if not events:
+            logger.debug("temporal channel: no events for namespace; falling back to chunks")
+            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+
+        logger.debug("temporal channel: events (%d candidates in scope)", len(events))
+
+        # Pre-compute event-summary cosines in one batched call.
+        cosine_by_index: dict[int, float] = {}
+        if query_embedding is not None:
+            indexed_embeddings: list[tuple[int, list[float]]] = [
+                (i, list(ev.embedding)) for i, ev in enumerate(events) if getattr(ev, "embedding", None) is not None
+            ]
+            if indexed_embeddings:
+                try:
+                    from khora._accel import batch_cosine_similarity
+
+                    sims = batch_cosine_similarity(
+                        query_embedding,
+                        [emb for _, emb in indexed_embeddings],
+                    )
+                    # batch_cosine_similarity returns (local_idx, score) pairs.
+                    for local_idx, score in sims:
+                        original_idx = indexed_embeddings[local_idx][0]
+                        cosine_by_index[original_idx] = float(score)
+                except Exception as exc:
+                    logger.debug("temporal channel: cosine batch failed (%s); falling back to no-cosine", exc)
+
+        cw = self._temporal_event_cosine_weight
+        tw = 1.0 - cw
+
+        # Pick max combined score per chunk_id.
+        per_chunk_score: dict[UUID, float] = {}
+        for idx, ev in enumerate(events):
+            chunk_id = getattr(ev, "chunk_id", None)
+            if chunk_id is None:
+                continue
+
+            cosine = cosine_by_index.get(idx)
+            ref_date = getattr(ev, "referenced_date", None)
+            proximity = _temporal_proximity(ref_date, start, end)
+
+            if cosine is None and proximity is None:
+                # No usable signal on this event — skip entirely.
+                if getattr(ev, "embedding", None) is None and ref_date is None:
+                    logger.debug("temporal channel: event %s has neither embedding nor referenced_date", idx)
+                continue
+
+            if cosine is None:
+                if getattr(ev, "embedding", None) is None:
+                    logger.debug("temporal channel: event %s missing embedding; using proximity only", idx)
+                combined = proximity if proximity is not None else 0.0
+            elif proximity is None:
+                logger.debug("temporal channel: event %s missing referenced_date; using cosine only", idx)
+                combined = cosine
+            else:
+                combined = cosine * cw + proximity * tw
+
+            prev = per_chunk_score.get(chunk_id)
+            if prev is None or combined > prev:
+                per_chunk_score[chunk_id] = combined
+
+        if not per_chunk_score:
+            logger.debug("temporal channel: events produced no usable scores; falling back to chunks")
+            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+
+        # Hydrate the top-scoring chunks. We only need ``limit`` of them.
+        top_chunk_ids = sorted(per_chunk_score, key=lambda cid: per_chunk_score[cid], reverse=True)[:limit]
+        try:
+            chunks_map = await storage.get_chunks_batch(top_chunk_ids)
+        except Exception as exc:
+            logger.debug("temporal channel: get_chunks_batch failed (%s)", exc)
+            return []
+
+        scored: list[tuple[Chunk, float]] = [
+            (chunks_map[cid], per_chunk_score[cid]) for cid in top_chunk_ids if cid in chunks_map
+        ]
+        # Already in score order (top_chunk_ids is sorted), but be defensive.
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored
+
+    async def _temporal_channel_chunks_fallback(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float] | None,
+        limit: int,
+        temporal_filter: Any | None,
+    ) -> list[tuple[Chunk, float]]:
+        """Legacy temporal channel: chunks scoped by ``created_at`` + Ebbinghaus decay.
+
+        Preserved as the fallback path for Chronicle #4 — see ``_temporal_channel``
+        for the routing rules. Body unchanged from the pre-#4 implementation.
         """
         storage = self._get_storage()
 
