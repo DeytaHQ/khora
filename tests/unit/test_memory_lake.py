@@ -3262,6 +3262,7 @@ class TestRecoverPendingDocuments:
     @pytest.mark.asyncio
     async def test_recovery_processes_stale_docs(self) -> None:
         """Stale PENDING documents are passed to process_staged_document."""
+        from datetime import UTC, timedelta
         from khora.core.models.document import Document
         from khora.storage.backends.base import PaginatedResult
         from khora.core.models import MemoryNamespace
@@ -3294,6 +3295,12 @@ class TestRecoverPendingDocuments:
         process_fn.assert_awaited_once()
         call_kwargs = process_fn.call_args
         assert call_kwargs[0][0] is stale_doc
+
+        # Verify the grace-period filter is applied correctly — without this,
+        # all PENDING docs would be recovered regardless of age.
+        list_docs_call = lake._engine._storage.list_documents.call_args_list[0]
+        assert list_docs_call.kwargs["status"] == "pending"
+        assert list_docs_call.kwargs["updated_before"] <= datetime.now(UTC) - timedelta(minutes=5)
 
     @pytest.mark.asyncio
     async def test_recovery_continues_after_per_doc_failure(self) -> None:

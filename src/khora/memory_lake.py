@@ -440,21 +440,31 @@ class MemoryLake:
                     break
 
                 for ns in namespaces:
-                    doc_offset = 0
+                    # Always query at offset=0: successfully recovered docs drop out of the
+                    # PENDING result set, so fixed-offset pagination would skip them.  Track
+                    # attempted IDs to avoid re-processing docs that persistently fail.
+                    attempted_ids: set = set()
                     while True:
-                        docs = await storage.list_documents(
+                        all_docs = await storage.list_documents(
                             ns.id,
                             status="pending",
                             updated_before=stale_before,
                             limit=100,
-                            offset=doc_offset,
+                            offset=0,
                         )
+                        docs = [d for d in all_docs if d.id not in attempted_ids]
                         if not docs:
                             break
 
                         for doc in docs:
+                            attempted_ids.add(doc.id)
                             try:
                                 occurred_at = doc.source_timestamp or doc.created_at
+                                # NOTE: Recovery always uses general_entities with no custom
+                                # ExpertiseConfig.  The original skill_name/expertise are not
+                                # stored on Document, so they cannot be reconstructed at
+                                # recovery time.  This is a deliberate limitation of
+                                # crash-recovery semantics.
                                 await process_fn(
                                     doc,
                                     skill_name="general_entities",
@@ -474,8 +484,6 @@ class MemoryLake:
                                     f"_recover_pending_documents: failed to recover document "
                                     f"{doc.id} (namespace={ns.id}): {exc}"
                                 )
-
-                        doc_offset += len(docs)
 
                 offset += len(namespaces)
                 if len(namespaces) < 100:
