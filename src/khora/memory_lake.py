@@ -499,7 +499,9 @@ class MemoryLake:
                 f"({total_failed} failed, grace_period={grace_minutes}m)"
             )
         else:
-            logger.debug(f"_recover_pending_documents: no stale PENDING documents found (grace_period={grace_minutes}m)")
+            logger.debug(
+                f"_recover_pending_documents: no stale PENDING documents found (grace_period={grace_minutes}m)"
+            )
 
     async def disconnect(self) -> None:
         """Disconnect from all storage backends."""

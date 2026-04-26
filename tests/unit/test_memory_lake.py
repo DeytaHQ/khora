@@ -3263,9 +3263,10 @@ class TestRecoverPendingDocuments:
     async def test_recovery_processes_stale_docs(self) -> None:
         """Stale PENDING documents are passed to process_staged_document."""
         from datetime import UTC, timedelta
+
+        from khora.core.models import MemoryNamespace
         from khora.core.models.document import Document
         from khora.storage.backends.base import PaginatedResult
-        from khora.core.models import MemoryNamespace
 
         lake = self._make_lake_with_recovery()
 
@@ -3305,9 +3306,9 @@ class TestRecoverPendingDocuments:
     @pytest.mark.asyncio
     async def test_recovery_continues_after_per_doc_failure(self) -> None:
         """Per-document failures are logged but do not abort recovery of remaining docs."""
+        from khora.core.models import MemoryNamespace
         from khora.core.models.document import Document
         from khora.storage.backends.base import PaginatedResult
-        from khora.core.models import MemoryNamespace
 
         lake = self._make_lake_with_recovery()
 
@@ -3322,9 +3323,7 @@ class TestRecoverPendingDocuments:
                 PaginatedResult(items=[], total=0, limit=100, offset=100),
             ]
         )
-        lake._engine._storage.list_documents = AsyncMock(
-            side_effect=[[doc_a, doc_b], []]
-        )
+        lake._engine._storage.list_documents = AsyncMock(side_effect=[[doc_a, doc_b], []])
         # First call raises, second succeeds
         process_fn = AsyncMock(side_effect=[RuntimeError("boom"), (1, 0, 0)])
         lake._engine.process_staged_document = process_fn
@@ -3336,9 +3335,9 @@ class TestRecoverPendingDocuments:
     @pytest.mark.asyncio
     async def test_recovery_uses_doc_extraction_hash(self) -> None:
         """Recovery preserves the document's existing extraction_config_hash."""
+        from khora.core.models import MemoryNamespace
         from khora.core.models.document import Document
         from khora.storage.backends.base import PaginatedResult
-        from khora.core.models import MemoryNamespace
 
         lake = self._make_lake_with_recovery()
 

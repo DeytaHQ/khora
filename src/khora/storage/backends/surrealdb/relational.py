@@ -354,7 +354,7 @@ class SurrealDBRelationalAdapter:
             params["updated_before"] = updated_before.isoformat()
         where = " AND ".join(conditions)
         rows = await self._conn.query(
-            f"SELECT * FROM document WHERE {where} ORDER BY created_at DESC LIMIT $lim START $off",
+            f"SELECT * FROM document WHERE {where} ORDER BY created_at DESC LIMIT $lim START $off",  # noqa: S608
             params,
         )
         return [self._row_to_document(r) for r in rows]
