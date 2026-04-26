@@ -30,6 +30,8 @@ def mock_config() -> MagicMock:
     mock_config.llm.max_retries = 3
     mock_config.telemetry_database_url = None
     mock_config.telemetry_service_name = "khora-test"
+    # Disable pending recovery in unit tests to avoid background task noise.
+    mock_config.pipelines.pending_recovery_enabled = False
     return mock_config
 
 

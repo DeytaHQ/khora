@@ -14,7 +14,7 @@ import hashlib
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -397,6 +397,111 @@ class MemoryLake:
 
         self._connected = True
         logger.info("Memory Lake connected")
+
+        # Launch stale PENDING document recovery as a background task (DYT-3125).
+        # Documents that were PENDING when the previous process crashed are re-queued
+        # through the processing pipeline. Runs only once at startup; does not block connect().
+        if self._config.pipelines.pending_recovery_enabled:
+            task = asyncio.create_task(self._recover_pending_documents())
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+
+    async def _recover_pending_documents(self) -> None:
+        """Re-queue stale PENDING documents left over from a previous process crash.
+
+        Queries all namespaces for documents that have been PENDING longer than the
+        configured grace period, then processes each one through the engine pipeline.
+        The grace period avoids racing with active submit_batch workers that may still
+        be completing from the previous process.
+        """
+        grace_minutes = self._config.pipelines.pending_recovery_grace_period_minutes
+        stale_before = datetime.now(UTC) - timedelta(minutes=grace_minutes)
+
+        storage = getattr(self._engine, "_storage", None)
+        if storage is None:
+            return
+
+        engine = self._get_engine()
+        process_fn = getattr(engine, "process_staged_document", None)
+        if process_fn is None:
+            logger.debug("_recover_pending_documents: engine does not support process_staged_document, skipping")
+            return
+
+        entity_types = list(self._config.pipelines.entity_types)
+        total_recovered = 0
+        total_failed = 0
+
+        try:
+            offset = 0
+            while True:
+                ns_page = await storage.list_namespaces(active_only=True, limit=100, offset=offset)
+                namespaces = ns_page.items
+                if not namespaces:
+                    break
+
+                for ns in namespaces:
+                    # Always query at offset=0: successfully recovered docs drop out of the
+                    # PENDING result set, so fixed-offset pagination would skip them.  Track
+                    # attempted IDs to avoid re-processing docs that persistently fail.
+                    attempted_ids: set = set()
+                    while True:
+                        all_docs = await storage.list_documents(
+                            ns.id,
+                            status="pending",
+                            updated_before=stale_before,
+                            limit=100,
+                            offset=0,
+                        )
+                        docs = [d for d in all_docs if d.id not in attempted_ids]
+                        if not docs:
+                            break
+
+                        for doc in docs:
+                            attempted_ids.add(doc.id)
+                            try:
+                                occurred_at = doc.source_timestamp or doc.created_at
+                                # NOTE: Recovery always uses general_entities with no custom
+                                # ExpertiseConfig.  The original skill_name/expertise are not
+                                # stored on Document, so they cannot be reconstructed at
+                                # recovery time.  This is a deliberate limitation of
+                                # crash-recovery semantics.
+                                await process_fn(
+                                    doc,
+                                    skill_name="general_entities",
+                                    occurred_at=occurred_at,
+                                    entity_types=entity_types,
+                                    relationship_types=[],
+                                    expertise=None,
+                                    extraction_config_hash=doc.extraction_config_hash,
+                                    chunk_strategy=None,
+                                    max_chunks_in_flight=None,
+                                    chunk_semaphore=self._chunk_semaphore,
+                                )
+                                total_recovered += 1
+                            except Exception as exc:
+                                total_failed += 1
+                                logger.warning(
+                                    f"_recover_pending_documents: failed to recover document "
+                                    f"{doc.id} (namespace={ns.id}): {exc}"
+                                )
+
+                offset += len(namespaces)
+                if len(namespaces) < 100:
+                    break
+
+        except Exception as exc:
+            logger.error(f"_recover_pending_documents: recovery aborted with error: {exc}")
+            return
+
+        if total_recovered or total_failed:
+            logger.info(
+                f"_recover_pending_documents: recovered {total_recovered} stale PENDING documents "
+                f"({total_failed} failed, grace_period={grace_minutes}m)"
+            )
+        else:
+            logger.debug(
+                f"_recover_pending_documents: no stale PENDING documents found (grace_period={grace_minutes}m)"
+            )
 
     async def disconnect(self) -> None:
         """Disconnect from all storage backends."""
