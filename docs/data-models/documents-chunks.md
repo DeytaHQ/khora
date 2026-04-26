@@ -294,7 +294,7 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_namespace ON documents(namespace_id);
 CREATE INDEX idx_documents_status ON documents(namespace_id, status);
 CREATE INDEX idx_documents_checksum ON documents(namespace_id, (metadata->>'checksum'));
-CREATE INDEX ix_documents_namespace_external_id
+CREATE UNIQUE INDEX ix_documents_namespace_external_id_unique
     ON documents(namespace_id, external_id) WHERE external_id IS NOT NULL;
 ```
 

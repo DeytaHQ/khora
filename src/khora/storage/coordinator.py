@@ -640,7 +640,7 @@ class StorageCoordinator:
             # Survivor relationships are accounted for implicitly via remap;
             # their id is preserved from the old graph state.
 
-            new_document.mark_completed(len(new_chunks), len(new_entities))
+            new_document.mark_completed(len(new_chunks), len(new_entities), relationships_created)
             await self.relational.update_document(new_document)
 
             return ReplaceResult(
@@ -712,6 +712,27 @@ class StorageCoordinator:
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.get_document_by_checksum(namespace_id, checksum)
+
+    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+
+        Unlike ``get_document_by_checksum``, this lookup returns documents in
+        any status (including ``FAILED`` and ``PROCESSING``) so callers can
+        self-heal on the next successful replace (ADR-056 §Decision #8).
+        """
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.get_document_by_external_id(namespace_id, external_id)
+
+    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+        """Batch variant of :meth:`get_document_by_external_id`.
+
+        Collapses N serial lookups into one query for ``remember_batch`` replace
+        dispatch. Status-agnostic like the single lookup.
+        """
+        if not self.relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self.relational.get_documents_by_external_ids(namespace_id, external_ids)
 
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
@@ -1212,6 +1233,19 @@ class StorageCoordinator:
             return await self.vector.get_entities_batch(entity_ids)
         return {}
 
+    async def get_entities_by_names_batch(self, namespace_id: UUID, names: list[str]) -> dict[str, Entity]:
+        """Fetch entities by name within a namespace.
+
+        Used by Chronicle (graph-less) to resolve event subjects to Entity
+        records. Delegates to the vector backend when present (pgvector
+        implements this); returns ``{}`` for backends that don't.
+        """
+        if not names:
+            return {}
+        if self.vector and hasattr(self.vector, "get_entities_by_names_batch"):
+            return await self.vector.get_entities_by_names_batch(namespace_id, names)
+        return {}
+
     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
         """Fetch multiple documents in a single query.
 
@@ -1314,6 +1348,83 @@ class StorageCoordinator:
             limit=limit,
             offset=offset,
         )
+
+    # =========================================================================
+    # Chronicle event / fact operations (delegated to vector backend)
+    #
+    # Schema lives in chronicle_events / memory_facts (migration 024). Writes
+    # for now go through the pgvector backend because it owns the embedding
+    # column on chronicle_events. Engine wiring (EventExtractor / FactExtractor)
+    # arrives in Chronicle #2/#3.
+    # =========================================================================
+
+    async def write_events(
+        self,
+        events: list[Any],
+        *,
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Persist Chronicle events to the chronicle_events table.
+
+        Returns the list of inserted event IDs in input order.
+        """
+        if not events:
+            return []
+        if not self.vector or not hasattr(self.vector, "write_events"):
+            raise RuntimeError("Vector backend does not support chronicle event writes")
+        return await self.vector.write_events(events, namespace_id=namespace_id)
+
+    async def write_facts(
+        self,
+        facts: list[Any],
+        *,
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Persist memory facts to the memory_facts table.
+
+        Returns the list of inserted fact IDs in input order.
+        """
+        if not facts:
+            return []
+        if not self.vector or not hasattr(self.vector, "write_facts"):
+            raise RuntimeError("Vector backend does not support chronicle fact writes")
+        return await self.vector.write_facts(facts, namespace_id=namespace_id)
+
+    async def query_events(
+        self,
+        namespace_id: UUID,
+        *,
+        subject: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Any]:
+        """Query chronicle_events filtered by subject and ``referenced_date`` range."""
+        if not self.vector or not hasattr(self.vector, "query_events"):
+            raise RuntimeError("Vector backend does not support chronicle event queries")
+        return await self.vector.query_events(
+            namespace_id,
+            subject=subject,
+            since=since,
+            until=until,
+            limit=limit,
+        )
+
+    async def query_active_facts_for_subject(
+        self,
+        namespace_id: UUID,
+        subject: str,
+    ) -> list[Any]:
+        """Return all active (not superseded) memory facts for a subject."""
+        if not self.vector or not hasattr(self.vector, "query_active_facts_for_subject"):
+            raise RuntimeError("Vector backend does not support chronicle fact queries")
+        return await self.vector.query_active_facts_for_subject(namespace_id, subject)
+
+    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID) -> None:
+        """Mark a fact inactive and record the replacement fact ID."""
+        if not self.vector or not hasattr(self.vector, "supersede_fact"):
+            raise RuntimeError("Vector backend does not support chronicle fact supersession")
+        await self.vector.supersede_fact(fact_id, superseded_by)
 
     # =========================================================================
     # Sync checkpoint operations (delegated to relational)

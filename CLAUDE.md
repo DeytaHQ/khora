@@ -24,6 +24,14 @@ uv run pytest -m e2e                               # End-to-end tests only
 
 Docker Compose is always available. Always run `make test` before opening a PR. Never skip tests.
 
+## Test Infrastructure Isolation
+
+**Never reuse running Docker containers from other projects.** Integration tests must use their own Docker Compose stack (compose file in this repo), not containers from dokimion, other worktrees, or other developer projects. Before running integration tests:
+
+1. Ensure your test databases are started from THIS repo's compose file
+2. Do NOT connect to containers named `dokimion-*` — those belong to the integration testing platform
+3. If port conflicts arise, stop your own containers or use different ports — never repurpose another project's infrastructure
+
 ## Architecture
 
 - **Engines:** implement `MemoryEngineProtocol` in `engines/protocol.py`. Default engine is `vectorcypher`

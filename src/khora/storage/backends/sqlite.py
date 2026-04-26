@@ -11,6 +11,7 @@ No ORM — raw SQL throughout. The PostgreSQL ORM models use PG-specific types
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS documents (
     metadata_ TEXT DEFAULT '{}',
     chunk_count INTEGER DEFAULT 0,
     entity_count INTEGER DEFAULT 0,
+    relationship_count INTEGER DEFAULT 0,
     error_message TEXT,
     extraction_config_hash TEXT,
     created_at TEXT NOT NULL,
@@ -214,6 +216,11 @@ class SQLiteRelationalBackend:
             stmt = statement.strip()
             if stmt:
                 await self._conn.execute(stmt)
+        # Idempotent migration: add relationship_count to existing databases.
+        try:
+            await self._conn.execute("ALTER TABLE documents ADD COLUMN relationship_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         await self._conn.commit()
 
     async def disconnect(self) -> None:
@@ -366,9 +373,9 @@ class SQLiteRelationalBackend:
             "INSERT INTO documents "
             "(id, namespace_id, content, status, source, source_type, content_type, "
             "title, author, language, checksum, size_bytes, metadata_, "
-            "chunk_count, entity_count, error_message, extraction_config_hash, "
+            "chunk_count, entity_count, relationship_count, error_message, extraction_config_hash, "
             "created_at, updated_at, processed_at, source_timestamp, external_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(document.id),
                 str(document.namespace_id),
@@ -385,6 +392,7 @@ class SQLiteRelationalBackend:
                 _json_dumps(document.metadata.custom),
                 document.chunk_count,
                 document.entity_count,
+                document.relationship_count,
                 document.error_message,
                 document.extraction_config_hash,
                 _dt_to_str(document.created_at) or now,
@@ -434,7 +442,7 @@ class SQLiteRelationalBackend:
             "UPDATE documents SET "
             "content = ?, status = ?, source = ?, source_type = ?, content_type = ?, "
             "title = ?, author = ?, language = ?, checksum = ?, size_bytes = ?, "
-            "metadata_ = ?, chunk_count = ?, entity_count = ?, error_message = ?, "
+            "metadata_ = ?, chunk_count = ?, entity_count = ?, relationship_count = ?, error_message = ?, "
             "extraction_config_hash = ?, external_id = ?, updated_at = ?, processed_at = ?, source_timestamp = ? "
             "WHERE id = ?",
             (
@@ -451,6 +459,7 @@ class SQLiteRelationalBackend:
                 _json_dumps(document.metadata.custom),
                 document.chunk_count,
                 document.entity_count,
+                document.relationship_count,
                 document.error_message,
                 document.extraction_config_hash,
                 document.external_id,
@@ -509,6 +518,23 @@ class SQLiteRelationalBackend:
             return None
         return self._row_to_document(row)
 
+    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+
+        Status is NOT filtered so FAILED rows can self-heal on the next
+        successful replace (ADR-056 §Decision #8).
+        """
+        if external_id is None:
+            return None
+        cursor = await self._conn.execute(
+            "SELECT * FROM documents WHERE namespace_id = ? AND external_id = ? LIMIT 1",
+            (str(namespace_id), external_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_document(row)
+
     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
         if not document_ids:
             return {}
@@ -522,6 +548,27 @@ class SQLiteRelationalBackend:
         for r in rows:
             doc = self._row_to_document(r)
             result[doc.id] = doc
+        return result
+
+    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+        """Batch lookup by ``(namespace_id, external_id)`` — ADR-056.
+
+        Status is NOT filtered (self-heal contract). Skips empty / None entries.
+        """
+        filtered = [e for e in external_ids if e]
+        if not filtered:
+            return {}
+        placeholders = ",".join("?" for _ in filtered)
+        cursor = await self._conn.execute(
+            f"SELECT * FROM documents WHERE namespace_id = ? AND external_id IN ({placeholders})",  # noqa: S608
+            [str(namespace_id), *filtered],
+        )
+        rows = await cursor.fetchall()
+        result: dict[str, Document] = {}
+        for r in rows:
+            doc = self._row_to_document(r)
+            if doc.external_id:
+                result[doc.external_id] = doc
         return result
 
     async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
@@ -612,6 +659,7 @@ class SQLiteRelationalBackend:
             ),
             chunk_count=row["chunk_count"] or 0,
             entity_count=row["entity_count"] or 0,
+            relationship_count=row["relationship_count"] or 0,
             error_message=row["error_message"],
             extraction_config_hash=row["extraction_config_hash"],
             created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
@@ -664,6 +712,11 @@ class SQLiteVectorBackend:
             stmt = statement.strip()
             if stmt:
                 await self._conn.execute(stmt)
+        # Idempotent migration: add relationship_count to existing databases.
+        try:
+            await self._conn.execute("ALTER TABLE documents ADD COLUMN relationship_count INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
         # FTS5 virtual table
         try:
             await self._conn.executescript(_FTS5_SQL)

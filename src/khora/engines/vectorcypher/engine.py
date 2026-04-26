@@ -26,10 +26,12 @@ from uuid import UUID
 
 from loguru import logger
 from neo4j import AsyncGraphDatabase
+from sqlalchemy.exc import IntegrityError
 
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import (
     Chunk,
+    ChunkMetadata,
     Document,
     DocumentMetadata,
     Entity,
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
 
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
+    from khora.memory_lake import _GlobalChunkSemaphore
     from khora.storage import StorageCoordinator
 
 
@@ -193,6 +196,16 @@ class VectorCypherConfig:
     # Maximum texts per LLM extraction batch. Lower values reduce output token
     # requirements and avoid timeouts with strict JSON schema constrained decoding.
     extraction_batch_size: int = 5
+
+    # Maximum number of chunks processed through stages 2–6 simultaneously.
+    # Primary memory control surface: chunks are ~2 KB each (512 tokens), so chunk
+    # count directly correlates with peak memory. None = process all chunks at once
+    # (current behavior, backward-compatible).
+    max_chunks_in_flight: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_chunks_in_flight is not None and self.max_chunks_in_flight < 1:
+            raise ValueError(f"max_chunks_in_flight must be >= 1, got {self.max_chunks_in_flight}")
 
     # Streaming pipeline (A-1: batch entity storage across documents)
     streaming_pipeline: bool = True
@@ -579,6 +592,32 @@ class VectorCypherEngine:
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
         storage = self._get_storage()
 
+        # ADR-056: external_id dispatch — route to replace_document_extraction
+        # when the caller supplied an external_id that already exists in the
+        # namespace. Lookup is status-agnostic (COMPLETED / PROCESSING / FAILED)
+        # so the replace path self-heals previously failed rows.
+        if external_id is not None:
+            existing_by_ext = await storage.get_document_by_external_id(namespace_id, external_id)
+            if existing_by_ext is not None:
+                return await self._remember_via_replace(
+                    existing=existing_by_ext,
+                    content=content,
+                    checksum=checksum,
+                    namespace_id=namespace_id,
+                    title=title,
+                    source=source,
+                    metadata=metadata,
+                    skill_name=skill_name,
+                    expertise=expertise,
+                    extraction_model=extraction_model,
+                    occurred_at=occurred_at or datetime.now(UTC),
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
+                    extraction_config_hash=extraction_config_hash,
+                    chunk_strategy=chunk_strategy,
+                    external_id=external_id,
+                )
+
         # Check for duplicate
         existing = await storage.get_document_by_checksum(namespace_id, checksum)
         if existing:
@@ -588,7 +627,7 @@ class VectorCypherEngine:
                 namespace_id=namespace_id,
                 chunks_created=existing.chunk_count,
                 entities_extracted=existing.entity_count,
-                relationships_created=0,
+                relationships_created=existing.relationship_count,
                 metadata={"duplicate": True, "status": str(existing.status)},
             )
 
@@ -608,7 +647,38 @@ class VectorCypherEngine:
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
         )
-        document = await storage.create_document(document)
+        try:
+            document = await storage.create_document(document)
+        except IntegrityError:
+            # Concurrent race on `(namespace_id, external_id)`: another caller
+            # inserted the same external_id between our lookup and this
+            # create. The partial UNIQUE index ``ix_documents_namespace_external_id_unique``
+            # (DYT-2672) converts the race into a deterministic conflict.
+            # Retry the lookup and route to replace so the loser still
+            # succeeds against the winner's row (ADR-056 §Decision #9).
+            if external_id is None:
+                raise
+            existing_after_race = await storage.get_document_by_external_id(namespace_id, external_id)
+            if existing_after_race is None:
+                raise
+            return await self._remember_via_replace(
+                existing=existing_after_race,
+                content=content,
+                checksum=checksum,
+                namespace_id=namespace_id,
+                title=title,
+                source=source,
+                metadata=metadata,
+                skill_name=skill_name,
+                expertise=expertise,
+                extraction_model=extraction_model,
+                occurred_at=occurred_at or datetime.now(UTC),
+                entity_types=entity_types,
+                relationship_types=relationship_types,
+                extraction_config_hash=extraction_config_hash,
+                chunk_strategy=chunk_strategy,
+                external_id=external_id,
+            )
 
         # Process document
         chunks_created, entities_extracted, relationships_created = await self._process_document(
@@ -641,6 +711,8 @@ class VectorCypherEngine:
         entity_types: list[str],
         relationship_types: list[str],
         chunk_strategy: ChunkStrategy | None = None,
+        max_chunks_in_flight: int | None = None,
+        chunk_semaphore: _GlobalChunkSemaphore | None = None,
     ) -> tuple[int, int, int]:
         """Process a document into chunks with skeleton-based entity extraction.
 
@@ -682,78 +754,186 @@ class VectorCypherEngine:
                 span.set_attribute("chunk_count", 0)
                 return 0, 0, 0
 
-            # Embed chunks in batch
-            with trace_span("khora.vectorcypher.embed_batch", chunk_count=len(raw_chunks)):
-                chunk_texts = [c.content for c in raw_chunks]
-                embeddings = await embedder.embed_batch(chunk_texts)
-
-            # Extract metadata
+            # Extract metadata (computed once, not per window)
             doc_metadata = document.metadata.custom if document.metadata else {}
 
-            # Create temporal chunks
-            temporal_chunks = []
-            for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
-                temporal_chunk = TemporalChunk(
-                    id=None,
-                    namespace_id=document.namespace_id,
-                    document_id=document.id,
-                    content=raw_chunk.content,
-                    embedding=embedding,
-                    occurred_at=occurred_at,
-                    created_at=datetime.now(UTC),
-                    source_system=doc_metadata.get("source_system"),
-                    author=doc_metadata.get("author"),
-                    channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                    tags=_ensure_tags(doc_metadata.get("tags", [])),
-                    confidence=1.0,
-                    metadata={
-                        **doc_metadata,
-                        "chunk_index": i,
-                        "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-                        "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-                    },
-                )
-                temporal_chunks.append(temporal_chunk)
+            # Split into windows when max_chunks_in_flight is set; otherwise one window.
+            # Per-call override takes precedence over the engine config.
+            window_size = (
+                max_chunks_in_flight if max_chunks_in_flight is not None else self._vc_config.max_chunks_in_flight
+            )
+            windows = (
+                [raw_chunks[i : i + window_size] for i in range(0, len(raw_chunks), window_size)]
+                if window_size is not None
+                else [raw_chunks]
+            )
 
-            # Store in pgvector
-            stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
-
-            # Update temporal_chunks with assigned IDs
-            for i, stored in enumerate(stored_chunks):
-                temporal_chunks[i].id = stored.id
-
-            # Create Chunk nodes in Neo4j (skipped for SurrealDB — chunks in temporal store)
-            if dual_nodes is not None:
-                await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
-
-            # Skeleton-based entity extraction (for core chunks only)
+            total_chunks_created = 0
             entities_extracted = 0
             relationships_created = 0
+            chunk_index_offset = 0
 
-            if self._config.pipeline.extract_entities:
-                entities_extracted, relationships_created = await self._run_skeleton_extraction(
-                    temporal_chunks,
-                    document.namespace_id,
-                    skill_name=skill_name,
-                    expertise=expertise,
-                    extraction_model=extraction_model,
-                    entity_types=entity_types,
-                    relationship_types=relationship_types,
-                )
+            for window in windows:
+                # Acquire global chunk semaphore before processing this window.
+                # This bounds total chunks in flight across all concurrent
+                # submit_batch calls to max_chunks_in_flight process-wide.
+                n_window = len(window)
+                n_acquired = n_window
+                if chunk_semaphore is not None:
+                    n_acquired = await chunk_semaphore.acquire(n_window)
+                try:
+                    # Embed window chunks in batch
+                    with trace_span("khora.vectorcypher.embed_batch", chunk_count=len(window)):
+                        chunk_texts = [c.content for c in window]
+                        embeddings = await embedder.embed_batch(chunk_texts)
+
+                    # Create temporal chunks
+                    temporal_chunks = []
+                    for i, (raw_chunk, embedding) in enumerate(zip(window, embeddings)):
+                        temporal_chunk = TemporalChunk(
+                            id=None,
+                            namespace_id=document.namespace_id,
+                            document_id=document.id,
+                            content=raw_chunk.content,
+                            embedding=embedding,
+                            occurred_at=occurred_at,
+                            created_at=datetime.now(UTC),
+                            source_system=doc_metadata.get("source_system"),
+                            author=doc_metadata.get("author"),
+                            channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
+                            tags=_ensure_tags(doc_metadata.get("tags", [])),
+                            confidence=1.0,
+                            metadata={
+                                **doc_metadata,
+                                "chunk_index": chunk_index_offset + i,
+                                "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+                                "end_char": raw_chunk.end_char
+                                if hasattr(raw_chunk, "end_char")
+                                else len(raw_chunk.content),
+                            },
+                        )
+                        temporal_chunks.append(temporal_chunk)
+
+                    # Store in pgvector
+                    stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
+
+                    # Update temporal_chunks with assigned IDs
+                    for i, stored in enumerate(stored_chunks):
+                        temporal_chunks[i].id = stored.id
+
+                    # Create Chunk nodes in Neo4j (skipped for SurrealDB — chunks in temporal store)
+                    if dual_nodes is not None:
+                        await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+
+                    # Skeleton-based entity extraction (for core chunks only)
+                    if self._config.pipeline.extract_entities:
+                        ents, rels = await self._run_skeleton_extraction(
+                            temporal_chunks,
+                            document.namespace_id,
+                            skill_name=skill_name,
+                            expertise=expertise,
+                            extraction_model=extraction_model,
+                            entity_types=entity_types,
+                            relationship_types=relationship_types,
+                        )
+                        entities_extracted += ents
+                        relationships_created += rels
+
+                    total_chunks_created += len(stored_chunks)
+                    chunk_index_offset += len(window)
+                finally:
+                    if chunk_semaphore is not None:
+                        await chunk_semaphore.release(n_acquired)
 
             # Update document status
-            document.mark_completed(len(stored_chunks), entities_extracted)
+            document.mark_completed(total_chunks_created, entities_extracted, relationships_created)
             await storage.update_document(document)
 
             logger.debug(
-                f"Processed document {document.id}: {len(stored_chunks)} chunks, "
+                f"Processed document {document.id}: {total_chunks_created} chunks, "
                 f"{entities_extracted} entities, {relationships_created} relationships"
             )
 
-            span.set_attribute("chunk_count", len(stored_chunks))
+            span.set_attribute("chunk_count", total_chunks_created)
             span.set_attribute("entities_extracted", entities_extracted)
             span.set_attribute("relationships_created", relationships_created)
-            return len(stored_chunks), entities_extracted, relationships_created
+            return total_chunks_created, entities_extracted, relationships_created
+
+    async def process_staged_document(
+        self,
+        document: Document,
+        *,
+        skill_name: str,
+        occurred_at: datetime,
+        entity_types: list[str],
+        relationship_types: list[str],
+        expertise: ExpertiseConfig | str | None = None,
+        extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
+        max_chunks_in_flight: int | None = None,
+        chunk_semaphore: _GlobalChunkSemaphore | None = None,
+    ) -> tuple[int, int, int]:
+        """Process a pre-staged PENDING document through the VectorCypher pipeline.
+
+        Called by MemoryLake.submit_batch() for documents that were already
+        persisted to the DB with PENDING status before this call. Delegates
+        to _process_document; does NOT create a new document record.
+
+        Args:
+            document: Pre-created PENDING Document from storage.
+            skill_name: Extraction skill to use.
+            occurred_at: Temporal anchor for chunks and entities.
+            entity_types: Entity types to extract.
+            relationship_types: Relationship types to extract.
+            expertise: Optional domain-specific extraction config.
+            extraction_config_hash: Optional hash for change detection.
+            chunk_strategy: Override chunking strategy.
+            max_chunks_in_flight: Maximum chunks per processing window.
+            chunk_semaphore: Optional global chunk semaphore (from MemoryLake)
+                shared across concurrent submit_batch calls to bound total
+                chunks in flight process-wide.
+
+        Returns:
+            Tuple of (chunks_created, entities_extracted, relationships_created).
+        """
+        # Update the document's extraction_config_hash if provided, so it is
+        # persisted when mark_completed() writes the record back.
+        if extraction_config_hash is not None and document.extraction_config_hash != extraction_config_hash:
+            document.extraction_config_hash = extraction_config_hash
+
+        return await self._process_document(
+            document,
+            skill_name=skill_name,
+            expertise=expertise,
+            extraction_model=None,
+            occurred_at=occurred_at,
+            entity_types=entity_types,
+            relationship_types=relationship_types,
+            chunk_strategy=chunk_strategy,
+            max_chunks_in_flight=max_chunks_in_flight,
+            chunk_semaphore=chunk_semaphore,
+        )
+
+    async def clear_document_extraction_state(self, document_id: UUID, namespace_id: UUID) -> None:
+        """Clear partial extraction state (khora_chunks + :Chunk nodes) for a FAILED document.
+
+        Called by submit_batch before re-queuing a previously-FAILED document to prevent
+        duplicate chunks accumulating on retry (ADR-068 self-heal path, H1 fix).
+
+        Best-effort: logs and ignores storage errors so that cleanup failures do not
+        block re-processing.
+        """
+        temporal_store = self._get_temporal_store()
+        dual_nodes = self._get_dual_nodes()
+        try:
+            await temporal_store.delete_chunks_by_document(document_id, namespace_id)
+        except Exception as exc:
+            logger.warning(f"submit_batch cleanup: could not clear khora_chunks for document {document_id}: {exc}")
+        if dual_nodes is not None:
+            try:
+                await dual_nodes.delete_chunks_by_document(document_id, namespace_id)
+            except Exception as exc:
+                logger.warning(f"submit_batch cleanup: could not clear :Chunk nodes for document {document_id}: {exc}")
 
     async def _run_skeleton_extraction(
         self,
@@ -1009,114 +1189,354 @@ class VectorCypherEngine:
 
         return entities, relationships, entity_chunk_links
 
-    async def _process_document_streaming(
+    async def _remember_via_replace(
         self,
-        document: Document,
         *,
+        existing: Document,
+        content: str,
+        checksum: str,
+        namespace_id: UUID,
+        title: str,
+        source: str,
+        metadata: dict[str, Any] | None,
         skill_name: str,
-        expertise: ExpertiseConfig | str | None = None,
-        extraction_model: str | None = None,
+        expertise: ExpertiseConfig | str | None,
+        extraction_model: str | None,
         occurred_at: datetime,
-        embedding_text_override: str | None = None,
         entity_types: list[str],
         relationship_types: list[str],
-        skeleton_ratio_override: float | None = None,
-        chunk_strategy: ChunkStrategy | None = None,
-    ) -> tuple[int, list[Entity], list[Relationship], list[EntityChunkLink]]:
-        """Process a document, returning entities for deferred batch storage.
+        extraction_config_hash: str | None,
+        chunk_strategy: ChunkStrategy | None,
+        external_id: str,
+    ) -> RememberResult:
+        """Dispatch an ``external_id``-matched remember() to the replace path.
 
-        Same as _process_document but returns entities/rels/links instead of
-        storing them, allowing the caller to batch across documents.
+        Builds chunks / entities / relationships in-memory, then performs the
+        full VectorCypher storage-side replace that ``replace_document_extraction``
+        alone does not cover. The coordinator primitive (DYT-2673) handles the
+        ``chunks`` table + Neo4j entity / relationship retire / remap / upsert,
+        but VectorCypher also owns ``khora_chunks`` (via ``TemporalVectorStore``)
+        and Neo4j ``:Chunk`` nodes (via ``DualNodeManager``). This method:
 
-        Args:
-            embedding_text_override: If provided, use this text for embedding
-                instead of the raw chunk content. The original content is still
-                stored in the chunk (preserves substring-based metrics).
+        1. Reuses ``existing.id`` per ADR-056 §API Contracts ("The same id may
+           be reused across replacements; the row is updated in place") and
+           preserves ``created_at`` / ``source_timestamp`` / ``processed_at``.
+        2. Chunks + embeds + extracts in-memory (mirrors the create path but
+           defers all persistence).
+        3. Wipes old ``khora_chunks`` rows and old ``:Chunk`` nodes, writes
+           new ones with refreshed embeddings / content / metadata — BEFORE
+           the coordinator call so a failure mid-wipe marks the doc FAILED
+           and the next replace self-heals (ADR-056 §Decision #8).
+        4. Delegates to ``coordinator.replace_document_extraction`` for
+           atomic PG transaction + graph retire / remap / upsert.
+        5. Rebuilds ``MENTIONED_IN`` edges from upserted entities to the
+           new ``:Chunk`` nodes. Without this, retired entities would still
+           reference old chunks via stale edges.
 
-        Returns:
-            Tuple of (chunks_created, entities, relationships, entity_chunk_links)
+        Any exception in steps 3 or 5 marks the document FAILED, best-effort
+        persists the status, and re-raises unwrapped — mirroring the
+        coordinator's own failure handling.
         """
         from khora.extraction.chunkers import create_chunker
+        from khora.pipelines.tasks.extract import extract_entities
 
         storage = self._get_storage()
         embedder = self._get_embedder()
-        temporal_store = self._get_temporal_store()
-        dual_nodes = self._get_dual_nodes()
 
+        # 1. Build the replacement Document row. Reuse existing.id; refresh
+        #    content/checksum/metadata/external_id/extraction_config_hash.
+        #    Preserve created_at from the existing row.
+        new_metadata = DocumentMetadata(
+            title=title,
+            source=source,
+            source_type="api",
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            custom=metadata or {},
+        )
+        new_document = Document(
+            id=existing.id,
+            namespace_id=namespace_id,
+            content=content,
+            metadata=new_metadata,
+            extraction_config_hash=extraction_config_hash,
+            external_id=external_id,
+            created_at=existing.created_at,
+            source_timestamp=existing.source_timestamp,
+            processed_at=existing.processed_at,
+        )
+
+        # 2. Chunk + embed in-memory (no persistence).
         strategy = chunk_strategy if chunk_strategy is not None else self._config.pipeline.chunking_strategy
         chunker = create_chunker(
             strategy=strategy,
             chunk_size=self._config.pipeline.chunk_size,
             chunk_overlap=self._config.pipeline.chunk_overlap,
         )
-        raw_chunks = await asyncio.to_thread(chunker.chunk, document.content)
+        raw_chunks = await asyncio.to_thread(chunker.chunk, content)
 
-        if not raw_chunks:
-            document.mark_completed(0, 0)
-            await storage.update_document(document)
-            return 0, [], [], []
-
-        # WS3: Use enriched text for embedding if provided (conversation context),
-        # but store original content in the chunk for answer_accuracy matching.
-        if embedding_text_override:
-            embed_texts = [embedding_text_override]
-        else:
+        new_chunks: list[Chunk] = []
+        if raw_chunks:
             embed_texts = [c.content for c in raw_chunks]
-        embeddings = await embedder.embed_batch(embed_texts)
-        doc_metadata = document.metadata.custom if document.metadata else {}
+            embeddings = await embedder.embed_batch(embed_texts)
+            doc_custom = new_metadata.custom
+            now = datetime.now(UTC)
+            for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
+                chunk_meta = ChunkMetadata(
+                    document_id=new_document.id,
+                    chunk_index=i,
+                    start_char=getattr(raw_chunk, "start_char", 0),
+                    end_char=getattr(raw_chunk, "end_char", len(raw_chunk.content)),
+                    custom={**doc_custom, "chunk_index": i},
+                )
+                new_chunks.append(
+                    Chunk(
+                        namespace_id=namespace_id,
+                        document_id=new_document.id,
+                        content=raw_chunk.content,
+                        metadata=chunk_meta,
+                        embedding=embedding,
+                        embedding_model=embedder.model_name,
+                        created_at=now,
+                        source_timestamp=occurred_at,
+                    )
+                )
 
-        temporal_chunks = []
-        for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
-            temporal_chunk = TemporalChunk(
-                id=None,
-                namespace_id=document.namespace_id,
-                document_id=document.id,
-                content=raw_chunk.content,
-                embedding=embedding,
-                occurred_at=occurred_at,
-                created_at=datetime.now(UTC),
-                source_system=doc_metadata.get("source_system"),
-                author=doc_metadata.get("author"),
-                channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                tags=_ensure_tags(doc_metadata.get("tags", [])),
-                confidence=1.0,
-                metadata={
-                    **doc_metadata,
-                    "chunk_index": i,
-                    "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-                    "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-                },
+        # 3. Extract entities + relationships from core chunks (skeleton),
+        #    exactly as the create path does — but deferred (no storage).
+        new_entities: list[Entity] = []
+        new_relationships: list[Relationship] = []
+        if new_chunks and self._config.pipeline.extract_entities:
+            if len(new_chunks) <= 2:
+                core_chunks = new_chunks
+            else:
+                skeleton = SkeletonIndexer(core_ratio=self._vc_config.skeleton_core_ratio)
+                skeleton_input = [
+                    TemporalChunk(
+                        id=c.id,
+                        namespace_id=c.namespace_id,
+                        document_id=c.document_id,
+                        content=c.content,
+                        embedding=c.embedding,
+                        occurred_at=occurred_at,
+                        created_at=c.created_at,
+                    )
+                    for c in new_chunks
+                ]
+                skeleton.add_chunks_batch(skeleton_input)
+                core_ids = await asyncio.to_thread(skeleton.build_skeleton)
+                core_chunks = [c for c in new_chunks if c.id in core_ids]
+
+            if core_chunks:
+                model = extraction_model or self._config.llm.model
+                extracted_entities, extracted_relationships = await extract_entities(
+                    core_chunks,
+                    skill_name=skill_name,
+                    expertise=expertise,
+                    model=model,
+                    max_concurrent=self._vc_config.max_concurrent_extractions,
+                    timeout=self._config.llm.timeout,
+                    max_tokens=self._config.llm.max_tokens,
+                    extraction_batch_size=self._vc_config.extraction_batch_size,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
+                    store_events=self._vc_config.store_events,
+                )
+
+                if extracted_entities:
+                    entity_texts = [
+                        f"{e.name}: {e.description}" if e.description else e.name for e in extracted_entities
+                    ]
+                    entity_embeddings = await embedder.embed_batch(entity_texts)
+                    for entity, emb in zip(extracted_entities, entity_embeddings):
+                        entity.embedding = emb
+                        entity.embedding_model = embedder.model_name
+
+                    new_entities = list(extracted_entities)
+                    new_relationships = list(extracted_relationships)
+
+                    cooccurrence_rels = _build_cooccurrence_relationships(new_entities, namespace_id, new_relationships)
+                    if cooccurrence_rels:
+                        new_relationships.extend(cooccurrence_rels)
+
+        # 4. Wipe/write VectorCypher-owned stores (khora_chunks + :Chunk nodes)
+        #    BEFORE the coordinator call. The coordinator only owns the
+        #    `chunks` table + graph entities/relationships; it does NOT know
+        #    about `khora_chunks` (via TemporalVectorStore) or :Chunk nodes
+        #    (via DualNodeManager), which VectorCypher's create path writes
+        #    directly (see `_process_document`). Without this, after a
+        #    replace, retrieval returns stale content because khora_chunks
+        #    still holds the old chunks and :Chunk nodes still reference
+        #    old document content, with MENTIONED_IN edges pointing from
+        #    retired entities to old chunks.
+        temporal_store = self._get_temporal_store()
+        dual_nodes = self._get_dual_nodes()
+        doc_metadata = new_metadata.custom
+
+        new_temporal_chunks: list[TemporalChunk] = []
+        for i, c in enumerate(new_chunks):
+            new_temporal_chunks.append(
+                TemporalChunk(
+                    id=c.id,
+                    namespace_id=c.namespace_id,
+                    document_id=c.document_id,
+                    content=c.content,
+                    embedding=c.embedding,
+                    occurred_at=occurred_at,
+                    created_at=datetime.now(UTC),
+                    source_system=doc_metadata.get("source_system"),
+                    author=doc_metadata.get("author"),
+                    channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
+                    tags=_ensure_tags(doc_metadata.get("tags", [])),
+                    confidence=1.0,
+                    metadata={
+                        **doc_metadata,
+                        "chunk_index": i,
+                        "start_char": c.metadata.start_char if c.metadata else 0,
+                        "end_char": c.metadata.end_char if c.metadata else len(c.content),
+                    },
+                )
             )
-            temporal_chunks.append(temporal_chunk)
 
-        # Store chunks in pgvector
-        stored_chunks = await temporal_store.create_chunks_batch(temporal_chunks)
-        for i, stored in enumerate(stored_chunks):
-            temporal_chunks[i].id = stored.id
+        try:
+            # Wipe old VectorCypher-owned state.
+            await temporal_store.delete_chunks_by_document(existing.id, namespace_id)
+            if dual_nodes is not None:
+                await dual_nodes.delete_chunks_by_document(existing.id, namespace_id)
 
-        # Create Chunk nodes in Neo4j (skipped for SurrealDB)
-        if dual_nodes is not None:
-            await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+            # Write new chunks (khora_chunks + :Chunk nodes).
+            if new_temporal_chunks:
+                stored_temporal = await temporal_store.create_chunks_batch(new_temporal_chunks)
+                # Propagate any assigned ids back so the coordinator, which
+                # writes to `chunks` below, uses the same uuids as
+                # khora_chunks / :Chunk nodes.
+                for tc, stored, chunk in zip(new_temporal_chunks, stored_temporal, new_chunks):
+                    tc.id = stored.id
+                    chunk.id = stored.id
+                if dual_nodes is not None:
+                    await dual_nodes.create_chunk_nodes_batch(new_temporal_chunks, namespace_id)
+        except Exception as e:
+            # Mirror coordinator's ADR-056 §Decision #8 self-heal semantics:
+            # mark FAILED and re-raise unwrapped so the next successful
+            # replace against the same external_id heals the row.
+            new_document.mark_failed(str(e))
+            try:
+                await storage.update_document(new_document)
+            except Exception as update_err:
+                logger.warning(
+                    f"Failed to mark document {new_document.id} FAILED during "
+                    f"_remember_via_replace error handling: {update_err}"
+                )
+            raise
 
-        # Deferred skeleton extraction — returns entities instead of storing
-        entities: list[Entity] = []
-        relationships: list[Relationship] = []
-        entity_chunk_links: list[EntityChunkLink] = []
+        # 5. Hand off to the coordinator — it owns the Postgres transaction,
+        #    graph retire / remap / upsert, and FAILED-on-exception handling.
+        replace_result = await storage.replace_document_extraction(
+            namespace_id=namespace_id,
+            old_document_id=existing.id,
+            new_document=new_document,
+            new_chunks=new_chunks,
+            new_entities=new_entities,
+            new_relationships=new_relationships,
+        )
 
-        if self._config.pipeline.extract_entities:
-            entities, relationships, entity_chunk_links = await self._run_skeleton_extraction_deferred(
-                temporal_chunks,
-                document.namespace_id,
-                skill_name=skill_name,
-                expertise=expertise,
-                extraction_model=extraction_model,
-                entity_types=entity_types,
-                relationship_types=relationship_types,
-                skeleton_ratio_override=skeleton_ratio_override,
-                is_conversation=skeleton_ratio_override is not None,
-            )
+        # 6. After the coordinator has (re)written graph entities (retire /
+        #    remap / upsert), relink entities → chunks via MENTIONED_IN for
+        #    Neo4j-backed deployments. Mirrors `_run_skeleton_extraction`
+        #    lines ~901-915. Skipped when dual_nodes is None (SurrealDB
+        #    unified — its graph adapter owns entity↔chunk linkage).
+        if dual_nodes is not None and new_entities:
+            entity_chunk_links: list[EntityChunkLink] = []
+            for entity in new_entities:
+                for chunk_id in entity.source_chunk_ids:
+                    entity_chunk_links.append(
+                        EntityChunkLink(
+                            entity_id=entity.id,
+                            chunk_id=chunk_id,
+                        )
+                    )
+            if entity_chunk_links:
+                try:
+                    await dual_nodes.link_entities_to_chunks_batch(entity_chunk_links)
+                except Exception as e:
+                    new_document.mark_failed(str(e))
+                    try:
+                        await storage.update_document(new_document)
+                    except Exception as update_err:
+                        logger.warning(
+                            f"Failed to mark document {new_document.id} FAILED "
+                            f"during MENTIONED_IN linking error handling: {update_err}"
+                        )
+                    raise
 
-        return len(stored_chunks), entities, relationships, entity_chunk_links
+        # 7. Overwrite ``source_chunk_ids`` to the current extraction's chunk
+        #    UUIDs. ADR-056 decomposes the replace into
+        #    ``upsert_entities_batch`` (net-new only; ON MATCH *appends*
+        #    source_chunk_ids[-250..]) + ``remap_source_document_ids_batch``
+        #    (survivors; source_document_ids only). Neither replaces
+        #    source_chunk_ids, so without this step survivor entities keep
+        #    retired chunk UUIDs and net-new entities accumulate stale UUIDs
+        #    from prior documents. Downstream consumers that read
+        #    ``len(entity.source_chunk_ids)`` as a mention count (Poros /
+        #    Peras per DYT-645; genesis analytics) would double-count across
+        #    replaces. SET is idempotent; safe for both survivors and net-new.
+        graph = storage.graph
+        reset_source_chunk_ids = getattr(graph, "reset_entity_source_chunk_ids_batch", None) if graph else None
+        if reset_source_chunk_ids is not None and new_entities:
+            reset_rows = [
+                {
+                    "name": e.name,
+                    "entity_type": e.entity_type,
+                    "source_chunk_ids": [str(c) for c in e.source_chunk_ids],
+                }
+                for e in new_entities
+                if e.name and e.entity_type
+            ]
+            if reset_rows:
+                await reset_source_chunk_ids(namespace_id, reset_rows)
+
+        # 8. Same append-with-tail concern for relationships: Neo4j's
+        #    create_relationships_batch ON MATCH clause appends
+        #    source_chunk_ids[-250..]. Match relationships by entity name+type
+        #    (MERGE-stable across replaces) rather than UUID — survivor
+        #    entities keep their persisted Neo4j id, which differs from the
+        #    fresh extraction's uuid.
+        reset_rel_source_chunk_ids = (
+            getattr(graph, "reset_relationship_source_chunk_ids_batch", None) if graph else None
+        )
+        if reset_rel_source_chunk_ids is not None and new_relationships and new_entities:
+            from khora.storage.backends.neo4j import _sanitize_neo4j_label
+
+            entity_key_by_id: dict[UUID, tuple[str, str]] = {
+                e.id: (e.name, e.entity_type) for e in new_entities if e.name and e.entity_type
+            }
+            rel_reset_rows: list[dict[str, Any]] = []
+            for r in new_relationships:
+                src_key = entity_key_by_id.get(r.source_entity_id)
+                tgt_key = entity_key_by_id.get(r.target_entity_id)
+                if src_key is None or tgt_key is None:
+                    continue
+                rel_reset_rows.append(
+                    {
+                        "source_name": src_key[0],
+                        "source_type": src_key[1],
+                        "target_name": tgt_key[0],
+                        "target_type": tgt_key[1],
+                        "rel_type": _sanitize_neo4j_label(r.relationship_type),
+                        "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
+                    }
+                )
+            if rel_reset_rows:
+                await reset_rel_source_chunk_ids(namespace_id, rel_reset_rows)
+
+        return RememberResult(
+            document_id=replace_result.document_id,
+            namespace_id=namespace_id,
+            chunks_created=replace_result.chunks_created,
+            entities_extracted=replace_result.entities_created + replace_result.entities_updated,
+            relationships_created=replace_result.relationships_created,
+            metadata={"replaced": True, "old_document_id": str(existing.id)},
+        )
 
     def _validate_recall_results(
         self,
@@ -1529,6 +1949,65 @@ class VectorCypherEngine:
                 progress_count += n
                 on_progress(progress_count, total)
 
+        # ── Stage 0a: external_id dispatch (ADR-056) ────────────────────
+        # Docs with an external_id that already exists in the namespace are
+        # routed to the replace path via self.remember() — which detects the
+        # same existing row and calls coordinator.replace_document_extraction.
+        # Unmatched / absent external_id docs fall through to the streaming
+        # pipeline below, unchanged.
+        #
+        # Batch the existence lookup: one ``get_documents_by_external_ids``
+        # call replaces N serial ``get_document_by_external_id`` round-trips.
+        external_id_handled: set[int] = set()
+        ext_id_to_idx: dict[str, int] = {}
+        for idx, doc_data in enumerate(documents):
+            ext_id = doc_data.get("external_id")
+            if ext_id is None or not isinstance(ext_id, str) or not ext_id.strip():
+                continue
+            # Keep the last-seen idx if an external_id repeats in the batch —
+            # earlier duplicates fall through to Stage 0 checksum dedup.
+            ext_id_to_idx[ext_id] = idx
+
+        existing_by_ext_map: dict[str, Any] = {}
+        if ext_id_to_idx:
+            existing_by_ext_map = await storage.get_documents_by_external_ids(namespace_id, list(ext_id_to_idx.keys()))
+
+        for ext_id, idx in ext_id_to_idx.items():
+            existing_by_ext = existing_by_ext_map.get(ext_id)
+            if existing_by_ext is None:
+                continue
+            doc_data = documents[idx]
+            try:
+                doc_metadata = doc_data.get("metadata", {})
+                occurred_at = (
+                    self._parse_datetime(doc_metadata["occurred_at"]) if "occurred_at" in doc_metadata else None
+                )
+                result = await self.remember(
+                    doc_data.get("content", ""),
+                    namespace_id,
+                    title=doc_data.get("title", ""),
+                    source=doc_data.get("source", ""),
+                    metadata=doc_metadata,
+                    skill_name=skill_name,
+                    expertise=expertise,
+                    extraction_model=extraction_model,
+                    occurred_at=occurred_at,
+                    entity_types=entity_types,
+                    relationship_types=relationship_types,
+                    extraction_config_hash=extraction_config_hash,
+                    chunk_strategy=chunk_strategy,
+                    external_id=ext_id,
+                )
+                results["processed"] += 1
+                results["chunks"] += result.chunks_created
+                results["entities"] += result.entities_extracted
+                results["relationships"] += result.relationships_created
+            except Exception as e:
+                logger.error(f"Failed to replace document external_id={ext_id!r}: {e}")
+                results["failed"] += 1
+            external_id_handled.add(idx)
+            _report_progress()
+
         # ── Stage 0: Dedup ──────────────────────────────────────────────
         _stage0_t0 = _time.perf_counter()
         doc_checksums = [hashlib.sha256(d.get("content", "").encode("utf-8")).hexdigest() for d in documents]
@@ -1536,10 +2015,13 @@ class VectorCypherEngine:
         if deduplicate:
             existing_docs = await storage.get_documents_by_checksums(namespace_id, doc_checksums)
 
-        # Filter to non-duplicate documents, preserving original index
+        # Filter to non-duplicate documents, preserving original index.
+        # Docs already dispatched via external_id above are excluded here.
         checksums_seen: set[str] = set()
         active_indices: list[int] = []
         for idx, checksum in enumerate(doc_checksums):
+            if idx in external_id_handled:
+                continue
             if checksum in checksums_seen or (deduplicate and checksum in existing_docs):
                 results["skipped"] += 1
                 _report_progress()
@@ -1657,300 +2139,372 @@ class VectorCypherEngine:
         if not ok_states:
             return BatchResult(total=total, **results)
 
-        # ── Stage 2: Batch-embed ALL chunk texts ────────────────────────
-        _stage2_t0 = _time.perf_counter()
-
-        # Collect all texts with provenance tracking
-        all_embed_texts: list[str] = []
-        text_offsets: list[tuple[int, int]] = []  # (state_index, start_offset) into all_embed_texts
-        for si, state in enumerate(ok_states):
-            text_offsets.append((si, len(all_embed_texts)))
-            all_embed_texts.extend(state.embed_texts)
-
-        logger.debug(f"Batch embedding {len(all_embed_texts)} texts across {len(ok_states)} documents")
-        all_embeddings = await embedder.embed_batch(all_embed_texts)
-
-        _stage2_ms = (_time.perf_counter() - _stage2_t0) * 1000
-
-        # ── Stage 3: Build TemporalChunks + store to pgvector + Neo4j ───
-        _stage3_t0 = _time.perf_counter()
-
-        # Build TemporalChunk objects with pre-computed embeddings
-        all_temporal_chunks: list[TemporalChunk] = []
-        state_chunk_ranges: list[tuple[int, int]] = []  # (start, end) indices into all_temporal_chunks
-
-        for si, state in enumerate(ok_states):
-            doc = state.document
-            assert doc is not None
-            doc_metadata = doc.metadata.custom if doc.metadata else {}
-            occurred = state.occurred_at or datetime.now(UTC)
-
-            start_idx = len(all_temporal_chunks)
-            _, embed_offset = text_offsets[si]
-
-            for ci, raw_chunk in enumerate(state.raw_chunks):
-                embedding = all_embeddings[embed_offset + min(ci, len(state.embed_texts) - 1)]
-                tc = TemporalChunk(
-                    id=None,
-                    namespace_id=doc.namespace_id,
-                    document_id=doc.id,
-                    content=raw_chunk.content,
-                    embedding=embedding,
-                    occurred_at=occurred,
-                    created_at=datetime.now(UTC),
-                    source_system=doc_metadata.get("source_system"),
-                    author=doc_metadata.get("author"),
-                    channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
-                    tags=_ensure_tags(doc_metadata.get("tags", [])),
-                    confidence=1.0,
-                    metadata={
-                        **doc_metadata,
-                        "chunk_index": ci,
-                        "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
-                        "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
-                    },
-                )
-                all_temporal_chunks.append(tc)
-
-            state_chunk_ranges.append((start_idx, len(all_temporal_chunks)))
-
-        # Batch store to pgvector
-        stored = await temporal_store.create_chunks_batch(all_temporal_chunks)
-        for i, s in enumerate(stored):
-            all_temporal_chunks[i].id = s.id
-
-        # Batch create Neo4j chunk nodes (skipped for SurrealDB)
-        if dual_nodes is not None:
-            await dual_nodes.create_chunk_nodes_batch(all_temporal_chunks, namespace_id)
-
-        _stage3_ms = (_time.perf_counter() - _stage3_t0) * 1000
-
-        # ── Stage 4: Skeleton extraction across ALL documents ───────────
-        _stage4_t0 = _time.perf_counter()
-
-        all_entities: list[Entity] = []
-        all_relationships: list[Relationship] = []
-        all_entity_chunk_links: list[EntityChunkLink] = []
-
-        if self._config.pipeline.extract_entities:
-            # Collect all chunks across documents for batch skeleton extraction
-            all_core_chunk_objects: list[Chunk] = []
-
-            for si, state in enumerate(ok_states):
-                start, end = state_chunk_ranges[si]
-                doc_chunks = all_temporal_chunks[start:end]
-
-                if not doc_chunks:
-                    continue
-
-                # Skeleton selection per document (maintains document-level PageRank semantics).
-                # Skip min_tokens gate for conversation mode — short messages are the norm
-                # and should always reach extraction with skeleton_ratio=0.90.
-                if not is_conversation_mode:
-                    min_tokens = self._vc_config.min_extraction_tokens
-                    if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in doc_chunks):
-                        continue
-
-                if len(doc_chunks) <= 2:
-                    core_ids = {c.id for c in doc_chunks}
-                else:
-                    effective_ratio = skeleton_ratio or self._vc_config.skeleton_core_ratio
-                    skeleton = SkeletonIndexer(core_ratio=effective_ratio)
-                    skeleton.add_chunks_batch(doc_chunks)
-                    core_ids = await asyncio.to_thread(skeleton.build_skeleton)
-
-                for tc in doc_chunks:
-                    if tc.id in core_ids:
-                        all_core_chunk_objects.append(
-                            Chunk(
-                                id=tc.id,
-                                namespace_id=tc.namespace_id,
-                                document_id=tc.document_id,
-                                content=tc.content,
-                                created_at=tc.created_at or tc.occurred_at,
-                            )
-                        )
-
-            if all_core_chunk_objects:
-                model = extraction_model or self._config.llm.model
-
-                if is_conversation_mode:
-                    # In conversation mode, extract per-document to match the
-                    # old pipeline's behaviour.  The old code called
-                    # extract_entities once per document (1-2 chunks each),
-                    # which produced more entities because the LLM saw each
-                    # message in isolation.  Batching all chunks together
-                    # causes cross-document entity deduplication that drops
-                    # ~60% of entities for short conversation messages.
-                    from collections import defaultdict
-
-                    doc_chunks_map: dict[UUID, list[Chunk]] = defaultdict(list)
-                    for chunk in all_core_chunk_objects:
-                        doc_chunks_map[chunk.document_id].append(chunk)
-
-                    # Map document_id -> occurred_at for temporal context in extraction
-                    doc_occurred_at: dict[UUID, datetime | None] = {}
-                    for state in ok_states:
-                        if state.document is not None:
-                            doc_occurred_at[state.document.id] = state.occurred_at
-
-                    logger.debug(
-                        f"Conversation extraction: {len(all_core_chunk_objects)} chunks "
-                        f"across {len(doc_chunks_map)} documents (per-document mode)"
+        # ── Build processing windows ─────────────────────────────────────
+        # When max_chunks_in_flight is set, group documents into windows so
+        # that the total chunk count per window stays ≤ the limit.  Document
+        # boundaries are respected: a document's chunks are never split across
+        # windows.  When the limit is None (default), a single window holds
+        # all documents (current behaviour, backward-compatible).
+        max_cif = self._vc_config.max_chunks_in_flight
+        if max_cif is None:
+            windows: list[list[_DocState]] = [ok_states]
+        else:
+            windows = []
+            _win: list[_DocState] = []
+            _win_count = 0
+            for _s in ok_states:
+                _n = len(_s.raw_chunks)
+                if _n > max_cif:
+                    logger.warning(
+                        f"Document idx={_s.idx} has {_n} chunks which exceeds "
+                        f"max_chunks_in_flight={max_cif}; processing as single-document window."
                     )
+                if _win and _win_count + _n > max_cif:
+                    windows.append(_win)
+                    _win = []
+                    _win_count = 0
+                _win.append(_s)
+                _win_count += _n
+            if _win:
+                windows.append(_win)
+            logger.debug(
+                f"Windowed processing: {len(ok_states)} docs → {len(windows)} windows (max_chunks_in_flight={max_cif})"
+            )
 
-                    per_doc_entities: list[Entity] = []
-                    per_doc_relationships: list[Relationship] = []
-                    sem = asyncio.Semaphore(self._vc_config.max_concurrent_extractions)
-
-                    async def _extract_one_doc(
-                        chunks: list[Chunk], occurred_at: datetime | None = None
-                    ) -> tuple[list, list]:
-                        ctx = {"document_created_at": occurred_at.isoformat()} if occurred_at else None
-                        async with sem:
-                            return await extract_entities(
-                                chunks,
-                                skill_name=skill_name,
-                                expertise=expertise,
-                                model=model,
-                                max_concurrent=1,
-                                context=ctx,
-                                timeout=self._config.llm.timeout,
-                                max_tokens=self._config.llm.max_tokens,
-                                extraction_batch_size=self._vc_config.extraction_batch_size,
-                                entity_types=entity_types,
-                                relationship_types=relationship_types,
-                                store_events=self._vc_config.store_events,
-                            )
-
-                    extraction_results = await asyncio.gather(
-                        *[_extract_one_doc(cks, doc_occurred_at.get(doc_id)) for doc_id, cks in doc_chunks_map.items()]
-                    )
-                    for ents, rels in extraction_results:
-                        per_doc_entities.extend(ents)
-                        per_doc_relationships.extend(rels)
-
-                    entities = per_doc_entities
-                    relationships = per_doc_relationships
-                else:
-                    logger.debug(
-                        f"Batch extraction: {len(all_core_chunk_objects)} core chunks from {len(ok_states)} documents"
-                    )
-                    entities, relationships = await extract_entities(
-                        all_core_chunk_objects,
-                        skill_name=skill_name,
-                        expertise=expertise,
-                        model=model,
-                        max_concurrent=self._vc_config.max_concurrent_extractions,
-                        timeout=self._config.llm.timeout,
-                        max_tokens=self._config.llm.max_tokens,
-                        extraction_batch_size=self._vc_config.extraction_batch_size,
-                        entity_types=entity_types,
-                        relationship_types=relationship_types,
-                        store_events=self._vc_config.store_events,
-                    )
-
-                if entities:
-                    all_entities = list(entities)
-                    all_relationships = list(relationships)
-
-                    # Build entity-chunk links
-                    for entity in all_entities:
-                        for chunk_id in entity.source_chunk_ids:
-                            all_entity_chunk_links.append(EntityChunkLink(entity_id=entity.id, chunk_id=chunk_id))
-
-                    # Co-occurrence relationships
-                    cooccurrence_rels = _build_cooccurrence_relationships(all_entities, namespace_id, all_relationships)
-                    if cooccurrence_rels:
-                        all_relationships.extend(cooccurrence_rels)
-
-        _stage4_ms = (_time.perf_counter() - _stage4_t0) * 1000
-
-        # ── Stage 5: Batch-embed ALL entity texts ───────────────────────
-        _stage5_t0 = _time.perf_counter()
-
-        if all_entities:
-            entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in all_entities]
-            entity_embeddings = await embedder.embed_batch(entity_texts)
-            for entity, emb in zip(all_entities, entity_embeddings):
-                entity.embedding = emb
-                entity.embedding_model = embedder.model_name
-
-        _stage5_ms = (_time.perf_counter() - _stage5_t0) * 1000
-
-        # ── Stage 6: Batch store entities + relationships ───────────────
+        # Accumulated timing across windows
+        _stage2_ms = 0.0
+        _stage3_ms = 0.0
+        _stage4_ms = 0.0
+        _stage5_ms = 0.0
         _stage6_upsert_ms = 0.0
         _stage6_rels_ms = 0.0
         _stage6_links_ms = 0.0
 
-        if all_entities:
-            # Cross-document entity dedup by normalized name:type
-            if self._vc_config.enable_smart_resolution:
-                from khora._accel import normalize_entity_name
+        # Track unique entity keys across windows to avoid double-counting entities
+        # that appear in multiple windows (upsert_entities_batch ensures a single DB
+        # row, so BatchResult.entities must reflect unique persisted cardinality).
+        _seen_entity_keys: set[tuple[str, str]] = set()
 
-                deduped: dict[str, Entity] = {}
-                for entity in all_entities:
-                    key = f"{normalize_entity_name(entity.name)}:{entity.entity_type}"
-                    if key in deduped:
-                        existing = deduped[key]
-                        existing.mention_count += entity.mention_count
-                        for doc_id in entity.source_document_ids:
-                            if doc_id not in existing.source_document_ids:
-                                existing.source_document_ids.append(doc_id)
-                        for chunk_id in entity.source_chunk_ids:
-                            if chunk_id not in existing.source_chunk_ids:
-                                existing.source_chunk_ids.append(chunk_id)
+        for window_states in windows:
+            # ── Stage 2: Batch-embed ALL chunk texts ────────────────────────
+            _t0 = _time.perf_counter()
+
+            # Collect all texts with provenance tracking
+            all_embed_texts: list[str] = []
+            text_offsets: list[tuple[int, int]] = []  # (state_index, start_offset) into all_embed_texts
+            for si, state in enumerate(window_states):
+                text_offsets.append((si, len(all_embed_texts)))
+                all_embed_texts.extend(state.embed_texts)
+
+            logger.debug(f"Batch embedding {len(all_embed_texts)} texts across {len(window_states)} documents")
+            all_embeddings = await embedder.embed_batch(all_embed_texts)
+
+            _stage2_ms += (_time.perf_counter() - _t0) * 1000
+
+            # ── Stage 3: Build TemporalChunks + store to pgvector + Neo4j ───
+            _t0 = _time.perf_counter()
+
+            # Build TemporalChunk objects with pre-computed embeddings
+            all_temporal_chunks: list[TemporalChunk] = []
+            state_chunk_ranges: list[tuple[int, int]] = []  # (start, end) indices into all_temporal_chunks
+
+            for si, state in enumerate(window_states):
+                doc = state.document
+                assert doc is not None
+                doc_metadata = doc.metadata.custom if doc.metadata else {}
+                occurred = state.occurred_at or datetime.now(UTC)
+
+                start_idx = len(all_temporal_chunks)
+                _, embed_offset = text_offsets[si]
+
+                for ci, raw_chunk in enumerate(state.raw_chunks):
+                    embedding = all_embeddings[embed_offset + min(ci, len(state.embed_texts) - 1)]
+                    tc = TemporalChunk(
+                        id=None,
+                        namespace_id=doc.namespace_id,
+                        document_id=doc.id,
+                        content=raw_chunk.content,
+                        embedding=embedding,
+                        occurred_at=occurred,
+                        created_at=datetime.now(UTC),
+                        source_system=doc_metadata.get("source_system"),
+                        author=doc_metadata.get("author"),
+                        channel=doc_metadata.get("channel") or doc_metadata.get("thread_id"),
+                        tags=_ensure_tags(doc_metadata.get("tags", [])),
+                        confidence=1.0,
+                        metadata={
+                            **doc_metadata,
+                            "chunk_index": ci,
+                            "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
+                            "end_char": raw_chunk.end_char
+                            if hasattr(raw_chunk, "end_char")
+                            else len(raw_chunk.content),
+                        },
+                    )
+                    all_temporal_chunks.append(tc)
+
+                state_chunk_ranges.append((start_idx, len(all_temporal_chunks)))
+
+            # Batch store to pgvector
+            stored = await temporal_store.create_chunks_batch(all_temporal_chunks)
+            for i, s in enumerate(stored):
+                all_temporal_chunks[i].id = s.id
+
+            # Batch create Neo4j chunk nodes (skipped for SurrealDB)
+            if dual_nodes is not None:
+                await dual_nodes.create_chunk_nodes_batch(all_temporal_chunks, namespace_id)
+
+            _stage3_ms += (_time.perf_counter() - _t0) * 1000
+
+            # ── Stage 4: Skeleton extraction across ALL documents ───────────
+            _t0 = _time.perf_counter()
+
+            all_entities: list[Entity] = []
+            all_relationships: list[Relationship] = []
+            all_entity_chunk_links: list[EntityChunkLink] = []
+
+            if self._config.pipeline.extract_entities:
+                # Collect all chunks across documents for batch skeleton extraction
+                all_core_chunk_objects: list[Chunk] = []
+
+                for si, state in enumerate(window_states):
+                    start, end = state_chunk_ranges[si]
+                    doc_chunks = all_temporal_chunks[start:end]
+
+                    if not doc_chunks:
+                        continue
+
+                    # Skeleton selection per document (maintains document-level PageRank semantics).
+                    # Skip min_tokens gate for conversation mode — short messages are the norm
+                    # and should always reach extraction with skeleton_ratio=0.90.
+                    if not is_conversation_mode:
+                        min_tokens = self._vc_config.min_extraction_tokens
+                        if min_tokens > 0 and all(len(c.content.split()) <= min_tokens for c in doc_chunks):
+                            continue
+
+                    if len(doc_chunks) <= 2:
+                        core_ids = {c.id for c in doc_chunks}
                     else:
-                        deduped[key] = entity
-                all_entities = list(deduped.values())
-                logger.debug(f"Cross-document dedup: {len(deduped)} unique entities")
+                        effective_ratio = skeleton_ratio or self._vc_config.skeleton_core_ratio
+                        skeleton = SkeletonIndexer(core_ratio=effective_ratio)
+                        skeleton.add_chunks_batch(doc_chunks)
+                        core_ids = await asyncio.to_thread(skeleton.build_skeleton)
 
-                # Rebuild entity-chunk links after dedup: the pre-dedup links
-                # reference UUIDs of discarded entities, causing MATCH failures
-                # in Neo4j (silent MENTIONED_IN edge loss).  Surviving entities
-                # already carry the merged source_chunk_ids from all duplicates.
+                    for tc in doc_chunks:
+                        if tc.id in core_ids:
+                            all_core_chunk_objects.append(
+                                Chunk(
+                                    id=tc.id,
+                                    namespace_id=tc.namespace_id,
+                                    document_id=tc.document_id,
+                                    content=tc.content,
+                                    created_at=tc.created_at or tc.occurred_at,
+                                )
+                            )
+
+                if all_core_chunk_objects:
+                    model = extraction_model or self._config.llm.model
+
+                    if is_conversation_mode:
+                        # In conversation mode, extract per-document to match the
+                        # old pipeline's behaviour.  The old code called
+                        # extract_entities once per document (1-2 chunks each),
+                        # which produced more entities because the LLM saw each
+                        # message in isolation.  Batching all chunks together
+                        # causes cross-document entity deduplication that drops
+                        # ~60% of entities for short conversation messages.
+                        from collections import defaultdict
+
+                        doc_chunks_map: dict[UUID, list[Chunk]] = defaultdict(list)
+                        for chunk in all_core_chunk_objects:
+                            doc_chunks_map[chunk.document_id].append(chunk)
+
+                        # Map document_id -> occurred_at for temporal context in extraction
+                        doc_occurred_at: dict[UUID, datetime | None] = {}
+                        for state in window_states:
+                            if state.document is not None:
+                                doc_occurred_at[state.document.id] = state.occurred_at
+
+                        logger.debug(
+                            f"Conversation extraction: {len(all_core_chunk_objects)} chunks "
+                            f"across {len(doc_chunks_map)} documents (per-document mode)"
+                        )
+
+                        per_doc_entities: list[Entity] = []
+                        per_doc_relationships: list[Relationship] = []
+                        sem = asyncio.Semaphore(self._vc_config.max_concurrent_extractions)
+
+                        async def _extract_one_doc(
+                            chunks: list[Chunk], occurred_at: datetime | None = None
+                        ) -> tuple[list, list]:
+                            ctx = {"document_created_at": occurred_at.isoformat()} if occurred_at else None
+                            async with sem:
+                                return await extract_entities(
+                                    chunks,
+                                    skill_name=skill_name,
+                                    expertise=expertise,
+                                    model=model,
+                                    max_concurrent=1,
+                                    context=ctx,
+                                    timeout=self._config.llm.timeout,
+                                    max_tokens=self._config.llm.max_tokens,
+                                    extraction_batch_size=self._vc_config.extraction_batch_size,
+                                    entity_types=entity_types,
+                                    relationship_types=relationship_types,
+                                    store_events=self._vc_config.store_events,
+                                )
+
+                        extraction_results = await asyncio.gather(
+                            *[
+                                _extract_one_doc(cks, doc_occurred_at.get(doc_id))
+                                for doc_id, cks in doc_chunks_map.items()
+                            ]
+                        )
+                        for ents, rels in extraction_results:
+                            per_doc_entities.extend(ents)
+                            per_doc_relationships.extend(rels)
+
+                        entities = per_doc_entities
+                        relationships = per_doc_relationships
+                    else:
+                        logger.debug(
+                            f"Batch extraction: {len(all_core_chunk_objects)} core chunks from {len(window_states)} documents"
+                        )
+                        entities, relationships = await extract_entities(
+                            all_core_chunk_objects,
+                            skill_name=skill_name,
+                            expertise=expertise,
+                            model=model,
+                            max_concurrent=self._vc_config.max_concurrent_extractions,
+                            timeout=self._config.llm.timeout,
+                            max_tokens=self._config.llm.max_tokens,
+                            extraction_batch_size=self._vc_config.extraction_batch_size,
+                            entity_types=entity_types,
+                            relationship_types=relationship_types,
+                            store_events=self._vc_config.store_events,
+                        )
+
+                    if entities:
+                        all_entities = list(entities)
+                        all_relationships = list(relationships)
+
+                        # Build entity-chunk links
+                        for entity in all_entities:
+                            for chunk_id in entity.source_chunk_ids:
+                                all_entity_chunk_links.append(EntityChunkLink(entity_id=entity.id, chunk_id=chunk_id))
+
+                        # Co-occurrence relationships
+                        cooccurrence_rels = _build_cooccurrence_relationships(
+                            all_entities, namespace_id, all_relationships
+                        )
+                        if cooccurrence_rels:
+                            all_relationships.extend(cooccurrence_rels)
+
+            _stage4_ms += (_time.perf_counter() - _t0) * 1000
+
+            # ── Stage 5: Batch-embed ALL entity texts ───────────────────────
+            _t0 = _time.perf_counter()
+
+            if all_entities:
+                entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in all_entities]
+                entity_embeddings = await embedder.embed_batch(entity_texts)
+                for entity, emb in zip(all_entities, entity_embeddings):
+                    entity.embedding = emb
+                    entity.embedding_model = embedder.model_name
+
+            _stage5_ms += (_time.perf_counter() - _t0) * 1000
+
+            # ── Stage 6: Batch store entities + relationships ───────────────
+            if all_entities:
+                # Cross-document entity dedup by normalized name:type
+                if self._vc_config.enable_smart_resolution:
+                    from khora._accel import normalize_entity_name
+
+                    deduped: dict[str, Entity] = {}
+                    for entity in all_entities:
+                        key = f"{normalize_entity_name(entity.name)}:{entity.entity_type}"
+                        if key in deduped:
+                            existing = deduped[key]
+                            existing.mention_count += entity.mention_count
+                            for doc_id in entity.source_document_ids:
+                                if doc_id not in existing.source_document_ids:
+                                    existing.source_document_ids.append(doc_id)
+                            for chunk_id in entity.source_chunk_ids:
+                                if chunk_id not in existing.source_chunk_ids:
+                                    existing.source_chunk_ids.append(chunk_id)
+                        else:
+                            deduped[key] = entity
+                    all_entities = list(deduped.values())
+                    logger.debug(f"Cross-document dedup: {len(deduped)} unique entities")
+
+                    # Rebuild entity-chunk links after dedup: the pre-dedup links
+                    # reference UUIDs of discarded entities, causing MATCH failures
+                    # in Neo4j (silent MENTIONED_IN edge loss).  Surviving entities
+                    # already carry the merged source_chunk_ids from all duplicates.
+                    all_entity_chunk_links = [
+                        EntityChunkLink(entity_id=entity.id, chunk_id=chunk_id)
+                        for entity in all_entities
+                        for chunk_id in entity.source_chunk_ids
+                    ]
+
+                _t0 = _time.perf_counter()
+                await storage.upsert_entities_batch(namespace_id, all_entities)
+                _stage6_upsert_ms += (_time.perf_counter() - _t0) * 1000
+
+                # Rebuild entity-chunk links after upsert: upsert_entities_batch()
+                # mutates entity.id in-place to the DB's canonical UUID when the entity
+                # already exists (e.g., cross-window collision).  Links built before this
+                # call carry pre-mutation UUIDs and cause silent MENTIONED_IN edge loss.
                 all_entity_chunk_links = [
                     EntityChunkLink(entity_id=entity.id, chunk_id=chunk_id)
                     for entity in all_entities
                     for chunk_id in entity.source_chunk_ids
                 ]
 
-            _t0 = _time.perf_counter()
-            await storage.upsert_entities_batch(namespace_id, all_entities)
-            _stage6_upsert_ms = (_time.perf_counter() - _t0) * 1000
+                if all_relationships:
+                    _t0 = _time.perf_counter()
+                    await storage.create_relationships_batch(all_relationships)
+                    _stage6_rels_ms += (_time.perf_counter() - _t0) * 1000
 
-            if all_relationships:
-                _t0 = _time.perf_counter()
-                await storage.create_relationships_batch(all_relationships)
-                _stage6_rels_ms = (_time.perf_counter() - _t0) * 1000
+                if all_entity_chunk_links and dual_nodes is not None:
+                    _t0 = _time.perf_counter()
+                    await dual_nodes.link_entities_to_chunks_batch(all_entity_chunk_links)
+                    _stage6_links_ms += (_time.perf_counter() - _t0) * 1000
 
-            if all_entity_chunk_links and dual_nodes is not None:
-                _t0 = _time.perf_counter()
-                await dual_nodes.link_entities_to_chunks_batch(all_entity_chunk_links)
-                _stage6_links_ms = (_time.perf_counter() - _t0) * 1000
+                logger.info(
+                    f"Streaming pipeline batch store: {len(all_entities)} entities, "
+                    f"{len(all_relationships)} relationships, {len(all_entity_chunk_links)} links"
+                )
 
-            logger.info(
-                f"Streaming pipeline batch store: {len(all_entities)} entities, "
-                f"{len(all_relationships)} relationships, {len(all_entity_chunk_links)} links"
-            )
+            # ── Update document statuses + fire on_progress (per window) ────
+            for si, state in enumerate(window_states):
+                doc = state.document
+                assert doc is not None
+                start, end = state_chunk_ranges[si]
+                chunks_created = end - start
+                # Count entities from this document's chunks
+                doc_chunk_ids = {all_temporal_chunks[i].id for i in range(start, end)}
+                doc_entity_count = sum(
+                    1 for e in all_entities if any(cid in doc_chunk_ids for cid in e.source_chunk_ids)
+                )
+                doc_relationship_count = sum(
+                    1 for r in all_relationships if any(cid in doc_chunk_ids for cid in r.source_chunk_ids)
+                )
+                doc.mark_completed(chunks_created, doc_entity_count, doc_relationship_count)
+                await storage.update_document(doc)
+                results["processed"] += 1
+                results["chunks"] += chunks_created
+                _report_progress()
 
-        # ── Update document statuses ────────────────────────────────────
-        for si, state in enumerate(ok_states):
-            doc = state.document
-            assert doc is not None
-            start, end = state_chunk_ranges[si]
-            chunks_created = end - start
-            # Count entities from this document's chunks
-            doc_chunk_ids = {all_temporal_chunks[i].id for i in range(start, end)}
-            doc_entity_count = sum(1 for e in all_entities if any(cid in doc_chunk_ids for cid in e.source_chunk_ids))
-            doc.mark_completed(chunks_created, doc_entity_count)
-            await storage.update_document(doc)
-            results["processed"] += 1
-            results["chunks"] += chunks_created
-            _report_progress()
-
-        results["entities"] += len(all_entities)
-        results["relationships"] += len(all_relationships)
+            new_entity_count = 0
+            for _e in all_entities:
+                _key = (_e.name, _e.entity_type)
+                if _key not in _seen_entity_keys:
+                    _seen_entity_keys.add(_key)
+                    new_entity_count += 1
+            results["entities"] += new_entity_count
+            results["relationships"] += len(all_relationships)
+            # end of window loop
 
         _stage6_total_ms = _stage6_upsert_ms + _stage6_rels_ms + _stage6_links_ms
         with trace_span(
@@ -2063,6 +2617,7 @@ class VectorCypherEngine:
                         relationship_types=relationship_types,
                         extraction_config_hash=extraction_config_hash,
                         chunk_strategy=chunk_strategy,
+                        external_id=doc_data.get("external_id"),
                     )
                     async with results_lock:
                         if result.metadata.get("duplicate"):

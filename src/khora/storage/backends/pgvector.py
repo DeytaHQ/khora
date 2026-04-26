@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from khora.core.models import Chunk, ChunkMetadata
-from khora.db.models import Base, ChunkModel, EntityModel
+from khora.db.models import Base, ChronicleEventModel, ChunkModel, EntityModel, MemoryFactModel
 from khora.db.schema import sync_enum_values
 from khora.storage.backends.mixins import AsyncSessionMixin
 from khora.telemetry import trace
@@ -626,6 +626,33 @@ class PgVectorBackend(AsyncSessionMixin):
             result = await session.execute(select(EntityModel).where(EntityModel.id.in_(entity_ids)))
             return {model.id: self._entity_model_to_domain(model) for model in result.scalars()}
 
+    async def get_entities_by_names_batch(self, namespace_id: UUID, names: list[str]) -> dict:
+        """Fetch entities by name within a namespace (one-shot batch).
+
+        Used by Chronicle to resolve event subjects to Entity records when
+        no graph backend is available. Returns a dict keyed by name; if more
+        than one entity shares the same name (e.g. different entity_types),
+        the entry with the highest mention_count wins (stable, repeatable).
+        Names not found are simply absent from the result.
+        """
+        if not names:
+            return {}
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(EntityModel)
+                .where(
+                    EntityModel.namespace_id == namespace_id,
+                    EntityModel.name.in_(names),
+                )
+                .order_by(EntityModel.mention_count.desc())
+            )
+            out: dict[str, Any] = {}
+            for model in result.scalars():
+                # First row per name wins (already sorted by mention_count DESC).
+                if model.name not in out:
+                    out[model.name] = self._entity_model_to_domain(model)
+            return out
+
     async def entity_exists(self, entity_id: UUID) -> bool:
         """Check if an entity exists in PostgreSQL."""
         async with self._get_session() as session:
@@ -890,6 +917,130 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             rows = result.scalars().all()
             return [self._chunk_model_to_domain(row) for row in rows]
+
+    # =========================================================================
+    # Chronicle engine: events + facts (migration 024)
+    #
+    # Inputs use the duck-typed ChronicleEvent / MemoryFact dataclasses from
+    # ``khora.engines.chronicle`` to avoid pulling LLM dependencies at import
+    # time. Each helper reads/writes only the column set defined in the
+    # ``chronicle_events`` / ``memory_facts`` tables.
+    # =========================================================================
+
+    async def write_events(
+        self,
+        events: list[Any],
+        *,
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Insert chronicle_events rows; returns inserted IDs in input order."""
+        if not events:
+            return []
+        models = [
+            ChronicleEventModel(
+                id=getattr(ev, "id", None),
+                namespace_id=namespace_id,
+                chunk_id=ev.chunk_id,
+                subject=ev.subject,
+                verb=ev.verb,
+                object_=ev.object or None,
+                observation_date=ev.observation_date or datetime.now(UTC),
+                referenced_date=ev.referenced_date,
+                relative_offset=ev.relative_offset or None,
+                confidence=float(ev.confidence),
+                source_text=ev.source_text or "",
+                embedding=getattr(ev, "embedding", None),
+            )
+            for ev in events
+        ]
+        async with self._get_session() as session:
+            session.add_all(models)
+            await session.commit()
+        return [m.id for m in models]
+
+    async def write_facts(
+        self,
+        facts: list[Any],
+        *,
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Insert memory_facts rows; returns inserted IDs in input order.
+
+        Maps ``MemoryFact`` (subject/predicate/object_/fact_text) directly to
+        the ``memory_facts`` table — Chronicle #3 reshaped the dataclass so
+        the placeholder adapter from Chronicle #1 is no longer needed.
+        """
+        if not facts:
+            return []
+        models = [
+            MemoryFactModel(
+                id=getattr(f, "id", None),
+                namespace_id=namespace_id,
+                subject=f.subject or "",
+                predicate=f.predicate or "",
+                object_=f.object_ or "",
+                fact_text=f.fact_text or "",
+                confidence=float(f.confidence),
+                is_active=bool(getattr(f, "is_active", True)),
+                superseded_by=getattr(f, "superseded_by", None),
+                source_chunk_ids=list(getattr(f, "source_chunk_ids", []) or []),
+            )
+            for f in facts
+        ]
+        async with self._get_session() as session:
+            session.add_all(models)
+            await session.commit()
+        return [m.id for m in models]
+
+    async def query_events(
+        self,
+        namespace_id: UUID,
+        *,
+        subject: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+    ) -> list[ChronicleEventModel]:
+        """Query chronicle_events filtered by subject and referenced_date range."""
+        async with self._get_session() as session:
+            stmt = select(ChronicleEventModel).where(ChronicleEventModel.namespace_id == namespace_id)
+            if subject is not None:
+                stmt = stmt.where(ChronicleEventModel.subject == subject)
+            if since is not None:
+                stmt = stmt.where(ChronicleEventModel.referenced_date >= since)
+            if until is not None:
+                stmt = stmt.where(ChronicleEventModel.referenced_date <= until)
+            stmt = stmt.order_by(ChronicleEventModel.referenced_date.desc().nullslast()).limit(limit)
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+    async def query_active_facts_for_subject(
+        self,
+        namespace_id: UUID,
+        subject: str,
+    ) -> list[MemoryFactModel]:
+        """Return all active (not superseded) memory facts for a subject."""
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(MemoryFactModel)
+                .where(
+                    MemoryFactModel.namespace_id == namespace_id,
+                    MemoryFactModel.subject == subject,
+                    MemoryFactModel.is_active.is_(True),
+                )
+                .order_by(MemoryFactModel.created_at.desc())
+            )
+            return list(result.scalars().all())
+
+    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID) -> None:
+        """Mark a fact inactive and link it to its replacement."""
+        async with self._get_session() as session:
+            await session.execute(
+                update(MemoryFactModel)
+                .where(MemoryFactModel.id == fact_id)
+                .values(is_active=False, superseded_by=superseded_by, updated_at=datetime.now(UTC))
+            )
+            await session.commit()
 
     async def get_embedding_stats(self, namespace_id: UUID) -> dict:
         """Get statistics about embeddings in a namespace."""

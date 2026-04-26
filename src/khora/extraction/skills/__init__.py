@@ -31,9 +31,11 @@ from .base import (
     ConfidenceLevel,
     CorrelationRule,
     EntityTypeConfig,
+    EventExtractionConfig,
     ExpansionConfig,
     ExpertiseConfig,
     ExtractionSkill,
+    FactExtractionConfig,
     InferenceCondition,
     InferenceRule,
     RelationshipTypeConfig,
@@ -65,6 +67,9 @@ __all__ = [
     "ConfidenceConfig",
     "ConfidenceLevel",
     "ExpansionConfig",
+    # Chronicle engine extraction toggles (Chronicle #1)
+    "EventExtractionConfig",
+    "FactExtractionConfig",
     # Loading and composition
     "ExpertiseLoader",
     "ExpertiseLoadError",

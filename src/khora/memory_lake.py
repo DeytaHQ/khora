@@ -9,12 +9,14 @@ The default engine is "vectorcypher" which uses knowledge graphs, vectors, and L
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from loguru import logger
 
@@ -22,6 +24,48 @@ from khora.config import KhoraConfig, load_config
 from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
 from khora.telemetry import trace_span
+
+
+class _GlobalChunkSemaphore:
+    """Counting semaphore supporting bulk acquire/release for chunk windowing.
+
+    asyncio.Semaphore only supports acquire/release of 1 unit at a time.
+    This uses asyncio.Condition to support acquiring N tokens at once,
+    ensuring total chunks in flight across all concurrent submit_batch
+    calls stay within the global limit.
+
+    If n > capacity in acquire(), n is clamped to capacity to avoid
+    permanent deadlock. This can occur when per-call max_chunks_in_flight
+    exceeds the semaphore capacity (i.e. conflicting values across calls).
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        self._in_flight = 0
+        self._condition = asyncio.Condition()
+
+    @property
+    def capacity(self) -> int:
+        return self._capacity
+
+    async def acquire(self, n: int) -> int:
+        """Block until n tokens are available, then acquire them. Returns tokens acquired."""
+        # Clamp to capacity to avoid permanent deadlock when n > capacity.
+        n = min(n, self._capacity)
+        async with self._condition:
+            while self._in_flight + n > self._capacity:
+                await self._condition.wait()
+            self._in_flight += n
+        return n
+
+    async def release(self, n: int) -> None:
+        """Release n tokens and wake any waiters."""
+        async with self._condition:
+            if self._in_flight < n:
+                raise RuntimeError(f"Semaphore release({n}) would underflow _in_flight={self._in_flight}")
+            self._in_flight -= n
+            self._condition.notify_all()
+
 
 if TYPE_CHECKING:
     from khora.core.models import Relationship
@@ -90,6 +134,83 @@ class Stats:
     entities: int
     relationships: int
     last_activity_at: datetime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class DocumentResult:
+    """Result of processing a single document via submit_batch().
+
+    Produced by the background worker and delivered to the on_result callback
+    as each document completes (or fails) processing.
+    """
+
+    document_id: UUID
+    """Row-level ID of the pre-created document record."""
+    namespace_id: UUID
+    success: bool
+    error: str | None = None
+    chunks_created: int = 0
+    entities_extracted: int = 0
+    relationships_created: int = 0
+    llm_usage: list[LLMUsage] = field(default_factory=list)
+    skipped: bool = False
+    """True when re-processing was skipped. Set for documents in COMPLETED, PROCESSING,
+    or ARCHIVED state (unless reprocess_archived=True). Callers should not treat skipped
+    results as errors."""
+    external_id: str | None = None
+    """Caller-supplied opaque identifier from Document.external_id.
+    Allows the caller to map each result back to its source row without
+    a separate database lookup (e.g. for incremental checkpoint advancement)."""
+
+
+@dataclass
+class BatchHandle:
+    """Handle returned by submit_batch() for tracking deferred batch processing.
+
+    Documents are persisted as PENDING before this handle is returned.
+    Background processing runs after return; use wait() to block until done.
+
+    Attributes:
+        batch_id: Unique identifier for this batch submission.
+        total: Total number of documents in the batch.
+        completed: Number of documents processed so far (success or failure).
+        is_done: True when all documents have been processed.
+    """
+
+    batch_id: UUID
+    total: int
+    _completed: int = field(default=0, init=False, repr=False)
+    _failed: int = field(default=0, init=False, repr=False)
+    _done_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+
+    @property
+    def completed(self) -> int:
+        """Number of documents processed (success + failure)."""
+        return self._completed
+
+    @property
+    def failed(self) -> int:
+        """Number of documents that failed processing."""
+        return self._failed
+
+    @property
+    def is_done(self) -> bool:
+        """True when all documents have been processed."""
+        return self._done_event.is_set()
+
+    async def wait(self) -> None:
+        """Block until all documents in the batch have been processed."""
+        await self._done_event.wait()
+
+    def _record_result(self, result: DocumentResult) -> None:
+        """Internal: update counters after a document completes."""
+        self._completed += 1
+        if not result.success:
+            self._failed += 1
+
+    def _mark_done(self) -> None:
+        """Internal: signal that all documents have been processed."""
+        self._done_event.set()
 
 
 @dataclass(slots=True, frozen=True)
@@ -224,6 +345,10 @@ class MemoryLake:
         self._run_migrations = run_migrations
         self._engine: MemoryEngineProtocol | None = None
         self._connected = False
+        self._bg_tasks: set[asyncio.Task] = set()
+        # Global chunk semaphore shared across all concurrent submit_batch calls.
+        # Initialized on first submit_batch call that sets max_chunks_in_flight.
+        self._chunk_semaphore: _GlobalChunkSemaphore | None = None
 
     async def connect(self) -> None:
         """Connect to all storage backends."""
@@ -540,6 +665,417 @@ class MemoryLake:
         finally:
             collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
+
+    async def submit_batch(
+        self,
+        documents: list[dict[str, Any]],
+        *,
+        on_result: Callable[[int, int, DocumentResult], None],
+        namespace: str | UUID,
+        skill_name: str = "general_entities",
+        entity_types: list[str],
+        relationship_types: list[str],
+        expertise: ExpertiseConfig | None = None,
+        extraction_config_hash: str | None = None,
+        chunk_strategy: ChunkStrategy | None = None,
+        max_chunks_in_flight: int | None = None,
+        max_concurrent: int = 1,
+        reprocess_archived: bool = False,
+    ) -> BatchHandle:
+        """Submit documents for deferred background processing.
+
+        Unlike remember_batch() (which blocks until all documents are processed),
+        submit_batch() persists documents as PENDING and returns a BatchHandle
+        immediately. Processing continues in the background.
+
+        Contract:
+        - Before return: all documents are persisted to the DB with PENDING status
+          (durable — survives crashes).
+        - After return: documents are processed in bounded windows of
+          max_chunks_in_flight chunks. on_result fires per document as each
+          completes.
+        - Multiple concurrent submit_batch() calls are safe; each has an
+          independent BatchHandle and background task.
+
+        Args:
+            documents: List of document dicts with 'content', 'title', 'source',
+                'metadata', 'external_id' keys.
+            on_result: Synchronous callback(completed, total, DocumentResult)
+                invoked per document as processing completes.
+            namespace: Namespace UUID (as UUID or string).
+            skill_name: Extraction skill to use.
+            entity_types: Required entity types to extract.
+            relationship_types: Required relationship types to extract.
+            expertise: Optional domain-specific extraction config.
+            extraction_config_hash: Optional hash for extraction config change detection.
+            chunk_strategy: Override chunking strategy for this batch.
+            max_chunks_in_flight: Maximum chunks processed per window. Controls
+                memory usage during background processing. None = unbounded.
+            max_concurrent: Maximum documents to process concurrently in background
+                (default: 1 — sequential processing).
+            reprocess_archived: If True, ARCHIVED documents are reset to PENDING
+                and re-processed like FAILED documents. If False (default), ARCHIVED
+                documents are skipped with a warning — preserving intentional
+                archival semantics.
+
+        Returns:
+            BatchHandle with batch_id, completion status, and wait() method.
+
+        Raises:
+            RuntimeError: If the engine does not support staged document processing.
+        """
+        from khora.core.models.document import Document, DocumentMetadata
+
+        if not documents:
+            handle = BatchHandle(batch_id=uuid4(), total=0)
+            handle._mark_done()
+            return handle
+
+        from khora.core.models.document import DocumentStatus
+
+        namespace_id = await self._resolve_namespace(namespace)
+        storage = self.storage
+
+        # Persist all documents as PENDING before returning the handle.
+        # This satisfies the durability contract — if the process crashes after
+        # submit_batch() returns, the PENDING records survive for recovery.
+        #
+        # ADR-068 Decision 1 — self-healing for existing documents:
+        # Instead of failing on duplicate external_id, detect and dispatch:
+        #   PENDING    → skip insert, re-queue for processing (self-heal stalled docs)
+        #   COMPLETED  → skip entirely, report success (already done)
+        #   FAILED     → reset to PENDING + update content, re-queue for processing
+        #   ARCHIVED   → skip by default (preserves intentional archival); set
+        #                reprocess_archived=True to re-activate explicitly (DYT-3077)
+        #   PROCESSING → skip to avoid race with active worker (M1)
+        pending_docs: list[Document] = []
+        pending_doc_data: list[dict[str, Any]] = []
+        pre_failed_docs: list[tuple[Document, str]] = []
+        pre_completed_docs: list[Document] = []
+
+        # Batch-lookup existing documents by external_id to avoid N serial queries.
+        all_external_ids = [d.get("external_id") for d in documents if d.get("external_id")]
+        existing_by_ext_id: dict[str, Document] = {}
+        if all_external_ids:
+            try:
+                existing_by_ext_id = await storage.get_documents_by_external_ids(namespace_id, all_external_ids)
+            except Exception as exc:
+                # M2: Fall through to the normal insert path if the lookup fails.
+                logger.warning(
+                    f"submit_batch: could not look up existing documents by external_id "
+                    f"({exc}); treating all as new inserts"
+                )
+                existing_by_ext_id = {}
+
+        seen_external_ids: set[str] = set()
+        pre_failed_doc_ids: set[UUID] = set()
+
+        for doc_data in documents:
+            content = doc_data.get("content", "")
+            checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            external_id = doc_data.get("external_id")
+
+            # M4: Skip duplicate external_ids within the same batch.
+            if external_id:
+                if external_id in seen_external_ids:
+                    logger.warning(
+                        f"submit_batch: duplicate external_id in batch, skipping subsequent occurrence "
+                        f"(external_id={external_id!r})"
+                    )
+                    continue
+                seen_external_ids.add(external_id)
+
+            existing = existing_by_ext_id.get(external_id) if external_id else None
+
+            if existing is not None:
+                if existing.status == DocumentStatus.COMPLETED:
+                    # Already fully processed — skip re-insertion, report as skipped.
+                    logger.debug(
+                        f"submit_batch: document already COMPLETED, skipping "
+                        f"(external_id={external_id!r}, doc_id={existing.id})"
+                    )
+                    pre_completed_docs.append(existing)
+                    continue
+
+                # M1: PROCESSING means an active worker holds this doc — skip to avoid race.
+                if existing.status == DocumentStatus.PROCESSING:
+                    logger.warning(
+                        f"submit_batch: document is PROCESSING, skipping re-queue to avoid race "
+                        f"(external_id={external_id!r}, doc_id={existing.id})"
+                    )
+                    pre_completed_docs.append(existing)
+                    continue
+
+                # ARCHIVED: skip by default to preserve intentional archival semantics.
+                # Callers must explicitly pass reprocess_archived=True to re-activate.
+                if existing.status == DocumentStatus.ARCHIVED and not reprocess_archived:
+                    logger.warning(
+                        f"submit_batch: ARCHIVED document skipped — pass reprocess_archived=True "
+                        f"to re-activate (external_id={external_id!r}, doc_id={existing.id})"
+                    )
+                    pre_completed_docs.append(existing)
+                    continue
+
+                # PENDING, FAILED, or ARCHIVED (reprocess_archived=True): reset to PENDING and re-process.
+                # Update content + metadata so the re-run uses the latest submitted values
+                # (fixes empty-source issue observed in soak test — DYT-3075).
+                prior_status = existing.status
+                # H1: Track FAILED and ARCHIVED docs — they may have prior extraction
+                # state (chunks, graph entities) that must be cleared before re-processing
+                # to prevent duplicate chunks/entities on retry.
+                if prior_status in (DocumentStatus.FAILED, DocumentStatus.ARCHIVED):
+                    pre_failed_doc_ids.add(existing.id)
+                existing.content = content
+                existing.metadata = DocumentMetadata(
+                    title=doc_data.get("title", ""),
+                    source=doc_data.get("source", ""),
+                    source_type="api",
+                    checksum=checksum,
+                    size_bytes=len(content.encode("utf-8")),
+                    custom=doc_data.get("metadata") or {},
+                )
+                existing.status = DocumentStatus.PENDING
+                existing.extraction_config_hash = extraction_config_hash
+                existing.error_message = None
+                logger.debug(
+                    f"submit_batch: re-queuing existing {prior_status.value} document "
+                    f"(external_id={external_id!r}, doc_id={existing.id})"
+                )
+                try:
+                    await storage.update_document(existing)
+                    pending_docs.append(existing)
+                    pending_doc_data.append(doc_data)
+                except Exception as exc:
+                    logger.warning(
+                        f"submit_batch: could not update document record (external_id={external_id!r}): {exc}"
+                    )
+                    pre_failed_docs.append((existing, str(exc)))
+                continue
+
+            # No existing document — normal insert path.
+            doc = Document(
+                namespace_id=namespace_id,
+                content=content,
+                metadata=DocumentMetadata(
+                    title=doc_data.get("title", ""),
+                    source=doc_data.get("source", ""),
+                    source_type="api",
+                    checksum=checksum,
+                    size_bytes=len(content.encode("utf-8")),
+                    custom=doc_data.get("metadata") or {},
+                ),
+                extraction_config_hash=extraction_config_hash,
+                external_id=external_id,
+            )
+            try:
+                doc = await storage.create_document(doc)
+                pending_docs.append(doc)
+                pending_doc_data.append(doc_data)
+            except Exception as exc:
+                logger.warning(
+                    f"submit_batch: could not create document record "
+                    f"(external_id={doc_data.get('external_id')!r}): {exc}"
+                )
+                pre_failed_docs.append((doc, str(exc)))
+
+        # Initialize (or validate) the global chunk semaphore.
+        # The first call that sets max_chunks_in_flight establishes the semaphore capacity.
+        # Subsequent calls with a different value log a warning — the first value wins.
+        if max_chunks_in_flight is not None:
+            if self._chunk_semaphore is None:
+                self._chunk_semaphore = _GlobalChunkSemaphore(max_chunks_in_flight)
+            elif self._chunk_semaphore.capacity != max_chunks_in_flight:
+                logger.warning(
+                    f"submit_batch: max_chunks_in_flight={max_chunks_in_flight} conflicts with "
+                    f"existing semaphore capacity={self._chunk_semaphore.capacity}; "
+                    f"first value wins — using {self._chunk_semaphore.capacity}"
+                )
+
+        handle = BatchHandle(
+            batch_id=uuid4(),
+            total=len(pending_docs) + len(pre_failed_docs) + len(pre_completed_docs),
+        )
+        task = asyncio.create_task(
+            self._submit_batch_worker(
+                handle,
+                pending_docs,
+                pending_doc_data,
+                pre_failed_docs,
+                pre_completed_docs,
+                on_result,
+                namespace_id=namespace_id,
+                skill_name=skill_name,
+                entity_types=entity_types,
+                relationship_types=relationship_types,
+                expertise=expertise,
+                extraction_config_hash=extraction_config_hash,
+                chunk_strategy=chunk_strategy,
+                max_chunks_in_flight=max_chunks_in_flight,
+                max_concurrent=max_concurrent,
+                pre_failed_doc_ids=pre_failed_doc_ids,
+                chunk_semaphore=self._chunk_semaphore if max_chunks_in_flight is not None else None,
+            )
+        )
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return handle
+
+    async def _submit_batch_worker(
+        self,
+        handle: BatchHandle,
+        pending_docs: list[Document],
+        doc_data_list: list[dict[str, Any]],
+        pre_failed_docs: list[tuple[Document, str]],
+        pre_completed_docs: list[Document],
+        on_result: Callable[[int, int, DocumentResult], None],
+        *,
+        namespace_id: UUID,
+        skill_name: str,
+        entity_types: list[str],
+        relationship_types: list[str],
+        expertise: ExpertiseConfig | None,
+        extraction_config_hash: str | None,
+        chunk_strategy: ChunkStrategy | None,
+        max_chunks_in_flight: int | None,
+        max_concurrent: int,
+        pre_failed_doc_ids: set[UUID],
+        chunk_semaphore: _GlobalChunkSemaphore | None = None,
+    ) -> None:
+        """Background worker that processes pre-staged PENDING documents."""
+        storage = self.storage
+
+        def _fire_result(result: DocumentResult) -> None:
+            handle._record_result(result)
+            try:
+                on_result(handle.completed, handle.total, result)
+            except Exception as cb_exc:
+                logger.warning(f"submit_batch: on_result callback raised: {cb_exc}")
+
+        # Fire error results for documents that failed to be created (e.g. external_id collision).
+        for doc, err in pre_failed_docs:
+            _fire_result(
+                DocumentResult(
+                    document_id=doc.id,
+                    namespace_id=namespace_id,
+                    success=False,
+                    error=err,
+                    external_id=doc.external_id,
+                )
+            )
+
+        # Fire skipped results for documents already COMPLETED (ADR-068 self-heal).
+        for doc in pre_completed_docs:
+            _fire_result(
+                DocumentResult(
+                    document_id=doc.id,
+                    namespace_id=namespace_id,
+                    success=True,
+                    skipped=True,
+                    chunks_created=doc.chunk_count,
+                    entities_extracted=doc.entity_count,
+                    relationships_created=doc.relationship_count,
+                    external_id=doc.external_id,
+                )
+            )
+
+        engine = self._get_engine()
+        process_fn = getattr(engine, "process_staged_document", None)
+        if process_fn is None:
+            # Engine doesn't support staged processing — mark all PENDING docs as FAILED.
+            err_msg = f"Engine {type(engine).__name__!r} does not support submit_batch (requires process_staged_document method)"
+            for doc in pending_docs:
+                doc.mark_failed(err_msg)
+                try:
+                    await storage.update_document(doc)
+                except Exception as upd_exc:
+                    logger.warning(f"submit_batch: could not update document status: {upd_exc}")
+                _fire_result(
+                    DocumentResult(
+                        document_id=doc.id,
+                        namespace_id=namespace_id,
+                        success=False,
+                        error=err_msg,
+                        external_id=doc.external_id,
+                    )
+                )
+            handle._mark_done()
+            return
+
+        sem = asyncio.Semaphore(max_concurrent)
+
+        async def _process_one(doc: Document, doc_data: dict[str, Any]) -> None:
+            from khora.telemetry.context import collect_usage, start_usage_collection
+
+            async with sem:
+                # H1: Clear partial extraction state for previously-FAILED documents
+                # before re-processing to prevent duplicate chunks/entities on retry.
+                if doc.id in pre_failed_doc_ids:
+                    if storage.vector is not None:
+                        try:
+                            await storage.vector.delete_chunks_by_document(doc.id)
+                        except Exception as exc:
+                            logger.warning(f"submit_batch: could not clear chunks table for {doc.id}: {exc}")
+                    clear_fn = getattr(engine, "clear_document_extraction_state", None)
+                    if clear_fn is not None:
+                        try:
+                            await clear_fn(doc.id, namespace_id)
+                        except Exception as exc:
+                            logger.warning(f"submit_batch: could not clear extraction state for {doc.id}: {exc}")
+
+                start_usage_collection()
+                try:
+                    doc_metadata = doc_data.get("metadata") or {}
+                    occurred_at_raw = doc_metadata.get("occurred_at")
+                    parse_dt = getattr(engine, "_parse_datetime", None)
+                    if occurred_at_raw and parse_dt is not None:
+                        occurred_at = parse_dt(occurred_at_raw)
+                    else:
+                        occurred_at = datetime.now(UTC)
+
+                    chunks, entities, rels = await process_fn(
+                        doc,
+                        skill_name=skill_name,
+                        occurred_at=occurred_at,
+                        entity_types=entity_types,
+                        relationship_types=relationship_types,
+                        expertise=expertise,
+                        extraction_config_hash=extraction_config_hash,
+                        chunk_strategy=chunk_strategy,
+                        max_chunks_in_flight=max_chunks_in_flight,
+                        chunk_semaphore=chunk_semaphore,
+                    )
+                    result = DocumentResult(
+                        document_id=doc.id,
+                        namespace_id=namespace_id,
+                        success=True,
+                        chunks_created=chunks,
+                        entities_extracted=entities,
+                        relationships_created=rels,
+                        llm_usage=collect_usage(),
+                        external_id=doc.external_id,
+                    )
+                except Exception as exc:
+                    partial_usage = collect_usage()
+                    logger.error(f"submit_batch: failed to process document {doc.id}: {exc}")
+                    doc.mark_failed(str(exc))
+                    try:
+                        await storage.update_document(doc)
+                    except Exception as upd_exc:
+                        logger.warning(f"submit_batch: could not update document status: {upd_exc}")
+                    result = DocumentResult(
+                        document_id=doc.id,
+                        namespace_id=namespace_id,
+                        success=False,
+                        error=str(exc),
+                        llm_usage=partial_usage,
+                        external_id=doc.external_id,
+                    )
+                _fire_result(result)
+
+        try:
+            await asyncio.gather(*[_process_one(doc, data) for doc, data in zip(pending_docs, doc_data_list)])
+        finally:
+            handle._mark_done()
 
     async def recall(
         self,

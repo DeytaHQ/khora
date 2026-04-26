@@ -604,3 +604,244 @@ class TestSharedExtractor:
 
             # Verify a new extractor was created
             MockExtractorClass.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Recursive bisection on output truncation (DYT-3079)
+# ---------------------------------------------------------------------------
+
+
+class TestBisectionOnTruncation:
+    """Tests for recursive bisection when LLM output is truncated."""
+
+    def _make_extractor(self) -> LLMEntityExtractor:
+        return LLMEntityExtractor(model="test-model", max_retries=1)
+
+    def _success(self, name: str = "E") -> ExtractionResult:
+        return ExtractionResult(
+            entities=[ExtractedEntity(name=name, entity_type="PERSON", confidence=0.9)],
+            relationships=[],
+        )
+
+    def _truncated(self) -> ExtractionResult:
+        return ExtractionResult(metadata={"error": "truncated_response", "finish_reason": "length"})
+
+    # All tests use tiered_extraction=False (bypass regex shortcut) and
+    # batch_size=50 (ensure all texts land in one batch) so that
+    # _extract_multi_batch is always reached.
+
+    @pytest.mark.asyncio
+    async def test_no_truncation_no_bisect(self) -> None:
+        """Happy path: no truncation, _extract_multi_batch called exactly once."""
+        extractor = self._make_extractor()
+        texts = ["text one", "text two", "text three", "text four"]
+
+        with patch.object(extractor, "_extract_multi_batch", new_callable=AsyncMock) as mock_multi:
+            mock_multi.return_value = [self._success() for _ in texts]
+            results = await extractor.extract_multi(
+                texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
+            )
+
+        assert len(results) == 4
+        mock_multi.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_full_truncation_bisects_once(self) -> None:
+        """Full batch truncation → bisect into two halves, both succeed."""
+        extractor = self._make_extractor()
+        texts = [f"text {i}" for i in range(8)]
+
+        call_count = 0
+
+        async def mock_multi_batch(batch, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if len(batch) == 8:
+                # Initial call — truncated
+                return [self._truncated() for _ in batch]
+            # Halves succeed
+            return [self._success() for _ in batch]
+
+        with patch.object(extractor, "_extract_multi_batch", side_effect=mock_multi_batch):
+            results = await extractor.extract_multi(
+                texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
+            )
+
+        assert len(results) == 8
+        assert all(not r.metadata.get("error") for r in results)
+        # 1 initial call + 2 half calls
+        assert call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_recursive_bisection(self) -> None:
+        """Left half also truncates → recurse to depth 2 before all succeed."""
+        extractor = self._make_extractor()
+        texts = [f"text {i}" for i in range(8)]
+
+        async def mock_multi_batch(batch, *args, **kwargs):
+            if len(batch) >= 4:
+                # batch of 8 or 4 → truncated
+                return [self._truncated() for _ in batch]
+            # batch of 2 → success
+            return [self._success() for _ in batch]
+
+        with patch.object(extractor, "_extract_multi_batch", side_effect=mock_multi_batch):
+            results = await extractor.extract_multi(
+                texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
+            )
+
+        assert len(results) == 8
+        assert all(not r.metadata.get("error") for r in results)
+
+    @pytest.mark.asyncio
+    async def test_single_item_floor_uses_single_doc(self) -> None:
+        """Single-item batch that truncates falls back to self.extract (not infinite recursion)."""
+        extractor = self._make_extractor()
+        texts = ["this text is long enough"]
+        single_result = self._success("Floor")
+
+        with (
+            patch.object(extractor, "_extract_multi_batch", new_callable=AsyncMock) as mock_multi,
+            patch.object(extractor, "extract", new_callable=AsyncMock, return_value=single_result) as mock_single,
+        ):
+            mock_multi.return_value = [self._truncated()]
+            results = await extractor.extract_multi(
+                texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
+            )
+
+        assert len(results) == 1
+        assert results[0].entities[0].name == "Floor"
+        mock_single.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_partial_success_keeps_good_bisects_bad(self) -> None:
+        """Partial truncation: keep successes at [0,1], bisect failures at [2,3]."""
+        extractor = self._make_extractor()
+        texts = ["text zero", "text one", "text two", "text three"]
+
+        call_count = 0
+
+        async def mock_multi_batch(batch, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if len(batch) == 4:
+                # First call: partial truncation — items 2 and 3 truncated
+                return [self._success("ok0"), self._success("ok1"), self._truncated(), self._truncated()]
+            # Bisected halves of [t2, t3] succeed
+            return [self._success("ok_bisected") for _ in batch]
+
+        with patch.object(extractor, "_extract_multi_batch", side_effect=mock_multi_batch):
+            results = await extractor.extract_multi(
+                texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
+            )
+
+        assert len(results) == 4
+        assert results[0].entities[0].name == "ok0"
+        assert results[1].entities[0].name == "ok1"
+        assert not results[2].metadata.get("error")
+        assert not results[3].metadata.get("error")
+        # 1 initial (4-item) + 2 bisection calls (1 per failed item, split into singles)
+        assert call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_transient_error_does_not_bisect(self) -> None:
+        """Non-truncation errors use the circuit breaker / single-doc fallback, not bisection."""
+        extractor = self._make_extractor()
+        texts = ["text zero", "text one", "text two", "text three"]
+        transient_error = ExtractionResult(metadata={"error": "network_error"})
+        single_result = self._success("single")
+
+        with (
+            patch.object(extractor, "_extract_multi_batch", new_callable=AsyncMock) as mock_multi,
+            patch.object(extractor, "extract", new_callable=AsyncMock, return_value=single_result),
+        ):
+            # All results have non-truncation error
+            mock_multi.return_value = [transient_error for _ in texts]
+            results = await extractor.extract_multi(
+                texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50
+            )
+
+        # Falls back to single-doc extraction (circuit breaker path)
+        assert len(results) == 4
+        # _extract_multi_batch is called once (no bisection)
+        mock_multi.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_persists_across_extract_batch_calls(self) -> None:
+        """_consecutive_batch_failures persists so circuit breaker trips across invocations."""
+        extractor = self._make_extractor()
+        texts = ["text zero", "text one"]
+        transient_error = ExtractionResult(metadata={"error": "network_error"})
+        single_result = self._success()
+
+        assert extractor._consecutive_batch_failures == 0
+
+        with (
+            patch.object(extractor, "_extract_multi_batch", new_callable=AsyncMock) as mock_multi,
+            patch.object(extractor, "extract", new_callable=AsyncMock, return_value=single_result),
+        ):
+            mock_multi.return_value = [transient_error for _ in texts]
+
+            # First call: 1 failure
+            await extractor.extract_multi(texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50)
+            assert extractor._consecutive_batch_failures == 1
+
+            # Second call: hits threshold, circuit breaker trips
+            await extractor.extract_multi(texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50)
+            assert extractor._consecutive_batch_failures == 2
+
+            # Third call: circuit breaker is tripped — _extract_multi_batch must NOT be called again
+            await extractor.extract_multi(texts, entity_types=["PERSON"], tiered_extraction=False, batch_size=50)
+            # Still 2 calls total: third invocation skipped batch mode entirely
+            assert mock_multi.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_extract_multi_batch_detects_truncation_via_json_decode_error(self) -> None:
+        """_extract_multi_batch returns truncated_response when JSON is cut off mid-string."""
+        extractor = self._make_extractor()
+        texts = ["text one", "text two"]
+
+        # Simulate a response whose JSON is truncated mid-string (as happens when the
+        # LLM hits its max_tokens limit without finishing output).
+        truncated_json = '{"sections": [{"entities": [{"name": "incomplet'
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = truncated_json
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+        mock_response.model = "test-model"
+
+        import litellm as _litellm
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+            patch("khora.telemetry.context.record_usage"),
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            results = await extractor._extract_multi_batch(
+                texts,
+                ["PERSON"],
+                _litellm,
+                system_prompt=None,
+                tool_context=None,
+                expertise=None,
+                context=None,
+                relationship_types=None,
+            )
+
+        assert len(results) == 2
+        for r in results:
+            assert r.metadata.get("error") == "truncated_response"
+
+    @pytest.mark.asyncio
+    async def test_bisect_and_extract_empty_batch_returns_empty_list(self) -> None:
+        """Empty batch passed to _bisect_and_extract returns [] without calling LLM."""
+        extractor = self._make_extractor()
+
+        with patch.object(extractor, "_extract_multi_batch", new_callable=AsyncMock) as mock_multi:
+            results = await extractor.extract_multi([], entity_types=["PERSON"], tiered_extraction=False, batch_size=50)
+
+        assert results == []
+        mock_multi.assert_not_called()

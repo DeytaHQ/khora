@@ -20,6 +20,7 @@ from .reranking import (
     rerank_chunks,
     rerank_entities,
 )
+from .router import QueryComplexity, QueryComplexityRouter, RouterConfig, RoutingDecision
 from .temporal import TemporalFilter, TemporalQuery
 from .understanding import (
     EntityMention,
@@ -63,4 +64,9 @@ __all__ = [
     "build_keyword_index",
     "normalize_bm25_score",
     "tokenize",
+    # Query routing
+    "QueryComplexity",
+    "QueryComplexityRouter",
+    "RouterConfig",
+    "RoutingDecision",
 ]

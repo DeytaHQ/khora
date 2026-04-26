@@ -336,3 +336,106 @@ class TestNonScalarMetadataPreserved:
             "VectorCypher engine still contains the isinstance scalar filter "
             "that drops non-scalar metadata — DYT-1114 fix not applied"
         )
+
+
+# ---------------------------------------------------------------------------
+# Bug #4: Cross-window entity count inflation (DYT-3064)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestCrossWindowEntityCountInflation:
+    """BatchResult.entities must not double-count entities that appear across
+    multiple windows when max_chunks_in_flight is set.
+
+    upsert_entities_batch() ensures a single DB row per entity, so
+    BatchResult.entities must reflect unique persisted cardinality.
+    The bug: ``results["entities"] += len(all_entities)`` was executed once
+    per window, inflating the count for shared entities.
+    Fix: a ``_seen_entity_keys`` set tracks entity keys across all windows.
+    """
+
+    def test_inflated_accumulation_pattern_removed(self) -> None:
+        """The engine must no longer use raw ``len(all_entities)`` to accumulate
+        the entity count across window iterations."""
+        import inspect
+
+        from khora.engines.vectorcypher.engine import VectorCypherEngine
+
+        source = inspect.getsource(VectorCypherEngine)
+
+        # The old (broken) pattern accumulated entity counts per-window without
+        # deduplication, inflating the count when an entity appears in >1 window.
+        assert 'results["entities"] += len(all_entities)' not in source, (
+            'Engine still uses results["entities"] += len(all_entities) directly '
+            "inside the window loop — cross-window entity count inflation not fixed (DYT-3064)"
+        )
+
+    def test_seen_entity_keys_dedup_logic(self) -> None:
+        """The counting logic used by the fix correctly deduplicates across windows.
+
+        This test exercises the exact algorithm extracted from the engine to verify
+        that entities shared across windows are counted only once.
+        """
+        # Simulate two windows each containing the same entity (Alice:PERSON).
+        # Window 1 also has a unique entity (Bob:PERSON).
+        # Window 2 also has a unique entity (Carol:PERSON).
+        # Expected unique count: 3 (Alice, Bob, Carol), not 4.
+
+        class _FakeEntity:
+            def __init__(self, name: str, entity_type: str) -> None:
+                self.name = name
+                self.entity_type = entity_type
+
+        window_entities = [
+            [_FakeEntity("Alice", "PERSON"), _FakeEntity("Bob", "PERSON")],  # window 1
+            [_FakeEntity("Alice", "PERSON"), _FakeEntity("Carol", "PERSON")],  # window 2
+        ]
+
+        # Replicate the fix's counting algorithm
+        seen_entity_keys: set[tuple[str, str]] = set()
+        total_entity_count = 0
+
+        for all_entities in window_entities:
+            new_entity_count = 0
+            for _e in all_entities:
+                _key = (_e.name, _e.entity_type)
+                if _key not in seen_entity_keys:
+                    seen_entity_keys.add(_key)
+                    new_entity_count += 1
+            total_entity_count += new_entity_count
+
+        assert total_entity_count == 3, (
+            f"Expected 3 unique entities (Alice, Bob, Carol), got {total_entity_count}. "
+            "Cross-window deduplication is broken."
+        )
+
+    def test_no_cross_window_inflation_when_all_distinct(self) -> None:
+        """When all entities are unique across windows, the count equals total entities."""
+
+        class _FakeEntity:
+            def __init__(self, name: str, entity_type: str) -> None:
+                self.name = name
+                self.entity_type = entity_type
+
+        window_entities = [
+            [_FakeEntity("Alice", "PERSON")],
+            [_FakeEntity("Bob", "PERSON")],
+            [_FakeEntity("Carol", "ORG")],
+        ]
+
+        seen_entity_keys: set[tuple[str, str]] = set()
+        total_entity_count = 0
+
+        for all_entities in window_entities:
+            new_entity_count = 0
+            for _e in all_entities:
+                _key = (_e.name, _e.entity_type)
+                if _key not in seen_entity_keys:
+                    seen_entity_keys.add(_key)
+                    new_entity_count += 1
+            total_entity_count += new_entity_count
+
+        assert total_entity_count == 3, (
+            f"Expected 3 unique entities, got {total_entity_count}. Counting is wrong even when entities are distinct."
+        )

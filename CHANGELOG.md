@@ -35,6 +35,15 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 - Timestamp collapse detection for batch-ingested content (#314)
 - Session-aware parallel retrieval for cross-session temporal queries (#279)
 
+### Chronicle epic (#444, #446, #447, #448, #449, #450, this PR)
+- #1 (#444): events / facts schema + per-namespace toggle
+- #2 (#447): EventExtractor wired into `remember()` / `remember_batch()`
+- #3 (#448): FactExtractor with ADD / UPDATE / DELETE / NOOP reconciliation
+- #4 (#449): temporal channel queries `chronicle_events.referenced_date` for cross-session entity resolution
+- #5 (#450): direct entity-channel hits + temporal-event subjects surfaced in `RecallResult.entities`
+- #6 (this PR): `QueryComplexityRouter` skips BM25 + entity channels for SIMPLE queries (temporal channel always preserved); fusion swapped to weighted RRF with per-channel min-max score normalisation to neutralise the BM25-vs-cosine score-scale mismatch. New `router_enabled` constructor flag (default `True`); router relocated to `khora.query.router` with a back-compat shim at `khora.engines.vectorcypher.router`.
+- #7 (#446): LanceDB vector store as an alternative chunk-vector backend
+
 ### Discovery agent overhaul
 - 6-phase improvement: bug fixes, model hierarchy, retry resilience, semantic relevance, Chronicle memory, multi-step exploration (#256-#263)
 - LiteLLM YAML config for per-task model selection (#258)

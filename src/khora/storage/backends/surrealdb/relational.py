@@ -284,6 +284,7 @@ class SurrealDBRelationalAdapter:
             "metadata_ = $metadata_, "
             "chunk_count = $chunk_count, "
             "entity_count = $entity_count, "
+            "relationship_count = $relationship_count, "
             "error_message = $error_message, "
             "extraction_config_hash = $extraction_config_hash, "
             "external_id = $external_id, "
@@ -307,6 +308,7 @@ class SurrealDBRelationalAdapter:
                 "metadata_": document.metadata.custom or {},
                 "chunk_count": document.chunk_count,
                 "entity_count": document.entity_count,
+                "relationship_count": document.relationship_count,
                 "error_message": document.error_message,
                 "extraction_config_hash": document.extraction_config_hash,
                 "external_id": document.external_id,
@@ -373,6 +375,7 @@ class SurrealDBRelationalAdapter:
             "metadata_ = $metadata_, "
             "chunk_count = $chunk_count, "
             "entity_count = $entity_count, "
+            "relationship_count = $relationship_count, "
             "error_message = $error_message, "
             "extraction_config_hash = $extraction_config_hash, "
             "external_id = $external_id, "
@@ -394,6 +397,7 @@ class SurrealDBRelationalAdapter:
                 "metadata_": document.metadata.custom or {},
                 "chunk_count": document.chunk_count,
                 "entity_count": document.entity_count,
+                "relationship_count": document.relationship_count,
                 "error_message": document.error_message,
                 "extraction_config_hash": document.extraction_config_hash,
                 "external_id": document.external_id,
@@ -453,6 +457,23 @@ class SurrealDBRelationalAdapter:
             return None
         return self._row_to_document(row)
 
+    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+
+        Status is NOT filtered so FAILED rows can self-heal on the next
+        successful replace (ADR-056 §Decision #8).
+        """
+        if external_id is None:
+            return None
+        ns_str = str(namespace_id)
+        row = await self._conn.query_one(
+            "SELECT * FROM document WHERE namespace_id = $ns AND external_id = $external_id LIMIT 1",
+            {"ns": ns_str, "external_id": external_id},
+        )
+        if row is None:
+            return None
+        return self._row_to_document(row)
+
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
 
@@ -491,6 +512,23 @@ class SurrealDBRelationalAdapter:
             {"ids": id_strs},
         )
         return {_parse_uuid(r["id"]): self._row_to_document(r) for r in rows}
+
+    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+        """Batch lookup by ``(namespace_id, external_id)`` — ADR-056. Status-agnostic."""
+        filtered = [e for e in external_ids if e]
+        if not filtered:
+            return {}
+        ns_str = str(namespace_id)
+        rows = await self._conn.query(
+            "SELECT * FROM document WHERE namespace_id = $ns AND external_id IN $external_ids",
+            {"ns": ns_str, "external_ids": filtered},
+        )
+        result: dict[str, Document] = {}
+        for r in rows:
+            ext = r.get("external_id")
+            if ext:
+                result[ext] = self._row_to_document(r)
+        return result
 
     async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
         """Fetch lightweight document metadata for source attribution."""
@@ -536,6 +574,7 @@ class SurrealDBRelationalAdapter:
             ),
             chunk_count=row.get("chunk_count", 0),
             entity_count=row.get("entity_count", 0),
+            relationship_count=row.get("relationship_count", 0),
             error_message=row.get("error_message"),
             extraction_config_hash=row.get("extraction_config_hash"),
             created_at=_parse_dt(row.get("created_at")) or datetime.now(UTC),

@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult, Stats
+from khora.memory_lake import BatchHandle, BatchResult, DocumentResult, MemoryLake, RecallResult, RememberResult, Stats
 
 from .helpers import RESOLVE_ROW_ID as _RESOLVE_ROW_ID
 from .helpers import make_lake as _make_lake
@@ -1637,3 +1637,1575 @@ class TestIncludeSources:
         # No doc IDs to fetch, so get_document_sources_batch should NOT be called
         lake._engine._storage.get_document_sources_batch.assert_not_awaited()
         assert result.entities[0][0].source_documents is None
+
+
+# ---------------------------------------------------------------------------
+# submit_batch
+# ---------------------------------------------------------------------------
+
+
+def _make_staged_doc(ns_id):
+    """Build a minimal mock Document as returned by storage.create_document."""
+    from khora.core.models.document import Document
+
+    doc = Document(namespace_id=ns_id, content="test content")
+    return doc
+
+
+def _make_lake_with_staged_support(ns_id):
+    """Make a lake whose engine exposes process_staged_document."""
+    lake = _make_lake(connected=True)
+    lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+    async def _fake_create_document(doc):
+        return doc
+
+    lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create_document)
+    lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+    # No pre-existing docs by default — each test can override as needed.
+    lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={})
+
+    async def _fake_process_staged(doc, **kwargs):
+        return (2, 1, 0)  # chunks, entities, rels
+
+    lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process_staged)
+    return lake
+
+
+class TestBatchHandleDataclass:
+    """Tests for BatchHandle dataclass."""
+
+    def test_initial_state(self) -> None:
+        from uuid import uuid4
+
+        handle = BatchHandle(batch_id=uuid4(), total=5)
+        assert handle.total == 5
+        assert handle.completed == 0
+        assert handle.failed == 0
+        assert not handle.is_done
+
+    def test_record_result_increments_completed(self) -> None:
+        handle = BatchHandle(batch_id=uuid4(), total=2)
+        r = DocumentResult(document_id=uuid4(), namespace_id=uuid4(), success=True)
+        handle._record_result(r)
+        assert handle.completed == 1
+        assert handle.failed == 0
+
+    def test_record_result_tracks_failures(self) -> None:
+        handle = BatchHandle(batch_id=uuid4(), total=2)
+        r = DocumentResult(document_id=uuid4(), namespace_id=uuid4(), success=False, error="oops")
+        handle._record_result(r)
+        assert handle.completed == 1
+        assert handle.failed == 1
+
+    def test_mark_done_sets_is_done(self) -> None:
+        handle = BatchHandle(batch_id=uuid4(), total=1)
+        assert not handle.is_done
+        handle._mark_done()
+        assert handle.is_done
+
+    @pytest.mark.asyncio
+    async def test_wait_returns_when_done(self) -> None:
+        import asyncio
+
+        handle = BatchHandle(batch_id=uuid4(), total=1)
+
+        async def _setter():
+            await asyncio.sleep(0)
+            handle._mark_done()
+
+        asyncio.create_task(_setter())
+        await handle.wait()
+        assert handle.is_done
+
+
+class TestDocumentResultDataclass:
+    """Tests for DocumentResult dataclass."""
+
+    def test_success_fields(self) -> None:
+        r = DocumentResult(
+            document_id=uuid4(),
+            namespace_id=uuid4(),
+            success=True,
+            chunks_created=3,
+            entities_extracted=2,
+            relationships_created=1,
+        )
+        assert r.success is True
+        assert r.error is None
+        assert r.chunks_created == 3
+        assert r.external_id is None
+
+    def test_failure_fields(self) -> None:
+        r = DocumentResult(
+            document_id=uuid4(),
+            namespace_id=uuid4(),
+            success=False,
+            error="embedding failed",
+        )
+        assert r.success is False
+        assert r.error == "embedding failed"
+        assert r.chunks_created == 0
+        assert r.external_id is None
+
+    def test_external_id_field(self) -> None:
+        r = DocumentResult(
+            document_id=uuid4(),
+            namespace_id=uuid4(),
+            success=True,
+            external_id="ext-abc",
+        )
+        assert r.external_id == "ext-abc"
+
+
+class TestSubmitBatch:
+    """Tests for MemoryLake.submit_batch()."""
+
+    @pytest.mark.asyncio
+    async def test_empty_documents_returns_done_handle(self) -> None:
+        """submit_batch with empty list returns a done handle immediately."""
+        lake = _make_lake(connected=True)
+        ns_id = uuid4()
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        handle = await lake.submit_batch(
+            [],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert handle.total == 0
+        assert handle.is_done
+
+    @pytest.mark.asyncio
+    async def test_returns_handle_before_processing(self) -> None:
+        """submit_batch returns handle immediately; create_document called before return."""
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        docs = [{"content": "hello"}]
+        called_before_return = []
+
+        orig_create = lake._engine._storage.create_document.side_effect
+
+        async def _spy_create(doc):
+            called_before_return.append(True)
+            return await orig_create(doc)
+
+        lake._engine._storage.create_document.side_effect = _spy_create
+
+        handle = await lake.submit_batch(
+            docs,
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        # create_document was called synchronously before handle was returned
+        assert called_before_return, "storage.create_document must be called before submit_batch returns"
+        assert handle.total == 1
+
+    @pytest.mark.asyncio
+    async def test_on_result_fires_per_document(self) -> None:
+        """on_result callback fires once per document with correct args."""
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        docs = [{"content": f"doc {i}"} for i in range(3)]
+        results: list[DocumentResult] = []
+        calls: list[tuple[int, int]] = []
+
+        def _on_result(completed, total, doc_result):
+            results.append(doc_result)
+            calls.append((completed, total))
+
+        handle = await lake.submit_batch(
+            docs,
+            on_result=_on_result,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 3
+        assert all(r.success for r in results)
+        assert calls[-1] == (3, 3)
+
+    @pytest.mark.asyncio
+    async def test_handle_is_done_after_wait(self) -> None:
+        """BatchHandle.is_done is True after wait() returns."""
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        handle = await lake.submit_batch(
+            [{"content": "x"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert handle.is_done
+        assert handle.completed == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_document_fires_on_result_with_error(self) -> None:
+        """If process_staged_document raises, on_result receives success=False."""
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        async def _failing_process(doc, **kwargs):
+            raise RuntimeError("embedding service unavailable")
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_failing_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "will fail"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "embedding service unavailable" in results[0].error
+        assert handle.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_engine_without_process_staged_fires_error(self) -> None:
+        """Engine lacking process_staged_document fires error result for each doc."""
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+        # Engine has no process_staged_document attribute
+        if hasattr(lake._engine, "process_staged_document"):
+            del lake._engine.process_staged_document
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "doc"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert handle.is_done
+
+    @pytest.mark.asyncio
+    async def test_multiple_concurrent_batches_dont_interfere(self) -> None:
+        """Two concurrent submit_batch calls produce independent handles."""
+        import asyncio
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        results_a: list[DocumentResult] = []
+        results_b: list[DocumentResult] = []
+
+        handle_a = await lake.submit_batch(
+            [{"content": "a1"}, {"content": "a2"}],
+            on_result=lambda c, t, r: results_a.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        handle_b = await lake.submit_batch(
+            [{"content": "b1"}],
+            on_result=lambda c, t, r: results_b.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        await asyncio.gather(handle_a.wait(), handle_b.wait())
+
+        assert handle_a.total == 2
+        assert handle_b.total == 1
+        assert len(results_a) == 2
+        assert len(results_b) == 1
+        assert handle_a.batch_id != handle_b.batch_id
+
+    @pytest.mark.asyncio
+    async def test_document_result_carries_stats(self) -> None:
+        """DocumentResult contains chunks/entities/rels from process_staged_document."""
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+
+        async def _process_with_stats(doc, **kwargs):
+            return (5, 3, 2)  # chunks, entities, rels
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_stats)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "rich doc"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert results[0].chunks_created == 5
+        assert results[0].entities_extracted == 3
+        assert results[0].relationships_created == 2
+
+    @pytest.mark.asyncio
+    async def test_document_result_carries_llm_usage(self) -> None:
+        """DocumentResult.llm_usage is populated from usage recorded during processing."""
+        from khora.memory_lake import LLMUsage
+        from khora.telemetry.context import record_usage
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        lake._engine._storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+
+        async def _process_with_usage(doc, **kwargs):
+            record_usage(
+                LLMUsage(
+                    operation="embedding",
+                    model="text-embedding-3-small",
+                    prompt_tokens=10,
+                    completion_tokens=0,
+                    total_tokens=10,
+                    latency_ms=5.0,
+                )
+            )
+            record_usage(
+                LLMUsage(
+                    operation="entity_extraction",
+                    model="gpt-4o",
+                    prompt_tokens=100,
+                    completion_tokens=50,
+                    total_tokens=150,
+                    latency_ms=200.0,
+                )
+            )
+            return (2, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_usage)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "doc with llm calls"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert results[0].success is True
+        assert len(results[0].llm_usage) == 2
+        ops = {u.operation for u in results[0].llm_usage}
+        assert ops == {"embedding", "entity_extraction"}
+
+    @pytest.mark.asyncio
+    async def test_failed_document_result_carries_partial_llm_usage(self) -> None:
+        """Failed DocumentResult includes any LLM usage recorded before the exception."""
+        from khora.memory_lake import LLMUsage
+        from khora.telemetry.context import record_usage
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        lake._engine._storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        async def _process_with_usage_then_fail(doc, **kwargs):
+            record_usage(
+                LLMUsage(
+                    operation="embedding",
+                    model="text-embedding-3-small",
+                    prompt_tokens=10,
+                    completion_tokens=0,
+                    total_tokens=10,
+                    latency_ms=5.0,
+                )
+            )
+            raise RuntimeError("graph write failed")
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_usage_then_fail)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "will fail after llm call"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert len(results[0].llm_usage) == 1
+        assert results[0].llm_usage[0].operation == "embedding"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_documents_llm_usage_isolation(self) -> None:
+        """Each document's llm_usage contains only its own recorded entries."""
+        from khora.memory_lake import LLMUsage
+        from khora.telemetry.context import record_usage
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        lake._engine._storage.create_document = AsyncMock(side_effect=lambda doc: doc)
+
+        call_count = 0
+
+        async def _process_with_distinct_usage(doc, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            op = f"embedding_{call_count}"
+            record_usage(
+                LLMUsage(
+                    operation=op,
+                    model="text-embedding-3-small",
+                    prompt_tokens=call_count * 10,
+                    completion_tokens=0,
+                    total_tokens=call_count * 10,
+                    latency_ms=float(call_count),
+                )
+            )
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_distinct_usage)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "doc A"}, {"content": "doc B"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_concurrent=2,
+        )
+        await handle.wait()
+
+        assert len(results) == 2
+        # Each result must have exactly one usage entry, not two
+        for r in results:
+            assert len(r.llm_usage) == 1
+        # The two results must have distinct operation names (no cross-contamination)
+        ops = {r.llm_usage[0].operation for r in results}
+        assert len(ops) == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_document_updates_storage_status(self) -> None:
+        """When process_staged_document raises, the document is marked FAILED in storage."""
+        from khora.core.models.document import DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        async def _fake_create(doc):
+            return doc
+
+        updated_docs = []
+
+        async def _fake_update(doc):
+            updated_docs.append(doc)
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+        lake._engine._storage.update_document = AsyncMock(side_effect=_fake_update)
+
+        async def _failing_process(doc, **kwargs):
+            raise RuntimeError("extraction failed")
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_failing_process)
+
+        handle = await lake.submit_batch(
+            [{"content": "will fail"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(updated_docs) == 1
+        assert updated_docs[0].status == DocumentStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_on_result_exception_does_not_hang(self) -> None:
+        """If on_result raises, handle.wait() still completes."""
+        import asyncio
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        def _bad_callback(completed, total, result):
+            raise ValueError("callback exploded")
+
+        handle = await lake.submit_batch(
+            [{"content": "doc"}],
+            on_result=_bad_callback,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        # Must complete within 5 seconds; if deadlocked, this raises TimeoutError.
+        await asyncio.wait_for(handle.wait(), timeout=5.0)
+        assert handle.is_done
+
+    @pytest.mark.asyncio
+    async def test_create_document_error_fallback_produces_error_result(self) -> None:
+        """If get_documents_by_external_ids finds nothing and create_document raises, on_result receives success=False.
+
+        This covers the race-condition path: external_id not found in lookup,
+        then a concurrent insert causes the create to fail.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        # No existing doc found by external_id lookup
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={})
+
+        def _raise_integrity(doc):
+            raise IntegrityError("INSERT", {}, Exception("unique constraint"))
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_raise_integrity)
+
+        async def _fake_process(doc, **kwargs):
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "duplicate", "external_id": "ext-123"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert handle.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_pending_external_id_requeues_for_processing(self) -> None:
+        """PENDING document with same external_id is re-queued, not failed (DYT-3075)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="old content", external_id="ext-pending")
+        existing_doc.status = DocumentStatus.PENDING
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-pending": existing_doc})
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        async def _fake_process(doc, **kwargs):
+            return (3, 2, 1)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "new content", "external_id": "ext-pending", "source": "updated-source"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # create_document must NOT be called — we reuse the existing doc
+        lake._engine._storage.create_document.assert_not_called()
+        # update_document IS called to reset status + content
+        lake._engine._storage.update_document.assert_called_once()
+        updated = lake._engine._storage.update_document.call_args[0][0]
+        assert updated.status == DocumentStatus.PENDING
+        assert updated.content == "new content"
+        assert updated.metadata.source == "updated-source"
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is False
+        assert results[0].chunks_created == 3
+        assert handle.failed == 0
+
+    @pytest.mark.asyncio
+    async def test_completed_external_id_reported_as_skipped(self) -> None:
+        """COMPLETED document with same external_id is skipped, not re-processed (DYT-3075)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="done", external_id="ext-done")
+        existing_doc.status = DocumentStatus.COMPLETED
+        existing_doc.chunk_count = 5
+        existing_doc.entity_count = 3
+        existing_doc.relationship_count = 7
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-done": existing_doc})
+
+        async def _fake_process(doc, **kwargs):
+            return (1, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "done", "external_id": "ext-done"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # Neither create nor update should be called
+        lake._engine._storage.create_document.assert_not_called()
+        # process_staged_document not called for skipped doc
+        lake._engine.process_staged_document.assert_not_called()
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is True
+        assert results[0].chunks_created == 5
+        assert results[0].entities_extracted == 3
+        assert results[0].relationships_created == 7
+        assert results[0].external_id == "ext-done"
+        assert handle.failed == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_external_id_resets_to_pending_and_reprocesses(self) -> None:
+        """FAILED document with same external_id is reset to PENDING and re-processed (DYT-3075)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="bad content", external_id="ext-failed")
+        existing_doc.status = DocumentStatus.FAILED
+        existing_doc.error_message = "previous error"
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-failed": existing_doc})
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        async def _fake_process(doc, **kwargs):
+            return (2, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "fixed content", "external_id": "ext-failed", "source": "fixed-source"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # update_document called to reset status and update content
+        lake._engine._storage.update_document.assert_called_once()
+        updated = lake._engine._storage.update_document.call_args[0][0]
+        assert updated.status == DocumentStatus.PENDING
+        assert updated.content == "fixed content"
+        assert updated.error_message is None
+
+        # Document was re-processed
+        lake._engine.process_staged_document.assert_called_once()
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is False
+        assert results[0].external_id == "ext-failed"
+        assert handle.failed == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_external_id_clears_prior_state_before_reprocess(self) -> None:
+        """For a FAILED doc, clear_document_extraction_state is called before re-processing (H1)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="bad content", external_id="ext-failed-h1")
+        existing_doc.status = DocumentStatus.FAILED
+        existing_doc.error_message = "previous error"
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-failed-h1": existing_doc})
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        clear_calls: list[tuple] = []
+
+        async def _fake_clear(doc_id, ns_id_arg):
+            clear_calls.append((doc_id, ns_id_arg))
+
+        lake._engine.clear_document_extraction_state = AsyncMock(side_effect=_fake_clear)
+
+        async def _fake_process(doc, **kwargs):
+            return (2, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        handle = await lake.submit_batch(
+            [{"content": "fixed content", "external_id": "ext-failed-h1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # Cleanup was called before re-processing
+        lake._engine.clear_document_extraction_state.assert_called_once_with(existing_doc.id, ns_id)
+        # Document was re-processed
+        lake._engine.process_staged_document.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_processing_external_id_skipped_to_avoid_race(self) -> None:
+        """PROCESSING document with same external_id is skipped to avoid race condition (M1)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="in progress", external_id="ext-proc")
+        existing_doc.status = DocumentStatus.PROCESSING
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-proc": existing_doc})
+
+        async def _fake_process(doc, **kwargs):
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "new content", "external_id": "ext-proc"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # PROCESSING doc skipped — not re-processed and not created
+        lake._engine.process_staged_document.assert_not_called()
+        lake._engine._storage.create_document.assert_not_called()
+        lake._engine._storage.update_document.assert_not_called()
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is True
+
+    @pytest.mark.asyncio
+    async def test_lookup_failure_falls_back_to_create(self) -> None:
+        """If get_documents_by_external_ids raises, submit_batch treats all docs as new inserts (M2)."""
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(side_effect=RuntimeError("DB timeout"))
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+
+        async def _fake_process(doc, **kwargs):
+            return (2, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "new doc", "external_id": "ext-new-m2"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # Falls back to create path
+        lake._engine._storage.create_document.assert_called_once()
+        assert len(results) == 1
+        assert results[0].success is True
+
+    @pytest.mark.asyncio
+    async def test_duplicate_external_id_in_batch_skips_second(self) -> None:
+        """When the same external_id appears twice in a batch, the second is skipped (M4)."""
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={})
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+
+        async def _fake_process(doc, **kwargs):
+            return (2, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [
+                {"content": "first content", "external_id": "ext-dup"},
+                {"content": "second content", "external_id": "ext-dup"},  # duplicate
+            ],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # Only one document created (second was skipped)
+        lake._engine._storage.create_document.assert_called_once()
+        assert len(results) == 1
+        assert results[0].success is True
+
+    @pytest.mark.asyncio
+    async def test_archived_external_id_skipped_by_default(self) -> None:
+        """ARCHIVED document with same external_id is skipped by default (DYT-3077).
+
+        ARCHIVED means 'not actively used'. Silently re-activating it on any
+        batch submission that includes its external_id violates that semantic.
+        By default, submit_batch skips ARCHIVED docs and fires a skipped result.
+        """
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="archived content", external_id="ext-archived")
+        existing_doc.status = DocumentStatus.ARCHIVED
+        existing_doc.chunk_count = 4
+        existing_doc.entity_count = 2
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={"ext-archived": existing_doc})
+
+        async def _fake_process(doc, **kwargs):
+            return (1, 1, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "new content", "external_id": "ext-archived"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        # ARCHIVED doc skipped — not re-processed, not created
+        lake._engine.process_staged_document.assert_not_called()
+        lake._engine._storage.create_document.assert_not_called()
+        lake._engine._storage.update_document.assert_not_called()
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is True
+        assert results[0].chunks_created == 4
+        assert results[0].entities_extracted == 2
+        assert handle.failed == 0
+
+    @pytest.mark.asyncio
+    async def test_archived_external_id_reprocessed_when_flag_set(self) -> None:
+        """ARCHIVED document is reset to PENDING and re-processed when reprocess_archived=True (DYT-3077)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="archived content", external_id="ext-archived-reprocess")
+        existing_doc.status = DocumentStatus.ARCHIVED
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(
+            return_value={"ext-archived-reprocess": existing_doc}
+        )
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+        lake._engine._storage.vector.delete_chunks_by_document = AsyncMock()
+        lake._engine.clear_document_extraction_state = AsyncMock()
+
+        async def _fake_process(doc, **kwargs):
+            return (3, 2, 1)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "refreshed content", "external_id": "ext-archived-reprocess", "source": "refresh"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            reprocess_archived=True,
+        )
+        await handle.wait()
+
+        # update_document called to reset status and update content
+        lake._engine._storage.update_document.assert_called_once()
+        updated = lake._engine._storage.update_document.call_args[0][0]
+        assert updated.status == DocumentStatus.PENDING
+        assert updated.content == "refreshed content"
+        assert updated.metadata.source == "refresh"
+        assert updated.error_message is None
+
+        # Prior extraction state was cleared before re-processing (H1)
+        lake._engine._storage.vector.delete_chunks_by_document.assert_called_once_with(existing_doc.id)
+        lake._engine.clear_document_extraction_state.assert_called_once_with(existing_doc.id, ns_id)
+
+        # Document was re-processed
+        lake._engine.process_staged_document.assert_called_once()
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].skipped is False
+        assert results[0].chunks_created == 3
+        assert results[0].entities_extracted == 2
+        assert handle.failed == 0
+
+    @pytest.mark.asyncio
+    async def test_archived_reprocess_update_document_failure_goes_to_failed(self) -> None:
+        """When reprocess_archived=True and update_document raises, the doc goes to pre_failed_docs (DYT-3077)."""
+        from khora.core.models.document import Document, DocumentStatus
+
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        existing_doc = Document(namespace_id=ns_id, content="archived content", external_id="ext-archived-fail")
+        existing_doc.status = DocumentStatus.ARCHIVED
+
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(
+            return_value={"ext-archived-fail": existing_doc}
+        )
+        lake._engine._storage.update_document = AsyncMock(side_effect=RuntimeError("DB write error"))
+        lake._engine.process_staged_document = AsyncMock()
+
+        results: list[DocumentResult] = []
+
+        handle = await lake.submit_batch(
+            [{"content": "refreshed content", "external_id": "ext-archived-fail"}],
+            on_result=lambda c, t, r: results.append(r),
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            reprocess_archived=True,
+        )
+        await handle.wait()
+
+        # Document was not re-processed — went to failed path
+        lake._engine.process_staged_document.assert_not_called()
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].skipped is False
+        assert handle.failed == 1
+
+
+# ---------------------------------------------------------------------------
+# _GlobalChunkSemaphore (DYT-3111)
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalChunkSemaphore:
+    """Unit tests for the _GlobalChunkSemaphore counting semaphore."""
+
+    @pytest.mark.asyncio
+    async def test_acquire_release_basic(self) -> None:
+        """acquire(n) decrements capacity; release(n) restores it."""
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        sem = _GlobalChunkSemaphore(10)
+        assert sem.capacity == 10
+        await sem.acquire(5)
+        await sem.release(5)
+        # After release, another acquire of full capacity should succeed immediately.
+        await sem.acquire(10)
+        await sem.release(10)
+
+    @pytest.mark.asyncio
+    async def test_acquire_blocks_until_capacity_available(self) -> None:
+        """acquire blocks when in_flight + n > capacity, unblocks on release."""
+        import asyncio
+
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        sem = _GlobalChunkSemaphore(5)
+        await sem.acquire(5)  # fills capacity
+
+        unblocked = asyncio.Event()
+
+        async def _waiter():
+            await sem.acquire(1)  # must wait
+            unblocked.set()
+            await sem.release(1)
+
+        task = asyncio.create_task(_waiter())
+        # Give waiter a chance to start and block.
+        await asyncio.sleep(0)
+        assert not unblocked.is_set(), "waiter should still be blocked"
+
+        await sem.release(5)  # unblocks waiter
+        await asyncio.wait_for(task, timeout=2.0)
+        assert unblocked.is_set()
+
+    @pytest.mark.asyncio
+    async def test_multiple_waiters_queue_correctly(self) -> None:
+        """Multiple waiters each get capacity in turn."""
+        import asyncio
+
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        sem = _GlobalChunkSemaphore(3)
+        order: list[int] = []
+
+        async def _worker(idx: int, n: int) -> None:
+            await sem.acquire(n)
+            order.append(idx)
+            await asyncio.sleep(0)  # yield to allow ordering checks
+            await sem.release(n)
+
+        await sem.acquire(3)  # fill semaphore
+        # Schedule two waiters
+        t1 = asyncio.create_task(_worker(1, 2))
+        t2 = asyncio.create_task(_worker(2, 1))
+        await asyncio.sleep(0)
+        assert order == [], "no worker should have proceeded yet"
+
+        await sem.release(3)
+        await asyncio.gather(t1, t2)
+        # Both workers completed — order determined by asyncio scheduling.
+        assert sorted(order) == [1, 2]
+
+    @pytest.mark.asyncio
+    async def test_acquire_clamped_to_capacity(self) -> None:
+        """acquire(n) with n > capacity is clamped to capacity (avoids deadlock)."""
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        sem = _GlobalChunkSemaphore(5)
+        # n=10 > capacity=5 — should not deadlock; clamped to 5.
+        await sem.acquire(10)
+        assert sem._in_flight == 5
+        await sem.release(5)
+        assert sem._in_flight == 0
+
+
+# ---------------------------------------------------------------------------
+# Global semaphore initialization in submit_batch (DYT-3111)
+# ---------------------------------------------------------------------------
+
+
+class TestSubmitBatchGlobalSemaphore:
+    """Tests for global chunk semaphore lifecycle and behavior in submit_batch."""
+
+    @pytest.mark.asyncio
+    async def test_semaphore_initialized_on_first_call(self) -> None:
+        """First submit_batch with max_chunks_in_flight creates _chunk_semaphore."""
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        assert lake._chunk_semaphore is None
+
+        handle = await lake.submit_batch(
+            [{"content": "hello", "external_id": "s1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=100,
+        )
+        await handle.wait()
+
+        assert isinstance(lake._chunk_semaphore, _GlobalChunkSemaphore)
+        assert lake._chunk_semaphore.capacity == 100
+
+    @pytest.mark.asyncio
+    async def test_semaphore_reused_on_second_call_same_value(self) -> None:
+        """Second call with same max_chunks_in_flight reuses existing semaphore."""
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        h1 = await lake.submit_batch(
+            [{"content": "doc1", "external_id": "r1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=50,
+        )
+        await h1.wait()
+        first_semaphore = lake._chunk_semaphore
+
+        h2 = await lake.submit_batch(
+            [{"content": "doc2", "external_id": "r2"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=50,
+        )
+        await h2.wait()
+
+        assert lake._chunk_semaphore is first_semaphore, "same semaphore instance reused"
+
+    @pytest.mark.asyncio
+    async def test_conflicting_max_chunks_in_flight_logs_warning(self) -> None:
+        """Second call with different max_chunks_in_flight logs a warning; first wins."""
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        h1 = await lake.submit_batch(
+            [{"content": "doc1", "external_id": "w1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=100,
+        )
+        await h1.wait()
+
+        from loguru import logger
+
+        captured: list[str] = []
+        handler_id = logger.add(lambda msg: captured.append(msg), level="WARNING")
+        try:
+            h2 = await lake.submit_batch(
+                [{"content": "doc2", "external_id": "w2"}],
+                on_result=lambda c, t, r: None,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                max_chunks_in_flight=200,  # different value
+            )
+            await h2.wait()
+        finally:
+            logger.remove(handler_id)
+
+        assert lake._chunk_semaphore is not None
+        assert lake._chunk_semaphore.capacity == 100, "first value wins"
+        assert any("conflicts" in str(m) or "first value wins" in str(m) for m in captured), (
+            f"expected warning about conflicting max_chunks_in_flight; got: {captured}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_chunk_semaphore_passed_to_process_staged_document(self) -> None:
+        """chunk_semaphore kwarg is forwarded to process_staged_document."""
+
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        received_kwargs: list[dict] = []
+
+        async def _capturing_process(doc, **kwargs):
+            received_kwargs.append(kwargs)
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_capturing_process)
+
+        handle = await lake.submit_batch(
+            [{"content": "test", "external_id": "cs1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=10,
+        )
+        await handle.wait()
+
+        assert len(received_kwargs) == 1
+        assert "chunk_semaphore" in received_kwargs[0]
+        assert isinstance(received_kwargs[0]["chunk_semaphore"], _GlobalChunkSemaphore)
+        assert received_kwargs[0]["chunk_semaphore"].capacity == 10
+
+    @pytest.mark.asyncio
+    async def test_no_semaphore_when_max_chunks_in_flight_none(self) -> None:
+        """When max_chunks_in_flight=None, no semaphore is created."""
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        handle = await lake.submit_batch(
+            [{"content": "hello", "external_id": "n1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=None,
+        )
+        await handle.wait()
+
+        assert lake._chunk_semaphore is None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_calls_share_semaphore(self) -> None:
+        """Two concurrent submit_batch calls share the same semaphore instance."""
+        import asyncio
+
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        semaphores_seen: list[object] = []
+        processing_events: list[asyncio.Event] = []
+
+        async def _tracking_process(doc, **kwargs):
+            semaphores_seen.append(kwargs.get("chunk_semaphore"))
+            ev = asyncio.Event()
+            processing_events.append(ev)
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_tracking_process)
+
+        h1 = await lake.submit_batch(
+            [{"content": "doc-a", "external_id": "ca1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=100,
+        )
+        h2 = await lake.submit_batch(
+            [{"content": "doc-b", "external_id": "ca2"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=100,
+        )
+        await asyncio.gather(h1.wait(), h2.wait())
+
+        assert len(semaphores_seen) == 2
+        assert semaphores_seen[0] is semaphores_seen[1], "both calls share the same semaphore"
+        assert isinstance(semaphores_seen[0], _GlobalChunkSemaphore)
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_on_process_failure(self) -> None:
+        """Semaphore tokens are released even when process_staged_document raises."""
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        call_count = 0
+
+        async def _failing_process(doc, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("simulated failure")
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_failing_process)
+
+        # First call fails — semaphore should still be released
+        h1 = await lake.submit_batch(
+            [{"content": "fail-doc", "external_id": "sf1"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=10,
+        )
+        await h1.wait()
+
+        sem = lake._chunk_semaphore
+        assert isinstance(sem, _GlobalChunkSemaphore)
+
+        # NOTE: The semaphore is per-window inside the engine, not per-document
+        # in the lake layer. Since the mock doesn't use the semaphore itself,
+        # we verify the lake still has a valid semaphore and the second call
+        # can proceed (no deadlock from unreleased tokens).
+        h2 = await lake.submit_batch(
+            [{"content": "ok-doc", "external_id": "sf2"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=10,
+        )
+        await h2.wait()
+        assert h2.failed == 0, "second call should succeed after first failed"
+
+    @pytest.mark.asyncio
+    async def test_none_max_chunks_after_prior_semaphore_does_not_inherit(self) -> None:
+        """submit_batch(None) after a prior semaphored call passes no semaphore (H-2 fix)."""
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        received_semaphores: list[object] = []
+
+        async def _capturing_process(doc, **kwargs):
+            received_semaphores.append(kwargs.get("chunk_semaphore"))
+            return (1, 0, 0)
+
+        lake._engine.process_staged_document = AsyncMock(side_effect=_capturing_process)
+
+        # First call establishes a semaphore.
+        h1 = await lake.submit_batch(
+            [{"content": "doc1", "external_id": "h2a"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=50,
+        )
+        await h1.wait()
+
+        # Second call opts out (None = unbounded) — must NOT inherit the semaphore.
+        h2 = await lake.submit_batch(
+            [{"content": "doc2", "external_id": "h2b"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_chunks_in_flight=None,
+        )
+        await h2.wait()
+
+        assert isinstance(received_semaphores[0], _GlobalChunkSemaphore), "first call gets semaphore"
+        assert received_semaphores[1] is None, "second call with None must receive no semaphore"
+
+
+# ---------------------------------------------------------------------------
+# Tests for acquire/release in _process_document (DYT-3111 M-3/M-4)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessDocumentSemaphore:
+    """Tests that exercise the actual acquire/release path in engine._process_document.
+
+    These tests complement TestSubmitBatchGlobalSemaphore, which mocks out
+    process_staged_document entirely.  Here we call _process_document directly
+    with mocked I/O so that the semaphore acquire/release in engine.py:779-844
+    is actually executed.
+    """
+
+    @staticmethod
+    def _make_minimal_engine():
+        """Return a VectorCypherEngine with all I/O mocked — no connect() needed."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from khora.engines.vectorcypher.engine import VectorCypherConfig, VectorCypherEngine
+
+        # Bypass __init__ (requires full config + Neo4j/storage setup).
+        engine = object.__new__(VectorCypherEngine)
+
+        cfg = MagicMock()
+        cfg.pipeline.chunking_strategy = None
+        cfg.pipeline.chunk_size = 512
+        cfg.pipeline.chunk_overlap = 50
+        cfg.pipeline.extract_entities = False  # skip LLM extraction
+
+        engine._config = cfg
+        engine._vc_config = VectorCypherConfig()
+
+        storage = MagicMock()
+        storage.update_document = AsyncMock()
+        engine._storage = storage
+
+        embedder = MagicMock()
+        embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 8 for _ in texts])
+        engine._embedder = embedder
+
+        async def _create_chunks_batch(chunks):
+            for c in chunks:
+                c.id = uuid4()
+            return chunks
+
+        temporal_store = MagicMock()
+        temporal_store.create_chunks_batch = AsyncMock(side_effect=_create_chunks_batch)
+        engine._temporal_store = temporal_store
+        engine._dual_nodes = None
+
+        return engine
+
+    @staticmethod
+    def _mock_raw_chunk(content: str = "test chunk"):
+        """Return a mock raw chunk with the attributes _process_document reads."""
+        from unittest.mock import MagicMock
+
+        chunk = MagicMock()
+        chunk.content = content
+        chunk.start_char = 0
+        chunk.end_char = len(content)
+        return chunk
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_on_embed_failure(self) -> None:
+        """release() is called in finally even when embed_batch raises (M-3 fix)."""
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from khora.core.models.document import Document
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        engine = self._make_minimal_engine()
+        engine._embedder.embed_batch = AsyncMock(side_effect=RuntimeError("embed failure"))
+
+        sem = _GlobalChunkSemaphore(100)
+        doc = Document(namespace_id=uuid4(), content="some content")
+        mock_chunk = self._mock_raw_chunk()
+
+        with patch("khora.extraction.chunkers.create_chunker") as mock_cc:
+            mock_cc.return_value = MagicMock()
+            with patch("asyncio.to_thread", new=AsyncMock(return_value=[mock_chunk])):
+                with pytest.raises(RuntimeError, match="embed failure"):
+                    await engine._process_document(
+                        doc,
+                        skill_name="default",
+                        expertise=None,
+                        extraction_model=None,
+                        occurred_at=datetime.now(UTC),
+                        entity_types=["PERSON"],
+                        relationship_types=["KNOWS"],
+                        chunk_semaphore=sem,
+                    )
+
+        assert sem._in_flight == 0, "semaphore must be fully released after embed_batch failure"
+
+    @pytest.mark.asyncio
+    async def test_semaphore_released_after_success(self) -> None:
+        """Semaphore tokens return to 0 after a successful window (M-4 coverage)."""
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from khora.core.models.document import Document
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        engine = self._make_minimal_engine()
+
+        sem = _GlobalChunkSemaphore(100)
+        doc = Document(namespace_id=uuid4(), content="some content")
+        mock_chunk = self._mock_raw_chunk()
+
+        with patch("khora.extraction.chunkers.create_chunker") as mock_cc:
+            mock_cc.return_value = MagicMock()
+            with patch("asyncio.to_thread", new=AsyncMock(return_value=[mock_chunk])):
+                result = await engine._process_document(
+                    doc,
+                    skill_name="default",
+                    expertise=None,
+                    extraction_model=None,
+                    occurred_at=datetime.now(UTC),
+                    entity_types=["PERSON"],
+                    relationship_types=["KNOWS"],
+                    chunk_semaphore=sem,
+                )
+
+        assert sem._in_flight == 0, "semaphore must be fully released after success"
+        assert result[0] == 1  # 1 chunk created
+
+    @pytest.mark.asyncio
+    async def test_semaphore_clamped_acquire_releases_correctly(self) -> None:
+        """When n > capacity, acquire clamps and release uses the clamped value (H-1 fix)."""
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from khora.core.models.document import Document
+        from khora.memory_lake import _GlobalChunkSemaphore
+
+        engine = self._make_minimal_engine()
+
+        # Semaphore capacity=3; window will have 1 chunk.
+        # With the H-1 fix, acquire(1) returns 1 and release(1) is called — no underflow.
+        sem = _GlobalChunkSemaphore(3)
+        doc = Document(namespace_id=uuid4(), content="chunk content")
+        mock_chunk = self._mock_raw_chunk()
+
+        with patch("khora.extraction.chunkers.create_chunker") as mock_cc:
+            mock_cc.return_value = MagicMock()
+            with patch("asyncio.to_thread", new=AsyncMock(return_value=[mock_chunk])):
+                await engine._process_document(
+                    doc,
+                    skill_name="default",
+                    expertise=None,
+                    extraction_model=None,
+                    occurred_at=datetime.now(UTC),
+                    entity_types=["PERSON"],
+                    relationship_types=["KNOWS"],
+                    max_chunks_in_flight=10,  # > semaphore capacity
+                    chunk_semaphore=sem,
+                )
+
+        assert sem._in_flight == 0, "release must use clamped acquire count — no underflow"

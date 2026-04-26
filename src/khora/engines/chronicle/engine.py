@@ -1,9 +1,16 @@
 """Chronicle engine — temporal-semantic memory for benchmark-optimized recall.
 
 This engine is designed for high-accuracy memory retrieval benchmarks
-(LongMemEval, LoCoMo, BEAM). Unlike GraphRAG, it requires no graph database —
-all storage is PostgreSQL + pgvector. Unlike Skeleton, it performs full entity
-extraction and 4-channel retrieval with temporal decay scoring.
+(LongMemEval, LoCoMo, BEAM). Unlike GraphRAG, it requires no external graph
+database. Two storage backends are supported:
+
+* ``"pgvector"`` (default): PostgreSQL + pgvector. Best for shared / managed
+  deployments and large corpora.
+* ``"lancedb"``: SQLite (relational + FTS5) + LanceDB (vectors). Embedded,
+  zero-infrastructure path that reuses the ``sqlite_lance`` storage backend.
+
+Unlike Skeleton, chronicle performs full entity extraction and 4-channel
+retrieval with temporal decay scoring on either backend.
 
 Implements:
 - Full ingest pipeline (chunking, embedding, entity extraction)
@@ -22,7 +29,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from loguru import logger
@@ -30,16 +37,25 @@ from loguru import logger
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import Chunk, Document, DocumentMetadata, Entity, MemoryNamespace
 from khora.engines._storage_config import build_storage_config
+from khora.engines.chronicle.compression import (
+    FactExtractor,
+    FactOperation,
+    MemoryCompressor,
+    MemoryFact,
+)
+from khora.engines.chronicle.events import ChronicleEvent, EventExtractor
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
-from khora.query.fusion import reciprocal_rank_fusion
+from khora.query.router import QueryComplexity, QueryComplexityRouter, RouterConfig
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
 from khora.telemetry import trace
 
 if TYPE_CHECKING:
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
+
+ChronicleStorageBackend = Literal["pgvector", "lancedb"]
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +125,86 @@ def _apply_temporal_decay(
     ]
     rescored.sort(key=lambda pair: pair[1], reverse=True)
     return rescored
+
+
+# ---------------------------------------------------------------------------
+# Temporal-channel helpers (Chronicle #4)
+# ---------------------------------------------------------------------------
+
+
+def _to_utc(dt: datetime | None) -> datetime | None:
+    """Normalize a datetime to a tz-aware UTC datetime (or pass through None)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def _extract_temporal_bounds(temporal_filter: Any | None) -> tuple[datetime | None, datetime | None]:
+    """Pull (start, end) UTC bounds out of a TemporalFilter-shaped object.
+
+    Accepts ``occurred_after``/``occurred_before`` and ``start_time``/``end_time``
+    attribute spellings to stay compatible with both Skeleton and Chronicle
+    filters.
+    """
+    if temporal_filter is None:
+        return None, None
+    start = getattr(temporal_filter, "occurred_after", None) or getattr(temporal_filter, "start_time", None)
+    end = getattr(temporal_filter, "occurred_before", None) or getattr(temporal_filter, "end_time", None)
+    return _to_utc(start), _to_utc(end)
+
+
+def _temporal_proximity(
+    referenced_date: datetime | None,
+    start: datetime | None,
+    end: datetime | None,
+) -> float | None:
+    """Score how close ``referenced_date`` is to the query's temporal window.
+
+    * ``None`` is returned when the event has no temporal anchor — callers
+      should fall back to cosine-only scoring.
+    * In-range events score 1.0.
+    * Out-of-range events decay exponentially with distance from the nearest
+      bound (1-week half-life ≈ ``exp(-days_outside / 7)``).
+    * When only a single instant is supplied (start == end, or only one of
+      them set), proximity is ``exp(-|days_diff| / 7)`` from that focal date.
+    """
+    if referenced_date is None:
+        return None
+
+    ref = _to_utc(referenced_date)
+    assert ref is not None  # _to_utc only returns None for None input
+    start_utc = _to_utc(start)
+    end_utc = _to_utc(end)
+
+    if start_utc is None and end_utc is None:
+        # Caller shouldn't reach here (channel checks signal first), but be
+        # safe and return a neutral score.
+        return 0.5
+
+    # Single focal date: |days_diff| with 1-week half-life.
+    focal: datetime | None = None
+    if start_utc is not None and end_utc is not None and start_utc == end_utc:
+        focal = start_utc
+    elif start_utc is None:
+        focal = end_utc
+    elif end_utc is None:
+        focal = start_utc
+
+    if focal is not None:
+        days_diff = abs((ref - focal).total_seconds()) / 86400.0
+        return math.exp(-days_diff / 7.0)
+
+    # Range case: in-range = 1.0; outside = decay from the nearest bound.
+    assert start_utc is not None and end_utc is not None
+    if start_utc <= ref <= end_utc:
+        return 1.0
+    if ref < start_utc:
+        days_outside = (start_utc - ref).total_seconds() / 86400.0
+    else:
+        days_outside = (ref - end_utc).total_seconds() / 86400.0
+    return math.exp(-days_outside / 7.0)
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +303,69 @@ _CROSS_SESSION_INTENT = re.compile(
 )
 
 
+def _weighted_normalized_rrf_multi(
+    ranked_lists: dict[str, list[tuple[Chunk, float]]],
+    weights: dict[str, float],
+    *,
+    k: int = 60,
+) -> list[tuple[Chunk, float]]:
+    """N-channel weighted RRF with per-channel min-max score normalization.
+
+    Replaces the rank-only ``khora.query.fusion.reciprocal_rank_fusion`` call
+    with a fusion that also blends in normalized raw scores. Each channel's
+    raw scores are min-max normalized to [0, 1] independently — this neutralises
+    the BM25-vs-cosine score-scale mismatch that ``reciprocal_rank_fusion``
+    cannot detect (rank-only fusion treats rank-1 BM25 == rank-1 cosine).
+
+    Score per chunk:
+
+        sum_over_channels( w_c * (1 / (k + rank_c) + 0.01 * normalized_score_c) )
+
+    The 0.01 factor keeps the normalized score subordinate to RRF (it acts as
+    a tiebreaker / signal-preservation nudge, not the dominant signal).
+    Mirrors :func:`khora.engines.vectorcypher.fusion.weighted_rrf_normalized`
+    but extends it to N channels in a single pass — pairwise folding on top
+    of that helper would re-normalise accumulator scores at every fold step
+    and break the score-scale invariant.
+
+    Args:
+        ranked_lists: Channel name -> list of (Chunk, raw_score) tuples.
+        weights: Channel name -> weight. Channels missing from ``weights``
+            default to 1.0; channels missing from ``ranked_lists`` are skipped.
+        k: RRF constant (default 60).
+
+    Returns:
+        List of (Chunk, fused_score) sorted by fused score descending.
+    """
+    if not ranked_lists:
+        return []
+
+    fused_scores: dict[Any, float] = {}
+    chunk_by_id: dict[Any, Chunk] = {}
+
+    for channel, results in ranked_lists.items():
+        if not results:
+            continue
+        weight = weights.get(channel, 1.0)
+        raw_scores = [score for _chunk, score in results]
+        s_min = min(raw_scores)
+        s_max = max(raw_scores)
+        s_range = s_max - s_min
+        for rank, (chunk, raw_score) in enumerate(results, start=1):
+            cid = chunk.id
+            chunk_by_id[cid] = chunk
+            if s_range > 0:
+                norm = (raw_score - s_min) / s_range
+            else:
+                norm = 1.0
+            contribution = weight * (1.0 / (k + rank) + 0.01 * norm)
+            fused_scores[cid] = fused_scores.get(cid, 0.0) + contribution
+
+    fused = [(chunk_by_id[cid], score) for cid, score in fused_scores.items()]
+    fused.sort(key=lambda pair: pair[1], reverse=True)
+    return fused
+
+
 class ChronicleEngine:
     """Chronicle engine — temporal-semantic memory for benchmark-optimized recall.
 
@@ -216,6 +375,20 @@ class ChronicleEngine:
     - Reciprocal Rank Fusion for multi-channel result merging
     - Ebbinghaus temporal decay scoring
     - No graph database required — PostgreSQL + pgvector only
+    - Event extraction (Chronicle #2): every persisted chunk is decomposed
+      into SVO ``ChronicleEvent`` rows by ``EventExtractor`` and written to
+      ``chronicle_events`` after the ingest pipeline finishes.
+
+    Event-extraction toggle resolution order (highest priority first):
+
+    1. ``namespace.config_overrides["events"]["enabled"]`` — runtime override
+       on the namespace, useful for opt-out without changing the global expertise.
+    2. ``expertise.events.enabled`` — the ``ExpertiseConfig`` default
+       (``True`` per ADR-022 unless overridden).
+
+    When neither is set the extractor runs (default-on). Per-chunk extraction
+    failures are swallowed with a warning so a single bad LLM call cannot
+    take down the whole ``remember()``.
 
     Usage:
         engine = ChronicleEngine(config)
@@ -233,6 +406,12 @@ class ChronicleEngine:
         config: KhoraConfig,
         *,
         storage_config: StorageConfig | None = None,
+        storage_backend: ChronicleStorageBackend | None = None,
+        lancedb_path: str | None = None,
+        temporal_use_events: bool = True,
+        temporal_event_cosine_weight: float = 0.5,
+        entity_limit: int = 20,
+        router_enabled: bool = True,
         abstention_min_chunks: int = 1,
         abstention_min_top_score: float = 0.3,
         abstention_combined_threshold: float = 0.5,
@@ -242,6 +421,39 @@ class ChronicleEngine:
         Args:
             config: KhoraConfig instance
             storage_config: Storage configuration (derived from config if None) - deprecated
+            storage_backend: Selects the chunk vector backend.
+
+                - ``"pgvector"``: PostgreSQL + pgvector (the original chronicle path).
+                - ``"lancedb"``: SQLite (relational + FTS5) + LanceDB (vectors). Embedded,
+                  zero-infrastructure. Reuses the ``sqlite_lance`` storage backend.
+                - ``None`` (default): inherit from ``config.storage.backend`` —
+                  ``"sqlite_lance"`` selects LanceDB, ``"surrealdb"`` selects SurrealDB,
+                  anything else falls back to pgvector.
+
+            lancedb_path: When ``storage_backend="lancedb"``, points at the SQLite db
+                file (the LanceDB directory is the sibling ``.lance`` path). Defaults
+                to ``./chronicle.db`` if neither this nor ``config.storage.sqlite_lance``
+                is provided.
+            temporal_use_events: When True (default), the temporal channel queries
+                ``chronicle_events`` and ranks by ``referenced_date`` (the date the
+                source text refers to) plus event-summary cosine. When False (or when
+                the events table is empty / the query has no temporal signal), the
+                channel falls back to chunk semantic search with Ebbinghaus decay on
+                ``chunks.created_at``.
+            temporal_event_cosine_weight: Blend factor between event-summary cosine
+                and temporal-proximity scores in the events path. ``0.5`` weights
+                them equally; higher values bias toward semantic match, lower toward
+                temporal anchoring.
+            entity_limit: Cap on the number of entities surfaced in
+                ``RecallResult.entities``. The fused list combines direct entity-channel
+                hits (full score) with event-derived entities (score attenuated by
+                ``0.5``) and is sorted by score before truncation. Defaults to 20.
+            router_enabled: When True (default), classify queries via
+                ``QueryComplexityRouter`` and skip the BM25 + entity channels for
+                SIMPLE queries. The temporal channel is always preserved (chronicle's
+                differentiator) — temporal queries that the router would otherwise
+                classify SIMPLE keep the temporal channel via ``temporal_signal``.
+                When False, all four channels run on every query (legacy behaviour).
             abstention_min_chunks: Minimum chunk count below which the
                 ``chunks_below_min`` abstention flag fires.
             abstention_min_top_score: Top-chunk score below which the
@@ -251,9 +463,24 @@ class ChronicleEngine:
                 ``_compute_abstention_signals`` for the weighting scheme.
         """
         self._config = config
+        self._storage_backend: ChronicleStorageBackend | None = storage_backend
+        self._lancedb_path = lancedb_path
+        self._temporal_use_events = temporal_use_events
+        self._temporal_event_cosine_weight = temporal_event_cosine_weight
+        self._entity_limit = entity_limit
+        self._router_enabled = router_enabled
+        # Router is cheap (regex + dataclass); construct eagerly. Disabling
+        # via ``router_enabled=False`` short-circuits at the ``recall()`` site.
+        self._router: QueryComplexityRouter = QueryComplexityRouter(RouterConfig(enabled=router_enabled))
 
-        # Build storage config — skip graph backend (chronicle is PostgreSQL + pgvector only)
-        self._storage_config = storage_config or build_storage_config(config, skip_graph=True)
+        if storage_config is not None:
+            self._storage_config = storage_config
+        elif storage_backend == "lancedb":
+            self._storage_config = self._build_lancedb_storage_config(config, lancedb_path)
+        else:
+            # pgvector / inherit from config — chronicle skips the graph backend
+            # for pgvector mode (entity SQL columns live on pgvector itself).
+            self._storage_config = build_storage_config(config, skip_graph=True)
 
         self._abstention_min_chunks = abstention_min_chunks
         self._abstention_min_top_score = abstention_min_top_score
@@ -261,7 +488,46 @@ class ChronicleEngine:
 
         self._storage: StorageCoordinator | None = None
         self._embedder: LiteLLMEmbedder | None = None
+        self._event_extractor: EventExtractor | None = None
+        self._fact_extractor: FactExtractor | None = None
+        self._compressor: MemoryCompressor | None = None
+        # Soft cap on concurrent LLM extractions per remember/remember_batch.
+        # Both event and fact extraction are one LLM call per chunk; the
+        # same semaphore caps the combined fan-out — they share the LLM
+        # provider as a single resource pool.
+        self._max_concurrent_extractions: int = 10
         self._connected = False
+
+    @staticmethod
+    def _build_lancedb_storage_config(
+        config: KhoraConfig,
+        lancedb_path: str | None,
+    ) -> StorageConfig:
+        """Construct a StorageConfig pointing at the sqlite_lance unified backend.
+
+        Reuses the user's existing ``config.storage.sqlite_lance`` entry when set;
+        otherwise synthesizes one from ``lancedb_path`` (or the default
+        ``./chronicle.db``) and the configured embedding dimension.
+        """
+        from khora.config.schema import SQLiteLanceConfig
+
+        sl_cfg = getattr(config.storage, "sqlite_lance", None)
+        if sl_cfg is None:
+            db_path = lancedb_path or "./chronicle.db"
+            sl_cfg = SQLiteLanceConfig(
+                db_path=db_path,
+                embedding_dimension=config.llm.embedding_dimension,
+            )
+        elif lancedb_path is not None:
+            # Caller-supplied path overrides the config entry's db_path so a
+            # single config can support multiple chronicle deployments.
+            sl_cfg = sl_cfg.model_copy(update={"db_path": lancedb_path})
+
+        return StorageConfig(
+            backend="sqlite_lance",
+            sqlite_lance_config=sl_cfg,
+            postgresql_url=None,
+        )
 
     # =========================================================================
     # Lifecycle
@@ -273,6 +539,12 @@ class ChronicleEngine:
             return
 
         logger.info("Connecting Chronicle engine...")
+
+        # When using the embedded sqlite_lance backend, the SQLite schema must
+        # exist before the coordinator opens the file. Postgres deployments
+        # are expected to migrate via ``alembic upgrade head`` out-of-band.
+        if self._storage_config.backend == "sqlite_lance":
+            await self._ensure_sqlite_schema()
 
         # Create and connect storage coordinator
         self._storage = create_storage_coordinator(self._storage_config)
@@ -328,11 +600,371 @@ class ChronicleEngine:
             raise RuntimeError("Chronicle engine not connected. Call connect() first.")
         return self._storage
 
+    async def _ensure_sqlite_schema(self) -> None:
+        """Run Alembic migrations against the sqlite_lance database file.
+
+        The unified backend factory (``StorageFactory._create_sqlite_lance_coordinator``)
+        opens the SQLite file directly via aiosqlite — it relies on the schema
+        already being in place. This mirrors the integration-test fixture
+        (``tests/integration/_sqlite_lance_fixtures.py``) so chronicle users
+        get a one-call setup instead of having to run ``alembic upgrade head``
+        manually.
+        """
+        from khora.db.session import run_migrations
+
+        sl_cfg = self._storage_config.sqlite_lance_config
+        if sl_cfg is None:
+            return  # nothing to migrate
+        db_path = getattr(sl_cfg, "db_path", None)
+        if not db_path:
+            return
+        url = f"sqlite+aiosqlite:///{db_path}"
+        result = await run_migrations(url)
+        if not result.success:
+            raise RuntimeError(f"Chronicle sqlite_lance migration failed: {result.error}")
+
     def _get_embedder(self) -> LiteLLMEmbedder:
         """Get embedder, raising if not connected."""
         if self._embedder is None:
             raise RuntimeError("Chronicle engine not connected. Call connect() first.")
         return self._embedder
+
+    # =========================================================================
+    # Event extraction wiring (Chronicle #2)
+    # =========================================================================
+
+    @staticmethod
+    def _events_enabled(namespace: MemoryNamespace | None, expertise: ExpertiseConfig | None) -> bool:
+        """Resolve the events.enabled flag.
+
+        Per-namespace ``config_overrides["events"]["enabled"]`` beats
+        ``expertise.events.enabled``; both default to True (default-on) when
+        absent, mirroring ADR-022.
+        """
+        if namespace is not None and namespace.config_overrides:
+            ns_events = namespace.config_overrides.get("events")
+            if isinstance(ns_events, dict) and "enabled" in ns_events:
+                return bool(ns_events["enabled"])
+        if expertise is not None:
+            return bool(expertise.events.enabled)
+        return True
+
+    def _get_event_extractor(self, expertise: ExpertiseConfig | None) -> EventExtractor:
+        """Lazily construct the EventExtractor.
+
+        The model comes from ``expertise.events.model`` when available, falling
+        back to ``config.llm.extraction_model`` and finally ``config.llm.model``.
+        Constructed once per engine instance — one extractor handles all
+        remember/remember_batch calls.
+        """
+        if self._event_extractor is None:
+            model = (
+                (expertise.events.model if expertise is not None else None)
+                or self._config.llm.extraction_model
+                or self._config.llm.model
+            )
+            self._event_extractor = EventExtractor(model=model)
+        return self._event_extractor
+
+    async def _extract_events_for_chunk(
+        self,
+        chunk: Chunk,
+        namespace_id: UUID,
+        extractor: EventExtractor,
+        sem: asyncio.Semaphore,
+    ) -> list[ChronicleEvent]:
+        """Run the extractor on a single chunk, swallowing per-chunk failures.
+
+        Returns an empty list if extraction raises so a single bad LLM call
+        cannot fail the whole ``remember()``. The chunk_id and namespace_id
+        are stamped onto every returned event so callers can pass the list
+        straight to ``coordinator.write_events``.
+        """
+        async with sem:
+            try:
+                events = await extractor.extract_events(
+                    chunk.content,
+                    chunk_id=chunk.id,
+                    namespace_id=namespace_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Event extraction failed for chunk %s: %s",
+                    chunk.id,
+                    exc,
+                )
+                return []
+        # The extractor already sets chunk_id/namespace_id, but be defensive
+        # in case a downstream replacement breaks that contract.
+        for ev in events:
+            ev.chunk_id = chunk.id
+            ev.namespace_id = namespace_id
+        return events
+
+    async def _embed_events(self, events: list[ChronicleEvent]) -> None:
+        """Populate ``event.embedding`` using the chronicle embedder.
+
+        Embedded in a single batch call to amortize the API round-trip.
+        Skips events whose summary is empty. Embedding failures are
+        swallowed (events still persist with ``embedding=None``).
+        """
+        if not events:
+            return
+        embedder = self._get_embedder()
+        targets = [ev for ev in events if ev.summary.strip()]
+        if not targets:
+            return
+        try:
+            vectors = await embedder.embed_batch([ev.summary for ev in targets])
+        except Exception as exc:
+            logger.warning("Event summary embedding failed: %s", exc)
+            return
+        for ev, vec in zip(targets, vectors):
+            ev.embedding = vec
+
+    async def _extract_and_persist_events(
+        self,
+        chunks: list[Chunk],
+        namespace_id: UUID,
+        expertise: ExpertiseConfig | None,
+    ) -> int:
+        """Extract events from chunks, embed summaries, persist, and return count.
+
+        Resolution of the enable flag is the caller's responsibility — this
+        helper assumes events are already enabled and unconditionally runs.
+        """
+        if not chunks:
+            return 0
+        extractor = self._get_event_extractor(expertise)
+        sem = asyncio.Semaphore(self._max_concurrent_extractions)
+        per_chunk = await asyncio.gather(
+            *(self._extract_events_for_chunk(c, namespace_id, extractor, sem) for c in chunks),
+            return_exceptions=False,
+        )
+        events: list[ChronicleEvent] = [ev for sub in per_chunk for ev in sub]
+        if not events:
+            return 0
+        await self._embed_events(events)
+        try:
+            await self._get_storage().write_events(events, namespace_id=namespace_id)
+        except Exception as exc:
+            logger.warning("write_events failed (skipping event persistence): %s", exc)
+            return 0
+        logger.debug("Persisted %d chronicle events across %d chunks", len(events), len(chunks))
+        return len(events)
+
+    # =========================================================================
+    # Fact extraction wiring (Chronicle #3)
+    # =========================================================================
+
+    @staticmethod
+    def _facts_enabled(namespace: MemoryNamespace | None, expertise: ExpertiseConfig | None) -> bool:
+        """Resolve the ``facts.enabled`` flag.
+
+        Per-namespace ``config_overrides["facts"]["enabled"]`` beats
+        ``expertise.facts.enabled``; both default to True (default-on) when
+        absent. Mirrors ``_events_enabled``.
+        """
+        if namespace is not None and namespace.config_overrides:
+            ns_facts = namespace.config_overrides.get("facts")
+            if isinstance(ns_facts, dict) and "enabled" in ns_facts:
+                return bool(ns_facts["enabled"])
+        if expertise is not None:
+            return bool(expertise.facts.enabled)
+        return True
+
+    def _get_fact_extractor(self, expertise: ExpertiseConfig | None) -> FactExtractor:
+        """Lazily construct the FactExtractor.
+
+        The model comes from ``expertise.facts.model`` when available, falling
+        back to ``config.llm.extraction_model`` and finally ``config.llm.model``.
+        """
+        if self._fact_extractor is None:
+            model = (
+                (expertise.facts.model if expertise is not None else None)
+                or self._config.llm.extraction_model
+                or self._config.llm.model
+            )
+            self._fact_extractor = FactExtractor(model=model)
+        return self._fact_extractor
+
+    def _get_compressor(self, expertise: ExpertiseConfig | None) -> MemoryCompressor:
+        """Lazily construct the MemoryCompressor (used for reconciliation)."""
+        if self._compressor is None:
+            model = (
+                (expertise.facts.model if expertise is not None else None)
+                or self._config.llm.extraction_model
+                or self._config.llm.model
+            )
+            self._compressor = MemoryCompressor(model=model)
+        return self._compressor
+
+    async def _extract_facts_for_chunk(
+        self,
+        chunk: Chunk,
+        namespace_id: UUID,
+        extractor: FactExtractor,
+        sem: asyncio.Semaphore,
+    ) -> list[MemoryFact]:
+        """Run the fact extractor on a single chunk, swallowing per-chunk failures."""
+        async with sem:
+            try:
+                facts = await extractor.extract_facts(
+                    chunk.content,
+                    chunk_id=chunk.id,
+                    namespace_id=namespace_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Fact extraction failed for chunk %s: %s",
+                    chunk.id,
+                    exc,
+                )
+                return []
+        # Defensive: stamp namespace_id and chunk linkage in case the
+        # extractor was replaced with a stub that doesn't set them.
+        for f in facts:
+            f.namespace_id = namespace_id
+            if chunk.id not in f.source_chunk_ids:
+                f.source_chunk_ids.append(chunk.id)
+        return facts
+
+    async def _reconcile_facts(
+        self,
+        new_facts: list[MemoryFact],
+        namespace_id: UUID,
+        expertise: ExpertiseConfig | None,
+    ) -> int:
+        """Apply ADD/UPDATE/DELETE/NOOP reconciliation and persist results.
+
+        Strategy:
+          1. Group new facts by subject.
+          2. Cache active facts per subject (one query per subject).
+          3. For each new fact, ask the compressor what to do:
+             - ADD     → queue for write
+             - UPDATE  → queue for write + supersede the target
+             - DELETE  → supersede only (no write)
+             - NOOP    → skip
+          4. After processing a subject, append accepted facts to its in-memory
+             cache so subsequent new facts about the same subject reconcile
+             against everything we just decided to keep — prevents within-batch
+             thrashing when two sentences contain the same fact.
+
+        Returns the number of new facts effectively persisted (ADD + UPDATE).
+        """
+        if not new_facts:
+            return 0
+
+        compressor = self._get_compressor(expertise)
+        storage = self._get_storage()
+
+        # Cache of active facts per subject — populated lazily.
+        active_by_subject: dict[str, list[MemoryFact]] = {}
+
+        facts_to_write: list[MemoryFact] = []
+        # Pairs of (old_fact_id, new_fact_id) for supersede calls. We resolve
+        # the new ID *after* write_facts so the new fact has a real DB id.
+        pending_supersedes: list[tuple[UUID, MemoryFact]] = []
+        # DELETE only — supersede pointing at *no* new fact (NULL) — done now
+        # because no write is needed.
+        deletes: list[UUID] = []
+
+        for new_fact in new_facts:
+            subject = new_fact.subject
+            if subject not in active_by_subject:
+                try:
+                    existing = await storage.query_active_facts_for_subject(namespace_id, subject)
+                except Exception as exc:
+                    logger.warning(
+                        "query_active_facts_for_subject failed for subject %r: %s — falling back to ADD",
+                        subject,
+                        exc,
+                    )
+                    existing = []
+                active_by_subject[subject] = list(existing)
+
+            existing_for_subject = active_by_subject[subject]
+            action = await compressor.reconcile_fact(existing_for_subject, new_fact)
+
+            if action.op is FactOperation.ADD:
+                facts_to_write.append(new_fact)
+                active_by_subject[subject].append(new_fact)
+            elif action.op is FactOperation.UPDATE:
+                facts_to_write.append(new_fact)
+                if action.target is not None:
+                    pending_supersedes.append((action.target.id, new_fact))
+                    # Drop the old fact from the in-memory cache so subsequent
+                    # reconciliations within this batch don't see it as active.
+                    active_by_subject[subject] = [f for f in active_by_subject[subject] if f.id != action.target.id]
+                active_by_subject[subject].append(new_fact)
+            elif action.op is FactOperation.DELETE:
+                if action.target is not None:
+                    deletes.append(action.target.id)
+                    active_by_subject[subject] = [f for f in active_by_subject[subject] if f.id != action.target.id]
+            # NOOP: skip — nothing to do.
+
+        # Persist new ADDs/UPDATEs first so we have stable IDs to point at.
+        if facts_to_write:
+            try:
+                await storage.write_facts(facts_to_write, namespace_id=namespace_id)
+            except Exception as exc:
+                logger.warning("write_facts failed during reconciliation: %s", exc)
+                return 0
+
+        # Supersede old → new for UPDATEs.
+        for old_id, new_fact in pending_supersedes:
+            try:
+                await storage.supersede_fact(old_id, new_fact.id)
+            except Exception as exc:
+                logger.warning("supersede_fact failed for %s -> %s: %s", old_id, new_fact.id, exc)
+
+        # DELETE: mark the old fact inactive without a replacement. The
+        # storage contract takes a UUID for ``superseded_by``; passing the
+        # fact's own id keeps the row marked inactive while leaving a
+        # self-reference as the "tombstone" pointer.
+        for old_id in deletes:
+            try:
+                await storage.supersede_fact(old_id, old_id)
+            except Exception as exc:
+                logger.warning("supersede_fact (delete) failed for %s: %s", old_id, exc)
+
+        return len(facts_to_write)
+
+    async def _extract_and_persist_facts(
+        self,
+        chunks: list[Chunk],
+        namespace_id: UUID,
+        expertise: ExpertiseConfig | None,
+    ) -> int:
+        """Extract facts from chunks, reconcile, persist, and return count.
+
+        Returns the number of facts effectively persisted (ADD + UPDATE).
+        Resolution of the ``facts.enabled`` flag is the caller's responsibility.
+        """
+        if not chunks:
+            return 0
+        extractor = self._get_fact_extractor(expertise)
+        sem = asyncio.Semaphore(self._max_concurrent_extractions)
+        per_chunk = await asyncio.gather(
+            *(self._extract_facts_for_chunk(c, namespace_id, extractor, sem) for c in chunks),
+            return_exceptions=False,
+        )
+        new_facts: list[MemoryFact] = [f for sub in per_chunk for f in sub]
+        if not new_facts:
+            return 0
+
+        reconcile = expertise.facts.reconcile if expertise is not None else True
+        if reconcile:
+            return await self._reconcile_facts(new_facts, namespace_id, expertise)
+
+        # Fast path: no reconciliation, write everything as ADD.
+        try:
+            await self._get_storage().write_facts(new_facts, namespace_id=namespace_id)
+        except Exception as exc:
+            logger.warning("write_facts failed (skipping fact persistence): %s", exc)
+            return 0
+        logger.debug("Persisted %d memory facts across %d chunks (no reconcile)", len(new_facts), len(chunks))
+        return len(new_facts)
 
     # =========================================================================
     # Core API: remember, recall, forget
@@ -400,7 +1032,7 @@ class ChronicleEngine:
                 namespace_id=namespace_id,
                 chunks_created=existing.chunk_count,
                 entities_extracted=existing.entity_count,
-                relationships_created=0,
+                relationships_created=existing.relationship_count,
                 metadata={"duplicate": True, "status": str(existing.status), "timings": timings},
             )
 
@@ -440,11 +1072,41 @@ class ChronicleEngine:
             kwargs["chunk_strategy"] = chunk_strategy
         result = await process_document(document, storage, **kwargs)
         timings["pipeline_ms"] = (time.perf_counter() - start) * 1000
+
+        # Chronicle #2/#3: extract SVO events + atomic facts from every
+        # persisted chunk. Default-on per ExpertiseConfig with per-namespace
+        # overrides via ``namespace.config_overrides[{"events"|"facts"}]``.
+        # Both share the same chunk fetch and per-chunk semaphore.
+        events_extracted = 0
+        facts_extracted = 0
+        try:
+            namespace = await storage.get_namespace(namespace_id)
+        except Exception:
+            namespace = None
+
+        run_events = self._events_enabled(namespace, expertise)
+        run_facts = self._facts_enabled(namespace, expertise)
+
+        if run_events or run_facts:
+            chunk_ids = result.get("chunk_ids", []) or []
+            if chunk_ids:
+                chunks_map = await storage.get_chunks_batch(list(chunk_ids))
+                chunks = [chunks_map[cid] for cid in chunk_ids if cid in chunks_map]
+                if run_events:
+                    start = time.perf_counter()
+                    events_extracted = await self._extract_and_persist_events(chunks, namespace_id, expertise)
+                    timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
+                if run_facts:
+                    start = time.perf_counter()
+                    facts_extracted = await self._extract_and_persist_facts(chunks, namespace_id, expertise)
+                    timings["fact_extraction_ms"] = (time.perf_counter() - start) * 1000
+
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
         logger.debug(
             f"remember() completed: {result['chunks']} chunks, {result['entities']} entities, "
-            f"{result['relationships']} relationships in {timings['total_ms']:.1f}ms"
+            f"{result['relationships']} relationships, {events_extracted} events, "
+            f"{facts_extracted} facts in {timings['total_ms']:.1f}ms"
         )
 
         return RememberResult(
@@ -453,7 +1115,11 @@ class ChronicleEngine:
             chunks_created=result["chunks"],
             entities_extracted=result["entities"],
             relationships_created=result["relationships"],
-            metadata={"timings": timings},
+            metadata={
+                "timings": timings,
+                "events_extracted": events_extracted,
+                "facts_extracted": facts_extracted,
+            },
         )
 
     @trace("khora.chronicle.recall")
@@ -533,14 +1199,46 @@ class ChronicleEngine:
                     resolved.confidence,
                 )
 
+        # ── Query routing (Chronicle #6) ──────────────────────────────
+        # Classify SIMPLE / MODERATE / COMPLEX. SIMPLE chronicle queries skip
+        # BM25 + entity channels (~50ms each) but ALWAYS keep the temporal
+        # channel — temporal scoring is chronicle's differentiator. Temporal
+        # signal is wired into the routing decision so dateparser-resolved
+        # temporal queries are forced to MODERATE (matches vectorcypher).
+        # Failures fall back to running all 4 channels (no behavioural skip).
+        run_bm25 = True
+        run_entity = True
+        force_temporal = temporal_filter is not None
+        routing_complexity: str = "disabled"
+        if self._router_enabled:
+            try:
+                from khora.query.temporal_detection import TemporalCategory, TemporalSignal
+
+                temporal_signal = TemporalSignal(
+                    is_temporal=force_temporal,
+                    category=TemporalCategory.EXPLICIT if force_temporal else TemporalCategory.NONE,
+                    confidence=0.9 if force_temporal else 1.0,
+                    source="resolver" if force_temporal else "none",
+                    temporal_filter=temporal_filter,
+                )
+                routing = await self._router.route(query, temporal_signal=temporal_signal)
+                routing_complexity = routing.complexity.value
+                if routing.complexity == QueryComplexity.SIMPLE:
+                    run_bm25 = False
+                    run_entity = False
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Chronicle router failed, running all channels: %s", exc)
+                routing_complexity = "fallback"
+
         # ── Phase 1: Embed query + BM25 in parallel ───────────────────
         # BM25 needs only the query text (no embedding), so start it
         # concurrently with embedding to save one round-trip of latency.
+        # Skipped entirely when the router classifies SIMPLE.
         query_embedding: list[float] | None = None
         bm25_results: list[tuple[Chunk, float]] = []
 
         bm25_task: asyncio.Task[list[tuple[Chunk, float]]] | None = None
-        if mode in (SearchMode.HYBRID, SearchMode.ALL):
+        if run_bm25 and mode in (SearchMode.HYBRID, SearchMode.ALL):
             bm25_task = asyncio.create_task(
                 storage.search_fulltext_chunks(
                     namespace_id,
@@ -570,6 +1268,10 @@ class ChronicleEngine:
         semantic_results: list[tuple[Chunk, float]] = []
         temporal_results: list[tuple[Chunk, float]] = []
         entity_results: list[tuple[Chunk, float]] = []
+        # Side-channel accumulators populated by _temporal_channel and
+        # _entity_channel — read after gather to build RecallResult.entities.
+        temporal_subject_scores: dict[str, float] = {}
+        entity_channel_hits: dict[UUID, tuple[Entity, float]] = {}
 
         # chronicle_temporal_window_days semantics:
         #   -1  = disable temporal channel entirely
@@ -609,11 +1311,12 @@ class ChronicleEngine:
                         query_embedding,
                         overfetch_limit,
                         temporal_filter,
+                        subject_scores=temporal_subject_scores,
                     ),
                 )
             )
 
-        if mode in (SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
+        if run_entity and mode in (SearchMode.HYBRID, SearchMode.ALL) and query_embedding is not None:
             channel_coros.append(
                 (
                     "entity",
@@ -622,6 +1325,7 @@ class ChronicleEngine:
                         query,
                         query_embedding,
                         overfetch_limit,
+                        entity_hits=entity_channel_hits,
                     ),
                 )
             )
@@ -650,10 +1354,13 @@ class ChronicleEngine:
         # Capture max raw cosine similarity for abstention signals
         max_raw_cosine = max((score for _, score in semantic_results), default=0.0) if semantic_results else 0.0
 
-        # ── Fusion via Reciprocal Rank Fusion ────────────────────────────
+        # ── Fusion via weighted RRF with per-channel score normalization ─
+        # Channels skipped by the router contribute empty lists; the helper
+        # ignores them. Per-channel min-max normalisation neutralises the
+        # BM25-vs-cosine score-scale mismatch (Chronicle #6).
         start = time.perf_counter()
 
-        ranked_lists: dict[str, list[tuple[Any, float]]] = {}
+        ranked_lists: dict[str, list[tuple[Chunk, float]]] = {}
         weights: dict[str, float] = {}
 
         if semantic_results:
@@ -669,15 +1376,10 @@ class ChronicleEngine:
             ranked_lists["entity"] = entity_results
             weights["entity"] = _rrf_w_entity
 
+        chunks_with_scores: list[tuple[Chunk, float]]
         if ranked_lists:
-            fused: list[tuple[Any, float]] = reciprocal_rank_fusion(
-                ranked_lists,
-                weights=weights,
-                id_extractor=lambda chunk: chunk.id,
-            )
-            chunks_with_scores: list[tuple[Chunk, float]] = fused[:overfetch_limit]
+            chunks_with_scores = _weighted_normalized_rrf_multi(ranked_lists, weights)[:overfetch_limit]
         elif semantic_results:
-            # Fallback: only one channel had results
             chunks_with_scores = semantic_results[:overfetch_limit]
         elif bm25_results:
             chunks_with_scores = bm25_results[:overfetch_limit]
@@ -735,6 +1437,16 @@ class ChronicleEngine:
         # Trim to requested limit
         chunks_with_scores = chunks_with_scores[:limit]
 
+        # ── Surface entity hits (Chronicle #5) ──────────────────────────
+        start = time.perf_counter()
+        entity_hits = await self._collect_entities(
+            namespace_id=namespace_id,
+            entity_channel_hits=entity_channel_hits,
+            temporal_event_subjects=temporal_subject_scores,
+            limit=self._entity_limit,
+        )
+        timings["entity_collect_ms"] = (time.perf_counter() - start) * 1000
+
         # ── Build context text ───────────────────────────────────────────
         context_parts = [chunk.content for chunk, _score in chunks_with_scores]
         context_text = "\n\n---\n\n".join(context_parts[:limit])
@@ -748,7 +1460,7 @@ class ChronicleEngine:
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
         logger.debug(
-            f"recall() completed: {len(chunks_with_scores)} chunks "
+            f"recall() completed: {len(chunks_with_scores)} chunks, {len(entity_hits)} entities "
             f"(semantic={len(semantic_results)}, bm25={len(bm25_results)}, "
             f"temporal={len(temporal_results)}, entity={len(entity_results)}) "
             f"in {timings['total_ms']:.1f}ms"
@@ -768,6 +1480,7 @@ class ChronicleEngine:
                     "temporal": len(temporal_results),
                     "entity": len(entity_results),
                 },
+                "routing": routing_complexity,
                 "decay_weight": decay_weight,
                 "max_raw_vector_score": max_raw_cosine,
                 "abstention_signals": abstention_signals,
@@ -818,12 +1531,160 @@ class ChronicleEngine:
         query_embedding: list[float] | None,
         limit: int,
         temporal_filter: Any | None,
+        subject_scores: dict[str, float] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Channel 3: Time-scoped chunk retrieval.
 
-        Searches for chunks within a temporal window and scores them by
-        both semantic relevance and temporal proximity to the query's
-        referenced time.
+        Two paths share this channel:
+
+        1. **Events path (default)**: queries ``chronicle_events`` filtered by
+           ``referenced_date`` (the date the source text refers to, NOT ingest
+           time). Each candidate event is scored by a blend of cosine similarity
+           between its SVO summary embedding and the query embedding, and a
+           temporal-proximity score against the query's temporal window.
+           Events are deduped by ``chunk_id`` (max score per chunk) and the
+           output unit of the channel remains a chunk.
+        2. **Legacy chunk-fallback path**: kicks in when (a) the events path is
+           disabled via ``temporal_use_events=False``, (b) there is no temporal
+           signal at all (no filter, no configured window), (c) the events
+           table returns zero candidates for the namespace, or (d) the events
+           query raises. Runs ``search_similar_chunks`` with ``created_at``
+           bounds and applies an Ebbinghaus 72h decay — preserves the original
+           behaviour pre Chronicle #4.
+
+        When ``subject_scores`` is provided, the events path also records the
+        subject of each scored event there (max combined score wins per
+        subject). The recall fusion site uses these to surface entities
+        mentioned in temporally-relevant chunks via
+        ``RecallResult.entities``. Only the events path populates this — the
+        chunk-fallback path operates without per-event subjects.
+        """
+        # Extract bounds once — both paths use them.
+        start, end = _extract_temporal_bounds(temporal_filter)
+        has_signal = start is not None or end is not None
+
+        if not self._temporal_use_events or not has_signal:
+            logger.debug(
+                "temporal channel: chunk_fallback (use_events=%s, has_signal=%s)",
+                self._temporal_use_events,
+                has_signal,
+            )
+            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+
+        storage = self._get_storage()
+
+        # Over-fetch events so re-ranking has more headroom.
+        try:
+            events = await storage.query_events(
+                namespace_id,
+                since=start,
+                until=end,
+                limit=max(limit * 4, 1),
+            )
+        except Exception as exc:
+            logger.debug("temporal channel: query_events failed (%s); falling back to chunks", exc)
+            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+
+        if not events:
+            logger.debug("temporal channel: no events for namespace; falling back to chunks")
+            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+
+        logger.debug("temporal channel: events (%d candidates in scope)", len(events))
+
+        # Pre-compute event-summary cosines in one batched call.
+        cosine_by_index: dict[int, float] = {}
+        if query_embedding is not None:
+            indexed_embeddings: list[tuple[int, list[float]]] = [
+                (i, list(ev.embedding)) for i, ev in enumerate(events) if getattr(ev, "embedding", None) is not None
+            ]
+            if indexed_embeddings:
+                try:
+                    from khora._accel import batch_cosine_similarity
+
+                    sims = batch_cosine_similarity(
+                        query_embedding,
+                        [emb for _, emb in indexed_embeddings],
+                    )
+                    # batch_cosine_similarity returns (local_idx, score) pairs.
+                    for local_idx, score in sims:
+                        original_idx = indexed_embeddings[local_idx][0]
+                        cosine_by_index[original_idx] = float(score)
+                except Exception as exc:
+                    logger.debug("temporal channel: cosine batch failed (%s); falling back to no-cosine", exc)
+
+        cw = self._temporal_event_cosine_weight
+        tw = 1.0 - cw
+
+        # Pick max combined score per chunk_id.
+        per_chunk_score: dict[UUID, float] = {}
+        for idx, ev in enumerate(events):
+            chunk_id = getattr(ev, "chunk_id", None)
+            if chunk_id is None:
+                continue
+
+            cosine = cosine_by_index.get(idx)
+            ref_date = getattr(ev, "referenced_date", None)
+            proximity = _temporal_proximity(ref_date, start, end)
+
+            if cosine is None and proximity is None:
+                # No usable signal on this event — skip entirely.
+                if getattr(ev, "embedding", None) is None and ref_date is None:
+                    logger.debug("temporal channel: event %s has neither embedding nor referenced_date", idx)
+                continue
+
+            if cosine is None:
+                if getattr(ev, "embedding", None) is None:
+                    logger.debug("temporal channel: event %s missing embedding; using proximity only", idx)
+                combined = proximity if proximity is not None else 0.0
+            elif proximity is None:
+                logger.debug("temporal channel: event %s missing referenced_date; using cosine only", idx)
+                combined = cosine
+            else:
+                combined = cosine * cw + proximity * tw
+
+            prev = per_chunk_score.get(chunk_id)
+            if prev is None or combined > prev:
+                per_chunk_score[chunk_id] = combined
+
+            # Stash the event subject (entity name) so recall() can resolve
+            # it back to an Entity record. Max combined score wins per subject.
+            if subject_scores is not None:
+                subject = (getattr(ev, "subject", "") or "").strip()
+                if subject:
+                    prev_subj = subject_scores.get(subject)
+                    if prev_subj is None or combined > prev_subj:
+                        subject_scores[subject] = combined
+
+        if not per_chunk_score:
+            logger.debug("temporal channel: events produced no usable scores; falling back to chunks")
+            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+
+        # Hydrate the top-scoring chunks. We only need ``limit`` of them.
+        top_chunk_ids = sorted(per_chunk_score, key=lambda cid: per_chunk_score[cid], reverse=True)[:limit]
+        try:
+            chunks_map = await storage.get_chunks_batch(top_chunk_ids)
+        except Exception as exc:
+            logger.debug("temporal channel: get_chunks_batch failed (%s)", exc)
+            return []
+
+        scored: list[tuple[Chunk, float]] = [
+            (chunks_map[cid], per_chunk_score[cid]) for cid in top_chunk_ids if cid in chunks_map
+        ]
+        # Already in score order (top_chunk_ids is sorted), but be defensive.
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored
+
+    async def _temporal_channel_chunks_fallback(
+        self,
+        namespace_id: UUID,
+        query_embedding: list[float] | None,
+        limit: int,
+        temporal_filter: Any | None,
+    ) -> list[tuple[Chunk, float]]:
+        """Legacy temporal channel: chunks scoped by ``created_at`` + Ebbinghaus decay.
+
+        Preserved as the fallback path for Chronicle #4 — see ``_temporal_channel``
+        for the routing rules. Body unchanged from the pre-#4 implementation.
         """
         storage = self._get_storage()
 
@@ -910,12 +1771,17 @@ class ChronicleEngine:
         query: str,
         query_embedding: list[float],
         limit: int,
+        entity_hits: dict[UUID, tuple[Entity, float]] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Channel 4: Entity co-occurrence retrieval.
 
         Finds entities similar to the query, then retrieves chunks that
         mention those entities. Provides a "follow the entities" signal
         complementary to pure semantic search.
+
+        When ``entity_hits`` is provided, the resolved Entity records are also
+        recorded there (keyed by entity id) along with their similarity score
+        so the recall fusion site can surface them in ``RecallResult.entities``.
         """
         storage = self._get_storage()
 
@@ -947,6 +1813,16 @@ class ChronicleEngine:
             return []
 
         logger.debug("Entity channel: resolved %d/%d entities", len(entities), len(entity_ids))
+
+        # Surface resolved entities for the recall fusion site so consumers
+        # can see *which* entities the channel matched, not just the chunks
+        # that mention them. Highest score wins on dedup.
+        if entity_hits is not None:
+            for eid, ent in entities.items():
+                escore = entity_scores.get(eid, 0.0)
+                prev = entity_hits.get(eid)
+                if prev is None or escore > prev[1]:
+                    entity_hits[eid] = (ent, escore)
 
         # Collect chunk IDs from entity sources, weighted by entity similarity
         chunk_scores: dict[UUID, float] = {}
@@ -1009,6 +1885,59 @@ class ChronicleEngine:
 
         logger.debug("Entity channel: returning %d chunks (after relevance gate)", len(results))
         return results
+
+    async def _collect_entities(
+        self,
+        *,
+        namespace_id: UUID,
+        entity_channel_hits: dict[UUID, tuple[Entity, float]],
+        temporal_event_subjects: dict[str, float],
+        limit: int,
+    ) -> list[tuple[Entity, float]]:
+        """Merge entity-channel hits with event-subject lookups for RecallResult.
+
+        Two sources contribute to ``RecallResult.entities``:
+
+        1. **Direct entity-channel hits** — already resolved Entity records
+           with similarity scores in ``[0, 1]``. Highest signal; kept at full
+           score.
+        2. **Temporal-channel event subjects** — string subjects that we look
+           up by name. Resolved entities receive their event score attenuated
+           by ``0.5`` so direct hits outrank derived ones on ties.
+
+        Dedupe by ``entity.id`` (max-score wins). Sort by score desc and
+        truncate at ``limit``. Returns ``[]`` when both sources are empty
+        — preserves the pre-#5 behaviour of ``RecallResult.entities=[]``.
+        """
+        # Start from a fresh dedup map; entity_channel_hits is the priority
+        # source (full scores).
+        merged: dict[UUID, tuple[Entity, float]] = dict(entity_channel_hits)
+
+        # Resolve event subjects we don't already have. Skip names that match
+        # an entity already in `merged` *by name* — saves a DB roundtrip and
+        # avoids attenuating an entity that the entity-channel already scored
+        # at full strength.
+        already_named = {ent.name for ent, _ in merged.values()}
+        unresolved_subjects = [s for s in temporal_event_subjects if s not in already_named]
+
+        if unresolved_subjects:
+            try:
+                resolved = await self._get_storage().get_entities_by_names_batch(namespace_id, unresolved_subjects)
+            except Exception as exc:
+                logger.debug("collect_entities: get_entities_by_names_batch failed (%s)", exc)
+                resolved = {}
+            for name, entity in resolved.items():
+                event_score = temporal_event_subjects.get(name, 0.0)
+                attenuated = event_score * 0.5
+                prev = merged.get(entity.id)
+                if prev is None or attenuated > prev[1]:
+                    merged[entity.id] = (entity, attenuated)
+
+        if not merged:
+            return []
+
+        ordered = sorted(merged.values(), key=lambda pair: pair[1], reverse=True)
+        return ordered[:limit]
 
     async def _cross_session_expand(
         self,
@@ -1254,6 +2183,37 @@ class ChronicleEngine:
             ingest_kwargs["extraction_max_tokens"] = extraction_max_tokens
         result = await ingest_documents(namespace_id, doc_inputs, self._get_storage(), **ingest_kwargs)
         timings["ingest_pipeline_ms"] = (time.perf_counter() - start) * 1000
+
+        # Chronicle #2/#3: extract events + facts for every chunk created
+        # across the batch.  Both helpers iterate the full chunk set
+        # produced by the ingest pipeline; they share the per-chunk
+        # extraction semaphore.
+        events_extracted = 0
+        facts_extracted = 0
+        try:
+            namespace = await self._get_storage().get_namespace(namespace_id)
+        except Exception:
+            namespace = None
+
+        run_events = self._events_enabled(namespace, expertise)
+        run_facts = self._facts_enabled(namespace, expertise)
+
+        if run_events or run_facts:
+            all_chunk_ids: list[UUID] = []
+            for per_doc in result.get("per_document_results", []):
+                all_chunk_ids.extend(per_doc.get("chunk_ids", []) or [])
+            if all_chunk_ids:
+                chunks_map = await self._get_storage().get_chunks_batch(all_chunk_ids)
+                chunks = [chunks_map[cid] for cid in all_chunk_ids if cid in chunks_map]
+                if run_events:
+                    start = time.perf_counter()
+                    events_extracted = await self._extract_and_persist_events(chunks, namespace_id, expertise)
+                    timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
+                if run_facts:
+                    start = time.perf_counter()
+                    facts_extracted = await self._extract_and_persist_facts(chunks, namespace_id, expertise)
+                    timings["fact_extraction_ms"] = (time.perf_counter() - start) * 1000
+
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
         processed = result.get("processed_documents", 0)
@@ -1263,8 +2223,9 @@ class ChronicleEngine:
 
         logger.info(
             f"remember_batch() completed: {processed}/{len(documents)} docs, "
-            f"{result.get('total_chunks', 0)} chunks, {result.get('total_entities', 0)} entities "
-            f"in {timings['total_ms']:.1f}ms ({timings.get('docs_per_second', 0):.1f} docs/sec)"
+            f"{result.get('total_chunks', 0)} chunks, {result.get('total_entities', 0)} entities, "
+            f"{events_extracted} events, {facts_extracted} facts in {timings['total_ms']:.1f}ms "
+            f"({timings.get('docs_per_second', 0):.1f} docs/sec)"
         )
 
         if on_progress:
@@ -1281,7 +2242,11 @@ class ChronicleEngine:
             chunks=result.get("total_chunks", 0),
             entities=result.get("total_entities", 0),
             relationships=result.get("total_relationships", 0) + result.get("total_inferred_relationships", 0),
-            metadata={"timings": timings},
+            metadata={
+                "timings": timings,
+                "events_extracted": events_extracted,
+                "facts_extracted": facts_extracted,
+            },
         )
 
     # =========================================================================

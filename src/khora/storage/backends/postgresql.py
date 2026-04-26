@@ -353,6 +353,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             metadata_=document.metadata.custom,
             chunk_count=document.chunk_count,
             entity_count=document.entity_count,
+            relationship_count=document.relationship_count,
             error_message=document.error_message,
             extraction_config_hash=document.extraction_config_hash,
             external_id=document.external_id,
@@ -420,6 +421,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 metadata_=document.metadata.custom,
                 chunk_count=document.chunk_count,
                 entity_count=document.entity_count,
+                relationship_count=document.relationship_count,
                 error_message=document.error_message,
                 extraction_config_hash=document.extraction_config_hash,
                 external_id=document.external_id,
@@ -488,6 +490,27 @@ class PostgreSQLBackend(AsyncSessionMixin):
             model = result.scalars().first()
             return self._document_model_to_domain(model) if model else None
 
+    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+
+        Status is NOT filtered: FAILED rows must be returned so the next
+        successful replace against the same external_id self-heals them
+        (ADR-056 §Decision #8). The partial UNIQUE index
+        ``ix_documents_namespace_external_id_unique`` guarantees at most one
+        row per (namespace_id, external_id).
+        """
+        if external_id is None:
+            return None
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.namespace_id == namespace_id,
+                    DocumentModel.external_id == external_id,
+                )
+            )
+            model = result.scalars().first()
+            return self._document_model_to_domain(model) if model else None
+
     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
         """Fetch multiple documents in a single query.
 
@@ -504,6 +527,30 @@ class PostgreSQLBackend(AsyncSessionMixin):
             result = await session.execute(select(DocumentModel).where(DocumentModel.id.in_(document_ids)))
             models = result.scalars().all()
             return {m.id: self._document_model_to_domain(m) for m in models}
+
+    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+        """Batch lookup for ``(namespace_id, external_id)`` — ADR-056.
+
+        Unlike ``get_documents_by_checksums``, does NOT filter by status so
+        FAILED / PROCESSING rows are returned too (self-heal contract). The
+        partial UNIQUE index ``ix_documents_namespace_external_id_unique``
+        guarantees at most one row per ``(namespace_id, external_id)``.
+
+        Skips ``None`` / empty strings in ``external_ids``.
+        """
+        filtered = [e for e in external_ids if e]
+        if not filtered:
+            return {}
+
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.namespace_id == namespace_id,
+                    DocumentModel.external_id.in_(filtered),
+                )
+            )
+            models = result.scalars().all()
+            return {m.external_id: self._document_model_to_domain(m) for m in models if m.external_id}
 
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
@@ -591,6 +638,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             ),
             chunk_count=model.chunk_count,
             entity_count=model.entity_count,
+            relationship_count=model.relationship_count,
             error_message=model.error_message,
             extraction_config_hash=model.extraction_config_hash,
             external_id=model.external_id,
