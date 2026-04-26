@@ -52,6 +52,7 @@ Programmatic values take priority over environment variables.
 | `weaviate` | Weaviate vector store | `weaviate-client>=4.20.1` |
 | `sqlite` | SQLite embedded relational + vector | `aiosqlite>=0.20.0` |
 | `lancedb` | LanceDB embedded vector store | `lancedb>=0.17.0`, `pyarrow` |
+| `sqlite-lance` | Unified SQLite + LanceDB backend (used by Chronicle's embedded path) | `lancedb>=0.17.0`, `aiosqlite>=0.20.0`, `pyarrow` |
 | `binary-readers` | PDF / docx / xlsx readers (used by khora-cli and downstream ingestors) | `pymupdf`, `openpyxl`, `python-docx` |
 | `parquet` | Parquet readers | `pyarrow>=18.0.0` |
 | `nlp` | spaCy-based sentence splitting | `spacy>=3.8` |
@@ -79,7 +80,7 @@ Prefix: `KHORA_STORAGE_`. See [architecture/storage-backends.md](architecture/st
 
 | Variable | Default | Description |
 |---|---|---|
-| `KHORA_STORAGE_BACKEND` | `postgres` | `postgres` (PostgreSQL + pgvector + external graph DB) or `surrealdb` (unified). |
+| `KHORA_STORAGE_BACKEND` | `postgres` | `postgres` (PostgreSQL + pgvector + external graph DB), `surrealdb` (unified), or `sqlite_lance` (SQLite + LanceDB embedded). |
 | `KHORA_STORAGE_POSTGRESQL_URL` | — | PostgreSQL connection URL. |
 | `KHORA_STORAGE_POSTGRESQL_POOL_SIZE` | `50` | asyncpg pool size. |
 | `KHORA_STORAGE_POSTGRESQL_MAX_OVERFLOW` | `30` | Max overflow connections. |
@@ -99,6 +100,39 @@ With `logfire` installed, the Neo4j backend emits OTel metrics automatically. Fo
 KHORA_STORAGE__GRAPH__POOL_SAMPLER_ENABLED=true
 KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS=500    # clamped to [50, 60000]
 ```
+
+### Chronicle: LanceDB embedded backend
+
+The Chronicle engine can run on either PostgreSQL + pgvector (default) or
+SQLite + LanceDB. The LanceDB path is composed from the existing
+`sqlite_lance` storage backend — chunk metadata and FTS5 live in SQLite,
+embeddings live in a sibling LanceDB directory. Pick it via the constructor:
+
+```python
+from khora import KhoraConfig
+from khora.engines.chronicle import ChronicleEngine
+
+config = KhoraConfig()  # no postgres URL needed for the embedded path
+engine = ChronicleEngine(
+    config,
+    storage_backend="lancedb",
+    lancedb_path="./data/chronicle.db",
+)
+await engine.connect()  # runs Alembic migrations against the SQLite file
+```
+
+Or set it globally via the storage backend selector — Chronicle will
+inherit the choice when no `storage_backend` argument is passed:
+
+```bash
+KHORA_STORAGE_BACKEND=sqlite_lance
+KHORA_STORAGE_SQLITE_LANCE__DB_PATH=./data/chronicle.db
+KHORA_STORAGE_SQLITE_LANCE__EMBEDDING_DIMENSION=1536
+```
+
+Install with `pip install 'khora[sqlite-lance]'` (pulls in `aiosqlite` and
+`lancedb`). The pgvector path is unchanged for existing deployments —
+omit `storage_backend` to get the original behavior.
 
 ## LLM
 

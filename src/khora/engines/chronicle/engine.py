@@ -1,9 +1,16 @@
 """Chronicle engine — temporal-semantic memory for benchmark-optimized recall.
 
 This engine is designed for high-accuracy memory retrieval benchmarks
-(LongMemEval, LoCoMo, BEAM). Unlike GraphRAG, it requires no graph database —
-all storage is PostgreSQL + pgvector. Unlike Skeleton, it performs full entity
-extraction and 4-channel retrieval with temporal decay scoring.
+(LongMemEval, LoCoMo, BEAM). Unlike GraphRAG, it requires no external graph
+database. Two storage backends are supported:
+
+* ``"pgvector"`` (default): PostgreSQL + pgvector. Best for shared / managed
+  deployments and large corpora.
+* ``"lancedb"``: SQLite (relational + FTS5) + LanceDB (vectors). Embedded,
+  zero-infrastructure path that reuses the ``sqlite_lance`` storage backend.
+
+Unlike Skeleton, chronicle performs full entity extraction and 4-channel
+retrieval with temporal decay scoring on either backend.
 
 Implements:
 - Full ingest pipeline (chunking, embedding, entity extraction)
@@ -22,7 +29,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from loguru import logger
@@ -40,6 +47,8 @@ from khora.telemetry import trace
 if TYPE_CHECKING:
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
+
+ChronicleStorageBackend = Literal["pgvector", "lancedb"]
 
 
 # ---------------------------------------------------------------------------
@@ -233,21 +242,75 @@ class ChronicleEngine:
         config: KhoraConfig,
         *,
         storage_config: StorageConfig | None = None,
+        storage_backend: ChronicleStorageBackend | None = None,
+        lancedb_path: str | None = None,
     ) -> None:
         """Initialize the Chronicle engine.
 
         Args:
             config: KhoraConfig instance
             storage_config: Storage configuration (derived from config if None) - deprecated
+            storage_backend: Selects the chunk vector backend.
+
+                - ``"pgvector"``: PostgreSQL + pgvector (the original chronicle path).
+                - ``"lancedb"``: SQLite (relational + FTS5) + LanceDB (vectors). Embedded,
+                  zero-infrastructure. Reuses the ``sqlite_lance`` storage backend.
+                - ``None`` (default): inherit from ``config.storage.backend`` —
+                  ``"sqlite_lance"`` selects LanceDB, ``"surrealdb"`` selects SurrealDB,
+                  anything else falls back to pgvector.
+
+            lancedb_path: When ``storage_backend="lancedb"``, points at the SQLite db
+                file (the LanceDB directory is the sibling ``.lance`` path). Defaults
+                to ``./chronicle.db`` if neither this nor ``config.storage.sqlite_lance``
+                is provided.
         """
         self._config = config
+        self._storage_backend: ChronicleStorageBackend | None = storage_backend
+        self._lancedb_path = lancedb_path
 
-        # Build storage config — skip graph backend (chronicle is PostgreSQL + pgvector only)
-        self._storage_config = storage_config or build_storage_config(config, skip_graph=True)
+        if storage_config is not None:
+            self._storage_config = storage_config
+        elif storage_backend == "lancedb":
+            self._storage_config = self._build_lancedb_storage_config(config, lancedb_path)
+        else:
+            # pgvector / inherit from config — chronicle skips the graph backend
+            # for pgvector mode (entity SQL columns live on pgvector itself).
+            self._storage_config = build_storage_config(config, skip_graph=True)
 
         self._storage: StorageCoordinator | None = None
         self._embedder: LiteLLMEmbedder | None = None
         self._connected = False
+
+    @staticmethod
+    def _build_lancedb_storage_config(
+        config: KhoraConfig,
+        lancedb_path: str | None,
+    ) -> StorageConfig:
+        """Construct a StorageConfig pointing at the sqlite_lance unified backend.
+
+        Reuses the user's existing ``config.storage.sqlite_lance`` entry when set;
+        otherwise synthesizes one from ``lancedb_path`` (or the default
+        ``./chronicle.db``) and the configured embedding dimension.
+        """
+        from khora.config.schema import SQLiteLanceConfig
+
+        sl_cfg = getattr(config.storage, "sqlite_lance", None)
+        if sl_cfg is None:
+            db_path = lancedb_path or "./chronicle.db"
+            sl_cfg = SQLiteLanceConfig(
+                db_path=db_path,
+                embedding_dimension=config.llm.embedding_dimension,
+            )
+        elif lancedb_path is not None:
+            # Caller-supplied path overrides the config entry's db_path so a
+            # single config can support multiple chronicle deployments.
+            sl_cfg = sl_cfg.model_copy(update={"db_path": lancedb_path})
+
+        return StorageConfig(
+            backend="sqlite_lance",
+            sqlite_lance_config=sl_cfg,
+            postgresql_url=None,
+        )
 
     # =========================================================================
     # Lifecycle
@@ -259,6 +322,12 @@ class ChronicleEngine:
             return
 
         logger.info("Connecting Chronicle engine...")
+
+        # When using the embedded sqlite_lance backend, the SQLite schema must
+        # exist before the coordinator opens the file. Postgres deployments
+        # are expected to migrate via ``alembic upgrade head`` out-of-band.
+        if self._storage_config.backend == "sqlite_lance":
+            await self._ensure_sqlite_schema()
 
         # Create and connect storage coordinator
         self._storage = create_storage_coordinator(self._storage_config)
@@ -313,6 +382,29 @@ class ChronicleEngine:
         if self._storage is None:
             raise RuntimeError("Chronicle engine not connected. Call connect() first.")
         return self._storage
+
+    async def _ensure_sqlite_schema(self) -> None:
+        """Run Alembic migrations against the sqlite_lance database file.
+
+        The unified backend factory (``StorageFactory._create_sqlite_lance_coordinator``)
+        opens the SQLite file directly via aiosqlite — it relies on the schema
+        already being in place. This mirrors the integration-test fixture
+        (``tests/integration/_sqlite_lance_fixtures.py``) so chronicle users
+        get a one-call setup instead of having to run ``alembic upgrade head``
+        manually.
+        """
+        from khora.db.session import run_migrations
+
+        sl_cfg = self._storage_config.sqlite_lance_config
+        if sl_cfg is None:
+            return  # nothing to migrate
+        db_path = getattr(sl_cfg, "db_path", None)
+        if not db_path:
+            return
+        url = f"sqlite+aiosqlite:///{db_path}"
+        result = await run_migrations(url)
+        if not result.success:
+            raise RuntimeError(f"Chronicle sqlite_lance migration failed: {result.error}")
 
     def _get_embedder(self) -> LiteLLMEmbedder:
         """Get embedder, raising if not connected."""
