@@ -626,6 +626,33 @@ class PgVectorBackend(AsyncSessionMixin):
             result = await session.execute(select(EntityModel).where(EntityModel.id.in_(entity_ids)))
             return {model.id: self._entity_model_to_domain(model) for model in result.scalars()}
 
+    async def get_entities_by_names_batch(self, namespace_id: UUID, names: list[str]) -> dict:
+        """Fetch entities by name within a namespace (one-shot batch).
+
+        Used by Chronicle to resolve event subjects to Entity records when
+        no graph backend is available. Returns a dict keyed by name; if more
+        than one entity shares the same name (e.g. different entity_types),
+        the entry with the highest mention_count wins (stable, repeatable).
+        Names not found are simply absent from the result.
+        """
+        if not names:
+            return {}
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(EntityModel)
+                .where(
+                    EntityModel.namespace_id == namespace_id,
+                    EntityModel.name.in_(names),
+                )
+                .order_by(EntityModel.mention_count.desc())
+            )
+            out: dict[str, Any] = {}
+            for model in result.scalars():
+                # First row per name wins (already sorted by mention_count DESC).
+                if model.name not in out:
+                    out[model.name] = self._entity_model_to_domain(model)
+            return out
+
     async def entity_exists(self, entity_id: UUID) -> bool:
         """Check if an entity exists in PostgreSQL."""
         async with self._get_session() as session:

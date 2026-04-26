@@ -1233,6 +1233,19 @@ class StorageCoordinator:
             return await self.vector.get_entities_batch(entity_ids)
         return {}
 
+    async def get_entities_by_names_batch(self, namespace_id: UUID, names: list[str]) -> dict[str, Entity]:
+        """Fetch entities by name within a namespace.
+
+        Used by Chronicle (graph-less) to resolve event subjects to Entity
+        records. Delegates to the vector backend when present (pgvector
+        implements this); returns ``{}`` for backends that don't.
+        """
+        if not names:
+            return {}
+        if self.vector and hasattr(self.vector, "get_entities_by_names_batch"):
+            return await self.vector.get_entities_by_names_batch(namespace_id, names)
+        return {}
+
     async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
         """Fetch multiple documents in a single query.
 
