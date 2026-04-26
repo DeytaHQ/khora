@@ -18,9 +18,12 @@ from khora import logging_config
 from khora.logging_config import apply_neo4j_log_level_from_env, setup_logging
 from khora.telemetry import logfire_integration
 from khora.telemetry.logfire_integration import (
+    _HAS_LOGFIRE,
     _NEO4J_LOGFIRE_HANDLER_MARK,
     install_neo4j_logfire_handler,
 )
+
+requires_logfire = pytest.mark.skipif(not _HAS_LOGFIRE, reason="logfire not installed")
 
 
 @pytest.fixture(autouse=True)
@@ -252,6 +255,7 @@ def _reset_neo4j_handlers():
             neo4j_logger.removeHandler(h)
 
 
+@requires_logfire
 def test_install_neo4j_logfire_handler_attaches_when_env_set_and_logfire_available(
     monkeypatch: pytest.MonkeyPatch,
     _reset_neo4j_handlers: None,
@@ -297,6 +301,7 @@ def test_install_neo4j_logfire_handler_noop_when_logfire_unavailable(
     assert _marked_neo4j_handlers() == []
 
 
+@requires_logfire
 def test_install_neo4j_logfire_handler_idempotent(
     monkeypatch: pytest.MonkeyPatch,
     _reset_neo4j_handlers: None,
@@ -308,6 +313,7 @@ def test_install_neo4j_logfire_handler_idempotent(
     assert len(_marked_neo4j_handlers()) == 1
 
 
+@requires_logfire
 def test_setup_logging_installs_neo4j_logfire_handler_when_env_set(
     monkeypatch: pytest.MonkeyPatch,
     _reset_neo4j_logger_level: logging.Logger,

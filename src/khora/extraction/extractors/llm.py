@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 from tenacity import AsyncRetrying, stop_after_attempt, stop_after_delay, wait_exponential
 
+from khora.config.llm import get_shared_session
+
 from .base import (
     EntityExtractor,
     ExtractedEntity,
@@ -776,6 +778,7 @@ class LLMEntityExtractor(EntityExtractor):
                                 timeout=self._timeout,
                                 num_retries=0,
                                 response_format=self._get_response_format(),
+                                shared_session=get_shared_session(),
                             )
                         _latency = (_time.perf_counter() - _t0) * 1000
                         self._log_rate_limit_headers(response)
@@ -919,6 +922,7 @@ class LLMEntityExtractor(EntityExtractor):
                         max_tokens=self._max_tokens,
                         timeout=self._timeout,
                         response_format=self._get_response_format(),
+                        shared_session=get_shared_session(),
                     )
                 _latency = (_time.perf_counter() - _t0) * 1000
                 self._log_rate_limit_headers(response)
@@ -1686,6 +1690,7 @@ Return ONLY valid JSON, no other text."""
                                 timeout=self._timeout,
                                 num_retries=0,
                                 response_format=self._get_multi_response_format(),
+                                shared_session=get_shared_session(),
                             )
                         _latency = (_time.perf_counter() - _t0) * 1000
                         self._log_rate_limit_headers(response)

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from loguru import logger
 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
 
+from khora.config.llm import get_shared_session
 from khora.telemetry import trace_span
 
 from .base import Embedder
@@ -404,6 +405,7 @@ class LiteLLMEmbedder(Embedder):
                         input=sanitized,
                         timeout=self._timeout,
                         dimensions=self._dimension,
+                        shared_session=get_shared_session(),
                     )
                     _latency = (_time.perf_counter() - _t0) * 1000
                     req_span.set_attribute("latency_ms", round(_latency, 2))
