@@ -26,17 +26,18 @@ Usage:
 from __future__ import annotations
 
 from .compression import FactExtractor, FactOperation, MemoryCompressor, MemoryFact
-from .engine import ChronicleEngine
+from .engine import ChronicleEngine, ChronicleStorageBackend
 from .events import ChronicleEvent, EventExtractor
-from .lancedb_store import LanceDBVectorStore
+from .lancedb_store import build_lancedb_coordinator
 
 __all__ = [
     "ChronicleEngine",
     "ChronicleEvent",
+    "ChronicleStorageBackend",
     "EventExtractor",
     "FactExtractor",
     "FactOperation",
-    "LanceDBVectorStore",
     "MemoryCompressor",
     "MemoryFact",
+    "build_lancedb_coordinator",
 ]
