@@ -23,9 +23,7 @@ from khora.telemetry.logfire_integration import (
     install_neo4j_logfire_handler,
 )
 
-requires_logfire = pytest.mark.skipif(
-    not _HAS_LOGFIRE, reason="logfire not installed"
-)
+requires_logfire = pytest.mark.skipif(not _HAS_LOGFIRE, reason="logfire not installed")
 
 
 @pytest.fixture(autouse=True)
