@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 from tenacity import AsyncRetrying, stop_after_attempt, stop_after_delay, wait_exponential
 
+from khora.config.llm import get_shared_session
+
 from .base import (
     EntityExtractor,
     ExtractedEntity,
@@ -765,8 +767,6 @@ class LLMEntityExtractor(EntityExtractor):
                         effective_max_tokens = self._max_tokens
 
                         with trace_span("khora.extraction.llm_call", model=self._model, call_type="single"):
-                            from khora.config.llm import get_shared_session
-
                             response = await litellm.acompletion(
                                 model=self._model,
                                 messages=[
@@ -912,8 +912,6 @@ class LLMEntityExtractor(EntityExtractor):
 
                 _t0 = _time.perf_counter()
                 with trace_span("khora.extraction.llm_call", model=self._model, call_type="relationship_second_pass"):
-                    from khora.config.llm import get_shared_session
-
                     response = await litellm.acompletion(
                         model=self._model,
                         messages=[
@@ -1681,8 +1679,6 @@ Return ONLY valid JSON, no other text."""
                             call_type="multi_batch",
                             batch_size=len(texts),
                         ):
-                            from khora.config.llm import get_shared_session
-
                             response = await litellm.acompletion(
                                 model=self._model,
                                 messages=[

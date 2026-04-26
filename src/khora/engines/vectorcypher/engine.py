@@ -410,9 +410,10 @@ class VectorCypherEngine:
             timeout=self._config.llm.timeout,
             max_retries=self._config.llm.max_retries,
         )
-        from khora.config.llm import configure_litellm
+        from khora.config.llm import _init_shared_session, configure_litellm
 
         configure_litellm(llm_config)
+        await _init_shared_session()
         self._embedder = LiteLLMEmbedder.from_config(llm_config)
 
         # Initialize dual node manager (Neo4j only — SurrealDB uses graph adapter).
