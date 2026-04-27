@@ -1106,12 +1106,19 @@ class MemoryLake:
             handle._mark_done()
             return
 
-        sem = asyncio.Semaphore(max_concurrent)
+        queue: asyncio.Queue[tuple[Document, dict[str, Any]]] = asyncio.Queue()
+        for doc, data in zip(pending_docs, doc_data_list):
+            queue.put_nowait((doc, data))
 
-        async def _process_one(doc: Document, doc_data: dict[str, Any]) -> None:
+        async def _worker() -> None:
             from khora.telemetry.context import collect_usage, start_usage_collection
 
-            async with sem:
+            while True:
+                try:
+                    doc, doc_data = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
                 # H1: Clear partial extraction state for previously-FAILED documents
                 # before re-processing to prevent duplicate chunks/entities on retry.
                 if doc.id in pre_failed_doc_ids:
@@ -1178,7 +1185,7 @@ class MemoryLake:
                 _fire_result(result)
 
         try:
-            await asyncio.gather(*[_process_one(doc, data) for doc, data in zip(pending_docs, doc_data_list)])
+            await asyncio.gather(*[_worker() for _ in range(min(max_concurrent, len(pending_docs)))])
         finally:
             handle._mark_done()
 
