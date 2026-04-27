@@ -107,7 +107,13 @@ class TestQueryComplexityRouterInit:
         """Test that routing stats are initialized to zero."""
         router = QueryComplexityRouter()
         stats = router.get_routing_stats()
-        assert stats == {"simple": 0, "moderate": 0, "complex": 0, "llm_fallback": 0}
+        assert stats == {
+            "simple": 0,
+            "moderate": 0,
+            "complex": 0,
+            "entity_anchored": 0,
+            "llm_fallback": 0,
+        }
 
 
 @pytest.mark.unit
@@ -121,8 +127,12 @@ class TestSimpleQueryRouting:
 
     @pytest.mark.asyncio
     async def test_simple_what_is(self, router: QueryComplexityRouter) -> None:
-        """Test 'what is' queries are classified as SIMPLE."""
-        decision = await router.route("What is Python?")
+        """Test 'what is' queries without a named entity are classified as SIMPLE.
+
+        Queries with a named entity (e.g. 'What is Python?') now route to
+        ENTITY_ANCHORED instead — see test_router_entity_anchored.py.
+        """
+        decision = await router.route("what is the weather")
         assert decision.complexity == QueryComplexity.SIMPLE
         assert decision.use_graph is False
         assert decision.graph_depth == 0
@@ -323,7 +333,7 @@ class TestRoutingStats:
         await router.route("Compare X versus Y with advantages and disadvantages")
 
         stats = router.get_routing_stats()
-        total = stats["simple"] + stats["moderate"] + stats["complex"]
+        total = stats["simple"] + stats["moderate"] + stats["complex"] + stats["entity_anchored"]
         assert total == 2
 
     @pytest.mark.asyncio

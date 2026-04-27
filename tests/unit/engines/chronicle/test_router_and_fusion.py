@@ -263,6 +263,48 @@ class TestRouterChannelGating:
         assert result.metadata["routing"] == "fallback"
 
     @pytest.mark.asyncio
+    async def test_entity_anchored_runs_all_channels_and_boosts_entity_weight(self) -> None:
+        """ENTITY_ANCHORED runs all four channels and 2× the entity-channel RRF weight."""
+        ns_id = uuid4()
+        entity_chunk = _make_chunk("entity-hit")
+        coord = _RecordingCoordinator(
+            semantic_results=[(_make_chunk("a"), 0.8)],
+            bm25_results=[(_make_chunk("b"), 5.2)],
+        )
+        engine = _bare_engine()
+        _wire(engine, coord)
+
+        captured_weights: dict[str, float] = {}
+
+        def _capture(ranked: Any, weights: Any) -> Any:  # noqa: ANN401
+            captured_weights.update(weights)
+            return [(chunk, score) for chunks in ranked.values() for chunk, score in chunks]
+
+        # Stub the entity channel directly so it produces chunk hits without
+        # needing a real entity → chunk resolution chain in the coordinator double.
+        async def _stub_entity_channel(*args: Any, **kwargs: Any) -> list[tuple[Chunk, float]]:
+            return [(entity_chunk, 0.7)]
+
+        with (
+            patch.object(
+                engine._router, "route", new=AsyncMock(return_value=_routing(QueryComplexity.ENTITY_ANCHORED))
+            ),
+            patch.object(engine, "_entity_channel", side_effect=_stub_entity_channel),
+            patch("khora.engines.chronicle.engine._weighted_normalized_rrf_multi", side_effect=_capture),
+        ):
+            result = await engine.recall("Who is Alice?", ns_id, limit=5, mode=SearchMode.HYBRID)
+
+        # All channels still run.
+        assert len(coord.search_fulltext_chunks_calls) == 1
+        # Routing surfaced.
+        assert result.metadata["routing"] == "entity_anchored"
+        # Entity weight doubled vs. the default 0.85.
+        assert captured_weights.get("entity") == pytest.approx(0.85 * 2.0)
+        # Other weights untouched.
+        assert captured_weights.get("semantic") == pytest.approx(1.0)
+        assert captured_weights.get("bm25") == pytest.approx(0.8)
+
+    @pytest.mark.asyncio
     async def test_temporal_signal_forces_moderate_for_temporal_query(self) -> None:
         """Explicit ``temporal_filter`` + the real heuristic router → MODERATE.
 
