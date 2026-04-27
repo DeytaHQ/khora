@@ -784,7 +784,7 @@ class MemoryLake:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
-        max_concurrent: int = 10,
+        max_concurrent: int = 20,
         reprocess_archived: bool = False,
     ) -> BatchHandle:
         """Submit documents for deferred background processing.
@@ -817,7 +817,7 @@ class MemoryLake:
             max_chunks_in_flight: Maximum chunks processed per window. Controls
                 memory usage during background processing. None = unbounded.
             max_concurrent: Maximum documents to process concurrently in background
-                (default: 10).
+                (default: 20).
             reprocess_archived: If True, ARCHIVED documents are reset to PENDING
                 and re-processed like FAILED documents. If False (default), ARCHIVED
                 documents are skipped with a warning — preserving intentional
