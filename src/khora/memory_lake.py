@@ -784,7 +784,7 @@ class MemoryLake:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
-        max_concurrent: int = 1,
+        max_concurrent: int = 20,
         reprocess_archived: bool = False,
     ) -> BatchHandle:
         """Submit documents for deferred background processing.
