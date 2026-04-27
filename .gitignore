@@ -243,3 +243,4 @@ scripts/slack-notify.py
 .claude/projects/
 .claude/worktrees/
 khora_discovery_data/
+.claude/commands/
