@@ -7,7 +7,7 @@ import re
 import time as _time_mod
 from collections import OrderedDict
 from hashlib import sha256
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
@@ -16,6 +16,13 @@ from khora.config.llm import get_shared_session
 from khora.telemetry import trace_span
 
 from .base import Embedder
+
+try:
+    import numpy as np
+
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
 
 if TYPE_CHECKING:
     from khora.config import LiteLLMConfig
@@ -110,7 +117,9 @@ class LiteLLMEmbedder(Embedder):
                 Dynamically sizes batches so short texts get large batches
                 and long texts get small batches, keeping API response
                 payloads under ~2MB to avoid HTTP transfer corruption.
-            cache_max_size: Maximum cached embeddings (0 to disable)
+            cache_max_size: Maximum cached embeddings (0 to disable). Each entry
+                uses ~13 KB (numpy float64) when numpy is available, or ~50 KB
+                (Python list[float]) otherwise. At 50,000 entries: ~650 MB.
             embed_concurrency: Maximum concurrent embedding sub-batch API calls
             retry_wait: Base wait time (seconds) for exponential backoff between retries
             cache_ttl_hours: Cache entry TTL in hours (None = no expiry)
@@ -124,7 +133,8 @@ class LiteLLMEmbedder(Embedder):
         self._max_batch_tokens = max_batch_tokens
         self._embed_concurrency = embed_concurrency
         self._retry_wait = retry_wait
-        self._cache: OrderedDict[str, tuple[list[float], float]] = OrderedDict()
+        # Stores numpy arrays when numpy is available (~13 KB/entry vs ~50 KB for list[float])
+        self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
         self._cache_max_size = cache_max_size
         self._cache_ttl_seconds: float | None = cache_ttl_hours * 3600.0 if cache_ttl_hours is not None else None
         self._cache_hits = 0
@@ -158,7 +168,7 @@ class LiteLLMEmbedder(Embedder):
                     return None
             self._cache.move_to_end(key)
             self._cache_hits += 1
-            return embedding
+            return embedding.tolist() if _HAS_NUMPY and hasattr(embedding, "tolist") else embedding
         self._cache_misses += 1
         return None
 
@@ -167,7 +177,9 @@ class LiteLLMEmbedder(Embedder):
         if not self._cache_max_size:
             return
         key = key or self._cache_key(text)
-        self._cache[key] = (embedding, _time_mod.monotonic())
+        # Store as numpy float64 array when available: ~13 KB/entry vs ~50 KB for list[float]
+        stored: Any = np.array(embedding, dtype=np.float64) if _HAS_NUMPY else embedding
+        self._cache[key] = (stored, _time_mod.monotonic())
         self._cache.move_to_end(key)
         while len(self._cache) > self._cache_max_size:
             self._cache.popitem(last=False)
@@ -200,6 +212,7 @@ class LiteLLMEmbedder(Embedder):
             embed_concurrency=config.embed_concurrency,
             batch_size=getattr(config, "embed_batch_size", 200),
             max_batch_tokens=getattr(config, "embed_batch_tokens", 50_000),
+            cache_max_size=getattr(config, "embed_cache_max_size", 50000),
         )
 
     @property

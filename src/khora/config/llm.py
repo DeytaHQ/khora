@@ -111,6 +111,15 @@ class LiteLLMConfig(BaseModel):
         "and long texts get small batches, keeping API response "
         "payloads under ~2MB.",
     )
+    embed_cache_max_size: int = Field(
+        default=50000,
+        ge=0,
+        description=(
+            "Maximum number of embeddings to cache in memory (0 to disable). "
+            "Each entry uses ~13 KB (numpy float64 array). "
+            "At 50,000 entries: ~650 MB. Tune for container memory budget."
+        ),
+    )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> LiteLLMConfig:
