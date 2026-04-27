@@ -16,6 +16,24 @@ uv run alembic upgrade head                       # Run migrations
 
 CLI tooling (`extract`, `search`) lives in the separate [khora-cli](https://github.com/DeytaHQ/khora-cli) package (`uv pip install khora-cli`). Ontology tooling (construct / validate / preview) lives in [khora-explorer](https://github.com/DeytaHQ/khora-explorer) (`uv pip install khora-explorer`). khora itself is a pure memory-lake library.
 
+## Test Commands
+
+```bash
+make test                                          # Full test suite (unit + integration + e2e), coverage ≥30%
+uv run pytest -m integration                       # Integration tests only
+uv run pytest -m e2e                               # End-to-end tests only
+```
+
+Docker Compose is always available. Always run `make test` before opening a PR. Never skip tests.
+
+## Test Infrastructure Isolation
+
+**Never reuse running Docker containers from other projects.** Integration tests must use their own Docker Compose stack (compose file in this repo), not containers from dokimion, other worktrees, or other developer projects. Before running integration tests:
+
+1. Ensure your test databases are started from THIS repo's compose file
+2. Do NOT connect to containers named `dokimion-*` — those belong to the integration testing platform
+3. If port conflicts arise, stop your own containers or use different ports — never repurpose another project's infrastructure
+
 ## Architecture
 
 - **Engines:** implement `MemoryEngineProtocol` in `engines/protocol.py`. Default engine is `vectorcypher`
@@ -260,7 +278,7 @@ Khora uses `hatch-vcs` — the package version comes from git tags (`git tag vX.
 
 ### Before Creating PRs
 
-Always run `make format && make test` before committing. CI will reject PRs that fail formatting or tests.
+Always run `make format && make test` before committing. CI will reject PRs that fail formatting or tests. Docker Compose is always available — never skip tests by claiming infrastructure is unavailable.
 
 ### Coding Principles
 
@@ -352,16 +370,17 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **Selective extraction** — KET-RAG style: scores chunk importance, sends top 70% to LLM, rest get co-occurrence edges only
 - **Entity resolution** — multi-strategy dedup with per-type thresholds (PERSON 0.92, DATE 0.95, default 0.85)
 - **Semantic expansion** — optional cross-tool entity unification + relationship inference (4 modes: smart/batch/incremental/none)
+- **Chronicle abstention signals** — `RecallResult.metadata["abstention_signals"]` exposes 4 boolean flags (`entities_empty`, `chunks_empty`, `chunks_below_min`, `top_score_low`), a weighted `combined_score` (0.0 high-confidence → 1.0 should-abstain), and a `should_abstain` convenience flag for downstream LLM answer-generation. Passive signals — chronicle still returns chunks even when they trip. Tunable via `ChronicleEngine` kwargs `abstention_min_chunks`, `abstention_min_top_score`, `abstention_combined_threshold`.
 
 ### Optional Dependencies
 - **spaCy:** `_HAS_SPACY` flag, falls back to regex sentence splitting
 - **Logfire:** `_HAS_LOGFIRE` flag, `trace_span()` yields no-op when absent. Install: `pip install khora[logfire]`
 - **`@trace` decorator:** `from khora.telemetry import trace`. Zero overhead when logfire absent
 - **Telemetry collector:** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording. Without it, `NoOpCollector` is used (zero cost)
+- **Neo4j pool metrics:** When logfire is installed, `Neo4jBackend` emits OTel metrics. **Use `khora.neo4j.pool.acquire_duration`** (histogram, seconds) for alerting — it records the real time until a connection is bound to the session, wrapped around `AsyncSession._connect` so retries and queries don't inflate it. Also emitted: `khora.neo4j.pool.timeout` (counter, increments on every `ConnectionAcquisitionTimeoutError` from any entry path), `khora.neo4j.pool.connections.{active,idle,total,creating}` + `khora.neo4j.pool.utilization` (observable gauges, ~60s export cadence — best-effort, unlocked reads), and `khora.neo4j.session.duration` (histogram, total session hold time). **Legacy:** `khora.neo4j.pool.acquisition_time` records session-object construction only (near-zero) — kept for dashboard back-compat; prefer `acquire_duration`. **Opt-in high-frequency sampler:** set `KHORA_STORAGE__GRAPH__POOL_SAMPLER_ENABLED=true` (+ optional `KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS=500`, clamped to [50, 60000]) to emit `khora.neo4j.pool.sampled.{active,idle,total,creating,utilization}` histograms for sub-minute burst/ramp investigation — sampler takes `pool.lock` for a short critical section. Zero cost without logfire, zero cost when sampler disabled. Pool internals (`driver._pool.connections`, `connections_reservations`, `in_use_connection_count`, `lock`) verified stable neo4j 5.x–6.1; all reads degrade gracefully via `getattr` fallback if internals shift.
 
 ### Logging
 - **loguru sinks are sync by default** — `logger.add(...)` has `enqueue=False`. In async code, `logger.*` calls then block the event loop on each format+write. Khora's `setup_logging()` enables `enqueue=True` on all sinks it installs, and registers `atexit.register(logger.complete)` so the queue drains on clean exit.
-- **Neo4j DEBUG → Logfire:** When `KHORA_NEO4J_LOG_LEVEL` is set and `logfire` is installed, `setup_logging()` attaches a `LogfireLoggingHandler` directly to the `neo4j` stdlib logger so driver DEBUG records (pool, bolt, routing) reach Logfire. Downstream consumers that don't call `khora.setup_logging()` (e.g. Peras) should call it themselves after `logfire.configure()`: `from khora.telemetry import install_neo4j_logfire_handler; install_neo4j_logfire_handler()`. The helper is idempotent and env-var-gated. **⚠ Credential risk:** neo4j driver DEBUG output can include bolt URIs with embedded credentials (`bolt://user:password@host`) and query parameters. Because this helper forwards DEBUG records to Logfire unmodified, operators enabling `KHORA_NEO4J_LOG_LEVEL=DEBUG` in environments that also ship to Logfire must rely on downstream scrubbing (Logfire `scrubbing_patterns`, e.g. `r"://\w+:[^@]+@"`) to prevent leakage.
 - **Library consumers MUST either** (a) call `khora.logging_config.setup_logging()`, OR (b) configure their own loguru sinks with `enqueue=True` explicitly. If a downstream service imports khora without doing either, it inherits loguru's default sync stderr sink and silently pays event-loop-blocking cost on every `logger.*` call inside an `async def`.
 - **Graceful shutdown drains via `logger.complete()`** — setup_logging registers this via atexit. Downstream consumers that configure their own sinks must do the same, otherwise in-flight queue entries are lost on exit.
 - **Abrupt termination (SIGKILL, crash) drops in-flight log records.** This is inherent to the enqueue model — the queue is drained by a background thread that can't run during a kill.
@@ -371,8 +390,10 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 ### Downstream
 - `genesis` and `khora-benchmarks` depend on khora. `lake.storage` is a stable public API
 - **LLMUsage contract:** `LLMUsage` fields are consumed by Poros/Peras for cost tracking (DYT-645) — changes require coordination
-- **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` changes require coordination
+- **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination (consumed by khora-explorer, genesis, khora-benchmarks). See `docs/adrs/adr-022-extraction-skills-public-api.md`. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract
+- Stable public API is codified in ADR-024 (memory-lake surface) and ADR-022 (extraction skills). Any breaking change to symbols listed there requires coordinated release with genesis, khora-benchmarks, khora-explorer, khora-cli. See `docs/adrs/adr-024-memory-lake-public-api.md`; `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface
 - `scripts/` vendored from TTOJ — skip in audits
+
 
 ## Codex Skill Mapping
 
