@@ -1226,6 +1226,11 @@ class ChronicleEngine:
                 if routing.complexity == QueryComplexity.SIMPLE:
                     run_bm25 = False
                     run_entity = False
+                elif routing.complexity == QueryComplexity.ENTITY_ANCHORED:
+                    # Boost the entity-channel RRF weight 2× for queries pivoting
+                    # on a single named entity. Other channels keep their weights;
+                    # the entity surface just gets a stronger pull during fusion.
+                    _rrf_w_entity *= 2.0
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Chronicle router failed, running all channels: %s", exc)
                 routing_complexity = "fallback"

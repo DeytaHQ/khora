@@ -36,6 +36,7 @@ class QueryComplexity(Enum):
     SIMPLE = "simple"  # Vector-only search
     MODERATE = "moderate"  # Shallow graph (depth=1)
     COMPLEX = "complex"  # Full VectorCypher (depth=2-3)
+    ENTITY_ANCHORED = "entity_anchored"  # Short factual question anchored to a named entity
 
 
 @dataclass
@@ -238,6 +239,7 @@ COMPLEX|Multi-hop query requiring graph traversal"""
             "simple": 0,
             "moderate": 0,
             "complex": 0,
+            "entity_anchored": 0,
             "llm_fallback": 0,
         }
 
@@ -478,6 +480,26 @@ COMPLEX|Multi-hop query requiring graph traversal"""
             complexity = QueryComplexity.SIMPLE
             depth = self._config.simple_depth
             entry_limit = self._config.simple_entry_limit
+
+        # ENTITY_ANCHORED: short factual lookup pivoting on a single named entity.
+        # Promote SIMPLE/MODERATE → ENTITY_ANCHORED when:
+        #   - At least one named entity present
+        #   - Query is short (≤12 words)
+        #   - No multi-hop / comparison / counterfactual / aggregation markers
+        # Chronicle uses this signal to up-weight the entity channel without
+        # changing graph depth; it does not promote COMPLEX queries.
+        if complexity in (QueryComplexity.SIMPLE, QueryComplexity.MODERATE) and entity_count >= 1 and word_count <= 12:
+            blocking_patterns = (
+                self._comparison_re,
+                self._multi_hop_re,
+                self._counterfactual_re,
+                self._aggregation_re,
+            )
+            if not any(p.search(query) for patterns in blocking_patterns for p in patterns):
+                complexity = QueryComplexity.ENTITY_ANCHORED
+                depth = self._config.moderate_depth
+                entry_limit = self._config.moderate_entry_limit
+                reasons.append("entity-anchored")
 
         use_graph = complexity != QueryComplexity.SIMPLE
 
@@ -722,6 +744,7 @@ COMPLEX|Multi-hop query requiring graph traversal"""
             "simple": 0,
             "moderate": 0,
             "complex": 0,
+            "entity_anchored": 0,
             "llm_fallback": 0,
         }
 
