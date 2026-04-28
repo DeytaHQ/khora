@@ -287,6 +287,7 @@ class SurrealDBRelationalAdapter:
             "relationship_count = $relationship_count, "
             "error_message = $error_message, "
             "extraction_config_hash = $extraction_config_hash, "
+            "extraction_params = $extraction_params, "
             "external_id = $external_id, "
             "created_at = $created_at, "
             "updated_at = $updated_at, "
@@ -311,6 +312,7 @@ class SurrealDBRelationalAdapter:
                 "relationship_count": document.relationship_count,
                 "error_message": document.error_message,
                 "extraction_config_hash": document.extraction_config_hash,
+                "extraction_params": document.extraction_params,
                 "external_id": document.external_id,
                 "created_at": document.created_at,
                 "updated_at": document.updated_at,
@@ -380,6 +382,7 @@ class SurrealDBRelationalAdapter:
             "relationship_count = $relationship_count, "
             "error_message = $error_message, "
             "extraction_config_hash = $extraction_config_hash, "
+            "extraction_params = $extraction_params, "
             "external_id = $external_id, "
             "updated_at = $updated_at, "
             "processed_at = $processed_at, "
@@ -402,6 +405,7 @@ class SurrealDBRelationalAdapter:
                 "relationship_count": document.relationship_count,
                 "error_message": document.error_message,
                 "extraction_config_hash": document.extraction_config_hash,
+                "extraction_params": document.extraction_params,
                 "external_id": document.external_id,
                 "updated_at": datetime.now(UTC),
                 "processed_at": document.processed_at,
@@ -579,6 +583,7 @@ class SurrealDBRelationalAdapter:
             relationship_count=row.get("relationship_count", 0),
             error_message=row.get("error_message"),
             extraction_config_hash=row.get("extraction_config_hash"),
+            extraction_params=row.get("extraction_params"),
             created_at=_parse_dt(row.get("created_at")) or datetime.now(UTC),
             updated_at=_parse_dt(row.get("updated_at")) or datetime.now(UTC),
             processed_at=_parse_dt(row.get("processed_at")),

@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS documents (
     relationship_count INTEGER DEFAULT 0,
     error_message TEXT,
     extraction_config_hash TEXT,
+    extraction_params TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     processed_at TEXT,
@@ -374,8 +375,8 @@ class SQLiteRelationalBackend:
             "(id, namespace_id, content, status, source, source_type, content_type, "
             "title, author, language, checksum, size_bytes, metadata_, "
             "chunk_count, entity_count, relationship_count, error_message, extraction_config_hash, "
-            "created_at, updated_at, processed_at, source_timestamp, external_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "extraction_params, created_at, updated_at, processed_at, source_timestamp, external_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(document.id),
                 str(document.namespace_id),
@@ -395,6 +396,7 @@ class SQLiteRelationalBackend:
                 document.relationship_count,
                 document.error_message,
                 document.extraction_config_hash,
+                _json_dumps(document.extraction_params) if document.extraction_params is not None else None,
                 _dt_to_str(document.created_at) or now,
                 _dt_to_str(document.updated_at) or now,
                 _dt_to_str(document.processed_at),
@@ -447,7 +449,7 @@ class SQLiteRelationalBackend:
             "content = ?, status = ?, source = ?, source_type = ?, content_type = ?, "
             "title = ?, author = ?, language = ?, checksum = ?, size_bytes = ?, "
             "metadata_ = ?, chunk_count = ?, entity_count = ?, relationship_count = ?, error_message = ?, "
-            "extraction_config_hash = ?, external_id = ?, updated_at = ?, processed_at = ?, source_timestamp = ? "
+            "extraction_config_hash = ?, extraction_params = ?, external_id = ?, updated_at = ?, processed_at = ?, source_timestamp = ? "
             "WHERE id = ?",
             (
                 document.content,
@@ -466,6 +468,7 @@ class SQLiteRelationalBackend:
                 document.relationship_count,
                 document.error_message,
                 document.extraction_config_hash,
+                _json_dumps(document.extraction_params) if document.extraction_params is not None else None,
                 document.external_id,
                 now,
                 _dt_to_str(document.processed_at),
@@ -666,6 +669,7 @@ class SQLiteRelationalBackend:
             relationship_count=row["relationship_count"] or 0,
             error_message=row["error_message"],
             extraction_config_hash=row["extraction_config_hash"],
+            extraction_params=_json_loads(row["extraction_params"]) if row["extraction_params"] else None,
             created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
             updated_at=_parse_dt(row["updated_at"]) or datetime.now(UTC),
             processed_at=_parse_dt(row["processed_at"]),

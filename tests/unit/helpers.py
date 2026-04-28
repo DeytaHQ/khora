@@ -30,8 +30,13 @@ def mock_config() -> MagicMock:
     mock_config.llm.max_retries = 3
     mock_config.telemetry_database_url = None
     mock_config.telemetry_service_name = "khora-test"
-    # Disable pending recovery in unit tests to avoid background task noise.
-    mock_config.pipelines.pending_recovery_enabled = False
+    # Disable pending processor in unit tests to avoid background task noise.
+    mock_config.pipelines.pending_processor_enabled = False
+    mock_config.pipelines.pending_processor_max_concurrent = 20
+    mock_config.pipelines.pending_processor_grace_period_minutes = 5
+    # Deprecated fields — keep None to avoid backwards-compat fallback.
+    mock_config.pipelines.pending_recovery_enabled = None
+    mock_config.pipelines.pending_recovery_grace_period_minutes = None
     return mock_config
 
 
