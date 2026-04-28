@@ -1227,7 +1227,7 @@ class MemoryLake:
             on_result=on_result,
             namespace_id=namespace_id,
             pre_failed_doc_ids=pre_failed_doc_ids,
-            _remaining=len(pending_docs),
+            _remaining=len(pending_docs) + len(pre_failed_docs) + len(pre_completed_docs),
         )
 
         # Fire error results for documents that failed to be created.
@@ -1257,10 +1257,10 @@ class MemoryLake:
                 )
             )
 
-        if not pending_docs:
-            # All docs were pre-handled (failed, completed, skipped).
+        if not pending_docs and not pre_failed_docs and not pre_completed_docs:
+            # Empty batch — nothing to process at all.
             handle._mark_done()
-        else:
+        elif pending_docs:
             # Enqueue PENDING docs for the unified processor.
             for doc, doc_data in zip(pending_docs, pending_doc_data):
                 self._processor_queue.put_nowait(_ProcessorItem(doc=doc, doc_data=doc_data, batch_reg=batch_reg))
