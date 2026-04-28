@@ -511,17 +511,32 @@ class PipelineSettings(BaseSettings):
         "mention_count <= this value. Set to 0 to skip all single-mention entities of these types.",
     )
 
-    # Stale PENDING document recovery (DYT-3125)
-    pending_recovery_enabled: bool = Field(
+    # Unified PENDING document processor (DYT-3305).
+    # Replaces the separate _submit_batch_worker and _recover_pending_documents paths.
+    pending_processor_enabled: bool = Field(
         default=True,
-        description="Enable automatic recovery of stale PENDING documents on MemoryLake.connect(). "
-        "Documents stuck in PENDING for longer than pending_recovery_grace_period_minutes are "
-        "re-queued through the processing pipeline as a background task.",
+        description="Enable the unified PENDING document processor. When True, a background "
+        "processor drains PENDING documents with bounded concurrency. On startup it also "
+        "recovers stale orphaned documents from previous crashes.",
     )
-    pending_recovery_grace_period_minutes: int = Field(
+    pending_processor_max_concurrent: int = Field(
+        default=20,
+        description="Maximum documents to process concurrently in the unified pending processor.",
+    )
+    pending_processor_grace_period_minutes: int = Field(
         default=5,
         description="Minimum age (minutes) a PENDING document must have before it is eligible for "
-        "recovery. Avoids racing with active submit_batch workers from the previous process.",
+        "crash-recovery processing. Avoids racing with in-flight writes.",
+    )
+
+    # Deprecated aliases — kept for backwards compat with existing env vars.
+    pending_recovery_enabled: bool | None = Field(
+        default=None,
+        description="Deprecated: use pending_processor_enabled instead.",
+    )
+    pending_recovery_grace_period_minutes: int | None = Field(
+        default=None,
+        description="Deprecated: use pending_processor_grace_period_minutes instead.",
     )
 
 

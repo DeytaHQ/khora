@@ -3212,18 +3212,19 @@ class TestProcessDocumentSemaphore:
 
 
 # ---------------------------------------------------------------------------
-# _recover_pending_documents (DYT-3125)
+# Unified pending processor (DYT-3305)
 # ---------------------------------------------------------------------------
 
 
-class TestRecoverPendingDocuments:
-    """Unit tests for MemoryLake._recover_pending_documents()."""
+class TestPendingProcessor:
+    """Unit tests for the unified pending processor."""
 
-    def _make_lake_with_recovery(self) -> MemoryLake:
-        """Create a MemoryLake with pending recovery enabled."""
+    def _make_lake_with_processor(self) -> MemoryLake:
+        """Create a MemoryLake with the pending processor enabled."""
         cfg = _mock_config()
-        cfg.pipelines.pending_recovery_enabled = True
-        cfg.pipelines.pending_recovery_grace_period_minutes = 5
+        cfg.pipelines.pending_processor_enabled = True
+        cfg.pipelines.pending_processor_max_concurrent = 20
+        cfg.pipelines.pending_processor_grace_period_minutes = 5
         cfg.pipelines.entity_types = ["PERSON", "ORGANIZATION"]
         with patch("khora.memory_lake.load_config", return_value=cfg):
             lake = MemoryLake()
@@ -3233,129 +3234,175 @@ class TestRecoverPendingDocuments:
         return lake
 
     @pytest.mark.asyncio
-    async def test_recovery_skips_when_disabled(self) -> None:
-        """No background task is launched when pending_recovery_enabled=False."""
-        lake = _make_lake()  # recovery disabled in mock config
+    async def test_processor_skips_when_disabled(self) -> None:
+        """No background task is launched when pending_processor_enabled=False."""
+        lake = _make_lake()  # processor disabled in mock config
         eng = _mock_engine()
         with patch("khora.engines.create_engine", return_value=eng):
             await lake.connect()
-        # No recovery task should have been created
-        assert all("_recover_pending_documents" not in str(t) for t in lake._bg_tasks)
+        assert lake._processor_task is None
 
     @pytest.mark.asyncio
-    async def test_recovery_skipped_when_no_process_fn(self) -> None:
-        """Recovery exits silently if engine has no process_staged_document."""
-        lake = self._make_lake_with_recovery()
-        # process_staged_document is not on the mock engine by default
+    async def test_orphan_recovery_skipped_when_no_process_fn(self) -> None:
+        """Orphan recovery exits silently if engine has no process_staged_document."""
+        lake = self._make_lake_with_processor()
         del lake._engine.process_staged_document
 
-        await lake._recover_pending_documents()  # Should not raise
+        await lake._enqueue_orphaned_pending_docs()  # Should not raise
 
     @pytest.mark.asyncio
-    async def test_recovery_skipped_when_no_storage(self) -> None:
-        """Recovery exits silently if engine exposes no _storage."""
-        lake = self._make_lake_with_recovery()
+    async def test_orphan_recovery_skipped_when_no_storage(self) -> None:
+        """Orphan recovery exits silently if engine exposes no _storage."""
+        lake = self._make_lake_with_processor()
         lake._engine._storage = None
 
-        await lake._recover_pending_documents()  # Should not raise
+        await lake._enqueue_orphaned_pending_docs()  # Should not raise
 
     @pytest.mark.asyncio
-    async def test_recovery_processes_stale_docs(self) -> None:
-        """Stale PENDING documents are passed to process_staged_document."""
+    async def test_orphan_recovery_enqueues_stale_docs(self) -> None:
+        """Stale PENDING documents are enqueued and processed by the processor."""
         from datetime import UTC, timedelta
 
         from khora.core.models import MemoryNamespace
         from khora.core.models.document import Document
         from khora.storage.backends.base import PaginatedResult
 
-        lake = self._make_lake_with_recovery()
+        lake = self._make_lake_with_processor()
 
         ns_id = uuid4()
         ns = MemoryNamespace(id=ns_id, namespace_id=ns_id)
         stale_doc = Document(namespace_id=ns_id, content="stale content")
 
-        # list_namespaces returns one namespace, then empty (stop pagination)
         lake._engine._storage.list_namespaces = AsyncMock(
             side_effect=[
                 PaginatedResult(items=[ns], total=1, limit=100, offset=0),
                 PaginatedResult(items=[], total=0, limit=100, offset=100),
             ]
         )
-        # list_documents returns one stale doc, then empty (stop pagination)
         lake._engine._storage.list_documents = AsyncMock(
             side_effect=[
                 [stale_doc],
                 [],
             ]
         )
-        process_fn = AsyncMock(return_value=(3, 2, 1))
-        lake._engine.process_staged_document = process_fn
 
-        await lake._recover_pending_documents()
+        await lake._enqueue_orphaned_pending_docs()
 
-        process_fn.assert_awaited_once()
-        call_kwargs = process_fn.call_args
-        assert call_kwargs[0][0] is stale_doc
-
-        # Verify the grace-period filter is applied correctly — without this,
-        # all PENDING docs would be recovered regardless of age.
+        # Verify the grace-period filter is applied correctly.
         list_docs_call = lake._engine._storage.list_documents.call_args_list[0]
         assert list_docs_call.kwargs["status"] == "pending"
         assert list_docs_call.kwargs["updated_before"] <= datetime.now(UTC) - timedelta(minutes=5)
 
-    @pytest.mark.asyncio
-    async def test_recovery_continues_after_per_doc_failure(self) -> None:
-        """Per-document failures are logged but do not abort recovery of remaining docs."""
-        from khora.core.models import MemoryNamespace
-        from khora.core.models.document import Document
-        from khora.storage.backends.base import PaginatedResult
-
-        lake = self._make_lake_with_recovery()
-
-        ns_id = uuid4()
-        ns = MemoryNamespace(id=ns_id, namespace_id=ns_id)
-        doc_a = Document(namespace_id=ns_id, content="doc A")
-        doc_b = Document(namespace_id=ns_id, content="doc B")
-
-        lake._engine._storage.list_namespaces = AsyncMock(
-            side_effect=[
-                PaginatedResult(items=[ns], total=1, limit=100, offset=0),
-                PaginatedResult(items=[], total=0, limit=100, offset=100),
-            ]
-        )
-        lake._engine._storage.list_documents = AsyncMock(side_effect=[[doc_a, doc_b], []])
-        # First call raises, second succeeds
-        process_fn = AsyncMock(side_effect=[RuntimeError("boom"), (1, 0, 0)])
-        lake._engine.process_staged_document = process_fn
-
-        await lake._recover_pending_documents()  # Should not raise
-
-        assert process_fn.await_count == 2
+        # Verify doc was enqueued.
+        assert lake._processor_queue.qsize() == 1
+        item = lake._processor_queue.get_nowait()
+        assert item.doc is stale_doc
+        assert item.batch_reg is None  # orphan — no batch registration
 
     @pytest.mark.asyncio
-    async def test_recovery_uses_doc_extraction_hash(self) -> None:
-        """Recovery preserves the document's existing extraction_config_hash."""
-        from khora.core.models import MemoryNamespace
+    async def test_orphan_recovery_processes_with_stored_params(self) -> None:
+        """Orphaned docs use their stored extraction_params for processing."""
         from khora.core.models.document import Document
-        from khora.storage.backends.base import PaginatedResult
+        from khora.memory_lake import _ProcessorItem
 
-        lake = self._make_lake_with_recovery()
+        lake = self._make_lake_with_processor()
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
 
         ns_id = uuid4()
-        ns = MemoryNamespace(id=ns_id, namespace_id=ns_id)
-        doc = Document(namespace_id=ns_id, content="content", extraction_config_hash="abc123")
-
-        lake._engine._storage.list_namespaces = AsyncMock(
-            side_effect=[
-                PaginatedResult(items=[ns], total=1, limit=100, offset=0),
-                PaginatedResult(items=[], total=0, limit=100, offset=100),
-            ]
+        doc = Document(
+            namespace_id=ns_id,
+            content="content",
+            extraction_config_hash="abc123",
+            extraction_params={
+                "skill_name": "custom_skill",
+                "entity_types": ["PERSON"],
+                "relationship_types": ["KNOWS"],
+                "expertise": None,
+                "chunk_strategy": "fixed",
+                "max_chunks_in_flight": None,
+            },
         )
-        lake._engine._storage.list_documents = AsyncMock(side_effect=[[doc], []])
+
         process_fn = AsyncMock(return_value=(1, 0, 0))
         lake._engine.process_staged_document = process_fn
 
-        await lake._recover_pending_documents()
+        await lake._process_pending_item(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
+
+        process_fn.assert_awaited_once()
+        _, call_kwargs = process_fn.call_args
+        assert call_kwargs["skill_name"] == "custom_skill"
+        assert call_kwargs["entity_types"] == ["PERSON"]
+        assert call_kwargs["relationship_types"] == ["KNOWS"]
+        assert call_kwargs["extraction_config_hash"] == "abc123"
+        assert call_kwargs["chunk_strategy"] == "fixed"
+
+    @pytest.mark.asyncio
+    async def test_orphan_recovery_falls_back_to_defaults(self) -> None:
+        """Orphaned docs without extraction_params fall back to config defaults."""
+        from khora.core.models.document import Document
+        from khora.memory_lake import _ProcessorItem
+
+        lake = self._make_lake_with_processor()
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        doc = Document(namespace_id=uuid4(), content="content")
+
+        process_fn = AsyncMock(return_value=(1, 0, 0))
+        lake._engine.process_staged_document = process_fn
+
+        await lake._process_pending_item(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
 
         _, call_kwargs = process_fn.call_args
-        assert call_kwargs["extraction_config_hash"] == "abc123"
+        assert call_kwargs["skill_name"] == "general_entities"
+        assert call_kwargs["entity_types"] == ["PERSON", "ORGANIZATION"]
+
+    @pytest.mark.asyncio
+    async def test_processor_handles_per_doc_failure(self) -> None:
+        """Per-document failures in the processor are handled gracefully."""
+        from khora.core.models.document import Document, DocumentStatus
+        from khora.memory_lake import _ProcessorItem
+
+        lake = self._make_lake_with_processor()
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        doc = Document(namespace_id=uuid4(), content="will fail")
+        process_fn = AsyncMock(side_effect=RuntimeError("boom"))
+        lake._engine.process_staged_document = process_fn
+
+        await lake._process_pending_item(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
+
+        # Doc should be marked FAILED.
+        assert doc.status == DocumentStatus.FAILED
+        assert "boom" in doc.error_message
+
+    @pytest.mark.asyncio
+    async def test_submit_batch_stores_extraction_params(self) -> None:
+        """submit_batch stores extraction params on created documents."""
+        ns_id = uuid4()
+        lake = _make_lake_with_staged_support(ns_id)
+
+        created_docs = []
+        orig_create = lake._engine._storage.create_document.side_effect
+
+        async def _spy_create(doc):
+            created_docs.append(doc)
+            return await orig_create(doc)
+
+        lake._engine._storage.create_document.side_effect = _spy_create
+
+        handle = await lake.submit_batch(
+            [{"content": "test doc"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            skill_name="custom_skill",
+        )
+        await handle.wait()
+
+        assert len(created_docs) == 1
+        params = created_docs[0].extraction_params
+        assert params is not None
+        assert params["skill_name"] == "custom_skill"
+        assert params["entity_types"] == ["PERSON"]
+        assert params["relationship_types"] == ["KNOWS"]

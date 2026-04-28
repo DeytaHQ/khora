@@ -81,6 +81,12 @@ class Document:
     # Extraction config tracking (max 255 chars; accommodates compound keys)
     extraction_config_hash: str | None = None
 
+    # Extraction parameters stored for deferred/crash-recovery processing.
+    # Contains skill_name, entity_types, relationship_types, expertise (as dict),
+    # chunk_strategy, and max_chunks_in_flight so the pending processor can
+    # reconstruct the original extraction intent without hardcoding defaults.
+    extraction_params: dict[str, Any] | None = None
+
     # Maximum length for extraction_config_hash (matches DB column String(255))
     _EXTRACTION_HASH_MAX_LEN: int = field(default=255, init=False, repr=False, compare=False)
 

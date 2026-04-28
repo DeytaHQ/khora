@@ -213,6 +213,41 @@ class BatchHandle:
         self._done_event.set()
 
 
+@dataclass
+class _BatchRegistration:
+    """In-memory tracking for an active submit_batch call.
+
+    Links document IDs to their BatchHandle and on_result callback so the
+    unified pending processor can deliver results back to the correct batch.
+    """
+
+    handle: BatchHandle
+    on_result: Callable[[int, int, DocumentResult], None]
+    namespace_id: UUID
+    pre_failed_doc_ids: set[UUID] = field(default_factory=set)
+    _remaining: int = 0
+
+    def fire_result(self, result: DocumentResult) -> None:
+        """Record a result and fire the callback. Mark handle done when all results delivered."""
+        self.handle._record_result(result)
+        try:
+            self.on_result(self.handle.completed, self.handle.total, result)
+        except Exception as cb_exc:
+            logger.warning(f"pending_processor: on_result callback raised: {cb_exc}")
+        self._remaining -= 1
+        if self._remaining <= 0:
+            self.handle._mark_done()
+
+
+@dataclass(slots=True, frozen=True)
+class _ProcessorItem:
+    """Work item for the unified pending processor."""
+
+    doc: Document
+    doc_data: dict[str, Any] | None  # None for orphaned docs recovered from DB
+    batch_reg: _BatchRegistration | None  # None for orphaned docs
+
+
 @dataclass(slots=True, frozen=True)
 class RecallResult:
     """Result of a recall operation.
@@ -349,6 +384,10 @@ class MemoryLake:
         # Global chunk semaphore shared across all concurrent submit_batch calls.
         # Initialized on first submit_batch call that sets max_chunks_in_flight.
         self._chunk_semaphore: _GlobalChunkSemaphore | None = None
+        # Unified pending processor (DYT-3305): replaces both _submit_batch_worker
+        # and _recover_pending_documents with a single mechanism.
+        self._processor_queue: asyncio.Queue[_ProcessorItem] = asyncio.Queue()
+        self._processor_task: asyncio.Task | None = None
 
     async def connect(self) -> None:
         """Connect to all storage backends."""
@@ -398,23 +437,75 @@ class MemoryLake:
         self._connected = True
         logger.info("Memory Lake connected")
 
-        # Launch stale PENDING document recovery as a background task (DYT-3125).
-        # Documents that were PENDING when the previous process crashed are re-queued
-        # through the processing pipeline. Runs only once at startup; does not block connect().
-        if self._config.pipelines.pending_recovery_enabled:
-            task = asyncio.create_task(self._recover_pending_documents())
-            self._bg_tasks.add(task)
-            task.add_done_callback(self._bg_tasks.discard)
+        # Start the unified pending processor (DYT-3305).
+        # Replaces both _submit_batch_worker and _recover_pending_documents.
+        # On startup it recovers orphaned PENDING docs; then drains the queue.
+        processor_enabled = self._config.pipelines.pending_processor_enabled
+        # Backwards compat: honour deprecated pending_recovery_enabled if set.
+        if processor_enabled and self._config.pipelines.pending_recovery_enabled is not None:
+            processor_enabled = self._config.pipelines.pending_recovery_enabled
+        if processor_enabled:
+            self._ensure_processor_running()
 
-    async def _recover_pending_documents(self) -> None:
-        """Re-queue stale PENDING documents left over from a previous process crash.
+    def _ensure_processor_running(self) -> None:
+        """Start the pending processor if it is not already running."""
+        if self._processor_task is None or self._processor_task.done():
+            self._processor_task = asyncio.create_task(self._run_pending_processor())
+            self._bg_tasks.add(self._processor_task)
+            self._processor_task.add_done_callback(self._bg_tasks.discard)
 
-        Queries all namespaces for documents that have been PENDING longer than the
-        configured grace period, then processes each one through the engine pipeline.
-        The grace period avoids racing with active submit_batch workers that may still
-        be completing from the previous process.
+    async def _run_pending_processor(self) -> None:
+        """Unified pending processor (DYT-3305).
+
+        Replaces both ``_submit_batch_worker`` (inline processing) and
+        ``_recover_pending_documents`` (startup recovery) with a single
+        mechanism that drains PENDING documents from a shared queue.
+
+        On startup: scans all namespaces for orphaned PENDING documents
+        (older than the grace period) and enqueues them for processing.
+
+        Then: runs a pool of workers that drain ``_processor_queue`` with
+        bounded concurrency.  Items are added by ``submit_batch`` or by
+        the orphan recovery scan.
         """
-        grace_minutes = self._config.pipelines.pending_recovery_grace_period_minutes
+        # Phase 1: recover orphaned PENDING docs from previous crashes.
+        try:
+            await self._enqueue_orphaned_pending_docs()
+        except Exception as exc:
+            logger.error(f"pending_processor: orphan recovery failed: {exc}")
+
+        # Phase 2: drain the queue with bounded concurrency.
+        max_concurrent = self._config.pipelines.pending_processor_max_concurrent
+
+        async def _worker() -> None:
+            while True:
+                item = await self._processor_queue.get()
+                try:
+                    await self._process_pending_item(item)
+                except Exception as exc:
+                    logger.error(f"pending_processor: unhandled error processing doc: {exc}")
+                finally:
+                    self._processor_queue.task_done()
+
+        workers = [asyncio.create_task(_worker()) for _ in range(max_concurrent)]
+        try:
+            await asyncio.gather(*workers)
+        except asyncio.CancelledError:
+            for w in workers:
+                w.cancel()
+            raise
+
+    async def _enqueue_orphaned_pending_docs(self) -> None:
+        """Scan for stale PENDING documents and enqueue them for processing.
+
+        Uses the configured grace period to avoid racing with in-flight writes.
+        Extraction parameters are read from the document's ``extraction_params``
+        column; if absent, falls back to config defaults.
+        """
+        grace_minutes = self._config.pipelines.pending_processor_grace_period_minutes
+        # Backwards compat: honour deprecated field if the new one wasn't explicitly set.
+        if self._config.pipelines.pending_recovery_grace_period_minutes is not None:
+            grace_minutes = self._config.pipelines.pending_recovery_grace_period_minutes
         stale_before = datetime.now(UTC) - timedelta(minutes=grace_minutes)
 
         storage = getattr(self._engine, "_storage", None)
@@ -424,84 +515,185 @@ class MemoryLake:
         engine = self._get_engine()
         process_fn = getattr(engine, "process_staged_document", None)
         if process_fn is None:
-            logger.debug("_recover_pending_documents: engine does not support process_staged_document, skipping")
+            logger.debug("pending_processor: engine does not support process_staged_document, skipping orphan recovery")
             return
 
-        entity_types = list(self._config.pipelines.entity_types)
-        total_recovered = 0
-        total_failed = 0
+        total_enqueued = 0
 
-        try:
-            offset = 0
-            while True:
-                ns_page = await storage.list_namespaces(active_only=True, limit=100, offset=offset)
-                namespaces = ns_page.items
-                if not namespaces:
-                    break
+        offset = 0
+        while True:
+            ns_page = await storage.list_namespaces(active_only=True, limit=100, offset=offset)
+            namespaces = ns_page.items
+            if not namespaces:
+                break
 
-                for ns in namespaces:
-                    # Always query at offset=0: successfully recovered docs drop out of the
-                    # PENDING result set, so fixed-offset pagination would skip them.  Track
-                    # attempted IDs to avoid re-processing docs that persistently fail.
-                    attempted_ids: set = set()
-                    while True:
-                        all_docs = await storage.list_documents(
-                            ns.id,
-                            status="pending",
-                            updated_before=stale_before,
-                            limit=100,
-                            offset=0,
-                        )
-                        docs = [d for d in all_docs if d.id not in attempted_ids]
-                        if not docs:
-                            break
+            for ns in namespaces:
+                attempted_ids: set[UUID] = set()
+                while True:
+                    all_docs = await storage.list_documents(
+                        ns.id,
+                        status="pending",
+                        updated_before=stale_before,
+                        limit=100,
+                        offset=0,
+                    )
+                    docs = [d for d in all_docs if d.id not in attempted_ids]
+                    if not docs:
+                        break
 
-                        for doc in docs:
-                            attempted_ids.add(doc.id)
-                            try:
-                                occurred_at = doc.source_timestamp or doc.created_at
-                                # NOTE: Recovery always uses general_entities with no custom
-                                # ExpertiseConfig.  The original skill_name/expertise are not
-                                # stored on Document, so they cannot be reconstructed at
-                                # recovery time.  This is a deliberate limitation of
-                                # crash-recovery semantics.
-                                await process_fn(
-                                    doc,
-                                    skill_name="general_entities",
-                                    occurred_at=occurred_at,
-                                    entity_types=entity_types,
-                                    relationship_types=[],
-                                    expertise=None,
-                                    extraction_config_hash=doc.extraction_config_hash,
-                                    chunk_strategy=None,
-                                    max_chunks_in_flight=None,
-                                    chunk_semaphore=self._chunk_semaphore,
-                                )
-                                total_recovered += 1
-                            except Exception as exc:
-                                total_failed += 1
-                                logger.warning(
-                                    f"_recover_pending_documents: failed to recover document "
-                                    f"{doc.id} (namespace={ns.id}): {exc}"
-                                )
+                    for doc in docs:
+                        attempted_ids.add(doc.id)
+                        self._processor_queue.put_nowait(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
+                        total_enqueued += 1
 
-                offset += len(namespaces)
-                if len(namespaces) < 100:
-                    break
+            offset += len(namespaces)
+            if len(namespaces) < 100:
+                break
 
-        except Exception as exc:
-            logger.error(f"_recover_pending_documents: recovery aborted with error: {exc}")
-            return
-
-        if total_recovered or total_failed:
+        if total_enqueued:
             logger.info(
-                f"_recover_pending_documents: recovered {total_recovered} stale PENDING documents "
-                f"({total_failed} failed, grace_period={grace_minutes}m)"
+                f"pending_processor: enqueued {total_enqueued} orphaned PENDING documents "
+                f"for recovery (grace_period={grace_minutes}m)"
             )
         else:
-            logger.debug(
-                f"_recover_pending_documents: no stale PENDING documents found (grace_period={grace_minutes}m)"
+            logger.debug(f"pending_processor: no orphaned PENDING documents found (grace_period={grace_minutes}m)")
+
+    async def _process_pending_item(self, item: _ProcessorItem) -> None:
+        """Process a single PENDING document through the engine pipeline.
+
+        Handles both enqueued items (from submit_batch with batch_reg) and
+        orphaned items (from crash recovery with batch_reg=None).
+        """
+        from khora.telemetry.context import collect_usage, start_usage_collection
+
+        doc = item.doc
+        batch_reg = item.batch_reg
+        namespace_id = batch_reg.namespace_id if batch_reg else doc.namespace_id
+
+        storage = self.storage
+        engine = self._get_engine()
+        process_fn = getattr(engine, "process_staged_document", None)
+
+        if process_fn is None:
+            err_msg = f"Engine {type(engine).__name__!r} does not support process_staged_document"
+            if batch_reg:
+                doc.mark_failed(err_msg)
+                try:
+                    await storage.update_document(doc)
+                except Exception as upd_exc:
+                    logger.warning(f"pending_processor: could not update document status: {upd_exc}")
+                batch_reg.fire_result(
+                    DocumentResult(
+                        document_id=doc.id,
+                        namespace_id=namespace_id,
+                        success=False,
+                        error=err_msg,
+                        external_id=doc.external_id,
+                    )
+                )
+            else:
+                logger.warning(f"pending_processor: {err_msg}, skipping orphan doc {doc.id}")
+            return
+
+        # H1: Clear partial extraction state for previously-FAILED/ARCHIVED documents
+        # before re-processing to prevent duplicate chunks/entities on retry.
+        pre_failed_doc_ids = batch_reg.pre_failed_doc_ids if batch_reg else set()
+        if doc.id in pre_failed_doc_ids:
+            if storage.vector is not None:
+                try:
+                    await storage.vector.delete_chunks_by_document(doc.id)
+                except Exception as exc:
+                    logger.warning(f"pending_processor: could not clear chunks table for {doc.id}: {exc}")
+            clear_fn = getattr(engine, "clear_document_extraction_state", None)
+            if clear_fn is not None:
+                try:
+                    await clear_fn(doc.id, namespace_id)
+                except Exception as exc:
+                    logger.warning(f"pending_processor: could not clear extraction state for {doc.id}: {exc}")
+
+        # Resolve extraction parameters.
+        # For enqueued items: use doc_data metadata for occurred_at, extraction_params from document.
+        # For orphaned items: use extraction_params stored on the document.
+        params = doc.extraction_params or {}
+        skill_name = params.get("skill_name", "general_entities")
+        entity_types = params.get("entity_types", list(self._config.pipelines.entity_types))
+        relationship_types = params.get("relationship_types", [])
+        extraction_config_hash = doc.extraction_config_hash
+        chunk_strategy = params.get("chunk_strategy")
+        max_chunks_in_flight = params.get("max_chunks_in_flight")
+
+        # Reconstruct expertise from stored dict, if present.
+        expertise = None
+        expertise_data = params.get("expertise")
+        if expertise_data is not None:
+            try:
+                from khora.extraction.skills import ExpertiseConfig
+
+                expertise = ExpertiseConfig.from_dict(expertise_data)
+            except Exception:
+                logger.warning(f"pending_processor: could not reconstruct ExpertiseConfig for doc {doc.id}")
+
+        # Resolve occurred_at.
+        if item.doc_data is not None:
+            doc_metadata = item.doc_data.get("metadata") or {}
+            occurred_at_raw = doc_metadata.get("occurred_at")
+            parse_dt = getattr(engine, "_parse_datetime", None)
+            if occurred_at_raw and parse_dt is not None:
+                occurred_at = parse_dt(occurred_at_raw)
+            else:
+                occurred_at = doc.source_timestamp or datetime.now(UTC)
+        else:
+            occurred_at = doc.source_timestamp or doc.created_at
+
+        start_usage_collection()
+        try:
+            chunks, entities, rels = await process_fn(
+                doc,
+                skill_name=skill_name,
+                occurred_at=occurred_at,
+                entity_types=entity_types,
+                relationship_types=relationship_types,
+                expertise=expertise,
+                extraction_config_hash=extraction_config_hash,
+                chunk_strategy=chunk_strategy,
+                max_chunks_in_flight=max_chunks_in_flight,
+                chunk_semaphore=self._chunk_semaphore if max_chunks_in_flight is not None else None,
             )
+            if batch_reg:
+                batch_reg.fire_result(
+                    DocumentResult(
+                        document_id=doc.id,
+                        namespace_id=namespace_id,
+                        success=True,
+                        chunks_created=chunks,
+                        entities_extracted=entities,
+                        relationships_created=rels,
+                        llm_usage=collect_usage(),
+                        external_id=doc.external_id,
+                    )
+                )
+            else:
+                collect_usage()  # discard for orphan recovery
+                logger.info(f"pending_processor: recovered orphan doc {doc.id}")
+        except Exception as exc:
+            partial_usage = collect_usage()
+            logger.error(f"pending_processor: failed to process document {doc.id}: {exc}")
+            doc.mark_failed(str(exc))
+            try:
+                await storage.update_document(doc)
+            except Exception as upd_exc:
+                logger.warning(f"pending_processor: could not update document status: {upd_exc}")
+            if batch_reg:
+                batch_reg.fire_result(
+                    DocumentResult(
+                        document_id=doc.id,
+                        namespace_id=namespace_id,
+                        success=False,
+                        error=str(exc),
+                        llm_usage=partial_usage,
+                        external_id=doc.external_id,
+                    )
+                )
 
     async def disconnect(self) -> None:
         """Disconnect from all storage backends."""
@@ -509,6 +701,15 @@ class MemoryLake:
             return
 
         logger.info("Disconnecting Memory Lake...")
+
+        # Cancel the pending processor if running.
+        if self._processor_task is not None and not self._processor_task.done():
+            self._processor_task.cancel()
+            try:
+                await self._processor_task
+            except asyncio.CancelledError:
+                pass
+            self._processor_task = None
 
         if self._engine:
             await self._engine.disconnect()
@@ -872,6 +1073,23 @@ class MemoryLake:
                 )
                 existing_by_ext_id = {}
 
+        # Build extraction parameters payload once, to be stored on each PENDING document.
+        expertise_dict = None
+        if expertise is not None:
+            try:
+                expertise_dict = expertise.to_dict()
+            except Exception as exc:
+                logger.debug(f"submit_batch: could not serialize expertise config: {exc}")
+        extraction_params_payload: dict[str, Any] = {
+            "skill_name": skill_name,
+            "entity_types": entity_types,
+            "relationship_types": relationship_types,
+            "expertise": expertise_dict,
+            "extraction_config_hash": extraction_config_hash,
+            "chunk_strategy": chunk_strategy,
+            "max_chunks_in_flight": max_chunks_in_flight,
+        }
+
         seen_external_ids: set[str] = set()
         pre_failed_doc_ids: set[UUID] = set()
 
@@ -941,6 +1159,7 @@ class MemoryLake:
                 )
                 existing.status = DocumentStatus.PENDING
                 existing.extraction_config_hash = extraction_config_hash
+                existing.extraction_params = extraction_params_payload
                 existing.error_message = None
                 logger.debug(
                     f"submit_batch: re-queuing existing {prior_status.value} document "
@@ -970,6 +1189,7 @@ class MemoryLake:
                     custom=doc_data.get("metadata") or {},
                 ),
                 extraction_config_hash=extraction_config_hash,
+                extraction_params=extraction_params_payload,
                 external_id=external_id,
             )
             try:
@@ -1000,65 +1220,19 @@ class MemoryLake:
             batch_id=uuid4(),
             total=len(pending_docs) + len(pre_failed_docs) + len(pre_completed_docs),
         )
-        task = asyncio.create_task(
-            self._submit_batch_worker(
-                handle,
-                pending_docs,
-                pending_doc_data,
-                pre_failed_docs,
-                pre_completed_docs,
-                on_result,
-                namespace_id=namespace_id,
-                skill_name=skill_name,
-                entity_types=entity_types,
-                relationship_types=relationship_types,
-                expertise=expertise,
-                extraction_config_hash=extraction_config_hash,
-                chunk_strategy=chunk_strategy,
-                max_chunks_in_flight=max_chunks_in_flight,
-                max_concurrent=max_concurrent,
-                pre_failed_doc_ids=pre_failed_doc_ids,
-                chunk_semaphore=self._chunk_semaphore if max_chunks_in_flight is not None else None,
-            )
+
+        # Create batch registration for callback delivery.
+        batch_reg = _BatchRegistration(
+            handle=handle,
+            on_result=on_result,
+            namespace_id=namespace_id,
+            pre_failed_doc_ids=pre_failed_doc_ids,
+            _remaining=len(pending_docs) + len(pre_failed_docs) + len(pre_completed_docs),
         )
-        self._bg_tasks.add(task)
-        task.add_done_callback(self._bg_tasks.discard)
-        return handle
 
-    async def _submit_batch_worker(
-        self,
-        handle: BatchHandle,
-        pending_docs: list[Document],
-        doc_data_list: list[dict[str, Any]],
-        pre_failed_docs: list[tuple[Document, str]],
-        pre_completed_docs: list[Document],
-        on_result: Callable[[int, int, DocumentResult], None],
-        *,
-        namespace_id: UUID,
-        skill_name: str,
-        entity_types: list[str],
-        relationship_types: list[str],
-        expertise: ExpertiseConfig | None,
-        extraction_config_hash: str | None,
-        chunk_strategy: ChunkStrategy | None,
-        max_chunks_in_flight: int | None,
-        max_concurrent: int,
-        pre_failed_doc_ids: set[UUID],
-        chunk_semaphore: _GlobalChunkSemaphore | None = None,
-    ) -> None:
-        """Background worker that processes pre-staged PENDING documents."""
-        storage = self.storage
-
-        def _fire_result(result: DocumentResult) -> None:
-            handle._record_result(result)
-            try:
-                on_result(handle.completed, handle.total, result)
-            except Exception as cb_exc:
-                logger.warning(f"submit_batch: on_result callback raised: {cb_exc}")
-
-        # Fire error results for documents that failed to be created (e.g. external_id collision).
+        # Fire error results for documents that failed to be created.
         for doc, err in pre_failed_docs:
-            _fire_result(
+            batch_reg.fire_result(
                 DocumentResult(
                     document_id=doc.id,
                     namespace_id=namespace_id,
@@ -1068,9 +1242,9 @@ class MemoryLake:
                 )
             )
 
-        # Fire skipped results for documents already COMPLETED (ADR-068 self-heal).
+        # Fire skipped results for documents already COMPLETED/PROCESSING/ARCHIVED.
         for doc in pre_completed_docs:
-            _fire_result(
+            batch_reg.fire_result(
                 DocumentResult(
                     document_id=doc.id,
                     namespace_id=namespace_id,
@@ -1083,111 +1257,17 @@ class MemoryLake:
                 )
             )
 
-        engine = self._get_engine()
-        process_fn = getattr(engine, "process_staged_document", None)
-        if process_fn is None:
-            # Engine doesn't support staged processing — mark all PENDING docs as FAILED.
-            err_msg = f"Engine {type(engine).__name__!r} does not support submit_batch (requires process_staged_document method)"
-            for doc in pending_docs:
-                doc.mark_failed(err_msg)
-                try:
-                    await storage.update_document(doc)
-                except Exception as upd_exc:
-                    logger.warning(f"submit_batch: could not update document status: {upd_exc}")
-                _fire_result(
-                    DocumentResult(
-                        document_id=doc.id,
-                        namespace_id=namespace_id,
-                        success=False,
-                        error=err_msg,
-                        external_id=doc.external_id,
-                    )
-                )
+        if not pending_docs and not pre_failed_docs and not pre_completed_docs:
+            # Empty batch — nothing to process at all.
             handle._mark_done()
-            return
+        elif pending_docs:
+            # Enqueue PENDING docs for the unified processor.
+            for doc, doc_data in zip(pending_docs, pending_doc_data):
+                self._processor_queue.put_nowait(_ProcessorItem(doc=doc, doc_data=doc_data, batch_reg=batch_reg))
+            # Ensure the processor is running (lazy start for tests / disabled config).
+            self._ensure_processor_running()
 
-        queue: asyncio.Queue[tuple[Document, dict[str, Any]]] = asyncio.Queue()
-        for doc, data in zip(pending_docs, doc_data_list):
-            queue.put_nowait((doc, data))
-
-        async def _worker() -> None:
-            from khora.telemetry.context import collect_usage, start_usage_collection
-
-            while True:
-                try:
-                    doc, doc_data = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-
-                # H1: Clear partial extraction state for previously-FAILED documents
-                # before re-processing to prevent duplicate chunks/entities on retry.
-                if doc.id in pre_failed_doc_ids:
-                    if storage.vector is not None:
-                        try:
-                            await storage.vector.delete_chunks_by_document(doc.id)
-                        except Exception as exc:
-                            logger.warning(f"submit_batch: could not clear chunks table for {doc.id}: {exc}")
-                    clear_fn = getattr(engine, "clear_document_extraction_state", None)
-                    if clear_fn is not None:
-                        try:
-                            await clear_fn(doc.id, namespace_id)
-                        except Exception as exc:
-                            logger.warning(f"submit_batch: could not clear extraction state for {doc.id}: {exc}")
-
-                start_usage_collection()
-                try:
-                    doc_metadata = doc_data.get("metadata") or {}
-                    occurred_at_raw = doc_metadata.get("occurred_at")
-                    parse_dt = getattr(engine, "_parse_datetime", None)
-                    if occurred_at_raw and parse_dt is not None:
-                        occurred_at = parse_dt(occurred_at_raw)
-                    else:
-                        occurred_at = datetime.now(UTC)
-
-                    chunks, entities, rels = await process_fn(
-                        doc,
-                        skill_name=skill_name,
-                        occurred_at=occurred_at,
-                        entity_types=entity_types,
-                        relationship_types=relationship_types,
-                        expertise=expertise,
-                        extraction_config_hash=extraction_config_hash,
-                        chunk_strategy=chunk_strategy,
-                        max_chunks_in_flight=max_chunks_in_flight,
-                        chunk_semaphore=chunk_semaphore,
-                    )
-                    result = DocumentResult(
-                        document_id=doc.id,
-                        namespace_id=namespace_id,
-                        success=True,
-                        chunks_created=chunks,
-                        entities_extracted=entities,
-                        relationships_created=rels,
-                        llm_usage=collect_usage(),
-                        external_id=doc.external_id,
-                    )
-                except Exception as exc:
-                    partial_usage = collect_usage()
-                    logger.error(f"submit_batch: failed to process document {doc.id}: {exc}")
-                    doc.mark_failed(str(exc))
-                    try:
-                        await storage.update_document(doc)
-                    except Exception as upd_exc:
-                        logger.warning(f"submit_batch: could not update document status: {upd_exc}")
-                    result = DocumentResult(
-                        document_id=doc.id,
-                        namespace_id=namespace_id,
-                        success=False,
-                        error=str(exc),
-                        llm_usage=partial_usage,
-                        external_id=doc.external_id,
-                    )
-                _fire_result(result)
-
-        try:
-            await asyncio.gather(*[_worker() for _ in range(min(max_concurrent, len(pending_docs)))])
-        finally:
-            handle._mark_done()
+        return handle
 
     async def recall(
         self,

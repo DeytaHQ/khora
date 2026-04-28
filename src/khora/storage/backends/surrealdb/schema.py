@@ -61,6 +61,7 @@ DEFINE FIELD IF NOT EXISTS entity_count ON document TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS relationship_count ON document TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS error_message ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS extraction_config_hash ON document TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS extraction_params ON document FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS metadata_ ON document FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS created_at ON document TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS updated_at ON document TYPE datetime DEFAULT time::now();
