@@ -2079,7 +2079,11 @@ Return ONLY valid JSON, no other text."""
         if json_match:
             try:
                 data = json.loads(json_match.group())
-                return self._parse_response(json.dumps(data))
+                # Pass dict directly — _parse_response accepts dicts and skips
+                # json.loads. Re-serializing with json.dumps would re-enter
+                # _parse_response as a string, risking mutual recursion if
+                # _strip_json_fences mangles the output back into invalid JSON.
+                return self._parse_response(data)
             except json.JSONDecodeError:
                 pass
 

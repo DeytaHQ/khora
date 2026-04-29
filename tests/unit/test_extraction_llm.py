@@ -152,6 +152,31 @@ class TestExtractJsonFromText:
         assert len(result.entities) == 0
         assert "raw_response" in result.metadata
 
+    def test_no_mutual_recursion_with_parse_response(self) -> None:
+        """_extract_json_from_text must not recurse via _parse_response.
+
+        Regression test for DYT-3395: when _extract_json_from_text called
+        _parse_response(json.dumps(data)), re-serialization could produce
+        a string that _strip_json_fences/_repair_json mangled back into
+        invalid JSON, causing _parse_response → _extract_json_from_text →
+        _parse_response → ... → RecursionError.
+        """
+        import sys
+
+        extractor = LLMEntityExtractor()
+        # Truncated JSON that has a valid subset: regex will match {"entities": []}
+        # from the wrapping, and the inner parse should NOT recurse.
+        text = '{"entities": [], "relationships": [{"source": "foo", "target": "ba'
+        old_limit = sys.getrecursionlimit()
+        # Set a low recursion limit so we catch infinite recursion fast
+        sys.setrecursionlimit(50)
+        try:
+            result = extractor._parse_response(text)
+            # Should return something (empty or partial), not blow the stack
+            assert isinstance(result, ExtractionResult)
+        finally:
+            sys.setrecursionlimit(old_limit)
+
 
 class TestFilterByConfidence:
     """Tests for _filter_by_confidence."""
