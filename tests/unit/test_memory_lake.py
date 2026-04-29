@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import warnings
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -3219,12 +3220,13 @@ class TestProcessDocumentSemaphore:
 class TestPendingProcessor:
     """Unit tests for the unified pending processor."""
 
-    def _make_lake_with_processor(self) -> MemoryLake:
+    def _make_lake_with_processor(self, queue_size: int = 1000) -> MemoryLake:
         """Create a MemoryLake with the pending processor enabled."""
         cfg = _mock_config()
         cfg.pipelines.pending_processor_enabled = True
         cfg.pipelines.pending_processor_max_concurrent = 20
         cfg.pipelines.pending_processor_grace_period_minutes = 5
+        cfg.pipelines.pending_processor_queue_size = queue_size
         cfg.pipelines.entity_types = ["PERSON", "ORGANIZATION"]
         with patch("khora.memory_lake.load_config", return_value=cfg):
             lake = MemoryLake()
@@ -3293,7 +3295,8 @@ class TestPendingProcessor:
         assert list_docs_call.kwargs["status"] == "pending"
         assert list_docs_call.kwargs["updated_before"] <= datetime.now(UTC) - timedelta(minutes=5)
 
-        # Verify doc was enqueued.
+        # Verify doc was enqueued and queue is bounded.
+        assert lake._processor_queue.maxsize == 1000
         assert lake._processor_queue.qsize() == 1
         item = lake._processor_queue.get_nowait()
         assert item.doc is stale_doc
@@ -3374,6 +3377,91 @@ class TestPendingProcessor:
         # Doc should be marked FAILED.
         assert doc.status == DocumentStatus.FAILED
         assert "boom" in doc.error_message
+
+    @pytest.mark.asyncio
+    async def test_backpressure_when_queue_full(self) -> None:
+        """await put() blocks when queue is full, resumes when drained."""
+        lake = self._make_lake_with_processor(queue_size=1)
+        assert lake._processor_queue.maxsize == 1
+
+        from khora.core.models.document import Document
+        from khora.memory_lake import _ProcessorItem
+
+        doc1 = Document(namespace_id=uuid4(), content="first")
+        doc2 = Document(namespace_id=uuid4(), content="second")
+
+        # Fill the queue (size=1).
+        await lake._processor_queue.put(_ProcessorItem(doc=doc1, doc_data=None, batch_reg=None))
+        assert lake._processor_queue.full()
+
+        # Second put should block — verify via timeout.
+        put_task = asyncio.create_task(
+            lake._processor_queue.put(_ProcessorItem(doc=doc2, doc_data=None, batch_reg=None))
+        )
+        await asyncio.sleep(0.05)
+        assert not put_task.done(), "put() should block when queue is full"
+
+        # Drain one item — blocked put should complete.
+        lake._processor_queue.get_nowait()
+        await asyncio.sleep(0.05)
+        assert put_task.done(), "put() should complete after queue is drained"
+
+    @pytest.mark.asyncio
+    async def test_orphan_recovery_no_deadlock_with_bounded_queue(self) -> None:
+        """Orphan recovery with more docs than maxsize completes (no deadlock).
+
+        Workers start before orphan recovery, so await put() never blocks
+        indefinitely even when orphaned docs exceed the queue's maxsize.
+        """
+        from khora.core.models import MemoryNamespace
+        from khora.core.models.document import Document
+        from khora.storage.backends.base import PaginatedResult
+
+        queue_size = 2
+        num_orphans = 5
+        lake = self._make_lake_with_processor(queue_size=queue_size)
+        lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
+
+        ns_id = uuid4()
+        ns = MemoryNamespace(id=ns_id, namespace_id=ns_id)
+        orphan_docs = [Document(namespace_id=ns_id, content=f"orphan-{i}") for i in range(num_orphans)]
+
+        lake._engine._storage.list_namespaces = AsyncMock(
+            side_effect=[
+                PaginatedResult(items=[ns], total=1, limit=100, offset=0),
+                PaginatedResult(items=[], total=0, limit=100, offset=100),
+            ]
+        )
+        lake._engine._storage.list_documents = AsyncMock(
+            side_effect=[
+                orphan_docs,
+                [],
+            ]
+        )
+
+        process_fn = AsyncMock(return_value=(1, 0, 0))
+        lake._engine.process_staged_document = process_fn
+
+        # Run the full processor — workers loop forever by design, so we
+        # wait until all orphan docs are processed, then cancel.
+        processor_task = asyncio.create_task(lake._run_pending_processor())
+        try:
+            # Wait for all orphans to be processed (workers drain the queue).
+            for _ in range(50):  # 50 × 0.1s = 5s max
+                await asyncio.sleep(0.1)
+                if process_fn.await_count >= num_orphans:
+                    break
+            else:
+                processor_task.cancel()
+                pytest.fail("Processor deadlocked — orphan recovery blocked on bounded queue")
+        finally:
+            processor_task.cancel()
+            try:
+                await processor_task
+            except asyncio.CancelledError:
+                pass
+
+        assert process_fn.await_count == num_orphans
 
     @pytest.mark.asyncio
     async def test_submit_batch_stores_extraction_params(self) -> None:

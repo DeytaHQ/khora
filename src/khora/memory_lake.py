@@ -470,13 +470,7 @@ class MemoryLake:
         bounded concurrency.  Items are added by ``submit_batch`` or by
         the orphan recovery scan.
         """
-        # Phase 1: recover orphaned PENDING docs from previous crashes.
-        try:
-            await self._enqueue_orphaned_pending_docs()
-        except Exception as exc:
-            logger.error(f"pending_processor: orphan recovery failed: {exc}")
-
-        # Phase 2: drain the queue with bounded concurrency.
+        # Phase 1: start workers so the queue can drain immediately.
         max_concurrent = self._config.pipelines.pending_processor_max_concurrent
 
         async def _worker() -> None:
@@ -490,6 +484,15 @@ class MemoryLake:
                     self._processor_queue.task_done()
 
         workers = [asyncio.create_task(_worker()) for _ in range(max_concurrent)]
+
+        # Phase 2: recover orphaned PENDING docs from previous crashes.
+        # Workers are already running, so `await put()` won't deadlock even
+        # when orphaned docs exceed the queue's maxsize.
+        try:
+            await self._enqueue_orphaned_pending_docs()
+        except Exception as exc:
+            logger.error(f"pending_processor: orphan recovery failed: {exc}")
+
         try:
             await asyncio.gather(*workers)
         except asyncio.CancelledError:

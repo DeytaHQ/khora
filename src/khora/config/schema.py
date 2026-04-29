@@ -525,6 +525,7 @@ class PipelineSettings(BaseSettings):
     )
     pending_processor_queue_size: int = Field(
         default=1000,
+        ge=1,
         description="Maximum number of items that can be queued for the pending processor. "
         "Limits memory growth under burst submit_batch calls or large orphan recovery scans. "
         "When full, enqueue calls apply backpressure (async wait).",
