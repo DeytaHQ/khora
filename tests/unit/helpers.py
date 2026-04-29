@@ -33,6 +33,7 @@ def mock_config() -> MagicMock:
     # Disable pending processor in unit tests to avoid background task noise.
     mock_config.pipelines.pending_processor_enabled = False
     mock_config.pipelines.pending_processor_max_concurrent = 20
+    mock_config.pipelines.pending_processor_queue_size = 1000
     mock_config.pipelines.pending_processor_grace_period_minutes = 5
     # Deprecated fields — keep None to avoid backwards-compat fallback.
     mock_config.pipelines.pending_recovery_enabled = None

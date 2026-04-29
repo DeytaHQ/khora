@@ -523,6 +523,12 @@ class PipelineSettings(BaseSettings):
         default=20,
         description="Maximum documents to process concurrently in the unified pending processor.",
     )
+    pending_processor_queue_size: int = Field(
+        default=1000,
+        description="Maximum number of items that can be queued for the pending processor. "
+        "Limits memory growth under burst submit_batch calls or large orphan recovery scans. "
+        "When full, enqueue calls apply backpressure (async wait).",
+    )
     pending_processor_grace_period_minutes: int = Field(
         default=5,
         description="Minimum age (minutes) a PENDING document must have before it is eligible for "

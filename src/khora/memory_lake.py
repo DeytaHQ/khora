@@ -386,7 +386,9 @@ class MemoryLake:
         self._chunk_semaphore: _GlobalChunkSemaphore | None = None
         # Unified pending processor (DYT-3305): replaces both _submit_batch_worker
         # and _recover_pending_documents with a single mechanism.
-        self._processor_queue: asyncio.Queue[_ProcessorItem] = asyncio.Queue()
+        self._processor_queue: asyncio.Queue[_ProcessorItem] = asyncio.Queue(
+            maxsize=self._config.pipelines.pending_processor_queue_size,
+        )
         self._processor_task: asyncio.Task | None = None
 
     async def connect(self) -> None:
@@ -543,7 +545,7 @@ class MemoryLake:
 
                     for doc in docs:
                         attempted_ids.add(doc.id)
-                        self._processor_queue.put_nowait(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
+                        await self._processor_queue.put(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
                         total_enqueued += 1
 
             offset += len(namespaces)
@@ -1263,7 +1265,7 @@ class MemoryLake:
         elif pending_docs:
             # Enqueue PENDING docs for the unified processor.
             for doc, doc_data in zip(pending_docs, pending_doc_data):
-                self._processor_queue.put_nowait(_ProcessorItem(doc=doc, doc_data=doc_data, batch_reg=batch_reg))
+                await self._processor_queue.put(_ProcessorItem(doc=doc, doc_data=doc_data, batch_reg=batch_reg))
             # Ensure the processor is running (lazy start for tests / disabled config).
             self._ensure_processor_running()
 
