@@ -263,17 +263,14 @@ async def _remember(
 
 
 async def _recall(lake: MemoryLake, query: str, **kwargs: Any) -> Any:
-    """Recall wrapper that pins ``mode=SearchMode.VECTOR`` to dodge DYT-3555.
+    """Recall wrapper that pins ``mode=SearchMode.VECTOR`` for deterministic ranking.
 
-    ``SkeletonConstructionEngine.recall`` references the non-existent
-    ``SearchMode.KEYWORD`` member when ``hybrid_alpha is None and
-    mode != SearchMode.VECTOR`` (engine.py:441). Until DYT-3555 is fixed,
-    every Skeleton recall path exposed by ``MemoryLake`` blows up with
-    ``AttributeError`` on its default ``HYBRID`` mode. Pinning mode to
-    VECTOR short-circuits the buggy ``elif`` branch — the test
-    ``test_skeleton_recall_default_hybrid_mode_bug`` documents the bug
-    itself, the rest of the suite uses this workaround so we still
-    exercise the real Skeleton ingest+retrieval surface.
+    Pre-DYT-3555 this was a workaround for the ``SearchMode.KEYWORD``
+    AttributeError on default HYBRID. Post-fix the wrapper still pins
+    VECTOR so top-k ordering tests aren't affected by the BM25 blend
+    weight (``hybrid_alpha=0.7`` under HYBRID). The default-HYBRID path
+    is exercised explicitly by
+    ``test_skeleton_recall_default_hybrid_mode``.
     """
     kwargs.setdefault("mode", SearchMode.VECTOR)
     return await lake.recall(query, **kwargs)
@@ -382,9 +379,8 @@ async def test_skeleton_recall_with_metadata_filter(lake: MemoryLake, namespace_
     )
 
     engine = lake._get_engine()  # type: ignore[attr-defined]
-    # ``hybrid_alpha=1.0`` (pure vector) is set explicitly so we skip the
-    # ``mode``-based defaulting at engine.py:438-444 that would otherwise
-    # trip DYT-3555 (SearchMode.KEYWORD AttributeError).
+    # ``hybrid_alpha=1.0`` (pure vector) is set explicitly to keep the test
+    # deterministic — the mode-based default would pick 0.7 (HYBRID).
     result = await engine.recall(
         "alpha document",
         namespace_id,
@@ -507,23 +503,23 @@ async def test_skeleton_recall_metadata_keys(lake: MemoryLake, namespace_id: UUI
     assert md["temporal_filter"] is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AttributeError,
-    reason="DYT-3555: Skeleton.recall references SearchMode.KEYWORD, which doesn't exist",
-)
-async def test_skeleton_recall_default_hybrid_mode_bug(lake: MemoryLake, namespace_id: UUID) -> None:
-    """Default ``MemoryLake.recall(...)`` against Skeleton crashes — see DYT-3555.
+async def test_skeleton_recall_default_hybrid_mode(lake: MemoryLake, namespace_id: UUID) -> None:
+    """Default ``MemoryLake.recall(...)`` against Skeleton works on HYBRID — DYT-3555.
 
-    ``SkeletonConstructionEngine.recall`` (engine.py:441) does
-    ``elif mode == SearchMode.KEYWORD`` but the enum has no such member,
-    so any non-VECTOR mode (HYBRID is the MemoryLake default) raises
-    ``AttributeError`` before we ever reach the temporal store. This test
-    documents the regression so the fix can flip it from xfail to pass.
+    Pre-fix, ``SkeletonConstructionEngine.recall`` (engine.py:441) referenced
+    a non-existent ``SearchMode.KEYWORD`` member, which crashed with
+    ``AttributeError`` whenever ``mode != VECTOR`` (HYBRID is the MemoryLake
+    default). DYT-3555 added ``KEYWORD`` to the enum, so this regression
+    test now asserts the default path simply returns a ``RecallResult``.
     """
     await _remember(lake, namespace_id=namespace_id, content="alpha simple sentence")
-    # Note: NOT calling ``_recall`` — this exercises the buggy default path.
-    await lake.recall("alpha", namespace=namespace_id, limit=5)
+    # Note: NOT calling ``_recall`` — this exercises the previously buggy
+    # default path (no explicit ``mode`` kwarg → ``SearchMode.HYBRID``).
+    result = await lake.recall("alpha", namespace=namespace_id, limit=5)
+
+    assert result.metadata.get("backend") == "pgvector"
+    # HYBRID maps to ``hybrid_alpha=0.7`` per engine.py:444.
+    assert result.metadata.get("hybrid_alpha") == 0.7
 
 
 async def test_skeleton_concurrent_remember(lake: MemoryLake, namespace_id: UUID) -> None:
