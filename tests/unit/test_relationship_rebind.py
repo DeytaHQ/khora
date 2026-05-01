@@ -153,10 +153,13 @@ async def test_relationship_lands_when_endpoint_re_canonicalised() -> None:
 
     rel = _make_relationship(ns_id, pre_upsert_beta_id, pre_upsert_gamma_id)
 
+    fake_embedder = MagicMock()
+    fake_embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536 for _ in texts])
     with (
         patch("khora.pipelines.tasks.chunk_document", new=AsyncMock(return_value=chunks)),
         patch("khora.pipelines.tasks.embed_chunks", new=AsyncMock(return_value=chunks)),
         patch("khora.pipelines.tasks.extract_entities", new=AsyncMock(return_value=([beta, gamma], [rel]))),
+        patch("khora.extraction.embedders.LiteLLMEmbedder", return_value=fake_embedder),
     ):
         result = await process_document(
             document,
@@ -231,10 +234,13 @@ async def test_relationship_resolves_via_db_fallback() -> None:
     gamma = _make_entity(ns_id, "gammathingy")
     rel = _make_relationship(ns_id, beta.id, gamma.id)
 
+    fake_embedder = MagicMock()
+    fake_embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536 for _ in texts])
     with (
         patch("khora.pipelines.tasks.chunk_document", new=AsyncMock(return_value=chunks)),
         patch("khora.pipelines.tasks.embed_chunks", new=AsyncMock(return_value=chunks)),
         patch("khora.pipelines.tasks.extract_entities", new=AsyncMock(return_value=([beta, gamma], [rel]))),
+        patch("khora.extraction.embedders.LiteLLMEmbedder", return_value=fake_embedder),
     ):
         result = await process_document(
             document,
@@ -285,6 +291,8 @@ async def test_genuinely_missing_entity_still_skipped() -> None:
         confidence=0.9,
     )
 
+    fake_embedder = MagicMock()
+    fake_embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536 for _ in texts])
     with (
         patch("khora.pipelines.tasks.chunk_document", new=AsyncMock(return_value=chunks)),
         patch("khora.pipelines.tasks.embed_chunks", new=AsyncMock(return_value=chunks)),
@@ -292,6 +300,7 @@ async def test_genuinely_missing_entity_still_skipped() -> None:
             "khora.pipelines.tasks.extract_entities",
             new=AsyncMock(return_value=([real_entity], [bogus_rel])),
         ),
+        patch("khora.extraction.embedders.LiteLLMEmbedder", return_value=fake_embedder),
     ):
         result = await process_document(
             document,
