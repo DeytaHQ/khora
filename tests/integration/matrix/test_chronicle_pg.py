@@ -443,15 +443,6 @@ async def test_chronicle_temporal_filter_pushdown(
     # all four channels honor the filter — see test_chronicle_temporal_old_doc_excluded.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Chronicle correctness gap: only the temporal channel forwards "
-        "created_after to SQL. Semantic + BM25 + entity channels do not "
-        "filter by time, so a 20-day-old chunk leaks through a 7-day "
-        "temporal_filter. Tracked for follow-up — see PR description."
-    ),
-)
 async def test_chronicle_temporal_old_doc_excluded(lake: MemoryLake, namespace_id: UUID) -> None:
     """Document older than the temporal_filter window must not appear in chunks."""
     r_recent = await _remember(lake, namespace_id=namespace_id, content="recent doc about Falcon launch.")
