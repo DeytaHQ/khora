@@ -1,5 +1,11 @@
 # Khora
 
+[![CI](https://github.com/DeytaHQ/khora/actions/workflows/ci.yml/badge.svg)](https://github.com/DeytaHQ/khora/actions/workflows/ci.yml)
+[![Release](https://github.com/DeytaHQ/khora/actions/workflows/release.yml/badge.svg)](https://github.com/DeytaHQ/khora/actions/workflows/release.yml)
+[![codecov](https://codecov.io/gh/DeytaHQ/khora/branch/main/graph/badge.svg)](https://codecov.io/gh/DeytaHQ/khora)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 > *"Khora is the receptacle, the space, the matrix in which all things come to be."* — Plato, *Timaeus*
 
 Khora is a **Memory Lake** library for Python 3.13+. It stores knowledge as a mix of documents, vectors, and graph relationships and retrieves it through hybrid search (vector + graph + keyword), reranking, and temporal context.
