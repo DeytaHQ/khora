@@ -29,6 +29,7 @@ def build_storage_config(config: KhoraConfig, *, skip_graph: bool = False) -> St
 
     Supports:
     - Traditional PostgreSQL + pgvector + Neo4j/Kuzu/Memgraph stack
+      (Kuzu DEPRECATED in 0.9.0 — removal in 0.10.0)
     - SurrealDB unified backend (when ``config.storage.backend == "surrealdb"``)
     - pool_pre_ping for connection health checking
     """

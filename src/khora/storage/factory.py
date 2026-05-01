@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 _GRAPH_REGISTRY: dict[str, tuple[str, str]] = {
     "neo4j": ("khora.storage.backends.neo4j", "Neo4jBackend"),
-    "kuzu": ("khora.storage.backends.kuzu", "KuzuBackend"),
+    "kuzu": ("khora.storage.backends.kuzu", "KuzuBackend"),  # DEPRECATED in 0.9.0 — removal in 0.10.0
     "memgraph": ("khora.storage.backends.memgraph", "MemgraphBackend"),
     "neptune": ("khora.storage.backends.neptune", "NeptuneBackend"),
     "surrealdb": ("khora.storage.backends.surrealdb.graph", "SurrealDBGraphAdapter"),

@@ -54,12 +54,16 @@ postgres = [
 ]
 # Graph backends
 neo4j = ["neo4j>=6.1.0"]
+# DEPRECATED in 0.9.0 — kuzu extra will be removed in 0.10.0.
+# Use the sqlite-lance extra for embedded, or neo4j for production.
 kuzu = ["kuzu>=0.11.3"]
 memgraph = ["neo4j>=6.1.0"]  # Memgraph uses bolt protocol via neo4j driver
 neptune = ["neo4j>=6.1.0"]  # Neptune uses Bolt protocol via neo4j driver
 neptune-iam = ["neo4j>=6.1.0", "boto3>=1.35.0"]  # With IAM auth support
 age = ["asyncpg>=0.31.0"]  # AGE uses PostgreSQL via asyncpg
 # All graph backends
+# DEPRECATED in 0.9.0 — graph-all still pulls in kuzu (deprecated). Transitional;
+# will drop kuzu in 0.10.0. Prefer the explicit per-backend extras.
 graph-all = ["neo4j>=6.1.0", "kuzu>=0.11.3"]
 # Weaviate vector database
 weaviate = ["weaviate-client>=4.20.1"]
