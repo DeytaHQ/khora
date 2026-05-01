@@ -1668,6 +1668,7 @@ class VectorCypherRetriever:
                     entry_entity_ids,
                     depth=depth,
                     limit_per_entity=20,
+                    prefer_current=prefer_current,
                 )
                 # Normalize: get_neighborhoods_batch returns
                 # {UUID: {"entities": [...], "relationships": [...]}}

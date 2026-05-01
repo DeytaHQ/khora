@@ -1287,6 +1287,7 @@ class StorageCoordinator:
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit_per_entity: int = 20,
+        prefer_current: bool = False,
     ) -> dict[UUID, dict[str, Any]]:
         """Get neighborhoods for multiple entities in a single query.
 
@@ -1295,6 +1296,10 @@ class StorageCoordinator:
             depth: Max traversal depth
             relationship_types: Optional relationship type filter
             limit_per_entity: Max nodes per entity neighborhood
+            prefer_current: When True, exclude paths that traverse any
+                edge whose ``valid_until`` has passed. Forwarded to graph
+                backends that support it (currently the embedded SQLite
+                backend); silently dropped otherwise.
 
         Returns:
             Dictionary mapping entity ID to neighborhood data
@@ -1302,12 +1307,20 @@ class StorageCoordinator:
         if not entity_ids:
             return {}
         if self.graph:
-            return await self.graph.get_neighborhoods_batch(
-                entity_ids,
-                depth=depth,
-                relationship_types=relationship_types,
-                limit_per_entity=limit_per_entity,
-            )
+            kwargs: dict[str, Any] = {
+                "depth": depth,
+                "relationship_types": relationship_types,
+                "limit_per_entity": limit_per_entity,
+            }
+            # Only forward prefer_current when set, so backends whose
+            # signatures don't accept the kwarg keep working.
+            if prefer_current:
+                try:
+                    return await self.graph.get_neighborhoods_batch(entity_ids, **kwargs, prefer_current=True)
+                except TypeError:
+                    # Backend doesn't accept prefer_current — fall through.
+                    pass
+            return await self.graph.get_neighborhoods_batch(entity_ids, **kwargs)
         return {}
 
     # =========================================================================
