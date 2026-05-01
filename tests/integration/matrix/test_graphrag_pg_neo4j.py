@@ -501,15 +501,15 @@ async def test_graphrag_two_hop_traversal(lake: MemoryLake) -> None:
     ``max_graph_depth`` (default 2), so a query starting from
     ``alphawidget`` should reach ``gammathingy`` via the 2-hop path.
 
-    Caveat (surfaced loudly via xfail, *not* fixed in this PR):
-    when ``betagadget`` is upserted a second time (in doc 2), its
-    canonical ID is reassigned by the entity-resolver. The relationship
-    extracted from doc 2 still references doc 2's freshly-minted UUIDs,
-    which are no longer in ``entity_id_mapping`` after the upsert
-    canonicalises them. ``_store_relationships`` then skips the
-    relationship with a "missing entity mappings" warning, so the
-    ``betagadget→gammathingy`` edge never lands in Neo4j and the
-    2-hop traversal can never succeed. Filed as **DYT-3558**.
+    Fixed in **DYT-3558**: when ``betagadget`` is upserted a second time
+    (in doc 2), Neo4j's MERGE syncs its in-memory ``id`` back to doc 1's
+    canonical UUID. Relationships built before the upsert still hold doc
+    2's extraction-time UUID, so we now (a) re-map every pre-upsert ID to
+    its canonical counterpart in ``entity_id_mapping`` immediately after
+    the upsert mutates the entity objects, and (b) fall back to a
+    ``(namespace, name, entity_type)`` lookup in ``_store_relationships``
+    when an endpoint UUID is still unmapped (e.g., expansion-inferred
+    relationships referring to entities outside this document's batch).
 
     Same dual-ID consideration as ``test_graphrag_entity_extraction_via_neo4j``:
     direct Cypher uses ``ns.id`` while ``lake.recall(namespace=...)``
@@ -546,21 +546,12 @@ async def test_graphrag_two_hop_traversal(lake: MemoryLake) -> None:
     rel_pairs = {(r["source"], r["target"]) for r in rel_records}
     # First hop always lands — first-time upserts hit the happy path.
     assert ("alphawidget", "betagadget") in rel_pairs, f"alpha→beta relationship missing in Neo4j: {rel_pairs}"
+    # Second hop is the DYT-3558 regression — must land after the fix.
+    assert ("betagadget", "gammathingy") in rel_pairs, (
+        f"beta→gamma relationship missing in Neo4j (DYT-3558 regression): {sorted(rel_pairs)}"
+    )
 
-    # Second hop reveals the DYT-3558 gap. xfail captures the regression
-    # without failing the suite, and writes the diagnostic into the
-    # output so it's visible in CI logs.
-    if ("betagadget", "gammathingy") not in rel_pairs:
-        pytest.xfail(
-            "DYT-3558: GraphRAG drops a relationship when it references an "
-            "entity that gets re-canonicalised by the entity-resolver. "
-            "Pipeline log shows: '_store_relationships ... skipped due to "
-            "missing entity mappings'. "
-            f"Neo4j has only: {sorted(rel_pairs)}"
-        )
-
-    # If we get here the bug is fixed — assert the 2-hop traversal then
-    # succeeds end-to-end via lake.recall.
+    # End-to-end: 2-hop traversal via lake.recall should now surface gammathingy.
     result = await lake.recall("alphawidget", namespace=ns.namespace_id, limit=10)
     entity_names = {e.name for e, _ in result.entities}
     assert "gammathingy" in entity_names, f"2-hop traversal did not surface gammathingy: {sorted(entity_names)}"
