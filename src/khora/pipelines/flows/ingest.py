@@ -1050,6 +1050,11 @@ async def process_document(
 
         # Step 4 & 5: Store chunks and entities in parallel
         # Chunks go to pgvector, entities go to graph+vector - independent writes
+
+        # DYT-3558: snapshot of pre-upsert (extraction-time) entity ID -> (name, entity_type)
+        # populated inside _store_entities, read by _store_relationships's fallback.
+        pre_upsert_name_type: dict[str, tuple[str, str]] = {}
+
         async def _store_chunks():
             """Store chunks to vector backend and optional temporal store."""
             async with pipeline_stage(
@@ -1120,6 +1125,10 @@ async def process_document(
 
                 # Save pre-upsert IDs (Neo4j may sync entity.id to a different value on MERGE)
                 pre_upsert_ids = [str(e.id) for e in entities]
+                # Also snapshot (name, entity_type) per pre-upsert ID — used by the
+                # _store_relationships fallback when a relationship references an
+                # entity UUID that was canonicalised away by the upsert. (DYT-3558)
+                pre_upsert_name_type.update({str(e.id): (e.name, e.entity_type) for e in entities})
                 logger.debug(f"Document {document.id}: upserting {len(entities)} entities")
 
                 # Batch upsert: single MERGE operation instead of N+1 individual lookups
@@ -1189,6 +1198,16 @@ async def process_document(
                     stored_id = name_type_to_stored.get(key)
                     if stored_id:
                         entity_id_mapping[str(orig_entity.id)] = stored_id
+                # DYT-3558: also map the *pre-upsert* (extraction-time) IDs to the
+                # canonical IDs. Neo4j's MERGE may rewrite entity.id in-place when
+                # an entity already exists from a previous document, after which
+                # the loop above only ever sees canonical → canonical. Relationships
+                # built before the upsert still hold the extraction-time UUIDs and
+                # would otherwise be silently dropped.
+                for pre_id, entity in zip(pre_upsert_ids, entities):
+                    canonical_id = str(entity.id)
+                    if pre_id != canonical_id and pre_id not in entity_id_mapping:
+                        entity_id_mapping[pre_id] = canonical_id
                 # Collect entities that need embeddings
                 entities_needing = [e for e, needs in store_results if needs]
                 _es_ctx["output_count"] = len(store_results)
@@ -1270,6 +1289,31 @@ async def process_document(
                 return 0, 0
             from uuid import UUID
 
+            async def _resolve_via_db(unmapped_id: str) -> str | None:
+                """DYT-3558 defense-in-depth fallback: resolve an unmapped extraction-time
+                UUID by looking up (namespace, name, type) in the storage backend.
+
+                Used when entity_id_mapping lacks an entry for a relationship endpoint
+                (e.g., an inferred relationship referencing an entity that wasn't part
+                of this document's upsert batch). Returns None when the entity simply
+                doesn't exist in the namespace — caller still warns in that case.
+                """
+                meta = pre_upsert_name_type.get(unmapped_id)
+                if meta is None:
+                    return None
+                name, entity_type = meta
+                resolved = await storage.get_entity_by_name(document.namespace_id, name, entity_type)
+                if resolved is None:
+                    return None
+                canonical_id = str(resolved.id)
+                # Memoize for subsequent relationships in the same batch
+                entity_id_mapping[unmapped_id] = canonical_id
+                logger.debug(
+                    f"Document {document.id}: relationship endpoint {unmapped_id} "
+                    f"resolved via (name, type) fallback to {canonical_id}"
+                )
+                return canonical_id
+
             valid_relationships = []
             skipped = 0
             for rel in all_relationships:
@@ -1278,6 +1322,11 @@ async def process_document(
 
                 mapped_source = entity_id_mapping.get(source_id)
                 mapped_target = entity_id_mapping.get(target_id)
+
+                if not mapped_source:
+                    mapped_source = await _resolve_via_db(source_id)
+                if not mapped_target:
+                    mapped_target = await _resolve_via_db(target_id)
 
                 if not mapped_source or not mapped_target:
                     skipped += 1
