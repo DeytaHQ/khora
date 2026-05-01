@@ -438,7 +438,7 @@ class SkeletonConstructionEngine:
         if hybrid_alpha is None:
             if mode == SearchMode.VECTOR:
                 hybrid_alpha = 1.0  # Pure vector
-            elif mode == SearchMode.KEYWORD:  # type: ignore[unresolved-attribute]
+            elif mode == SearchMode.KEYWORD:
                 hybrid_alpha = 0.0  # Pure BM25
             else:  # HYBRID
                 hybrid_alpha = 0.7  # Default blend
