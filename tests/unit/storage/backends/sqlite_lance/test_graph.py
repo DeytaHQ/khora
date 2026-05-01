@@ -565,6 +565,109 @@ class TestTraversal:
 
 
 # ---------------------------------------------------------------------------
+# prefer_current — every-edge predicate (DYT-3549)
+#
+# Mirrors the Neo4j Cypher pattern in ``engines/vectorcypher/dual_nodes.py:599``:
+#     all(r IN relationships(path) WHERE r.valid_until IS NULL OR r.valid_until > _now)
+# A path is excluded if ANY edge along it is expired, not only the terminal one.
+# ---------------------------------------------------------------------------
+
+
+class TestPreferCurrentEveryEdge:
+    async def _build_expired_middle_chain(self, adapter: SQLiteLanceGraphAdapter, ns: UUID):
+        """A -[r1, valid_until=NULL]-> B -[r2, valid_until=now-1d]-> C -[r3, NULL]-> D.
+
+        Plus a parallel A -[r4, NULL]-> E -[r5, NULL]-> F path for the
+        positive-control assertion that current paths still come back.
+        """
+        a = _make_entity(ns, name="A")
+        b = _make_entity(ns, name="B")
+        c = _make_entity(ns, name="C")
+        d = _make_entity(ns, name="D")
+        e = _make_entity(ns, name="E")
+        f = _make_entity(ns, name="F")
+        for ent in (a, b, c, d, e, f):
+            await adapter.create_entity(ent)
+
+        expired = datetime.now(UTC) - timedelta(days=1)
+
+        r1 = _make_relationship(ns, a.id, b.id, rel_type="LINKS")
+        r2 = _make_relationship(ns, b.id, c.id, rel_type="LINKS")
+        r2.valid_until = expired  # MIDDLE edge is expired
+        r3 = _make_relationship(ns, c.id, d.id, rel_type="LINKS")
+        r4 = _make_relationship(ns, a.id, e.id, rel_type="LINKS")
+        r5 = _make_relationship(ns, e.id, f.id, rel_type="LINKS")
+        for rel in (r1, r2, r3, r4, r5):
+            await adapter.create_relationship(rel)
+
+        return {"a": a, "b": b, "c": c, "d": d, "e": e, "f": f, "r2_id": r2.id}
+
+    async def test_find_paths_default_returns_expired_middle_path(self, adapter: SQLiteLanceGraphAdapter):
+        """Without prefer_current, the 3-hop path through the expired middle edge is returned."""
+        ns = uuid4()
+        nodes = await self._build_expired_middle_chain(adapter, ns)
+
+        paths = await adapter.find_paths(ns, nodes["a"].id, nodes["d"].id, max_depth=3)
+        assert len(paths) == 1
+        assert len(paths[0]) == 3  # 3 edges A→B→C→D
+
+    async def test_find_paths_prefer_current_excludes_expired_middle_edge(self, adapter: SQLiteLanceGraphAdapter):
+        """With prefer_current=True, any path crossing r2 (expired) must be excluded.
+
+        This is the bug fix: the predicate is applied to EVERY edge, not
+        only the terminal one — Neo4j parity (dual_nodes.py:599).
+        """
+        ns = uuid4()
+        nodes = await self._build_expired_middle_chain(adapter, ns)
+
+        paths = await adapter.find_paths(ns, nodes["a"].id, nodes["d"].id, max_depth=3, prefer_current=True)
+        assert paths == []
+
+    async def test_find_paths_prefer_current_returns_all_current_path(self, adapter: SQLiteLanceGraphAdapter):
+        """A separate path made only of current edges must still be returned."""
+        ns = uuid4()
+        nodes = await self._build_expired_middle_chain(adapter, ns)
+
+        paths = await adapter.find_paths(ns, nodes["a"].id, nodes["f"].id, max_depth=3, prefer_current=True)
+        assert len(paths) == 1
+        assert len(paths[0]) == 2  # A→E→F
+
+    async def test_get_neighborhoods_batch_prefer_current_drops_expired_edge(self, adapter: SQLiteLanceGraphAdapter):
+        """Neighborhood expansion must also skip expired edges on every recursive arm."""
+        ns = uuid4()
+        nodes = await self._build_expired_middle_chain(adapter, ns)
+
+        # Without the flag, B's depth-1 neighborhood includes C via r2.
+        nb_default = await adapter.get_neighborhood(nodes["b"].id, depth=1, limit=10)
+        names_default = {ent.name for ent in nb_default["entities"]}
+        assert "C" in names_default
+
+        # With prefer_current, r2 is filtered out → C is no longer reachable from B.
+        nb_current = await adapter.get_neighborhood(nodes["b"].id, depth=1, limit=10, prefer_current=True)
+        names_current = {ent.name for ent in nb_current["entities"]}
+        assert "C" not in names_current
+        # And the expired edge itself is not in the relationship list.
+        rel_ids = {rel.id for rel in nb_current["relationships"]}
+        assert nodes["r2_id"] not in rel_ids
+
+    async def test_find_paths_prefer_current_excludes_path_when_terminal_edge_expired(
+        self, adapter: SQLiteLanceGraphAdapter
+    ):
+        """Sanity: the existing terminal-edge case still works after the fix."""
+        ns = uuid4()
+        a = _make_entity(ns, name="A")
+        b = _make_entity(ns, name="B")
+        for ent in (a, b):
+            await adapter.create_entity(ent)
+        r = _make_relationship(ns, a.id, b.id, rel_type="LINKS")
+        r.valid_until = datetime.now(UTC) - timedelta(days=1)
+        await adapter.create_relationship(r)
+
+        paths = await adapter.find_paths(ns, a.id, b.id, max_depth=2, prefer_current=True)
+        assert paths == []
+
+
+# ---------------------------------------------------------------------------
 # Attribute search
 # ---------------------------------------------------------------------------
 

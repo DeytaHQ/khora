@@ -560,12 +560,20 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         *,
         max_depth: int = 3,
         relationship_types: list[str] | None = None,
+        prefer_current: bool = False,
+        now: datetime | None = None,
     ) -> list[list[dict[str, Any]]]:
         """Find directed paths from source→target using a recursive CTE.
 
         Returns a list of paths; each path is an ordered list of
         ``{"type": "relationship", "data": {...}}`` dicts representing
         the edges of the path.  Depth is bounded by ``max_depth``.
+
+        When ``prefer_current`` is True, every edge of the path must
+        satisfy ``valid_until IS NULL OR valid_until > now`` — mirroring
+        the Neo4j ``all(r IN relationships(path) ...)`` predicate (see
+        ``engines/vectorcypher/dual_nodes.py:599``).  ``now`` defaults to
+        ``datetime.now(UTC)`` and is hoisted so it is bound once.
         """
         ns = uuid_to_text(namespace_id)
         src = uuid_to_text(source_entity_id)
@@ -573,15 +581,30 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         effective_max = max(1, min(max_depth, 8))
 
         rel_filter = ""
-        params: list[Any] = [src, ns]
         if relationship_types:
             placeholders = ", ".join("?" for _ in relationship_types)
             rel_filter = f" AND r.relationship_type IN ({placeholders})"
+
+        valid_filter = ""
+        now_iso: str | None = None
+        if prefer_current:
+            valid_filter = " AND (r.valid_until IS NULL OR r.valid_until > ?)"
+            now_iso = iso8601(now or datetime.now(UTC))
+
+        # Anchor params: src, ns, [rel_types...], [now]
+        # Recursive params: depth, ns, [rel_types...], [now]
+        # Tail params: tgt
+        params: list[Any] = [src, ns]
+        if relationship_types:
             params.extend(relationship_types)
+        if prefer_current:
+            params.append(now_iso)
         params.append(effective_max)
         params.append(ns)
         if relationship_types:
             params.extend(relationship_types)
+        if prefer_current:
+            params.append(now_iso)
         params.append(tgt)
 
         # Path reconstruction trick: concatenate edge ids with a delimiter
@@ -599,6 +622,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
                 WHERE r.source_entity_id = ?
                   AND r.namespace_id = ?
                   {rel_filter}
+                  {valid_filter}
                 UNION ALL
                 SELECT r.id, walk.src, r.target_entity_id, walk.depth + 1,
                        walk.edge_ids || ',' || r.id,
@@ -609,6 +633,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
                   AND r.namespace_id = ?
                   AND instr(walk.visited, '|' || r.target_entity_id || '|') = 0
                   {rel_filter}
+                  {valid_filter}
             )
             SELECT edge_ids, depth
             FROM walk
@@ -668,18 +693,25 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit: int = 50,
+        prefer_current: bool = False,
+        now: datetime | None = None,
     ) -> dict[str, Any]:
         """Get the outbound+inbound neighborhood of an entity up to ``depth``.
 
         Uses a single recursive CTE that expands both directions.
         Returns ``{"entities": [...], "relationships": [...]}`` with
         Entity / Relationship domain objects.
+
+        See :meth:`get_neighborhoods_batch` for the semantics of
+        ``prefer_current`` / ``now``.
         """
         result = await self.get_neighborhoods_batch(
             [entity_id],
             depth=depth,
             relationship_types=relationship_types,
             limit_per_entity=limit,
+            prefer_current=prefer_current,
+            now=now,
         )
         return result.get(entity_id, {"entities": [], "relationships": []})
 
@@ -690,12 +722,19 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit_per_entity: int = 20,
+        prefer_current: bool = False,
+        now: datetime | None = None,
     ) -> dict[UUID, dict[str, Any]]:
         """Batch neighborhood expansion using a single recursive CTE.
 
         Overrides :meth:`GraphBackendBase.get_neighborhoods_batch` to
         avoid the default N+1 loop.  All entity seeds are expanded in
         one query; results are partitioned per seed on return.
+
+        When ``prefer_current`` is True, every edge of the expansion
+        path must satisfy ``valid_until IS NULL OR valid_until > now`` —
+        mirroring the Neo4j ``all(r IN relationships(path) ...)``
+        predicate.  ``now`` defaults to ``datetime.now(UTC)``.
         """
         if not entity_ids:
             return {}
@@ -711,18 +750,30 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
             rel_filter = f" AND r.relationship_type IN ({placeholders})"
             rel_params = list(relationship_types)
 
+        valid_filter = ""
+        valid_params: list[Any] = []
+        if prefer_current:
+            valid_filter = " AND (r.valid_until IS NULL OR r.valid_until > ?)"
+            valid_params = [iso8601(now or datetime.now(UTC))]
+
         # Anchor params: seed ids for both outbound + inbound arms,
-        # plus the relationship_type filter twice.
+        # plus the relationship_type filter twice and the valid_until
+        # predicate twice (one per anchor arm).
         params: list[Any] = []
         params.extend(seed_texts)
         params.extend(rel_params)
+        params.extend(valid_params)
         params.extend(seed_texts)
         params.extend(rel_params)
-        # Recursive arms: depth bound twice (out + in), plus rel filter twice.
+        params.extend(valid_params)
+        # Recursive arms: depth bound twice (out + in), rel filter twice,
+        # valid_until predicate twice.
         params.append(effective_depth)
         params.extend(rel_params)
+        params.extend(valid_params)
         params.append(effective_depth)
         params.extend(rel_params)
+        params.extend(valid_params)
 
         sql = f"""
             WITH RECURSIVE walk(seed, cur, depth, direction, edge_id) AS (
@@ -730,23 +781,27 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
                 FROM relationships r
                 WHERE r.source_entity_id IN ({seed_placeholders})
                   {rel_filter}
+                  {valid_filter}
                 UNION ALL
                 SELECT r.target_entity_id, r.source_entity_id, 1, 'in', r.id
                 FROM relationships r
                 WHERE r.target_entity_id IN ({seed_placeholders})
                   {rel_filter}
+                  {valid_filter}
                 UNION ALL
                 SELECT walk.seed, r.target_entity_id, walk.depth + 1, 'out', r.id
                 FROM walk
                 JOIN relationships r ON r.source_entity_id = walk.cur
                 WHERE walk.depth < ?
                   {rel_filter}
+                  {valid_filter}
                 UNION ALL
                 SELECT walk.seed, r.source_entity_id, walk.depth + 1, 'in', r.id
                 FROM walk
                 JOIN relationships r ON r.target_entity_id = walk.cur
                 WHERE walk.depth < ?
                   {rel_filter}
+                  {valid_filter}
             )
             SELECT DISTINCT seed, cur, edge_id FROM walk
         """  # noqa: S608
