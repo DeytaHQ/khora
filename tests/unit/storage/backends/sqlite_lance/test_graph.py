@@ -563,6 +563,171 @@ class TestTraversal:
     async def test_get_neighborhoods_batch_empty(self, adapter: SQLiteLanceGraphAdapter):
         assert await adapter.get_neighborhoods_batch([]) == {}
 
+    async def test_find_paths_multigraph_back_and_forth(self, adapter: SQLiteLanceGraphAdapter):
+        """A pair of nodes connected by two distinct directed edges
+        (A→B via r1, B→A via r2) admits a legitimate 2-hop A→A path
+        that traverses each edge exactly once.  Neo4j's ``MATCH [*1..N]``
+        forbids reusing **edges**, not nodes — the pre-DYT-3548 CTE
+        tracked visited *nodes*, which incorrectly blocked the return
+        walk into A and silently dropped this path."""
+        ns = uuid4()
+        a = _make_entity(ns, name="mg_A")
+        b = _make_entity(ns, name="mg_B")
+        await adapter.create_entity(a)
+        await adapter.create_entity(b)
+
+        r1 = _make_relationship(ns, a.id, b.id, rel_type="OUT")
+        r2 = _make_relationship(ns, b.id, a.id, rel_type="BACK")
+        await adapter.create_relationship(r1)
+        await adapter.create_relationship(r2)
+
+        paths = await adapter.find_paths(ns, a.id, a.id, max_depth=2)
+        assert len(paths) == 1, f"expected the A→B→A round trip, got {len(paths)} paths"
+        assert len(paths[0]) == 2
+        edge_ids = [hop["data"]["id"] for hop in paths[0]]
+        assert edge_ids == [str(r1.id), str(r2.id)]
+
+    async def test_find_paths_parallel_edges_at_depth_two(self, adapter: SQLiteLanceGraphAdapter):
+        """Two parallel A→B edges must yield the same number of paths
+        at any depth — once both r1+r3 and r2+r3 reach C, the path
+        count is independent of which parallel edge was taken first."""
+        ns = uuid4()
+        a = _make_entity(ns, name="pe_A")
+        b = _make_entity(ns, name="pe_B")
+        c = _make_entity(ns, name="pe_C")
+        for e in (a, b, c):
+            await adapter.create_entity(e)
+
+        r1 = _make_relationship(ns, a.id, b.id, rel_type="ONE")
+        r2 = _make_relationship(ns, a.id, b.id, rel_type="TWO")
+        r3 = _make_relationship(ns, b.id, c.id, rel_type="THREE")
+        for r in (r1, r2, r3):
+            await adapter.create_relationship(r)
+
+        paths = await adapter.find_paths(ns, a.id, c.id, max_depth=2)
+        assert len(paths) == 2  # one per parallel A→B edge
+        starting_edges = {p[0]["data"]["id"] for p in paths}
+        assert starting_edges == {str(r1.id), str(r2.id)}
+        assert all(p[-1]["data"]["id"] == str(r3.id) for p in paths)
+
+    async def test_get_neighborhoods_batch_cyclic_walk_is_bounded(self, adapter: SQLiteLanceGraphAdapter):
+        """Cycle A→B→A (2 parallel directed edges).  The pre-DYT-3548
+        ``get_neighborhoods_batch`` CTE had NO visited set at all, so
+        the recursive arms re-traversed the cycle ``2^depth`` times
+        before the trailing ``DISTINCT`` collapsed the rows.  The fix
+        tracks visited **edge ids** so each edge appears at most once
+        per walk, bounding row count by ``num_edges`` rather than
+        ``2^depth``.
+
+        We compare the OLD-style CTE (no visited gate, kept inline as
+        a test fixture) against the NEW-style (with the gate) on the
+        same data.  The old structure must produce ``2^depth`` rows;
+        the new must stay bounded.  This isolates the fix from
+        unrelated downstream Python-side filtering.
+        """
+        ns = uuid4()
+        a = _make_entity(ns, name="cyc_A")
+        b = _make_entity(ns, name="cyc_B")
+        await adapter.create_entity(a)
+        await adapter.create_entity(b)
+
+        # Two parallel directed edges forming a 2-cycle.
+        edges = [
+            _make_relationship(ns, a.id, b.id, rel_type="OUT"),
+            _make_relationship(ns, b.id, a.id, rel_type="BACK"),
+        ]
+        for r in edges:
+            await adapter.create_relationship(r)
+
+        depth = 6
+
+        # First: the public API returns a correct, bounded result.
+        result = await adapter.get_neighborhoods_batch([a.id], depth=depth, limit_per_entity=1000)
+        bucket = result[a.id]
+        assert len(bucket["relationships"]) == 2
+        assert {e.name for e in bucket["entities"]} == {"cyc_A", "cyc_B"}
+
+        from khora.storage.backends.sqlite_lance._helpers import uuid_to_text
+
+        seed = uuid_to_text(a.id)
+
+        # OLD CTE (verbatim from the pre-fix code, no ``visited``).
+        old_sql = """
+            WITH RECURSIVE walk(seed, cur, depth, direction, edge_id) AS (
+                SELECT r.source_entity_id, r.target_entity_id, 1, 'out', r.id
+                FROM relationships r
+                WHERE r.source_entity_id = ?
+                UNION ALL
+                SELECT r.target_entity_id, r.source_entity_id, 1, 'in', r.id
+                FROM relationships r
+                WHERE r.target_entity_id = ?
+                UNION ALL
+                SELECT walk.seed, r.target_entity_id, walk.depth + 1, 'out', r.id
+                FROM walk
+                JOIN relationships r ON r.source_entity_id = walk.cur
+                WHERE walk.depth < ?
+                UNION ALL
+                SELECT walk.seed, r.source_entity_id, walk.depth + 1, 'in', r.id
+                FROM walk
+                JOIN relationships r ON r.target_entity_id = walk.cur
+                WHERE walk.depth < ?
+            )
+            SELECT COUNT(*) AS c FROM walk
+        """
+
+        # NEW CTE (mirrors the post-fix production CTE).
+        new_sql = """
+            WITH RECURSIVE walk(seed, cur, depth, direction, edge_id, visited) AS (
+                SELECT r.source_entity_id, r.target_entity_id, 1, 'out', r.id,
+                       '|' || r.id || '|'
+                FROM relationships r
+                WHERE r.source_entity_id = ?
+                UNION ALL
+                SELECT r.target_entity_id, r.source_entity_id, 1, 'in', r.id,
+                       '|' || r.id || '|'
+                FROM relationships r
+                WHERE r.target_entity_id = ?
+                UNION ALL
+                SELECT walk.seed, r.target_entity_id, walk.depth + 1, 'out', r.id,
+                       walk.visited || r.id || '|'
+                FROM walk
+                JOIN relationships r ON r.source_entity_id = walk.cur
+                WHERE walk.depth < ?
+                  AND instr(walk.visited, '|' || r.id || '|') = 0
+                UNION ALL
+                SELECT walk.seed, r.source_entity_id, walk.depth + 1, 'in', r.id,
+                       walk.visited || r.id || '|'
+                FROM walk
+                JOIN relationships r ON r.target_entity_id = walk.cur
+                WHERE walk.depth < ?
+                  AND instr(walk.visited, '|' || r.id || '|') = 0
+            )
+            SELECT COUNT(*) AS c FROM walk
+        """
+
+        async with adapter._handle.sqlite.execute(old_sql, [seed, seed, depth, depth]) as cur:
+            old_row = await cur.fetchone()
+        old_walk_rows = int(old_row["c"])
+
+        async with adapter._handle.sqlite.execute(new_sql, [seed, seed, depth, depth]) as cur:
+            new_row = await cur.fetchone()
+        new_walk_rows = int(new_row["c"])
+
+        # Old structure: cycle re-entered once per depth level, two
+        # seed arms → ~2^(depth+1) rows.  Concretely, depth=6 yields
+        # 126 rows; ascertain it's at least exponential-shaped (>= 50).
+        assert old_walk_rows >= 50, (
+            f"old (no-visited) CTE produced only {old_walk_rows} rows — test fixture is wrong, the cycle should explode"
+        )
+        # New structure: each edge at most once per walk.  With 2
+        # edges and 2 seed arms, total walks are ≤ 4 (length-1) + ≤ 4
+        # (length-2) = 8.
+        assert new_walk_rows <= 16, (
+            f"new (edge-visited) CTE emitted {new_walk_rows} rows — edge revisit is not properly gated"
+        )
+        # And the new bound must be a strict reduction from the old.
+        assert new_walk_rows < old_walk_rows
+
 
 # ---------------------------------------------------------------------------
 # Attribute search

@@ -588,13 +588,17 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         # and split after the fact.  SQLite supports recursive CTEs with
         # string concatenation but does not expose json_array aggregation
         # inside the recursive term, so we use a simple delimited string.
+        #
+        # ``visited`` tracks **edge ids**, not node ids — matches Neo4j's
+        # ``MATCH [*1..N]`` semantics, which forbids reusing the same
+        # relationship rather than the same node.  See DYT-3548.
         sql = f"""
             WITH RECURSIVE walk(
                 edge_id, src, cur, depth, edge_ids, visited
             ) AS (
                 SELECT r.id, r.source_entity_id, r.target_entity_id, 1,
                        r.id,
-                       '|' || r.source_entity_id || '|' || r.target_entity_id || '|'
+                       '|' || r.id || '|'
                 FROM relationships r
                 WHERE r.source_entity_id = ?
                   AND r.namespace_id = ?
@@ -602,12 +606,12 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
                 UNION ALL
                 SELECT r.id, walk.src, r.target_entity_id, walk.depth + 1,
                        walk.edge_ids || ',' || r.id,
-                       walk.visited || r.target_entity_id || '|'
+                       walk.visited || r.id || '|'
                 FROM walk
                 JOIN relationships r ON r.source_entity_id = walk.cur
                 WHERE walk.depth < ?
                   AND r.namespace_id = ?
-                  AND instr(walk.visited, '|' || r.target_entity_id || '|') = 0
+                  AND instr(walk.visited, '|' || r.id || '|') = 0
                   {rel_filter}
             )
             SELECT edge_ids, depth
@@ -724,28 +728,40 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         params.append(effective_depth)
         params.extend(rel_params)
 
+        # ``visited`` tracks **edge ids** (matching Neo4j's
+        # ``MATCH [*1..N]`` semantics — forbid reusing the same edge,
+        # not the same node).  Without this, a cycle like A→B→C→A
+        # makes the recursion fan out exponentially with depth, even
+        # though ``DISTINCT`` masks the row count after the fact.
+        # See DYT-3548.
         sql = f"""
-            WITH RECURSIVE walk(seed, cur, depth, direction, edge_id) AS (
-                SELECT r.source_entity_id, r.target_entity_id, 1, 'out', r.id
+            WITH RECURSIVE walk(seed, cur, depth, direction, edge_id, visited) AS (
+                SELECT r.source_entity_id, r.target_entity_id, 1, 'out', r.id,
+                       '|' || r.id || '|'
                 FROM relationships r
                 WHERE r.source_entity_id IN ({seed_placeholders})
                   {rel_filter}
                 UNION ALL
-                SELECT r.target_entity_id, r.source_entity_id, 1, 'in', r.id
+                SELECT r.target_entity_id, r.source_entity_id, 1, 'in', r.id,
+                       '|' || r.id || '|'
                 FROM relationships r
                 WHERE r.target_entity_id IN ({seed_placeholders})
                   {rel_filter}
                 UNION ALL
-                SELECT walk.seed, r.target_entity_id, walk.depth + 1, 'out', r.id
+                SELECT walk.seed, r.target_entity_id, walk.depth + 1, 'out', r.id,
+                       walk.visited || r.id || '|'
                 FROM walk
                 JOIN relationships r ON r.source_entity_id = walk.cur
                 WHERE walk.depth < ?
+                  AND instr(walk.visited, '|' || r.id || '|') = 0
                   {rel_filter}
                 UNION ALL
-                SELECT walk.seed, r.source_entity_id, walk.depth + 1, 'in', r.id
+                SELECT walk.seed, r.source_entity_id, walk.depth + 1, 'in', r.id,
+                       walk.visited || r.id || '|'
                 FROM walk
                 JOIN relationships r ON r.target_entity_id = walk.cur
                 WHERE walk.depth < ?
+                  AND instr(walk.visited, '|' || r.id || '|') = 0
                   {rel_filter}
             )
             SELECT DISTINCT seed, cur, edge_id FROM walk
