@@ -1280,7 +1280,7 @@ class HybridQueryEngine:
                         return_exceptions=True,
                     )
                     for (source, _), result in zip(_fb_tasks, _fb_results):
-                        if isinstance(result, Exception):
+                        if isinstance(result, BaseException):
                             logger.warning(f"Fallback {source} search failed: {result}")
                             continue
                         if result.get("chunks"):
