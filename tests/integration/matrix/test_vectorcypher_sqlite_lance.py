@@ -1,0 +1,528 @@
+"""VectorCypher SQLite+LanceDB integration tests (DYT-3545 / PR-D).
+
+VectorCypher is one of khora's two production-ready engines and v0.9.0
+declares **SQLite + LanceDB** the default *embedded* stack. These tests
+wire up ``MemoryLake(engine="vectorcypher")`` against a fully-embedded
+sqlite_lance coordinator (per-test ``tmp_path``) and exercise the same
+remember/recall behaviour we already cover for the production stack.
+
+How LLM calls are stubbed:
+* ``LiteLLMEmbedder.embed_batch`` and ``embed`` return content-derived
+  unit vectors of dimension ``EMBED_DIM=32`` (the embedded backend's
+  default) so similar text shares an embedding and recall ordering is
+  deterministic. ``OPENAI_API_KEY`` is **not** required.
+* ``LLMEntityExtractor.extract_multi`` is replaced with a registry stub
+  identical to the chronicle-pg pattern — register entities per content
+  marker before calling ``_remember()``.
+
+How to run locally::
+
+    uv run pytest tests/integration/matrix/test_vectorcypher_sqlite_lance.py \\
+        -v -m integration --no-cov
+
+No Docker / Postgres / Neo4j needed — the embedded stack is pure
+in-process SQLite (``aiosqlite``) and LanceDB (``lancedb``).
+
+## State on ``main`` (2026-05-01)
+
+VectorCypher's ``connect()`` path branches between Neo4j (default) and
+SurrealDB (``is_surrealdb`` flag). There is no third arm for
+``sqlite_lance`` — passing ``backend="sqlite_lance"`` falls into the
+Neo4j arm and raises ``ValueError: Neo4j URL is required``. This is
+filed as **DYT-3560** (parented under DYT-3545) and is the load-bearing
+gap for v0.9.0's "embedded VectorCypher" story.
+
+Until DYT-3560 lands, *every* test in this module is expected to xfail
+at fixture setup (``lake.connect()``). They are written end-to-end so
+that when DYT-3560 wires the embedded path, the same tests serve as the
+acceptance suite without rewriting them.
+
+In addition, two scenario-specific xfails reference R1/R2:
+* DYT-3548 (PR #473) — multi-hop CTE traversal correctness.
+* DYT-3549 (PR #472) — ``prefer_current`` honoring on CTE traversal.
+
+When DYT-3560 lands, flip the module-level ``xfail`` to a per-test
+filter and re-run; expected R1/R2-related tests will keep their
+narrower xfail markers.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from uuid import UUID
+
+import pytest
+
+try:  # Module-level import gate matches existing sqlite_lance suites.
+    import aiosqlite  # noqa: F401
+    import lancedb  # noqa: F401
+
+    _HAS_EMBEDDED = True
+except ImportError:
+    _HAS_EMBEDDED = False
+
+from khora.config import KhoraConfig
+from khora.config.schema import SQLiteLanceConfig
+from khora.extraction.extractors.base import (
+    ExtractedEntity,
+    ExtractedRelationship,
+    ExtractionResult,
+)
+from khora.extraction.skills import ExpertiseConfig
+from khora.memory_lake import MemoryLake
+
+EMBED_DIM = 32  # matches the sqlite_lance default and the existing fixture helper
+
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(not _HAS_EMBEDDED, reason="aiosqlite/lancedb not installed"),
+    # DYT-3560: VectorCypher has no sqlite_lance code path on main, so
+    # ``lake.connect()`` raises ``ValueError`` for every test here. Flip
+    # this to non-strict / remove once DYT-3560 lands.
+    pytest.mark.xfail(
+        strict=True,
+        reason="DYT-3560: VectorCypher engine has no sqlite_lance backend support yet",
+        raises=Exception,
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# Deterministic embedder + extractor stubs (no OPENAI_API_KEY needed)
+# ---------------------------------------------------------------------------
+
+
+def _embed_for(text_in: str) -> list[float]:
+    """Return a deterministic L2-normalised ``EMBED_DIM`` vector for ``text_in``.
+
+    Mirrors ``tests/integration/_sqlite_lance_fixtures.fake_embedding`` —
+    SHA-256 the text, expand to ``EMBED_DIM`` floats, normalise.  Same
+    text ⇒ same vector, different text ⇒ different vector.  Suitable for
+    top-k ordering assertions but NOT for semantic similarity (the hash
+    has no notion of meaning).
+    """
+    seed = hashlib.sha256(text_in.encode("utf-8")).digest()
+    raw = [(seed[i % len(seed)] - 128) / 128.0 for i in range(EMBED_DIM)]
+    norm = sum(x * x for x in raw) ** 0.5 or 1.0
+    return [x / norm for x in raw]
+
+
+_EXTRACTION_REGISTRY: dict[str, ExtractionResult] = {}
+
+
+def _plan_extraction(
+    marker: str,
+    entities: list[tuple[str, str]],
+    relationships: list[tuple[str, str, str]] | None = None,
+) -> None:
+    """Stage an ``ExtractionResult`` for documents containing ``marker``."""
+    _EXTRACTION_REGISTRY[marker] = ExtractionResult(
+        entities=[ExtractedEntity(name=n, entity_type=t, confidence=0.99) for n, t in entities],
+        relationships=[
+            ExtractedRelationship(
+                source_entity=s,
+                target_entity=t,
+                relationship_type=rt,
+                confidence=0.99,
+            )
+            for s, t, rt in (relationships or [])
+        ],
+    )
+
+
+async def _stub_extract_multi(self: Any, texts: list[str], **_kwargs: Any) -> list[ExtractionResult]:
+    out: list[ExtractionResult] = []
+    for t in texts:
+        matched = next(
+            (result for marker, result in _EXTRACTION_REGISTRY.items() if marker in t),
+            None,
+        )
+        out.append(matched if matched is not None else ExtractionResult())
+    return out
+
+
+async def _stub_embed_batch(self: Any, texts: list[str]) -> list[list[float]]:
+    return [_embed_for(t) for t in texts]
+
+
+async def _stub_embed(self: Any, text_in: str) -> list[float]:
+    return _embed_for(text_in)
+
+
+@pytest.fixture(autouse=True)
+def _patch_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub embedder + extractor so no real LLM is called.
+
+    This is the explicit ``OPENAI_API_KEY``-not-required guarantee — VC
+    calls ``LiteLLMEmbedder`` on every remember/recall, so without this
+    patch the tests would attempt real network calls.
+    """
+    _EXTRACTION_REGISTRY.clear()
+    monkeypatch.setattr(
+        "khora.extraction.embedders.litellm.LiteLLMEmbedder.embed_batch",
+        _stub_embed_batch,
+    )
+    monkeypatch.setattr(
+        "khora.extraction.embedders.litellm.LiteLLMEmbedder.embed",
+        _stub_embed,
+    )
+    monkeypatch.setattr(
+        "khora.extraction.extractors.llm.LLMEntityExtractor.extract_multi",
+        _stub_extract_multi,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-test embedded MemoryLake fixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def lake(tmp_path: Path) -> AsyncIterator[MemoryLake]:
+    """Per-test VectorCypher MemoryLake on a fresh embedded stack.
+
+    Each test gets its own ``tmp_path`` for isolation — sqlite_lance
+    caches engine pools by URL inside ``StorageFactory``, so reusing a
+    path across tests would leak state.
+    """
+    config = KhoraConfig()
+    config.storage.backend = "sqlite_lance"
+    config.storage.sqlite_lance = SQLiteLanceConfig(
+        db_path=str(tmp_path / "khora.db"),
+        lance_path=str(tmp_path / "khora.lance"),
+        embedding_dimension=EMBED_DIM,
+    )
+    config.llm.embedding_dimension = EMBED_DIM
+    config.storage.embedding_dimension = EMBED_DIM
+    # No Neo4j — the whole point of the embedded path.
+    config.neo4j_url = None
+    # Single-chunk documents keep the test deterministic.
+    config.pipelines.chunk_size = 1024
+    config.pipelines.extract_entities = True
+    config.pipelines.selective_extraction = False
+
+    lake = MemoryLake(config, engine="vectorcypher", run_migrations=True)
+    await lake.connect()
+    try:
+        yield lake
+    finally:
+        try:
+            await lake.disconnect()
+        except Exception:
+            # Disconnect can throw if connect partially succeeded; the
+            # xfail marker is what matters at the test boundary.
+            pass
+
+
+@pytest.fixture
+async def namespace_id(lake: MemoryLake) -> UUID:
+    ns = await lake.create_namespace()
+    return ns.namespace_id
+
+
+def _no_event_extraction() -> ExpertiseConfig:
+    """ExpertiseConfig that runs entity extraction but skips event/fact extraction."""
+    return ExpertiseConfig(name="vc-sqlite-lance-integ")
+
+
+async def _remember(
+    lake: MemoryLake,
+    *,
+    namespace_id: UUID,
+    content: str,
+    title: str = "",
+    occurred_at: datetime | None = None,
+) -> Any:
+    return await lake.remember(
+        content=content,
+        namespace=namespace_id,
+        title=title,
+        entity_types=["PERSON", "CONCEPT", "EVENT", "ORG"],
+        relationship_types=["KNOWS", "RELATES_TO", "MENTIONS"],
+        expertise=_no_event_extraction(),
+        occurred_at=occurred_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+async def test_vc_remember_recall_roundtrip(lake: MemoryLake, namespace_id: UUID) -> None:
+    """Ingest 3 docs, recall, assert ingested text appears in ``context_text``."""
+    contents = [
+        "Alice met Bob at the Python conference in Berlin.",
+        "Carol presented research on graph databases at the same event.",
+        "Dan organized the after-party that lasted until midnight.",
+    ]
+    for c in contents:
+        await _remember(lake, namespace_id=namespace_id, content=c)
+
+    result = await lake.recall("Python conference Berlin", namespace=namespace_id, limit=10)
+
+    assert result.metadata.get("engine") == "vectorcypher"
+    assert len(result.chunks) >= 1, "expected at least one chunk back"
+    # The most-relevant ingested text must be visible in the LLM context.
+    assert "Python conference" in result.context_text
+
+
+async def test_vc_namespace_isolation(lake: MemoryLake) -> None:
+    """Two namespaces, recall does not cross-bleed."""
+    ns_a = (await lake.create_namespace()).namespace_id
+    ns_b = (await lake.create_namespace()).namespace_id
+
+    await _remember(lake, namespace_id=ns_a, content="alpha document about kangaroos")
+    await _remember(lake, namespace_id=ns_b, content="bravo document about penguins")
+
+    result_a = await lake.recall("animals", namespace=ns_a, limit=10)
+    result_b = await lake.recall("animals", namespace=ns_b, limit=10)
+
+    a_text = " ".join(c.content for c, _ in result_a.chunks)
+    b_text = " ".join(c.content for c, _ in result_b.chunks)
+
+    assert "kangaroos" in a_text
+    assert "penguins" not in a_text, "namespace_b leaked into namespace_a"
+    assert "penguins" in b_text
+    assert "kangaroos" not in b_text, "namespace_a leaked into namespace_b"
+
+
+async def test_vc_entity_extraction(lake: MemoryLake, namespace_id: UUID) -> None:
+    """Ingest a doc with a known entity → entity persists in the embedded graph.
+
+    Queries the SQLite-CTE graph adapter directly via
+    ``coord.graph.list_entities`` to confirm the entity was actually
+    written (not just returned by the LLM stub).
+    """
+    _plan_extraction(
+        "Ada Lovelace",
+        entities=[("Ada Lovelace", "PERSON"), ("Analytical Engine", "CONCEPT")],
+        relationships=[("Ada Lovelace", "Analytical Engine", "WORKED_ON")],
+    )
+    await _remember(
+        lake,
+        namespace_id=namespace_id,
+        content="Ada Lovelace wrote the first algorithm intended for the Analytical Engine.",
+    )
+
+    coord = lake._engine._storage  # type: ignore[union-attr]
+    entities = await coord.graph.list_entities(namespace_id, limit=100)
+    names = {e.name for e in entities}
+    assert "Ada Lovelace" in names, f"expected Ada Lovelace in graph, got {names}"
+    assert "Analytical Engine" in names
+
+
+async def test_vc_two_hop_traversal(lake: MemoryLake, namespace_id: UUID) -> None:
+    """3 connected docs (A→B→C), query about A surfaces C via 2-hop traversal.
+
+    Marked xfail with **DYT-3548 + DYT-3549** — these PRs (R1/R2) fix
+    correctness gaps in the SQLite-CTE traversal that VectorCypher would
+    otherwise exercise. Once those merge to main, drop the per-test
+    xfail and rely only on the module-level DYT-3560 marker.
+    """
+    _plan_extraction(
+        "Alice",
+        entities=[("Alice", "PERSON"), ("Bob", "PERSON")],
+        relationships=[("Alice", "Bob", "KNOWS")],
+    )
+    _plan_extraction(
+        "Bob and Carol",
+        entities=[("Bob", "PERSON"), ("Carol", "PERSON")],
+        relationships=[("Bob", "Carol", "KNOWS")],
+    )
+    _plan_extraction(
+        "Carol presented",
+        entities=[("Carol", "PERSON"), ("graph databases", "CONCEPT")],
+        relationships=[("Carol", "graph databases", "RESEARCHES")],
+    )
+
+    await _remember(lake, namespace_id=namespace_id, content="Alice knows Bob from college.")
+    await _remember(lake, namespace_id=namespace_id, content="Bob and Carol collaborate on research projects.")
+    await _remember(lake, namespace_id=namespace_id, content="Carol presented findings on graph databases.")
+
+    # Force ≥ 2-hop expansion via graph_depth=2.
+    result = await lake.recall(
+        "Alice",
+        namespace=namespace_id,
+        limit=10,
+        graph_depth=2,
+    )
+
+    text_blob = result.context_text + " ".join(c.content for c, _ in result.chunks)
+    # The 2-hop reachable concept ("graph databases" via Bob→Carol) must
+    # surface in the recall result. If this fails the CTE traversal is
+    # not crossing 2 hops — see DYT-3548.
+    assert "graph databases" in text_blob.lower(), f"2-hop entity not surfaced; got context={text_blob[:300]!r}"
+
+
+async def test_vc_temporal_filter(lake: MemoryLake, namespace_id: UUID) -> None:
+    """Two docs at different ``occurred_at``; recall with ``last 7 days`` filter
+    only returns the recent one.
+    """
+    now = datetime.now(UTC)
+    await _remember(
+        lake,
+        namespace_id=namespace_id,
+        content="recent doc about Falcon launch in May 2026.",
+        occurred_at=now - timedelta(days=2),
+    )
+    r_old = await _remember(
+        lake,
+        namespace_id=namespace_id,
+        content="old doc about Falcon launch in 2024.",
+        occurred_at=now - timedelta(days=400),
+    )
+
+    seven_days_ago = now - timedelta(days=7)
+    result = await lake.recall(
+        "Falcon launch",
+        namespace=namespace_id,
+        limit=10,
+        start_time=seven_days_ago,
+    )
+
+    returned_doc_ids = {c.document_id for c, _ in result.chunks}
+    assert r_old.document_id not in returned_doc_ids, f"old document leaked through temporal filter: {returned_doc_ids}"
+
+
+async def test_vc_recall_metadata_keys(lake: MemoryLake, namespace_id: UUID) -> None:
+    """``RecallResult.metadata`` exposes the keys VC documents on every recall."""
+    await _remember(lake, namespace_id=namespace_id, content="A simple sentence about apples.")
+
+    result = await lake.recall("apples", namespace=namespace_id, limit=5)
+
+    md = result.metadata
+    # Engine identifier is the only key VC promises across every code
+    # path; routing/timing keys depend on the router being enabled. We
+    # assert the floor.
+    assert md.get("engine") == "vectorcypher"
+    # ``RecallResult.metadata`` must be a dict so downstream consumers
+    # can ``.get()`` keys safely.
+    assert isinstance(md, dict)
+    # When routing fires, ``routing`` will be present; we treat it as
+    # informational rather than load-bearing on the embedded path.
+
+
+async def test_vc_concurrent_remember(lake: MemoryLake, namespace_id: UUID) -> None:
+    """5 concurrent ingests in one namespace, no integrity errors."""
+    contents = [f"document number {i} mentions widget-{i}" for i in range(5)]
+    results = await asyncio.gather(
+        *(_remember(lake, namespace_id=namespace_id, content=c) for c in contents),
+        return_exceptions=True,
+    )
+    errors = [r for r in results if isinstance(r, Exception)]
+    assert not errors, f"concurrent remember raised: {errors}"
+    doc_ids = {r.document_id for r in results}  # type: ignore[union-attr]
+    assert len(doc_ids) == 5, f"expected 5 distinct documents, got {doc_ids}"
+
+
+async def test_vc_recall_empty_namespace(lake: MemoryLake) -> None:
+    """Recall on a fresh empty namespace returns an empty (but well-formed) result."""
+    ns = (await lake.create_namespace()).namespace_id
+    result = await lake.recall("anything", namespace=ns, limit=5)
+    assert result.chunks == []
+    assert result.metadata.get("engine") == "vectorcypher"
+
+
+async def test_vc_dual_node_persistence(lake: MemoryLake, namespace_id: UUID) -> None:
+    """Ingest one doc with an entity → confirm the dual-node markers VectorCypher
+    writes (chunk-node + entity-node + MENTIONED_IN-style edge) are persisted in
+    the embedded graph.
+
+    On Neo4j the markers are ``(:Chunk)``, ``(:Entity)``, ``[:MENTIONED_IN]``
+    nodes/edges (see ``dual_nodes.py``). Translated to the SQLite-CTE
+    adapter, we expect:
+      * a chunk row in the chunks table,
+      * an entity row with a ``source_chunk_ids`` link back to that chunk,
+      * a relationship the engine emits to mirror MENTIONED_IN (today
+        VectorCypher writes ASSOCIATED_WITH co-occurrence edges via
+        ``_build_cooccurrence_relationships``).
+    """
+    _plan_extraction(
+        "Marie Curie",
+        entities=[("Marie Curie", "PERSON"), ("radium", "CONCEPT")],
+        relationships=[("Marie Curie", "radium", "DISCOVERED")],
+    )
+    r = await _remember(
+        lake,
+        namespace_id=namespace_id,
+        content="Marie Curie discovered radium and polonium in 1898.",
+    )
+
+    coord = lake._engine._storage  # type: ignore[union-attr]
+
+    # Entity persistence: both names land in the graph.
+    entities = await coord.graph.list_entities(namespace_id, limit=100)
+    name_to_entity = {e.name: e for e in entities}
+    assert "Marie Curie" in name_to_entity, f"missing Marie Curie: {list(name_to_entity)}"
+    assert "radium" in name_to_entity, f"missing radium: {list(name_to_entity)}"
+
+    # Chunk-node ↔ entity-node link: ``source_chunk_ids`` (or
+    # ``source_document_ids``) must include this document's chunk.
+    marie = name_to_entity["Marie Curie"]
+    assert r.document_id in (marie.source_document_ids or []) or any(marie.source_chunk_ids or []), (
+        f"Marie Curie has no source link back to the ingest doc: {marie!r}"
+    )
+
+    # Edge persistence: at least one relationship survives the ingest.
+    rels = await coord.graph.list_relationships(namespace_id, limit=100)
+    assert rels, "expected at least one relationship after dual-node write"
+
+
+async def test_vc_prefer_current_via_cte(lake: MemoryLake, namespace_id: UUID) -> None:
+    """3-hop A→B→C with B's outgoing edge expired; ``prefer_current=True`` must
+    NOT return C's content.
+
+    This tests Graphiti-style bi-temporal invalidation pushed through the
+    SQLite-CTE traversal. R2 (DYT-3549) is the fix that makes
+    ``prefer_current`` honor expired/invalidated edges in the CTE. Until
+    that lands, the CTE happily walks expired edges, so this test is
+    expected to fail even after DYT-3560 wires the VC embedded path.
+
+    The chain: B→C edge has ``valid_to`` in the past → with
+    ``prefer_current=True`` it must be skipped → C ("polonium") is
+    unreachable from A ("Marie") via 2-hop traversal. We assert
+    ``"polonium"`` is NOT in the recall context.
+    """
+    _plan_extraction(
+        "Marie",
+        entities=[("Marie", "PERSON"), ("Pierre", "PERSON")],
+        relationships=[("Marie", "Pierre", "KNOWS")],
+    )
+    _plan_extraction(
+        "Pierre",
+        entities=[("Pierre", "PERSON"), ("polonium", "CONCEPT")],
+        relationships=[("Pierre", "polonium", "STUDIES")],
+    )
+
+    await _remember(lake, namespace_id=namespace_id, content="Marie collaborated with Pierre.")
+    await _remember(lake, namespace_id=namespace_id, content="Pierre researched polonium extensively.")
+
+    # Manually expire the Pierre→polonium edge in the embedded graph.
+    coord = lake._engine._storage  # type: ignore[union-attr]
+    rels = await coord.graph.list_relationships(namespace_id, limit=100)
+    target_rel = next(
+        (r for r in rels if r.relationship_type == "STUDIES"),
+        None,
+    )
+    assert target_rel is not None, f"expected STUDIES relationship, got {rels!r}"
+    # Expire the edge by setting valid_to in the past. The exact field
+    # name lives on Relationship; CTE traversal R2 reads it for filtering.
+    target_rel.valid_to = datetime.now(UTC) - timedelta(days=1)
+    await coord.graph.create_relationships_batch(namespace_id, [target_rel])
+
+    result = await lake.recall(
+        "Marie",
+        namespace=namespace_id,
+        limit=10,
+        graph_depth=2,
+        prefer_current=True,
+    )
+
+    text_blob = result.context_text.lower() + " ".join(c.content for c, _ in result.chunks).lower()
+    assert "polonium" not in text_blob, "expired edge leaked through prefer_current=True (DYT-3549 R2 fix not in main)"
