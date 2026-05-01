@@ -408,14 +408,14 @@ class TestMigrationPackageStructure:
         assert env_path.exists(), f"env.py not found at {env_path}"
 
     @pytest.mark.unit
-    def test_versions_dir_has_26_files(self):
-        """versions/ directory contains 26 migration files."""
+    def test_versions_dir_has_27_files(self):
+        """versions/ directory contains 27 migration files."""
         versions_dir = _MIGRATIONS_DIR / "versions"
         migration_files = sorted(versions_dir.glob("*.py"))
         # Filter out __pycache__ and __init__
         migration_files = [f for f in migration_files if not f.name.startswith("__")]
-        assert len(migration_files) == 26, (
-            f"Expected 26 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
+        assert len(migration_files) == 27, (
+            f"Expected 27 migration files, found {len(migration_files)}: {[f.name for f in migration_files]}"
         )
 
     @pytest.mark.unit
@@ -805,12 +805,14 @@ class TestDoRunMigrationsAheadDetection:
 
     def _setup_conn(self, version_num: str | None, *, table_exists: bool = True) -> MagicMock:
         """Create a mock connection that returns the given version for the advisory
-        lock query, information_schema existence check, and (optionally) the version table query.
+        lock query, information_schema existence check, version-num width check,
+        and (optionally) the version table query.
 
         Execute call order after the fix:
-          1. pg_try_advisory_xact_lock       → scalar() True
-          2. information_schema.tables check → scalar() table_exists
-          3. SELECT version_num              → fetchone() row/None  (only when table_exists)
+          1. pg_try_advisory_xact_lock         → scalar() True
+          2. information_schema.tables check   → scalar() table_exists
+          3. information_schema.columns width  → scalar() 64 (only when table_exists)
+          4. SELECT version_num                → fetchone() row/None (only when table_exists)
         """
         conn = MagicMock()
         # do_run_migrations branches on dialect.name — simulate Postgres.
@@ -823,13 +825,17 @@ class TestDoRunMigrationsAheadDetection:
         pg_catalog_result.scalar.return_value = table_exists
 
         if table_exists:
+            # Width check returns 64 — already wide enough, no ALTER issued. (DYT-3546)
+            width_result = MagicMock()
+            width_result.scalar.return_value = 64
+
             version_result = MagicMock()
             if version_num is not None:
                 # Row behaves like a sequence/tuple: row[0] should return version_num.
                 version_result.fetchone.return_value = (version_num,)
             else:
                 version_result.fetchone.return_value = None
-            conn.execute.side_effect = [lock_result, pg_catalog_result, version_result]
+            conn.execute.side_effect = [lock_result, pg_catalog_result, width_result, version_result]
         else:
             conn.execute.side_effect = [lock_result, pg_catalog_result]
 
@@ -919,8 +925,12 @@ class TestDoRunMigrationsAheadDetection:
         existence_result = MagicMock()
         existence_result.scalar.return_value = True  # table exists
 
-        # Third execute (version SELECT) raises an error
-        conn.execute.side_effect = [lock_result, existence_result, Exception("permission denied")]
+        # Width check: column already wide enough — no ALTER. (DYT-3546)
+        width_result = MagicMock()
+        width_result.scalar.return_value = 64
+
+        # Fourth execute (version SELECT) raises an error
+        conn.execute.side_effect = [lock_result, existence_result, width_result, Exception("permission denied")]
 
         env.do_run_migrations(conn)
 
@@ -952,6 +962,73 @@ class TestDoRunMigrationsAheadDetection:
                 env.do_run_migrations(conn)
 
         env.context.run_migrations.assert_not_called()
+
+    @pytest.mark.unit
+    def test_widens_version_num_when_too_narrow(self):
+        """Issues ALTER TABLE when existing version_num column is narrower than 64.
+
+        Covers DYT-3546: existing PostgreSQL deployments may have the version_num
+        column at the Alembic default VARCHAR(32). env.py widens it in-place
+        before running migrations so that subsequent revision IDs >32 chars fit.
+        """
+        env = _load_env_functions()
+        conn = MagicMock()
+        conn.dialect.name = "postgresql"
+
+        lock_result = MagicMock()
+        lock_result.scalar.return_value = True
+
+        existence_result = MagicMock()
+        existence_result.scalar.return_value = True
+
+        # Width check returns 32 — too narrow, ALTER must be issued.
+        width_result = MagicMock()
+        width_result.scalar.return_value = 32
+
+        alter_result = MagicMock()  # ALTER TABLE has no return value we use
+
+        version_result = MagicMock()
+        version_result.fetchone.return_value = ("known_rev",)
+
+        conn.execute.side_effect = [
+            lock_result,
+            existence_result,
+            width_result,
+            alter_result,
+            version_result,
+        ]
+
+        mock_rev = MagicMock()
+        mock_rev.revision = "known_rev"
+        mock_script_dir = MagicMock()
+        mock_script_dir.walk_revisions.return_value = [mock_rev]
+
+        with patch.object(env.ScriptDirectory, "from_config", return_value=mock_script_dir):
+            env.do_run_migrations(conn)
+
+        # Confirm ALTER TABLE was issued (4th execute call) targeting VARCHAR(64)
+        alter_call = conn.execute.call_args_list[3]
+        sql_text = str(alter_call.args[0])
+        assert "ALTER TABLE" in sql_text
+        assert "VARCHAR(64)" in sql_text
+        env.context.run_migrations.assert_called_once()
+
+    @pytest.mark.unit
+    def test_skips_widen_when_already_wide(self):
+        """Skips ALTER TABLE when version_num column is already at or above target width."""
+        env = _load_env_functions()
+        conn = self._setup_conn("known_rev")  # _setup_conn already uses width=64
+
+        mock_rev = MagicMock()
+        mock_rev.revision = "known_rev"
+        mock_script_dir = MagicMock()
+        mock_script_dir.walk_revisions.return_value = [mock_rev]
+
+        with patch.object(env.ScriptDirectory, "from_config", return_value=mock_script_dir):
+            env.do_run_migrations(conn)
+
+        # Only 4 executes: lock, exists, width-check, version SELECT — no ALTER.
+        assert conn.execute.call_count == 4
 
 
 # ---------------------------------------------------------------------------
