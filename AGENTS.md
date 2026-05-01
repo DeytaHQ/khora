@@ -216,6 +216,9 @@ Before creating a PR, verify:
 - [ ] No `any` types in changed files (TypeScript projects)
 - [ ] No secrets, API keys, or credentials in code (use env vars)
 - [ ] No `console.log` left in production code (use structured logger)
+- [ ] New endpoints/pipelines have logging following patterns/logging.md
+- [ ] Logfire instrumentation added for new library clients (FastAPI, httpx, SQLAlchemy, etc.) (Python/Logfire projects)
+- [ ] `logger.add()` used for Logfire (never `logger.configure()`) (Python/Logfire projects)
 - [ ] PR created with description and Linear issue link
 - [ ] Linear issue updated (status, comment with PR link)
 
@@ -394,7 +397,6 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - Stable public API is codified in ADR-024 (memory-lake surface) and ADR-022 (extraction skills). Any breaking change to symbols listed there requires coordinated release with genesis, khora-benchmarks, khora-explorer, khora-cli. See `docs/adrs/adr-024-memory-lake-public-api.md`; `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface
 - `scripts/` vendored from TTOJ — skip in audits
 
-
 ## Codex Skill Mapping
 
 | Skill | Description |
@@ -414,6 +416,7 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 | `review-api` | name: review-api |
 | `review-database` | name: review-database |
 | `review-docs` | name: review-docs |
+| `review-logging` | name: review-logging |
 | `review-performance` | name: review-performance |
 | `review-security` | name: review-security |
 | `review-test` | name: review-test |
