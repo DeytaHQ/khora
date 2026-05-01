@@ -49,6 +49,7 @@ class TestProtocolConformance:
         self._assert_graph_protocol(backend)
 
     @pytest.mark.skipif(not HAS_KUZU, reason="kuzu package not installed")
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
     def test_kuzu_implements_protocol(self, tmp_path):
         backend = KuzuBackend(str(tmp_path / "kuzu_db"))
         self._assert_graph_protocol(backend)
@@ -118,6 +119,7 @@ class TestFromConfig:
         assert backend._database == "testdb"
 
     @pytest.mark.skipif(not HAS_KUZU, reason="kuzu package not installed")
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
     def test_kuzu_from_config(self, tmp_path):
         from khora.config.schema import KuzuConfig
 

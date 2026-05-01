@@ -140,7 +140,7 @@ class KuzuConfig(BaseModel):
         :class:`SurrealDBConfig` instead.
     """
 
-    backend: Literal["kuzu"] = "kuzu"
+    backend: Literal["kuzu"] = "kuzu"  # DEPRECATED in 0.9.0 — removal in 0.10.0
     database_path: str = Field(default="./kuzu_db", description="Path to Kùzu database directory")
     read_only: bool = Field(default=False, description="Open database in read-only mode")
 
@@ -243,7 +243,7 @@ def _graph_discriminator(v: Any) -> str:
 
 GraphConfig = Annotated[
     Annotated[Neo4jConfig, Tag("neo4j")]
-    | Annotated[KuzuConfig, Tag("kuzu")]
+    | Annotated[KuzuConfig, Tag("kuzu")]  # DEPRECATED in 0.9.0
     | Annotated[MemgraphConfig, Tag("memgraph")]
     | Annotated[NeptuneConfig, Tag("neptune")]
     | Annotated[SurrealDBConfig, Tag("surrealdb")]

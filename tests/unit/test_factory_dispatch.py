@@ -69,6 +69,7 @@ class TestFactoryLegacyPath:
 class TestFactoryNewStyleDispatch:
     """New-style config dispatch creates correct backend types."""
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
     def test_kuzu_config_dispatch(self):
         config = StorageConfig(
             graph_config=KuzuConfig(database_path="/tmp/test_kuzu"),

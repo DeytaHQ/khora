@@ -1,12 +1,15 @@
-"""Kùzu embedded graph backend for knowledge graph storage.
+"""**DEPRECATED in 0.9.0** — will be removed in 0.10.0.
+
+Kùzu embedded graph backend for knowledge graph storage.
 
 Kùzu is an embedded graph database that supports Cypher queries.
 All operations are synchronous and wrapped in asyncio.to_thread().
 
-.. deprecated::
-    KuzuDB backend is deprecated. Kuzu was acquired by Apple in October 2025
-    and the repository is archived. Consider using ``neo4j`` or ``surrealdb``
-    backends instead.
+.. deprecated:: 0.9.0
+    KuzuBackend is deprecated and will be removed in khora 0.10.0.
+    Kuzu was acquired by Apple in October 2025 and the upstream repository
+    is archived. Use the SQLite+LanceDB embedded stack (``memory://`` after
+    0.9.0) for local/embedded use, or PostgreSQL + Neo4j for production.
 """
 
 from __future__ import annotations
@@ -30,8 +33,9 @@ from khora.storage.backends.mixins import (
 )
 
 warnings.warn(
-    "KuzuDB backend is deprecated. Kuzu was acquired by Apple in October 2025 "
-    "and the repository is archived. Consider using 'neo4j' or 'surrealdb' backends instead.",
+    "KuzuBackend is deprecated and will be removed in khora 0.10.0. "
+    "Use the SQLite+LanceDB embedded stack (memory:// after 0.9.0) "
+    "or PostgreSQL + Neo4j for production.",
     DeprecationWarning,
     stacklevel=2,
 )
@@ -42,6 +46,9 @@ class KuzuBackend(GraphBackendBase):
 
     Uses an on-disk embedded database — no network needed.
     Ideal for single-process deployments, CI/CD testing, and edge devices.
+
+    .. deprecated:: 0.9.0
+        Removal scheduled for khora 0.10.0. See module docstring for migration.
     """
 
     def __init__(
@@ -50,6 +57,13 @@ class KuzuBackend(GraphBackendBase):
         *,
         read_only: bool = False,
     ) -> None:
+        warnings.warn(
+            "KuzuBackend is deprecated and will be removed in khora 0.10.0. "
+            "Use the SQLite+LanceDB embedded stack (memory:// after 0.9.0) "
+            "or PostgreSQL + Neo4j for production.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._database_path = database_path
         self._read_only = read_only
         self._db: Any = None
