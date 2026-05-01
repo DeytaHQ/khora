@@ -1235,6 +1235,14 @@ class ChronicleEngine:
                 logger.warning("Chronicle router failed, running all channels: %s", exc)
                 routing_complexity = "fallback"
 
+        # Extract temporal bounds once and forward them to every channel.
+        # WHY: until DYT-3547 only the temporal channel honored these bounds,
+        # so a 20-day-old chunk could leak through a 7-day window via the
+        # semantic / BM25 / entity channels. Pgvector's search_similar and
+        # search_fulltext already pushdown COALESCE(source_timestamp,
+        # created_at) when these are set; we just need to pass them in.
+        created_after, created_before = _extract_temporal_bounds(temporal_filter)
+
         # ── Phase 1: Embed query + BM25 in parallel ───────────────────
         # BM25 needs only the query text (no embedding), so start it
         # concurrently with embedding to save one round-trip of latency.
@@ -1249,6 +1257,8 @@ class ChronicleEngine:
                     namespace_id,
                     query,
                     limit=overfetch_limit,
+                    created_after=created_after,
+                    created_before=created_before,
                 )
             )
 
@@ -1302,6 +1312,8 @@ class ChronicleEngine:
                         query_embedding,
                         limit=overfetch_limit,
                         min_similarity=min_similarity,
+                        created_after=created_after,
+                        created_before=created_before,
                     ),
                 )
             )
@@ -1331,6 +1343,8 @@ class ChronicleEngine:
                         query_embedding,
                         overfetch_limit,
                         entity_hits=entity_channel_hits,
+                        created_after=created_after,
+                        created_before=created_before,
                     ),
                 )
             )
@@ -1777,6 +1791,8 @@ class ChronicleEngine:
         query_embedding: list[float],
         limit: int,
         entity_hits: dict[UUID, tuple[Entity, float]] | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Channel 4: Entity co-occurrence retrieval.
 
@@ -1847,6 +1863,25 @@ class ChronicleEngine:
         except Exception as e:
             logger.warning("Entity channel: get_chunks_batch failed for %d IDs: %s", len(chunk_ids), e)
             return []
+
+        # Apply temporal filter post-hydration. get_chunks_batch has no
+        # WHERE-clause hook, so we filter by COALESCE(source_timestamp,
+        # created_at) here to match the pgvector pushdown rule used by the
+        # other channels (DYT-3547).
+        if created_after is not None or created_before is not None:
+            filtered_map: dict[UUID, Chunk] = {}
+            for cid, chunk in chunks_map.items():
+                ct = getattr(chunk, "source_timestamp", None) or chunk.created_at
+                if ct is None:
+                    continue
+                if ct.tzinfo is None:
+                    ct = ct.replace(tzinfo=UTC)
+                if created_after is not None and ct < created_after:
+                    continue
+                if created_before is not None and ct > created_before:
+                    continue
+                filtered_map[cid] = chunk
+            chunks_map = filtered_map
 
         # Semantic relevance gate: filter out entity-adjacent chunks that
         # share entity mentions but are semantically irrelevant to the query.
