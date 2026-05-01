@@ -11,8 +11,9 @@ import time
 from logging.config import fileConfig
 
 from alembic import context
+from alembic.ddl.impl import DefaultImpl
 from alembic.script import ScriptDirectory
-from sqlalchemy import pool, text
+from sqlalchemy import Column, MetaData, PrimaryKeyConstraint, String, Table, pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -33,8 +34,39 @@ target_metadata = Base.metadata
 # Dedicated version table — avoids collision with downstream apps
 VERSION_TABLE = "khora_alembic_version"
 
+# version_num column width. Alembic's default is 32, but Khora revision IDs
+# (e.g. "022_promote_external_id_index_unique") exceed that. Widened to 64.
+# (DYT-3546)
+VERSION_NUM_LENGTH = 64
+
 # Advisory lock ID — deterministic int64 from hashlib, unique to khora migrations
 LOCK_ID = int.from_bytes(hashlib.md5(b"khora_migrations", usedforsecurity=False).digest()[:8], "big", signed=True)
+
+
+# Override Alembic's hardcoded String(32) for the version table. This ensures
+# fresh databases get a wider column on initial CREATE — without this, the
+# first revision longer than 32 chars would fail on INSERT. Existing databases
+# are widened by migration 026_widen_alembic_version_column. (DYT-3546)
+def _version_table_impl(
+    self: DefaultImpl,
+    *,
+    version_table: str,
+    version_table_schema: str | None,
+    version_table_pk: bool,
+    **_kw: object,
+) -> Table:
+    vt = Table(
+        version_table,
+        MetaData(),
+        Column("version_num", String(VERSION_NUM_LENGTH), nullable=False),
+        schema=version_table_schema,
+    )
+    if version_table_pk:
+        vt.append_constraint(PrimaryKeyConstraint("version_num", name=f"{version_table}_pkc"))
+    return vt
+
+
+DefaultImpl.version_table_impl = _version_table_impl  # type: ignore[method-assign]
 
 
 def _get_url() -> str:
@@ -144,6 +176,28 @@ def do_run_migrations(connection: Connection) -> None:
                 text("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = :table)"),
                 {"table": VERSION_TABLE},
             ).scalar()
+
+        # Pre-migration widen: existing PostgreSQL deployments may have version_num
+        # at the Alembic default VARCHAR(32). Khora revision IDs (e.g.
+        # "022_promote_external_id_index_unique") exceed 32 chars, so the next
+        # migration step would fail when Alembic writes the new revision. Widen
+        # in-place before running migrations. Idempotent: skipped if already wide.
+        # (DYT-3546)
+        if is_postgres and table_exists:
+            current_width = connection.execute(
+                text(
+                    "SELECT character_maximum_length FROM information_schema.columns "
+                    "WHERE table_name = :table AND column_name = 'version_num'"
+                ),
+                {"table": VERSION_TABLE},
+            ).scalar()
+            if current_width is not None and current_width < VERSION_NUM_LENGTH:
+                connection.execute(
+                    text(
+                        f"ALTER TABLE {VERSION_TABLE} "  # noqa: S608
+                        f"ALTER COLUMN version_num TYPE VARCHAR({VERSION_NUM_LENGTH})"
+                    )
+                )
 
         current_rev = None
         if table_exists:
