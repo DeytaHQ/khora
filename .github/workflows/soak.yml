@@ -1,0 +1,98 @@
+name: Soak (manual)
+
+# DYT-3545: Long-running soak / burn-in for v0.9.0 release sign-off.
+#
+# This workflow is **manual only** (workflow_dispatch). It does NOT gate any
+# other workflow — soak is a release sign-off step, not a per-PR check.
+# Trigger from the Actions tab before tagging a release.
+#
+# Drives both stacks:
+#   1. SQLite + LanceDB (embedded, no Docker) — runs first, fastest signal.
+#   2. PostgreSQL + Neo4j (production) — Docker compose stack from this repo.
+#
+# Per-stack JSON summaries are uploaded as artifacts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: "Soak duration per stack (default 14400 = 4h)"
+        required: true
+        default: "14400"
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    # Add 30-min slack on top of the configured duration; the workflow sets
+    # KHORA_SOAK_DURATION_S per-stack, so the wallclock for two stacks is
+    # ~2× duration_seconds plus setup.
+    timeout-minutes: 600
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      # ---------------------------------------------------------------
+      # Stack 1 — SQLite + LanceDB (no Docker)
+      # ---------------------------------------------------------------
+      - name: Soak — SQLite + LanceDB
+        env:
+          KHORA_SOAK_DURATION_S: ${{ github.event.inputs.duration_seconds }}
+        run: |
+          uv run pytest tests/soak/test_soak.py::test_soak_sqlite_lance \
+            -m soak --no-cov -s -v
+
+      # ---------------------------------------------------------------
+      # Stack 2 — PostgreSQL + Neo4j (Docker compose from this repo)
+      # ---------------------------------------------------------------
+      - name: Start PostgreSQL + Neo4j
+        run: |
+          docker compose -f compose.yaml up -d
+          # Wait for healthchecks
+          for svc in khora-postgres khora-neo4j; do
+            for i in $(seq 1 60); do
+              status=$(docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null || echo "starting")
+              if [ "$status" = "healthy" ]; then echo "$svc healthy"; break; fi
+              echo "waiting for $svc ($status)..."
+              sleep 5
+            done
+          done
+
+      - name: Soak — PostgreSQL + Neo4j
+        env:
+          KHORA_SOAK_DURATION_S: ${{ github.event.inputs.duration_seconds }}
+          KHORA_SOAK_PG_URL: postgresql+asyncpg://khora:khora@localhost:5434/khora
+          KHORA_GRAPH_URL: bolt://neo4j:pleaseletmein@localhost:7688
+        run: |
+          uv run pytest tests/soak/test_soak.py::test_soak_postgres_neo4j \
+            -m soak --no-cov -s -v
+
+      - name: Stop databases
+        if: always()
+        run: docker compose -f compose.yaml down -v
+
+      # ---------------------------------------------------------------
+      # Upload per-stack JSON summaries
+      # ---------------------------------------------------------------
+      - name: Upload soak summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-summaries
+          path: /tmp/khora-soak-*.json
+          if-no-files-found: warn
