@@ -500,6 +500,7 @@ class VectorCypherEngine:
             config=retriever_config,
             storage=self._storage,
             neo4j_query_timeout=neo4j_query_timeout,
+            backend=backend,
         )
 
         # Initialize telemetry

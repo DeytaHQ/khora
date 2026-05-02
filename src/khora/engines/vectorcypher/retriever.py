@@ -184,6 +184,28 @@ def _extract_occurred_at(item: Any) -> str | None:
     return None
 
 
+def _has_target_date(
+    temporal_filter: Any | None,
+    temporal_signal: Any | None,
+) -> bool:
+    """Return True if the recall request carries a point-in-time target date.
+
+    Used to gate the embedded sqlite_lance backend (DYT-3550) which lacks
+    bi-temporal version columns. Both inputs are duck-typed because the
+    same attribute names (``occurred_after`` / ``occurred_before``) are
+    shared between the user-facing temporal filter and the
+    ``TemporalSignal``-attached filter produced by EXPLICIT detection.
+    """
+    for tf in (temporal_filter, getattr(temporal_signal, "temporal_filter", None)):
+        if tf is None:
+            continue
+        if getattr(tf, "occurred_before", None) is not None:
+            return True
+        if getattr(tf, "occurred_after", None) is not None:
+            return True
+    return False
+
+
 class VectorCypherRetriever:
     """Hybrid retriever combining vector search with Cypher graph traversal.
 
@@ -207,6 +229,7 @@ class VectorCypherRetriever:
         router_config: RouterConfig | None = None,
         storage: StorageCoordinator | None = None,
         neo4j_query_timeout: float | None = None,
+        backend: str = "postgres",
     ):
         """Initialize the retriever.
 
@@ -224,6 +247,9 @@ class VectorCypherRetriever:
             neo4j_query_timeout: Optional per-transaction timeout in seconds
                 forwarded to the underlying ``DualNodeManager`` to bound
                 ``get_entity_neighborhoods``. ``None`` disables the timeout.
+            backend: Storage backend identifier (e.g., ``"postgres"``,
+                ``"surrealdb"``, ``"sqlite_lance"``). Used to gate features
+                that aren't implemented on the embedded backend (DYT-3550).
         """
         self._vector_store = vector_store
         self._neo4j_driver = neo4j_driver
@@ -231,6 +257,7 @@ class VectorCypherRetriever:
         self._database = database
         self._config = config or RetrieverConfig()
         self._storage = storage
+        self._backend = backend
 
         # Initialize router with config, syncing adaptive depth settings
         if router_config is None:
@@ -294,6 +321,18 @@ class VectorCypherRetriever:
         """
         with trace_span("khora.vectorcypher.retrieve", namespace_id=str(namespace_id)) as span:
             limit = limit or self._config.max_chunks
+
+            # DYT-3550: gate point-in-time / historical queries on the embedded
+            # backend. The sqlite_lance schema lacks ``version_valid_from/to``
+            # columns, so ``_version_filter_entities`` would silently fall
+            # through and return current-state results — a correctness bug.
+            # Fail fast with a clear message before any storage I/O.
+            if self._backend == "sqlite_lance" and _has_target_date(temporal_filter, temporal_signal):
+                raise NotImplementedError(
+                    "Point-in-time queries (target_date) are not supported on "
+                    "the embedded sqlite_lance backend. Use the production "
+                    "stack (PostgreSQL+Neo4j) for historical/temporal queries."
+                )
 
             # Resolve retrieval parameters from temporal signal
             params = (
