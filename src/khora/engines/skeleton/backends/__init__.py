@@ -156,17 +156,22 @@ def create_temporal_store(
     weaviate_url: str | None = None,
     surrealdb_config: Any | None = None,
     engine: Any | None = None,
+    sqlite_lance_handle: Any | None = None,
 ) -> TemporalVectorStore:
     """Create a temporal vector store backend.
 
     Args:
-        backend: Backend type ("pgvector", "weaviate", or "surrealdb")
+        backend: Backend type ("pgvector", "weaviate", "surrealdb", or "sqlite_lance")
         config: Khora configuration
         weaviate_url: Weaviate URL (required for weaviate backend)
         surrealdb_config: SurrealDBConfig instance (optional, falls back to config.storage.surrealdb)
         engine: Optional shared SQLAlchemy AsyncEngine (pgvector backend only).
             When provided, the temporal store reuses this engine instead of
             creating a private connection pool.
+        sqlite_lance_handle: Shared ``EmbeddedStorageHandle`` (sqlite_lance backend only).
+            The Skeleton engine extracts this from the unified
+            ``StorageCoordinator``'s vector adapter so the temporal store and
+            the coordinator share one aiosqlite + LanceDB pair.
 
     Returns:
         Configured TemporalVectorStore implementation
@@ -185,8 +190,17 @@ def create_temporal_store(
         from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore
 
         return SurrealDBTemporalStore(config, surrealdb_config=surrealdb_config)
+    elif backend == "sqlite_lance":
+        if sqlite_lance_handle is None:
+            raise ValueError(
+                "sqlite_lance_handle is required for sqlite_lance backend "
+                "(extracted from the unified StorageCoordinator)"
+            )
+        from khora.engines.skeleton.backends.sqlite_lance import SQLiteLanceTemporalStore
+
+        return SQLiteLanceTemporalStore(sqlite_lance_handle)
     else:
-        raise ValueError(f"Unknown backend: {backend}. Available: pgvector, weaviate, surrealdb")
+        raise ValueError(f"Unknown backend: {backend}. Available: pgvector, weaviate, surrealdb, sqlite_lance")
 
 
 __all__ = [

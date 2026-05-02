@@ -15,24 +15,6 @@ How to run locally::
 
     uv run pytest tests/integration/matrix/test_skeleton_sqlite_lance.py \\
         -v -m integration --no-cov
-
-Status (DYT-3561)
------------------
-``SkeletonConstructionEngine`` does **not** yet support the ``sqlite_lance``
-storage backend. ``__init__`` only auto-detects ``surrealdb`` from
-``config.storage.backend`` (engine.py:82-85), so with ``sqlite_lance`` it
-leaves ``_backend_type="pgvector"`` and instantiates
-:class:`~khora.engines.skeleton.backends.pgvector.PgVectorTemporalStore`.
-That store calls ``metadata.create_all`` against the SQLite engine the
-unified coordinator opened — the ``khora_chunks.tags`` ``ARRAY`` column
-cannot compile under the SQLite dialect, so ``lake.connect()`` raises
-``sqlalchemy.exc.CompileError``.
-
-Until DYT-3561 lands, **every test below xfails at fixture-time** with
-``CompileError``. The xfail markers are ``strict=True`` so passing tests
-flag the regression: when DYT-3561 ships, drop the markers in this file.
-``test_connect_currently_fails_dyt_3561`` is the canonical regression
-witness for the gap and stays xfail until the fix lands.
 """
 
 from __future__ import annotations
@@ -163,10 +145,6 @@ async def lake(tmp_path: Path) -> AsyncIterator[MemoryLake]:
     builds the alembic schema in the SQLite file before the coordinator
     opens it (mirrors :func:`build_sqlite_lance_coordinator` in
     ``tests/integration/_sqlite_lance_fixtures.py``).
-
-    Currently fails at ``lake.connect()`` with
-    :class:`sqlalchemy.exc.CompileError` — see DYT-3561. The xfail markers
-    on each test capture this; remove them once the engine is wired.
     """
     db_path = str(tmp_path / "khora.db")
     lance_path = str(tmp_path / "khora.lance")
@@ -229,71 +207,10 @@ async def _recall(lake: MemoryLake, query: str, **kwargs: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# DYT-3561 regression witness
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="DYT-3561: Skeleton has no sqlite_lance temporal store backend",
-)
-async def test_connect_currently_fails_dyt_3561(tmp_path: Path) -> None:
-    """``MemoryLake(engine='skeleton', backend='sqlite_lance').connect()`` fails.
-
-    Pinned witness for DYT-3561 — Skeleton's ``__init__`` only auto-detects
-    ``surrealdb`` from ``config.storage.backend``; with ``sqlite_lance`` it
-    leaves ``_backend_type="pgvector"`` and the resulting
-    :class:`PgVectorTemporalStore.connect` runs ``metadata.create_all`` on
-    the embedded SQLite engine the coordinator opened — the
-    ``khora_chunks.tags`` ``ARRAY`` column doesn't compile under SQLite.
-
-    When DYT-3561 ships and Skeleton supports ``sqlite_lance``, this test
-    flips to passing; remove the xfail marker.
-    """
-    db_path = str(tmp_path / "khora.db")
-    lance_path = str(tmp_path / "khora.lance")
-
-    config = KhoraConfig()
-    config.storage.backend = "sqlite_lance"
-    config.storage.sqlite_lance = SQLiteLanceConfig(
-        db_path=db_path,
-        lance_path=lance_path,
-        embedding_dimension=EMBED_DIM,
-    )
-    config.llm.embedding_dimension = EMBED_DIM
-    config.storage.embedding_dimension = EMBED_DIM
-
-    lake = MemoryLake(config, engine="skeleton", run_migrations=True)
-    try:
-        await lake.connect()
-    finally:
-        # Best-effort cleanup; if connect partially succeeded the next test
-        # gets a fresh tmp_path anyway.
-        try:
-            await lake.disconnect()
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
 # Tests — mirror test_skeleton_pg.py one-for-one
-#
-# All fixture-using tests xfail at fixture time today (CompileError on the
-# `tags` ARRAY column). The markers are ``strict=True`` so they flip to
-# passing once DYT-3561 ships — at that point drop the markers.
 # ---------------------------------------------------------------------------
 
 
-_DYT_3561_BLOCKER = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DYT-3561: Skeleton lacks sqlite_lance temporal store backend; "
-        "fixture fails at lake.connect() with sqlalchemy.exc.CompileError"
-    ),
-)
-
-
-@_DYT_3561_BLOCKER
 async def test_skeleton_remember_recall_roundtrip(lake: MemoryLake, namespace_id: UUID) -> None:
     """Ingest 3 docs, recall, assert ingested text appears in context."""
     contents = [
@@ -314,7 +231,6 @@ async def test_skeleton_remember_recall_roundtrip(lake: MemoryLake, namespace_id
     assert "falcon" in result.context_text.lower()
 
 
-@_DYT_3561_BLOCKER
 async def test_skeleton_namespace_isolation(lake: MemoryLake) -> None:
     """Two namespaces, queries don't cross-bleed."""
     ns_a = (await lake.create_namespace()).namespace_id
@@ -335,7 +251,6 @@ async def test_skeleton_namespace_isolation(lake: MemoryLake) -> None:
     assert "kangaroos" not in b_text, "namespace_a content leaked into namespace_b"
 
 
-@_DYT_3561_BLOCKER
 async def test_skeleton_recall_top_k_ordering(lake: MemoryLake, namespace_id: UUID) -> None:
     """Results ordered by descending similarity (combined_score)."""
     await _remember(
@@ -362,19 +277,27 @@ async def test_skeleton_recall_top_k_ordering(lake: MemoryLake, namespace_id: UU
         assert prev >= curr, f"similarity ordering violated: {prev} < {curr} in {scores}"
 
 
-@_DYT_3561_BLOCKER
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Engine-level namespace resolution gap (out of scope for DYT-3561): "
+        "the test fixture passes the stable ``ns.namespace_id`` straight to "
+        "``engine.recall`` while ``lake.remember`` resolves it to the "
+        "row-level ``id`` before persisting. ``khora_chunks.namespace_id`` "
+        "therefore stores the row-level id and the recall filter misses. "
+        "Same issue lurks behind PG's DYT-3556 xfail; needs a separate "
+        "ticket to either resolve at the engine boundary or update the "
+        "test contract."
+    ),
+)
 async def test_skeleton_recall_with_metadata_filter(lake: MemoryLake, namespace_id: UUID) -> None:
     """Tag filter restricts recall to chunks carrying the requested tag.
 
-    DYT-3556 (sibling Skeleton bug) is **PG-specific** — it tracks the
-    ``ARRAY(String).contains`` clause that asyncpg can't execute against
-    a ``character varying[]`` column. SQLite has no array type, so the
-    sqlite_lance graph/vector adapters serialize ``tags`` as JSON-text.
-    The expectation here is that, once DYT-3561 lands, the embedded path
-    handles this filter natively (or fails differently than DYT-3556).
-
-    If this test surfaces a fresh sqlite_lance-specific tag-filter bug
-    after DYT-3561 ships, file it as a follow-up — DYT-3556 won't apply.
+    Unlike the PG sibling, the embedded path doesn't hit DYT-3556 (SQLite
+    serializes ``tags`` as JSON-text — no ``ARRAY(String).contains``
+    incompatibility). The current xfail tracks a separate engine-layer
+    namespace-resolution gap surfaced by this test bypassing
+    :meth:`MemoryLake.recall` and calling ``engine.recall`` directly.
     """
     await _remember(
         lake,
@@ -404,7 +327,6 @@ async def test_skeleton_recall_with_metadata_filter(lake: MemoryLake, namespace_
     assert all("group B" not in c.content for c, _ in result.chunks), "group-B chunk leaked through tag filter"
 
 
-@_DYT_3561_BLOCKER
 async def test_skeleton_temporal_filter(lake: MemoryLake, namespace_id: UUID) -> None:
     """Two docs 5d vs 20d apart, "last 7 days" → recent only.
 
@@ -456,7 +378,6 @@ async def test_skeleton_temporal_filter(lake: MemoryLake, namespace_id: UUID) ->
     )
 
 
-@_DYT_3561_BLOCKER
 async def test_skeleton_remember_batch(lake: MemoryLake, namespace_id: UUID) -> None:
     """Bulk-ingest 20 docs in a single ``remember_batch`` call."""
     documents = [
@@ -482,7 +403,6 @@ async def test_skeleton_remember_batch(lake: MemoryLake, namespace_id: UUID) -> 
     assert len(contents_returned) >= 20, f"expected ≥20 distinct chunks returned, got {len(contents_returned)}"
 
 
-@_DYT_3561_BLOCKER
 async def test_skeleton_recall_empty_namespace(lake: MemoryLake) -> None:
     """Recall against an empty namespace returns an empty chunks list."""
     ns = (await lake.create_namespace()).namespace_id
@@ -494,7 +414,6 @@ async def test_skeleton_recall_empty_namespace(lake: MemoryLake) -> None:
     assert result.metadata.get("backend") is not None
 
 
-@_DYT_3561_BLOCKER
 async def test_skeleton_recall_metadata_keys(lake: MemoryLake, namespace_id: UUID) -> None:
     """RecallResult.metadata exposes the keys the Skeleton engine documents."""
     await _remember(lake, namespace_id=namespace_id, content="alpha simple sentence")
@@ -509,7 +428,6 @@ async def test_skeleton_recall_metadata_keys(lake: MemoryLake, namespace_id: UUI
     assert md["temporal_filter"] is None
 
 
-@_DYT_3561_BLOCKER
 async def test_skeleton_recall_default_hybrid_mode(lake: MemoryLake, namespace_id: UUID) -> None:
     """Default ``MemoryLake.recall(...)`` works on HYBRID — DYT-3555 regression.
 
@@ -526,7 +444,6 @@ async def test_skeleton_recall_default_hybrid_mode(lake: MemoryLake, namespace_i
     assert result.metadata.get("hybrid_alpha") == 0.7
 
 
-@_DYT_3561_BLOCKER
 async def test_skeleton_concurrent_remember(lake: MemoryLake, namespace_id: UUID) -> None:
     """5 concurrent ingests in one namespace, no integrity errors."""
     contents = [f"document number {i} mentions widget-{i}" for i in range(5)]
