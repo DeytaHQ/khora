@@ -13,6 +13,7 @@ Khora supports four pluggable engines with different strengths. This guide helps
 | **LLM Cost** | Medium (~700 calls/1000 docs) | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) | Medium (~700 calls/1000 docs) |
 | **Graph Backend** | Required (Neo4j/Neptune/AGE) | Required (Neo4j/Memgraph) | Not required | Not required |
 | **Search Modes** | Vector + Cypher + BM25 + RRF | Vector + Graph + Keyword | Vector + BM25 Hybrid | 4-channel: Semantic + BM25 + Temporal + Entity |
+| **Point-in-time queries** | Production-only (PG+Neo4j); not supported on the embedded `sqlite_lance` backend | n/a | n/a | n/a |
 | **Best For** | Complex multi-hop queries | Knowledge bases | Chat history, logs, events | Temporal queries, long conversations |
 
 ## Detailed Comparison
@@ -171,6 +172,10 @@ SurrealDB (single database)
 ```
 
 SurrealDB can serve as all three backends in a single database, simplifying deployment. It's available as an alternative for any engine, though the PostgreSQL + Neo4j stack is more mature for production use.
+
+### Embedded backend (`sqlite_lance`)
+
+The embedded `sqlite_lance` backend (SQLite + LanceDB) is intended for evaluation, tests, and small single-process deployments. It does **not** support point-in-time / historical queries: VectorCypher's `_version_filter_entities` reads `version_valid_from` / `version_valid_to` columns that exist only in the Neo4j Entity-version graph. Calling `recall()` with a target date (either via `start_time` / `end_time` arguments or a query whose temporal detection produces an `EXPLICIT` category date) on `sqlite_lance` raises `NotImplementedError` immediately, before any storage I/O. Use the production stack (PostgreSQL+Neo4j) for historical/temporal queries (DYT-3550).
 
 ### Search Capabilities (VectorCypher)
 
