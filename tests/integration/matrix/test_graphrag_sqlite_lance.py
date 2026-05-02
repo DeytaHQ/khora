@@ -387,10 +387,6 @@ async def test_graphrag_two_hop_traversal(lake: MemoryLake) -> None:
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DYT-3562: GraphRAG embedded path doesn't push temporal filter to LanceDB query",
-)
 async def test_graphrag_temporal_filter(lake: MemoryLake, namespace_id: UUID) -> None:
     """Backdate one doc 20 days, leave another at 5 days, query last 7 days.
 
