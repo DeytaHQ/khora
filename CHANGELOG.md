@@ -4,7 +4,7 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
-## [0.9.0] — Embedded Backend Realignment, Production-Readiness Scoping
+## [0.9.0] — 2026-05-02 — Embedded Backend Realignment, Production-Readiness Scoping
 
 ### Embedded backend overhaul (DYT-3545 family)
 
