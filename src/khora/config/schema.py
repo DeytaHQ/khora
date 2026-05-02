@@ -217,6 +217,14 @@ class SQLiteLanceConfig(BaseModel):
         description="IVF partition count (ivf_pq only). None = auto from row count.",
     )
     hnsw_m: int = Field(default=16, description="HNSW M parameter (max connections per layer)")
+    retrain_factor: float = Field(
+        default=2.0,
+        description=(
+            "Rebuild the LanceDB ANN index once the row count grows to "
+            "retrain_factor * (rows at last training). Default 2.0 retrains "
+            "when the corpus has doubled. Set <= 1.0 to disable retraining."
+        ),
+    )
 
     model_config = {"extra": "forbid"}
 

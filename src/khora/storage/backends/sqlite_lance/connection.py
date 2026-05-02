@@ -60,6 +60,7 @@ class EmbeddedStorageHandleConfig:
     lance_index: Literal["auto", "ivf_pq", "hnsw", "brute"] = "auto"
     ivf_partitions: int | None = None
     hnsw_m: int = 16
+    retrain_factor: float = 2.0
 
 
 class EmbeddedStorageHandle:

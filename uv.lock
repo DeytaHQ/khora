@@ -1289,7 +1289,7 @@ requires-dist = [
     { name = "kuzu", marker = "extra == 'all-backends'", specifier = ">=0.11.3" },
     { name = "kuzu", marker = "extra == 'graph-all'", specifier = ">=0.11.3" },
     { name = "kuzu", marker = "extra == 'kuzu'", specifier = ">=0.11.3" },
-    { name = "lancedb", marker = "extra == 'all-backends'", specifier = ">=0.17.0" },
+    { name = "lancedb", marker = "extra == 'all-backends'", specifier = ">=0.25" },
     { name = "lancedb", marker = "extra == 'lancedb'", specifier = ">=0.25" },
     { name = "lancedb", marker = "extra == 'sqlite-lance'", specifier = ">=0.25" },
     { name = "litellm", specifier = ">=1.81.15" },

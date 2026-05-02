@@ -481,6 +481,7 @@ class StorageFactory:
             lance_index=getattr(config, "lance_index", "auto"),
             ivf_partitions=getattr(config, "ivf_partitions", None),
             hnsw_m=getattr(config, "hnsw_m", 16),
+            retrain_factor=getattr(config, "retrain_factor", 2.0),
         )
         handle = EmbeddedStorageHandle(handle_config)
 
