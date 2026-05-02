@@ -621,6 +621,16 @@ class VectorCypherEngine:
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
         storage = self._get_storage()
 
+        # Resolve occurred_at: explicit kwarg wins, then metadata["occurred_at"]
+        # (parity with remember_batch), finally fall back to now().
+        if occurred_at is None:
+            occurred_at = datetime.now(UTC)
+            if metadata and "occurred_at" in metadata:
+                try:
+                    occurred_at = self._parse_datetime(metadata["occurred_at"])
+                except ValueError:
+                    pass
+
         # ADR-056: external_id dispatch — route to replace_document_extraction
         # when the caller supplied an external_id that already exists in the
         # namespace. Lookup is status-agnostic (COMPLETED / PROCESSING / FAILED)
@@ -639,7 +649,7 @@ class VectorCypherEngine:
                     skill_name=skill_name,
                     expertise=expertise,
                     extraction_model=extraction_model,
-                    occurred_at=occurred_at or datetime.now(UTC),
+                    occurred_at=occurred_at,
                     entity_types=entity_types,
                     relationship_types=relationship_types,
                     extraction_config_hash=extraction_config_hash,
@@ -701,7 +711,7 @@ class VectorCypherEngine:
                 skill_name=skill_name,
                 expertise=expertise,
                 extraction_model=extraction_model,
-                occurred_at=occurred_at or datetime.now(UTC),
+                occurred_at=occurred_at,
                 entity_types=entity_types,
                 relationship_types=relationship_types,
                 extraction_config_hash=extraction_config_hash,
@@ -715,7 +725,7 @@ class VectorCypherEngine:
             skill_name=skill_name,
             expertise=expertise,
             extraction_model=extraction_model,
-            occurred_at=occurred_at or datetime.now(UTC),
+            occurred_at=occurred_at,
             entity_types=entity_types,
             relationship_types=relationship_types,
             chunk_strategy=chunk_strategy,
