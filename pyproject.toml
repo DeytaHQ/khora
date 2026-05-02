@@ -142,6 +142,7 @@ markers = [
     "integration: Integration tests",
     "e2e: End-to-end tests",
     "slow: Slow tests (skipped by default; run with -m slow)",
+    "soak: Long-running soak/burn-in tests (skipped by default; run with -m soak --no-cov)",
 ]
 asyncio_mode = "auto"
 
@@ -235,4 +236,5 @@ dev = [
     "rapidfuzz>=3.14.3",  # For ty type checking of optional accel module
     "spacy>=3.8.11",
     "aiosqlite>=0.20.0",  # For SQLite backend tests
+    "psutil>=5.9.0",  # DYT-3545: RSS sampling for soak harness
 ]
