@@ -4,6 +4,60 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.9.0] — Embedded Backend Realignment, Production-Readiness Scoping
+
+### Embedded backend overhaul (DYT-3545 family)
+
+The v0.9.0 embedded path lands as a complete-but-experimental SQLite + LanceDB stack covering all four engines (VectorCypher, GraphRAG, Skeleton, Chronicle). Engine × embedded integration tests now exist for all four engines; the prior "unverified embedded code path" gap from the audit is closed. See [ADR-025](docs/adrs/adr-025-embedded-backend-realignment.md) for the strategic rationale.
+
+**Production-readiness scoping (per stack, not per engine).** Stamping is now per `(engine × storage stack)`:
+
+- **VectorCypher** — production-ready on **PostgreSQL + pgvector + Neo4j** only.
+- **Chronicle** — production-ready on **PostgreSQL + pgvector** (no graph DB required).
+- **GraphRAG** and **Skeleton** — available; same PG-based stacks.
+- **SQLite + LanceDB** for any engine — **experimental**. Documented scale ceiling: ~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3.
+- **SurrealDB** for any engine — **experimental**. Python SDK on alpha track (`>=2.0.0a1`); KNN unreliable in embedded mode (brute-force cosine + HNSW fallback).
+
+See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md#production-readiness-by-stack-v090) for the full matrix.
+
+### Embedded engine wiring
+
+- DYT-3560 (#482): VectorCypher wired to the `sqlite_lance` backend.
+- DYT-3561 (#481): Skeleton wired to the `sqlite_lance` backend with a temporal-store adapter.
+- DYT-3562: GraphRAG embedded path pushes the temporal filter into the LanceDB WHERE — was previously post-hoc and xfail-pinned.
+- DYT-3578 (#486): Temporal filter pushed into SQLite-side WHERE in the GraphRAG embedded chunk fetch path.
+- DYT-3581: VectorCypher honours `metadata['occurred_at']` on the embedded path (parity with `remember_batch`).
+
+### Embedded retrieval correctness
+
+- DYT-3547: Chronicle channels (BM25 / semantic / temporal / entity) now share the same `created_after`/`created_before` bounds — fixes channel divergence that broke RRF fusion.
+- DYT-3548: Recursive-CTE graph traversal switched from node-visited to edge-visited tracking (mirrors Neo4j `MATCH [*1..N]`).
+- DYT-3549: `valid_until > now` filter inlined into both anchor and recursive arms of the CTE.
+- DYT-3555 / DYT-3556: Skeleton tag-cast and `occurred_at` parsing fixes (`Skeleton.remember()` parity with `remember_batch()`, DYT-3557).
+- DYT-3558: Embedded compensating-delete-on-failure logging hardened.
+- DYT-3579 (#485): LanceDB IVF-PQ index now retrains once the corpus grows past `retrain_factor × (rows at last training)`. Configurable via `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` (default `2.0`). Fixes silent recall degradation as the corpus grows past the initial training threshold (5k rows). Set ≤ `1.0` to disable.
+
+### Embedded warts (documented, not fixed)
+
+- **Partial atomicity in `coordinator.transaction()`** on embedded — only the SQL session is enrolled; LanceDB writes happen post-commit with compensating deletes.
+- **DYT-3550**: Point-in-time queries are not supported on the embedded stack. The CTE port does not implement PIT semantics. Tracked.
+- **FTS5 on chunks only** — entity-anchored recall falls back to `LIKE` / JSON-equality on embedded. Use the PostgreSQL stack for entity-heavy corpora.
+
+### Deprecated
+
+- **Kuzu graph backend** (`khora[kuzu]`) — deprecated in 0.9.0, scheduled for removal in 0.10. Kuzu was acquired by Apple in October 2025 and the upstream repository is archived. Migrate to SQLite + LanceDB (embedded) or PostgreSQL + Neo4j (production).
+
+### v0.10 roadmap
+
+ADR-025 enumerates two deferred decisions for v0.10 to address the embedded warts:
+
+- **sqlite-vec** as a candidate to collapse the SQLite + LanceDB dual-store into a single in-SQLite-transaction vector store (eliminates partial atomicity, drops install footprint from ~150 MB to ~5 MB).
+- **`pgserver` (embedded Postgres)** as a candidate for true production-parity embedded mode (HNSW recall, real ACID, zero schema fork).
+- **Default embedded URI routing** — currently `MemoryLake("memory://")` treats the URL as the PostgreSQL `database_url`; SurrealDB owns the `memory://` scheme internally. Routing a top-level `memory://` URI to the recommended embedded stack is a v0.10 code change.
+- **`lance-graph` integration** is explicitly **deferred to v0.10** — no second 0.x Rust crate enters a "production-ready" path in v0.9.0.
+
+---
+
 ## [Unreleased] — Graph Backends, Temporal Precision, Discovery Agent Overhaul
 
 ### Added

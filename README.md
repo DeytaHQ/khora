@@ -19,22 +19,29 @@ Khora is a **library, not an application**. CLI tooling lives in sibling package
 
 ```bash
 pip install khora                 # core (PostgreSQL + pgvector)
-pip install khora[surrealdb]      # embedded SurrealDB, zero infrastructure
-pip install khora[all-backends]   # Neo4j, Kuzu, SurrealDB, SQLite, Weaviate
+pip install khora[sqlite-lance]   # [experimental] embedded SQLite + LanceDB
+pip install khora[surrealdb]      # [experimental] unified SurrealDB (single store)
+pip install khora[all-backends]   # everything: Neo4j, SurrealDB, SQLite+LanceDB, Weaviate, AGE
 ```
 
-See [docs/configuration.md](docs/configuration.md) for the full extras list.
+See [docs/configuration.md](docs/configuration.md) for the full extras list. The `kuzu` extra is **deprecated in 0.9.0** and scheduled for removal in 0.10.
 
-## Quickstart
+## Production stack
 
-Zero-infrastructure — SurrealDB runs in-process:
+The production-ready combination in v0.9.0 is **PostgreSQL + pgvector + Neo4j**:
+
+- **VectorCypher** (default engine) — runs on PostgreSQL + pgvector + Neo4j.
+- **Chronicle** — runs on PostgreSQL + pgvector (no graph DB required).
+- **GraphRAG** and **Skeleton** — available; same PG+Neo4j (or PG-only for Skeleton) shape.
+
+Set `KHORA_DATABASE_URL` and `KHORA_NEO4J_URL`, run `uv run alembic upgrade head`, then instantiate `MemoryLake()` with no arguments:
 
 ```python
 import asyncio
 from khora import MemoryLake
 
 async def main() -> None:
-    async with MemoryLake("memory://") as lake:
+    async with MemoryLake() as lake:  # reads KHORA_DATABASE_URL / KHORA_NEO4J_URL
         ns = await lake.create_namespace("demo")
         await lake.remember(
             "Marie Curie won the Nobel Prize in Physics in 1903.",
@@ -46,7 +53,14 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-For production (PostgreSQL + pgvector + Neo4j), set `KHORA_DATABASE_URL` and `KHORA_NEO4J_URL`, run `uv run alembic upgrade head`, then instantiate `MemoryLake()` with no arguments. See [docs/](docs/) for details.
+## Embedded options (experimental)
+
+Khora ships two zero-infrastructure paths. Both are marked **experimental** in v0.9.0 — fine for demos, evaluation, tests, and small single-user CLIs; not yet stamped as a deployment story.
+
+- **SQLite + LanceDB** (`pip install khora[sqlite-lance]`, set `KHORA_STORAGE_BACKEND=sqlite_lance`) — recommended embedded stack. Covers VectorCypher, GraphRAG, Skeleton, and Chronicle via dialect-aware Alembic migrations and LanceDB-backed vector search. Documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. Known gaps: no point-in-time queries (DYT-3550), partial atomicity in `coordinator.transaction()`, FTS on chunks only. See [configuration.md](docs/configuration.md#embedded-backends-experimental).
+- **SurrealDB** (`pip install khora[surrealdb]`) — unified relational + vector + graph in one store. Python SDK is on the alpha track (`>=2.0.0a1`), and KNN (`<|K|>`) is unreliable in embedded mode (uses brute-force cosine + HNSW fallback). Suitable for experimentation; not recommended for production.
+
+> **Quickstart caveat.** A literal `MemoryLake("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector — there is no `memory://` URL scheme parsed by the lake itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` (or `surrealdb`) and the corresponding `db_path` / connection settings. Routing a true `memory://` URI to the SQLite+LanceDB stack is tracked for v0.10.
 
 ## Documentation
 

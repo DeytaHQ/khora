@@ -69,6 +69,7 @@ Pluggable retrieval strategies that implement `MemoryEngineProtocol`.
 
 - [ADR-022](adrs/adr-022-extraction-skills-public-api.md) — extraction skills public API.
 - [ADR-024](adrs/adr-024-memory-lake-public-api.md) — memory-lake public API (the stable top-level surface).
+- [ADR-025](adrs/adr-025-embedded-backend-realignment.md) — embedded backend realignment for v0.9.0 (production-readiness scoping per stack, sqlite-vec / pgserver deferred to v0.10).
 
 ## Process
 

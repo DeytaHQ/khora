@@ -42,9 +42,9 @@ Programmatic values take priority over environment variables.
 | Extra | Purpose | Pulls in |
 |---|---|---|
 | *(default)* | Core: PostgreSQL + pgvector + Neo4j driver + litellm | — |
-| `surrealdb` | Unified SurrealDB backend (embedded or remote) | `surrealdb>=2.0.0a1` |
-| `embedded` | Alias for `surrealdb` (zero-infrastructure path) | `surrealdb>=2.0.0a1` |
-| `kuzu` | Embedded graph backend | `kuzu>=0.11.3` |
+| `surrealdb` | **[experimental]** Unified SurrealDB backend (embedded or remote). SDK on alpha track; KNN unreliable in embedded mode | `surrealdb>=2.0.0a1` |
+| `embedded` | Alias for `surrealdb` (zero-infrastructure path) — **experimental** | `surrealdb>=2.0.0a1` |
+| `kuzu` | **[deprecated in 0.9.0, removal scheduled for 0.10]** Embedded graph backend | `kuzu>=0.11.3` |
 | `memgraph` | Memgraph via Bolt | `neo4j>=6.1.0` |
 | `neptune` | AWS Neptune via Bolt | `neo4j>=6.1.0` |
 | `neptune-iam` | Neptune with IAM SigV4 | `neo4j>=6.1.0`, `boto3` |
@@ -52,7 +52,7 @@ Programmatic values take priority over environment variables.
 | `weaviate` | Weaviate vector store | `weaviate-client>=4.20.1` |
 | `sqlite` | SQLite embedded relational + vector | `aiosqlite>=0.20.0` |
 | `lancedb` | LanceDB embedded vector store | `lancedb>=0.17.0`, `pyarrow` |
-| `sqlite-lance` | Unified SQLite + LanceDB backend (used by Chronicle's embedded path) | `lancedb>=0.17.0`, `aiosqlite>=0.20.0`, `pyarrow` |
+| `sqlite-lance` | **[experimental]** Unified SQLite + LanceDB embedded backend. Recommended embedded stack; covers VectorCypher / GraphRAG / Skeleton / Chronicle | `lancedb>=0.17.0`, `aiosqlite>=0.20.0`, `pyarrow` |
 | `binary-readers` | PDF / docx / xlsx readers (used by khora-cli and downstream ingestors) | `pymupdf`, `openpyxl`, `python-docx` |
 | `parquet` | Parquet readers | `pyarrow>=18.0.0` |
 | `nlp` | spaCy-based sentence splitting | `spacy>=3.8` |
@@ -133,6 +133,51 @@ KHORA_STORAGE_SQLITE_LANCE__EMBEDDING_DIMENSION=1536
 Install with `pip install 'khora[sqlite-lance]'` (pulls in `aiosqlite` and
 `lancedb`). The pgvector path is unchanged for existing deployments —
 omit `storage_backend` to get the original behavior.
+
+## Embedded backends (experimental)
+
+The embedded paths (`sqlite_lance` and `surrealdb`) are marked **experimental in v0.9.0**. They are appropriate for demos, evaluation, tests, and small single-user CLIs. They are not the deployment story for v0.9.0; for production, use PostgreSQL + pgvector (+ Neo4j for VectorCypher / GraphRAG). See [ADR-025](adrs/adr-025-embedded-backend-realignment.md) for the rationale.
+
+### SQLite + LanceDB (recommended embedded stack)
+
+Documented scale ceiling — performance and recall degrade noticeably above these thresholds:
+
+- **~1M chunks** (LanceDB IVF-PQ training time + write serialisation start to dominate)
+- **~100k entities** (recursive-CTE traversal cost on hub nodes)
+- **~500k relationships**
+- **Traversal depth ≤3** (the `instr(walk.visited, ...)` visited-set scan in `graph.py` is `O(depth × fan-out × visited-len)` and degrades sharply at depth ≥4 with high fan-out)
+
+Known gaps and warts:
+
+- **Partial atomicity in `coordinator.transaction()`** — only the SQL session is enrolled; LanceDB writes happen post-commit with compensating-delete-on-failure. A crash between SQLite commit and Lance write can leave orphaned vectors or missing embeddings; reconciliation runs on the next ingest.
+- **Point-in-time queries are not supported** on the embedded stack (DYT-3550). The CTE port does not expose the equivalent of pgvector's PIT semantics.
+- **FTS5 covers chunks only** — entity-anchored recall falls back to `LIKE` / JSON-equality. Recommend the PostgreSQL stack for entity-heavy corpora.
+- **Install footprint** is ~130–180 MB unpacked (pyarrow + lancedb native + Arrow C++ runtime). "Embedded" means "no server", not "no native deps".
+- **IVF-PQ retraining** is automatic when the corpus grows past `retrain_factor × (rows at last training)`. Tune via `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` (see below).
+
+Vector index tuning fields on the `sqlite_lance` storage config:
+
+| Variable | Default | Description |
+|---|---|---|
+| `KHORA_STORAGE_SQLITE_LANCE__DB_PATH` | `./khora.db` | SQLite file path. |
+| `KHORA_STORAGE_SQLITE_LANCE__LANCE_PATH` | sibling `.lance` dir | LanceDB directory. |
+| `KHORA_STORAGE_SQLITE_LANCE__EMBEDDING_DIMENSION` | `1536` | Vector dimension. |
+| `KHORA_STORAGE_SQLITE_LANCE__USE_HALFVEC` | `false` | Store as float16. |
+| `KHORA_STORAGE_SQLITE_LANCE__LANCE_INDEX` | `auto` | `auto` / `ivf_pq` / `hnsw` / `brute`. |
+| `KHORA_STORAGE_SQLITE_LANCE__IVF_PARTITIONS` | `null` (auto) | IVF partition count. |
+| `KHORA_STORAGE_SQLITE_LANCE__HNSW_M` | `16` | HNSW `M`. |
+| `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` | `2.0` | Rebuild the LanceDB ANN index once the row count grows to `retrain_factor × (rows at last training)`. Default `2.0` retrains when the corpus has doubled. Set ≤ `1.0` to disable retraining. Added in v0.9.0 (DYT-3579). |
+
+### SurrealDB (experimental, unified store)
+
+The SurrealDB backend is feature-complete (relational + vector + graph + KV in a single store) but is **experimental in v0.9.0**:
+
+- Python SDK is pinned to `>=2.0.0a1` — alpha track for SurrealDB 3.x compatibility.
+- KNN expression `<|K|>` is unreliable in embedded mode; the backend falls back to brute-force cosine + HNSW.
+- Concurrent upserts require the `_SurrealDBEntityKeyGate` to serialise on `(namespace_id, name, entity_type)` keys.
+- BSL-1.1 license — review for downstream packaging concerns before adopting.
+
+Connection schemes: `memory://` (in-process), `surrealkv://...` (embedded file), `ws://...` (remote). Note: `MemoryLake("memory://")` does **not** route to SurrealDB today — the positional argument is treated as the PostgreSQL `database_url`. Set `KHORA_STORAGE_BACKEND=surrealdb` and the relevant `KHORA_STORAGE_SURREALDB_*` settings explicitly. Routing a `memory://` URI directly to the embedded stack is tracked for v0.10.
 
 ## LLM
 
