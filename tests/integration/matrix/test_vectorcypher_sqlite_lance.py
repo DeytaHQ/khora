@@ -81,14 +81,6 @@ EMBED_DIM = 32  # matches the sqlite_lance default and the existing fixture help
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not _HAS_EMBEDDED, reason="aiosqlite/lancedb not installed"),
-    # DYT-3560: VectorCypher has no sqlite_lance code path on main, so
-    # ``lake.connect()`` raises ``ValueError`` for every test here. Flip
-    # this to non-strict / remove once DYT-3560 lands.
-    pytest.mark.xfail(
-        strict=True,
-        reason="DYT-3560: VectorCypher engine has no sqlite_lance backend support yet",
-        raises=Exception,
-    ),
 ]
 
 
@@ -236,7 +228,6 @@ async def _remember(
     namespace_id: UUID,
     content: str,
     title: str = "",
-    occurred_at: datetime | None = None,
 ) -> Any:
     return await lake.remember(
         content=content,
@@ -245,7 +236,6 @@ async def _remember(
         entity_types=["PERSON", "CONCEPT", "EVENT", "ORG"],
         relationship_types=["KNOWS", "RELATES_TO", "MENTIONS"],
         expertise=_no_event_extraction(),
-        occurred_at=occurred_at,
     )
 
 
@@ -298,6 +288,12 @@ async def test_vc_entity_extraction(lake: MemoryLake, namespace_id: UUID) -> Non
     Queries the SQLite-CTE graph adapter directly via
     ``coord.graph.list_entities`` to confirm the entity was actually
     written (not just returned by the LLM stub).
+
+    Note on dual-IDs (ADR-024): ``MemoryNamespace`` carries two UUIDs —
+    ``namespace_id`` (stable) is what ``MemoryLake.recall`` accepts, but
+    the graph rows key on ``namespace.id`` (row-level FK), so we resolve
+    before the direct lookup. Names are lowercased by
+    ``normalize_entity_names_batch`` before persistence.
     """
     _plan_extraction(
         "Ada Lovelace",
@@ -311,20 +307,26 @@ async def test_vc_entity_extraction(lake: MemoryLake, namespace_id: UUID) -> Non
     )
 
     coord = lake._engine._storage  # type: ignore[union-attr]
-    entities = await coord.graph.list_entities(namespace_id, limit=100)
+    row_ns_id = await coord.resolve_namespace(namespace_id)
+    entities = await coord.graph.list_entities(row_ns_id, limit=100)
     names = {e.name for e in entities}
-    assert "Ada Lovelace" in names, f"expected Ada Lovelace in graph, got {names}"
-    assert "Analytical Engine" in names
+    assert "ada lovelace" in names, f"expected ada lovelace in graph, got {names}"
+    assert "analytical engine" in names
 
 
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "VC's sync remember path does not rebind extraction-time entity IDs "
+        "to upsert-resolved IDs (DYT-3558 fixed this only in "
+        "pipelines/flows/ingest.py, not in vectorcypher/engine._run_skeleton_extraction). "
+        "On sqlite_lance, that produces FOREIGN KEY failures when a second "
+        "document re-mentions an entity from the first doc."
+    ),
+    raises=Exception,
+)
 async def test_vc_two_hop_traversal(lake: MemoryLake, namespace_id: UUID) -> None:
-    """3 connected docs (A→B→C), query about A surfaces C via 2-hop traversal.
-
-    Marked xfail with **DYT-3548 + DYT-3549** — these PRs (R1/R2) fix
-    correctness gaps in the SQLite-CTE traversal that VectorCypher would
-    otherwise exercise. Once those merge to main, drop the per-test
-    xfail and rely only on the module-level DYT-3560 marker.
-    """
+    """3 connected docs (A→B→C), query about A surfaces C via 2-hop traversal."""
     _plan_extraction(
         "Alice",
         entities=[("Alice", "PERSON"), ("Bob", "PERSON")],
@@ -360,23 +362,43 @@ async def test_vc_two_hop_traversal(lake: MemoryLake, namespace_id: UUID) -> Non
     assert "graph databases" in text_blob.lower(), f"2-hop entity not surfaced; got context={text_blob[:300]!r}"
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="DYT-3562: VectorCypher embedded path doesn't push temporal filter to LanceDB query (same shape as GraphRAG embedded)",
+)
 async def test_vc_temporal_filter(lake: MemoryLake, namespace_id: UUID) -> None:
     """Two docs at different ``occurred_at``; recall with ``last 7 days`` filter
     only returns the recent one.
+
+    ``MemoryLake.remember()`` does not surface ``occurred_at`` on its public
+    API (engines accept it but the lake-level wrapper does not forward it),
+    so we ingest both docs at ``now`` and then back-date one chunk's
+    ``source_timestamp`` directly in SQLite — same pattern as
+    ``test_skeleton_pg`` for the production stack.
     """
     now = datetime.now(UTC)
     await _remember(
         lake,
         namespace_id=namespace_id,
         content="recent doc about Falcon launch in May 2026.",
-        occurred_at=now - timedelta(days=2),
     )
     r_old = await _remember(
         lake,
         namespace_id=namespace_id,
         content="old doc about Falcon launch in 2024.",
-        occurred_at=now - timedelta(days=400),
     )
+
+    # Back-date the "old" doc's chunks via the embedded SQLite handle.
+    # The sqlite_lance backend stores UUIDs as 32-char hex (no dashes),
+    # so we must match that form when filtering on ``document_id``.
+    coord = lake._engine._storage  # type: ignore[union-attr]
+    handle = coord.vector._handle  # type: ignore[union-attr]
+    backdated_iso = (now - timedelta(days=400)).isoformat()
+    await handle.sqlite.execute(
+        "UPDATE chunks SET source_timestamp = ? WHERE document_id = ?",
+        (backdated_iso, str(r_old.document_id).replace("-", "")),
+    )
+    await handle.sqlite.commit()
 
     seven_days_ago = now - timedelta(days=7)
     result = await lake.recall(
@@ -455,25 +477,37 @@ async def test_vc_dual_node_persistence(lake: MemoryLake, namespace_id: UUID) ->
     )
 
     coord = lake._engine._storage  # type: ignore[union-attr]
+    row_ns_id = await coord.resolve_namespace(namespace_id)
 
-    # Entity persistence: both names land in the graph.
-    entities = await coord.graph.list_entities(namespace_id, limit=100)
+    # Entity persistence: both names land in the graph (lowercased).
+    entities = await coord.graph.list_entities(row_ns_id, limit=100)
     name_to_entity = {e.name: e for e in entities}
-    assert "Marie Curie" in name_to_entity, f"missing Marie Curie: {list(name_to_entity)}"
+    assert "marie curie" in name_to_entity, f"missing marie curie: {list(name_to_entity)}"
     assert "radium" in name_to_entity, f"missing radium: {list(name_to_entity)}"
 
     # Chunk-node ↔ entity-node link: ``source_chunk_ids`` (or
     # ``source_document_ids``) must include this document's chunk.
-    marie = name_to_entity["Marie Curie"]
+    marie = name_to_entity["marie curie"]
     assert r.document_id in (marie.source_document_ids or []) or any(marie.source_chunk_ids or []), (
-        f"Marie Curie has no source link back to the ingest doc: {marie!r}"
+        f"marie curie has no source link back to the ingest doc: {marie!r}"
     )
 
     # Edge persistence: at least one relationship survives the ingest.
-    rels = await coord.graph.list_relationships(namespace_id, limit=100)
+    rels = await coord.graph.list_relationships(row_ns_id, limit=100)
     assert rels, "expected at least one relationship after dual-node write"
 
 
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "Same root cause as test_vc_two_hop_traversal: VC's sync remember "
+        "does not rebind extraction-time entity IDs after upsert resolution, "
+        "so a second doc re-mentioning a prior entity hits FOREIGN KEY on "
+        "create_relationships_batch. Mirror of the GraphRAG DYT-3558 case "
+        "but on the VectorCypher path. Tracked alongside DYT-3548/DYT-3549."
+    ),
+    raises=Exception,
+)
 async def test_vc_prefer_current_via_cte(lake: MemoryLake, namespace_id: UUID) -> None:
     """3-hop A→B→C with B's outgoing edge expired; ``prefer_current=True`` must
     NOT return C's content.
@@ -505,7 +539,8 @@ async def test_vc_prefer_current_via_cte(lake: MemoryLake, namespace_id: UUID) -
 
     # Manually expire the Pierre→polonium edge in the embedded graph.
     coord = lake._engine._storage  # type: ignore[union-attr]
-    rels = await coord.graph.list_relationships(namespace_id, limit=100)
+    row_ns_id = await coord.resolve_namespace(namespace_id)
+    rels = await coord.graph.list_relationships(row_ns_id, limit=100)
     target_rel = next(
         (r for r in rels if r.relationship_type == "STUDIES"),
         None,
@@ -514,7 +549,7 @@ async def test_vc_prefer_current_via_cte(lake: MemoryLake, namespace_id: UUID) -
     # Expire the edge by setting valid_to in the past. The exact field
     # name lives on Relationship; CTE traversal R2 reads it for filtering.
     target_rel.valid_to = datetime.now(UTC) - timedelta(days=1)
-    await coord.graph.create_relationships_batch(namespace_id, [target_rel])
+    await coord.graph.create_relationships_batch(row_ns_id, [target_rel])
 
     result = await lake.recall(
         "Marie",

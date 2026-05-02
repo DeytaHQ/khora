@@ -336,12 +336,16 @@ class VectorCypherEngine:
 
         logger.info("Connecting VectorCypher engine...")
 
-        # Detect unified SurrealDB backend — skips Neo4j and uses SurrealDB for everything
-        is_surrealdb = getattr(self._config.storage, "backend", "postgres") == "surrealdb"
+        # Detect non-Neo4j backends — skips Neo4j and uses the unified
+        # backend's graph adapter for Cypher-equivalent operations.
+        backend = getattr(self._config.storage, "backend", "postgres")
+        is_surrealdb = backend == "surrealdb"
+        is_sqlite_lance = backend == "sqlite_lance"
+        skip_neo4j = is_surrealdb or is_sqlite_lance
         neo4j_database = "neo4j"
         neo4j_query_timeout: float | None = 5.0
 
-        if not is_surrealdb:
+        if not skip_neo4j:
             # Connect to Neo4j (required for VectorCypher with traditional stack)
             neo4j_url = self._config.get_neo4j_url()
             if not neo4j_url:
@@ -363,7 +367,7 @@ class VectorCypherEngine:
         # Create and connect relational storage
         self._storage = create_storage_coordinator(self._storage_config)
 
-        if not is_surrealdb:
+        if not skip_neo4j:
             # Share the Neo4j driver so only one connection pool is used
             from khora.storage.backends.neo4j import Neo4jBackend
 
@@ -391,6 +395,21 @@ class VectorCypherEngine:
                 self._config,
                 connection=shared_conn,
             )
+        elif is_sqlite_lance:
+            # Reuse the coordinator's shared EmbeddedStorageHandle (single
+            # aiosqlite + LanceDB pair across all adapters). The vector
+            # adapter holds the canonical reference. Mirrors the Skeleton
+            # engine wiring landed in #481.
+            if self._storage.vector is None:
+                raise RuntimeError("sqlite_lance coordinator did not provide a vector backend")
+            sqlite_lance_handle = getattr(self._storage.vector, "_handle", None)
+            if sqlite_lance_handle is None:
+                raise RuntimeError("sqlite_lance vector adapter is missing its EmbeddedStorageHandle")
+            self._temporal_store = create_temporal_store(
+                "sqlite_lance",
+                self._config,
+                sqlite_lance_handle=sqlite_lance_handle,
+            )
         else:
             # Share the coordinator's SQLAlchemy engine so the temporal store
             # does not create a second connection pool against the same PG.
@@ -416,10 +435,11 @@ class VectorCypherEngine:
         await _init_shared_session()
         self._embedder = LiteLLMEmbedder.from_config(llm_config)
 
-        # Initialize dual node manager (Neo4j only — SurrealDB uses graph adapter).
+        # Initialize dual node manager (Neo4j only — non-Neo4j backends
+        # use the storage coordinator's graph adapter directly).
         # Route session acquisition through Neo4jBackend._session so pool
         # metrics (timeout counter + acquire_duration) observe these paths.
-        if not is_surrealdb:
+        if not skip_neo4j:
             neo4j_backend = self._storage.graph if self._storage is not None else None
             self._dual_nodes = DualNodeManager(
                 self._neo4j_driver,
