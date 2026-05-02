@@ -2,6 +2,23 @@
 
 Khora supports four pluggable engines with different strengths. This guide helps you choose the right engine for your use case.
 
+## Production-readiness by stack (v0.9.0)
+
+Production-readiness is **per (engine × stack)**, not per engine. The same engine can be production-ready on one storage stack and experimental on another.
+
+| Engine        | PostgreSQL + pgvector + Neo4j  | PostgreSQL + pgvector (no graph) | SQLite + LanceDB (embedded) | SurrealDB (unified)        |
+|---------------|--------------------------------|----------------------------------|-----------------------------|----------------------------|
+| VectorCypher  | **Production-ready**           | n/a (graph required)             | Experimental (DYT-3560)     | Experimental               |
+| Chronicle     | n/a (graph not required)       | **Production-ready**             | Experimental                | Experimental               |
+| GraphRAG      | Available                      | n/a (graph required)             | Experimental                | Experimental               |
+| Skeleton      | n/a (graph not required)       | Available                        | Experimental (DYT-3561)     | Experimental               |
+
+- **Production-ready** — qualified for production deployment in v0.9.0; covered by integration and e2e tests; documented gotchas have known mitigations.
+- **Available** — supported, exercised in tests, but has not been stamped production-ready in v0.9.0. Equivalent retrieval semantics; less load-tested.
+- **Experimental** — feature-complete enough for demos, evaluation, and tests on small corpora. Not a deployment story. See the [embedded backend caveats](../configuration.md#embedded-backends-experimental) and [ADR-025](../adrs/adr-025-embedded-backend-realignment.md) for the full list of gaps.
+
+The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. SurrealDB is experimental on multiple fronts (Python SDK on alpha track, KNN unreliable in embedded mode). The `kuzu` graph backend is **deprecated in 0.9.0** and scheduled for removal in 0.10.
+
 ## Quick Comparison
 
 | Aspect | VectorCypher (default) | GraphRAG | Skeleton Construction | Chronicle |
@@ -160,7 +177,7 @@ Neo4j (required)
 └── Graph traversal
 ```
 
-**Alternative: SurrealDB (any engine)**
+**Alternative: SurrealDB (experimental in v0.9.0)**
 
 ```
 SurrealDB (single database)
@@ -170,7 +187,15 @@ SurrealDB (single database)
 └── Event sourcing
 ```
 
-SurrealDB can serve as all three backends in a single database, simplifying deployment. It's available as an alternative for any engine, though the PostgreSQL + Neo4j stack is more mature for production use.
+SurrealDB can serve as all three backends in a single database. **Marked experimental in v0.9.0**: the Python SDK is pinned to `>=2.0.0a1` (alpha track for SurrealDB 3.x support), KNN (`<|K|>`) is unreliable in embedded mode and falls back to brute-force cosine + HNSW, and concurrent upserts require the `_SurrealDBEntityKeyGate` to serialise on `(ns, name, type)` keys. PostgreSQL + Neo4j remains the production stack for any engine.
+
+**Alternative: SQLite + LanceDB (experimental embedded path)**
+
+```
+SQLite (relational + graph + FTS5 BM25)  +  LanceDB (vector embeddings)
+```
+
+The embedded path covers all four engines via dialect-aware Alembic migrations against SQLite plus a sibling LanceDB directory for vectors. Suitable for demos, evaluation, tests, and small single-user CLIs (≤1M chunks, ≤100k entities, ≤500k edges, traversal depth ≤3). See [configuration.md](../configuration.md#embedded-backends-experimental) for the full list of caveats (partial transaction atomicity, no point-in-time queries, FTS only on chunks).
 
 ### Search Capabilities (VectorCypher)
 
