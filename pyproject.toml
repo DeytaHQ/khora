@@ -77,7 +77,7 @@ all-backends = [
     "weaviate-client>=4.20.1",
     "surrealdb>=2.0.0a1",
     "aiosqlite>=0.20.0",
-    "lancedb>=0.17.0",
+    "lancedb>=0.25",
     "pyarrow>=18.0.0",
 ]
 # Neural reranking
