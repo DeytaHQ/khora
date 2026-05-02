@@ -69,10 +69,18 @@ class SQLiteLanceVectorAdapter:
         # but avoids the catalog round-trip on hot paths).
         self._chunks_vec: Any = None
         self._entities_vec: Any = None
-        # Track which tables already have an ANN index so we only pay the
-        # training cost once per process.
-        self._chunks_indexed = False
-        self._entities_indexed = False
+        # Row count at last index training. ``None`` = never trained, so the
+        # next opportunity will train if the corpus is large enough. We
+        # retrain once the row count grows by ``retrain_factor`` so a
+        # long-running process doesn't keep querying a stale index after
+        # the corpus has 10x'd (DYT-3580).
+        self._chunks_at_last_index: int | None = None
+        self._entities_at_last_index: int | None = None
+        # In-flight retrain tasks — kept so we don't schedule a second
+        # rebuild while the first is still running, and so callers (tests)
+        # can await completion.
+        self._chunks_retrain_task: asyncio.Task[None] | None = None
+        self._entities_retrain_task: asyncio.Task[None] | None = None
         self._index_lock = asyncio.Lock()
         # LanceDB is a single-writer store — serialize concurrent writes
         # (add/delete/create_index) per-table to avoid lost rows seen under
@@ -545,24 +553,111 @@ class SQLiteLanceVectorAdapter:
             await tbl.add(arrow_tbl)
 
     async def _maybe_build_chunks_index(self) -> None:
-        if self._chunks_indexed:
-            return
-        async with self._index_lock:
-            if self._chunks_indexed:
-                return
-            await self._build_index(await self._chunks_table(), "chunks_vec")
-            self._chunks_indexed = True
+        await self._maybe_build_or_retrain(
+            self._chunks_table,
+            "chunks_vec",
+            kind="chunks",
+        )
 
     async def _maybe_build_entities_index(self) -> None:
-        if self._entities_indexed:
-            return
-        async with self._index_lock:
-            if self._entities_indexed:
-                return
-            await self._build_index(await self._entities_table(), "entities_vec")
-            self._entities_indexed = True
+        await self._maybe_build_or_retrain(
+            self._entities_table,
+            "entities_vec",
+            kind="entities",
+        )
 
-    async def _build_index(self, tbl: Any, label: str) -> None:
+    async def _maybe_build_or_retrain(
+        self,
+        get_table: Any,
+        label: str,
+        *,
+        kind: str,
+    ) -> None:
+        """Build the ANN index on first need, or retrain if the corpus has grown.
+
+        Called from the search path. Cheap when no work is needed: just a
+        ``count_rows()`` plus a ratio check. When a retrain is needed the
+        actual rebuild runs in a background task so the search isn't blocked
+        — readers keep using the previous index until the new one is swapped
+        in atomically by ``create_index(replace=True)``.
+
+        Trigger: ``current_rows >= retrain_factor * rows_at_last_train``.
+        Retrain is disabled when ``retrain_factor <= 1.0``.
+        """
+        if self._handle.config.lance_index == "brute":
+            return
+
+        tbl = await get_table()
+        try:
+            rows = await tbl.count_rows()
+        except Exception:
+            rows = 0
+
+        last = self._chunks_at_last_index if kind == "chunks" else self._entities_at_last_index
+        retrain_factor = self._handle.config.retrain_factor
+
+        if last is None:
+            # Never trained — train inline so the first search after the
+            # threshold is crossed sees the index. Below threshold, _build_index
+            # no-ops and we leave _chunks_at_last_index unset so the next
+            # search reconsiders.
+            async with self._index_lock:
+                # Re-check under the lock — another concurrent searcher may
+                # have trained while we waited.
+                last_locked = self._chunks_at_last_index if kind == "chunks" else self._entities_at_last_index
+                if last_locked is not None:
+                    return
+                trained_at = await self._build_index(tbl, label, rows)
+                if trained_at is not None:
+                    if kind == "chunks":
+                        self._chunks_at_last_index = trained_at
+                    else:
+                        self._entities_at_last_index = trained_at
+            return
+
+        if retrain_factor <= 1.0 or last <= 0:
+            return
+        if rows < int(last * retrain_factor):
+            return
+
+        # Retrain in the background — single-flight per table.
+        existing = self._chunks_retrain_task if kind == "chunks" else self._entities_retrain_task
+        if existing is not None and not existing.done():
+            return
+
+        task = asyncio.create_task(self._retrain_in_background(get_table, label, kind, last))
+        if kind == "chunks":
+            self._chunks_retrain_task = task
+        else:
+            self._entities_retrain_task = task
+
+    async def _retrain_in_background(
+        self,
+        get_table: Any,
+        label: str,
+        kind: str,
+        old_rows: int,
+    ) -> None:
+        async with self._index_lock:
+            tbl = await get_table()
+            try:
+                rows_now = await tbl.count_rows()
+            except Exception:
+                rows_now = 0
+            logger.info(
+                "Retraining LanceDB IVF-PQ index on {}: {} -> {} rows",
+                label,
+                old_rows,
+                rows_now,
+            )
+            trained_at = await self._build_index(tbl, label, rows_now)
+            if trained_at is not None:
+                if kind == "chunks":
+                    self._chunks_at_last_index = trained_at
+                else:
+                    self._entities_at_last_index = trained_at
+
+    async def _build_index(self, tbl: Any, label: str, rows: int) -> int | None:
         """Create an ANN index following the handle's ``lance_index`` policy.
 
         - ``"brute"``: skip index creation entirely (brute-force scans).
@@ -570,15 +665,14 @@ class SQLiteLanceVectorAdapter:
         - ``"auto"`` / ``"ivf_pq"``: build IVF_PQ only once the table has
           at least ``_ANN_INDEX_THRESHOLD`` rows; below that LanceDB's
           brute-force scan is faster than paying training cost.
+
+        Returns the row count the index was trained on, or ``None`` if no
+        index was built (so the caller leaves the "last trained" marker
+        unset and the next search reconsiders).
         """
         mode = self._handle.config.lance_index
         if mode == "brute":
-            return
-
-        try:
-            rows = await tbl.count_rows()
-        except Exception:
-            rows = 0
+            return None
 
         async with self._lance_write_lock:
             try:
@@ -594,11 +688,11 @@ class SQLiteLanceVectorAdapter:
                         replace=True,
                     )
                     logger.info("Created HNSW index on {} ({} rows)", label, rows)
-                    return
+                    return rows
 
                 # auto / ivf_pq
                 if rows < _ANN_INDEX_THRESHOLD:
-                    return
+                    return None
 
                 from lancedb.index import IvfPq
 
@@ -621,8 +715,10 @@ class SQLiteLanceVectorAdapter:
                     partitions,
                     sub_vectors,
                 )
+                return rows
             except Exception as exc:
                 logger.warning("Failed to build ANN index on {}: {}", label, exc)
+                return None
 
     # ------------------------------------------------------------------
     # Row → domain helpers
