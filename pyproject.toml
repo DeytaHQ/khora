@@ -132,7 +132,8 @@ addopts = [
     "--cov=khora",
     "--cov-branch",
     "--cov-report=term-missing",
-    "--cov-fail-under=46",
+    # DYT-3545: 82% target on changed surface; aggregate gate set to honest current floor
+    "--cov-fail-under=53",
     "-m",
     "not slow",
 ]
