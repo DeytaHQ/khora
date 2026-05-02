@@ -325,7 +325,7 @@ class SQLiteLanceVectorAdapter:
             # ISO form since LanceDB's SQL parser accepts timestamp literals.
             where.append(f"created_at >= timestamp '{created_after.isoformat()}'")
         if created_before is not None:
-            where.append(f"created_at <= timestamp '{created_before.isoformat()}'")
+            where.append(f"created_at < timestamp '{created_before.isoformat()}'")
         where_sql = " AND ".join(where)
 
         await self._maybe_build_chunks_index()
@@ -339,11 +339,22 @@ class SQLiteLanceVectorAdapter:
         id_order: list[str] = [r["id"] for r in results]
         sims: dict[str, float] = {r["id"]: 1.0 - float(r.get("_distance", 0.0)) for r in results}
 
-        placeholders = ",".join("?" for _ in id_order)
-        cur = await self._sqlite.execute(
-            f"SELECT * FROM chunks WHERE id IN ({placeholders})",  # noqa: S608
-            id_order,
-        )
+        # Temporal refinement on the SQLite side. SQLite is the source of
+        # truth for chunk metadata and tracks ``source_timestamp`` (LanceDB
+        # only stores ``created_at``), so we re-apply the bounds here using
+        # ``COALESCE(source_timestamp, created_at)`` — matches the pgvector
+        # backend's column-precedence rule (DYT-3547 / PR #470). Half-open
+        # interval ``>= start AND < end`` to match the Chronicle pushdown
+        # contract.
+        sql_parts = [f"SELECT * FROM chunks WHERE id IN ({','.join('?' for _ in id_order)})"]  # noqa: S608
+        params: list[Any] = list(id_order)
+        if created_after is not None:
+            sql_parts.append("AND COALESCE(source_timestamp, created_at) >= ?")
+            params.append(_dt_to_str(created_after))
+        if created_before is not None:
+            sql_parts.append("AND COALESCE(source_timestamp, created_at) < ?")
+            params.append(_dt_to_str(created_before))
+        cur = await self._sqlite.execute(" ".join(sql_parts), params)
         rows = await cur.fetchall()
         by_id = {row["id"]: row for row in rows}
 
