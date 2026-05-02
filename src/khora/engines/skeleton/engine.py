@@ -266,11 +266,21 @@ class SkeletonConstructionEngine:
         # it skips full entity extraction for cost efficiency. The hash is
         # still persisted for change-detection workflows.
 
+        # Resolve occurred_at: explicit kwarg wins, then metadata["occurred_at"]
+        # (parity with remember_batch), finally fall back to now().
+        if occurred_at is None:
+            occurred_at = datetime.now(UTC)
+            if metadata and "occurred_at" in metadata:
+                try:
+                    occurred_at = self._parse_datetime(metadata["occurred_at"])
+                except ValueError:
+                    pass
+
         # Process through simplified pipeline (no full KG extraction)
         chunks_created, entities_extracted, relationships_created = await self._process_document(
             document,
             skill_name=skill_name,
-            occurred_at=occurred_at or datetime.now(UTC),
+            occurred_at=occurred_at,
             chunk_strategy=chunk_strategy,
         )
 
