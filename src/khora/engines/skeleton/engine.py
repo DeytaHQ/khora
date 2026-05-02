@@ -4,7 +4,7 @@ This engine is optimized for:
 - Temporal queries with structured field filtering
 - Fast and cost-efficient ingestion
 - High-precision retrieval with bi-temporal model
-- Multiple backends (pgvector, Weaviate)
+- Multiple backends (pgvector, Weaviate, SurrealDB, sqlite_lance)
 """
 
 from __future__ import annotations
@@ -79,9 +79,11 @@ class SkeletonConstructionEngine:
             weaviate_url: Weaviate URL (required for weaviate backend)
         """
         self._config = config
-        # Auto-detect surrealdb backend from config when not explicitly set
+        # Auto-detect unified backends from config when not explicitly set
         if backend == "pgvector" and config.storage.backend == "surrealdb":
             backend = "surrealdb"
+        elif backend == "pgvector" and config.storage.backend == "sqlite_lance":
+            backend = "sqlite_lance"
         self._backend_type = backend
         self._weaviate_url = weaviate_url
 
@@ -112,12 +114,26 @@ class SkeletonConstructionEngine:
                 shared_pg_engine = getattr(self._storage.vector, "_engine", None)
             if shared_pg_engine is None and self._storage.relational is not None:
                 shared_pg_engine = getattr(self._storage.relational, "_engine", None)
+
+        # For the sqlite_lance unified backend the temporal store reuses
+        # the coordinator's shared EmbeddedStorageHandle (single aiosqlite
+        # + LanceDB pair across all adapters).  The vector adapter holds
+        # the canonical reference.
+        sqlite_lance_handle = None
+        if self._backend_type == "sqlite_lance":
+            if self._storage.vector is None:
+                raise RuntimeError("sqlite_lance backend requires a vector adapter on the coordinator")
+            sqlite_lance_handle = getattr(self._storage.vector, "_handle", None)
+            if sqlite_lance_handle is None:
+                raise RuntimeError("sqlite_lance vector adapter is missing its EmbeddedStorageHandle")
+
         self._temporal_store = create_temporal_store(
             self._backend_type,
             self._config,
             weaviate_url=self._weaviate_url,
             surrealdb_config=self._config.storage.surrealdb if self._backend_type == "surrealdb" else None,
             engine=shared_pg_engine,
+            sqlite_lance_handle=sqlite_lance_handle,
         )
         await self._temporal_store.connect()
 
