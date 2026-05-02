@@ -25,6 +25,7 @@ from sqlalchemy import (
     Table,
     Text,
     and_,
+    cast,
     func,
     select,
     text,
@@ -562,8 +563,13 @@ class PgVectorTemporalStore(TemporalVectorStore):
             conditions.append(khora_chunks_table.c.channel == f.channel)
 
         if f.tags:
-            # All tags must be present
-            conditions.append(khora_chunks_table.c.tags.contains(f.tags))
+            # All tags must be present.
+            # The ``tags`` column is declared as ``ARRAY(String)`` which compiles
+            # to ``character varying[]``, but asyncpg infers a list-of-str literal
+            # as ``text[]``. PostgreSQL has no ``varchar[] @> text[]`` operator,
+            # so we cast the literal to ``varchar[]`` explicitly to match. See
+            # DYT-3556.
+            conditions.append(khora_chunks_table.c.tags.contains(cast(f.tags, ARRAY(String))))
 
         # Handle additional filters
         for key, value in f.additional.items():

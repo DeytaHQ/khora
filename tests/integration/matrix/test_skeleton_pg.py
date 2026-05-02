@@ -348,10 +348,6 @@ async def test_skeleton_recall_top_k_ordering(lake: MemoryLake, namespace_id: UU
         assert prev >= curr, f"similarity ordering violated: {prev} < {curr} in {scores}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="DYT-3556: tags column is VARCHAR[] but filter literal lands as TEXT[]",
-)
 async def test_skeleton_recall_with_metadata_filter(lake: MemoryLake, namespace_id: UUID) -> None:
     """Tag filter restricts recall to chunks carrying the requested tag.
 
@@ -361,9 +357,8 @@ async def test_skeleton_recall_with_metadata_filter(lake: MemoryLake, namespace_
     needed metadata filtering today. If/when MemoryLake grows a ``filters``
     parameter, this test should switch to using it.
 
-    See DYT-3556 — ``ARRAY(String).contains(...)`` compiles to a SQL clause
-    that asyncpg can't execute against the ``character varying[]`` column,
-    so the query effectively returns no rows. Test is xfail until fixed.
+    DYT-3556 — the filter literal is now cast to ``ARRAY(String)`` so that
+    PostgreSQL's ``@>`` operator matches the ``character varying[]`` column.
     """
     await _remember(
         lake,
@@ -379,11 +374,17 @@ async def test_skeleton_recall_with_metadata_filter(lake: MemoryLake, namespace_
     )
 
     engine = lake._get_engine()  # type: ignore[attr-defined]
+    # Engine-layer recall expects the row-level namespace id (the FK target on
+    # ``khora_chunks.namespace_id``); the public ``namespace_id`` fixture is
+    # the stable namespace identifier. ``MemoryLake.recall`` resolves this for
+    # us automatically — when calling the engine directly we have to do it
+    # ourselves.
+    row_namespace_id = await lake._resolve_namespace(namespace_id)  # type: ignore[attr-defined]
     # ``hybrid_alpha=1.0`` (pure vector) is set explicitly to keep the test
     # deterministic — the mode-based default would pick 0.7 (HYBRID).
     result = await engine.recall(
         "alpha document",
-        namespace_id,
+        row_namespace_id,
         limit=10,
         temporal_filter=TemporalFilter(tags=["group-A"]),
         hybrid_alpha=1.0,
