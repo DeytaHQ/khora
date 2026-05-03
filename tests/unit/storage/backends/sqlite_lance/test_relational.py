@@ -17,7 +17,6 @@ except ImportError:
 
 from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentStatus
-from khora.db.session import run_migrations
 
 pytestmark = pytest.mark.skipif(not _HAS_EMBEDDED, reason="aiosqlite/lancedb not installed")
 
@@ -35,18 +34,14 @@ if _HAS_EMBEDDED:
 
 
 @pytest.fixture
-async def adapter(tmp_path):
+async def adapter(migrated_sqlite_db, tmp_path):
     """Migrated SQLite DB + connected relational adapter.
 
     Uses the real Alembic migration chain (dialect-gated since DYT-2727)
     to validate that the adapter works against the production schema.
     """
-    db_path = str(tmp_path / "khora.db")
+    db_path = str(migrated_sqlite_db)
     lance_path = str(tmp_path / "khora.lance")
-
-    url = f"sqlite+aiosqlite:///{db_path}"
-    result = await run_migrations(url)
-    assert result.success, f"migrations failed: {result.error}"
 
     handle = EmbeddedStorageHandle(
         EmbeddedStorageHandleConfig(db_path=db_path, lance_path=lance_path),

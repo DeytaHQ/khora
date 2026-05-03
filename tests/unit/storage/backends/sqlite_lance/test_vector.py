@@ -24,7 +24,6 @@ from khora.core.models.entity import Entity
 pytestmark = pytest.mark.skipif(not _HAS_LANCEDB, reason="lancedb not installed")
 
 if _HAS_LANCEDB:
-    from khora.db.session import run_migrations
     from khora.storage.backends.sqlite_lance.connection import (
         EmbeddedStorageHandle,
         EmbeddedStorageHandleConfig,
@@ -39,12 +38,7 @@ if _HAS_LANCEDB:
 # ---------------------------------------------------------------------------
 
 
-async def _build_handle(tmp_path: Path, *, use_halfvec: bool) -> EmbeddedStorageHandle:
-    db_path = tmp_path / "k.db"
-    lance_path = tmp_path / "k.lance"
-    result = await run_migrations(f"sqlite+aiosqlite:///{db_path}")
-    assert result.success, result.error
-
+async def _build_handle(db_path: Path, lance_path: Path, *, use_halfvec: bool) -> EmbeddedStorageHandle:
     cfg = EmbeddedStorageHandleConfig(
         db_path=str(db_path),
         lance_path=str(lance_path),
@@ -62,15 +56,15 @@ async def _build_handle(tmp_path: Path, *, use_halfvec: bool) -> EmbeddedStorage
 
 
 @pytest.fixture
-async def handle(tmp_path: Path):
-    h = await _build_handle(tmp_path, use_halfvec=False)
+async def handle(migrated_sqlite_db: Path, tmp_path: Path):
+    h = await _build_handle(migrated_sqlite_db, tmp_path / "k.lance", use_halfvec=False)
     yield h
     await h.disconnect()
 
 
 @pytest.fixture
-async def halfvec_handle(tmp_path: Path):
-    h = await _build_handle(tmp_path, use_halfvec=True)
+async def halfvec_handle(migrated_sqlite_db: Path, tmp_path: Path):
+    h = await _build_handle(migrated_sqlite_db, tmp_path / "k.lance", use_halfvec=True)
     yield h
     await h.disconnect()
 
