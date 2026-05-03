@@ -1,0 +1,687 @@
+{
+  "_comment": "Khora telemetry public surface contract. See telemetry-contract.md. Items tagged stability=public must not break without a major version bump. Keep this file in sync with the codebase — tests/unit/telemetry/test_contract.py acts as the drift gate.",
+  "version": "1.0",
+  "service_namespace": "khora",
+  "span_name_regex": "^khora\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$",
+  "public_exports": [
+    "TelemetryCollector",
+    "NoOpCollector",
+    "get_collector",
+    "init_telemetry",
+    "shutdown_telemetry",
+    "get_trace_id",
+    "set_trace_id",
+    "ensure_trace_id",
+    "clear_trace_id",
+    "start_usage_collection",
+    "record_usage",
+    "collect_usage",
+    "trace_span",
+    "install_neo4j_logfire_handler",
+    "trace",
+    "metric_counter",
+    "metric_gauge_callback",
+    "metric_histogram"
+  ],
+  "event_types": [
+    {
+      "name": "LLMEvent",
+      "stability": "public",
+      "fields": [
+        {
+          "name": "timestamp",
+          "type": "datetime"
+        },
+        {
+          "name": "service_name",
+          "type": "str"
+        },
+        {
+          "name": "operation",
+          "type": "str"
+        },
+        {
+          "name": "model",
+          "type": "str"
+        },
+        {
+          "name": "prompt_tokens",
+          "type": "int"
+        },
+        {
+          "name": "completion_tokens",
+          "type": "int"
+        },
+        {
+          "name": "total_tokens",
+          "type": "int"
+        },
+        {
+          "name": "latency_ms",
+          "type": "float"
+        },
+        {
+          "name": "status",
+          "type": "str"
+        },
+        {
+          "name": "error_message",
+          "type": "str | None"
+        },
+        {
+          "name": "namespace_id",
+          "type": "UUID | None"
+        },
+        {
+          "name": "metadata",
+          "type": "dict[str, Any]"
+        },
+        {
+          "name": "trace_id",
+          "type": "UUID | None"
+        },
+        {
+          "name": "parent_event_id",
+          "type": "int | None"
+        },
+        {
+          "name": "cache_hit",
+          "type": "bool"
+        },
+        {
+          "name": "batch_size",
+          "type": "int"
+        }
+      ]
+    },
+    {
+      "name": "StorageEvent",
+      "stability": "public",
+      "fields": [
+        {
+          "name": "timestamp",
+          "type": "datetime"
+        },
+        {
+          "name": "service_name",
+          "type": "str"
+        },
+        {
+          "name": "backend",
+          "type": "str"
+        },
+        {
+          "name": "operation",
+          "type": "str"
+        },
+        {
+          "name": "latency_ms",
+          "type": "float"
+        },
+        {
+          "name": "record_count",
+          "type": "int"
+        },
+        {
+          "name": "status",
+          "type": "str"
+        },
+        {
+          "name": "error_message",
+          "type": "str | None"
+        },
+        {
+          "name": "namespace_id",
+          "type": "UUID | None"
+        },
+        {
+          "name": "metadata",
+          "type": "dict[str, Any]"
+        },
+        {
+          "name": "trace_id",
+          "type": "UUID | None"
+        },
+        {
+          "name": "parent_event_id",
+          "type": "int | None"
+        }
+      ]
+    },
+    {
+      "name": "PipelineEvent",
+      "stability": "public",
+      "fields": [
+        {
+          "name": "timestamp",
+          "type": "datetime"
+        },
+        {
+          "name": "service_name",
+          "type": "str"
+        },
+        {
+          "name": "pipeline",
+          "type": "str"
+        },
+        {
+          "name": "stage",
+          "type": "str"
+        },
+        {
+          "name": "run_id",
+          "type": "UUID | None"
+        },
+        {
+          "name": "latency_ms",
+          "type": "float"
+        },
+        {
+          "name": "input_count",
+          "type": "int"
+        },
+        {
+          "name": "output_count",
+          "type": "int"
+        },
+        {
+          "name": "status",
+          "type": "str"
+        },
+        {
+          "name": "error_message",
+          "type": "str | None"
+        },
+        {
+          "name": "namespace_id",
+          "type": "UUID | None"
+        },
+        {
+          "name": "metadata",
+          "type": "dict[str, Any]"
+        },
+        {
+          "name": "trace_id",
+          "type": "UUID | None"
+        },
+        {
+          "name": "parent_event_id",
+          "type": "int | None"
+        }
+      ]
+    }
+  ],
+  "collector_methods": [
+    "record_llm_call",
+    "record_storage_op",
+    "record_pipeline_stage"
+  ],
+  "spans": [
+    {
+      "name": "khora.recall",
+      "stability": "public",
+      "owner": "memory_lake"
+    },
+    {
+      "name": "khora.remember",
+      "stability": "public",
+      "owner": "memory_lake"
+    },
+    {
+      "name": "khora.remember_batch",
+      "stability": "public",
+      "owner": "memory_lake"
+    },
+    {
+      "name": "khora.forget",
+      "stability": "public",
+      "owner": "memory_lake"
+    },
+    {
+      "name": "khora.vectorcypher.retrieve",
+      "stability": "public",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.simple_retrieve",
+      "stability": "public",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.process_document",
+      "stability": "public",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.remember_batch",
+      "stability": "public",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.skeleton.chunk",
+      "stability": "public",
+      "owner": "skeleton"
+    },
+    {
+      "name": "khora.skeleton.embed",
+      "stability": "public",
+      "owner": "skeleton"
+    },
+    {
+      "name": "khora.skeleton.batch_chunk",
+      "stability": "public",
+      "owner": "skeleton"
+    },
+    {
+      "name": "khora.skeleton.batch_embed",
+      "stability": "public",
+      "owner": "skeleton"
+    },
+    {
+      "name": "khora.skeleton.batch_store",
+      "stability": "public",
+      "owner": "skeleton"
+    },
+    {
+      "name": "khora.temporal_store.search",
+      "stability": "public",
+      "owner": "skeleton"
+    },
+    {
+      "name": "khora.embedder.api_call",
+      "stability": "public",
+      "owner": "embedder"
+    },
+    {
+      "name": "khora.embedder.litellm_request",
+      "stability": "public",
+      "owner": "embedder"
+    },
+    {
+      "name": "khora.extraction.llm_call",
+      "stability": "public",
+      "owner": "extraction"
+    },
+    {
+      "name": "khora.extraction.extract_entities",
+      "stability": "public",
+      "owner": "extraction"
+    },
+    {
+      "name": "khora.query.embedding",
+      "stability": "public",
+      "owner": "query"
+    },
+    {
+      "name": "khora.query.graph_search",
+      "stability": "public",
+      "owner": "query"
+    },
+    {
+      "name": "khora.query.hyde",
+      "stability": "public",
+      "owner": "query"
+    },
+    {
+      "name": "khora.query.rerank",
+      "stability": "public",
+      "owner": "query"
+    },
+    {
+      "name": "khora.embedder.cache_lookup",
+      "stability": "internal",
+      "owner": "embedder"
+    },
+    {
+      "name": "khora.embedder.normalize",
+      "stability": "internal",
+      "owner": "embedder"
+    },
+    {
+      "name": "khora.ingestion.entity_dedup",
+      "stability": "internal",
+      "owner": "ingestion"
+    },
+    {
+      "name": "khora.query.mmr_diversity",
+      "stability": "internal",
+      "owner": "query"
+    },
+    {
+      "name": "khora.vectorcypher.bm25_search_chunks",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.change_decomposition",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.chunking",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.coherence_boost",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.cypher_expand",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.embed_batch",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.embed_query",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.llm_reranking",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.recency_boost",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.reranking",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.route",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.temporal_detect",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.vector_search_chunks",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.vector_search_entities",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.version_filter",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.version_history",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.skeleton_extraction",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.skeleton_build",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.session_discovery",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.fetch_entity_chunks",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.vectorcypher.rrf_fusion",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
+      "name": "khora.ingestion.expansion",
+      "stability": "internal",
+      "owner": "ingestion"
+    },
+    {
+      "name": "khora.neo4j.upsert_entities_batch",
+      "stability": "internal",
+      "owner": "neo4j"
+    },
+    {
+      "name": "khora.neo4j.retire_orphaned_entities_batch",
+      "stability": "internal",
+      "owner": "neo4j"
+    },
+    {
+      "name": "khora.neo4j.create_relationships_batch",
+      "stability": "internal",
+      "owner": "neo4j"
+    },
+    {
+      "name": "khora.neo4j.get_chunks_by_entities.timeout",
+      "stability": "internal",
+      "owner": "neo4j"
+    },
+    {
+      "name": "khora.neo4j.get_entity_neighborhoods.timeout",
+      "stability": "internal",
+      "owner": "neo4j"
+    },
+    {
+      "name": "khora.neo4j.get_relationships_between.timeout",
+      "stability": "internal",
+      "owner": "neo4j"
+    },
+    {
+      "name": "khora.neo4j.get_temporal_chunks.timeout",
+      "stability": "internal",
+      "owner": "neo4j"
+    },
+    {
+      "name": "khora.neo4j.get_entity_channels.timeout",
+      "stability": "internal",
+      "owner": "neo4j"
+    },
+    {
+      "name": "khora.neo4j.get_neighborhood.timeout",
+      "stability": "internal",
+      "owner": "neo4j"
+    },
+    {
+      "name": "khora.neo4j.get_neighborhoods_batch.timeout",
+      "stability": "internal",
+      "owner": "neo4j"
+    }
+  ],
+  "pipeline_stages": [
+    {
+      "name": "ingestion.chunking",
+      "stability": "internal"
+    },
+    {
+      "name": "ingestion.embedding",
+      "stability": "internal"
+    },
+    {
+      "name": "ingestion.extraction",
+      "stability": "internal"
+    },
+    {
+      "name": "ingestion.storage",
+      "stability": "internal"
+    },
+    {
+      "name": "ingestion.entity_storage",
+      "stability": "internal"
+    },
+    {
+      "name": "ingestion.entity_embedding",
+      "stability": "internal"
+    },
+    {
+      "name": "ingestion.smart_resolution",
+      "stability": "internal"
+    },
+    {
+      "name": "query.understanding",
+      "stability": "internal"
+    },
+    {
+      "name": "query.entity_linking",
+      "stability": "internal"
+    },
+    {
+      "name": "query.hyde",
+      "stability": "internal"
+    },
+    {
+      "name": "query.reranking",
+      "stability": "internal"
+    },
+    {
+      "name": "query.cache_lookup",
+      "stability": "internal"
+    },
+    {
+      "name": "query.search",
+      "stability": "internal"
+    },
+    {
+      "name": "query.fusion",
+      "stability": "internal"
+    },
+    {
+      "name": "query.keyword_search",
+      "stability": "internal"
+    },
+    {
+      "name": "query.multi_stage_1_recall",
+      "stability": "internal"
+    },
+    {
+      "name": "query.multi_stage_2_normalize",
+      "stability": "internal"
+    },
+    {
+      "name": "query.multi_stage_3_filter",
+      "stability": "internal"
+    },
+    {
+      "name": "query.multi_stage_4_rerank",
+      "stability": "internal"
+    },
+    {
+      "name": "query.multi_stage_5_diversity",
+      "stability": "internal"
+    },
+    {
+      "name": "expansion.cross_tool_unification",
+      "stability": "internal"
+    },
+    {
+      "name": "expansion.relationship_inference",
+      "stability": "internal"
+    }
+  ],
+  "metrics": [
+    {
+      "name": "khora.neo4j.pool.acquire_duration",
+      "type": "histogram",
+      "stability": "public",
+      "unit": "s"
+    },
+    {
+      "name": "khora.neo4j.pool.acquisition_time",
+      "type": "histogram",
+      "stability": "public",
+      "unit": "s"
+    },
+    {
+      "name": "khora.neo4j.session.duration",
+      "type": "histogram",
+      "stability": "public",
+      "unit": "s"
+    },
+    {
+      "name": "khora.neo4j.pool.timeout",
+      "type": "counter",
+      "stability": "public",
+      "unit": ""
+    },
+    {
+      "name": "khora.neo4j.pool.connections.active",
+      "type": "gauge",
+      "stability": "public",
+      "unit": ""
+    },
+    {
+      "name": "khora.neo4j.pool.connections.idle",
+      "type": "gauge",
+      "stability": "public",
+      "unit": ""
+    },
+    {
+      "name": "khora.neo4j.pool.connections.total",
+      "type": "gauge",
+      "stability": "public",
+      "unit": ""
+    },
+    {
+      "name": "khora.neo4j.pool.connections.creating",
+      "type": "gauge",
+      "stability": "public",
+      "unit": ""
+    },
+    {
+      "name": "khora.neo4j.pool.utilization",
+      "type": "gauge",
+      "stability": "public",
+      "unit": ""
+    },
+    {
+      "name": "khora.neo4j.pool.sampled.active",
+      "type": "histogram",
+      "stability": "internal",
+      "unit": ""
+    },
+    {
+      "name": "khora.neo4j.pool.sampled.idle",
+      "type": "histogram",
+      "stability": "internal",
+      "unit": ""
+    },
+    {
+      "name": "khora.neo4j.pool.sampled.total",
+      "type": "histogram",
+      "stability": "internal",
+      "unit": ""
+    },
+    {
+      "name": "khora.neo4j.pool.sampled.creating",
+      "type": "histogram",
+      "stability": "internal",
+      "unit": ""
+    },
+    {
+      "name": "khora.neo4j.pool.sampled.utilization",
+      "type": "histogram",
+      "stability": "internal",
+      "unit": ""
+    }
+  ]
+}
