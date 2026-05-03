@@ -4,6 +4,30 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [Unreleased] — Telemetry Public Surface, OSS Observability Contract
+
+Telemetry workstream (PRs #504–#509) shipped after the v0.9.1 tag. It hardens cardinality safety, codifies the public observability surface as a JSON contract enforced by a CI drift gate, fixes a silent regression that had been zeroing out `storage_events.namespace_id` since February 2026, and broadens metric coverage. See [ADR-026](docs/adrs/adr-026-telemetry-contract.md) for the design rationale and the OSS implication: public telemetry names are now API and break the same way any other public symbol does.
+
+### Added
+
+- **Public observability contract.** `docs/telemetry-contract.json` lists every public export in `khora.telemetry.__all__` (19 names), every `LLMEvent` / `StorageEvent` / `PipelineEvent` field, all 22 collector-recorded pipeline stages, all 58 `trace_span(...)` call sites (22 public, 36 internal), and all 21 metrics (16 public, 5 internal). `docs/telemetry-contract.md` is the human-facing explainer. `tests/unit/telemetry/test_contract.py` (10-test drift gate) walks the codebase via ripgrep and fails CI on any undeclared instrumentation. (#505)
+- **`khora.telemetry.bounded_text_hash`.** Helper that turns free-text span attributes (raw query, document content, chunk text) into a SHA1[:8] hash — caps cardinality and removes the privacy hazard of raw text on spans. Now used at the four query / extraction sites that previously emitted raw text. (#504)
+- **Chronicle abstention metrics.** `khora.chronicle.abstention_signal` (counter, public) and `khora.chronicle.abstention_combined_score` (histogram, public) aggregate the four boolean abstention signals + combined score that `RecallResult.metadata["abstention_signals"]` exposes per call, so abstention rate and confidence distribution can be tracked at fleet scale instead of only inspected per-request. (#507)
+- **Aggregate operator metrics.** `khora.memory.recall.duration` (histogram, public, seconds), `khora.memory.ingest.duration` (histogram, public, seconds), `khora.llm.tokens` (counter, public), `khora.llm.cost_usd` (counter, public), `khora.log.queue.depth` (gauge, public, proxy via handler-error count — loguru 0.7.3 does not expose `qsize()`). (#509)
+- **Six additional LLM call sites instrumented.** HyDE, listwise rerank, fact extraction, fact reconciliation, event extraction now record `LLMEvent` rows; chat was already wired. Two patterns coexist (`_telemetry_op="..."` through `khora.config.llm.acompletion` vs. inline `record_llm_call` after direct litellm calls); both are documented in `CLAUDE.md`. (#508)
+
+### Fixed
+
+- **`storage_events.namespace_id` 100% NULL since Feb 2026.** Restored namespace propagation through the storage telemetry path. The break had survived multiple releases because no operator dashboard was reading the column — DYT-3398 surfaced it during the Phase-0 audit. (#506)
+
+### OSS implication
+
+- Names tagged `public` in `docs/telemetry-contract.json` are now part of khora's public API. Renames or removals require a major version bump and prior coordination with genesis, khora-benchmarks, khora-explorer, and khora-cli. Names tagged `internal` (e.g. inner-loop spans like `khora.vectorcypher.coherence_boost`) may be renamed freely as long as the JSON is updated in the same PR.
+- New attributes follow OTel semantic conventions: `gen_ai.*` for LLM, `db.*` for storage, `code.*` for stack info.
+- The contract enables the operator-dashboard work that follows; it does not by itself fix the under-utilisation. Telemetry has been collected to PostgreSQL since 0.4.0, and dashboards / alerts that consume those events remain TODO.
+
+---
+
 ## [0.9.0] — 2026-05-02 — Embedded Backend Realignment, Production-Readiness Scoping
 
 ### Embedded backend overhaul (DYT-3545 family)
