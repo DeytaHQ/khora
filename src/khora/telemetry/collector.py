@@ -120,9 +120,23 @@ class TelemetryCollector:
         return kwargs
 
     def record_llm_call(self, **kwargs: Any) -> None:
+        # Capture cost_usd before LLMEvent strips unknown kwargs.
+        cost_usd = kwargs.pop("cost_usd", None)
         kwargs = self._inject_trace_context(kwargs)
         event = LLMEvent(service_name=self._service_name, **kwargs)
         self._buffer.append(("llm", event.model_dump()))
+        # Aggregate OTel metrics — fire on every call regardless of DB flush
+        # so SLO dashboards work even when DB telemetry is disabled.
+        from .aggregate_metrics import record_llm_call_metrics
+
+        record_llm_call_metrics(
+            model=event.model,
+            operation=event.operation,
+            status=event.status,
+            prompt_tokens=event.prompt_tokens,
+            completion_tokens=event.completion_tokens,
+            cost_usd=cost_usd,
+        )
 
     def record_storage_op(self, **kwargs: Any) -> None:
         kwargs = self._inject_trace_context(kwargs)

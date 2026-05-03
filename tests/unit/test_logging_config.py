@@ -71,7 +71,8 @@ def test_setup_logging_human_stdout_sink_uses_enqueue():
     ):
         setup_logging(level="INFO", json_logs=False, log_file=None)
 
-    assert mock_logger.add.call_count == 1
+    # One human stdout sink + one queue-depth error-counting sink (Phase 3).
+    assert mock_logger.add.call_count == 2
     assert mock_logger.add.call_args_list[0].kwargs.get("enqueue") is True
 
 
@@ -84,7 +85,8 @@ def test_setup_logging_json_stdout_sink_uses_enqueue():
     ):
         setup_logging(level="INFO", json_logs=True, log_file=None)
 
-    assert mock_logger.add.call_count == 1
+    # One JSON stdout sink + one queue-depth error-counting sink (Phase 3).
+    assert mock_logger.add.call_count == 2
     kwargs = mock_logger.add.call_args_list[0].kwargs
     assert kwargs.get("enqueue") is True
     assert kwargs.get("serialize") is True
@@ -99,8 +101,8 @@ def test_setup_logging_file_sink_uses_enqueue(tmp_path: Path):
     ):
         setup_logging(level="INFO", json_logs=False, log_file=tmp_path / "khora.log")
 
-    # One human stdout sink + one file sink = two logger.add calls.
-    assert mock_logger.add.call_count == 2
+    # Human stdout + file sink + queue-depth error-counting sink (Phase 3).
+    assert mock_logger.add.call_count == 3
     file_call = mock_logger.add.call_args_list[1]
     assert file_call.kwargs.get("enqueue") is True
     assert file_call.kwargs.get("rotation") == "10 MB"

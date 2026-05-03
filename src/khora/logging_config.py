@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from loguru import logger
 
@@ -132,6 +133,23 @@ def setup_logging(
     if not _drain_registered:
         atexit.register(logger.complete)
         _drain_registered = True
+
+    # Install a queue-health proxy gauge. loguru 0.7.3's
+    # ``multiprocessing.SimpleQueue`` exposes no ``qsize()`` so we surface
+    # ERROR-level log volume instead — a saturated queue almost always
+    # correlates with a sink/format error storm. A counting sink bumps the
+    # gauge counter; the gauge callback reports the running total at OTel
+    # exporter cadence (~60s). See tests/soak/test_soak.py PR #493.
+    try:
+        from khora.telemetry import aggregate_metrics as _agg
+
+        def _error_counting_sink(_message: Any) -> None:
+            _agg._increment_log_handler_errors()
+
+        logger.add(_error_counting_sink, level="ERROR", enqueue=False, catch=True)
+        _agg.register_log_queue_depth_gauge()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to install log-queue-depth gauge: {}", exc)
 
     # Intercept standard logging and redirect to loguru
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)

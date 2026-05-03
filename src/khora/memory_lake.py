@@ -845,6 +845,9 @@ class MemoryLake:
         Returns:
             RememberResult with details
         """
+        import time as _time
+
+        from khora.telemetry.aggregate_metrics import record_ingest_duration
         from khora.telemetry.context import (
             clear_trace_id,
             collect_usage,
@@ -854,6 +857,8 @@ class MemoryLake:
 
         ensure_trace_id()
         start_usage_collection()
+        _t0 = _time.perf_counter()
+        _status = "success"
         try:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.remember", namespace_id=str(namespace_id), content_length=len(content)):
@@ -875,9 +880,17 @@ class MemoryLake:
                     external_id=external_id,
                 )
                 return replace(result, llm_usage=collect_usage())
+        except Exception:
+            _status = "error"
+            raise
         finally:
             collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
+            record_ingest_duration(
+                _time.perf_counter() - _t0,
+                stage="end_to_end",
+                status=_status,
+            )
 
     async def remember_batch(
         self,
@@ -933,6 +946,9 @@ class MemoryLake:
         Returns:
             BatchResult with aggregated statistics
         """
+        import time as _time
+
+        from khora.telemetry.aggregate_metrics import record_ingest_duration
         from khora.telemetry.context import (
             clear_trace_id,
             collect_usage,
@@ -942,6 +958,8 @@ class MemoryLake:
 
         ensure_trace_id()
         start_usage_collection()
+        _t0 = _time.perf_counter()
+        _status = "success"
         try:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
@@ -968,9 +986,17 @@ class MemoryLake:
                     **batch_kwargs,
                 )
                 return replace(result, llm_usage=collect_usage())
+        except Exception:
+            _status = "error"
+            raise
         finally:
             collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
+            record_ingest_duration(
+                _time.perf_counter() - _t0,
+                stage="end_to_end",
+                status=_status,
+            )
 
     async def submit_batch(
         self,
@@ -1329,6 +1355,9 @@ class MemoryLake:
             ValueError: If both ``start_time`` and ``end_time`` are provided
                 and ``start_time > end_time``.
         """
+        import time as _time
+
+        from khora.telemetry.aggregate_metrics import record_recall_duration
         from khora.telemetry.context import (
             clear_trace_id,
             collect_usage,
@@ -1338,6 +1367,8 @@ class MemoryLake:
 
         ensure_trace_id()
         start_usage_collection()
+        _t0 = _time.perf_counter()
+        _status = "success"
         try:
             if start_time is not None or end_time is not None:
                 if start_time is not None and end_time is not None:
@@ -1374,9 +1405,18 @@ class MemoryLake:
                 if include_sources:
                     await self._populate_sources(result.chunks, result.entities, result.relationships)
                 return replace(result, llm_usage=collect_usage())
+        except Exception:
+            _status = "error"
+            raise
         finally:
             collect_usage()  # idempotent — drains queue if not already collected
             clear_trace_id()
+            record_recall_duration(
+                _time.perf_counter() - _t0,
+                engine=self._engine_name,
+                mode=getattr(mode, "value", str(mode)),
+                status=_status,
+            )
 
     async def forget(
         self,

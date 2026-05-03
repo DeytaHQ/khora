@@ -17,12 +17,12 @@
     "record_usage",
     "collect_usage",
     "trace_span",
+    "bounded_text_hash",
     "install_neo4j_logfire_handler",
     "trace",
     "metric_counter",
     "metric_gauge_callback",
-    "metric_histogram",
-    "bounded_text_hash"
+    "metric_histogram"
   ],
   "event_types": [
     {
@@ -695,6 +695,36 @@
       "type": "histogram",
       "stability": "public",
       "unit": "1"
+    },
+    {
+      "name": "khora.memory.recall.duration",
+      "type": "histogram",
+      "stability": "public",
+      "unit": "s"
+    },
+    {
+      "name": "khora.memory.ingest.duration",
+      "type": "histogram",
+      "stability": "public",
+      "unit": "s"
+    },
+    {
+      "name": "khora.llm.tokens",
+      "type": "counter",
+      "stability": "public",
+      "unit": "tokens"
+    },
+    {
+      "name": "khora.llm.cost_usd",
+      "type": "counter",
+      "stability": "public",
+      "unit": "USD"
+    },
+    {
+      "name": "khora.log.queue.depth",
+      "type": "gauge",
+      "stability": "public",
+      "unit": "records"
     }
   ]
 }
