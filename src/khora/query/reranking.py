@@ -319,7 +319,7 @@ class LLMReranker(Reranker):
             )
 
             try:
-                response = await acompletion(prompt, config)
+                response = await acompletion(prompt, config, _telemetry_op="llm_rerank")
                 data = json.loads(response.strip())
                 scores = [float(s) for s in data["scores"]]
                 # Clamp and pad/truncate to match batch size
@@ -566,7 +566,7 @@ async def llm_listwise_rerank(
 
     try:
         config = LiteLLMConfig(model=model, temperature=0.0, max_tokens=100)
-        response = await acompletion(prompt, config)
+        response = await acompletion(prompt, config, _telemetry_op="listwise_rerank")
         order = json.loads(response.strip())
         order = [int(x) - 1 for x in order if isinstance(x, (int, float))]
 

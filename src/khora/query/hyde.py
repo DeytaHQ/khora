@@ -47,6 +47,7 @@ class HyDEExpander:
             system_prompt=system_prompt,
             temperature=0.7,
             max_tokens=200,
+            _telemetry_op="hyde",
         )
 
     async def expand_query_embedding(

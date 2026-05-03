@@ -186,6 +186,11 @@ class FactExtractor:
         if not text.strip():
             return []
 
+        import time as _time
+
+        from khora.telemetry import get_collector
+
+        _t0 = _time.perf_counter()
         try:
             response = await litellm.acompletion(
                 model=self._model,
@@ -201,6 +206,18 @@ class FactExtractor:
         except Exception:
             logger.debug("Fact extraction failed, returning empty")
             return []
+
+        _latency = (_time.perf_counter() - _t0) * 1000
+        usage = getattr(response, "usage", None)
+        get_collector().record_llm_call(
+            operation="fact_extraction",
+            model=self._model,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+            latency_ms=_latency,
+            namespace_id=namespace_id,
+        )
 
         facts: list[MemoryFact] = []
         for raw in raw_facts:
@@ -332,6 +349,11 @@ class MemoryCompressor:
             f"EXISTING FACTS about '{new_fact.subject}':\n{existing_list}"
         )
 
+        import time as _time
+
+        from khora.telemetry import get_collector
+
+        _t0 = _time.perf_counter()
         try:
             response = await litellm.acompletion(
                 model=self._model,
@@ -347,6 +369,17 @@ class MemoryCompressor:
         except Exception:
             logger.debug("Contradiction check failed, defaulting to ADD")
             return ReconcileAction(op=FactOperation.ADD)
+
+        _latency = (_time.perf_counter() - _t0) * 1000
+        usage = getattr(response, "usage", None)
+        get_collector().record_llm_call(
+            operation="fact_reconcile",
+            model=self._model,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+            latency_ms=_latency,
+        )
 
         op_str = str(result.get("operation", "add")).lower()
         try:

@@ -141,6 +141,11 @@ class EventExtractor:
 
         now = datetime.now(UTC)
 
+        import time as _time
+
+        from khora.telemetry import get_collector
+
+        _t0 = _time.perf_counter()
         try:
             response = await litellm.acompletion(
                 model=self._model,
@@ -156,6 +161,18 @@ class EventExtractor:
         except Exception:
             logger.debug("Event extraction failed, returning empty")
             return []
+
+        _latency = (_time.perf_counter() - _t0) * 1000
+        usage = getattr(response, "usage", None)
+        get_collector().record_llm_call(
+            operation="event_extraction",
+            model=self._model,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            total_tokens=getattr(usage, "total_tokens", 0) or 0,
+            latency_ms=_latency,
+            namespace_id=namespace_id,
+        )
 
         events = []
         for raw in raw_events:
