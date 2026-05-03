@@ -318,6 +318,9 @@ async def acompletion(
 
     import time as _time
 
+    # Pop telemetry-only kwargs before forwarding to litellm so it never sees them.
+    _operation = kwargs.pop("_telemetry_op", "completion")
+
     _t0 = _time.perf_counter()
     response = await litellm.acompletion(
         model=config.model,
@@ -337,7 +340,6 @@ async def acompletion(
     _prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
     _completion_tokens = getattr(usage, "completion_tokens", 0) or 0
     _total_tokens = getattr(usage, "total_tokens", 0) or 0
-    _operation = kwargs.get("_telemetry_op", "completion")
     get_collector().record_llm_call(
         operation=_operation,
         model=config.model,
