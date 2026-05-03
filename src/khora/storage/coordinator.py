@@ -42,15 +42,41 @@ if TYPE_CHECKING:
     )
 
 
+def _extract_namespace_id(args: tuple[Any, ...], kwargs: dict[str, Any]) -> UUID | None:
+    """Best-effort extraction of ``namespace_id`` from a decorated method's call.
+
+    Looks in (in order): ``kwargs["namespace_id"]``, any positional ``UUID``
+    arg (after ``self``), the ``.namespace_id`` attribute of a positional
+    model arg (e.g. ``Document``, ``Entity``, ``Chunk``, ``Relationship``),
+    or the ``.namespace_id`` of the first element of a positional list.
+    Returns ``None`` if no source is found.
+    """
+    ns = kwargs.get("namespace_id")
+    if isinstance(ns, UUID):
+        return ns
+
+    # Skip the bound `self` (args[0]); inspect remaining positionals.
+    for arg in args[1:]:
+        if isinstance(arg, UUID):
+            return arg
+        attr = getattr(arg, "namespace_id", None)
+        if isinstance(attr, UUID):
+            return attr
+        if isinstance(arg, list) and arg:
+            head_attr = getattr(arg[0], "namespace_id", None)
+            if isinstance(head_attr, UUID):
+                return head_attr
+
+    return None
+
+
 def _record_storage_op(operation: str, backend: str = "postgresql"):
     """Decorator to record telemetry for async storage operations.
 
     Measures wall-clock time and records success/error via the global
-    telemetry collector.  Additional keyword arguments for
-    ``record_storage_op`` (e.g. ``record_count``, ``namespace_id``)
-    can be supplied by the decorated function by returning them as a
-    dict from a ``_telemetry_kwargs`` attribute — but typically callers
-    just let the decorator handle timing.
+    telemetry collector.  Best-effort extracts ``namespace_id`` from the
+    decorated method's arguments via :func:`_extract_namespace_id` so
+    ``storage_events.namespace_id`` is populated downstream (DYT-3398).
     """
 
     span_name = f"khora.storage.{operation}"
@@ -59,6 +85,7 @@ def _record_storage_op(operation: str, backend: str = "postgresql"):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
             t0 = _time.perf_counter()
+            namespace_id = _extract_namespace_id(args, kwargs)
             try:
                 with trace_span(span_name, backend=backend) as span:
                     result = await func(*args, **kwargs)
@@ -69,6 +96,7 @@ def _record_storage_op(operation: str, backend: str = "postgresql"):
                     operation=operation,
                     backend=backend,
                     latency_ms=elapsed * 1000,
+                    namespace_id=namespace_id,
                 )
                 return result
             except Exception:
@@ -78,6 +106,7 @@ def _record_storage_op(operation: str, backend: str = "postgresql"):
                     backend=backend,
                     latency_ms=elapsed * 1000,
                     status="error",
+                    namespace_id=namespace_id,
                 )
                 raise
 
