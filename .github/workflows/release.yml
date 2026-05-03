@@ -1,11 +1,16 @@
-# Release pipeline — tests first, then publish khora + khora-accel in parallel.
+# Release pipeline — verify CI is green, then publish khora + khora-accel in parallel.
 #
 # Trigger: v[0-9]* tag push (e.g. v0.5.0, v1.0.0-rc1) plus manual dispatch.
 # This is the ONLY workflow that runs on tag push; ci.yml handles PRs and branches.
 #
 # Pipeline:
-#   test ──> build-accel (3 platforms × 2 Python versions) ──┬──> publish-khora
-#                                                           └──> publish-accel
+#   verify-ci-green ──> build-accel (3 platforms × 2 Python versions) ──┬──> publish-khora
+#                                                                       └──> publish-accel
+#
+# verify-ci-green confirms ci.yml already passed for the tagged SHA on main.
+# Re-running the full test suite at tag time was ~10 min of redundant work.
+# Tag arbitrary commits at your own risk: if no successful CI run exists for
+# the SHA, the release fails fast with a clear error.
 #
 # Authentication: GitHub OIDC federation — no long-lived AWS credentials.
 # Concurrency: one release at a time; never cancel in-flight publishes.
@@ -28,48 +33,36 @@ concurrency:
 
 jobs:
   # ============================================================================
-  # Test — must pass before anything is published.
+  # Verify CI is green — precondition gate, replaces the redundant test re-run.
+  #
+  # ci.yml already runs the full pytest+lint+security suite on every push to
+  # main and on every PR. Re-running the same suite on tag push wastes ~10 min
+  # per release. Instead we confirm the tagged SHA has a successful ci.yml run
+  # via the GitHub Actions REST API. If not, fail loudly: the operator must
+  # push the commit to main, wait for CI to pass, and then tag.
   # ============================================================================
-  test:
+  verify-ci-green:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          version: "latest"
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-          prune-cache: false
-
-      - name: Set up Python
-        run: uv python install 3.13
-
-      - name: Restore venv cache
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}
-          restore-keys: |
-            venv-${{ runner.os }}-py3.13-
-
-      - name: Install dependencies
-        run: uv sync --all-extras
-
-      - name: Type check with ty
-        run: uv run ty check src/
-
-      - name: Run prek checks (formatting, linting, imports)
-        run: uv run prek run --all-files
-
-      - name: Verify migration source files and ORM/migration drift
-        run: uv run pytest tests/unit/test_migration_drift.py -v -o "addopts=" --no-cov
-
-      - name: Run tests with coverage
-        run: uv run pytest --cov=src/khora --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=30
+      - name: Verify CI workflow succeeded for this SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "Checking for successful ci.yml run on SHA $SHA..."
+          runs=$(gh api \
+            "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&status=success&per_page=10" \
+            --jq '.total_count // 0')
+          if [ "$runs" -eq 0 ]; then
+            echo "::error::No successful ci.yml run found for SHA ${SHA}."
+            echo "::error::Tag pushes assume CI has already validated the commit on main."
+            echo "::error::Push the commit to main, wait for CI to go green, then tag."
+            exit 1
+          fi
+          echo "Found ${runs} successful ci.yml run(s) for ${SHA} — proceeding with release."
 
   # ============================================================================
   # Publish khora — pure Python wheel to CodeArtifact.
@@ -124,10 +117,11 @@ jobs:
 
   # ============================================================================
   # Build khora-accel — native wheels for 3 platforms × 2 Python versions via maturin.
-  # Runs after tests pass. Builds must complete before either publish job starts.
+  # Runs after the CI-green precondition. Builds must complete before either
+  # publish job starts.
   # ============================================================================
   build-accel:
-    needs: test
+    needs: verify-ci-green
     strategy:
       fail-fast: false
       matrix:
