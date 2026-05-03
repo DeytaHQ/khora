@@ -656,8 +656,53 @@ class Neo4jBackend(GraphBackendBase):
         #          LLM prompt examples, expansion modules (relationship_inferrer,
         #          cross_tool_unifier).
         rel_indexes = [
-            # type-independent relationship id index (used by remap, get, delete)
-            "CREATE INDEX rel_id IF NOT EXISTS FOR ()-[r]-() ON (r.id)",
+            # --- id on all known relationship types (used by remap, get, delete) ---
+            # Neo4j RANGE indexes require an explicit relationship type — the
+            # bare ()-[r]-() form is only valid for LOOKUP indexes, so we expand
+            # the same type set used for namespace_id below.
+            # Core / general
+            "CREATE INDEX rel_relates_to_id IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.id)",
+            "CREATE INDEX rel_collaborates_id IF NOT EXISTS FOR ()-[r:COLLABORATES_WITH]-() ON (r.id)",
+            "CREATE INDEX rel_associated_id IF NOT EXISTS FOR ()-[r:ASSOCIATED_WITH]-() ON (r.id)",
+            "CREATE INDEX rel_depends_id IF NOT EXISTS FOR ()-[r:DEPENDS_ON]-() ON (r.id)",
+            "CREATE INDEX rel_owns_id IF NOT EXISTS FOR ()-[r:OWNS]-() ON (r.id)",
+            "CREATE INDEX rel_works_for_id IF NOT EXISTS FOR ()-[r:WORKS_FOR]-() ON (r.id)",
+            "CREATE INDEX rel_implements_id IF NOT EXISTS FOR ()-[r:IMPLEMENTS]-() ON (r.id)",
+            "CREATE INDEX rel_part_of_id IF NOT EXISTS FOR ()-[r:PART_OF]-() ON (r.id)",
+            # People & org relationships
+            "CREATE INDEX rel_knows_id IF NOT EXISTS FOR ()-[r:KNOWS]-() ON (r.id)",
+            "CREATE INDEX rel_manages_id IF NOT EXISTS FOR ()-[r:MANAGES]-() ON (r.id)",
+            "CREATE INDEX rel_reports_to_id IF NOT EXISTS FOR ()-[r:REPORTS_TO]-() ON (r.id)",
+            # Location
+            "CREATE INDEX rel_located_in_id IF NOT EXISTS FOR ()-[r:LOCATED_IN]-() ON (r.id)",
+            "CREATE INDEX rel_headquartered_in_id IF NOT EXISTS FOR ()-[r:HEADQUARTERED_IN]-() ON (r.id)",
+            # Temporal ordering
+            "CREATE INDEX rel_precedes_id IF NOT EXISTS FOR ()-[r:PRECEDES]-() ON (r.id)",
+            "CREATE INDEX rel_follows_id IF NOT EXISTS FOR ()-[r:FOLLOWS]-() ON (r.id)",
+            # Business
+            "CREATE INDEX rel_competes_with_id IF NOT EXISTS FOR ()-[r:COMPETES_WITH]-() ON (r.id)",
+            "CREATE INDEX rel_partners_with_id IF NOT EXISTS FOR ()-[r:PARTNERS_WITH]-() ON (r.id)",
+            "CREATE INDEX rel_uses_id IF NOT EXISTS FOR ()-[r:USES]-() ON (r.id)",
+            "CREATE INDEX rel_created_by_id IF NOT EXISTS FOR ()-[r:CREATED_BY]-() ON (r.id)",
+            # Slack / messaging
+            "CREATE INDEX rel_messaged_id IF NOT EXISTS FOR ()-[r:MESSAGED]-() ON (r.id)",
+            "CREATE INDEX rel_sent_message_to_id IF NOT EXISTS FOR ()-[r:SENT_MESSAGE_TO]-() ON (r.id)",
+            "CREATE INDEX rel_mentioned_id IF NOT EXISTS FOR ()-[r:MENTIONED]-() ON (r.id)",
+            "CREATE INDEX rel_posted_in_id IF NOT EXISTS FOR ()-[r:POSTED_IN]-() ON (r.id)",
+            "CREATE INDEX rel_member_of_id IF NOT EXISTS FOR ()-[r:MEMBER_OF]-() ON (r.id)",
+            # Project / task
+            "CREATE INDEX rel_works_on_id IF NOT EXISTS FOR ()-[r:WORKS_ON]-() ON (r.id)",
+            "CREATE INDEX rel_assigned_to_id IF NOT EXISTS FOR ()-[r:ASSIGNED_TO]-() ON (r.id)",
+            # Research / derivation
+            "CREATE INDEX rel_derived_from_id IF NOT EXISTS FOR ()-[r:DERIVED_FROM]-() ON (r.id)",
+            # Expansion-generated types
+            "CREATE INDEX rel_co_occurs_with_id IF NOT EXISTS FOR ()-[r:CO_OCCURS_WITH]-() ON (r.id)",
+            "CREATE INDEX rel_cross_referenced_id IF NOT EXISTS FOR ()-[r:CROSS_REFERENCED]-() ON (r.id)",
+            # Entity-to-chunk / event participation
+            "CREATE INDEX rel_mentioned_in_id IF NOT EXISTS FOR ()-[r:MENTIONED_IN]-() ON (r.id)",
+            "CREATE INDEX rel_participated_in_id IF NOT EXISTS FOR ()-[r:PARTICIPATED_IN]-() ON (r.id)",
+            # Bi-temporal entity versioning: SUPERSEDES edges
+            "CREATE INDEX rel_supersedes_id IF NOT EXISTS FOR ()-[r:SUPERSEDES]-() ON (r.id)",
             # --- namespace_id on all known relationship types ---
             # Core / general
             "CREATE INDEX rel_namespace IF NOT EXISTS FOR ()-[r:RELATES_TO]-() ON (r.namespace_id)",
@@ -734,7 +779,7 @@ class Neo4jBackend(GraphBackendBase):
                 try:
                     await session.run(index)
                 except Exception as e:
-                    logger.warning(f"Relationship index creation skipped (may require Neo4j ≥5.7 or Enterprise): {e}")
+                    logger.warning(f"Relationship index creation skipped: {e}")
 
     def _get_driver(self) -> AsyncDriver:
         """Get the Neo4j driver."""

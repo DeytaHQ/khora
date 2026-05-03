@@ -56,6 +56,10 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 - `exceptions.py` — `KhoraError` hierarchy with domain-specific exceptions
 - `telemetry/` — Optional PostgreSQL-backed telemetry collector + `@trace` decorator
 
+## Doc Conventions (overrides workflow.md)
+
+**Do not maintain `docs/AI_CHANGELOG.md` in this repo.** The shared workflow doc references it, but khora deliberately opts out: do not create the file, do not append entries, do not include it in PRs. Commit messages and merged-PR titles are the changelog of record.
+
 @.claude/docs/workflow.md
 
 ## Conventions
