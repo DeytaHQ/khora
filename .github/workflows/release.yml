@@ -44,6 +44,9 @@ jobs:
   verify-ci-green:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read   # required by `gh api .../actions/workflows/.../runs`
     steps:
       - name: Verify CI workflow succeeded for this SHA
         env:
