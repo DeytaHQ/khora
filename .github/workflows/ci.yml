@@ -305,13 +305,10 @@ jobs:
           echo "Built: $(ls dist/)"
 
       - name: Publish to CodeArtifact
-        run: |
-          twine upload \
-            --skip-existing \
-            --repository-url https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/ \
-            --username aws \
-            --password "${{ env.CA_TOKEN }}" \
-            dist/*
+        env:
+          CA_REPOSITORY_URL: https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/
+          CA_TOKEN: ${{ env.CA_TOKEN }}
+        run: ./.github/scripts/publish-codeartifact.sh dist/*
 
   publish-dev-accel:
     needs: build-accel-dev
@@ -355,10 +352,7 @@ jobs:
           echo "CA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       - name: Publish to CodeArtifact
-        run: |
-          twine upload \
-            --skip-existing \
-            --repository-url https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/ \
-            --username aws \
-            --password "${{ env.CA_TOKEN }}" \
-            dist/*
+        env:
+          CA_REPOSITORY_URL: https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/
+          CA_TOKEN: ${{ env.CA_TOKEN }}
+        run: ./.github/scripts/publish-codeartifact.sh dist/*
