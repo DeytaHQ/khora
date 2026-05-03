@@ -21,7 +21,8 @@
     "trace",
     "metric_counter",
     "metric_gauge_callback",
-    "metric_histogram"
+    "metric_histogram",
+    "bounded_text_hash"
   ],
   "event_types": [
     {
