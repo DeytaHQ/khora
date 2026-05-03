@@ -119,6 +119,7 @@ jobs:
       - name: Publish to CodeArtifact
         run: |
           twine upload \
+            --skip-existing \
             --repository-url https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/ \
             --username aws \
             --password "${{ env.CA_TOKEN }}" \
@@ -224,6 +225,7 @@ jobs:
       - name: Publish to CodeArtifact
         run: |
           twine upload \
+            --skip-existing \
             --repository-url https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/ \
             --username aws \
             --password "${{ env.CA_TOKEN }}" \
