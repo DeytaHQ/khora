@@ -50,12 +50,28 @@ from khora.query import SearchMode
 from khora.query.router import QueryComplexity, QueryComplexityRouter, RouterConfig
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
 from khora.telemetry import trace
+from khora.telemetry.metrics import metric_counter, metric_histogram
 
 if TYPE_CHECKING:
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
 
 ChronicleStorageBackend = Literal["pgvector", "lancedb"]
+
+
+# --- Abstention metrics (DYT-3145 Phase 4) ---
+# Module-level instruments so every recall() shares one OTel handle.
+# No namespace label — Phase 0 audit identified 438 distinct namespaces,
+# emitting per-namespace would blow cardinality. Aggregate-only by design.
+_ABSTENTION_SIGNAL_COUNTER = metric_counter(
+    "khora.chronicle.abstention_signal",
+    description="Chronicle abstention signal firings, by signal name.",
+)
+_ABSTENTION_COMBINED_SCORE_HISTOGRAM = metric_histogram(
+    "khora.chronicle.abstention_combined_score",
+    unit="1",
+    description="Chronicle abstention combined-score (0.0=confident, 1.0=should-abstain).",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1530,6 +1546,20 @@ class ChronicleEngine:
         # chunks_below_min is weighted highest because zero/few chunks is the
         # strongest signal that retrieval failed.
         combined = 0.3 * float(entities_empty) + 0.4 * float(chunks_below_min) + 0.3 * float(top_score_low)
+
+        # Aggregate metrics (DYT-3145 Phase 4). Per-signal counter increments
+        # 0-4 times per recall; histogram observed once per recall. Both are
+        # aggregate-only — no namespace_id label (cardinality safety).
+        if entities_empty:
+            _ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "entities_empty"})
+        if chunks_empty:
+            _ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "chunks_empty"})
+        if chunks_below_min:
+            _ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "chunks_below_min"})
+        if top_score_low:
+            _ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "top_score_low"})
+        _ABSTENTION_COMBINED_SCORE_HISTOGRAM.record(combined)
+
         return {
             "entities_empty": entities_empty,
             "chunks_empty": chunks_empty,

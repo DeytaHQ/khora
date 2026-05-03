@@ -682,6 +682,18 @@
       "type": "histogram",
       "stability": "internal",
       "unit": ""
+    },
+    {
+      "name": "khora.chronicle.abstention_signal",
+      "type": "counter",
+      "stability": "public",
+      "unit": ""
+    },
+    {
+      "name": "khora.chronicle.abstention_combined_score",
+      "type": "histogram",
+      "stability": "public",
+      "unit": "1"
     }
   ]
 }
