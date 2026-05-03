@@ -454,6 +454,26 @@ class LLMSettings(BaseSettings):
     model_list: list[dict[str, Any]] | None = Field(default=None, description="Model list for router")
     router_settings: dict[str, Any] | None = Field(default=None, description="Router settings")
 
+    # Shared aiohttp session connector settings (mirrors LiteLLMConfig fields).
+    # The shared session is created once per process on first engine connect;
+    # see LiteLLMConfig docstring for first-call-wins semantics.
+    max_total_connections: int = Field(
+        default=200,
+        gt=0,
+        description="Total cap on simultaneous connections in the shared aiohttp session, summed across all hosts.",
+    )
+    max_connections_per_host: int = Field(
+        default=0,
+        ge=0,
+        description="Per-host cap on simultaneous connections in the shared "
+        "aiohttp session. 0 = unlimited (matches pre-0.9.0 behaviour).",
+    )
+    keepalive_timeout_s: float = Field(
+        default=30.0,
+        gt=0,
+        description="Idle keepalive seconds for connections in the shared aiohttp session.",
+    )
+
 
 class PipelineSettings(BaseSettings):
     """Pipeline configuration settings.
