@@ -62,6 +62,33 @@ Khora ships two zero-infrastructure paths. Both are marked **experimental** in v
 
 > **Quickstart caveat.** A literal `MemoryLake("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector — there is no `memory://` URL scheme parsed by the lake itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` (or `surrealdb`) and the corresponding `db_path` / connection settings. Routing a true `memory://` URI to the SQLite+LanceDB stack is tracked for v0.10.
 
+## Observability
+
+khora emits OpenTelemetry spans and metrics via [Logfire](https://logfire.pydantic.dev/) and records structured `LLMEvent` / `StorageEvent` / `PipelineEvent` rows to PostgreSQL when a collector is configured. Both integrations are opt-in — without them, all instrumentation is a zero-cost no-op.
+
+- **Public surface is documented in [`docs/telemetry-contract.json`](docs/telemetry-contract.json)** (with explainer at [`docs/telemetry-contract.md`](docs/telemetry-contract.md)). It lists every public span, metric, pipeline stage, event-type field, and `khora.telemetry.__all__` export. Items tagged `stability: public` are part of khora's API surface and follow standard semver — breaking changes require a major version bump. Drift is enforced in CI via `tests/unit/telemetry/test_contract.py`. See [ADR-026](docs/adrs/adr-026-telemetry-contract.md).
+- **OTel semantic conventions** apply to attributes: `gen_ai.*` for LLM calls, `db.*` for storage, `code.*` for stack info. Vendor-neutral over the OTel exporter chain.
+- **Logfire integration is opt-in via the `[logfire]` extra:**
+
+  ```bash
+  pip install khora[logfire]
+  ```
+
+  ```python
+  import logfire
+  from khora import MemoryLake
+
+  logfire.configure(service_name="my-service")
+  # khora's @trace decorators and trace_span() context managers
+  # now emit spans automatically; metrics like khora.memory.recall.duration,
+  # khora.llm.tokens, khora.llm.cost_usd, khora.chronicle.abstention_signal
+  # are exported on the standard OTel cadence.
+  ```
+
+  Without the `logfire` extra installed, `trace_span()` yields a no-op and `metric_*` registrations short-circuit.
+- **Structured event recording is opt-in via `KHORA_TELEMETRY_DATABASE_URL`** (PostgreSQL). When set, `TelemetryCollector` writes `LLMEvent` / `StorageEvent` / `PipelineEvent` rows for downstream cost tracking and incident reconstruction. Without it, `NoOpCollector` is used (zero cost).
+- **Async logging caveat.** Library consumers that import khora without configuring loguru sinks inherit the default sync stderr sink, which blocks the event loop on every log call inside `async def`. Either call `khora.logging_config.setup_logging()` (which configures sinks with `enqueue=True` and registers an `atexit` drain) or configure your own loguru sinks with `enqueue=True` explicitly.
+
 ## Documentation
 
 Start at [docs/README.md](docs/README.md). Key entry points:
