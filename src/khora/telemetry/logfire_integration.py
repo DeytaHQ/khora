@@ -14,6 +14,7 @@ Install with::
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -35,8 +36,22 @@ __all__ = [
     "NoOpSpan",
     "LogfireSpan",
     "trace_span",
+    "bounded_text_hash",
     "install_neo4j_logfire_handler",
 ]
+
+
+def bounded_text_hash(text: str) -> str:
+    """Return a short, bounded hash for use as a span attribute.
+
+    Span/metric backends (Logfire, OTel exporters → Prometheus) bill per
+    distinct attribute value. Using raw user text as a span attr causes
+    unbounded cardinality. Hash to the first 8 hex chars — collisions are
+    irrelevant for grouping observability data, but cardinality stays
+    bounded by actual unique inputs (rather than every keystroke variant).
+    """
+    return hashlib.sha1(text.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
+
 
 # Marker attribute used to identify neo4j logfire handlers that khora owns so
 # repeated ``install_neo4j_logfire_handler()`` calls can strip stale handlers

@@ -469,7 +469,7 @@ class TestMemoryLakeSpans:
 
     @pytest.mark.asyncio
     async def test_recall_creates_span(self):
-        """recall() creates a logfire span with namespace_id and query_length."""
+        """recall() creates a bounded logfire span — query_hash + query_length, no raw query."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
         lake._engine.recall = AsyncMock(
@@ -501,7 +501,10 @@ class TestMemoryLakeSpans:
         call_args = mock_span_fn.call_args
         assert call_args[0][0] == "khora.recall"
         assert call_args[1]["namespace_id"] == str(_RESOLVE_ROW_ID)
-        assert call_args[1]["query"] == "test query"
+        assert "query" not in call_args[1], "raw query must not be a span attribute (cardinality bomb)"
+        assert call_args[1]["query_length"] == len("test query")
+        assert isinstance(call_args[1]["query_hash"], str)
+        assert len(call_args[1]["query_hash"]) == 8
 
     @pytest.mark.asyncio
     async def test_forget_creates_span(self):
@@ -621,13 +624,14 @@ class TestSpanAttributeWhitelist:
                 assert secret_content not in val, "Raw content leaked into span attributes"
 
     @pytest.mark.asyncio
-    async def test_recall_captures_query(self):
-        """recall() span attributes contain the query text."""
+    async def test_recall_does_not_leak_query(self):
+        """recall() span attributes record query_hash + query_length, never the raw query."""
         lake = _make_lake(connected=True)
         ns_id = uuid4()
+        secret_query = "what was the password the CEO mentioned in slack yesterday"
         lake._engine.recall = AsyncMock(
             return_value=RecallResult(
-                query="test query",
+                query=secret_query,
                 namespace_id=ns_id,
                 chunks=[],
                 entities=[],
@@ -648,10 +652,14 @@ class TestSpanAttributeWhitelist:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.recall("test query", namespace=ns_id)
+            await lake.recall(secret_query, namespace=ns_id)
 
         call_args = mock_span_fn.call_args
-        assert call_args[1]["query"] == "test query"
+        for val in call_args[1].values():
+            if isinstance(val, str):
+                assert secret_query not in val, "raw query leaked into span attributes"
+        assert call_args[1]["query_length"] == len(secret_query)
+        assert len(call_args[1]["query_hash"]) == 8
 
 
 # =========================================================================

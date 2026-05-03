@@ -37,7 +37,7 @@ except ImportError:
     ConnectionPoolError = ServiceUnavailable  # type: ignore[misc,assignment]
 
 from khora.core.models import Chunk, ChunkMetadata, Entity, Relationship
-from khora.telemetry import trace_span
+from khora.telemetry import bounded_text_hash, trace_span
 
 from .dual_nodes import DualNodeManager
 from .fusion import (
@@ -778,7 +778,11 @@ class VectorCypherRetriever:
         if temporal_signal and temporal_signal.category == TemporalCategory.CHANGE and version_history:
             current_state_query = self._decompose_change_query(query)
             if current_state_query and current_state_query != query:
-                with trace_span("khora.vectorcypher.change_decomposition", sub_query=current_state_query):
+                with trace_span(
+                    "khora.vectorcypher.change_decomposition",
+                    sub_query_hash=bounded_text_hash(current_state_query),
+                    sub_query_length=len(current_state_query),
+                ):
                     sub_embedding = await self._embedder.embed(current_state_query)
                     sub_vector_chunks = await self._vector_search_chunks(
                         query_embedding=sub_embedding,

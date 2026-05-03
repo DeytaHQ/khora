@@ -32,7 +32,7 @@ from .context import (
     set_trace_id,
     start_usage_collection,
 )
-from .logfire_integration import install_neo4j_logfire_handler, trace_span
+from .logfire_integration import bounded_text_hash, install_neo4j_logfire_handler, trace_span
 from .metrics import metric_counter, metric_gauge_callback, metric_histogram
 from .noop import NoOpCollector
 from .trace_decorator import trace
@@ -54,6 +54,7 @@ __all__ = [
     "record_usage",
     "collect_usage",
     "trace_span",
+    "bounded_text_hash",
     "install_neo4j_logfire_handler",
     "trace",
     "metric_counter",

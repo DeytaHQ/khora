@@ -23,7 +23,7 @@ from loguru import logger
 from khora.config import KhoraConfig, load_config
 from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
-from khora.telemetry import trace_span
+from khora.telemetry import bounded_text_hash, trace_span
 
 
 class _GlobalChunkSemaphore:
@@ -1355,7 +1355,12 @@ class MemoryLake:
             else:
                 temporal_filter = None
             namespace_id = await self._resolve_namespace(namespace)
-            with trace_span("khora.recall", namespace_id=str(namespace_id), query=query):
+            with trace_span(
+                "khora.recall",
+                namespace_id=str(namespace_id),
+                query_hash=bounded_text_hash(query),
+                query_length=len(query),
+            ):
                 result = await self._get_engine().recall(
                     query,
                     namespace_id,
