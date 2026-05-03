@@ -422,12 +422,18 @@ class VectorCypherEngine:
         await self._temporal_store.connect()
 
         # Create embedder
+        # Connector fields are forwarded so YAML-configured values reach the
+        # shared aiohttp session via configure_litellm — without this hop they
+        # would be silently dropped (DYT-3599).
         llm_config = LiteLLMConfig(
             model=self._config.llm.model,
             embedding_model=self._config.llm.embedding_model,
             embedding_dimension=self._config.llm.embedding_dimension,
             timeout=self._config.llm.timeout,
             max_retries=self._config.llm.max_retries,
+            max_total_connections=self._config.llm.max_total_connections,
+            max_connections_per_host=self._config.llm.max_connections_per_host,
+            keepalive_timeout_s=self._config.llm.keepalive_timeout_s,
         )
         from khora.config.llm import _init_shared_session, configure_litellm
 

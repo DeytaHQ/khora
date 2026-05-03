@@ -20,6 +20,13 @@ class LiteLLMConfig(BaseModel):
 
     This configuration provides a unified interface to all LLM providers
     including OpenAI, Anthropic, Google, and others through LiteLLM.
+
+    Connector fields (``max_total_connections``, ``max_connections_per_host``,
+    ``keepalive_timeout_s``) configure the process-wide aiohttp ``ClientSession``
+    that wraps every LiteLLM call. The session is created once on first
+    ``configure_litellm`` + ``_init_shared_session`` call and shared across all
+    engines in the process — first-call-wins semantics. If two engines configure
+    different connector values, the second one logs a warning and is ignored.
     """
 
     # Primary model configuration
@@ -121,6 +128,35 @@ class LiteLLMConfig(BaseModel):
         ),
     )
 
+    # ── Shared aiohttp session connector settings ─────────────────────────────
+    # The shared session is built once on first engine connect; these values
+    # are read by ``_init_shared_session`` from the cache populated by
+    # ``configure_litellm``. Maps onto ``aiohttp.TCPConnector(limit=...,
+    # limit_per_host=..., keepalive_timeout=...)``.
+    max_total_connections: int = Field(
+        default=200,
+        gt=0,
+        description="Total cap on simultaneous connections in the shared "
+        "aiohttp session, summed across all hosts. Default 200 covers a "
+        "MemoryLake mixing OpenAI + Anthropic + reranker hosts at the "
+        "concurrency genesis configures.",
+    )
+    max_connections_per_host: int = Field(
+        default=0,
+        ge=0,
+        description="Per-host cap on simultaneous connections in the shared "
+        "aiohttp session. Default 0 means no per-host limit (matches "
+        "pre-0.9.0 behaviour where each call had its own session). Set this "
+        "to a positive integer to cap concurrent requests against a single "
+        "provider — note the LLM provider's published rate limits also apply, "
+        "so this is belt-and-suspenders, not the primary throttle.",
+    )
+    keepalive_timeout_s: float = Field(
+        default=30.0,
+        gt=0,
+        description="Idle keepalive seconds for connections in the shared aiohttp session.",
+    )
+
     @classmethod
     def from_yaml(cls, path: str | Path) -> LiteLLMConfig:
         """Load configuration from a YAML file.
@@ -173,6 +209,9 @@ class LiteLLMConfig(BaseModel):
 
 
 _shared_aiohttp_session: Any = None
+# Cached connector settings populated by ``configure_litellm`` and consumed by
+# ``_init_shared_session``. First-call wins; later configs are warned about.
+_connector_settings: dict[str, float | int] | None = None
 
 
 def configure_litellm(config: LiteLLMConfig | None = None) -> None:
@@ -212,6 +251,27 @@ def configure_litellm(config: LiteLLMConfig | None = None) -> None:
         elif "gemini" in config.model.lower():
             os.environ.setdefault("GOOGLE_API_KEY", api_key)
 
+    # Cache connector settings for the shared session. First config wins —
+    # subsequent calls with different connector settings warn (the session is
+    # process-wide and built once).
+    global _connector_settings
+    new_settings = {
+        "limit": config.max_total_connections,
+        "limit_per_host": config.max_connections_per_host,
+        "keepalive_timeout": config.keepalive_timeout_s,
+    }
+    if _connector_settings is None:
+        _connector_settings = new_settings
+    elif _connector_settings != new_settings:
+        logger.warning(
+            "configure_litellm called with connector settings that differ "
+            "from the cached values; the shared aiohttp session is process-"
+            "global and was built with the first config — new values will be "
+            "ignored. Cached: {} | New: {}",
+            _connector_settings,
+            new_settings,
+        )
+
     logger.info(f"LiteLLM configured with model: {config.model}")
 
 
@@ -221,6 +281,10 @@ async def _init_shared_session() -> None:
     Must be called from an async context (e.g. engine connect()) so that
     aiohttp.ClientSession is instantiated inside a running coroutine.
     The guard prevents session leaks on repeated connect() calls.
+
+    Reads connector settings from the module-level cache populated by
+    ``configure_litellm``; falls back to ``LiteLLMConfig`` defaults if no
+    config has been registered yet (e.g. tests that bypass ``configure_litellm``).
     """
     global _shared_aiohttp_session
     if _shared_aiohttp_session is not None:
@@ -228,12 +292,32 @@ async def _init_shared_session() -> None:
     try:
         import aiohttp
 
-        connector = aiohttp.TCPConnector(limit=20, limit_per_host=10, keepalive_timeout=30)
+        if _connector_settings is None:
+            # Caller skipped configure_litellm; fall back to model defaults.
+            defaults = LiteLLMConfig()
+            settings: dict[str, float | int] = {
+                "limit": defaults.max_total_connections,
+                "limit_per_host": defaults.max_connections_per_host,
+                "keepalive_timeout": defaults.keepalive_timeout_s,
+            }
+        else:
+            settings = _connector_settings
+
+        connector = aiohttp.TCPConnector(
+            limit=int(settings["limit"]),
+            limit_per_host=int(settings["limit_per_host"]),
+            keepalive_timeout=float(settings["keepalive_timeout"]),
+        )
         _shared_aiohttp_session = aiohttp.ClientSession(
             connector=connector,
             timeout=aiohttp.ClientTimeout(total=600),
         )
-        logger.debug("Shared aiohttp session created for litellm calls")
+        logger.debug(
+            "Shared aiohttp session created (limit={}, limit_per_host={}, keepalive_timeout={})",
+            settings["limit"],
+            settings["limit_per_host"],
+            settings["keepalive_timeout"],
+        )
     except ImportError:
         logger.debug("aiohttp not available, skipping shared session creation")
 
@@ -245,10 +329,13 @@ def get_shared_session() -> Any:
 
 async def close_shared_session() -> None:
     """Close the shared aiohttp session. Call on engine/app shutdown."""
-    global _shared_aiohttp_session
+    global _shared_aiohttp_session, _connector_settings
     if _shared_aiohttp_session is not None:
         await _shared_aiohttp_session.close()
         _shared_aiohttp_session = None
+        # Clear cached connector settings so the next configure_litellm call
+        # can register fresh values without tripping the first-call-wins warning.
+        _connector_settings = None
         logger.debug("Shared aiohttp session closed")
 
 

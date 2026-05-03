@@ -4,6 +4,31 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [Unreleased] — Connector throughput restoration
+
+### Performance — restore pre-0.9.0 LiteLLM throughput (DYT-3599)
+
+The shared aiohttp session introduced in DYT-3156 (v0.9.0) was created with hard-coded `TCPConnector(limit=20, limit_per_host=10)`. `limit_per_host=10` silently throttled all OpenAI / Anthropic / etc. requests to 10 in flight per host, regardless of caller-configured concurrency. Downstream services (e.g. Genesis with `max_concurrent_llm_calls=200`) regressed ~5–20× on wall-time after upgrading to 0.9.x because the shared session became the dominant ceiling on parallel LLM/embedding calls.
+
+The connector is now configurable through `LiteLLMConfig` and `LLMSettings`:
+
+| Field                       | Default | aiohttp arg            |
+|-----------------------------|---------|------------------------|
+| `max_total_connections`     | 200     | `limit`                |
+| `max_connections_per_host`  | 0 (unlimited) | `limit_per_host` |
+| `keepalive_timeout_s`       | 30.0    | `keepalive_timeout`    |
+
+Defaults restore pre-0.9.0 throughput: total cap is generous, no per-host throttle. Fields are read by `_init_shared_session` from a cache populated by `configure_litellm` (first-call-wins; subsequent calls with non-matching connector settings log a warning and are ignored).
+
+**Migration call-out** — anyone who relied on the v0.9.0 connector throttle as a budget brake or rate-limit circuit-breaker should set `max_connections_per_host` explicitly in YAML / env (`KHORA_LLM_MAX_CONNECTIONS_PER_HOST`). On Anthropic Claude tier 1 in particular, an unlimited per-host connector combined with extraction loops can produce 429 storms that the previous 10-cap masked. Pick a value that matches your provider tier rather than relying on the connector for backpressure.
+
+### Out of scope (related but tracked separately)
+
+* DYT-3079's `_bisect_and_extract` issues up to 2N LLM calls when truncation is detected — amplifies any concurrency change downstream. Not touched here.
+* DYT-3305's unified pending processor spawns 20 background workers on every `MemoryLake.connect()` even for engines that never call `submit_batch`. Idle but not free. Not touched here.
+
+---
+
 ## [Unreleased] — Telemetry Public Surface, OSS Observability Contract
 
 Telemetry workstream (PRs #504–#509) shipped after the v0.9.1 tag. It hardens cardinality safety, codifies the public observability surface as a JSON contract enforced by a CI drift gate, fixes a silent regression that had been zeroing out `storage_events.namespace_id` since February 2026, and broadens metric coverage. See [ADR-026](docs/adrs/adr-026-telemetry-contract.md) for the design rationale and the OSS implication: public telemetry names are now API and break the same way any other public symbol does.
