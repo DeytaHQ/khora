@@ -38,7 +38,6 @@ pytestmark = pytest.mark.skipif(not _HAS_LANCEDB, reason="lancedb not installed"
 
 
 if _HAS_LANCEDB:
-    from khora.db.session import run_migrations
     from khora.storage.backends.sqlite_lance.connection import (
         EmbeddedStorageHandle,
         EmbeddedStorageHandleConfig,
@@ -47,12 +46,8 @@ if _HAS_LANCEDB:
 
 
 async def _build_adapter(
-    tmp_path: Path, *, retrain_factor: float = 2.0
+    db_path: Path, lance_path: Path, *, retrain_factor: float = 2.0
 ) -> tuple[EmbeddedStorageHandle, SQLiteLanceVectorAdapter]:
-    db_path = tmp_path / "k.db"
-    lance_path = tmp_path / "k.lance"
-    result = await run_migrations(f"sqlite+aiosqlite:///{db_path}")
-    assert result.success, result.error
     cfg = EmbeddedStorageHandleConfig(
         db_path=str(db_path),
         lance_path=str(lance_path),
@@ -84,10 +79,10 @@ async def _wait_for_retrain(adapter: SQLiteLanceVectorAdapter) -> None:
 
 
 class TestRetrainTrigger:
-    async def test_initial_train_at_threshold(self, tmp_path: Path):
+    async def test_initial_train_at_threshold(self, migrated_sqlite_db: Path, tmp_path: Path):
         """Before any training, hitting the search path with >= 5000 rows
         trains the index inline and records the row count."""
-        handle, adapter = await _build_adapter(tmp_path)
+        handle, adapter = await _build_adapter(migrated_sqlite_db, tmp_path / "k.lance")
         try:
             tbl = _fake_table(row_count=5_000)
             with patch.object(adapter, "_chunks_table", AsyncMock(return_value=tbl)):
@@ -98,9 +93,9 @@ class TestRetrainTrigger:
         finally:
             await adapter.disconnect()
 
-    async def test_retrain_when_corpus_doubles(self, tmp_path: Path):
+    async def test_retrain_when_corpus_doubles(self, migrated_sqlite_db: Path, tmp_path: Path):
         """After initial train at 5k, growing to 10k triggers a retrain."""
-        handle, adapter = await _build_adapter(tmp_path)
+        handle, adapter = await _build_adapter(migrated_sqlite_db, tmp_path / "k.lance")
         try:
             tbl = _fake_table(row_count=5_000)
             with patch.object(adapter, "_chunks_table", AsyncMock(return_value=tbl)):
@@ -120,10 +115,10 @@ class TestRetrainTrigger:
         finally:
             await adapter.disconnect()
 
-    async def test_no_retrain_below_factor(self, tmp_path: Path):
+    async def test_no_retrain_below_factor(self, migrated_sqlite_db: Path, tmp_path: Path):
         """100 extra rows past 10k (total 10.1k) is far below the 2x
         threshold (would need 20k) — no retrain."""
-        handle, adapter = await _build_adapter(tmp_path)
+        handle, adapter = await _build_adapter(migrated_sqlite_db, tmp_path / "k.lance")
         try:
             tbl = _fake_table(row_count=10_000)
             with patch.object(adapter, "_chunks_table", AsyncMock(return_value=tbl)):
@@ -141,9 +136,9 @@ class TestRetrainTrigger:
         finally:
             await adapter.disconnect()
 
-    async def test_configurable_retrain_factor(self, tmp_path: Path):
+    async def test_configurable_retrain_factor(self, migrated_sqlite_db: Path, tmp_path: Path):
         """retrain_factor=1.5 triggers retrain at 7.5k rows."""
-        handle, adapter = await _build_adapter(tmp_path, retrain_factor=1.5)
+        handle, adapter = await _build_adapter(migrated_sqlite_db, tmp_path / "k.lance", retrain_factor=1.5)
         try:
             tbl = _fake_table(row_count=5_000)
             with patch.object(adapter, "_chunks_table", AsyncMock(return_value=tbl)):
@@ -169,9 +164,9 @@ class TestRetrainTrigger:
         finally:
             await adapter.disconnect()
 
-    async def test_retrain_disabled_when_factor_le_one(self, tmp_path: Path):
+    async def test_retrain_disabled_when_factor_le_one(self, migrated_sqlite_db: Path, tmp_path: Path):
         """retrain_factor=1.0 disables retraining entirely."""
-        handle, adapter = await _build_adapter(tmp_path, retrain_factor=1.0)
+        handle, adapter = await _build_adapter(migrated_sqlite_db, tmp_path / "k.lance", retrain_factor=1.0)
         try:
             tbl = _fake_table(row_count=5_000)
             with patch.object(adapter, "_chunks_table", AsyncMock(return_value=tbl)):
@@ -188,10 +183,10 @@ class TestRetrainTrigger:
         finally:
             await adapter.disconnect()
 
-    async def test_no_train_below_threshold(self, tmp_path: Path):
+    async def test_no_train_below_threshold(self, migrated_sqlite_db: Path, tmp_path: Path):
         """Below 5000 rows in auto/ivf_pq mode, no index is built and the
         marker stays unset so the next search reconsiders."""
-        handle, adapter = await _build_adapter(tmp_path)
+        handle, adapter = await _build_adapter(migrated_sqlite_db, tmp_path / "k.lance")
         try:
             tbl = _fake_table(row_count=4_999)
             with patch.object(adapter, "_chunks_table", AsyncMock(return_value=tbl)):
@@ -202,10 +197,10 @@ class TestRetrainTrigger:
         finally:
             await adapter.disconnect()
 
-    async def test_entities_index_retrains_too(self, tmp_path: Path):
+    async def test_entities_index_retrains_too(self, migrated_sqlite_db: Path, tmp_path: Path):
         """The same retrain logic applies to entities_vec — it's the same
         bug pattern. Doubled corpus triggers a rebuild."""
-        handle, adapter = await _build_adapter(tmp_path)
+        handle, adapter = await _build_adapter(migrated_sqlite_db, tmp_path / "k.lance")
         try:
             tbl = _fake_table(row_count=5_000)
             with patch.object(adapter, "_entities_table", AsyncMock(return_value=tbl)):

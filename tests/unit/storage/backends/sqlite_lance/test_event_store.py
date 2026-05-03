@@ -21,7 +21,6 @@ from khora.core.models.event import EventType, MemoryEvent
 pytestmark = pytest.mark.skipif(not _HAS_DEPS, reason="aiosqlite/lancedb not installed")
 
 if _HAS_DEPS:
-    from khora.db.session import run_migrations
     from khora.storage.backends.sqlite_lance.connection import (
         EmbeddedStorageHandle,
         EmbeddedStorageHandleConfig,
@@ -37,13 +36,9 @@ if _HAS_DEPS:
 
 
 @pytest.fixture
-async def handle(tmp_path: Path):
-    db_path = tmp_path / "events.db"
-    migration_result = await run_migrations(f"sqlite+aiosqlite:///{db_path}")
-    assert migration_result.success, migration_result.error
-
+async def handle(migrated_sqlite_db: Path, tmp_path: Path):
     cfg = EmbeddedStorageHandleConfig(
-        db_path=str(db_path),
+        db_path=str(migrated_sqlite_db),
         lance_path=str(tmp_path / "events.lance"),
         embedding_dimension=8,
         use_halfvec=False,

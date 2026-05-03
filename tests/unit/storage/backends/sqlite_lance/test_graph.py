@@ -21,7 +21,6 @@ from khora.core.models import Entity, Episode, Relationship
 pytestmark = pytest.mark.skipif(not _HAS_LANCEDB, reason="lancedb not installed")
 
 if _HAS_LANCEDB:
-    from khora.db.session import run_migrations
     from khora.storage.backends.sqlite_lance.connection import (
         EmbeddedStorageHandle,
         EmbeddedStorageHandleConfig,
@@ -35,7 +34,7 @@ if _HAS_LANCEDB:
 
 
 @pytest.fixture
-async def handle(tmp_path: Path):
+async def handle(migrated_sqlite_db: Path, tmp_path: Path):
     """Connect a handle backed by the real Alembic-migrated schema.
 
     Unit tests here exercise graph semantics (CRUD, traversal, merge),
@@ -44,14 +43,10 @@ async def handle(tmp_path: Path):
     relationship.  FK enforcement is exercised end-to-end in
     ``tests/integration/test_sqlite_lance_ingest.py``.
     """
-    db_path = tmp_path / "graph.db"
     lance_path = tmp_path / "graph.lance"
 
-    migration_result = await run_migrations(f"sqlite+aiosqlite:///{db_path}")
-    assert migration_result.success, migration_result.error
-
     cfg = EmbeddedStorageHandleConfig(
-        db_path=str(db_path),
+        db_path=str(migrated_sqlite_db),
         lance_path=str(lance_path),
         embedding_dimension=8,
         use_halfvec=False,

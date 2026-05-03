@@ -106,11 +106,11 @@ class TestChronicleLanceDBBackend:
         assert engine._storage_config.backend == "sqlite_lance"
 
     @pytest.mark.asyncio
-    async def test_recall_returns_top_k_via_lancedb(self, tmp_path: Path) -> None:
+    async def test_recall_returns_top_k_via_lancedb(self, chronicle_sqlite_db: Path, tmp_path: Path) -> None:
         """Ingest 5 chunks, recall top 3 — verifies semantic + BM25 channels run on LanceDB."""
         from khora.engines.chronicle.engine import ChronicleEngine
 
-        config = _make_config(tmp_path / "chronicle.db")
+        config = _make_config(chronicle_sqlite_db)
         engine = ChronicleEngine(
             config,
             storage_backend="lancedb",
@@ -145,14 +145,14 @@ class TestChronicleLanceDBBackend:
             await engine.disconnect()
 
     @pytest.mark.asyncio
-    async def test_temporal_filter_pushdown(self, tmp_path: Path) -> None:
+    async def test_temporal_filter_pushdown(self, chronicle_sqlite_db: Path, tmp_path: Path) -> None:
         """Temporal filter limits results to chunks within the requested window."""
         from datetime import UTC, datetime, timedelta
 
         from khora.engines.chronicle.engine import ChronicleEngine
         from khora.query.temporal import TemporalFilter
 
-        config = _make_config(tmp_path / "chronicle.db")
+        config = _make_config(chronicle_sqlite_db)
         engine = ChronicleEngine(
             config,
             storage_backend="lancedb",
@@ -228,12 +228,12 @@ class TestChronicleLanceDBBackend:
             await engine.disconnect()
 
     @pytest.mark.asyncio
-    async def test_entity_channel_works_against_lancedb(self, tmp_path: Path) -> None:
+    async def test_entity_channel_works_against_lancedb(self, chronicle_sqlite_db: Path, tmp_path: Path) -> None:
         """search_similar_entities + get_entities_batch must work on the sqlite_lance graph."""
         from khora.core.models import Entity
         from khora.engines.chronicle.engine import ChronicleEngine
 
-        config = _make_config(tmp_path / "chronicle.db")
+        config = _make_config(chronicle_sqlite_db)
         engine = ChronicleEngine(
             config,
             storage_backend="lancedb",
