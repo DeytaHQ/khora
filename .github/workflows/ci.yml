@@ -157,9 +157,13 @@ jobs:
       - name: Verify migration source files and ORM/migration drift
         run: uv run pytest tests/unit/test_migration_drift.py -v -o "addopts=" --no-cov
 
-      - name: Run tests with coverage
+      - name: Run unit tests with coverage (parallel)
         run: |
-          uv run pytest --cov=src/khora --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=30
+          uv run pytest tests/unit/ --cov=src/khora --cov-branch --cov-report= --cov-fail-under=0 -n auto
+
+      - name: Run integration tests with coverage (serial)
+        run: |
+          uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-report=xml --cov-fail-under=30 -m integration
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

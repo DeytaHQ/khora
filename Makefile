@@ -7,7 +7,7 @@
 #   make dev               # Start development environment
 #   make test              # Run tests with coverage
 
-.PHONY: help dev dev-down test lint format typecheck prek clean \
+.PHONY: help dev dev-down test test-unit test-integration lint format typecheck prek clean \
         rust-build rust-dev rust-test rust-bench rust-clean \
         docker-run docker-down docker-clean
 
@@ -19,7 +19,9 @@ help:
 	@echo "Development:"
 	@echo "  make dev              Start databases (postgres + neo4j)"
 	@echo "  make dev-down         Stop databases"
-	@echo "  make test             Run tests with coverage"
+	@echo "  make test             Run tests with coverage (unit parallel + integration serial)"
+	@echo "  make test-unit        Run unit tests in parallel (-n auto)"
+	@echo "  make test-integration Run integration tests serially"
 	@echo "  make lint             Run linting (ruff, ty)"
 	@echo "  make typecheck        Run type checking (ty)"
 	@echo "  make format           Format code (ruff)"
@@ -66,9 +68,17 @@ dev:
 dev-down:
 	docker compose down
 
-# Run tests with coverage
-test:
-	uv run pytest --cov=src/khora --cov-branch --cov-report=term-missing --cov-fail-under=30
+# Run unit tests in parallel (xdist) with coverage; integration tests stay serial
+# because tests/integration/matrix/* fixtures DROP SCHEMA on shared PostgreSQL.
+test: test-unit test-integration
+
+# Run unit tests parallel; clear report so coverage is finalized by test-integration.
+test-unit:
+	uv run pytest tests/unit/ --cov=src/khora --cov-branch --cov-report= --cov-fail-under=0 -n auto
+
+# Run integration tests serial; appends to .coverage from test-unit and emits the report.
+test-integration:
+	uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-fail-under=30 -m integration
 
 # Run type checking
 typecheck:
