@@ -1,0 +1,49 @@
+name: Coverage (nightly)
+
+# Coverage runs on push-to-main (in ci.yml) and on this nightly schedule.
+# PRs skip coverage to keep feedback fast — see ci.yml.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # 06:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Verify migration source files and ORM/migration drift
+        run: uv run pytest tests/unit/test_migration_drift.py -v -o "addopts=" --no-cov
+
+      - name: Run tests with coverage
+        run: |
+          uv run pytest --cov=src/khora --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=30
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          flags: nightly
+          name: khora-coverage-nightly
+          fail_ci_if_error: false

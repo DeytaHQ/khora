@@ -157,17 +157,29 @@ jobs:
       - name: Verify migration source files and ORM/migration drift
         run: uv run pytest tests/unit/test_migration_drift.py -v -o "addopts=" --no-cov
 
+      # PR runs skip coverage to keep feedback fast (~15s saved per PR).
+      # Coverage runs on push-to-main and the nightly schedule (see coverage-nightly.yml).
+      - name: Run unit tests (PR — no coverage, parallel)
+        if: github.event_name == 'pull_request'
+        run: uv run pytest tests/unit/ --no-cov -n auto
+
       - name: Run unit tests with coverage (parallel)
+        if: github.event_name != 'pull_request'
         run: |
           uv run pytest tests/unit/ --cov=src/khora --cov-branch --cov-report= --cov-fail-under=0 -n auto
 
+      - name: Run integration tests (PR — no coverage, serial)
+        if: github.event_name == 'pull_request'
+        run: uv run pytest tests/integration/ --no-cov -m integration
+
       - name: Run integration tests with coverage (serial)
+        if: github.event_name != 'pull_request'
         run: |
           uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-report=xml --cov-fail-under=30 -m integration
 
       - name: Upload coverage to Codecov
+        if: github.event_name != 'pull_request'
         uses: codecov/codecov-action@v5
-        if: always()
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.xml
