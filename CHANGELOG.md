@@ -4,6 +4,19 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [Unreleased] — Recall API time bounds honored
+
+### Fixed — API-supplied `temporal_filter` no longer dropped (DYT-3605)
+
+Callers passing an explicit `temporal_filter` to `MemoryLake.recall()` had their bounds silently bypassed in two places:
+
+* **vectorcypher**: when `temporal_filter` was provided, the auto-detection branch (which also synthesizes the `TemporalSignal` consumed by the retriever's skip-fallback / version-filter / recency-weighting logic) was skipped entirely. The retriever then saw `temporal_signal=None` and applied none of the temporal-aware behavior the caller had asked for, including the sparse-results fallback that re-runs the search without the time bound.
+* **graphrag**: same shape — the auto-detect block was guarded by `temporal_filter is None`, so the resulting `RecallResult.metadata` was missing `temporal_category` / `temporal_confidence` for API-bounded queries.
+
+Both engines now synthesize an `EXPLICIT`-category `TemporalSignal` with `confidence=1.0` and `source="api"` when `temporal_filter` is supplied, so downstream behavior is consistent regardless of whether the bounds came from the caller or were detected from the query string. The new `source="api"` value joins the existing `"dictionary"` / `"semantic"` / `"none"` set on the `temporal_detect` span — telemetry contract unchanged (span attributes are not enumerated). graphrag's `apply_recency_bias` remains untouched on the API path: `EXPLICIT` does not match the `RECENCY`/`STATE_QUERY` guard, preserving existing behavior for API callers.
+
+---
+
 ## [Unreleased] — Connector throughput restoration
 
 ### Performance — restore pre-0.9.0 LiteLLM throughput (DYT-3599)

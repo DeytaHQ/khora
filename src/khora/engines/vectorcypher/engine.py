@@ -51,7 +51,7 @@ from khora.telemetry import trace, trace_span
 from .dual_nodes import DualNodeManager, EntityChunkLink
 from .retriever import RetrieverConfig, VectorCypherRetriever
 from .router import QueryComplexityRouter, RouterConfig
-from .temporal_detection import TemporalDetector, TemporalSignal
+from .temporal_detection import TemporalCategory, TemporalDetector, TemporalSignal
 
 if TYPE_CHECKING:
     from neo4j import AsyncDriver
@@ -1683,12 +1683,30 @@ class VectorCypherEngine:
         # even in raw mode — raw skips LLM enrichment but temporal category
         # detection is critical for recency weighting and sort order.
         temporal_signal: TemporalSignal | None = None
-        if temporal_filter is None:
+        if temporal_filter is not None:
+            # API-asserted bounds: synthesize an EXPLICIT signal so downstream
+            # behavior (skip-fallback in retriever, version filter, recency
+            # weighting) treats the caller-supplied predicate as a high-confidence
+            # temporal intent. source="api" disambiguates from
+            # "dictionary"/"semantic"/"none" in traces.
+            temporal_signal = TemporalSignal(
+                is_temporal=True,
+                category=TemporalCategory.EXPLICIT,
+                confidence=1.0,
+                source="api",
+                temporal_filter=temporal_filter,
+            )
+            with trace_span("khora.vectorcypher.temporal_detect") as td_span:
+                td_span.set_attribute("category", temporal_signal.category.value)
+                td_span.set_attribute("confidence", temporal_signal.confidence)
+                td_span.set_attribute("source", temporal_signal.source)
+        else:
             with trace_span("khora.vectorcypher.temporal_detect") as td_span:
                 detector = TemporalDetector()
                 temporal_signal = detector.detect(query)
                 td_span.set_attribute("category", temporal_signal.category.value)
                 td_span.set_attribute("confidence", temporal_signal.confidence)
+                td_span.set_attribute("source", temporal_signal.source)
                 # EXPLICIT category produces a date-range TemporalFilter for pushdown
                 if temporal_signal.temporal_filter is not None:
                     temporal_filter = temporal_signal.temporal_filter

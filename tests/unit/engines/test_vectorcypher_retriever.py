@@ -1022,3 +1022,130 @@ class TestLLMRerankConfidenceGate:
         assert retriever._should_skip_llm_rerank(top_score=0.8, gap=0.25) is False
         # top=0.9 ≥ 0.85 AND gap=0.25 ≥ 0.2 → decisive gate fires
         assert retriever._should_skip_llm_rerank(top_score=0.9, gap=0.25) is True
+
+
+@pytest.mark.unit
+class TestExplicitTemporalSignalSkipsFallback:
+    """DYT-3605: when the caller asserts an EXPLICIT temporal_signal carrying a
+    parsed date filter, the retriever's "sparse-results" re-run-without-filter
+    fallback (engine.py-side, line ~754) MUST be skipped. Sparse results are
+    the correct signal in this path — the data may simply not exist in that
+    time window, which feeds downstream abstention."""
+
+    @pytest.mark.asyncio
+    async def test_explicit_temporal_signal_skips_sparse_results_fallback(self) -> None:
+        from datetime import datetime
+        from unittest.mock import patch
+
+        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.engines.vectorcypher.temporal_detection import (
+            TemporalCategory,
+            TemporalSignal,
+        )
+
+        ns_id = uuid4()
+
+        # ── Fixture wiring (mirrors TestGracefulDegradation.retriever) ────────
+        vector_store = AsyncMock()
+        neo4j_driver = AsyncMock()
+        embedder = AsyncMock()
+        embedder.embed = AsyncMock(return_value=[0.1] * 1536)
+        embedder.model_name = "test-model"
+        embedder.dimension = 1536
+
+        # Mock vector store search (used by _vector_search_chunks under the hood)
+        chunk_id = uuid4()
+        doc_id = uuid4()
+        mock_result = MagicMock()
+        mock_result.chunk = MagicMock()
+        mock_result.chunk.id = chunk_id
+        mock_result.chunk.namespace_id = ns_id
+        mock_result.chunk.content = "in-window chunk"
+        mock_result.chunk.document_id = doc_id
+        mock_result.chunk.occurred_at = None
+        mock_result.chunk.created_at = None
+        mock_result.chunk.metadata = {}
+        mock_result.combined_score = 0.85
+        mock_result.similarity = 0.85
+        # Single result: well below limit // 2 = 5, so the fallback condition
+        # (sparse results) WOULD trigger if not gated by EXPLICIT.
+        vector_store.search = AsyncMock(return_value=[mock_result])
+
+        storage = AsyncMock()
+        entry_entity_id = uuid4()
+        storage.search_similar_entities = AsyncMock(return_value=[(entry_entity_id, 0.9)])
+        storage.get_entities_batch = AsyncMock(return_value={})
+
+        # Disable session-aware search to avoid the parallel session-fanout
+        # path — that path issues additional _vector_search_chunks calls and
+        # would muddy the call-count assertion.
+        config = RetrieverConfig(
+            query_cache_ttl_seconds=0,
+            enable_session_aware_search=False,
+        )
+        retriever = VectorCypherRetriever(
+            vector_store=vector_store,
+            neo4j_driver=neo4j_driver,
+            embedder=embedder,
+            config=config,
+            storage=storage,
+        )
+
+        # Route to MODERATE (use_graph=True) so the sparse-fallback site at
+        # retriever.py:754 is reachable.
+        retriever._router = MagicMock()
+        retriever._router.route = AsyncMock(
+            return_value=RoutingDecision(
+                complexity=QueryComplexity.MODERATE,
+                use_graph=True,
+                graph_depth=2,
+                confidence=0.8,
+                reasoning="moderate",
+            )
+        )
+        retriever._router.compute_adaptive_depth = MagicMock(return_value=2)
+
+        # Stub out graph-touching helpers so _vectorcypher_retrieve completes
+        # cleanly without exercising Neo4j internals.
+        retriever._cypher_expand = AsyncMock(return_value=({}, {}))
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[])
+        retriever._version_filter_entities = AsyncMock(return_value=[])
+
+        # Build the EXPLICIT signal: API-style with a parsed date filter.
+        # occurred_before is exclusive in pgvector — bounds chosen so any
+        # in-window timestamp would sit strictly inside [after, before).
+        tf = TemporalFilter(
+            occurred_after=datetime(2025, 1, 1, tzinfo=UTC),
+            occurred_before=datetime(2025, 6, 1, tzinfo=UTC),
+        )
+        temporal_signal = TemporalSignal(
+            is_temporal=True,
+            category=TemporalCategory.EXPLICIT,
+            confidence=1.0,
+            source="api",
+            temporal_filter=tf,
+        )
+
+        # Spy on _vector_search_chunks while preserving its real behavior.
+        original = retriever._vector_search_chunks
+        spy = AsyncMock(wraps=original)
+        with patch.object(retriever, "_vector_search_chunks", spy):
+            await retriever.retrieve(
+                "what happened in early 2025",
+                ns_id,
+                temporal_filter=tf,
+                temporal_signal=temporal_signal,
+                limit=10,
+            )
+
+        # Sparse-results fallback re-runs _vector_search_chunks with
+        # temporal_filter=None when triggered. The EXPLICIT-with-date guard
+        # MUST suppress that re-run — exactly one call, with the original
+        # filter intact.
+        assert spy.await_count == 1, (
+            f"_vector_search_chunks was called {spy.await_count} times; the "
+            "EXPLICIT-with-date guard should have suppressed the sparse-"
+            "results fallback re-run."
+        )
+        forwarded_filter = spy.await_args.kwargs["temporal_filter"]
+        assert forwarded_filter is tf
