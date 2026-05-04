@@ -377,16 +377,31 @@ class GraphRAGEngine:
 
         # Auto-detect temporal category when no explicit filter and not raw mode
         temporal_signal: TemporalSignal | None = None
-        if temporal_filter is None and not raw:
-            detector = TemporalDetector()
-            temporal_signal = detector.detect(query)
-            params = get_retrieval_params(temporal_signal)
+        if not raw:
+            if temporal_filter is not None:
+                # API-asserted bounds: synthesize an EXPLICIT signal so metadata
+                # reporting (temporal_category / temporal_confidence) is consistent
+                # with the vectorcypher engine. source="api" disambiguates the
+                # path. EXPLICIT does not match the RECENCY/STATE_QUERY guard, so
+                # apply_recency_bias remains untouched (preserves existing behavior
+                # for API callers).
+                temporal_signal = TemporalSignal(
+                    is_temporal=True,
+                    category=TemporalCategory.EXPLICIT,
+                    confidence=1.0,
+                    source="api",
+                    temporal_filter=temporal_filter,
+                )
+            else:
+                detector = TemporalDetector()
+                temporal_signal = detector.detect(query)
+                params = get_retrieval_params(temporal_signal)
 
-            if temporal_signal.is_temporal:
-                config.enable_temporal_detection = True
-            if temporal_signal.category in (TemporalCategory.RECENCY, TemporalCategory.STATE_QUERY):
-                config.apply_recency_bias = True
-                config.recency_weight = params.recency_weight
+                if temporal_signal.is_temporal:
+                    config.enable_temporal_detection = True
+                if temporal_signal.category in (TemporalCategory.RECENCY, TemporalCategory.STATE_QUERY):
+                    config.apply_recency_bias = True
+                    config.recency_weight = params.recency_weight
 
         # Resolve relative dates ("last 7 days") to SQL-pushdown filter
         # for RECENCY / STATE_QUERY categories when no explicit filter exists.

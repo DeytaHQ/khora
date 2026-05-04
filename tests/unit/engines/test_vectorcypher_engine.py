@@ -2029,3 +2029,111 @@ class TestProcessDocumentWindowing:
         engine._storage.update_document.assert_awaited_once()
         persisted_doc = engine._storage.update_document.await_args.args[0]
         assert persisted_doc.relationship_count == rels
+
+
+@pytest.mark.unit
+class TestVectorCypherEngineApiTemporalFilter:
+    """DYT-3605: API-supplied temporal_filter synthesizes an EXPLICIT signal."""
+
+    @pytest.fixture
+    def engine_with_mocked_retriever(self) -> VectorCypherEngine:
+        """Engine wired with a retriever whose retrieve() is an AsyncMock."""
+        from khora.engines.vectorcypher.retriever import VectorCypherResult
+        from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
+
+        config = MagicMock()
+        config.get_postgresql_url.return_value = "postgresql://localhost/test"
+        config.get_neo4j_url.return_value = "bolt://localhost:7687"
+        config.get_neo4j_user.return_value = "neo4j"
+        config.get_neo4j_password.return_value = "password"
+        config.get_neo4j_database.return_value = "neo4j"
+        config.get_graph_config.return_value = MagicMock()
+        config.get_vector_config.return_value = MagicMock()
+        config.storage.postgresql_pool_size = 5
+        config.storage.postgresql_max_overflow = 10
+        config.storage.embedding_dimension = 1536
+
+        engine = VectorCypherEngine(config)
+        engine._connected = True
+        engine._storage = AsyncMock()
+        engine._temporal_store = AsyncMock()
+        engine._embedder = AsyncMock()
+        engine._dual_nodes = AsyncMock()
+        engine._neo4j_driver = AsyncMock()
+
+        routing = RoutingDecision(
+            complexity=QueryComplexity.SIMPLE,
+            use_graph=False,
+            graph_depth=0,
+            confidence=0.8,
+            reasoning="test",
+        )
+        chunk = Chunk(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="A chunk with enough content to pass the validation threshold for recall.",
+        )
+        retriever_result = VectorCypherResult(
+            chunks=[(chunk, 0.9)],
+            entities=[],
+            routing_decision=routing,
+            metadata={"search_mode": "simple_vector"},
+        )
+
+        engine._retriever = MagicMock()
+        engine._retriever._config = MagicMock()
+        engine._retriever._config.hybrid_alpha = 0.7
+        engine._retriever.retrieve = AsyncMock(return_value=retriever_result)
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_recall_with_api_temporal_filter_synthesizes_explicit_signal(
+        self, engine_with_mocked_retriever: VectorCypherEngine
+    ) -> None:
+        """When recall() is called with an API-supplied temporal_filter, the engine
+        must synthesize a TemporalSignal with category=EXPLICIT, source="api",
+        confidence=1.0, and forward it (along with the original filter) to the
+        retriever — bypassing the dictionary/semantic temporal detector entirely.
+        """
+        from khora.engines.skeleton.backends import TemporalFilter
+        from khora.engines.vectorcypher.temporal_detection import TemporalCategory
+
+        # occurred_before is exclusive in pgvector; using two distinct dates.
+        tf = TemporalFilter(
+            occurred_after=datetime(2025, 1, 1, tzinfo=UTC),
+            occurred_before=datetime(2025, 6, 1, tzinfo=UTC),
+        )
+
+        ns_id = uuid4()
+        await engine_with_mocked_retriever.recall("anything", ns_id, temporal_filter=tf)
+
+        engine_with_mocked_retriever._retriever.retrieve.assert_awaited_once()
+        kwargs = engine_with_mocked_retriever._retriever.retrieve.await_args.kwargs
+
+        # The API filter is forwarded verbatim alongside the synthesized signal.
+        assert kwargs["temporal_filter"] is tf
+        signal = kwargs["temporal_signal"]
+        assert signal is not None
+        assert signal.category == TemporalCategory.EXPLICIT
+        assert signal.source == "api"
+        assert signal.confidence == 1.0
+        assert signal.is_temporal is True
+        assert signal.temporal_filter is tf
+
+    @pytest.mark.asyncio
+    async def test_recall_without_temporal_filter_runs_detector(
+        self, engine_with_mocked_retriever: VectorCypherEngine
+    ) -> None:
+        """Regression: when recall() is called WITHOUT temporal_filter, the engine
+        must run the existing temporal detector (signal source != "api")."""
+        ns_id = uuid4()
+        await engine_with_mocked_retriever.recall("what did we do last week", ns_id)
+
+        engine_with_mocked_retriever._retriever.retrieve.assert_awaited_once()
+        kwargs = engine_with_mocked_retriever._retriever.retrieve.await_args.kwargs
+
+        signal = kwargs["temporal_signal"]
+        assert signal is not None
+        # Detector path produces "dictionary" / "semantic" / "none" — never "api".
+        assert signal.source != "api"
