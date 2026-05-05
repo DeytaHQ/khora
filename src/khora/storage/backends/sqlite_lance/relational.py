@@ -32,6 +32,8 @@ from khora.db.models import DocumentModel, MemoryNamespaceModel, SyncCheckpointM
 from khora.storage.backends.base import PaginatedResult
 from khora.storage.backends.mixins import AsyncSessionMixin
 
+from ..._log_safe import _safe_url_for_log
+
 if TYPE_CHECKING:
     from .connection import EmbeddedStorageHandle
 
@@ -110,7 +112,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             return
 
         url = _build_sqlite_url(self._handle.config.db_path)
-        logger.info(f"Opening SQLAlchemy async engine for {url}")
+        logger.info("Opening SQLAlchemy async engine for {url}", url=_safe_url_for_log(url))
         self._engine = create_async_engine(url, future=True)
         _register_pragmas(self._engine)
         self._session_factory = async_sessionmaker(

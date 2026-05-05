@@ -30,6 +30,8 @@ from khora.storage.backends.mixins import element_to_dict as _element_to_dict
 from khora.storage.backends.mixins import serialize_dict as _serialize_dict
 from khora.telemetry import trace, trace_span
 
+from .._log_safe import _safe_url_for_log
+
 # Neo4j relationship labels must be valid identifiers: letters, digits, underscores.
 # LLM-generated types like "at-risk" or "works for" need sanitizing.
 _NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
@@ -561,7 +563,7 @@ class Neo4jBackend(GraphBackendBase):
             self._start_pool_sampler()
             return
 
-        logger.info(f"Connecting to Neo4j at {self._url}...")
+        logger.info("Connecting to Neo4j at {url}...", url=_safe_url_for_log(self._url))
         self._driver = AsyncGraphDatabase.driver(
             self._url,
             auth=(self._user, self._password),
