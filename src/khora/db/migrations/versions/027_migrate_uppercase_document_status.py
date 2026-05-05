@@ -36,13 +36,7 @@ def upgrade() -> None:
     """Normalise uppercase document_status rows to lowercase. Postgres-only."""
     if op.get_bind().dialect.name != "postgresql":
         return
-    op.execute(
-        text(
-            "UPDATE documents "
-            "SET status = LOWER(status::text)::document_status "
-            "WHERE status::text ~ '[A-Z]'"
-        )
-    )
+    op.execute(text("UPDATE documents SET status = LOWER(status::text)::document_status WHERE status::text ~ '[A-Z]'"))
 
 
 def downgrade() -> None:

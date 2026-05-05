@@ -17,9 +17,7 @@ import pytest
 
 @pytest.fixture
 def migration():
-    return importlib.import_module(
-        "khora.db.migrations.versions.027_migrate_uppercase_document_status"
-    )
+    return importlib.import_module("khora.db.migrations.versions.027_migrate_uppercase_document_status")
 
 
 class TestRevisionMetadata:
