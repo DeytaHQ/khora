@@ -8,6 +8,8 @@ from typing import Any
 
 from loguru import logger
 
+from ..._log_safe import _safe_url_for_log
+
 # Module-level lock prevents concurrent schema initialization from
 # multiple SurrealDBConnection instances (the StorageCoordinator
 # connects 4 backends in parallel, all sharing the same embedded DB).
@@ -89,7 +91,7 @@ class SurrealDBConnection:
         import surrealdb
 
         endpoint = self._build_endpoint()
-        logger.info(f"Connecting to SurrealDB ({self._mode}): {endpoint}")
+        logger.info(f"Connecting to SurrealDB ({self._mode}): {_safe_url_for_log(endpoint)}")
         # Use getattr to create the client so ty does not infer the union
         # return type of AsyncSurreal() (whose HTTP variant .connect(url)
         # has a required url param that conflicts with the WS variant).

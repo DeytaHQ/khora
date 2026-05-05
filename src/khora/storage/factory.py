@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from ._log_safe import _safe_url_for_log
 from .backends.pgvector import PgVectorBackend
 from .backends.postgresql import PostgreSQLBackend
 from .coordinator import StorageCoordinator
@@ -197,14 +198,14 @@ class StorageFactory:
                 max_overflow=max_overflow,
                 pool_pre_ping=pool_pre_ping,
             )
-            logger.debug(f"Created shared engine for {key}")
+            logger.debug("Created shared engine for {url}", url=_safe_url_for_log(key))
         return self._engine_cache[key]
 
     async def dispose_engines(self) -> None:
         """Dispose all cached engines."""
         for key, engine in self._engine_cache.items():
             await engine.dispose()
-            logger.debug(f"Disposed shared engine for {key}")
+            logger.debug("Disposed shared engine for {url}", url=_safe_url_for_log(key))
         self._engine_cache.clear()
 
     def create_relational_backend(self) -> PostgreSQLBackend | None:

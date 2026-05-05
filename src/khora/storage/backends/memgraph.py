@@ -26,6 +26,8 @@ from khora.storage.backends.mixins import (
     serialize_dict,
 )
 
+from .._log_safe import _safe_url_for_log
+
 
 class MemgraphBackend(GraphBackendBase):
     """Memgraph graph backend using the neo4j Python driver over Bolt.
@@ -67,7 +69,7 @@ class MemgraphBackend(GraphBackendBase):
 
         from neo4j import AsyncGraphDatabase
 
-        logger.info(f"Connecting to Memgraph at {self._url}...")
+        logger.info("Connecting to Memgraph at {url}...", url=_safe_url_for_log(self._url))
         self._driver = AsyncGraphDatabase.driver(
             self._url,
             auth=(self._user, self._password),

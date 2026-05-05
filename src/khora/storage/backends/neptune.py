@@ -27,6 +27,8 @@ from khora.storage.backends.mixins import (
     serialize_dict,
 )
 
+from .._log_safe import _safe_url_for_log
+
 
 class NeptuneBackend(GraphBackendBase):
     """AWS Neptune graph backend using the neo4j Python driver over Bolt.
@@ -108,7 +110,7 @@ class NeptuneBackend(GraphBackendBase):
         else:
             auth = (self._user, self._password) if self._user else None
 
-        logger.info(f"Connecting to Neptune at {self._url}...")
+        logger.info("Connecting to Neptune at {url}...", url=_safe_url_for_log(self._url))
         self._driver = AsyncGraphDatabase.driver(
             self._url,
             auth=auth,

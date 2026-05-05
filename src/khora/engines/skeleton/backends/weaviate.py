@@ -21,6 +21,7 @@ from khora.engines.skeleton.backends import (
     TemporalSearchResult,
     TemporalVectorStore,
 )
+from khora.storage._log_safe import _safe_url_for_log
 
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
@@ -93,7 +94,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
             logger.info(f"Created Weaviate collection: {COLLECTION_NAME}")
 
         self._connected = True
-        logger.info(f"WeaviateTemporalStore connected to {self._weaviate_url}")
+        logger.info("WeaviateTemporalStore connected to {url}", url=_safe_url_for_log(self._weaviate_url))
 
     async def disconnect(self) -> None:
         """Disconnect from Weaviate."""
