@@ -205,12 +205,6 @@ Rules:
 - Run dependency install and `ttoj install` in a new worktree before building or testing
 - Clean up worktrees after PRs are merged: `git worktree remove .claude/worktrees/{TICKET-ID}-short-desc`
 
-## AI Changelog
-
-After every completed task, append an entry to `docs/AI_CHANGELOG.md`. Create the file if it doesn't exist.
-
-Format: `- YYYY-MM-DD: TICKET-ID: Brief description of change` (one line, max 72 chars). Append at bottom; never edit existing entries.
-
 ## Pre-Submission Checklist
 
 Before creating a PR, verify:
