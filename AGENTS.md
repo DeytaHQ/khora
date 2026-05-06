@@ -58,6 +58,10 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 - `exceptions.py` — `KhoraError` hierarchy with domain-specific exceptions
 - `telemetry/` — Optional PostgreSQL-backed telemetry collector + `@trace` decorator
 
+## Doc Conventions (overrides workflow.md)
+
+**Do not maintain `docs/AI_CHANGELOG.md` in this repo.** The shared workflow doc references it, but khora deliberately opts out: do not create the file, do not append entries, do not include it in PRs. Commit messages and merged-PR titles are the changelog of record.
+
 ## Workflow Reference
 
 <!-- Shared workflow doc installed by TTOJ at .claude/docs/workflow.md.      -->
@@ -200,12 +204,6 @@ Rules:
 - Each agent gets its own worktree directory under `.claude/worktrees/`
 - Run dependency install and `ttoj install` in a new worktree before building or testing
 - Clean up worktrees after PRs are merged: `git worktree remove .claude/worktrees/{TICKET-ID}-short-desc`
-
-## AI Changelog
-
-After every completed task, append an entry to `docs/AI_CHANGELOG.md`. Create the file if it doesn't exist.
-
-Format: `- YYYY-MM-DD: TICKET-ID: Brief description of change` (one line, max 72 chars). Append at bottom; never edit existing entries.
 
 ## Pre-Submission Checklist
 
@@ -390,12 +388,24 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **loguru queue is unbounded in 0.7.3.** Under sustained burst (DEBUG mode + error storm + slow sink), records accumulate faster than the background thread can drain them and eventually OOM the process. Napkin math: ~1 KB/record × ~9k records/s net accumulation → 512 MB pod OOMs in ~60s (INFO) or ~3s (DEBUG with cascading errors). loguru 0.7.3 does not expose a `maxsize` kwarg on `logger.add()`. Mitigation: keep log volume bounded by request rate (avoid unbounded DEBUG in prod); watch for `MemoryError` in low-memory containers. Revisit if loguru exposes `maxsize` upstream.
 - **`enqueue=True` is not a free latency win.** See `scripts/bench_logger_enqueue.py`: on fast buffered sinks, the pickle + IPC overhead dominates a userspace memcpy, so enqueue is ~5× slower per call than sync. On slow sinks with sustained throughput (no idle between bursts), enqueue does not help either — the kernel pipe fills and the producer blocks. Enqueue wins only in the realistic case: slow sink + idle between bursts (a request handler doing async I/O between log calls), where p99 event-loop stalls drop ~25-40% (≈15-18 ms → ≈11 ms, run-dependent) and wall time drops ~23% (2058 ms → 1593 ms) on the handler-shaped scenario. Keep this in mind when evaluating logging overhead on hot paths.
 
+### Telemetry
+- **Public contract lives at `docs/telemetry-contract.json`** (with sibling explainer `docs/telemetry-contract.md`). When you add a span (`trace_span`), pipeline stage (`pipeline_stage` / `record_pipeline_stage`), metric (`metric_counter` / `metric_histogram` / `metric_gauge_callback`), event-type field, or new public export to `khora.telemetry.__all__`, you MUST update the contract JSON in the same PR. CI fails otherwise via `tests/unit/telemetry/test_contract.py` (10-test drift gate that walks the codebase with ripgrep). See `docs/adrs/adr-026-telemetry-contract.md` for the design rationale.
+- **Public vs internal stability tags.** Items tagged `stability: public` in the contract are part of the OSS API surface — renaming or removing them requires a major version bump and prior coordination with downstream consumers (genesis, khora-benchmarks, khora-explorer, khora-cli). Items tagged `internal` may be renamed freely as long as the JSON is updated. Top-level engine entry points (`khora.recall`, `khora.remember`, `khora.vectorcypher.retrieve`) and operator-facing metrics (`khora.memory.recall.duration`, `khora.llm.tokens`, etc.) are public. Inner-loop spans (`khora.vectorcypher.coherence_boost`, `khora.vectorcypher.rrf_fusion`, etc.) are internal.
+- **Cardinality rule — never put `namespace_id` on a metric.** It is a span attribute and a log field only. Phase-0 audit measured 438 distinct namespace IDs over the production retention window in one deployment; Logfire and Prometheus bill per series, so a `namespace_id` label produces an unbounded cost curve. The same rule applies to any other attribute with cardinality ~O(tenants).
+- **Free-text span attributes.** Use `khora.telemetry.bounded_text_hash` (added in #504) for any free-text value (raw user query, document content, chunk text) — it returns a SHA1[:8] hash. Never put raw text on a span attribute: it is both a privacy hazard and a cardinality bomb.
+- **OTel semconv adopted for new attributes.** `gen_ai.*` for LLM (model, prompt tokens, completion tokens), `db.*` for storage backends, `code.*` for stack info. Keeps khora vendor-neutral over the OTel exporter chain.
+- **Two existing LLM instrumentation patterns — pick whichever the surrounding code uses, do not introduce a third.** (a) Pass `_telemetry_op="<op>"` through `khora.config.llm.acompletion`; the wrapper records the call automatically. (b) Inline `record_llm_call(...)` after a direct `litellm.acompletion` call. The 9 call sites that existed before #508 plus the 6 added in #508 (HyDE, listwise rerank, fact extraction, fact reconcile, event extraction; chat was already wired) all follow one of these two patterns.
+- **`khora.log.queue.depth` is a proxy.** It exports the loguru-handler-error count, not the real enqueue-queue size — `loguru>=0.7.3` does not expose `qsize()`. The metric *name* is in the public contract because dashboards depend on it; the implementation can switch to a real reading when loguru exposes one. Do not "fix" this by removing the metric.
+- **`coordinator.transaction()` cross-store atomicity remains partial on embedded** (see ADR-025). Span instrumentation does not promise transactional semantics it does not have — do not annotate spans in a way that implies all-or-nothing writes across SQL + LanceDB on the embedded path.
+- **Telemetry collector is opt-in.** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording; without it, `NoOpCollector` is used (zero cost). Logfire integration is gated by `_HAS_LOGFIRE` — `trace_span()` yields a no-op when the optional `logfire` extra is absent.
+
 ### Downstream
 - `genesis` and `khora-benchmarks` depend on khora. `lake.storage` is a stable public API
 - **LLMUsage contract:** `LLMUsage` fields are consumed by Poros/Peras for cost tracking (DYT-645) — changes require coordination
 - **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination (consumed by khora-explorer, genesis, khora-benchmarks). See `docs/adrs/adr-022-extraction-skills-public-api.md`. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract
 - Stable public API is codified in ADR-024 (memory-lake surface) and ADR-022 (extraction skills). Any breaking change to symbols listed there requires coordinated release with genesis, khora-benchmarks, khora-explorer, khora-cli. See `docs/adrs/adr-024-memory-lake-public-api.md`; `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface
 - `scripts/` vendored from TTOJ — skip in audits
+
 
 ## Codex Skill Mapping
 
