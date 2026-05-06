@@ -1307,10 +1307,10 @@ class MemoryLake:
         elif pending_docs:
             # Enqueue PENDING docs for the unified processor.
             if self._processor_task is None or self._processor_task.done():
-                logger.warning(
-                    "submit_batch: pending processor is not running — %d queued doc(s) will not be "
-                    "processed until start_pending_processor() is called.",
-                    len(pending_docs),
+                raise RuntimeError(
+                    f"submit_batch: pending processor is not running — cannot process {len(pending_docs)} "
+                    "doc(s). Call start_pending_processor() before submitting documents that require "
+                    "processing."
                 )
             for doc, doc_data in zip(pending_docs, pending_doc_data):
                 self._processor_queue.put_nowait(_ProcessorItem(doc=doc, doc_data=doc_data, batch_reg=batch_reg))

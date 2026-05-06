@@ -1810,8 +1810,8 @@ class TestSubmitBatch:
         assert handle.total == 1
 
     @pytest.mark.asyncio
-    async def test_submit_batch_warns_when_processor_not_started(self) -> None:
-        """submit_batch emits a warning when pending docs are queued but the processor is not running."""
+    async def test_submit_batch_raises_when_processor_not_started(self) -> None:
+        """submit_batch raises RuntimeError when pending docs cannot be processed."""
         ns_id = uuid4()
         lake = _make_lake(connected=True)
         lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
@@ -1825,7 +1825,7 @@ class TestSubmitBatch:
 
         assert lake._processor_task is None
 
-        with patch("khora.memory_lake.logger") as mock_logger:
+        with pytest.raises(RuntimeError, match="pending processor is not running"):
             await lake.submit_batch(
                 [{"content": "doc without processor"}],
                 on_result=lambda c, t, r: None,
@@ -1833,9 +1833,6 @@ class TestSubmitBatch:
                 entity_types=["PERSON"],
                 relationship_types=["KNOWS"],
             )
-            mock_logger.warning.assert_called_once()
-            warning_msg = mock_logger.warning.call_args[0][0]
-            assert "pending processor is not running" in warning_msg
 
     @pytest.mark.asyncio
     async def test_on_result_fires_per_document(self) -> None:
