@@ -156,9 +156,6 @@ def _build_config(tmp_path: Path) -> KhoraConfig:
     config.pipelines.chunk_size = 1024
     config.pipelines.extract_entities = True
     config.pipelines.selective_extraction = False
-    # Disable the orphan-pending-doc background processor so each test
-    # is fully synchronous and tear-down is deterministic.
-    config.pipelines.pending_processor_enabled = False
     return config
 
 

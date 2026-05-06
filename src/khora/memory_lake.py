@@ -437,22 +437,40 @@ class MemoryLake:
         self._connected = True
         logger.info("Memory Lake connected")
 
-        # Start the unified pending processor (DYT-3305).
-        # Replaces both _submit_batch_worker and _recover_pending_documents.
-        # On startup it recovers orphaned PENDING docs; then drains the queue.
-        processor_enabled = self._config.pipelines.pending_processor_enabled
-        # Backwards compat: honour deprecated pending_recovery_enabled if set.
-        if processor_enabled and self._config.pipelines.pending_recovery_enabled is not None:
-            processor_enabled = self._config.pipelines.pending_recovery_enabled
-        if processor_enabled:
-            self._ensure_processor_running()
-
     def _ensure_processor_running(self) -> None:
         """Start the pending processor if it is not already running."""
         if self._processor_task is None or self._processor_task.done():
             self._processor_task = asyncio.create_task(self._run_pending_processor())
             self._bg_tasks.add(self._processor_task)
             self._processor_task.add_done_callback(self._bg_tasks.discard)
+
+    def start_pending_processor(self) -> None:
+        """Start the pending document processor (idempotent).
+
+        Safe to call multiple times — a second call is a no-op if the processor
+        is already running. Call this after connect() on services that write
+        documents. Read-only services should not call this.
+
+        Raises:
+            RuntimeError: if connect() has not been called yet.
+        """
+        if not self._connected:
+            raise RuntimeError("Memory Lake not connected. Call connect() first.")
+        self._ensure_processor_running()
+
+    async def stop_pending_processor(self) -> None:
+        """Stop the pending document processor.
+
+        Cancels the background task and waits for it to exit. The processor can
+        be restarted by calling start_pending_processor() again.
+        """
+        if self._processor_task is not None and not self._processor_task.done():
+            self._processor_task.cancel()
+            try:
+                await self._processor_task
+            except asyncio.CancelledError:
+                pass
+            self._processor_task = None
 
     async def _run_pending_processor(self) -> None:
         """Unified pending processor (DYT-3305).
@@ -1288,10 +1306,14 @@ class MemoryLake:
             handle._mark_done()
         elif pending_docs:
             # Enqueue PENDING docs for the unified processor.
+            if self._processor_task is None or self._processor_task.done():
+                raise RuntimeError(
+                    f"submit_batch: pending processor is not running — cannot process {len(pending_docs)} "
+                    "doc(s). Call start_pending_processor() before submitting documents that require "
+                    "processing."
+                )
             for doc, doc_data in zip(pending_docs, pending_doc_data):
                 self._processor_queue.put_nowait(_ProcessorItem(doc=doc, doc_data=doc_data, batch_reg=batch_reg))
-            # Ensure the processor is running (lazy start for tests / disabled config).
-            self._ensure_processor_running()
 
         return handle
 

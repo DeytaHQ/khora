@@ -543,9 +543,9 @@ class PipelineSettings(BaseSettings):
     # Replaces the separate _submit_batch_worker and _recover_pending_documents paths.
     pending_processor_enabled: bool = Field(
         default=True,
-        description="Enable the unified PENDING document processor. When True, a background "
-        "processor drains PENDING documents with bounded concurrency. On startup it also "
-        "recovers stale orphaned documents from previous crashes.",
+        description="Retained for backwards compatibility. No longer auto-consulted on connect() — "
+        "the processor must now be started explicitly via MemoryLake.start_pending_processor(). "
+        "Setting this env var has no effect on processor startup.",
     )
     pending_processor_max_concurrent: int = Field(
         default=20,
