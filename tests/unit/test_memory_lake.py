@@ -1653,7 +1653,7 @@ def _make_staged_doc(ns_id):
 
 
 def _make_lake_with_staged_support(ns_id):
-    """Make a lake whose engine exposes process_staged_document."""
+    """Make a lake whose engine exposes process_staged_document, with processor started."""
     lake = _make_lake(connected=True)
     lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
 
@@ -1669,6 +1669,7 @@ def _make_lake_with_staged_support(ns_id):
         return (2, 1, 0)  # chunks, entities, rels
 
     lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process_staged)
+    lake.start_pending_processor()
     return lake
 
 
@@ -1873,6 +1874,7 @@ class TestSubmitBatch:
             raise RuntimeError("embedding service unavailable")
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_failing_process)
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -1906,6 +1908,7 @@ class TestSubmitBatch:
         # Engine has no process_staged_document attribute
         if hasattr(lake._engine, "process_staged_document"):
             del lake._engine.process_staged_document
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -1973,6 +1976,7 @@ class TestSubmitBatch:
             return (5, 3, 2)  # chunks, entities, rels
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_stats)
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -2024,6 +2028,7 @@ class TestSubmitBatch:
             return (2, 1, 0)
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_usage)
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -2067,6 +2072,7 @@ class TestSubmitBatch:
             raise RuntimeError("graph write failed")
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_usage_then_fail)
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -2114,6 +2120,7 @@ class TestSubmitBatch:
             return (1, 0, 0)
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_process_with_distinct_usage)
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -2160,6 +2167,7 @@ class TestSubmitBatch:
             raise RuntimeError("extraction failed")
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_failing_process)
+        lake.start_pending_processor()
 
         handle = await lake.submit_batch(
             [{"content": "will fail"}],
@@ -2255,6 +2263,7 @@ class TestSubmitBatch:
             return (3, 2, 1)
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -2349,6 +2358,7 @@ class TestSubmitBatch:
             return (2, 1, 0)
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -2404,6 +2414,7 @@ class TestSubmitBatch:
             return (2, 1, 0)
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+        lake.start_pending_processor()
 
         handle = await lake.submit_batch(
             [{"content": "fixed content", "external_id": "ext-failed-h1"}],
@@ -2475,6 +2486,7 @@ class TestSubmitBatch:
             return (2, 1, 0)
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -2509,6 +2521,7 @@ class TestSubmitBatch:
             return (2, 1, 0)
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -2601,6 +2614,7 @@ class TestSubmitBatch:
             return (3, 2, 1)
 
         lake._engine.process_staged_document = AsyncMock(side_effect=_fake_process)
+        lake.start_pending_processor()
 
         results: list[DocumentResult] = []
 
@@ -3234,13 +3248,69 @@ class TestPendingProcessor:
         return lake
 
     @pytest.mark.asyncio
-    async def test_processor_skips_when_disabled(self) -> None:
-        """No background task is launched when pending_processor_enabled=False."""
-        lake = _make_lake()  # processor disabled in mock config
+    async def test_connect_never_starts_processor(self) -> None:
+        """connect() never spawns the pending processor regardless of config."""
+        lake = _make_lake()
         eng = _mock_engine()
         with patch("khora.engines.create_engine", return_value=eng):
             await lake.connect()
         assert lake._processor_task is None
+
+    @pytest.mark.asyncio
+    async def test_start_pending_processor_starts_task(self) -> None:
+        """start_pending_processor() spawns the background task."""
+        lake = self._make_lake_with_processor()
+        assert lake._processor_task is None
+        lake.start_pending_processor()
+        assert lake._processor_task is not None
+        assert not lake._processor_task.done()
+        lake._processor_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_start_pending_processor_idempotent(self) -> None:
+        """Calling start_pending_processor() twice does not spawn two tasks."""
+        lake = self._make_lake_with_processor()
+        lake.start_pending_processor()
+        first_task = lake._processor_task
+        lake.start_pending_processor()
+        assert lake._processor_task is first_task
+        lake._processor_task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_start_pending_processor_requires_connected(self) -> None:
+        """start_pending_processor() raises if the lake is not connected."""
+        with patch("khora.memory_lake.load_config", return_value=_mock_config()):
+            lake = MemoryLake()
+        with pytest.raises(RuntimeError, match="not connected"):
+            lake.start_pending_processor()
+
+    @pytest.mark.asyncio
+    async def test_stop_pending_processor_cancels_task(self) -> None:
+        """stop_pending_processor() cancels the running task."""
+        lake = self._make_lake_with_processor()
+        lake.start_pending_processor()
+        assert lake._processor_task is not None
+        await lake.stop_pending_processor()
+        assert lake._processor_task is None
+
+    @pytest.mark.asyncio
+    async def test_stop_pending_processor_noop_when_not_started(self) -> None:
+        """stop_pending_processor() is a no-op if the processor was never started."""
+        lake = self._make_lake_with_processor()
+        await lake.stop_pending_processor()  # Should not raise
+        assert lake._processor_task is None
+
+    @pytest.mark.asyncio
+    async def test_start_after_stop_restarts_processor(self) -> None:
+        """start_pending_processor() after stop_pending_processor() starts a new task."""
+        lake = self._make_lake_with_processor()
+        lake.start_pending_processor()
+        first_task = lake._processor_task
+        await lake.stop_pending_processor()
+        lake.start_pending_processor()
+        assert lake._processor_task is not None
+        assert lake._processor_task is not first_task
+        lake._processor_task.cancel()
 
     @pytest.mark.asyncio
     async def test_orphan_recovery_skipped_when_no_process_fn(self) -> None:

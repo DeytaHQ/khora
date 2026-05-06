@@ -53,6 +53,23 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Batch processing
+
+`submit_batch()` stages documents as PENDING and returns a `BatchHandle` immediately. A background processor picks them up and calls `on_result` per document as each completes.
+
+**The processor is opt-in.** Call `lake.start_pending_processor()` after `connect()` on services that write documents. Read-only services do not need it. The processor can be stopped with `await lake.stop_pending_processor()` and restarted at any time.
+
+```python
+async with MemoryLake() as lake:
+    lake.start_pending_processor()   # opt-in; write-path services only
+    handle = await lake.submit_batch(
+        [{"content": "doc 1"}, {"content": "doc 2"}],
+        on_result=lambda completed, total, result: print(result),
+        namespace=ns_id,
+    )
+    await handle.wait()
+```
+
 ## Embedded options (experimental)
 
 Khora ships two zero-infrastructure paths. Both are marked **experimental** in v0.9.0 — fine for demos, evaluation, tests, and small single-user CLIs; not yet stamped as a deployment story.

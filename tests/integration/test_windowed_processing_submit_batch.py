@@ -347,6 +347,7 @@ class TestSubmitBatchIntegration:
         config = _make_config()
         _lake = MemoryLake(config, run_migrations=False)
         await _lake.connect()
+        _lake.start_pending_processor()
         ns = await _lake.create_namespace()
         stable_id = ns.namespace_id
         row_id = await _lake.storage.resolve_namespace(stable_id)
