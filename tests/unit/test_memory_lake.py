@@ -1810,6 +1810,34 @@ class TestSubmitBatch:
         assert handle.total == 1
 
     @pytest.mark.asyncio
+    async def test_submit_batch_warns_when_processor_not_started(self) -> None:
+        """submit_batch emits a warning when pending docs are queued but the processor is not running."""
+        ns_id = uuid4()
+        lake = _make_lake(connected=True)
+        lake._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
+
+        async def _fake_create(doc):
+            return doc
+
+        lake._engine._storage.create_document = AsyncMock(side_effect=_fake_create)
+        lake._engine._storage.get_documents_by_external_ids = AsyncMock(return_value={})
+        lake._engine.process_staged_document = AsyncMock(return_value=(2, 1, 0))
+
+        assert lake._processor_task is None
+
+        with patch("khora.memory_lake.logger") as mock_logger:
+            await lake.submit_batch(
+                [{"content": "doc without processor"}],
+                on_result=lambda c, t, r: None,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+            mock_logger.warning.assert_called_once()
+            warning_msg = mock_logger.warning.call_args[0][0]
+            assert "pending processor is not running" in warning_msg
+
+    @pytest.mark.asyncio
     async def test_on_result_fires_per_document(self) -> None:
         """on_result callback fires once per document with correct args."""
 

@@ -47,6 +47,9 @@ def mock_engine() -> MagicMock:
     # Storage and embedder — resolve_namespace returns a distinct row-level ID
     mock_eng._storage = MagicMock()
     mock_eng._storage.resolve_namespace = AsyncMock(return_value=RESOLVE_ROW_ID)
+    _empty_ns_page = MagicMock()
+    _empty_ns_page.items = []
+    mock_eng._storage.list_namespaces = AsyncMock(return_value=_empty_ns_page)
     mock_eng._embedder = MagicMock()
 
     # Lifecycle
