@@ -3501,3 +3501,52 @@ class TestPendingProcessor:
         assert params["skill_name"] == "custom_skill"
         assert params["entity_types"] == ["PERSON"]
         assert params["relationship_types"] == ["KNOWS"]
+
+
+# ---------------------------------------------------------------------------
+# DYT-3787: undefined-table detection for fresh-DB orphan recovery
+# ---------------------------------------------------------------------------
+
+
+class TestIsUndefinedTableError:
+    """Tests for `_is_undefined_table_error` — used by `_run_pending_processor`
+    to silence the "memory_namespaces does not exist" ERROR on fresh ephemeral
+    DBs (DYT-3787)."""
+
+    def test_detects_undefined_table_via_sqlstate_attribute(self) -> None:
+        from khora.memory_lake import _is_undefined_table_error
+
+        class _FakeAsyncpgError(Exception):
+            sqlstate = "42P01"
+
+        assert _is_undefined_table_error(_FakeAsyncpgError("relation does not exist")) is True
+
+    def test_detects_when_wrapped_via_orig(self) -> None:
+        """SQLAlchemy wraps the asyncpg exception under `.orig` — the helper
+        must look through the wrapper, not just the top-level exception."""
+        from khora.memory_lake import _is_undefined_table_error
+
+        class _AsyncpgError(Exception):
+            sqlstate = "42P01"
+
+        class _SQLAlchemyError(Exception):
+            def __init__(self, orig: Exception) -> None:
+                super().__init__(str(orig))
+                self.orig = orig
+
+        wrapped = _SQLAlchemyError(_AsyncpgError("table missing"))
+        assert _is_undefined_table_error(wrapped) is True
+
+    def test_returns_false_for_other_sqlstate(self) -> None:
+        """Other postgres errors (constraint violation, etc.) must not match."""
+        from khora.memory_lake import _is_undefined_table_error
+
+        class _OtherError(Exception):
+            sqlstate = "23505"  # unique_violation
+
+        assert _is_undefined_table_error(_OtherError("dup key")) is False
+
+    def test_returns_false_for_plain_exception(self) -> None:
+        from khora.memory_lake import _is_undefined_table_error
+
+        assert _is_undefined_table_error(RuntimeError("not a db error")) is False
