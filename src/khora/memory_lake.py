@@ -26,6 +26,22 @@ from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
 
 
+def _is_undefined_table_error(exc: BaseException) -> bool:
+    """Return True if *exc* is (or wraps) a Postgres "undefined table" error.
+
+    SQLSTATE 42P01 is raised by asyncpg as ``UndefinedTableError`` and wrapped
+    by SQLAlchemy as ``ProgrammingError``. We don't import either type here to
+    avoid a hard dependency on the postgres backend at module-import time —
+    duck-type via the SQLSTATE attribute on the underlying driver exception.
+    """
+    for candidate in (exc, getattr(exc, "orig", None), getattr(exc, "__cause__", None)):
+        if candidate is None:
+            continue
+        if getattr(candidate, "sqlstate", None) == "42P01":
+            return True
+    return False
+
+
 class _GlobalChunkSemaphore:
     """Counting semaphore supporting bulk acquire/release for chunk windowing.
 
@@ -490,7 +506,15 @@ class MemoryLake:
         try:
             await self._enqueue_orphaned_pending_docs()
         except Exception as exc:
-            logger.error(f"pending_processor: orphan recovery failed: {exc}")
+            if _is_undefined_table_error(exc):
+                # Fresh DB — `memory_namespaces` hasn't been created yet, so there
+                # are no namespaces and therefore no orphaned PENDING docs. Common
+                # path on per-run ephemeral databases (e.g. khora-benchmarks-service).
+                logger.debug(
+                    "pending_processor: skipping orphan recovery on fresh DB (memory_namespaces table not yet created)"
+                )
+            else:
+                logger.error(f"pending_processor: orphan recovery failed: {exc}")
 
         # Phase 2: drain the queue with bounded concurrency.
         max_concurrent = self._config.pipelines.pending_processor_max_concurrent

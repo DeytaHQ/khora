@@ -150,10 +150,19 @@ class PgVectorBackend(AsyncSessionMixin):
                 logger.warning("halfvec requested but pgvector < 0.7.0 — falling back to full-precision vectors")
             elif not await self._check_halfvec_indexes():
                 self._halfvec_available = False
-                logger.warning(
-                    "halfvec HNSW indexes not found — falling back to full-precision vectors. "
-                    "Run migrations to create them."
-                )
+                # Distinguish "fresh DB, migrations not run yet" (benign — common path
+                # for ephemeral per-run databases like khora-benchmarks-service) from
+                # "tables exist but indexes are missing" (real misconfiguration).
+                if not await self._halfvec_target_tables_exist():
+                    logger.info(
+                        "halfvec HNSW indexes not yet created (fresh DB) — using full-precision "
+                        "vectors until migrations run"
+                    )
+                else:
+                    logger.warning(
+                        "halfvec HNSW indexes not found — falling back to full-precision vectors. "
+                        "Run migrations to create them."
+                    )
             else:
                 self._halfvec_available = True
                 logger.info("halfvec (float16) support detected — enabled for similarity search")
@@ -201,6 +210,30 @@ class PgVectorBackend(AsyncSessionMixin):
                 return (major, minor) >= (0, 7)
         except Exception as e:
             logger.debug(f"Failed to detect pgvector version: {e}")
+            return False
+
+    async def _halfvec_target_tables_exist(self) -> bool:
+        """Return True iff both ``chunks`` and ``entities`` tables exist.
+
+        Used to distinguish "fresh DB before migrations" (benign — vectors fall
+        back to full precision until tables are created) from "tables exist but
+        indexes were never built" (real misconfiguration worth a warning).
+        """
+        try:
+            async with self._get_session() as session:
+                result = await session.execute(
+                    text(
+                        "SELECT count(*) FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE c.relkind = 'r' "
+                        "AND n.nspname = 'public' "
+                        "AND c.relname IN ('chunks', 'entities')"
+                    )
+                )
+                count = result.scalar_one_or_none() or 0
+                return count == 2
+        except Exception as e:
+            logger.debug(f"Failed to check halfvec target tables: {e}")
             return False
 
     async def _check_halfvec_indexes(self) -> bool:
