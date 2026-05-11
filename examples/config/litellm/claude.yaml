@@ -1,4 +1,4 @@
-# Anthropic Claude Configuration for Khora Memory Lake
+# Anthropic Claude Configuration for Khora
 # Uses Claude Sonnet for high-quality extraction and reasoning
 
 model: "claude-sonnet-4-20250514"

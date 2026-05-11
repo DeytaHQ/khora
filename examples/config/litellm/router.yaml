@@ -1,4 +1,4 @@
-# Multi-Provider Router Configuration for Khora Memory Lake
+# Multi-Provider Router Configuration for Khora
 # Uses LiteLLM router for automatic failover between providers
 
 model: "gpt-4o-mini"  # Default model
