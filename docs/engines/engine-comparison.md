@@ -1,6 +1,8 @@
 # Engine Comparison
 
-Khora supports four pluggable engines with different strengths. This guide helps you choose the right engine for your use case.
+Khora supports three pluggable engines with different strengths. This guide helps you choose the right engine for your use case.
+
+> **Note (0.10.1):** The `graphrag` engine was removed in v0.10.1. Use `vectorcypher` (default) for hybrid graph+vector recall; set `engine_kwargs={"skeleton_core_ratio": 1.0}` for the legacy GraphRAG behavior of extracting entities from 100% of chunks instead of the default selective 70%.
 
 ## Production-readiness by stack (v0.9.0)
 
@@ -10,7 +12,6 @@ Production-readiness is **per (engine × stack)**, not per engine. The same engi
 |---------------|--------------------------------|----------------------------------|-----------------------------|----------------------------|
 | VectorCypher  | **Production-ready**           | n/a (graph required)             | Experimental (DYT-3560)     | Experimental               |
 | Chronicle     | n/a (graph not required)       | **Production-ready**             | Experimental                | Experimental               |
-| GraphRAG      | Available                      | n/a (graph required)             | Experimental                | Experimental               |
 | Skeleton      | n/a (graph not required)       | Available                        | Experimental (DYT-3561)     | Experimental               |
 
 - **Production-ready** — qualified for production deployment in v0.9.0; covered by integration and e2e tests; documented gotchas have known mitigations.
@@ -21,381 +22,217 @@ The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunk
 
 ## Quick Comparison
 
-| Aspect | VectorCypher (default) | GraphRAG | Skeleton Construction | Chronicle |
-|--------|------------------------|----------|----------------------|-----------|
-| **Primary Focus** | Hybrid retrieval | Knowledge graphs | Temporal events | Conversational memory |
-| **Entity Extraction** | Skeleton (70%) | Upfront (all documents) | Lazy (on-demand) | Full extraction |
-| **Core Data Model** | Dual nodes (Entity + Chunk) | Entities & relationships | Chunks with temporal metadata | SVO events + facts |
-| **Time Model** | Bi-temporal + temporal detection (7 categories) | Single (`created_at`) | Bi-temporal (`occurred_at` + `ingested_at`) | Triple timestamps + Ebbinghaus decay |
-| **LLM Cost** | Medium (~700 calls/1000 docs) | Higher (~1000 calls/1000 docs) | Lower (~100 calls/1000 docs) | Medium (~700 calls/1000 docs) |
-| **Graph Backend** | Required (Neo4j/Neptune/AGE) | Required (Neo4j/Memgraph) | Not required | Not required |
-| **Search Modes** | Vector + Cypher + BM25 + RRF | Vector + Graph + Keyword | Vector + BM25 Hybrid | 4-channel: Semantic + BM25 + Temporal + Entity |
-| **Point-in-time queries** | Production-only (PG+Neo4j); not supported on the embedded `sqlite_lance` backend | n/a | n/a | n/a |
-| **Best For** | Complex multi-hop queries | Knowledge bases | Chat history, logs, events | Temporal queries, long conversations |
+| Aspect | VectorCypher (default) | Skeleton Construction | Chronicle |
+|--------|------------------------|----------------------|-----------|
+| **Primary Focus** | Hybrid retrieval | Temporal events | Conversational memory |
+| **Entity Extraction** | Selective (70% default, configurable 0.0–1.0) | Lazy (on-demand) | Full extraction |
+| **Core Data Model** | Dual nodes (Entity + Chunk) | Chunks with temporal metadata | SVO events + facts |
+| **Time Model** | Bi-temporal + temporal detection (7 categories) | Bi-temporal (`occurred_at` + `ingested_at`) | Triple timestamps + Ebbinghaus decay |
+| **LLM Cost** | Medium (~700 calls/1000 docs) at default; ~1000 at `skeleton_core_ratio=1.0` | Lower (~100 calls/1000 docs) | Medium (~700 calls/1000 docs) |
+| **Graph Backend** | Required (Neo4j/Neptune/AGE) | Not required | Not required |
+| **Search Modes** | Vector + Cypher + BM25 + RRF | Vector + BM25 Hybrid | 4-channel: Semantic + BM25 + Temporal + Entity |
+| **Point-in-time queries** | Production-only (PG+Neo4j); not supported on the embedded `sqlite_lance` backend | n/a | n/a |
+| **Best For** | Complex multi-hop queries, knowledge bases | Chat history, logs, events | Temporal queries, long conversations |
 
 ## Detailed Comparison
 
 ### Entity Extraction
 
-**GraphRAG:**
-- Extracts entities from every document during ingestion
-- Rich relationship extraction with typed edges
-- Cross-document entity deduplication and resolution
-- Full knowledge graph construction
+**VectorCypher:**
+- Skeleton-based selective extraction (KET-RAG): top N% chunks by importance get full LLM extraction; remaining chunks get keyword + co-occurrence edges.
+- `skeleton_core_ratio` defaults to 0.70 (70% core). Set to `1.0` for full extraction (legacy GraphRAG behavior).
+- Entities stored in Neo4j (or alternate graph backend) for Cypher traversal.
 
 ```python
-# GraphRAG: Entity extraction happens during remember()
-result = await lake.remember(content)
-print(f"Extracted {result.entities_extracted} entities")
-print(f"Created {result.relationships_created} relationships")
+# VectorCypher: skeleton-selective extraction
+async with Khora(db_url, engine="vectorcypher") as lake:
+    result = await lake.remember(content)
+    print(f"Extracted {result.entities_extracted} entities")
+
+# For 100% extraction (legacy GraphRAG behavior):
+async with Khora(db_url, engine="vectorcypher",
+                 engine_kwargs={"skeleton_core_ratio": 1.0}) as lake:
+    result = await lake.remember(content)
 ```
 
 **Skeleton Construction:**
-- Uses skeleton indexing to identify ~10% "core" chunks
-- Only core chunks get LLM extraction
-- Non-core chunks use keyword-based pseudo-entities
-- Lazy expansion during retrieval if needed
+- Uses skeleton indexing to identify ~10% "core" chunks.
+- Only core chunks get LLM extraction.
+- Non-core chunks use keyword-based pseudo-entities.
+- Lazy expansion during retrieval if needed.
 
 ```python
-# Skeleton Construction: Minimal extraction, skeleton-based
-result = await lake.remember(content)
-# Entities only extracted for "core" chunks (high PageRank)
+# Skeleton Construction: minimal extraction, skeleton-based
+async with Khora(db_url, engine="skeleton") as lake:
+    result = await lake.remember(content)
+    # Entities only extracted for "core" chunks (high PageRank)
 ```
+
+**Chronicle:**
+- Full extraction on every document — runs the same shared ingest pipeline VectorCypher uses, no skeleton selectivity.
+- Extracts SVO events (subject-verb-object tuples) in addition to entities/relationships.
+- Stores in PostgreSQL only; no graph backend involvement.
 
 ### Time Model
 
-**GraphRAG:**
-- Single timestamp: `created_at` (when document was ingested)
-- Recency bias in search (configurable decay)
-- No distinction between event time and ingestion time
+**VectorCypher:**
+- Per-category temporal detection (7 categories) on the query side.
+- Bi-temporal storage when `occurred_at` is provided via metadata.
+- Recency bias in scoring (configurable).
 
 **Skeleton Construction:**
 - Bi-temporal model:
   - `occurred_at`: When the event actually happened
   - `ingested_at`: When we learned about it
-- Hierarchical time navigation (Year → Quarter → Month → Week → Day)
-- Native temporal filtering in queries
+- Hierarchical time navigation (Year → Quarter → Month → Week → Day).
+- Native temporal filtering in queries.
 
 ```python
-# Skeleton Construction: Store event with occurrence time
-await lake.remember(
-    "Alice joined the team",
-    metadata={"occurred_at": "2024-01-15T09:00:00Z"}
-)
+# Skeleton Construction: store event with occurrence time
+await lake.remember(content, occurred_at=datetime(2024, 1, 15))
 
 # Query: "What happened in January?"
-results = await lake.recall(
-    "team changes",
-    temporal_filter={"occurred_after": "2024-01-01", "occurred_before": "2024-02-01"}
-)
+results = await lake.recall("January events", time_range=("2024-01-01", "2024-01-31"))
 ```
+
+**Chronicle:**
+- Triple timestamps: `valid_from`, `valid_to`, `recorded_at`.
+- Ebbinghaus forgetting-curve decay applied to relevance scores.
+- 4-channel parallel retrieval (semantic + BM25 + temporal + entity).
 
 ### Search Capabilities
 
-**GraphRAG:**
-
-| Mode | Description |
-|------|-------------|
-| `VECTOR` | Semantic similarity via embeddings |
-| `GRAPH` | Entity-centric traversal, relationship exploration |
-| `KEYWORD` | BM25 full-text search |
-| `HYBRID` | All three combined with RRF |
+**VectorCypher:**
+- Vector similarity + Cypher graph traversal + BM25 keyword + RRF fusion.
+- Query routing determines the search path automatically.
 
 ```python
-# GraphRAG: Entity exploration
-entities = await lake.list_entities(entity_type="PERSON")
-related = await lake.find_related_entities(entity_id, max_depth=2)
+# VectorCypher: query routing determines the search path automatically
+results = await lake.recall("Who founded Acme Corp?")  # Multi-hop entity query
+results = await lake.recall("CEO recent news")  # Hybrid vector + temporal
 ```
 
 **Skeleton Construction:**
-
-| Mode | Description |
-|------|-------------|
-| `VECTOR` | Semantic similarity via embeddings |
-| `HYBRID` | Vector + BM25 with configurable alpha |
+- Vector + BM25 hybrid only (no graph traversal).
+- Time-filtered hybrid search with skeleton expansion.
 
 ```python
-# Skeleton Construction: Time-filtered hybrid search
+# Skeleton Construction: time-filtered hybrid search
 results = await lake.recall(
-    query,
-    hybrid_alpha=0.7,  # 70% vector, 30% BM25
-    temporal_filter={"author": "alice", "channel": "engineering"}
+    "deployment errors",
+    time_range=("2024-01-01", "2024-01-31"),
+    mode=SearchMode.HYBRID,
 )
 ```
 
-### Entity Extraction (VectorCypher)
-
-**VectorCypher:**
-- Uses skeleton indexing with a higher core ratio (default 70%)
-- Core chunks get full LLM entity extraction; non-core use keywords
-- Entities and chunks stored as dual nodes in Neo4j (`MENTIONED_IN` links)
-- Per-complexity fusion weights tune how much graph signal to blend in
-
-```python
-# VectorCypher: Skeleton-based extraction with graph storage
-result = await lake.remember(content)
-# 70% of chunks get full entity extraction (configurable)
-# Entities stored in Neo4j for Cypher traversal
-```
+**Chronicle:**
+- 4 parallel channels: semantic vector + BM25 keyword + temporal + entity.
+- Abstention signals (4 flags + weighted score) to detect low-confidence results.
 
 ### Infrastructure Requirements
 
-**GraphRAG:**
-
-```
-PostgreSQL (required)
-├── Documents & metadata
-├── Event sourcing
-└── pgvector embeddings
-
-Neo4j/Kuzu/Memgraph (required)
-├── Entity nodes
-├── Relationship edges
-└── Graph traversal
-```
-
-**Skeleton Construction:**
-
-```
-PostgreSQL (required)
-├── Documents & metadata
-├── pgvector embeddings
-├── BM25 full-text (tsvector)
-└── BRIN temporal indexes
-```
-
-**VectorCypher:**
-
-```
-PostgreSQL (required)
-├── Documents & metadata
-└── pgvector embeddings
-
-Neo4j (required)
-├── Entity nodes
-├── Chunk nodes
-├── MENTIONED_IN relationships
-└── Graph traversal
-```
-
-**Alternative: SurrealDB (experimental in v0.9.0)**
-
-```
-SurrealDB (single database)
-├── Documents & metadata (relational)
-├── Vector embeddings (native vector search)
-├── Entity/relationship graph (native graph)
-└── Event sourcing
-```
-
-SurrealDB can serve as all three backends in a single database. **Marked experimental in v0.9.0**: the Python SDK is pinned to `>=2.0.0a1` (alpha track for SurrealDB 3.x support), KNN (`<|K|>`) is unreliable in embedded mode and falls back to brute-force cosine + HNSW, and concurrent upserts require the `_SurrealDBEntityKeyGate` to serialise on `(ns, name, type)` keys. PostgreSQL + Neo4j remains the production stack for any engine.
-
-**Alternative: SQLite + LanceDB (experimental embedded path)**
-
-```
-SQLite (relational + graph + FTS5 BM25)  +  LanceDB (vector embeddings)
-```
-
-The embedded path covers all four engines via dialect-aware Alembic migrations against SQLite plus a sibling LanceDB directory for vectors. Suitable for demos, evaluation, tests, and small single-user CLIs (≤1M chunks, ≤100k entities, ≤500k edges, traversal depth ≤3). See [configuration.md](../configuration.md#embedded-backends-experimental) for the full list of caveats (partial transaction atomicity, no point-in-time queries, FTS only on chunks).
-
-### Embedded backend (`sqlite_lance`)
-
-The embedded `sqlite_lance` backend (SQLite + LanceDB) is intended for evaluation, tests, and small single-process deployments. It does **not** support point-in-time / historical queries: VectorCypher's `_version_filter_entities` reads `version_valid_from` / `version_valid_to` columns that exist only in the Neo4j Entity-version graph. Calling `recall()` with a target date (either via `start_time` / `end_time` arguments or a query whose temporal detection produces an `EXPLICIT` category date) on `sqlite_lance` raises `NotImplementedError` immediately, before any storage I/O. Use the production stack (PostgreSQL+Neo4j) for historical/temporal queries (DYT-3550).
-
-### Search Capabilities (VectorCypher)
-
-**VectorCypher:**
-
-| Mode | Description |
-|------|-------------|
-| `SIMPLE` | Vector-only search (fastest, no graph traversal) |
-| `MODERATE` | Shallow graph expansion (depth=1) + vector fusion |
-| `COMPLEX` | Deep graph traversal (depth=2-3) + weighted RRF fusion |
-
-```python
-# VectorCypher: Query routing determines the search path automatically
-results = await lake.recall(
-    "How are Alice and Bob connected through projects?",
-    graph_depth=2,  # Or let the router decide
-)
-```
+| Component | VectorCypher | Skeleton | Chronicle |
+|-----------|--------------|----------|-----------|
+| PostgreSQL + pgvector | Required | Required | Required |
+| Graph database (Neo4j/Memgraph/Neptune/AGE) | Required | Not required | Not required |
+| LLM API | Required (extraction + embeddings) | Required (embeddings + lazy extraction) | Required (extraction + embeddings) |
+| Embedded option (sqlite-lance) | Experimental | Experimental | Experimental |
 
 ### Cost Analysis
 
-For 10,000 documents:
+For 1000 documents averaging 5KB each:
 
-| Operation | GraphRAG | Skeleton Construction | VectorCypher |
-|-----------|----------|----------------------|--------------|
-| Entity extraction calls | ~10,000 | ~1,000 | ~7,000 |
-| Relationship extraction calls | ~10,000 | ~0 | ~7,000 |
-| Embedding calls | ~10,000 | ~10,000 | ~10,000 |
-| **Total LLM calls** | **~30,000** | **~11,000** | **~24,000** |
-
-*Note: VectorCypher extraction counts assume the default 70% core ratio. Actual costs depend on document length, extraction complexity, and LLM pricing.*
+| Operation | VectorCypher (default 70%) | VectorCypher (`skeleton_core_ratio=1.0`) | Skeleton Construction | Chronicle |
+|-----------|---------------------------|------------------------------------------|----------------------|-----------|
+| Entity extraction | ~700 LLM calls | ~1000 LLM calls | ~100 LLM calls (core only) | ~1000 LLM calls |
+| Embedding generation | ~1000 embedding calls | ~1000 embedding calls | ~1000 embedding calls | ~1000 embedding calls |
+| Graph operations | Cypher writes | Cypher writes | None | None |
+| **Total LLM cost** | **~$0.10–0.20** | **~$0.15–0.30** | **~$0.02–0.05** | **~$0.15–0.30** |
 
 ## Use Case Guide
 
-### Choose GraphRAG When...
+### Choose VectorCypher When...
 
-- **Building a knowledge base**: Product documentation, research papers, FAQs
-- **Entity relationships matter**: "Who reports to whom?", "What products does Company X make?"
-- **Graph exploration needed**: Multi-hop traversal, relationship discovery
-- **Accuracy over cost**: Willing to pay for comprehensive extraction
-- **Long-term reference**: Content doesn't change frequently
-
-**Example Use Cases:**
-- Corporate knowledge management
-- Research paper analysis
-- Product catalog with relationships
-- Organizational charts and hierarchies
-- Documentation with cross-references
+- **Multi-hop knowledge queries**: "Who works with engineers who worked on the auth project?"
+- **Graph-shaped data**: Documents reference entities that reference other entities.
+- **Balanced cost/quality**: Default 70% extraction is cheaper than full GraphRAG-style; 100% available via `skeleton_core_ratio=1.0`.
+- **Production-grade**: The default-recommended engine; well-tested on PostgreSQL + Neo4j.
 
 ### Choose Skeleton Construction When...
 
-- **Time is the primary dimension**: Chat logs, event streams, meeting notes (note: VectorCypher also handles temporal queries well via its TemporalDetector)
-- **Cost optimization critical**: Large volumes, budget constraints
-- **Freshness matters**: Recent events more important than old
-- **Structured filtering needed**: By author, channel, tags, time ranges
-- **Simple infrastructure**: Don't want to manage Neo4j
-- **Real-time ingestion**: Streaming data, continuous updates
+- **Time matters most**: Chat logs, event streams, meeting transcripts.
+- **Cost is a primary concern**: 5–10× fewer LLM calls.
+- **PostgreSQL-only infrastructure**: No graph database available.
+- **Freshness is critical**: Bi-temporal model tracks both event time and ingestion time.
 
-**Example Use Cases:**
-- Slack/Discord message archives
-- Meeting transcripts with timestamps
-- Support ticket history
-- Application logs and events
-- News and social media monitoring
-- Customer interaction history
+### Choose Chronicle When...
 
-### Choose VectorCypher When...
+- **Conversational memory**: Chat history, support tickets, meeting transcripts.
+- **Benchmark-optimized recall**: LongMemEval, LoCoMo, BEAM.
+- **Temporal queries**: "What did Alice say last week about the budget?"
+- **No graph DB**: Runs on PostgreSQL + pgvector only.
 
-- **Multi-hop queries are common**: "How are X and Y connected through Z?"
-- **Graph traversal is essential**: Organizational hierarchies, deal chains, team structures
-- **Relationship discovery matters**: Finding implicit connections across data sources
-- **Neo4j is available**: VectorCypher requires Neo4j (not optional)
-- **Temporal reasoning needed**: Cascade temporal detection classifies queries into 7 categories with category-specific retrieval (recency boost, sorting, decay override)
-- **Balanced cost/quality**: Willing to pay more than Skeleton but less than GraphRAG
+## Migration
 
-**Example Use Cases:**
-- CRM relationship mapping (deals → contacts → companies)
-- Organizational knowledge graphs with multi-hop exploration
-- Research collaboration networks
-- Supply chain relationship tracking
-- Any domain where "connections between things" is the primary query pattern
-
-## Migration Considerations
-
-### From GraphRAG to Skeleton Construction
-
-1. **Graph features lost**: Entity relationships won't be pre-computed
-2. **Query changes**: `SearchMode.GRAPH` not available; use `HYBRID`
-3. **Entity methods unavailable**: `list_entities()`, `find_related_entities()`
-4. **Temporal benefits**: Add `occurred_at` metadata for time-based queries
+### Replacing GraphRAG (removed in 0.10.1)
 
 ```python
-# Before (GraphRAG)
-results = await lake.recall(query, mode=SearchMode.GRAPH)
-entities = await lake.find_related_entities(entity_id)
+# Before (graphrag — no longer available)
+async with Khora(db_url, engine="graphrag") as lake:
+    await lake.remember(content)
 
-# After (Skeleton Construction)
-results = await lake.recall(
-    query,
-    mode=SearchMode.HYBRID,
-    temporal_filter={"occurred_after": "2024-01-01"}
-)
-# Entity relationships must be handled differently
+# After — drop-in: vectorcypher with full extraction
+async with Khora(db_url, engine="vectorcypher",
+                 engine_kwargs={"skeleton_core_ratio": 1.0}) as lake:
+    await lake.remember(content)
+
+# Or accept default selective extraction (recommended — 30% cheaper):
+async with Khora(db_url, engine="vectorcypher") as lake:
+    await lake.remember(content)
 ```
 
-### From Skeleton Construction to GraphRAG
+Existing graphrag-ingested data remains queryable via `vectorcypher` against the same database — the table shapes are identical.
 
-1. **Temporal metadata preserved**: `occurred_at` becomes document metadata
-2. **Re-extraction needed**: All documents must be re-processed for entities
-3. **Infrastructure addition**: Neo4j/Kuzu/Memgraph required
-4. **Higher initial cost**: Full entity extraction on migration
+### Between VectorCypher and Skeleton Construction
 
-```python
-# Before (Skeleton Construction)
-results = await lake.recall(query, temporal_filter={...})
+VectorCypher and Skeleton store data differently (Skeleton has no graph backend), so switching is a re-ingest, not a query-side switch. Pick based on your workload:
 
-# After (GraphRAG)
-results = await lake.recall(query, mode=SearchMode.HYBRID)
-entities = await lake.list_entities(entity_type="PERSON")
-```
+- Cost-sensitive + PG-only → Skeleton
+- Multi-hop entity queries + graph DB available → VectorCypher
 
 ## Hybrid Approach
 
-For some use cases, you might use both engines:
-
-1. **Skeleton Construction for ingestion**: Fast, cost-efficient initial storage
-2. **Background GraphRAG enrichment**: Async entity extraction for important documents
-3. **Query routing**: Time-sensitive queries → Skeleton Construction, entity queries → GraphRAG
+For complex use cases, consider running multiple engines against the same data store:
 
 ```python
-# Example: Dual-engine setup (conceptual)
-async with Khora(db_url, engine="skeleton") as skeleton_lake:
-    async with Khora(db_url, engine="graphrag") as graphrag_lake:
-        # Fast ingestion via Skeleton Construction
-        await skeleton_lake.remember(content, title="Event")
-
-        # Background enrichment for important content
-        if is_important(content):
-            await graphrag_lake.remember(content, title="Event")
-```
-
-## Configuration Examples
-
-### GraphRAG Setup
-
-```yaml
-# genesis.yaml
-engine:
-  name: graphrag
-
-# Environment
-KHORA_DATABASE_URL=postgresql://localhost/khora
-KHORA_NEO4J_URL=bolt://localhost:7687
-```
-
-### Skeleton Construction Setup
-
-```yaml
-# genesis.yaml
-engine:
-  name: skeleton
-  backend: pgvector  # or weaviate
-
-temporal:
-  default_lookback_days: 90
-  hierarchy_enabled: true
-
-query:
-  hybrid_alpha: 0.7
-  recency_decay_days: 30
-
-# Environment
-KHORA_DATABASE_URL=postgresql://localhost/khora
-# No Neo4j required
+# Example: dual-engine setup (conceptual)
+async def hybrid_query(query: str):
+    async with Khora(db_url, engine="vectorcypher") as kg_lake:
+        async with Khora(db_url, engine="skeleton") as temporal_lake:
+            # Route entity queries to VectorCypher
+            if has_entity_intent(query):
+                return await kg_lake.recall(query)
+            # Route temporal queries to Skeleton
+            elif has_temporal_intent(query):
+                return await temporal_lake.recall(query)
 ```
 
 ## Performance Benchmarks
 
-*Benchmarks on 10,000 documents, single-node deployment:*
-
-| Metric | GraphRAG | Skeleton Construction | Notes |
-|--------|----------|----------------------|-------|
-| Ingestion time | ~45 min | ~8 min | Entity extraction overhead |
-| Query latency (p50) | ~200ms | ~150ms | Graph traversal adds latency |
-| Query latency (p99) | ~800ms | ~400ms | |
-| Storage size | ~2.5 GB | ~1.5 GB | Graph storage overhead |
-| Memory usage | ~4 GB | ~2 GB | Neo4j in-memory graph |
-
-*Note: Actual performance varies by hardware, document size, and query patterns.*
+| Metric | VectorCypher (default) | Skeleton Construction | Notes |
+|--------|------------------------|----------------------|-------|
+| Ingestion (1000 docs) | ~30 minutes | ~3 minutes | Selective vs lazy extraction |
+| Retrieval (single query) | ~200ms | ~150ms | Vector + Cypher + BM25 vs Vector + BM25 |
+| Entity lookup | ~50ms | ~100ms | Direct graph vs lazy expansion |
+| Multi-hop traversal | ~100ms | Limited | Graph backend native |
+| Time-range filtering | ~200ms | ~75ms | Skeleton optimized |
+| Storage (1000 docs) | ~120MB | ~80MB | VectorCypher adds graph state |
 
 ## Related Documentation
 
-- [Chronicle Engine](chronicle-engine.md) — Temporal-semantic memory with 4-channel retrieval
-- [Skeleton Construction Engine](skeleton-engine.md) — Temporal-first, cost-optimized engine
-- [VectorCypher Engine](vectorcypher-engine.md) — Hybrid vector + Cypher graph traversal
-- [Temporal Model](temporal-model.md) — Bi-temporal design deep dive
-- [Skeleton Indexing](skeleton-indexing.md) — Cost optimization via PageRank
-- [Hybrid Search](hybrid-search.md) — Vector + BM25 fusion
+- [VectorCypher Engine](vectorcypher-engine.md) — default, hybrid retrieval.
+- [Skeleton Construction Engine](skeleton-engine.md) — temporal-first, no graph DB.
+- [Chronicle Engine](chronicle-engine.md) — conversational + temporal.
+- [Temporal Model](temporal-model.md) — bi-temporal design details.
+- [Hybrid Search](hybrid-search.md) — vector + BM25 fusion primitive.
+- [References](../REFERENCES.md) — research papers and inspirations.

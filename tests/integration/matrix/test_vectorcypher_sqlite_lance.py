@@ -364,7 +364,7 @@ async def test_vc_two_hop_traversal(lake: Khora, namespace_id: UUID) -> None:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="DYT-3562: VectorCypher embedded path doesn't push temporal filter to LanceDB query (same shape as GraphRAG embedded)",
+    reason="DYT-3562: VectorCypher embedded path doesn't push temporal filter to LanceDB query",
 )
 async def test_vc_temporal_filter(lake: Khora, namespace_id: UUID) -> None:
     """Two docs at different ``occurred_at``; recall with ``last 7 days`` filter
@@ -503,8 +503,7 @@ async def test_vc_dual_node_persistence(lake: Khora, namespace_id: UUID) -> None
         "Same root cause as test_vc_two_hop_traversal: VC's sync remember "
         "does not rebind extraction-time entity IDs after upsert resolution, "
         "so a second doc re-mentioning a prior entity hits FOREIGN KEY on "
-        "create_relationships_batch. Mirror of the GraphRAG DYT-3558 case "
-        "but on the VectorCypher path. Tracked alongside DYT-3548/DYT-3549."
+        "create_relationships_batch. Tracked alongside DYT-3548/DYT-3549/DYT-3558."
     ),
     raises=Exception,
 )

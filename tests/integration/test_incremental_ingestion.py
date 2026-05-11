@@ -447,7 +447,7 @@ class TestIncrementalIngestion:
     async def test_bm25_cache_invalidation(self) -> None:
         """BM25 keyword searcher cache is invalidated after ingestion.
 
-        After remember() or remember_batch(), the GraphRAG engine should
+        After remember() or remember_batch(), the engine should
         call invalidate_caches() so stale BM25 indexes are rebuilt.
         """
         lake = _make_connected_lake()
@@ -477,76 +477,6 @@ class TestIncrementalIngestion:
             )
 
         engine.remember.assert_awaited_once()
-
-    async def test_cache_invalidation_called_in_graphrag_engine(self) -> None:
-        """GraphRAG engine calls invalidate_caches after remember()."""
-        from khora.engines.graphrag.engine import GraphRAGEngine
-
-        mock_config = _mock_config()
-        engine = GraphRAGEngine(mock_config)
-
-        # Mock internals
-        mock_storage = MagicMock()
-        mock_storage.get_document_by_checksum = AsyncMock(return_value=None)
-        mock_storage.create_document = AsyncMock(side_effect=lambda doc: doc)
-
-        mock_query_engine = MagicMock()
-        mock_query_engine.invalidate_caches = MagicMock()
-
-        engine._storage = mock_storage
-        engine._query_engine = mock_query_engine
-        engine._connected = True
-        engine._embedder = MagicMock()
-
-        mock_result = {"chunks": 1, "entities": 1, "relationships": 0}
-        with patch("khora.pipelines.flows.ingest.process_document", AsyncMock(return_value=mock_result)):
-            await engine.remember(
-                "Test content",
-                NAMESPACE_ID,
-                title="Test",
-                entity_types=["PERSON", "ORGANIZATION"],
-                relationship_types=["WORKS_FOR"],
-            )
-
-        mock_query_engine.invalidate_caches.assert_called_once_with(NAMESPACE_ID)
-
-    async def test_cache_invalidation_called_in_remember_batch(self) -> None:
-        """GraphRAG engine calls invalidate_caches after remember_batch()."""
-        from khora.engines.graphrag.engine import GraphRAGEngine
-
-        mock_config = _mock_config()
-        engine = GraphRAGEngine(mock_config)
-
-        mock_storage = MagicMock()
-        mock_storage.list_entities = AsyncMock(return_value=[])
-
-        mock_query_engine = MagicMock()
-        mock_query_engine.invalidate_caches = MagicMock()
-
-        engine._storage = mock_storage
-        engine._query_engine = mock_query_engine
-        engine._connected = True
-        engine._embedder = MagicMock()
-
-        mock_result = {
-            "total_documents": 2,
-            "processed_documents": 2,
-            "skipped_documents": 0,
-            "failed_documents": 0,
-            "total_chunks": 2,
-            "total_entities": 1,
-            "total_relationships": 0,
-            "total_inferred_relationships": 0,
-        }
-        with patch("khora.pipelines.flows.ingest.ingest_documents", AsyncMock(return_value=mock_result)):
-            await engine.remember_batch(
-                [{"content": "Doc 1"}, {"content": "Doc 2"}],
-                NAMESPACE_ID,
-                entity_types=["PERSON", "ORGANIZATION"],
-                relationship_types=["WORKS_FOR"],
-            )
-
-        mock_query_engine.invalidate_caches.assert_called_once_with(NAMESPACE_ID)
 
     # -----------------------------------------------------------------------
     # Test: Full Khora remember→recall integration

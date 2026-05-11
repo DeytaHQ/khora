@@ -230,7 +230,7 @@ Engines are discovered through the `khora.engines` registry. The default is `vec
 ```python
 from khora import create_engine, list_engines, register_engine
 
-list_engines()                              # ['vectorcypher', 'graphrag', 'skeleton', 'chronicle']
+list_engines()                              # ['skeleton', 'vectorcypher', 'chronicle']
 engine = create_engine("chronicle", ...)    # low-level — prefer Khora(engine="chronicle")
 register_engine("my_engine", MyEngineClass) # must implement MemoryEngineProtocol
 ```

@@ -4,6 +4,47 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.10.1] — Remove `graphrag` engine
+
+### Removed — BREAKING
+
+- **`graphrag` engine.** `engine="graphrag"` no longer accepted by `Khora(...)` or
+  `create_engine(...)`; raises `ValueError: Unknown engine: graphrag` on 0.10.1+.
+  The engine module (`src/khora/engines/graphrag/`) and its dedicated tests have
+  been deleted.
+
+### Migration
+
+```diff
+- async with Khora(db_url, engine="graphrag") as lake:
++ async with Khora(db_url, engine="vectorcypher") as lake:
+```
+
+For graphrag-equivalent **100% chunk extraction** (vs vectorcypher's default
+selective 70%):
+
+```python
+async with Khora(
+    db_url,
+    engine="vectorcypher",
+    engine_kwargs={"skeleton_core_ratio": 1.0},
+) as lake:
+    ...
+```
+
+### Data portability
+
+Graphrag and vectorcypher wrote to the same tables (`documents`, `chunks`,
+`entities`, `relationships`) on the same Postgres/Neo4j stack. **Existing
+graphrag-ingested data remains queryable via vectorcypher** with no migration.
+New ingest under vectorcypher uses KET-RAG selectivity unless overridden.
+
+### Why no deprecation cycle?
+
+The engine had no external dependencies and only one internal consumer
+(`genesis`, which has migrated in lockstep). The breaking-change cost of a
+deprecation shim was higher than the breaking-change cost of a hard removal.
+
 ## [0.10.0] — Rename `MemoryLake` → `Khora`, drop "Memory Lake" branding
 
 ### Changed — BREAKING

@@ -22,10 +22,7 @@ Choose Skeleton Construction instead when:
 - **No Neo4j available**: VectorCypher requires Neo4j
 - **Simple infrastructure preferred**: Skeleton works with PostgreSQL only
 
-Choose GraphRAG instead when:
-
-- **Full knowledge graph needed**: Complete entity/relationship extraction upfront
-- **Highest extraction quality required**: GraphRAG extracts from 100% of documents
+For graphrag-equivalent comprehensive extraction (100% of chunks), pass `engine_kwargs={"skeleton_core_ratio": 1.0}` — VectorCypher's KET-RAG selectivity defaults to the top 70% of chunks but accepts a 1.0 override that matches the legacy GraphRAG engine's extraction quality at the same LLM cost.
 
 ## Architecture Overview
 
@@ -530,14 +527,14 @@ KHORA_NEO4J_PASSWORD=password
 
 ### Comparison with Other Engines
 
-| Metric | VectorCypher | Skeleton | GraphRAG |
-|--------|--------------|----------|----------|
-| LLM calls per 1000 docs | ~700 | ~100 | ~1000 |
-| Core chunk ratio | 70% (default) | 10% | 100% |
-| Multi-hop queries | Native | Limited | Full |
-| Graph database | Required | Not required | Required |
-| Query routing | Yes | No | No |
-| RRF fusion | Yes | No | Yes |
+| Metric | VectorCypher | Skeleton |
+|--------|--------------|----------|
+| LLM calls per 1000 docs | ~700 (default) / ~1000 (`skeleton_core_ratio=1.0`) | ~100 |
+| Core chunk ratio | 70% (configurable 0.0–1.0) | 10% |
+| Multi-hop queries | Native | Limited |
+| Graph database | Required | Not required |
+| Query routing | Yes | No |
+| RRF fusion | Yes | No |
 
 ## Tuning Guide
 

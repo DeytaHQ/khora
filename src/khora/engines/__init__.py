@@ -1,17 +1,17 @@
 """Engine registry and factory for pluggable memory engines.
 
 Memory engines implement different strategies for storing and retrieving memories.
-The default engine is "graphrag" which uses knowledge graphs, vector embeddings,
-and LLM-based entity extraction.
+The default engine is "vectorcypher" which uses knowledge graphs, vector embeddings,
+and LLM-based entity extraction with selective (KET-RAG) skeleton indexing.
 
 Usage:
     from khora.engines import create_engine, list_engines, register_engine
 
     # List available engines
-    engines = list_engines()  # ["graphrag"]
+    engines = list_engines()  # ["skeleton", "vectorcypher", "chronicle"]
 
     # Create an engine instance
-    engine = create_engine("graphrag", config)
+    engine = create_engine("vectorcypher", config)
 
     # Register a custom engine
     register_engine("my_engine", "my_package.engine", "MyEngine")
@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 
 # Registry: name -> (module_path, class_name)
 _ENGINE_REGISTRY: dict[str, tuple[str, str]] = {
-    "graphrag": ("khora.engines.graphrag.engine", "GraphRAGEngine"),
     "skeleton": ("khora.engines.skeleton.engine", "SkeletonConstructionEngine"),
     "vectorcypher": ("khora.engines.vectorcypher.engine", "VectorCypherEngine"),
     "chronicle": ("khora.engines.chronicle.engine", "ChronicleEngine"),
@@ -72,7 +71,7 @@ def create_engine(
     """Create an engine instance by name.
 
     Args:
-        name: Engine name (e.g., "graphrag")
+        name: Engine name (e.g., "vectorcypher")
         config: KhoraConfig instance
         storage_config: Optional StorageConfig (deprecated, for backwards compat)
         **kwargs: Additional arguments passed to the engine constructor

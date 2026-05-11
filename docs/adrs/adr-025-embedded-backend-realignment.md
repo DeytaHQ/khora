@@ -21,7 +21,7 @@ The strategic analysis that informed this ADR is collected in:
 
 - `/tmp/khora-embedded-architect.md` — high-level architectural review of the four protocols and the storage abstraction shape.
 - `/tmp/khora-embedded-sqlite-lance-analysis.md` — capability matrix, performance reality check, scale ceiling, sharp edges.
-- `/tmp/khora-embedded-rag-needs.md` — per-engine recall recipe and the retrieval-correctness floor for VectorCypher / GraphRAG / Skeleton / Chronicle.
+- `/tmp/khora-embedded-rag-needs.md` — per-engine recall recipe and the retrieval-correctness floor for VectorCypher / Skeleton / Chronicle (and the now-removed GraphRAG engine — see 0.10.1 changelog).
 - `/tmp/khora-embedded-alternatives.md` — DB-expert survey of 13 candidate stacks (sqlite-vec, pgserver, DuckDB+VSS, Tantivy+Qdrant, Milvus Lite, etc.).
 - `/tmp/khora-embedded-critique.md` — devil's-advocate case against shipping `sqlite_lance` "production-ready" in v0.9.0.
 
@@ -47,7 +47,6 @@ The v0.9.0 production-readiness matrix is codified in [`docs/engines/engine-comp
 |---------------|------------------------|--------------------------|------------------|---------------|
 | VectorCypher  | Production-ready       | n/a                      | Experimental     | Experimental  |
 | Chronicle     | n/a                    | Production-ready         | Experimental     | Experimental  |
-| GraphRAG      | Available              | n/a                      | Experimental     | Experimental  |
 | Skeleton      | n/a                    | Available                | Experimental     | Experimental  |
 
 Marketing language should never stamp an engine production-ready in isolation — every claim must name the stack.

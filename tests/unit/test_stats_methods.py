@@ -174,60 +174,6 @@ class TestChronicleEngineStats:
 
 
 @pytest.mark.unit
-class TestGraphRAGEngineStats:
-    """Tests for GraphRAGEngine.stats() with last_activity_at."""
-
-    @pytest.mark.asyncio
-    async def test_stats_returns_last_activity_at(self) -> None:
-        """stats() populates last_activity_at from storage."""
-        from khora.engines.graphrag.engine import GraphRAGEngine
-
-        ts = datetime(2026, 3, 15, 8, 30, 0, tzinfo=UTC)
-        config = _mock_khora_config()
-        engine = GraphRAGEngine(config)
-        engine._connected = True
-        engine._storage = _mock_storage(
-            doc_count=7,
-            chunk_count=35,
-            entity_count=12,
-            relationship_count=9,
-            last_activity_at=ts,
-        )
-
-        result = await engine.stats(uuid4())
-
-        assert result.documents == 7
-        assert result.chunks == 35
-        assert result.entities == 12
-        assert result.relationships == 9
-        assert result.last_activity_at == ts
-
-    @pytest.mark.asyncio
-    async def test_stats_fallback_on_error(self) -> None:
-        """stats() returns zeros and None when all storage methods fail."""
-        from khora.engines.graphrag.engine import GraphRAGEngine
-
-        config = _mock_khora_config()
-        engine = GraphRAGEngine(config)
-        engine._connected = True
-
-        storage = AsyncMock()
-        storage.get_document_stats = AsyncMock(side_effect=AttributeError)
-        storage.count_chunks = AsyncMock(side_effect=NotImplementedError)
-        storage.count_entities = AsyncMock(side_effect=AttributeError)
-        storage.count_relationships = AsyncMock(side_effect=NotImplementedError)
-        engine._storage = storage
-
-        result = await engine.stats(uuid4())
-
-        assert result.documents == 0
-        assert result.chunks == 0
-        assert result.entities == 0
-        assert result.relationships == 0
-        assert result.last_activity_at is None
-
-
-@pytest.mark.unit
 class TestSkeletonEngineStats:
     """Tests for SkeletonConstructionEngine.stats() with last_activity_at."""
 

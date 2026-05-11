@@ -320,7 +320,7 @@ class SkeletonConstructionEngine:
     ) -> tuple[int, int, int]:
         """Process a document into chunks (simplified pipeline).
 
-        Unlike GraphRAG, this focuses on fast chunking and embedding without
+        Unlike VectorCypher, this focuses on fast chunking and embedding without
         full entity extraction. Entity extraction can be done lazily on retrieval.
         """
         from khora.extraction.chunkers import create_chunker
@@ -989,12 +989,12 @@ class SkeletonConstructionEngine:
         """Not supported by Skeleton Construction engine.
 
         The Skeleton engine focuses on temporal chunk retrieval without
-        maintaining entity graphs. Use GraphRAG or VectorCypher for
-        entity graph traversal.
+        maintaining entity graphs. Use VectorCypher for entity graph
+        traversal.
         """
         raise NotImplementedError(
             "find_related_entities is not supported by the Skeleton Construction engine. "
-            "Use GraphRAG or VectorCypher for entity graph operations."
+            "Use VectorCypher for entity graph operations."
         )
 
     # =========================================================================
@@ -1024,12 +1024,11 @@ class SkeletonConstructionEngine:
         """Not supported by Skeleton Construction engine.
 
         The Skeleton engine focuses on temporal chunk retrieval without
-        maintaining entity graphs. Use GraphRAG or VectorCypher for
-        entity search.
+        maintaining entity graphs. Use VectorCypher for entity search.
         """
         raise NotImplementedError(
             "search_entities is not supported by the Skeleton Construction engine. "
-            "Use GraphRAG or VectorCypher for entity graph operations."
+            "Use VectorCypher for entity graph operations."
         )
 
     async def stats(self, namespace_id: UUID) -> Stats:

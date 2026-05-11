@@ -310,7 +310,7 @@ class TestEngineRegistration:
 
         engines = list_engines()
         assert "skeleton" in engines
-        assert "graphrag" in engines
+        assert "graphrag" not in engines
 
     def test_create_skeleton_engine(self):
         """Test creating Skeleton Construction engine via factory."""

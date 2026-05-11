@@ -1,4 +1,4 @@
-"""Unit tests for DYT-3558: GraphRAG drops relationships when an entity is re-canonicalised.
+"""Unit tests for DYT-3558: ingest drops relationships when an entity is re-canonicalised.
 
 When an entity is upserted a second time, Neo4j's MERGE syncs the in-memory
 ``Entity.id`` to the canonical (already-stored) UUID. Relationships built

@@ -19,7 +19,7 @@ def build_storage_config(config: KhoraConfig, *, skip_graph: bool = False) -> St
     """Build a StorageConfig from a KhoraConfig, handling all backend types.
 
     This replaces the ~20-line inline config construction that was
-    duplicated in Skeleton, GraphRAG, and VectorCypher engines.
+    duplicated in Skeleton and VectorCypher engines.
 
     Args:
         config: The KhoraConfig to build from.

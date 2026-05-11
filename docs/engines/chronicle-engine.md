@@ -1,8 +1,8 @@
 # Chronicle Engine
 
-The Chronicle engine is Khora's 4th memory engine, designed for **temporal and conversational memory**. It targets high scores on benchmarks like LongMemEval, LoCoMo, and BEAM by combining semantic search with temporal reasoning.
+The Chronicle engine is Khora's memory engine designed for **temporal and conversational memory**. It targets high scores on benchmarks like LongMemEval, LoCoMo, and BEAM by combining semantic search with temporal reasoning.
 
-Unlike GraphRAG and VectorCypher, Chronicle requires **no graph database** — it runs on PostgreSQL + pgvector only, with an optional embedded LanceDB store for zero-infrastructure deployments.
+Unlike VectorCypher, Chronicle requires **no graph database** — it runs on PostgreSQL + pgvector only, with an optional embedded LanceDB store for zero-infrastructure deployments.
 
 ## When to Use Chronicle
 
@@ -115,14 +115,14 @@ async with Khora("memory://", engine="chronicle") as lake:
 
 ## Comparison with Other Engines
 
-| Feature | Chronicle | GraphRAG | VectorCypher | Skeleton |
-|---------|-----------|----------|--------------|----------|
-| Graph DB required | No | Yes | Yes | Optional |
-| Temporal decay | Ebbinghaus | None (configurable) | Per-category | Recency bias |
-| Retrieval channels | 4 (parallel) | 3 (vector+graph+keyword) | 2 (vector+graph) | 2 (vector+BM25) |
-| Event decomposition | SVO tuples | No | No | No |
-| Compression | Progressive | No | No | No |
-| Best for | Conversations, temporal | Knowledge bases | Multi-hop queries | Cost-sensitive |
+| Feature | Chronicle | VectorCypher | Skeleton |
+|---------|-----------|--------------|----------|
+| Graph DB required | No | Yes | Optional |
+| Temporal decay | Ebbinghaus | Per-category | Recency bias |
+| Retrieval channels | 4 (parallel) | 2 (vector+graph) | 2 (vector+BM25) |
+| Event decomposition | SVO tuples | No | No |
+| Compression | Progressive | No | No |
+| Best for | Conversations, temporal | Multi-hop queries | Cost-sensitive |
 
 ## Configuration
 

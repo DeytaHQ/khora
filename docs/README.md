@@ -24,7 +24,6 @@ Pluggable retrieval strategies that implement `MemoryEngineProtocol`.
 
 - [Engine comparison](engines/engine-comparison.md) — pick the right engine.
 - [VectorCypher](engines/vectorcypher-engine.md) — default, hybrid vector + Cypher + BM25.
-- [GraphRAG](engines/engine-comparison.md#graphrag) — entity-centric community summarisation.
 - [Skeleton](engines/skeleton-engine.md) — lightweight, no graph DB required.
 - [Skeleton indexing](engines/skeleton-indexing.md) — how Skeleton indexes content.
 - [Chronicle](engines/chronicle-engine.md) — temporal-semantic memory.

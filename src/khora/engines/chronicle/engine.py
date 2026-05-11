@@ -1,7 +1,7 @@
 """Chronicle engine — temporal-semantic memory for benchmark-optimized recall.
 
 This engine is designed for high-accuracy memory retrieval benchmarks
-(LongMemEval, LoCoMo, BEAM). Unlike GraphRAG, it requires no external graph
+(LongMemEval, LoCoMo, BEAM). Unlike VectorCypher, it requires no external graph
 database. Two storage backends are supported:
 
 * ``"pgvector"`` (default): PostgreSQL + pgvector. Best for shared / managed
@@ -1006,8 +1006,8 @@ class ChronicleEngine:
         """Store content in the memory engine.
 
         Uses the shared ingest pipeline for chunking, embedding, and entity
-        extraction — identical to GraphRAG's pipeline for maximum extraction
-        quality.
+        extraction — the same pipeline VectorCypher uses, for maximum
+        extraction quality.
 
         Args:
             content: Content to remember
@@ -2151,7 +2151,7 @@ class ChronicleEngine:
     ) -> BatchResult:
         """Store multiple documents via the shared ingest pipeline.
 
-        Delegates to the same ``ingest_documents`` pipeline used by GraphRAG
+        Delegates to the same ``ingest_documents`` pipeline used by VectorCypher
         for full entity extraction, deduplication, and optional expansion.
 
         Args:
@@ -2367,8 +2367,8 @@ class ChronicleEngine:
         """Find entities related to a given entity.
 
         Chronicle is designed for PostgreSQL-only operation without a graph
-        backend. Returns an empty list. Use GraphRAG or VectorCypher for
-        graph-based entity traversal.
+        backend. Returns an empty list. Use VectorCypher for graph-based
+        entity traversal.
         """
         return []
 
