@@ -1,4 +1,4 @@
-"""Source synchronization flows for Khora Memory Lake.
+"""Source synchronization flows for Khora.
 
 Provides incremental sync from external sources with checkpoint tracking.
 """

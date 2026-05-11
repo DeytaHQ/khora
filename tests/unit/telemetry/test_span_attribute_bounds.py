@@ -23,7 +23,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.memory_lake import MemoryLake, RecallResult
+from khora.khora import Khora, RecallResult
 from khora.telemetry.logfire_integration import bounded_text_hash
 
 ATTR_BUDGET_CHARS = 64
@@ -61,9 +61,9 @@ def _mock_engine() -> MagicMock:
     return eng
 
 
-def _make_lake() -> MemoryLake:
-    with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-        lake = MemoryLake()
+def _make_lake() -> Khora:
+    with patch("khora.khora.load_config", return_value=_mock_config()):
+        lake = Khora()
     lake._connected = True
     lake._engine = _mock_engine()
     return lake
@@ -80,7 +80,7 @@ def _capturing_span(captured: list[dict]):
     return _stub
 
 
-async def _run_recall(lake: MemoryLake, query: str, captured: list[dict]) -> None:
+async def _run_recall(lake: Khora, query: str, captured: list[dict]) -> None:
     ns_id = uuid4()
     lake._engine.recall = AsyncMock(
         return_value=RecallResult(
@@ -94,7 +94,7 @@ async def _run_recall(lake: MemoryLake, query: str, captured: list[dict]) -> Non
     with (
         patch("khora.telemetry.context.ensure_trace_id"),
         patch("khora.telemetry.context.clear_trace_id"),
-        patch("khora.memory_lake.trace_span", side_effect=_capturing_span(captured)),
+        patch("khora.khora.trace_span", side_effect=_capturing_span(captured)),
     ):
         await lake.recall(query, namespace=ns_id)
 

@@ -1,11 +1,11 @@
-"""Shared test helpers for MemoryLake unit tests."""
+"""Shared test helpers for Khora unit tests."""
 
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-from khora.memory_lake import MemoryLake
+from khora.khora import Khora
 
 # Stable row-level ID returned by resolve_namespace across all tests
 RESOLVE_ROW_ID = uuid4()
@@ -83,10 +83,10 @@ def mock_engine() -> MagicMock:
     return mock_eng
 
 
-def make_lake(*, connected: bool = False) -> MemoryLake:
-    """Create a MemoryLake with mocked config, optionally pre-connected."""
-    with patch("khora.memory_lake.load_config", return_value=mock_config()):
-        lake = MemoryLake()
+def make_lake(*, connected: bool = False) -> Khora:
+    """Create a Khora with mocked config, optionally pre-connected."""
+    with patch("khora.khora.load_config", return_value=mock_config()):
+        lake = Khora()
 
     if connected:
         lake._connected = True

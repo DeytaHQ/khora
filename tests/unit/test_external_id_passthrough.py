@@ -1,6 +1,6 @@
 """Unit tests for DYT-2428: external_id pass-through.
 
-Tests the full chain from MemoryLake → Engine for the external_id parameter.
+Tests the full chain from Khora → Engine for the external_id parameter.
 """
 
 from __future__ import annotations
@@ -11,12 +11,12 @@ from uuid import uuid4
 
 import pytest
 
-from khora.memory_lake import BatchResult, RememberResult
+from khora.khora import BatchResult, RememberResult
 
 from .helpers import RESOLVE_ROW_ID, make_lake
 
 # ---------------------------------------------------------------------------
-# 1. MemoryLake.remember() with external_id
+# 1. Khora.remember() with external_id
 # ---------------------------------------------------------------------------
 
 
@@ -79,7 +79,7 @@ class TestRememberWithExternalId:
 
 
 # ---------------------------------------------------------------------------
-# 2. MemoryLake.remember_batch() with external_id in doc dicts
+# 2. Khora.remember_batch() with external_id in doc dicts
 # ---------------------------------------------------------------------------
 
 
@@ -185,11 +185,11 @@ class TestExternalIdSignatures:
         param = sig.parameters["external_id"]
         assert param.default is None
 
-    def test_memory_lake_remember_has_external_id(self) -> None:
-        """MemoryLake.remember includes external_id parameter."""
-        from khora.memory_lake import MemoryLake
+    def test_khora_remember_has_external_id(self) -> None:
+        """Khora.remember includes external_id parameter."""
+        from khora.khora import Khora
 
-        sig = inspect.signature(MemoryLake.remember)
+        sig = inspect.signature(Khora.remember)
         assert "external_id" in sig.parameters
         param = sig.parameters["external_id"]
         assert param.default is None

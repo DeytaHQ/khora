@@ -1,4 +1,4 @@
-"""ACL checker with permission inheritance for Khora Memory Lake."""
+"""ACL checker with permission inheritance for Khora."""
 
 from __future__ import annotations
 

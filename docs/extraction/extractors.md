@@ -367,7 +367,7 @@ for attempt in range(self._max_retries):
 
 ## API Usage
 
-### Via MemoryLake
+### Via Khora
 
 ```python
 result = await lake.remember(

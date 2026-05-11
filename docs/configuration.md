@@ -22,7 +22,7 @@ Legacy double-underscore nesting (`KHORA_STORAGE__POSTGRESQL_URL`) is still acce
 ### Programmatic
 
 ```python
-from khora import KhoraConfig, MemoryLake
+from khora import KhoraConfig, Khora
 from khora.config.schema import StorageSettings, LLMSettings
 
 config = KhoraConfig(
@@ -31,7 +31,7 @@ config = KhoraConfig(
     llm=LLMSettings(model="gpt-4o", embedding_model="text-embedding-3-small"),
 )
 
-async with MemoryLake(config) as lake:
+async with Khora(config) as lake:
     ...
 ```
 
@@ -177,7 +177,7 @@ The SurrealDB backend is feature-complete (relational + vector + graph + KV in a
 - Concurrent upserts require the `_SurrealDBEntityKeyGate` to serialise on `(namespace_id, name, entity_type)` keys.
 - BSL-1.1 license — review for downstream packaging concerns before adopting.
 
-Connection schemes: `memory://` (in-process), `surrealkv://...` (embedded file), `ws://...` (remote). Note: `MemoryLake("memory://")` does **not** route to SurrealDB today — the positional argument is treated as the PostgreSQL `database_url`. Set `KHORA_STORAGE_BACKEND=surrealdb` and the relevant `KHORA_STORAGE_SURREALDB_*` settings explicitly. Routing a `memory://` URI directly to the embedded stack is tracked for v0.10.
+Connection schemes: `memory://` (in-process), `surrealkv://...` (embedded file), `ws://...` (remote). Note: `Khora("memory://")` does **not** route to SurrealDB today — the positional argument is treated as the PostgreSQL `database_url`. Set `KHORA_STORAGE_BACKEND=surrealdb` and the relevant `KHORA_STORAGE_SURREALDB_*` settings explicitly. Routing a `memory://` URI directly to the embedded stack is tracked for v0.10.
 
 ## LLM
 

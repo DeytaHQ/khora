@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.memory_lake import RecallResult
+from khora.khora import RecallResult
 
 
 def _mock_khora_config() -> MagicMock:

@@ -1,4 +1,4 @@
-"""Pipeline orchestration for Khora Memory Lake.
+"""Pipeline orchestration for Khora.
 
 Provides pipelines for document ingestion,
 processing, and synchronization.

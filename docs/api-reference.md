@@ -1,12 +1,12 @@
 # API Reference
 
-The public Memory Lake surface is pinned by [ADR-024](adrs/adr-024-memory-lake-public-api.md) and the machine-readable `__all__` in `src/khora/__init__.py`. Everything on this page is stable. Symbols not listed here may change without notice.
+The public Khora surface is pinned by [ADR-024](adrs/adr-024-memory-lake-public-api.md) and the machine-readable `__all__` in `src/khora/__init__.py`. Everything on this page is stable. Symbols not listed here may change without notice.
 
 ## Top-level imports
 
 ```python
 from khora import (
-    MemoryLake,
+    Khora,
     KhoraConfig,
     KhoraError,
     SearchMode,
@@ -29,12 +29,12 @@ from khora import (
 )
 ```
 
-## `MemoryLake`
+## `Khora`
 
 Primary facade. Delegates to a pluggable engine (default: `vectorcypher`).
 
 ```python
-MemoryLake(
+Khora(
     database_url: str | KhoraConfig | None = None,
     *,
     engine: str = "vectorcypher",
@@ -53,11 +53,11 @@ MemoryLake(
 ### Connection
 
 ```python
-async with MemoryLake(...) as lake:
+async with Khora(...) as lake:
     ...                       # connect() / disconnect() called automatically
 
 # or manually
-lake = MemoryLake(...)
+lake = Khora(...)
 await lake.connect()
 try:
     ...
@@ -152,7 +152,7 @@ removed: bool = await lake.forget(document_id: UUID, *, namespace: str | UUID)
 
 ### `list_entities` / `find_related_entities`
 
-Convenience accessors over the underlying engine's graph-view API. Signatures are stable but return types are engine-specific; consult the type hints in `src/khora/memory_lake.py`.
+Convenience accessors over the underlying engine's graph-view API. Signatures are stable but return types are engine-specific; consult the type hints in `src/khora/khora.py`.
 
 ### `stats`
 
@@ -231,7 +231,7 @@ Engines are discovered through the `khora.engines` registry. The default is `vec
 from khora import create_engine, list_engines, register_engine
 
 list_engines()                              # ['vectorcypher', 'graphrag', 'skeleton', 'chronicle']
-engine = create_engine("chronicle", ...)    # low-level — prefer MemoryLake(engine="chronicle")
+engine = create_engine("chronicle", ...)    # low-level — prefer Khora(engine="chronicle")
 register_engine("my_engine", MyEngineClass) # must implement MemoryEngineProtocol
 ```
 

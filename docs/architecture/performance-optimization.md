@@ -362,7 +362,7 @@ The PostgreSQL entity upsert changed from N individual INSERT statements in a si
 
 ### `remember_batch` Through `ingest_documents`
 
-`MemoryLake.remember_batch()` now delegates to `ingest_documents` instead of calling `remember()` N times. This enables the shared `EntityIndex` for cross-document entity deduplication, smart mode resolution, and parallel document processing — all of which were previously only available through the direct pipeline API.
+`Khora.remember_batch()` now delegates to `ingest_documents` instead of calling `remember()` N times. This enables the shared `EntityIndex` for cross-document entity deduplication, smart mode resolution, and parallel document processing — all of which were previously only available through the direct pipeline API.
 
 ### Impact
 

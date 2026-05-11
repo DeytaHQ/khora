@@ -5,7 +5,7 @@ Verifies ``_SQLiteLanceEntityKeyGate`` serializes overlapping
 that all want the same entity converge on a single row — not N rows,
 no exceptions, no partial writes.
 
-Adapter-level test (not MemoryLake.remember) per the ticket rules:
+Adapter-level test (not Khora.remember) per the ticket rules:
 remember() would drag Neo4j and LLM calls into scope, which is
 irrelevant to the entity-gate contract this test protects.
 """

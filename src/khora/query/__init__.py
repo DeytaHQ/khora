@@ -1,4 +1,4 @@
-"""Query engine for Khora Memory Lake.
+"""Query engine for Khora.
 
 Provides hybrid search combining vector, graph, and keyword search
 with Reciprocal Rank Fusion for result combination.

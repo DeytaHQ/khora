@@ -199,9 +199,9 @@ chunk_overlap = 50
 ### Creating Documents
 
 ```python
-from khora import MemoryLake
+from khora import Khora
 
-async with MemoryLake() as lake:
+async with Khora() as lake:
     result = await lake.remember(
         "Einstein developed the theory of relativity in 1905.",
         title="Physics History",

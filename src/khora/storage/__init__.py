@@ -1,4 +1,4 @@
-"""Storage layer for Khora Memory Lake.
+"""Storage layer for Khora.
 
 Provides unified access to multiple storage backends:
 - PostgreSQL: Relational data (documents, events, tenancy, ACLs)

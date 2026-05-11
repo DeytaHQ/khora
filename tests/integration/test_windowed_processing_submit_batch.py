@@ -40,7 +40,7 @@ from khora.config import KhoraConfig
 from khora.core.models.document import DocumentStatus
 from khora.engines.vectorcypher.engine import VectorCypherConfig
 from khora.extraction.extractors.base import ExtractedEntity, ExtractionResult
-from khora.memory_lake import DocumentResult, MemoryLake
+from khora.khora import DocumentResult, Khora
 
 # Use full embedding dimension to match the deployed PostgreSQL schema (vector(1536))
 EMBED_DIM = 1536
@@ -166,7 +166,7 @@ class TestWindowedProcessingIntegration:
         config = _make_config()
         vc_config = VectorCypherConfig(max_chunks_in_flight=2)
 
-        lake = MemoryLake(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
+        lake = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
         await lake.connect()
         try:
             ns = await lake.create_namespace()
@@ -203,7 +203,7 @@ class TestWindowedProcessingIntegration:
         config = _make_config(chunk_size=100, chunk_overlap=0)
         vc_config = VectorCypherConfig(max_chunks_in_flight=2)
 
-        lake = MemoryLake(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
+        lake = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
         await lake.connect()
         try:
             ns = await lake.create_namespace()
@@ -245,7 +245,7 @@ class TestWindowedProcessingIntegration:
         config = _make_config()
         vc_config = VectorCypherConfig(max_chunks_in_flight=1, enable_smart_resolution=False)
 
-        lake = MemoryLake(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
+        lake = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
         await lake.connect()
         try:
             ns = await lake.create_namespace()
@@ -292,7 +292,7 @@ class TestWindowedProcessingIntegration:
         # Default VectorCypherConfig has max_chunks_in_flight=None
         vc_config = VectorCypherConfig(max_chunks_in_flight=None)
 
-        lake = MemoryLake(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
+        lake = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
         await lake.connect()
         try:
             ns = await lake.create_namespace()
@@ -345,7 +345,7 @@ class TestSubmitBatchIntegration:
           count_entities, etc.) — the documents are stored under this ID
         """
         config = _make_config()
-        _lake = MemoryLake(config, run_migrations=False)
+        _lake = Khora(config, run_migrations=False)
         await _lake.connect()
         _lake.start_pending_processor()
         ns = await _lake.create_namespace()

@@ -12,7 +12,7 @@ Key techniques:
 - Temporal decay (Ebbinghaus forgetting curve)
 
 Usage:
-    async with MemoryLake(db_url, engine="chronicle") as lake:
+    async with Khora(db_url, engine="chronicle") as lake:
         ns = await lake.create_namespace()
         await lake.remember(
             "Alice met Bob at the conference on March 15th.",

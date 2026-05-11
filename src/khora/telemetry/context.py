@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
-    from khora.memory_lake import LLMUsage
+    from khora.khora import LLMUsage
 
 _trace_id_var: ContextVar[UUID | None] = ContextVar("khora_trace_id", default=None)
 _parent_event_id_var: ContextVar[int | None] = ContextVar("khora_parent_event_id", default=None)
@@ -86,7 +86,7 @@ def clear_parent_event_id() -> None:
 def start_usage_collection() -> None:
     """Create a new asyncio.Queue in the contextvar for this request scope.
 
-    Call at the start of a MemoryLake facade method (remember, recall, etc.).
+    Call at the start of a Khora facade method (remember, recall, etc.).
     """
     _usage_accumulator.set(asyncio.Queue())
 
@@ -95,7 +95,7 @@ def record_usage(usage: LLMUsage) -> None:
     """Record a single LLMUsage entry into the current request's queue.
 
     No-op if ``start_usage_collection()`` was not called (i.e. when Khora
-    internals are invoked outside the MemoryLake facade).
+    internals are invoked outside the Khora facade).
 
     ``put_nowait()`` is safe under cooperative multitasking (asyncio.gather).
     """

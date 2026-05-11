@@ -1,9 +1,9 @@
-"""MemoryLake - Primary API for Khora Memory Lake.
+"""Primary API for Khora — the top-level facade class.
 
 This is the main entry point for using Khora as a library.
 Provides a simple, unified interface for memory storage and retrieval.
 
-The MemoryLake class is a thin facade that delegates to pluggable engines.
+The Khora class is a thin facade that delegates to pluggable engines.
 The default engine is "vectorcypher" which uses knowledge graphs, vectors, and LLM extraction.
 """
 
@@ -291,11 +291,11 @@ class RecallResult:
     llm_usage: list[LLMUsage] = field(default_factory=list)
 
 
-class MemoryLake:
-    """Primary interface for Khora Memory Lake.
+class Khora:
+    """Primary interface for Khora.
 
     Provides a simple API for storing and retrieving memories:
-    - remember(): Store content in the memory lake
+    - remember(): Store content in Khora
     - recall(): Retrieve relevant memories for a query
     - forget(): Remove memories
     - create_namespace(): Create a new memory namespace
@@ -303,29 +303,29 @@ class MemoryLake:
 
     Can be used as a context manager for automatic connection handling.
 
-    The MemoryLake is a facade that delegates to pluggable engines.
+    The Khora is a facade that delegates to pluggable engines.
     The default engine is "vectorcypher" which uses knowledge graphs and vector embeddings.
 
     Usage:
         # Simplest - from env vars (KHORA_DATABASE_URL)
-        async with MemoryLake() as lake:
+        async with Khora() as lake:
             await lake.remember("Important fact...", namespace=namespace_id,
                 entity_types=["PERSON", "CONCEPT"], relationship_types=["RELATES_TO"])
 
         # Common - explicit database URL
-        async with MemoryLake("postgresql://localhost/mydb") as lake:
+        async with Khora("postgresql://localhost/mydb") as lake:
             results = await lake.recall("What do I know about...", namespace=namespace_id)
 
         # With graph backend
-        async with MemoryLake("postgresql://...", graph_url="bolt://localhost:7687") as lake:
+        async with Khora("postgresql://...", graph_url="bolt://localhost:7687") as lake:
             ...
 
         # Explicit engine selection (same as default)
-        async with MemoryLake("postgresql://...", engine="vectorcypher") as lake:
+        async with Khora("postgresql://...", engine="vectorcypher") as lake:
             ...
 
         # Full config
-        async with MemoryLake(KhoraConfig(...)) as lake:
+        async with Khora(KhoraConfig(...)) as lake:
             ...
     """
 
@@ -340,7 +340,7 @@ class MemoryLake:
         engine_kwargs: dict[str, Any] | None = None,
         run_migrations: bool = False,
     ) -> None:
-        """Initialize the Memory Lake.
+        """Initialize the Khora.
 
         Args:
             database_url: PostgreSQL URL, or full KhoraConfig, or None (reads KHORA_DATABASE_URL from env)
@@ -354,19 +354,19 @@ class MemoryLake:
 
         Examples:
             # Simplest - from env vars
-            lake = MemoryLake()
+            lake = Khora()
 
             # Common - explicit database
-            lake = MemoryLake("postgresql://localhost/mydb")
+            lake = Khora("postgresql://localhost/mydb")
 
             # With graph
-            lake = MemoryLake("postgresql://...", graph_url="bolt://...")
+            lake = Khora("postgresql://...", graph_url="bolt://...")
 
             # Explicit engine selection
-            lake = MemoryLake("postgresql://...", engine="vectorcypher")
+            lake = Khora("postgresql://...", engine="vectorcypher")
 
             # Full config
-            lake = MemoryLake(KhoraConfig(...))
+            lake = Khora(KhoraConfig(...))
         """
         # Handle overloaded first argument
         if isinstance(database_url, KhoraConfig):
@@ -410,7 +410,7 @@ class MemoryLake:
         if self._connected:
             return
 
-        logger.info("Connecting Memory Lake...")
+        logger.info("Connecting Khora...")
 
         if self._run_migrations:
             from khora.db.session import run_migrations as _run_migrations
@@ -442,7 +442,7 @@ class MemoryLake:
         await self._engine.connect()
 
         # Wire hook dispatcher into the storage coordinator so the
-        # ingestion pipeline can dispatch events without knowing about MemoryLake.
+        # ingestion pipeline can dispatch events without knowing about Khora.
         storage = getattr(self._engine, "_storage", None)
         if storage is not None:
             try:
@@ -451,7 +451,7 @@ class MemoryLake:
                 pass  # Mock or non-standard engine — hooks won't fire
 
         self._connected = True
-        logger.info("Memory Lake connected")
+        logger.info("Khora connected")
 
     def _ensure_processor_running(self) -> None:
         """Start the pending processor if it is not already running."""
@@ -471,7 +471,7 @@ class MemoryLake:
             RuntimeError: if connect() has not been called yet.
         """
         if not self._connected:
-            raise RuntimeError("Memory Lake not connected. Call connect() first.")
+            raise RuntimeError("Khora not connected. Call connect() first.")
         self._ensure_processor_running()
 
     async def stop_pending_processor(self) -> None:
@@ -742,7 +742,7 @@ class MemoryLake:
         if not self._connected:
             return
 
-        logger.info("Disconnecting Memory Lake...")
+        logger.info("Disconnecting Khora...")
 
         # Cancel the pending processor if running.
         if self._processor_task is not None and not self._processor_task.done():
@@ -758,9 +758,9 @@ class MemoryLake:
             self._engine = None
 
         self._connected = False
-        logger.info("Memory Lake disconnected")
+        logger.info("Khora disconnected")
 
-    async def __aenter__(self) -> MemoryLake:
+    async def __aenter__(self) -> Khora:
         """Async context manager entry."""
         await self.connect()
         return self
@@ -772,7 +772,7 @@ class MemoryLake:
     def _get_engine(self) -> MemoryEngineProtocol:
         """Get the engine (internal use)."""
         if self._engine is None:
-            raise RuntimeError("Memory Lake not connected. Call connect() first.")
+            raise RuntimeError("Khora not connected. Call connect() first.")
         return self._engine
 
     @property
@@ -783,7 +783,7 @@ class MemoryLake:
         managing namespaces and other administrative tasks not covered
         by the high-level API.
 
-        For common operations, prefer the MemoryLake convenience methods:
+        For common operations, prefer the Khora convenience methods:
         - lake.get_document() for document retrieval
         - lake.list_documents() for document listing
         - lake.search_entities() for entity search
@@ -858,7 +858,7 @@ class MemoryLake:
         chunk_strategy: ChunkStrategy | None = None,
         external_id: str | None = None,
     ) -> RememberResult:
-        """Store content in the memory lake.
+        """Store content in Khora.
 
         This is the primary method for adding memories. It:
         1. Creates a document
@@ -1802,17 +1802,17 @@ class MemoryLake:
 
 # Convenience function for one-off usage
 @asynccontextmanager
-async def memory_lake(
+async def khora(
     config: KhoraConfig | None = None,
-) -> AsyncGenerator[MemoryLake]:
-    """Context manager for one-off Memory Lake usage.
+) -> AsyncGenerator[Khora]:
+    """Context manager for one-off Khora usage.
 
     Usage:
-        async with memory_lake() as lake:
+        async with khora() as lake:
             await lake.remember("Hello, world!")
             result = await lake.recall("greeting")
     """
-    lake = MemoryLake(config)
+    lake = Khora(config)
     try:
         await lake.connect()
         yield lake

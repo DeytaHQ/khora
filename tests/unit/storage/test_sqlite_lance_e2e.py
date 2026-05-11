@@ -6,7 +6,7 @@ across four adapters (relational, graph, vector, event_store), Alembic
 migrations against the SQLite file, and backend health checks.
 
 Per-adapter write/read contracts are covered by the per-adapter test
-modules (DYT-2728..2731); a ``MemoryLake.remember()`` round-trip will
+modules (DYT-2728..2731); a ``Khora.remember()`` round-trip will
 be added in DYT-2734 (integration tests).
 """
 

@@ -309,10 +309,10 @@ config = RetrieverConfig(
 ## Practical Example
 
 ```python
-from khora import MemoryLake, SearchMode
+from khora import Khora, SearchMode
 from khora.query import QueryConfig
 
-async with MemoryLake() as lake:
+async with Khora() as lake:
     # Search with custom fusion settings
     results = await lake.recall(
         "Einstein's contributions to physics",

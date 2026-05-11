@@ -5,7 +5,7 @@ Khora is a memory-lake library. This directory contains everything beyond the qu
 ## Getting started
 
 - [Configuration](configuration.md) — `KHORA_*` environment variables, `KhoraConfig`, installation extras.
-- [API reference](api-reference.md) — public `MemoryLake` methods and result types (ADR-024).
+- [API reference](api-reference.md) — public `Khora` methods and result types (ADR-024).
 - [Migrations](migrations.md) — Alembic workflow for library users (PostgreSQL backends only).
 - [Consumers](consumers.md) — how downstream packages (khora-cli, khora-explorer, genesis, khora-benchmarks) use khora.
 

@@ -4,7 +4,7 @@ Revision ID: 000_initial_schema
 Revises:
 Create Date: 2026-01-27
 
-Creates all base tables for Khora Memory Lake:
+Creates all base tables for Khora:
 - Multi-tenancy: organizations, workspaces, memory_namespaces
 - Documents: documents, chunks
 - Entities: entities, relationships, episodes

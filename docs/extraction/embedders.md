@@ -162,7 +162,7 @@ No API key needed - just run Ollama locally.
 
 ## Usage in Khora
 
-### Via MemoryLake
+### Via Khora
 
 ```python
 # Uses configured default embedding model

@@ -434,7 +434,7 @@ The Slack skill (`extraction/skills/builtin/slack.yaml`) is designed for ingesti
 
 ## API Usage
 
-### Via MemoryLake
+### Via Khora
 
 ```python
 result = await lake.remember(

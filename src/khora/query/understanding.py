@@ -1,4 +1,4 @@
-"""Query understanding module for Khora Memory Lake.
+"""Query understanding module for Khora.
 
 Provides comprehensive LLM-based query interpretation in a SINGLE request:
 - Intent detection and complexity assessment
@@ -196,7 +196,7 @@ class UnderstandingResult:
 
 
 # Comprehensive prompt that extracts everything in one shot
-COMPREHENSIVE_UNDERSTANDING_PROMPT = """You are an expert query understanding system for a corporate memory lake.
+COMPREHENSIVE_UNDERSTANDING_PROMPT = """You are an expert query understanding system for a corporate knowledge base.
 
 DATA SOURCES AVAILABLE:
 - Slack: Team messages, channels, threads, reactions
@@ -331,7 +331,7 @@ Respond with ONLY the JSON object, no markdown, no explanation."""
 
 # Lightweight prompt for non-agentic queries that skips follow-ups, source priority detail,
 # and agentic exploration hints. Cuts token usage ~50% for typical recall queries.
-LIGHTWEIGHT_UNDERSTANDING_PROMPT = """You are a query understanding system for a memory lake.
+LIGHTWEIGHT_UNDERSTANDING_PROMPT = """You are a query understanding system for a knowledge base.
 
 CURRENT DATETIME: {current_datetime}
 

@@ -1,4 +1,4 @@
-"""Two-phase ingestion flow for Khora Memory Lake.
+"""Two-phase ingestion flow for Khora.
 
 Phase 1 (Staging): Fast parallel fetch, checksum-based change detection
 Phase 2 (Enrichment): Chunk, embed, extract entities, integrate graph

@@ -1,4 +1,4 @@
-"""Hybrid query engine for Khora Memory Lake.
+"""Hybrid query engine for Khora.
 
 Combines vector search, graph traversal, and keyword search
 with configurable fusion weights. Now enhanced with:

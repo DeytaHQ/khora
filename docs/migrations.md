@@ -4,12 +4,12 @@ Khora ships its own Alembic migrations bundled inside the package at `src/khora/
 
 ## Who runs migrations?
 
-Library consumers (genesis, khora-cli, khora-benchmarks, custom services) need Khora's schema to exist before calling `MemoryLake()`. Two options:
+Library consumers (genesis, khora-cli, khora-benchmarks, custom services) need Khora's schema to exist before calling `Khora()`. Two options:
 
 ### 1. Let Khora run them for you
 
 ```python
-async with MemoryLake(run_migrations=True) as lake:
+async with Khora(run_migrations=True) as lake:
     ...
 ```
 
@@ -58,11 +58,11 @@ This is signalled internally by a `_DatabaseAheadError` from `env.py` to `sessio
 
 ## Fresh-database behaviour
 
-On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrations()` / `MemoryLake(run_migrations=True)` creates every table from scratch. The implementation checks for the table's existence via `information_schema.tables` rather than issuing a raw query that would abort the transaction (fixed in v0.6.6, DYT-1447).
+On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrations()` / `Khora(run_migrations=True)` creates every table from scratch. The implementation checks for the table's existence via `information_schema.tables` rather than issuing a raw query that would abort the transaction (fixed in v0.6.6, DYT-1447).
 
 ## What about `create_tables()`?
 
-Removed — it bypassed Alembic and left the version table in an inconsistent state. If you find old docs or sample code referencing `create_tables()`, replace it with `run_migrations()` or `MemoryLake(run_migrations=True)`.
+Removed — it bypassed Alembic and left the version table in an inconsistent state. If you find old docs or sample code referencing `create_tables()`, replace it with `run_migrations()` or `Khora(run_migrations=True)`.
 
 ## SurrealDB
 

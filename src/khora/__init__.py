@@ -1,4 +1,4 @@
-"""Khora - Deyta's memory lake and materialization of knowledge.
+"""Khora — knowledge graph + vector + SQL storage library.
 
 Khora provides a unified interface for:
 - Storing and retrieving knowledge artifacts
@@ -7,26 +7,26 @@ Khora provides a unified interface for:
 
 Example usage:
     # Simplest - from env vars (KHORA_DATABASE_URL)
-    from khora import MemoryLake
+    from khora import Khora
 
-    async with MemoryLake() as lake:
+    async with Khora() as lake:
         await lake.remember("Important information to store")
         results = await lake.recall("query about information")
 
     # Common - explicit database URL
-    async with MemoryLake("postgresql://localhost/mydb") as lake:
+    async with Khora("postgresql://localhost/mydb") as lake:
         await lake.remember("content", title="My Document")
         results = await lake.recall("query", limit=20)
 
     # With graph backend
-    async with MemoryLake(
+    async with Khora(
         "postgresql://localhost/mydb",
         graph_url="bolt://localhost:7687",
     ) as lake:
         results = await lake.recall("query", mode=SearchMode.GRAPH)
 
     # Batch ingestion with automatic optimization
-    async with MemoryLake(database_url) as lake:
+    async with Khora(database_url) as lake:
         result = await lake.remember_batch(documents)
         print(f"Processed {result.processed} docs, {result.entities} entities")
 
@@ -34,7 +34,7 @@ Example usage:
     results = await lake.recall(query, mode=SearchMode.ALL, raw=True)
 
     # Chronicle engine — temporal-semantic recall, no graph DB needed
-    async with MemoryLake("postgresql://localhost/mydb", engine="chronicle") as lake:
+    async with Khora("postgresql://localhost/mydb", engine="chronicle") as lake:
         ns = await lake.create_namespace()
         await lake.remember(
             "Alice met Bob at the conference on March 15th.",
@@ -52,12 +52,12 @@ from .engines import create_engine, list_engines, register_engine
 from .exceptions import KhoraError
 from .extraction.skills import EntityTypeConfig, ExpertiseConfig, RelationshipTypeConfig
 from .hooks import SemanticFilter
-from .memory_lake import (
+from .khora import (
     BatchHandle,
     BatchResult,
     DocumentResult,
+    Khora,
     LLMUsage,
-    MemoryLake,
     RecallResult,
     RememberResult,
     Stats,
@@ -68,7 +68,7 @@ __version__ = __import__("importlib").metadata.version("khora")
 
 __all__ = [
     "KhoraError",
-    "MemoryLake",
+    "Khora",
     "LLMUsage",
     "RememberResult",
     "RecallResult",

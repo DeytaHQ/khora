@@ -1,4 +1,4 @@
-"""Pipeline flows for Khora Memory Lake."""
+"""Pipeline flows for Khora."""
 
 from __future__ import annotations
 

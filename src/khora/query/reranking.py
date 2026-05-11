@@ -1,4 +1,4 @@
-"""Reranking module for Khora Memory Lake.
+"""Reranking module for Khora.
 
 Provides neural re-ranking of search results using:
 - Cross-encoder models (sentence-transformers)

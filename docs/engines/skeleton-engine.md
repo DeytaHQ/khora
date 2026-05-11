@@ -66,10 +66,10 @@ Choose GraphRAG instead when:
 The main engine class implementing `MemoryEngineProtocol`:
 
 ```python
-from khora import MemoryLake
+from khora import Khora
 
 # Use Skeleton Construction engine explicitly
-async with MemoryLake("postgresql://...", engine="skeleton") as lake:
+async with Khora("postgresql://...", engine="skeleton") as lake:
     # Store with temporal context
     result = await lake.remember(
         "Meeting notes from quarterly review",

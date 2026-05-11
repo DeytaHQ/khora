@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "khora-accel"
 dynamic = ["version"]
 requires-python = ">=3.13"
-description = "Rust-accelerated operations for Khora memory lake"
+description = "Rust-accelerated operations for Khora"
 
 
 [tool.maturin]

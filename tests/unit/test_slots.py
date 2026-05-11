@@ -13,7 +13,7 @@ import pytest
 
 from khora.core.models.document import Chunk, ChunkMetadata, DocumentMetadata
 from khora.core.models.entity import Entity, Episode, Relationship
-from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
+from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 
 # ── helpers ──────────────────────────────────────────────────────────
 

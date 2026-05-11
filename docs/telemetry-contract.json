@@ -221,22 +221,22 @@
     {
       "name": "khora.recall",
       "stability": "public",
-      "owner": "memory_lake"
+      "owner": "khora"
     },
     {
       "name": "khora.remember",
       "stability": "public",
-      "owner": "memory_lake"
+      "owner": "khora"
     },
     {
       "name": "khora.remember_batch",
       "stability": "public",
-      "owner": "memory_lake"
+      "owner": "khora"
     },
     {
       "name": "khora.forget",
       "stability": "public",
-      "owner": "memory_lake"
+      "owner": "khora"
     },
     {
       "name": "khora.vectorcypher.retrieve",

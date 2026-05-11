@@ -1,4 +1,4 @@
-"""Temporal query support for Khora Memory Lake."""
+"""Temporal query support for Khora."""
 
 from __future__ import annotations
 

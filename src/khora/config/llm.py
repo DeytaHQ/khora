@@ -138,7 +138,7 @@ class LiteLLMConfig(BaseModel):
         gt=0,
         description="Total cap on simultaneous connections in the shared "
         "aiohttp session, summed across all hosts. Default 200 covers a "
-        "MemoryLake mixing OpenAI + Anthropic + reranker hosts at the "
+        "Khora mixing OpenAI + Anthropic + reranker hosts at the "
         "concurrency genesis configures.",
     )
     max_connections_per_host: int = Field(
@@ -439,7 +439,7 @@ async def acompletion(
     # DYT-645: Extractors call litellm.acompletion() directly, not this helper.
     # If they switch to this helper, remove their own record_usage() calls to
     # avoid double-counting.
-    from khora.memory_lake import LLMUsage
+    from khora.khora import LLMUsage
     from khora.telemetry.context import record_usage
 
     record_usage(
@@ -512,7 +512,7 @@ async def aembedding(
     # DYT-645: Embedders call litellm.aembedding() directly, not this helper.
     # If they switch to this helper, remove their own record_usage() calls to
     # avoid double-counting.
-    from khora.memory_lake import LLMUsage
+    from khora.khora import LLMUsage
     from khora.telemetry.context import record_usage
 
     record_usage(

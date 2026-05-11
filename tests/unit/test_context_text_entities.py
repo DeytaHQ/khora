@@ -15,7 +15,7 @@ import pytest
 
 from khora.core.models.document import Chunk, ChunkMetadata
 from khora.core.models.entity import Entity, Relationship
-from khora.memory_lake import RecallResult
+from khora.khora import RecallResult
 from khora.query.engine import format_entity_section, format_relationship_section
 
 

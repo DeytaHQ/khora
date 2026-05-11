@@ -68,11 +68,11 @@ LanceDB stores vectors in local files with HNSW indexing — no database server 
 
 ```python
 import asyncio
-from khora import MemoryLake
+from khora import Khora
 
 async def main():
     # Chronicle with PostgreSQL + pgvector
-    async with MemoryLake(
+    async with Khora(
         "postgresql://khora:khora@localhost:5434/khora",
         engine="chronicle",
         run_migrations=True,
@@ -107,7 +107,7 @@ asyncio.run(main())
 ### With Embedded SurrealDB (Zero Infrastructure)
 
 ```python
-async with MemoryLake("memory://", engine="chronicle") as lake:
+async with Khora("memory://", engine="chronicle") as lake:
     ns = await lake.create_namespace("demo")
     await lake.remember("...", namespace=ns.namespace_id)
     result = await lake.recall("...", namespace=ns.namespace_id)

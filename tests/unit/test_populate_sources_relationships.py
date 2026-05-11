@@ -9,7 +9,7 @@ import pytest
 
 from khora.core.models.document import Chunk, DocumentSource
 from khora.core.models.entity import Entity, Relationship
-from khora.memory_lake import MemoryLake
+from khora.khora import Khora
 
 
 def _mock_config() -> MagicMock:
@@ -49,10 +49,10 @@ def _mock_engine() -> MagicMock:
     return mock_eng
 
 
-def _make_lake() -> MemoryLake:
-    """Create a connected MemoryLake with mocked internals."""
-    with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-        lake = MemoryLake()
+def _make_lake() -> Khora:
+    """Create a connected Khora with mocked internals."""
+    with patch("khora.khora.load_config", return_value=_mock_config()):
+        lake = Khora()
     lake._connected = True
     lake._engine = _mock_engine()
     return lake

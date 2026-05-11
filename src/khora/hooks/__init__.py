@@ -6,10 +6,10 @@ ingestion.
 
 Example usage::
 
-    from khora import MemoryLake
+    from khora import Khora
     from khora.hooks import EventType, SemanticFilter
 
-    async with MemoryLake(db_url) as lake:
+    async with Khora(db_url) as lake:
         # Simple: subscribe to all entity creation events
         async def on_entity(event):
             print(f"New entity: {event.data.get('name')}")

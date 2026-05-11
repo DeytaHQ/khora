@@ -9,9 +9,9 @@ Khora isolates data through **namespaces**. Every document, chunk, entity, and r
 All your data is scoped to namespaces. When you call `remember()` or `recall()`, you must always specify a namespace:
 
 ```python
-from khora import MemoryLake
+from khora import Khora
 
-async with MemoryLake() as lake:
+async with Khora() as lake:
     # Store in a specific namespace (required)
     await lake.remember(
         "Important document content...",
@@ -42,9 +42,9 @@ You can't accidentally see another namespace's data.
 ## Creating Namespaces
 
 ```python
-from khora import MemoryLake
+from khora import Khora
 
-async with MemoryLake() as lake:
+async with Khora() as lake:
     # Create a namespace via the public API
     namespace = await lake.create_namespace()
 
@@ -110,7 +110,7 @@ The swap is atomic. One moment users see v1, the next they see v2. No downtime, 
 ### How to Do It
 
 ```python
-async with MemoryLake() as lake:
+async with Khora() as lake:
     # 1. Get current namespace by UUID
     current = await lake.storage.get_namespace(current_namespace_id)
 

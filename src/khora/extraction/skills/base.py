@@ -345,8 +345,8 @@ class ExpertiseConfig:
         loader = ExpertiseLoader()
         expertise = loader.load_file("saas_expert.yaml")
 
-        # Use with MemoryLake
-        async with MemoryLake() as lake:
+        # Use with Khora
+        async with Khora() as lake:
             result = await lake.remember(content, expertise=expertise)
 
         # Or define programmatically

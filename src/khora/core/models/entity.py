@@ -1,4 +1,4 @@
-"""Entity and relationship models for Khora Memory Lake.
+"""Entity and relationship models for Khora.
 
 Entities represent extracted knowledge (people, organizations, concepts, etc.)
 and relationships connect them in a knowledge graph stored in Neo4j.
@@ -40,7 +40,7 @@ class Entity:
     source_document_ids: list[UUID] = field(default_factory=list)
     source_chunk_ids: list[UUID] = field(default_factory=list)
 
-    # Populated by MemoryLake when include_sources=True
+    # Populated by Khora when include_sources=True
     source_documents: dict[UUID, DocumentSource] | None = None
 
     mention_count: int = 1
@@ -134,7 +134,7 @@ class Relationship:
     source_document_ids: list[UUID] = field(default_factory=list)
     source_chunk_ids: list[UUID] = field(default_factory=list)
 
-    # Populated by MemoryLake when include_sources=True
+    # Populated by Khora when include_sources=True
     source_documents: dict[UUID, DocumentSource] | None = None
 
     # Temporal validity

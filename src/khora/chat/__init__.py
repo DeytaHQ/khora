@@ -1,7 +1,7 @@
-"""Chat module for Khora Memory Lake.
+"""Chat module for Khora.
 
 Provides conversational interface with persona-based responses,
-history management, and memory lake integration.
+history management, and Khora integration.
 """
 
 from __future__ import annotations

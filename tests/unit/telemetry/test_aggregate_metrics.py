@@ -19,7 +19,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.memory_lake import MemoryLake, RecallResult
+from khora.khora import Khora, RecallResult
 from khora.telemetry import aggregate_metrics
 
 
@@ -110,9 +110,9 @@ def _mock_engine() -> MagicMock:
     return eng
 
 
-def _make_lake() -> MemoryLake:
-    with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-        lake = MemoryLake()
+def _make_lake() -> Khora:
+    with patch("khora.khora.load_config", return_value=_mock_config()):
+        lake = Khora()
     lake._connected = True
     lake._engine = _mock_engine()
     return lake

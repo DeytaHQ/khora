@@ -1,4 +1,4 @@
-"""Entity linking module for Khora Memory Lake.
+"""Entity linking module for Khora.
 
 Links entity mentions from queries to existing entities in the knowledge graph.
 Uses multiple strategies:

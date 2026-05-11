@@ -2,7 +2,7 @@
 
 VectorCypher is one of khora's two production-ready engines and v0.9.0
 declares **SQLite + LanceDB** the default *embedded* stack. These tests
-wire up ``MemoryLake(engine="vectorcypher")`` against a fully-embedded
+wire up ``Khora(engine="vectorcypher")`` against a fully-embedded
 sqlite_lance coordinator (per-test ``tmp_path``) and exercise the same
 remember/recall behaviour we already cover for the production stack.
 
@@ -74,7 +74,7 @@ from khora.extraction.extractors.base import (
     ExtractionResult,
 )
 from khora.extraction.skills import ExpertiseConfig
-from khora.memory_lake import MemoryLake
+from khora.khora import Khora
 
 EMBED_DIM = 32  # matches the sqlite_lance default and the existing fixture helper
 
@@ -170,13 +170,13 @@ def _patch_llm(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Per-test embedded MemoryLake fixture
+# Per-test embedded Khora fixture
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
-async def lake(tmp_path: Path) -> AsyncIterator[MemoryLake]:
-    """Per-test VectorCypher MemoryLake on a fresh embedded stack.
+async def lake(tmp_path: Path) -> AsyncIterator[Khora]:
+    """Per-test VectorCypher Khora on a fresh embedded stack.
 
     Each test gets its own ``tmp_path`` for isolation — sqlite_lance
     caches engine pools by URL inside ``StorageFactory``, so reusing a
@@ -198,7 +198,7 @@ async def lake(tmp_path: Path) -> AsyncIterator[MemoryLake]:
     config.pipelines.extract_entities = True
     config.pipelines.selective_extraction = False
 
-    lake = MemoryLake(config, engine="vectorcypher", run_migrations=True)
+    lake = Khora(config, engine="vectorcypher", run_migrations=True)
     await lake.connect()
     try:
         yield lake
@@ -212,7 +212,7 @@ async def lake(tmp_path: Path) -> AsyncIterator[MemoryLake]:
 
 
 @pytest.fixture
-async def namespace_id(lake: MemoryLake) -> UUID:
+async def namespace_id(lake: Khora) -> UUID:
     ns = await lake.create_namespace()
     return ns.namespace_id
 
@@ -223,7 +223,7 @@ def _no_event_extraction() -> ExpertiseConfig:
 
 
 async def _remember(
-    lake: MemoryLake,
+    lake: Khora,
     *,
     namespace_id: UUID,
     content: str,
@@ -244,7 +244,7 @@ async def _remember(
 # ---------------------------------------------------------------------------
 
 
-async def test_vc_remember_recall_roundtrip(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_vc_remember_recall_roundtrip(lake: Khora, namespace_id: UUID) -> None:
     """Ingest 3 docs, recall, assert ingested text appears in ``context_text``."""
     contents = [
         "Alice met Bob at the Python conference in Berlin.",
@@ -262,7 +262,7 @@ async def test_vc_remember_recall_roundtrip(lake: MemoryLake, namespace_id: UUID
     assert "Python conference" in result.context_text
 
 
-async def test_vc_namespace_isolation(lake: MemoryLake) -> None:
+async def test_vc_namespace_isolation(lake: Khora) -> None:
     """Two namespaces, recall does not cross-bleed."""
     ns_a = (await lake.create_namespace()).namespace_id
     ns_b = (await lake.create_namespace()).namespace_id
@@ -282,7 +282,7 @@ async def test_vc_namespace_isolation(lake: MemoryLake) -> None:
     assert "kangaroos" not in b_text, "namespace_a leaked into namespace_b"
 
 
-async def test_vc_entity_extraction(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_vc_entity_extraction(lake: Khora, namespace_id: UUID) -> None:
     """Ingest a doc with a known entity → entity persists in the embedded graph.
 
     Queries the SQLite-CTE graph adapter directly via
@@ -290,7 +290,7 @@ async def test_vc_entity_extraction(lake: MemoryLake, namespace_id: UUID) -> Non
     written (not just returned by the LLM stub).
 
     Note on dual-IDs (ADR-024): ``MemoryNamespace`` carries two UUIDs —
-    ``namespace_id`` (stable) is what ``MemoryLake.recall`` accepts, but
+    ``namespace_id`` (stable) is what ``Khora.recall`` accepts, but
     the graph rows key on ``namespace.id`` (row-level FK), so we resolve
     before the direct lookup. Names are lowercased by
     ``normalize_entity_names_batch`` before persistence.
@@ -325,7 +325,7 @@ async def test_vc_entity_extraction(lake: MemoryLake, namespace_id: UUID) -> Non
     ),
     raises=Exception,
 )
-async def test_vc_two_hop_traversal(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_vc_two_hop_traversal(lake: Khora, namespace_id: UUID) -> None:
     """3 connected docs (A→B→C), query about A surfaces C via 2-hop traversal."""
     _plan_extraction(
         "Alice",
@@ -366,11 +366,11 @@ async def test_vc_two_hop_traversal(lake: MemoryLake, namespace_id: UUID) -> Non
     strict=True,
     reason="DYT-3562: VectorCypher embedded path doesn't push temporal filter to LanceDB query (same shape as GraphRAG embedded)",
 )
-async def test_vc_temporal_filter(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_vc_temporal_filter(lake: Khora, namespace_id: UUID) -> None:
     """Two docs at different ``occurred_at``; recall with ``last 7 days`` filter
     only returns the recent one.
 
-    ``MemoryLake.remember()`` does not surface ``occurred_at`` on its public
+    ``Khora.remember()`` does not surface ``occurred_at`` on its public
     API (engines accept it but the lake-level wrapper does not forward it),
     so we ingest both docs at ``now`` and then back-date one chunk's
     ``source_timestamp`` directly in SQLite — same pattern as
@@ -412,7 +412,7 @@ async def test_vc_temporal_filter(lake: MemoryLake, namespace_id: UUID) -> None:
     assert r_old.document_id not in returned_doc_ids, f"old document leaked through temporal filter: {returned_doc_ids}"
 
 
-async def test_vc_recall_metadata_keys(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_vc_recall_metadata_keys(lake: Khora, namespace_id: UUID) -> None:
     """``RecallResult.metadata`` exposes the keys VC documents on every recall."""
     await _remember(lake, namespace_id=namespace_id, content="A simple sentence about apples.")
 
@@ -430,7 +430,7 @@ async def test_vc_recall_metadata_keys(lake: MemoryLake, namespace_id: UUID) -> 
     # informational rather than load-bearing on the embedded path.
 
 
-async def test_vc_concurrent_remember(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_vc_concurrent_remember(lake: Khora, namespace_id: UUID) -> None:
     """5 concurrent ingests in one namespace, no integrity errors."""
     contents = [f"document number {i} mentions widget-{i}" for i in range(5)]
     results = await asyncio.gather(
@@ -443,7 +443,7 @@ async def test_vc_concurrent_remember(lake: MemoryLake, namespace_id: UUID) -> N
     assert len(doc_ids) == 5, f"expected 5 distinct documents, got {doc_ids}"
 
 
-async def test_vc_recall_empty_namespace(lake: MemoryLake) -> None:
+async def test_vc_recall_empty_namespace(lake: Khora) -> None:
     """Recall on a fresh empty namespace returns an empty (but well-formed) result."""
     ns = (await lake.create_namespace()).namespace_id
     result = await lake.recall("anything", namespace=ns, limit=5)
@@ -451,7 +451,7 @@ async def test_vc_recall_empty_namespace(lake: MemoryLake) -> None:
     assert result.metadata.get("engine") == "vectorcypher"
 
 
-async def test_vc_dual_node_persistence(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_vc_dual_node_persistence(lake: Khora, namespace_id: UUID) -> None:
     """Ingest one doc with an entity → confirm the dual-node markers VectorCypher
     writes (chunk-node + entity-node + MENTIONED_IN-style edge) are persisted in
     the embedded graph.
@@ -508,7 +508,7 @@ async def test_vc_dual_node_persistence(lake: MemoryLake, namespace_id: UUID) ->
     ),
     raises=Exception,
 )
-async def test_vc_prefer_current_via_cte(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_vc_prefer_current_via_cte(lake: Khora, namespace_id: UUID) -> None:
     """3-hop A→B→C with B's outgoing edge expired; ``prefer_current=True`` must
     NOT return C's content.
 

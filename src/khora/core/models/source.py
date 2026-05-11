@@ -1,4 +1,4 @@
-"""Controlled source vocabulary for Khora Memory Lake.
+"""Controlled source vocabulary for Khora.
 
 Defines canonical source type identifiers shared between extraction
 and query pipelines, ensuring consistent provenance tracking.

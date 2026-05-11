@@ -417,9 +417,9 @@ async def embed_query(query: str) -> list[float]:
 ### Via Code
 
 ```python
-from khora import MemoryLake
+from khora import Khora
 
-async with MemoryLake(db_url, engine="skeleton") as lake:
+async with Khora(db_url, engine="skeleton") as lake:
     results = await lake.recall(
         query,
         mode=SearchMode.HYBRID,

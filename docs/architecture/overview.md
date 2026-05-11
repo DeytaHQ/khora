@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Khora is a **Memory Lake** - a system that remembers everything you tell it and helps you find what you need later. Unlike a simple database or search engine, Khora understands your content at multiple levels: the literal words, the concepts and meanings, and the relationships between things.
+Khora is a **Khora** - a system that remembers everything you tell it and helps you find what you need later. Unlike a simple database or search engine, Khora understands your content at multiple levels: the literal words, the concepts and meanings, and the relationships between things.
 
 ## The Big Picture
 
@@ -11,7 +11,7 @@ At its heart, Khora combines three different ways of storing and finding informa
                                |
                                v
                     +-------------------+
-                    |    MemoryLake     |
+                    |    Khora     |
                     |                   |
                     |  remember()       |  <- Store new knowledge
                     |  recall()         |  <- Find what you need
@@ -140,14 +140,14 @@ This hybrid approach means you get the best of all worlds. Semantic search finds
 
 ## The Core Components
 
-### MemoryLake
+### Khora
 
-Your primary interface. Lives at `src/khora/memory_lake.py`.
+Your primary interface. Lives at `src/khora/khora.py`.
 
 ```python
-from khora import MemoryLake
+from khora import Khora
 
-async with MemoryLake() as lake:
+async with Khora() as lake:
     # Store something
     result = await lake.remember(
         "Einstein developed relativity while working at the patent office.",
@@ -161,13 +161,13 @@ async with MemoryLake() as lake:
     await lake.forget(result.document_id)
 ```
 
-MemoryLake handles all the complexity of coordinating three databases, running extraction pipelines, and combining search results. You just tell it what to remember and what to recall.
+Khora handles all the complexity of coordinating three databases, running extraction pipelines, and combining search results. You just tell it what to remember and what to recall.
 
 ### StorageCoordinator
 
 The traffic controller. Lives at `src/khora/storage/coordinator.py`.
 
-When MemoryLake needs to store an entity, StorageCoordinator knows that it should go to Neo4j for graph queries *and* pgvector for similarity search. When you delete a document, it ensures cleanup happens everywhere. It also provides `transaction()` for atomic multi-backend writes with savepoint support.
+When Khora needs to store an entity, StorageCoordinator knows that it should go to Neo4j for graph queries *and* pgvector for similarity search. When you delete a document, it ensures cleanup happens everywhere. It also provides `transaction()` for atomic multi-backend writes with savepoint support.
 
 ### HybridQueryEngine
 

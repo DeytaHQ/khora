@@ -1,4 +1,4 @@
-"""Cross-layer ACL enforcement for Khora Memory Lake."""
+"""Cross-layer ACL enforcement for Khora."""
 
 from __future__ import annotations
 

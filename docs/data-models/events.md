@@ -1,6 +1,6 @@
 # Memory Events
 
-Khora uses event sourcing to capture all changes to the memory lake. Every create, update, and delete operation is recorded as an immutable event.
+Khora uses event sourcing to capture all changes to Khora. Every create, update, and delete operation is recorded as an immutable event.
 
 ## MemoryEvent Model
 

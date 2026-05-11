@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.memory_lake import BatchResult, LLMUsage, RecallResult, RememberResult
+from khora.khora import BatchResult, LLMUsage, RecallResult, RememberResult
 
 # ---------------------------------------------------------------------------
 # LLMUsage dataclass (DYT-646)

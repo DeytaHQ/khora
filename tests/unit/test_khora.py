@@ -1,4 +1,4 @@
-"""Unit tests for memory_lake.py — MemoryLake primary API."""
+"""Unit tests for khora.py — Khora primary API."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.memory_lake import BatchHandle, BatchResult, DocumentResult, MemoryLake, RecallResult, RememberResult, Stats
+from khora.khora import BatchHandle, BatchResult, DocumentResult, Khora, RecallResult, RememberResult, Stats
 
 from .helpers import RESOLVE_ROW_ID as _RESOLVE_ROW_ID
 from .helpers import make_lake as _make_lake
@@ -88,12 +88,12 @@ class TestRecallResult:
 
 
 # ---------------------------------------------------------------------------
-# MemoryLake initialization
+# Khora initialization
 # ---------------------------------------------------------------------------
 
 
-class TestMemoryLakeInit:
-    """Tests for MemoryLake initialization."""
+class TestKhoraInit:
+    """Tests for Khora initialization."""
 
     def test_init_default(self) -> None:
         """Default init loads config from env."""
@@ -107,7 +107,7 @@ class TestMemoryLakeInit:
 
         # Create a real KhoraConfig (not a mock) to trigger the isinstance check
         cfg = KhoraConfig(database_url="postgresql://test")
-        lake = MemoryLake(cfg)
+        lake = Khora(cfg)
 
         assert lake._config is cfg
         assert lake._config.database_url == "postgresql://test"
@@ -115,8 +115,8 @@ class TestMemoryLakeInit:
     def test_init_with_storage_config(self) -> None:
         """Init with explicit storage_config uses it directly."""
         storage_cfg = MagicMock()
-        with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-            lake = MemoryLake(storage_config=storage_cfg)
+        with patch("khora.khora.load_config", return_value=_mock_config()):
+            lake = Khora(storage_config=storage_cfg)
         assert lake._storage_config is storage_cfg
 
     def test_not_connected_properties_raise(self) -> None:
@@ -183,7 +183,7 @@ class TestConnectDisconnect:
 
     @pytest.mark.asyncio
     async def test_context_manager(self) -> None:
-        """async with MemoryLake() connects and disconnects."""
+        """async with Khora() connects and disconnects."""
         lake = _make_lake()
         lake.connect = AsyncMock()
         lake.disconnect = AsyncMock()
@@ -904,20 +904,20 @@ class TestHealthCheck:
 
 
 class TestSimplifiedConstructor:
-    """Tests for the simplified MemoryLake constructor."""
+    """Tests for the simplified Khora constructor."""
 
     def test_init_with_database_url_string(self) -> None:
         """Init with database URL string creates config."""
-        with patch("khora.memory_lake.load_config") as mock_load:
-            lake = MemoryLake("postgresql://localhost/mydb")
+        with patch("khora.khora.load_config") as mock_load:
+            lake = Khora("postgresql://localhost/mydb")
             mock_load.assert_not_called()
 
         assert lake._config.database_url == "postgresql://localhost/mydb"
 
     def test_init_with_database_url_and_graph_url(self) -> None:
         """Init with both database and graph URLs."""
-        with patch("khora.memory_lake.load_config"):
-            lake = MemoryLake(
+        with patch("khora.khora.load_config"):
+            lake = Khora(
                 "postgresql://localhost/mydb",
                 graph_url="bolt://localhost:7687",
             )
@@ -927,8 +927,8 @@ class TestSimplifiedConstructor:
 
     def test_init_with_custom_embedding_model(self) -> None:
         """Init with custom embedding model."""
-        with patch("khora.memory_lake.load_config"):
-            lake = MemoryLake(
+        with patch("khora.khora.load_config"):
+            lake = Khora(
                 "postgresql://localhost/mydb",
                 embedding_model="text-embedding-3-large",
             )
@@ -941,15 +941,15 @@ class TestSimplifiedConstructor:
 
         # Create a real KhoraConfig (not a mock) to trigger the isinstance check
         cfg = KhoraConfig(database_url="postgresql://test")
-        lake = MemoryLake(cfg)
+        lake = Khora(cfg)
 
         assert lake._config is cfg
         assert lake._config.database_url == "postgresql://test"
 
     def test_init_with_none_loads_from_env(self) -> None:
         """Init with None loads config from env/file."""
-        with patch("khora.memory_lake.load_config", return_value=_mock_config()) as mock_load:
-            lake = MemoryLake()
+        with patch("khora.khora.load_config", return_value=_mock_config()) as mock_load:
+            lake = Khora()
             mock_load.assert_called_once()
 
         assert lake._config is not None
@@ -958,15 +958,15 @@ class TestSimplifiedConstructor:
         """Init with None but graph_url override."""
         mock_cfg = _mock_config()
         mock_cfg.neo4j_url = None
-        with patch("khora.memory_lake.load_config", return_value=mock_cfg):
-            lake = MemoryLake(graph_url="bolt://custom:7687")
+        with patch("khora.khora.load_config", return_value=mock_cfg):
+            lake = Khora(graph_url="bolt://custom:7687")
 
         assert lake._config.neo4j_url == "bolt://custom:7687"
 
     def test_init_with_engine_parameter(self) -> None:
         """Init with explicit engine parameter."""
-        with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-            lake = MemoryLake(engine="graphrag")
+        with patch("khora.khora.load_config", return_value=_mock_config()):
+            lake = Khora(engine="graphrag")
 
         assert lake._engine_name == "graphrag"
 
@@ -1760,7 +1760,7 @@ class TestDocumentResultDataclass:
 
 
 class TestSubmitBatch:
-    """Tests for MemoryLake.submit_batch()."""
+    """Tests for Khora.submit_batch()."""
 
     @pytest.mark.asyncio
     async def test_empty_documents_returns_done_handle(self) -> None:
@@ -2021,7 +2021,7 @@ class TestSubmitBatch:
     @pytest.mark.asyncio
     async def test_document_result_carries_llm_usage(self) -> None:
         """DocumentResult.llm_usage is populated from usage recorded during processing."""
-        from khora.memory_lake import LLMUsage
+        from khora.khora import LLMUsage
         from khora.telemetry.context import record_usage
 
         ns_id = uuid4()
@@ -2074,7 +2074,7 @@ class TestSubmitBatch:
     @pytest.mark.asyncio
     async def test_failed_document_result_carries_partial_llm_usage(self) -> None:
         """Failed DocumentResult includes any LLM usage recorded before the exception."""
-        from khora.memory_lake import LLMUsage
+        from khora.khora import LLMUsage
         from khora.telemetry.context import record_usage
 
         ns_id = uuid4()
@@ -2118,7 +2118,7 @@ class TestSubmitBatch:
     @pytest.mark.asyncio
     async def test_concurrent_documents_llm_usage_isolation(self) -> None:
         """Each document's llm_usage contains only its own recorded entries."""
-        from khora.memory_lake import LLMUsage
+        from khora.khora import LLMUsage
         from khora.telemetry.context import record_usage
 
         ns_id = uuid4()
@@ -2725,7 +2725,7 @@ class TestGlobalChunkSemaphore:
     @pytest.mark.asyncio
     async def test_acquire_release_basic(self) -> None:
         """acquire(n) decrements capacity; release(n) restores it."""
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         sem = _GlobalChunkSemaphore(10)
         assert sem.capacity == 10
@@ -2740,7 +2740,7 @@ class TestGlobalChunkSemaphore:
         """acquire blocks when in_flight + n > capacity, unblocks on release."""
         import asyncio
 
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         sem = _GlobalChunkSemaphore(5)
         await sem.acquire(5)  # fills capacity
@@ -2766,7 +2766,7 @@ class TestGlobalChunkSemaphore:
         """Multiple waiters each get capacity in turn."""
         import asyncio
 
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         sem = _GlobalChunkSemaphore(3)
         order: list[int] = []
@@ -2792,7 +2792,7 @@ class TestGlobalChunkSemaphore:
     @pytest.mark.asyncio
     async def test_acquire_clamped_to_capacity(self) -> None:
         """acquire(n) with n > capacity is clamped to capacity (avoids deadlock)."""
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         sem = _GlobalChunkSemaphore(5)
         # n=10 > capacity=5 — should not deadlock; clamped to 5.
@@ -2813,7 +2813,7 @@ class TestSubmitBatchGlobalSemaphore:
     @pytest.mark.asyncio
     async def test_semaphore_initialized_on_first_call(self) -> None:
         """First submit_batch with max_chunks_in_flight creates _chunk_semaphore."""
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         ns_id = uuid4()
         lake = _make_lake_with_staged_support(ns_id)
@@ -2907,7 +2907,7 @@ class TestSubmitBatchGlobalSemaphore:
     async def test_chunk_semaphore_passed_to_process_staged_document(self) -> None:
         """chunk_semaphore kwarg is forwarded to process_staged_document."""
 
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         ns_id = uuid4()
         lake = _make_lake_with_staged_support(ns_id)
@@ -2958,7 +2958,7 @@ class TestSubmitBatchGlobalSemaphore:
         """Two concurrent submit_batch calls share the same semaphore instance."""
         import asyncio
 
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         ns_id = uuid4()
         lake = _make_lake_with_staged_support(ns_id)
@@ -2999,7 +2999,7 @@ class TestSubmitBatchGlobalSemaphore:
     @pytest.mark.asyncio
     async def test_semaphore_released_on_process_failure(self) -> None:
         """Semaphore tokens are released even when process_staged_document raises."""
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         ns_id = uuid4()
         lake = _make_lake_with_staged_support(ns_id)
@@ -3047,7 +3047,7 @@ class TestSubmitBatchGlobalSemaphore:
     @pytest.mark.asyncio
     async def test_none_max_chunks_after_prior_semaphore_does_not_inherit(self) -> None:
         """submit_batch(None) after a prior semaphored call passes no semaphore (H-2 fix)."""
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         ns_id = uuid4()
         lake = _make_lake_with_staged_support(ns_id)
@@ -3157,7 +3157,7 @@ class TestProcessDocumentSemaphore:
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from khora.core.models.document import Document
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         engine = self._make_minimal_engine()
         engine._embedder.embed_batch = AsyncMock(side_effect=RuntimeError("embed failure"))
@@ -3190,7 +3190,7 @@ class TestProcessDocumentSemaphore:
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from khora.core.models.document import Document
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         engine = self._make_minimal_engine()
 
@@ -3222,7 +3222,7 @@ class TestProcessDocumentSemaphore:
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from khora.core.models.document import Document
-        from khora.memory_lake import _GlobalChunkSemaphore
+        from khora.khora import _GlobalChunkSemaphore
 
         engine = self._make_minimal_engine()
 
@@ -3258,15 +3258,15 @@ class TestProcessDocumentSemaphore:
 class TestPendingProcessor:
     """Unit tests for the unified pending processor."""
 
-    def _make_lake_with_processor(self) -> MemoryLake:
-        """Create a MemoryLake with the pending processor enabled."""
+    def _make_lake_with_processor(self) -> Khora:
+        """Create a Khora with the pending processor enabled."""
         cfg = _mock_config()
         cfg.pipelines.pending_processor_enabled = True
         cfg.pipelines.pending_processor_max_concurrent = 20
         cfg.pipelines.pending_processor_grace_period_minutes = 5
         cfg.pipelines.entity_types = ["PERSON", "ORGANIZATION"]
-        with patch("khora.memory_lake.load_config", return_value=cfg):
-            lake = MemoryLake()
+        with patch("khora.khora.load_config", return_value=cfg):
+            lake = Khora()
         lake._connected = True
         eng = _mock_engine()
         lake._engine = eng
@@ -3304,8 +3304,8 @@ class TestPendingProcessor:
     @pytest.mark.asyncio
     async def test_start_pending_processor_requires_connected(self) -> None:
         """start_pending_processor() raises if the lake is not connected."""
-        with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-            lake = MemoryLake()
+        with patch("khora.khora.load_config", return_value=_mock_config()):
+            lake = Khora()
         with pytest.raises(RuntimeError, match="not connected"):
             lake.start_pending_processor()
 
@@ -3398,7 +3398,7 @@ class TestPendingProcessor:
     async def test_orphan_recovery_processes_with_stored_params(self) -> None:
         """Orphaned docs use their stored extraction_params for processing."""
         from khora.core.models.document import Document
-        from khora.memory_lake import _ProcessorItem
+        from khora.khora import _ProcessorItem
 
         lake = self._make_lake_with_processor()
         lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
@@ -3435,7 +3435,7 @@ class TestPendingProcessor:
     async def test_orphan_recovery_falls_back_to_defaults(self) -> None:
         """Orphaned docs without extraction_params fall back to config defaults."""
         from khora.core.models.document import Document
-        from khora.memory_lake import _ProcessorItem
+        from khora.khora import _ProcessorItem
 
         lake = self._make_lake_with_processor()
         lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
@@ -3455,7 +3455,7 @@ class TestPendingProcessor:
     async def test_processor_handles_per_doc_failure(self) -> None:
         """Per-document failures in the processor are handled gracefully."""
         from khora.core.models.document import Document, DocumentStatus
-        from khora.memory_lake import _ProcessorItem
+        from khora.khora import _ProcessorItem
 
         lake = self._make_lake_with_processor()
         lake._engine._storage.update_document = AsyncMock(side_effect=lambda doc: doc)
@@ -3514,7 +3514,7 @@ class TestIsUndefinedTableError:
     DBs (DYT-3787)."""
 
     def test_detects_undefined_table_via_sqlstate_attribute(self) -> None:
-        from khora.memory_lake import _is_undefined_table_error
+        from khora.khora import _is_undefined_table_error
 
         class _FakeAsyncpgError(Exception):
             sqlstate = "42P01"
@@ -3524,7 +3524,7 @@ class TestIsUndefinedTableError:
     def test_detects_when_wrapped_via_orig(self) -> None:
         """SQLAlchemy wraps the asyncpg exception under `.orig` — the helper
         must look through the wrapper, not just the top-level exception."""
-        from khora.memory_lake import _is_undefined_table_error
+        from khora.khora import _is_undefined_table_error
 
         class _AsyncpgError(Exception):
             sqlstate = "42P01"
@@ -3539,7 +3539,7 @@ class TestIsUndefinedTableError:
 
     def test_returns_false_for_other_sqlstate(self) -> None:
         """Other postgres errors (constraint violation, etc.) must not match."""
-        from khora.memory_lake import _is_undefined_table_error
+        from khora.khora import _is_undefined_table_error
 
         class _OtherError(Exception):
             sqlstate = "23505"  # unique_violation
@@ -3547,6 +3547,6 @@ class TestIsUndefinedTableError:
         assert _is_undefined_table_error(_OtherError("dup key")) is False
 
     def test_returns_false_for_plain_exception(self) -> None:
-        from khora.memory_lake import _is_undefined_table_error
+        from khora.khora import _is_undefined_table_error
 
         assert _is_undefined_table_error(RuntimeError("not a db error")) is False

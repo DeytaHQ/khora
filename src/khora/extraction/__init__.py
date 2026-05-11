@@ -1,4 +1,4 @@
-"""Extraction module for Khora Memory Lake.
+"""Extraction module for Khora.
 
 Provides text chunking, embedding generation, and entity extraction
 capabilities using LLM-based processing.

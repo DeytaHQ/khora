@@ -1,4 +1,4 @@
-"""Pipeline registry with decorators for Khora Memory Lake."""
+"""Pipeline registry with decorators for Khora."""
 
 from __future__ import annotations
 

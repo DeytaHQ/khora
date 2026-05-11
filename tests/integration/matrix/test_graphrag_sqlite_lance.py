@@ -49,7 +49,7 @@ from khora.extraction.extractors.base import (
     ExtractionResult,
 )
 from khora.extraction.skills import ExpertiseConfig
-from khora.memory_lake import MemoryLake
+from khora.khora import Khora
 
 # Embedded fixtures use a small dim by convention (see _sqlite_lance_fixtures).
 # LanceDB stores the schema with this dim — must match the embedder stub.
@@ -160,8 +160,8 @@ def _build_config(tmp_path: Path) -> KhoraConfig:
 
 
 @pytest.fixture
-async def lake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[MemoryLake]:
-    """Per-test ``MemoryLake(engine="graphrag")`` over sqlite_lance.
+async def lake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
+    """Per-test ``Khora(engine="graphrag")`` over sqlite_lance.
 
     Function-scoped because the adapter handle owns the SQLite + LanceDB
     files in ``tmp_path``; a module-scoped fixture would have to re-run
@@ -181,7 +181,7 @@ async def lake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
     result = await run_migrations(db_url)
     assert result.success, f"migrations failed: {result.error}"
 
-    lake = MemoryLake(config, engine="graphrag", run_migrations=False)
+    lake = Khora(config, engine="graphrag", run_migrations=False)
     await lake.connect()
     try:
         yield lake
@@ -190,13 +190,13 @@ async def lake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
 
 
 @pytest.fixture
-async def namespace_id(lake: MemoryLake) -> UUID:
+async def namespace_id(lake: Khora) -> UUID:
     ns = await lake.create_namespace()
     return ns.namespace_id
 
 
 async def _remember(
-    lake: MemoryLake,
+    lake: Khora,
     *,
     namespace_id: UUID,
     content: str,
@@ -212,12 +212,12 @@ async def _remember(
     )
 
 
-def _sqlite_path(lake: MemoryLake) -> str:
-    """Resolve the SQLite path from the live MemoryLake config."""
+def _sqlite_path(lake: Khora) -> str:
+    """Resolve the SQLite path from the live Khora config."""
     return lake._config.storage.sqlite_lance.db_path  # type: ignore[union-attr]
 
 
-async def _sqlite_query(lake: MemoryLake, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+async def _sqlite_query(lake: Khora, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
     """Direct read against the live aiosqlite connection on the lake handle."""
     storage = lake._engine._storage  # type: ignore[union-attr]
     handle = storage.graph._handle  # type: ignore[union-attr]
@@ -231,7 +231,7 @@ async def _sqlite_query(lake: MemoryLake, sql: str, params: tuple = ()) -> list[
 # ---------------------------------------------------------------------------
 
 
-async def test_graphrag_remember_recall_roundtrip(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_graphrag_remember_recall_roundtrip(lake: Khora, namespace_id: UUID) -> None:
     """Ingest 3 docs, recall, assert ingested doc text appears in context."""
     contents = [
         "Alice met Bob at the Python conference in Berlin on March 15th.",
@@ -247,7 +247,7 @@ async def test_graphrag_remember_recall_roundtrip(lake: MemoryLake, namespace_id
     assert "Python conference" in result.context_text
 
 
-async def test_graphrag_namespace_isolation(lake: MemoryLake) -> None:
+async def test_graphrag_namespace_isolation(lake: Khora) -> None:
     """Two namespaces, queries don't cross-bleed."""
     ns_a = (await lake.create_namespace()).namespace_id
     ns_b = (await lake.create_namespace()).namespace_id
@@ -267,7 +267,7 @@ async def test_graphrag_namespace_isolation(lake: MemoryLake) -> None:
     assert "kangaroos" not in b_text, "ns_a leaked into ns_b"
 
 
-async def test_graphrag_entity_extraction(lake: MemoryLake) -> None:
+async def test_graphrag_entity_extraction(lake: Khora) -> None:
     """Ingest a doc with a known entity, assert it lands in the SQLite graph.
 
     Mirrors PR #475's ``test_graphrag_entity_extraction_via_neo4j`` but
@@ -276,7 +276,7 @@ async def test_graphrag_entity_extraction(lake: MemoryLake) -> None:
 
     Notes on dual-IDs: ``MemoryNamespace`` carries two UUIDs (ADR-024).
     The relational + graph rows in SQLite key on ``namespace.id`` (the
-    row-level FK), while ``MemoryLake.recall(namespace=...)`` accepts the
+    row-level FK), while ``Khora.recall(namespace=...)`` accepts the
     stable ``namespace_id``. So our direct lookup uses ``ns.id``.
 
     Names are normalized to lowercase by ``normalize_entity_names_batch``
@@ -303,7 +303,7 @@ async def test_graphrag_entity_extraction(lake: MemoryLake) -> None:
     assert rows[0]["entity_type"] == "PERSON"
 
 
-async def test_graphrag_two_hop_traversal(lake: MemoryLake) -> None:
+async def test_graphrag_two_hop_traversal(lake: Khora) -> None:
     """Ingest A→B→C, query about A, assert C surfaces via 2-hop graph traversal.
 
     Stages a 3-document chain where extraction emits explicit relationships:
@@ -384,7 +384,7 @@ async def test_graphrag_two_hop_traversal(lake: MemoryLake) -> None:
         )
 
 
-async def test_graphrag_temporal_filter(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_graphrag_temporal_filter(lake: Khora, namespace_id: UUID) -> None:
     """Backdate one doc 20 days, leave another at 5 days, query last 7 days.
 
     The vector channel pushes ``created_after`` down to
@@ -453,7 +453,7 @@ async def test_graphrag_temporal_filter(lake: MemoryLake, namespace_id: UUID) ->
     )
 
 
-async def test_graphrag_recall_metadata(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_graphrag_recall_metadata(lake: Khora, namespace_id: UUID) -> None:
     """RecallResult.metadata carries the expected GraphRAG keys on embedded."""
     await _remember(lake, namespace_id=namespace_id, content="A simple sentence about apples.")
 
@@ -472,7 +472,7 @@ async def test_graphrag_recall_metadata(lake: MemoryLake, namespace_id: UUID) ->
     assert "neighborhood_depth" in md["graph_traversal"]
 
 
-async def test_graphrag_concurrent_remember(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_graphrag_concurrent_remember(lake: Khora, namespace_id: UUID) -> None:
     """5 concurrent ingests in one namespace, no integrity errors.
 
     Embedded SQLite uses WAL mode + a 5s busy_timeout and the
@@ -497,7 +497,7 @@ async def test_graphrag_concurrent_remember(lake: MemoryLake, namespace_id: UUID
     assert len(contents_returned) >= 5
 
 
-async def test_graphrag_recall_empty_namespace(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_graphrag_recall_empty_namespace(lake: Khora, namespace_id: UUID) -> None:
     """Recall against a freshly-created namespace returns an empty result cleanly."""
     result = await lake.recall("anything at all", namespace=namespace_id, limit=10)
 
@@ -507,7 +507,7 @@ async def test_graphrag_recall_empty_namespace(lake: MemoryLake, namespace_id: U
     assert result.metadata.get("mode") in {"HYBRID", "VECTOR", "GRAPH", "ALL"}
 
 
-async def test_graphrag_relationship_re_upsert(lake: MemoryLake) -> None:
+async def test_graphrag_relationship_re_upsert(lake: Khora) -> None:
     """3-doc chain where the middle entity is re-mentioned. Verify rel lands.
 
     Same regression as DYT-3558 (PR #477) but exercised on the embedded

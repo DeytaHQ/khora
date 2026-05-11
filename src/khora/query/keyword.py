@@ -1,4 +1,4 @@
-"""Keyword search module for Khora Memory Lake.
+"""Keyword search module for Khora.
 
 Provides BM25-based keyword search for improved recall alongside
 vector search.

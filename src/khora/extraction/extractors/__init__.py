@@ -1,4 +1,4 @@
-"""Entity extraction for Khora Memory Lake."""
+"""Entity extraction for Khora."""
 
 from __future__ import annotations
 

@@ -45,7 +45,7 @@ from khora.engines.chronicle.compression import (
 )
 from khora.engines.chronicle.events import ChronicleEvent, EventExtractor
 from khora.extraction.embedders import LiteLLMEmbedder
-from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
+from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
 from khora.query.router import QueryComplexity, QueryComplexityRouter, RouterConfig
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
@@ -410,8 +410,8 @@ class ChronicleEngine:
         engine = ChronicleEngine(config)
         await engine.connect()
 
-        # Or via MemoryLake facade:
-        async with MemoryLake(db_url, engine="chronicle") as lake:
+        # Or via Khora facade:
+        async with Khora(db_url, engine="chronicle") as lake:
             await lake.remember(content, namespace=ns_id,
                 entity_types=["PERSON"], relationship_types=["KNOWS"])
             result = await lake.recall("query", namespace=ns_id)

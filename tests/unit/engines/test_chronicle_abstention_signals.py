@@ -17,7 +17,7 @@ import pytest
 from khora.config import KhoraConfig
 from khora.core.models import Chunk, ChunkMetadata, Entity
 from khora.engines.chronicle.engine import ChronicleEngine
-from khora.memory_lake import RecallResult
+from khora.khora import RecallResult
 
 # ---------------------------------------------------------------------------
 # Helpers

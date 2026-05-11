@@ -8,7 +8,7 @@
 
 > *"Khora is the receptacle, the space, the matrix in which all things come to be."* — Plato, *Timaeus*
 
-Khora is a **Memory Lake** library for Python 3.13+. It stores knowledge as a mix of documents, vectors, and graph relationships and retrieves it through hybrid search (vector + graph + keyword), reranking, and temporal context.
+Khora is a **Khora** library for Python 3.13+. It stores knowledge as a mix of documents, vectors, and graph relationships and retrieves it through hybrid search (vector + graph + keyword), reranking, and temporal context.
 
 Khora is a **library, not an application**. CLI tooling lives in sibling packages:
 
@@ -34,14 +34,14 @@ The production-ready combination in v0.9.0 is **PostgreSQL + pgvector + Neo4j**:
 - **Chronicle** — runs on PostgreSQL + pgvector (no graph DB required).
 - **GraphRAG** and **Skeleton** — available; same PG+Neo4j (or PG-only for Skeleton) shape.
 
-Set `KHORA_DATABASE_URL` and `KHORA_NEO4J_URL`, run `uv run alembic upgrade head`, then instantiate `MemoryLake()` with no arguments:
+Set `KHORA_DATABASE_URL` and `KHORA_NEO4J_URL`, run `uv run alembic upgrade head`, then instantiate `Khora()` with no arguments:
 
 ```python
 import asyncio
-from khora import MemoryLake
+from khora import Khora
 
 async def main() -> None:
-    async with MemoryLake() as lake:  # reads KHORA_DATABASE_URL / KHORA_NEO4J_URL
+    async with Khora() as lake:  # reads KHORA_DATABASE_URL / KHORA_NEO4J_URL
         ns = await lake.create_namespace("demo")
         await lake.remember(
             "Marie Curie won the Nobel Prize in Physics in 1903.",
@@ -60,7 +60,7 @@ asyncio.run(main())
 **The processor is opt-in.** Call `lake.start_pending_processor()` after `connect()` on services that write documents. Read-only services do not need it. The processor can be stopped with `await lake.stop_pending_processor()` and restarted at any time.
 
 ```python
-async with MemoryLake() as lake:
+async with Khora() as lake:
     lake.start_pending_processor()   # opt-in; write-path services only
     handle = await lake.submit_batch(
         [{"content": "doc 1"}, {"content": "doc 2"}],
@@ -77,7 +77,7 @@ Khora ships two zero-infrastructure paths. Both are marked **experimental** in v
 - **SQLite + LanceDB** (`pip install khora[sqlite-lance]`, set `KHORA_STORAGE_BACKEND=sqlite_lance`) — recommended embedded stack. Covers VectorCypher, GraphRAG, Skeleton, and Chronicle via dialect-aware Alembic migrations and LanceDB-backed vector search. Documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. Known gaps: no point-in-time queries (DYT-3550), partial atomicity in `coordinator.transaction()`, FTS on chunks only. See [configuration.md](docs/configuration.md#embedded-backends-experimental).
 - **SurrealDB** (`pip install khora[surrealdb]`) — unified relational + vector + graph in one store. Python SDK is on the alpha track (`>=2.0.0a1`), and KNN (`<|K|>`) is unreliable in embedded mode (uses brute-force cosine + HNSW fallback). Suitable for experimentation; not recommended for production.
 
-> **Quickstart caveat.** A literal `MemoryLake("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector — there is no `memory://` URL scheme parsed by the lake itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` (or `surrealdb`) and the corresponding `db_path` / connection settings. Routing a true `memory://` URI to the SQLite+LanceDB stack is tracked for v0.10.
+> **Quickstart caveat.** A literal `Khora("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector — there is no `memory://` URL scheme parsed by the lake itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` (or `surrealdb`) and the corresponding `db_path` / connection settings. Routing a true `memory://` URI to the SQLite+LanceDB stack is tracked for v0.10.
 
 ## Observability
 
@@ -93,7 +93,7 @@ khora emits OpenTelemetry spans and metrics via [Logfire](https://logfire.pydant
 
   ```python
   import logfire
-  from khora import MemoryLake
+  from khora import Khora
 
   logfire.configure(service_name="my-service")
   # khora's @trace decorators and trace_span() context managers
@@ -110,7 +110,7 @@ khora emits OpenTelemetry spans and metrics via [Logfire](https://logfire.pydant
 
 Start at [docs/README.md](docs/README.md). Key entry points:
 
-- [API reference](docs/api-reference.md) — public `MemoryLake` surface (ADR-024).
+- [API reference](docs/api-reference.md) — public `Khora` surface (ADR-024).
 - [Configuration](docs/configuration.md) — `KHORA_*` env vars and `KhoraConfig`.
 - [Architecture](docs/architecture/overview.md) — how the pieces fit.
 - [Engines](docs/engines/engine-comparison.md) — VectorCypher, GraphRAG, Skeleton, Chronicle.

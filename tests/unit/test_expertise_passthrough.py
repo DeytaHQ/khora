@@ -1,6 +1,6 @@
 """Unit tests for DYT-697: Expertise API pass-through.
 
-Tests the full chain from MemoryLake → Engine → process_document
+Tests the full chain from Khora → Engine → process_document
 for expertise and extraction_config_hash parameters.
 """
 
@@ -17,7 +17,7 @@ from khora.extraction.skills import (
     ExpertiseConfig,
     RelationshipTypeConfig,
 )
-from khora.memory_lake import BatchResult, RememberResult
+from khora.khora import BatchResult, RememberResult
 
 from .helpers import make_lake
 
@@ -78,7 +78,7 @@ class TestTopLevelExports:
 
 
 # ---------------------------------------------------------------------------
-# 2. MemoryLake.remember() with expertise
+# 2. Khora.remember() with expertise
 # ---------------------------------------------------------------------------
 
 
@@ -180,7 +180,7 @@ class TestRememberWithExpertise:
 
 
 # ---------------------------------------------------------------------------
-# 3. MemoryLake.remember_batch() with expertise
+# 3. Khora.remember_batch() with expertise
 # ---------------------------------------------------------------------------
 
 

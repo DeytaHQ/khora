@@ -42,7 +42,7 @@ from khora.engines._storage_config import build_storage_config
 from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
 from khora.engines.skeleton.skeleton import SkeletonIndexer
 from khora.extraction.embedders import LiteLLMEmbedder
-from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
+from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
 from khora.query.engine import format_entity_section, format_relationship_section
 from khora.storage import StorageConfig, create_storage_coordinator
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
-    from khora.memory_lake import _GlobalChunkSemaphore
+    from khora.khora import _GlobalChunkSemaphore
     from khora.storage import StorageCoordinator
 
 
@@ -921,7 +921,7 @@ class VectorCypherEngine:
     ) -> tuple[int, int, int]:
         """Process a pre-staged PENDING document through the VectorCypher pipeline.
 
-        Called by MemoryLake.submit_batch() for documents that were already
+        Called by Khora.submit_batch() for documents that were already
         persisted to the DB with PENDING status before this call. Delegates
         to _process_document; does NOT create a new document record.
 
@@ -935,7 +935,7 @@ class VectorCypherEngine:
             extraction_config_hash: Optional hash for change detection.
             chunk_strategy: Override chunking strategy.
             max_chunks_in_flight: Maximum chunks per processing window.
-            chunk_semaphore: Optional global chunk semaphore (from MemoryLake)
+            chunk_semaphore: Optional global chunk semaphore (from Khora)
                 shared across concurrent submit_batch calls to bound total
                 chunks in flight process-wide.
 

@@ -1,6 +1,6 @@
-"""Event sourcing models for Khora Memory Lake.
+"""Event sourcing models for Khora.
 
-All changes to the memory lake are captured as immutable events,
+All changes to Khora are captured as immutable events,
 enabling perfect audit trails, temporal queries, and replay.
 """
 
@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 
 class EventType(str, Enum):
-    """Types of events in the memory lake."""
+    """Types of events in Khora."""
 
     # Document events
     DOCUMENT_CREATED = "document.created"
@@ -61,7 +61,7 @@ class EventType(str, Enum):
 
 @dataclass
 class MemoryEvent:
-    """An immutable event in the memory lake.
+    """An immutable event in Khora.
 
     Events form an append-only log of all changes, enabling:
     - Complete audit trail

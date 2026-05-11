@@ -1,7 +1,7 @@
 """Unit tests for parameterized extraction (DYT-262).
 
 Tests that entity_types and relationship_types parameters are correctly
-threaded through the extraction pipeline: MemoryLake -> Engine -> Extractor -> Prompt.
+threaded through the extraction pipeline: Khora -> Engine -> Extractor -> Prompt.
 """
 
 from __future__ import annotations
@@ -101,11 +101,11 @@ def _mock_engine() -> MagicMock:
 
 
 def _make_lake(*, connected: bool = False):
-    """Create a MemoryLake with mocked config, optionally pre-connected."""
-    from khora.memory_lake import MemoryLake
+    """Create a Khora with mocked config, optionally pre-connected."""
+    from khora.khora import Khora
 
-    with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-        lake = MemoryLake()
+    with patch("khora.khora.load_config", return_value=_mock_config()):
+        lake = Khora()
 
     if connected:
         lake._connected = True
@@ -377,17 +377,17 @@ class TestExtractEntitiesTaskThreadsTypes:
 
 
 # ---------------------------------------------------------------------------
-# 8. MemoryLake.remember() threads types
+# 8. Khora.remember() threads types
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestMemoryLakeRememberThreadsTypes:
-    """MemoryLake.remember() passes entity_types to the engine."""
+class TestKhoraRememberThreadsTypes:
+    """Khora.remember() passes entity_types to the engine."""
 
-    async def test_memory_lake_remember_threads_types(self) -> None:
+    async def test_khora_remember_threads_types(self) -> None:
         """engine.remember() is called with entity_types and relationship_types."""
-        from khora.memory_lake import RememberResult
+        from khora.khora import RememberResult
 
         lake = _make_lake(connected=True)
         ns_id = uuid4()
@@ -419,17 +419,17 @@ class TestMemoryLakeRememberThreadsTypes:
 
 
 # ---------------------------------------------------------------------------
-# 9. MemoryLake.remember_batch() threads types
+# 9. Khora.remember_batch() threads types
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-class TestMemoryLakeRememberBatchThreadsTypes:
-    """MemoryLake.remember_batch() passes entity_types to the engine."""
+class TestKhoraRememberBatchThreadsTypes:
+    """Khora.remember_batch() passes entity_types to the engine."""
 
-    async def test_memory_lake_remember_batch_threads_types(self) -> None:
+    async def test_khora_remember_batch_threads_types(self) -> None:
         """engine.remember_batch() is called with entity_types and relationship_types."""
-        from khora.memory_lake import BatchResult
+        from khora.khora import BatchResult
 
         lake = _make_lake(connected=True)
         ns_id = uuid4()

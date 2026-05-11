@@ -20,7 +20,7 @@ khora-cli imports a narrow slice of khora's public API:
 
 ```python
 from khora import (
-    MemoryLake, KhoraConfig, SearchMode, LLMUsage,
+    Khora, KhoraConfig, SearchMode, LLMUsage,
     RememberResult, RecallResult, BatchResult,
 )
 from khora.extraction.binary_readers import extract_if_needed
@@ -56,7 +56,7 @@ This surface is codified by [ADR-022](adrs/adr-022-extraction-skills-public-api.
 
 ### genesis
 
-Uses `MemoryLake` through the stable top-level surface (ADR-024) plus `lake.storage` for direct backend access. Also imports `LLMUsage` for cost tracking (DYT-645 contract shared with Poros/Peras). Pins a specific khora version per deploy; follows khora's major releases.
+Uses `Khora` through the stable top-level surface (ADR-024) plus `lake.storage` for direct backend access. Also imports `LLMUsage` for cost tracking (DYT-645 contract shared with Poros/Peras). Pins a specific khora version per deploy; follows khora's major releases.
 
 ### khora-benchmarks
 
@@ -64,7 +64,7 @@ Benchmarks khora's retrieval engines. Imports include private modules (`khora.en
 
 ### anima, ttoj
 
-Thin consumers of the top-level `MemoryLake` surface. No private imports.
+Thin consumers of the top-level `Khora` surface. No private imports.
 
 ## Migration from pre-v0.8 khora
 
@@ -81,14 +81,14 @@ If your project installed `khora` before v0.8.0 and used the CLI:
 | `from khora.discovery import …` | Install `khora-explorer`. Module has moved. |
 | `from khora.cli import …` | Install `khora-cli`. Module has moved. |
 
-The `khora` top-level imports (`MemoryLake`, `KhoraConfig`, `SearchMode`, `ExpertiseConfig`, etc.) are unchanged and continue to work.
+The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseConfig`, etc.) are unchanged and continue to work.
 
 ## Stability contract
 
 Two ADRs formalise what you can depend on:
 
 - [ADR-022](adrs/adr-022-extraction-skills-public-api.md) — `ExpertiseConfig` and friends from `khora.extraction.skills.base`.
-- [ADR-024](adrs/adr-024-memory-lake-public-api.md) — top-level `khora` re-exports (`MemoryLake`, results, `SearchMode`, etc.).
+- [ADR-024](adrs/adr-024-memory-lake-public-api.md) — top-level `khora` re-exports (`Khora`, results, `SearchMode`, etc.).
 
 Both are append-only in minor releases. Breaking changes require a major bump **and** coordinated releases across genesis, khora-benchmarks, khora-explorer, and khora-cli.
 
@@ -98,6 +98,6 @@ For a new downstream consumer:
 
 1. `pip install khora[<backend-of-choice>]` — pick the backend matrix that matches your infra (`postgres`-default for PG, `surrealdb` for zero-infra, `all-backends` if unsure).
 2. Either call `khora.logging_config.setup_logging()` once per process, or configure your own loguru sinks with `enqueue=True`. The default loguru sink blocks the event loop in async code — see [configuration.md](configuration.md#logging).
-3. Run migrations (for PostgreSQL) — pass `run_migrations=True` to `MemoryLake` or invoke `alembic upgrade head` out-of-band. See [migrations.md](migrations.md).
+3. Run migrations (for PostgreSQL) — pass `run_migrations=True` to `Khora` or invoke `alembic upgrade head` out-of-band. See [migrations.md](migrations.md).
 4. Import only from the symbols listed in [api-reference.md](api-reference.md) unless you are willing to follow khora's internal churn.
 5. Pin Khora by major version. Minor-version upgrades are safe; majors may require coordinated releases.

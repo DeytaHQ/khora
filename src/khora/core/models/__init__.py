@@ -1,4 +1,4 @@
-"""Core domain models for Khora Memory Lake."""
+"""Core domain models for Khora."""
 
 from __future__ import annotations
 

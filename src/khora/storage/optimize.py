@@ -1,4 +1,4 @@
-"""Storage optimization for Khora Memory Lake.
+"""Storage optimization for Khora.
 
 Creates additional indexes on PostgreSQL and Neo4j that improve query
 and search performance beyond the base indexes created at schema init time.
@@ -614,7 +614,7 @@ async def optimize_storage(coordinator) -> dict:
     """Run all optimizations against a connected StorageCoordinator.
 
     This is the main entry point for callers that already have a
-    ``StorageCoordinator`` (e.g. via ``MemoryLake.storage``).
+    ``StorageCoordinator`` (e.g. via ``Khora.storage``).
 
     Args:
         coordinator: A connected ``StorageCoordinator`` instance.

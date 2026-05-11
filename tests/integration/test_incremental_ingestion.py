@@ -1,6 +1,6 @@
 """Integration tests for incremental document ingestion.
 
-Validates that the MemoryLake correctly handles incremental updates:
+Validates that the Khora correctly handles incremental updates:
 1. Ingest batch 1 → query returns batch 1 results
 2. Ingest batch 2 → query returns BOTH batch 1 AND batch 2 results
 
@@ -20,7 +20,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, Entity, Relationship
-from khora.memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult
+from khora.khora import BatchResult, Khora, RecallResult, RememberResult
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -549,7 +549,7 @@ class TestIncrementalIngestion:
         mock_query_engine.invalidate_caches.assert_called_once_with(NAMESPACE_ID)
 
     # -----------------------------------------------------------------------
-    # Test: Full MemoryLake remember→recall integration
+    # Test: Full Khora remember→recall integration
     # -----------------------------------------------------------------------
 
     async def test_remember_then_recall_integration(self) -> None:
@@ -829,7 +829,7 @@ class TestIncrementalIngestion:
         assert len(bob_works_at_acme) == 1
 
     async def test_three_batch_remember_batch_then_recall(self) -> None:
-        """Full MemoryLake flow with 3 batches — recall finds content from all."""
+        """Full Khora flow with 3 batches — recall finds content from all."""
         lake = _make_connected_lake()
         engine = lake._engine
 
@@ -929,10 +929,10 @@ def _find_entity(state: IncrementalStorageState, name: str) -> Entity:
     raise ValueError(f"Entity not found: {name}")
 
 
-def _make_connected_lake() -> MemoryLake:
-    """Create a MemoryLake with a mocked engine, pre-connected."""
-    with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-        lake = MemoryLake()
+def _make_connected_lake() -> Khora:
+    """Create a Khora with a mocked engine, pre-connected."""
+    with patch("khora.khora.load_config", return_value=_mock_config()):
+        lake = Khora()
 
     lake._connected = True
 
