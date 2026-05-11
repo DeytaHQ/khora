@@ -1,4 +1,4 @@
-# Google Gemini Configuration for Khora Memory Lake
+# Google Gemini Configuration for Khora
 # Uses Gemini 2.0 Flash for fast, cost-effective processing
 
 model: "gemini/gemini-2.0-flash"

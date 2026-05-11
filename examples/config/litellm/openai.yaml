@@ -1,4 +1,4 @@
-# OpenAI GPT Configuration for Khora Memory Lake
+# OpenAI GPT Configuration for Khora
 # Uses GPT-4o-mini for cost-effective general use
 
 model: "gpt-4o-mini"

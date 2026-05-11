@@ -13,13 +13,13 @@ This directory contains example expertise configurations for Khora's knowledge g
 
 3. **Use with Khora**:
    ```python
-   from khora import MemoryLake
+   from khora import Khora
    from khora.extraction.skills import ExpertiseLoader
 
    loader = ExpertiseLoader()
    expertise = loader.load_file("~/.khora/expertise/my_expertise.yaml")
 
-   async with MemoryLake() as lake:
+   async with Khora() as lake:
        result = await lake.remember(content, expertise=expertise)
    ```
 
@@ -207,7 +207,7 @@ expertise = ExpertiseConfig(
 )
 
 # Use directly
-async with MemoryLake() as lake:
+async with Khora() as lake:
     result = await lake.remember(content, expertise=expertise)
 
 # Or register for reuse
