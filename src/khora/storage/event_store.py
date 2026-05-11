@@ -1,6 +1,6 @@
 """PostgreSQL-based event store for event sourcing.
 
-Provides an append-only event log for all memory lake operations,
+Provides an append-only event log for all Khora operations,
 enabling audit trails, temporal queries, and event replay.
 """
 

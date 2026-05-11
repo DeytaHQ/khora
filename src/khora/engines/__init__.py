@@ -41,13 +41,13 @@ def register_engine(name: str, module_path: str, class_name: str) -> None:
     """Register a custom engine implementation.
 
     Args:
-        name: Engine name to register (used in MemoryLake(engine=...))
+        name: Engine name to register (used in Khora(engine=...))
         module_path: Full module path containing the engine class
         class_name: Name of the engine class
 
     Example:
         register_engine("my_engine", "my_package.engine", "MyEngine")
-        async with MemoryLake("postgresql://...", engine="my_engine") as lake:
+        async with Khora("postgresql://...", engine="my_engine") as lake:
             ...
     """
     _ENGINE_REGISTRY[name] = (module_path, class_name)

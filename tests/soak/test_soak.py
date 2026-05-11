@@ -9,7 +9,7 @@ catches it. We also want recall p95 SLO assertions and a memory ceiling
 assertion.
 
 What this harness does:
-    * Drives a continuous ingest + recall mix against a live ``MemoryLake``
+    * Drives a continuous ingest + recall mix against a live ``Khora``
       (skeleton engine on SQLite + LanceDB by default — zero infra).
     * Default mix: 70% recall / 30% ingest, with a burst pattern of
       60s @ 50 ops/s followed by 30s @ 5 ops/s, repeating.
@@ -77,7 +77,7 @@ except ImportError:  # pragma: no cover - psutil is in dev group
 
 from khora.config import KhoraConfig
 from khora.config.schema import SQLiteLanceConfig
-from khora.memory_lake import MemoryLake
+from khora.khora import Khora
 
 EMBED_DIM = 32
 
@@ -234,7 +234,7 @@ def _load_config_from_env() -> SoakConfig:
     )
 
 
-async def _build_embedded_lake(tmp_path: Path) -> MemoryLake:
+async def _build_embedded_lake(tmp_path: Path) -> Khora:
     cfg = KhoraConfig()
     cfg.storage.backend = "sqlite_lance"
     cfg.storage.sqlite_lance = SQLiteLanceConfig(
@@ -245,7 +245,7 @@ async def _build_embedded_lake(tmp_path: Path) -> MemoryLake:
     cfg.llm.embedding_dimension = EMBED_DIM
     cfg.storage.embedding_dimension = EMBED_DIM
     cfg.pipelines.chunk_size = 1024
-    lake = MemoryLake(cfg, engine="skeleton", run_migrations=True)
+    lake = Khora(cfg, engine="skeleton", run_migrations=True)
     await lake.connect()
     return lake
 
@@ -267,7 +267,7 @@ def _seed_query_pool() -> list[str]:
     return base_terms
 
 
-async def _ingest_one(lake: MemoryLake, namespace_id: UUID, seq: int) -> None:
+async def _ingest_one(lake: Khora, namespace_id: UUID, seq: int) -> None:
     content = (
         f"Soak document #{seq} talks about widget-{seq % 50} and gear-{seq % 13}. "
         f"It references concepts like neural network, graph database, and vector search."
@@ -282,7 +282,7 @@ async def _ingest_one(lake: MemoryLake, namespace_id: UUID, seq: int) -> None:
     )
 
 
-async def _recall_one(lake: MemoryLake, namespace_id: UUID, seq: int, queries: list[str]) -> int:
+async def _recall_one(lake: Khora, namespace_id: UUID, seq: int, queries: list[str]) -> int:
     q = queries[seq % len(queries)]
     result = await lake.recall(query=q, namespace=namespace_id, limit=10)
     return len(result.chunks)
@@ -324,7 +324,7 @@ class _SoakResult:
 
 async def _drive_soak(
     *,
-    lake: MemoryLake,
+    lake: Khora,
     namespace_id: UUID,
     cfg: SoakConfig,
     tracker: _LoguruErrorTracker,
@@ -557,7 +557,7 @@ async def test_soak_postgres_neo4j(loguru_tracker: _LoguruErrorTracker) -> None:
     pg_url = os.environ["KHORA_SOAK_PG_URL"]
     graph_url = os.environ.get("KHORA_GRAPH_URL")
 
-    lake = MemoryLake(
+    lake = Khora(
         pg_url,
         graph_url=graph_url,
         engine="vectorcypher",

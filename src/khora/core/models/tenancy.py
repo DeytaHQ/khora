@@ -1,4 +1,4 @@
-"""Multi-tenancy models for Khora Memory Lake.
+"""Multi-tenancy models for Khora.
 
 Namespace is the sole data isolation boundary. All memories, entities,
 and relationships are scoped to a namespace_id.

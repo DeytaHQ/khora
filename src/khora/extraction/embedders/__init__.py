@@ -1,4 +1,4 @@
-"""Embedding generation for Khora Memory Lake."""
+"""Embedding generation for Khora."""
 
 from __future__ import annotations
 

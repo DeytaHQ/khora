@@ -1,4 +1,4 @@
-"""Pipeline tasks for Khora Memory Lake."""
+"""Pipeline tasks for Khora."""
 
 from __future__ import annotations
 

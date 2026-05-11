@@ -271,7 +271,7 @@ More overlap = more redundancy = better boundary handling, but larger storage.
 
 ## Usage Examples
 
-### Via MemoryLake
+### Via Khora
 
 ```python
 # Use semantic chunking (default)

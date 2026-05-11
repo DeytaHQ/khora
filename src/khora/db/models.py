@@ -1,4 +1,4 @@
-"""SQLAlchemy models for Khora Memory Lake.
+"""SQLAlchemy models for Khora.
 
 This module defines the complete database schema including:
 - Multi-tenancy (namespaces)

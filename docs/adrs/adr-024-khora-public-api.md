@@ -1,15 +1,17 @@
-# ADR-024: Memory Lake Public API
+# ADR-024: Khora Public API
 
-- **Status:** Accepted
-- **Date:** 2026-04-16
+- **Status:** Accepted (revised 2026-05-11 — see ADR-027 for the rename history)
+- **Date:** 2026-04-16 (revised 2026-05-11)
 - **Deciders:** Khora architecture team
+
+> **Note (2026-05-11):** This ADR was originally titled "Memory Lake Public API" and codified the `MemoryLake` class. ADR-027 renamed the class to `Khora` and the module to `khora.khora` for the 0.10.0 release. All references have been updated in place; see ADR-027 for the rationale and the (hard) migration policy.
 
 ## Context
 
 ADR-022 stabilized the extraction-skills dataclasses
 (`ExpertiseConfig` et al.) that callers pass into
-`MemoryLake.remember()`. It did not cover the rest of the surface
-downstream packages already depend on: the `MemoryLake` class itself,
+`Khora.remember()`. It did not cover the rest of the surface
+downstream packages already depend on: the `Khora` class itself,
 result dataclasses returned from `remember()` / `recall()` /
 `remember_batch()`, the `KhoraConfig` settings hierarchy, a few
 supporting helpers, and the `khora.chat` module that `genesis` drives
@@ -22,20 +24,18 @@ fourth consumer — on top of `genesis`, `khora-benchmarks`, and
 future refactors inside khora do not silently break published
 releases of its consumers.
 
-This ADR is documentation-only. It does not add, rename, or change any
-runtime behaviour; it describes the symbols that are **already** in
-`__all__` on the top-level `khora` package plus the modules those
-consumers import today.
+This ADR describes the symbols that are in `__all__` on the top-level
+`khora` package plus the modules those consumers import today.
 
-### Observed downstream imports
+### Observed downstream imports (as of 0.10.0)
 
-- `genesis`: `from khora import MemoryLake`;
+- `genesis`: `from khora import Khora`;
   `from khora.core.models import MemoryNamespace`;
   `from khora.config import KhoraConfig`;
   `from khora.config.llm import LiteLLMConfig, configure_litellm`;
   `from khora.config.schema import LLMSettings, PipelineSettings, StorageSettings`;
   `from khora.chat import ChatEngine, ChatResponse, PersonaConfig, load_persona_config`.
-- `khora-benchmarks`: `from khora import MemoryLake`;
+- `khora-benchmarks`: `from khora import Khora`;
   `from khora.config import KhoraConfig`;
   `from khora.config.schema import LLMSettings, PipelineSettings, QuerySettings`;
   `from khora.query import SearchMode`;
@@ -45,14 +45,14 @@ consumers import today.
 - `khora-explorer`: `from khora.extraction.skills.base import …`
   (covered by ADR-022); `from khora.config.schema import KhoraConfig`.
 - `khora-cli` (new, DYT-2655): will import
-  `from khora import MemoryLake, KhoraConfig, SearchMode, LLMUsage,
+  `from khora import Khora, KhoraConfig, SearchMode, LLMUsage,
   RememberResult, RecallResult, BatchResult`;
   `from khora.extraction.binary_readers import extract_if_needed`;
   `from khora.logging_config import setup_logging`.
 
 ## Decision
 
-The symbols listed below are the **stable Memory Lake public API**.
+The symbols listed below are the **stable Khora public API**.
 Additive changes are permitted in minor releases; breaking changes
 require a major version bump and prior coordination with the consumer
 list above.
@@ -64,13 +64,13 @@ contract):
 
 | Symbol | Source |
 | --- | --- |
-| `MemoryLake` | `khora.memory_lake.MemoryLake` |
+| `Khora` | `khora.khora.Khora` |
 | `SearchMode` | `khora.query.engine.SearchMode` |
-| `RememberResult` | `khora.memory_lake.RememberResult` |
-| `RecallResult` | `khora.memory_lake.RecallResult` |
-| `BatchResult` | `khora.memory_lake.BatchResult` |
-| `Stats` | `khora.memory_lake.Stats` |
-| `LLMUsage` | `khora.memory_lake.LLMUsage` (DYT-645, also covered by Poros/Peras coordination) |
+| `RememberResult` | `khora.khora.RememberResult` |
+| `RecallResult` | `khora.khora.RecallResult` |
+| `BatchResult` | `khora.khora.BatchResult` |
+| `Stats` | `khora.khora.Stats` |
+| `LLMUsage` | `khora.khora.LLMUsage` (DYT-645, also covered by Poros/Peras coordination) |
 | `KhoraConfig` | `khora.config.schema.KhoraConfig` |
 | `KhoraError` | `khora.exceptions.KhoraError` |
 | `DocumentSource` | `khora.core.models.document.DocumentSource` |
@@ -79,13 +79,13 @@ contract):
 | `create_engine` / `list_engines` / `register_engine` | `khora.engines` |
 | `ExpertiseConfig` / `EntityTypeConfig` / `RelationshipTypeConfig` | ADR-022 |
 
-### `khora.MemoryLake` methods
+### `khora.Khora` methods
 
 All signatures are keyword-only beyond the first positional; adding a
 new keyword argument with a default is additive. Removing a keyword or
 changing a default-observable behaviour is breaking.
 
-- `MemoryLake(database_url: str | KhoraConfig | None = None, *, engine: str = "vectorcypher", graph_url: str | None = None, embedding_model: str = "text-embedding-3-small", storage_config: StorageConfig | None = None, engine_kwargs: dict[str, Any] | None = None, run_migrations: bool = False)`
+- `Khora(database_url: str | KhoraConfig | None = None, *, engine: str = "vectorcypher", graph_url: str | None = None, embedding_model: str = "text-embedding-3-small", storage_config: StorageConfig | None = None, engine_kwargs: dict[str, Any] | None = None, run_migrations: bool = False)`
 - `async connect() -> None`
 - `async disconnect() -> None`
 - `async __aenter__() / __aexit__(...)` — context-manager form
@@ -99,7 +99,7 @@ changing a default-observable behaviour is breaking.
 - `async stats(*, namespace: str | UUID) -> Stats`
 - `storage` property — returns the underlying `StorageCoordinator`. Stable in that it exists; the `StorageCoordinator` surface is **not** part of this ADR.
 
-There is no `MemoryLake.from_config(...)` classmethod today. The
+There is no `Khora.from_config(...)` classmethod today. The
 constructor already accepts a `KhoraConfig` as its first positional
 argument, which covers the same ergonomic; adding a classmethod alias
 is a candidate for a future additive change but is out of scope here.
@@ -149,7 +149,7 @@ Renaming or removing a field is breaking.
 ### `khora.core.models`
 
 - `MemoryNamespace` — the dataclass returned from
-  `MemoryLake.create_namespace()` and consumed by `genesis` TUI.
+  `Khora.create_namespace()` and consumed by `genesis` TUI.
   Public fields: `id`, `namespace_id`, `tenancy_mode`, `version`,
   `is_active`, `config_overrides`, `sync_checkpoints`, `metadata`,
   `created_at`, `updated_at`.
@@ -199,7 +199,9 @@ change to the rest of the chat API in the CHANGELOG under
 - Deprecation must be announced in `CHANGELOG.md` under
   `### Deprecated` in a minor release **before** the symbol is removed
   in the next major release. The deprecation entry must name the
-  replacement symbol.
+  replacement symbol. (See ADR-027 for the one explicit exception to
+  this rule: the 0.10.0 `MemoryLake` → `Khora` rename shipped without
+  a shim because downstream consumers were updated in lockstep.)
 - `__all__` in `src/khora/__init__.py` is the machine-readable source
   of truth for the top-level surface. For submodules, the `__all__`
   list in that submodule is authoritative.
@@ -210,23 +212,26 @@ ADR-024 is **additive** to ADR-022. The seven extraction-skills
 dataclasses enumerated in ADR-022 (`ExpertiseConfig`,
 `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`,
 `ExpansionConfig`, `CorrelationRule`, `InferenceRule`) remain governed
-by ADR-022 and are the `expertise` argument to `MemoryLake.remember()`
-and `MemoryLake.remember_batch()`. ADR-024 codifies the rest of the
+by ADR-022 and are the `expertise` argument to `Khora.remember()`
+and `Khora.remember_batch()`. ADR-024 codifies the rest of the
 surface the same consumers already touch.
 
 ## Compatibility with consumers
 
-- `genesis` — imports `MemoryLake`, `KhoraConfig`, `MemoryNamespace`,
+- `genesis` — imports `Khora`, `KhoraConfig`, `MemoryNamespace`,
   `LiteLLMConfig`, `configure_litellm`, `ChatResponse` (and other
-  `khora.chat` names). All are covered above. No migration needed.
-- `khora-benchmarks` — imports `MemoryLake`, `KhoraConfig`,
+  `khora.chat` names). All are covered above. After the 0.10.0 rename
+  (see ADR-027), genesis must update `from khora import MemoryLake` to
+  `from khora import Khora`; the symbol path is the only thing that
+  moved.
+- `khora-benchmarks` — imports `Khora`, `KhoraConfig`,
   `SearchMode` plus internal modules. The public imports are covered;
   benchmarks' use of `khora.engines.vectorcypher` internals remains
   explicitly private — benchmarks pin a khora version to manage
   churn.
 - `khora-explorer` — imports from `khora.extraction.skills.base`
   (ADR-022) and `khora.config.schema`. Both covered.
-- `khora-cli` (new, DYT-2655) — will import `MemoryLake`,
+- `khora-cli` (new, DYT-2655) — will import `Khora`,
   `KhoraConfig`, `SearchMode`, `LLMUsage`, `RememberResult`,
   `RecallResult`, `BatchResult`, `extract_if_needed`, `setup_logging`.
   All covered; no API additions required.
@@ -239,7 +244,7 @@ surface the same consumers already touch.
 
 - Four downstream packages can pin a khora minor version and trust
   that patch releases will not break their imports.
-- Contributors editing `khora/__init__.py`, `memory_lake.py`, or
+- Contributors editing `khora/__init__.py`, `khora.py`, or
   `config/schema.py` have a single document to consult before
   renaming.
 - `khora-cli` can proceed without litigating "is this public?" for
@@ -257,13 +262,15 @@ surface the same consumers already touch.
 
 **Neutral**
 
-- This ADR documents existing behaviour. No migration is required.
+- This ADR documents existing behaviour. No migration is required for
+  symbols other than `MemoryLake` → `Khora` (ADR-027).
   `__all__` in `src/khora/__init__.py` already lists the top-level
-  surface; no re-export is being added or removed by this ADR.
+  surface.
 
 ## Related
 
 - ADR-022 — Extraction skills public API (the `expertise` argument).
+- ADR-027 — `MemoryLake` → `Khora` rename + 0.10.0 release policy.
 - DYT-645 — `LLMUsage` contract with Poros/Peras.
 - DYT-2655 — parent initiative introducing `khora-cli`.
 - `CLAUDE.md` § Downstream — summarizes the contract for agents.

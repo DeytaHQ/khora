@@ -10,12 +10,12 @@ The Skeleton Construction engine is optimized for:
 
 Usage:
     # Default backend (pgvector)
-    async with MemoryLake(db_url, engine="skeleton") as lake:
+    async with Khora(db_url, engine="skeleton") as lake:
         await lake.remember("content", title="Doc", entity_types=[...], relationship_types=[...])
         results = await lake.recall("query", temporal_filter=TemporalFilter.relative_days(-1))
 
     # Weaviate backend (advanced filtering)
-    async with MemoryLake(
+    async with Khora(
         db_url,
         engine="skeleton",
         backend="weaviate",

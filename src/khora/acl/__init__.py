@@ -1,4 +1,4 @@
-"""Access Control Layer for Khora Memory Lake.
+"""Access Control Layer for Khora.
 
 Provides permission checking and enforcement across all storage layers.
 """

@@ -1,4 +1,4 @@
-"""Query result cache with TTL for Khora Memory Lake.
+"""Query result cache with TTL for Khora.
 
 Provides an in-memory LRU cache that avoids re-executing identical
 queries within a configurable time-to-live window.

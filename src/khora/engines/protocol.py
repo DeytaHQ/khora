@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from khora.core.models import Document, Entity, MemoryNamespace
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
-    from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
+    from khora.khora import BatchResult, RecallResult, RememberResult, Stats
     from khora.query import SearchMode
 
 
@@ -20,7 +20,7 @@ class MemoryEngineProtocol(Protocol):
     """Protocol all memory engines must implement.
 
     Engines encapsulate the full implementation of memory storage and retrieval.
-    The MemoryLake facade delegates all operations to the configured engine.
+    The Khora facade delegates all operations to the configured engine.
     """
 
     # =========================================================================

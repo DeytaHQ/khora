@@ -1,4 +1,4 @@
-"""Agentic search for Khora Memory Lake.
+"""Agentic search for Khora.
 
 Provides a two-step exploration agent that:
 1. Performs initial search with comprehensive query understanding (single LLM call)

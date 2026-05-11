@@ -1,4 +1,4 @@
-"""Configurable extraction skills and expertise for Khora Memory Lake.
+"""Configurable extraction skills and expertise for Khora.
 
 This module provides the expertise configuration system for controlling
 entity and relationship extraction. All domain knowledge is configurable
@@ -19,8 +19,8 @@ Example usage:
         ],
     )
 
-    # Use with MemoryLake
-    async with MemoryLake() as lake:
+    # Use with Khora
+    async with Khora() as lake:
         result = await lake.remember(content, expertise=expertise)
 """
 

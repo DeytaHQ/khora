@@ -1,4 +1,4 @@
-"""Document and chunk models for Khora Memory Lake.
+"""Document and chunk models for Khora.
 
 Documents represent source content that is chunked, embedded, and stored
 for semantic search and retrieval.
@@ -58,7 +58,7 @@ class DocumentSource:
 
 @dataclass
 class Document:
-    """A document to be processed and stored in the memory lake.
+    """A document to be processed and stored in Khora.
 
     Documents are the primary input unit. They are chunked, embedded,
     and stored for retrieval. Entities and relationships are extracted
@@ -174,7 +174,7 @@ class Chunk:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     source_timestamp: datetime | None = None
 
-    # Populated by MemoryLake when include_sources=True
+    # Populated by Khora when include_sources=True
     source_document: DocumentSource | None = None
 
     @property

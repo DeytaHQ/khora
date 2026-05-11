@@ -5,10 +5,10 @@ Semantic hooks let you subscribe to events during document ingestion and receive
 ## Quick Example
 
 ```python
-from khora import MemoryLake
+from khora import Khora
 from khora.hooks import SemanticFilter
 
-async with MemoryLake(db_url) as lake:
+async with Khora(db_url) as lake:
     # Simple: get notified on every new entity
     async def on_entity(event):
         print(f"New entity: {event.data.get('name')} ({event.data.get('entity_type')})")

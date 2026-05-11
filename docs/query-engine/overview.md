@@ -236,12 +236,12 @@ QueryResult(
 
 ## Using the Query Engine
 
-### Simple Usage via MemoryLake
+### Simple Usage via Khora
 
 ```python
-from khora import MemoryLake, SearchMode
+from khora import Khora, SearchMode
 
-async with MemoryLake() as lake:
+async with Khora() as lake:
     results = await lake.recall(
         "machine learning applications",
         mode=SearchMode.HYBRID,

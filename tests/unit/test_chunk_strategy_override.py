@@ -1,7 +1,7 @@
 """Unit tests for per-call chunk_strategy override (DYT-1124).
 
 Tests verify:
-- MemoryLake facade threads chunk_strategy to engine (remember + remember_batch)
+- Khora facade threads chunk_strategy to engine (remember + remember_batch)
 - VectorCypher _process_document uses override when set, config when None
 - Skeleton _process_document uses override when set, config when None
 - Protocol and all engine signatures accept chunk_strategy
@@ -20,7 +20,7 @@ from uuid import uuid4
 import pytest
 
 from khora.extraction.chunkers import ChunkStrategy, create_chunker
-from khora.memory_lake import RememberResult
+from khora.khora import RememberResult
 
 from .helpers import RESOLVE_ROW_ID, make_lake
 
@@ -77,13 +77,13 @@ def _vectorcypher_engine_with_mocks():
 
 
 # ===========================================================================
-# MemoryLake facade threading tests
+# Khora facade threading tests
 # ===========================================================================
 
 
 @pytest.mark.unit
-class TestMemoryLakeFacadeThreading:
-    """Verify MemoryLake passes chunk_strategy through to the engine."""
+class TestKhoraFacadeThreading:
+    """Verify Khora passes chunk_strategy through to the engine."""
 
     @pytest.mark.asyncio
     async def test_remember_threads_chunk_strategy(self) -> None:
@@ -137,7 +137,7 @@ class TestMemoryLakeFacadeThreading:
     @pytest.mark.asyncio
     async def test_remember_batch_threads_chunk_strategy(self) -> None:
         """remember_batch() forwards chunk_strategy to engine.remember_batch()."""
-        from khora.memory_lake import BatchResult
+        from khora.khora import BatchResult
 
         lake = make_lake(connected=True)
         engine = lake._engine
@@ -165,7 +165,7 @@ class TestMemoryLakeFacadeThreading:
     @pytest.mark.asyncio
     async def test_remember_batch_default_chunk_strategy_is_none(self) -> None:
         """remember_batch() passes None when chunk_strategy not specified."""
-        from khora.memory_lake import BatchResult
+        from khora.khora import BatchResult
 
         lake = make_lake(connected=True)
         engine = lake._engine

@@ -442,7 +442,7 @@ class LiteLLMEmbedder(Embedder):
                         cache_hit=False,
                     )
 
-                    from khora.memory_lake import LLMUsage
+                    from khora.khora import LLMUsage
                     from khora.telemetry.context import record_usage
 
                     record_usage(

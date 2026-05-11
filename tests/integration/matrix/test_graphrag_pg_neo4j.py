@@ -2,7 +2,7 @@
 
 GraphRAG is khora's default production engine but had **zero dedicated
 integration tests** prior to this file (per the DYT-3545 audit, §5).
-These tests wire up ``MemoryLake(engine="graphrag")`` against the real
+These tests wire up ``Khora(engine="graphrag")`` against the real
 production stack: ``khora-postgres`` (compose.yaml, port 5434) +
 ``khora-neo4j`` (compose.yaml, bolt port 7688), with stubbed LLM calls
 to keep the suite hermetic and offline.
@@ -51,7 +51,7 @@ from khora.extraction.extractors.base import (
     ExtractionResult,
 )
 from khora.extraction.skills import ExpertiseConfig
-from khora.memory_lake import MemoryLake
+from khora.khora import Khora
 
 EMBED_DIM = 1536  # matches the chunks.embedding Vector(1536) column from migrations
 
@@ -237,8 +237,8 @@ def _patch_llm(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-async def lake(_stack_ready: None, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[MemoryLake]:
-    """Per-test GraphRAG MemoryLake bound to live PG + Neo4j.
+async def lake(_stack_ready: None, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
+    """Per-test GraphRAG Khora bound to live PG + Neo4j.
 
     Function-scoped because the storage coordinator caches engine pools
     by URL; sharing across tests was tripping the autouse monkeypatch
@@ -262,7 +262,7 @@ async def lake(_stack_ready: None, monkeypatch: pytest.MonkeyPatch) -> AsyncIter
     config.pipelines.extract_entities = True
     config.pipelines.selective_extraction = False
 
-    lake = MemoryLake(config, engine="graphrag", run_migrations=False)
+    lake = Khora(config, engine="graphrag", run_migrations=False)
     await lake.connect()
     try:
         yield lake
@@ -271,13 +271,13 @@ async def lake(_stack_ready: None, monkeypatch: pytest.MonkeyPatch) -> AsyncIter
 
 
 @pytest.fixture
-async def namespace_id(lake: MemoryLake) -> UUID:
+async def namespace_id(lake: Khora) -> UUID:
     ns = await lake.create_namespace()
     return ns.namespace_id
 
 
 async def _remember(
-    lake: MemoryLake,
+    lake: Khora,
     *,
     namespace_id: UUID,
     content: str,
@@ -316,7 +316,7 @@ async def _neo4j_query(query: str, **params: Any) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-async def test_graphrag_remember_recall_roundtrip(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_graphrag_remember_recall_roundtrip(lake: Khora, namespace_id: UUID) -> None:
     """Ingest 3 docs, recall, assert ingested doc text appears in context."""
     contents = [
         "Alice met Bob at the Python conference in Berlin on March 15th.",
@@ -332,7 +332,7 @@ async def test_graphrag_remember_recall_roundtrip(lake: MemoryLake, namespace_id
     assert "Python conference" in result.context_text
 
 
-async def test_graphrag_namespace_isolation(lake: MemoryLake) -> None:
+async def test_graphrag_namespace_isolation(lake: Khora) -> None:
     """Two namespaces, queries don't cross-bleed."""
     ns_a = (await lake.create_namespace()).namespace_id
     ns_b = (await lake.create_namespace()).namespace_id
@@ -352,7 +352,7 @@ async def test_graphrag_namespace_isolation(lake: MemoryLake) -> None:
     assert "kangaroos" not in b_text, "namespace_a content leaked into namespace_b"
 
 
-async def test_graphrag_entity_extraction_via_neo4j(lake: MemoryLake) -> None:
+async def test_graphrag_entity_extraction_via_neo4j(lake: Khora) -> None:
     """Ingest a doc with a known entity, assert it lands as a node in Neo4j.
 
     This exercises the full extraction → entity-resolution → graph-write
@@ -395,7 +395,7 @@ async def test_graphrag_entity_extraction_via_neo4j(lake: MemoryLake) -> None:
     assert records[0]["entity_type"] == "PERSON"
 
 
-async def test_graphrag_temporal_filter(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_graphrag_temporal_filter(lake: Khora, namespace_id: UUID) -> None:
     """Backdate one doc 20 days, leave another at 5 days, query last 7 days.
 
     Asserts the ``start_time`` parameter on ``recall()`` excludes the
@@ -435,7 +435,7 @@ async def test_graphrag_temporal_filter(lake: MemoryLake, namespace_id: UUID) ->
     )
 
 
-async def test_graphrag_recall_metadata(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_graphrag_recall_metadata(lake: Khora, namespace_id: UUID) -> None:
     """RecallResult.metadata carries the expected GraphRAG keys."""
     await _remember(lake, namespace_id=namespace_id, content="A simple sentence about apples.")
 
@@ -460,7 +460,7 @@ async def test_graphrag_recall_metadata(lake: MemoryLake, namespace_id: UUID) ->
     assert "neighborhood_depth" in md["graph_traversal"]
 
 
-async def test_graphrag_concurrent_remember(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_graphrag_concurrent_remember(lake: Khora, namespace_id: UUID) -> None:
     """5 concurrent ingests in one namespace, no integrity errors."""
     contents = [f"document number {i} mentions widget-{i}" for i in range(5)]
     results = await asyncio.gather(
@@ -479,7 +479,7 @@ async def test_graphrag_concurrent_remember(lake: MemoryLake, namespace_id: UUID
     assert len(contents_returned) >= 5
 
 
-async def test_graphrag_recall_empty_namespace(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_graphrag_recall_empty_namespace(lake: Khora, namespace_id: UUID) -> None:
     """Recall against a freshly-created namespace returns an empty result cleanly."""
     result = await lake.recall("anything at all", namespace=namespace_id, limit=10)
 
@@ -489,7 +489,7 @@ async def test_graphrag_recall_empty_namespace(lake: MemoryLake, namespace_id: U
     assert result.metadata.get("mode") in {"HYBRID", "VECTOR", "GRAPH", "ALL"}
 
 
-async def test_graphrag_two_hop_traversal(lake: MemoryLake) -> None:
+async def test_graphrag_two_hop_traversal(lake: Khora) -> None:
     """Ingest A→B→C, query about A, assert C surfaces via 2-hop graph traversal.
 
     Stages a 3-document chain where extraction emits explicit relationships:

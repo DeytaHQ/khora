@@ -2,7 +2,7 @@
 
 Chronicle is one of khora's two production-ready engines but had zero
 integration coverage on a real PostgreSQL stack. These tests wire up
-``MemoryLake(engine="chronicle")`` against ``khora-postgres`` (compose.yaml)
+``Khora(engine="chronicle")`` against ``khora-postgres`` (compose.yaml)
 with stubbed LLM calls — no Neo4j, no OpenAI.
 
 Why no Neo4j: Chronicle's four channels (semantic / BM25 / temporal / entity)
@@ -47,7 +47,7 @@ from khora.extraction.extractors.base import (
 )
 from khora.extraction.skills import ExpertiseConfig
 from khora.extraction.skills.base import EventExtractionConfig, FactExtractionConfig
-from khora.memory_lake import MemoryLake
+from khora.khora import Khora
 
 EMBED_DIM = 1536  # matches the chunks.embedding Vector(1536) column from migrations
 
@@ -216,8 +216,8 @@ def _patch_llm(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-async def lake(_migrations_once: None) -> AsyncIterator[MemoryLake]:
-    """Per-test Chronicle MemoryLake bound to live PG.
+async def lake(_migrations_once: None) -> AsyncIterator[Khora]:
+    """Per-test Chronicle Khora bound to live PG.
 
     Function-scoped because the storage coordinator caches engine pools by
     URL; sharing across tests was tripping the autouse monkeypatch reset
@@ -233,7 +233,7 @@ async def lake(_migrations_once: None) -> AsyncIterator[MemoryLake]:
     config.pipelines.extract_entities = True
     config.pipelines.selective_extraction = False
 
-    lake = MemoryLake(config, engine="chronicle", run_migrations=False)
+    lake = Khora(config, engine="chronicle", run_migrations=False)
     await lake.connect()
     try:
         yield lake
@@ -242,13 +242,13 @@ async def lake(_migrations_once: None) -> AsyncIterator[MemoryLake]:
 
 
 @pytest.fixture
-async def namespace_id(lake: MemoryLake) -> UUID:
+async def namespace_id(lake: Khora) -> UUID:
     ns = await lake.create_namespace()
     return ns.namespace_id
 
 
 async def _remember(
-    lake: MemoryLake,
+    lake: Khora,
     *,
     namespace_id: UUID,
     content: str,
@@ -270,7 +270,7 @@ async def _remember(
 # ---------------------------------------------------------------------------
 
 
-async def test_chronicle_remember_recall_roundtrip(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_chronicle_remember_recall_roundtrip(lake: Khora, namespace_id: UUID) -> None:
     """Ingest 3 docs, recall, assert ingested text appears in context."""
     contents = [
         "Alice met Bob at the Python conference in Berlin on March 15th.",
@@ -288,7 +288,7 @@ async def test_chronicle_remember_recall_roundtrip(lake: MemoryLake, namespace_i
     assert "Python conference" in result.context_text
 
 
-async def test_chronicle_four_channels_contribute(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_chronicle_four_channels_contribute(lake: Khora, namespace_id: UUID) -> None:
     """Each applicable channel reports a non-zero hit count for a hybrid query."""
     _plan_extraction("Alice", entities=[("Alice", "PERSON"), ("Berlin", "LOCATION")])
     _plan_extraction("Carol", entities=[("Carol", "PERSON")])
@@ -319,7 +319,7 @@ async def test_chronicle_four_channels_contribute(lake: MemoryLake, namespace_id
     assert channels["entity"] >= 1, f"entity channel empty: {channels}"
 
 
-async def test_chronicle_abstention_signals_on_topic(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_chronicle_abstention_signals_on_topic(lake: Khora, namespace_id: UUID) -> None:
     """Query matches corpus → ``should_abstain`` is False, combined < 0.5."""
     _plan_extraction("Alice", entities=[("Alice", "PERSON")])
     await _remember(
@@ -336,7 +336,7 @@ async def test_chronicle_abstention_signals_on_topic(lake: MemoryLake, namespace
     assert sig["combined_score"] < 0.5, f"combined too high: {sig}"
 
 
-async def test_chronicle_abstention_signals_off_topic(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_chronicle_abstention_signals_off_topic(lake: Khora, namespace_id: UUID) -> None:
     """Query unrelated to corpus → at least one weak-signal flag fires.
 
     With deterministic identical embeddings every chunk has cosine=1.0, so
@@ -371,7 +371,7 @@ async def test_chronicle_abstention_signals_off_topic(lake: MemoryLake, namespac
 
 
 async def test_chronicle_temporal_filter_pushdown(
-    lake: MemoryLake, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch
+    lake: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Backdate one chunk by 20 days, leave another at 5 days, query "last 7 days".
 
@@ -415,7 +415,7 @@ async def test_chronicle_temporal_filter_pushdown(
 
     monkeypatch.setattr(coord, "search_similar_chunks", _spy)
 
-    # Query with start_time = 7 days ago → MemoryLake constructs a
+    # Query with start_time = 7 days ago → Khora constructs a
     # SkeletonTemporalFilter with occurred_after, which Chronicle's temporal
     # channel forwards as created_after to search_similar_chunks (engine.py:1700-1733).
     seven_days_ago = datetime.now(UTC) - timedelta(days=7)
@@ -443,7 +443,7 @@ async def test_chronicle_temporal_filter_pushdown(
     # all four channels honor the filter — see test_chronicle_temporal_old_doc_excluded.
 
 
-async def test_chronicle_temporal_old_doc_excluded(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_chronicle_temporal_old_doc_excluded(lake: Khora, namespace_id: UUID) -> None:
     """Document older than the temporal_filter window must not appear in chunks."""
     r_recent = await _remember(lake, namespace_id=namespace_id, content="recent doc about Falcon launch.")
     r_old = await _remember(lake, namespace_id=namespace_id, content="old doc about Falcon launch.")
@@ -473,7 +473,7 @@ async def test_chronicle_temporal_old_doc_excluded(lake: MemoryLake, namespace_i
     assert r_old.document_id not in returned_doc_ids
 
 
-async def test_chronicle_entity_anchored_routing(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_chronicle_entity_anchored_routing(lake: Khora, namespace_id: UUID) -> None:
     """ "Who is Alice?" → ENTITY_ANCHORED routing classification.
 
     The router's classification depends on the heuristic match against the
@@ -497,7 +497,7 @@ async def test_chronicle_entity_anchored_routing(lake: MemoryLake, namespace_id:
     )
 
 
-async def test_chronicle_namespace_isolation(lake: MemoryLake) -> None:
+async def test_chronicle_namespace_isolation(lake: Khora) -> None:
     """Two namespaces, queries don't cross-bleed."""
     ns_a = (await lake.create_namespace()).namespace_id
     ns_b = (await lake.create_namespace()).namespace_id
@@ -517,7 +517,7 @@ async def test_chronicle_namespace_isolation(lake: MemoryLake) -> None:
     assert "kangaroos" not in b_text, "namespace_a content leaked into namespace_b"
 
 
-async def test_chronicle_recall_metadata_completeness(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_chronicle_recall_metadata_completeness(lake: Khora, namespace_id: UUID) -> None:
     """All RecallResult.metadata keys documented in CLAUDE.md must be present."""
     await _remember(lake, namespace_id=namespace_id, content="A simple sentence about apples.")
 
@@ -551,7 +551,7 @@ async def test_chronicle_recall_metadata_completeness(lake: MemoryLake, namespac
     assert set(md["abstention_signals"].keys()) == expected_signals
 
 
-async def test_chronicle_concurrent_remember(lake: MemoryLake, namespace_id: UUID) -> None:
+async def test_chronicle_concurrent_remember(lake: Khora, namespace_id: UUID) -> None:
     """5 concurrent ingests in one namespace, no integrity errors."""
     contents = [f"document number {i} mentions widget-{i}" for i in range(5)]
     results = await asyncio.gather(

@@ -1,4 +1,4 @@
-"""Configuration resolver for Khora Memory Lake.
+"""Configuration resolver for Khora.
 
 Resolves configuration values with 2-tier inheritance: global defaults -> namespace overrides.
 """

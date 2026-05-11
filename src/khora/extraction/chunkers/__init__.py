@@ -1,4 +1,4 @@
-"""Text chunking strategies for Khora Memory Lake."""
+"""Text chunking strategies for Khora."""
 
 from __future__ import annotations
 

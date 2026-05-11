@@ -118,7 +118,7 @@ print(f"Found {len(result.chunks)} unique chunks")
 print(f"Summary: {result.summary}")
 ```
 
-### Via MemoryLake
+### Via Khora
 
 ```python
 result = await lake.recall(

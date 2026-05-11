@@ -342,9 +342,9 @@ This enables:
 ### Listing Entities
 
 ```python
-from khora import MemoryLake
+from khora import Khora
 
-async with MemoryLake() as lake:
+async with Khora() as lake:
     # List all entities
     entities = await lake.list_entities()
 

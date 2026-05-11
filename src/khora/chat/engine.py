@@ -1,4 +1,4 @@
-"""Chat engine for conversational memory lake interactions."""
+"""Chat engine for conversational Khora interactions."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .history import HistoryManager
 from .prompt import PromptGenerator
 
 if TYPE_CHECKING:
-    from khora.memory_lake import MemoryLake
+    from khora.khora import Khora
 
     from .persona import PersonaConfig
 
@@ -35,7 +35,7 @@ class ChatEngine:
     def __init__(
         self,
         persona: PersonaConfig,
-        memory_lake: MemoryLake,
+        khora: Khora,
         llm_model: str = "gpt-4o",
         agentic_search: bool = False,
     ) -> None:
@@ -43,12 +43,12 @@ class ChatEngine:
 
         Args:
             persona: Persona configuration for response generation
-            memory_lake: MemoryLake instance for search
+            khora: Khora instance for search
             llm_model: LLM model to use for response generation
             agentic_search: Whether to use multi-step agentic search
         """
         self.persona = persona
-        self.lake = memory_lake
+        self.lake = khora
         self.llm_model = llm_model
         self.agentic_search = agentic_search
 
@@ -87,7 +87,7 @@ class ChatEngine:
 
         logger.debug(f"Processing chat query: {query[:50]}...")
 
-        # 1. Search memory lake for relevant context
+        # 1. Search Khora for relevant context
         recall_result = await self.lake.recall(
             query,
             namespace=namespace_id,

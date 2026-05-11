@@ -11,8 +11,8 @@
 
 Through v0.8.x the embedded story for khora drifted across multiple shapes — Kuzu (now archived upstream), SurrealDB (in-tree but with KNN warts), and an emerging SQLite + LanceDB backend (`sqlite_lance`) that landed engine-level integration tests during the DYT-3545 sprint. Around the same time the documentation began to imply that the embedded path was production-ready alongside the PostgreSQL + pgvector + Neo4j stack. A strategic review concluded that this framing was more aspirational than load-bearing:
 
-- **No internal consumer pulls for `memory://` today.** A grep across `genesis`, `khora-benchmarks`, `khora-cli`, `khora-explorer` shows zero non-vendored hits — every downstream constructs a `MemoryLake(KhoraConfig(...))` from a real config. The "embedded persona" is a hypothesis, not an installed user.
-- **`memory://` does not parse as a backend selector.** `MemoryLake("memory://")` treats the URL as the PostgreSQL `database_url`. The only `memory://` scheme defined in-tree is the SurrealDB in-process default (`storage/backends/surrealdb/connection.py:71`), which is not what the README's quickstart example was implying.
+- **No internal consumer pulls for `memory://` today.** A grep across `genesis`, `khora-benchmarks`, `khora-cli`, `khora-explorer` shows zero non-vendored hits — every downstream constructs a `Khora(KhoraConfig(...))` from a real config. The "embedded persona" is a hypothesis, not an installed user.
+- **`memory://` does not parse as a backend selector.** `Khora("memory://")` treats the URL as the PostgreSQL `database_url`. The only `memory://` scheme defined in-tree is the SurrealDB in-process default (`storage/backends/surrealdb/connection.py:71`), which is not what the README's quickstart example was implying.
 - **Two-engine seam (SQLite + LanceDB) has structural warts.** `coordinator.transaction()` only enrols the SQL session — graph writes go through raw aiosqlite, LanceDB writes happen post-commit with compensating-delete-on-failure. Partial atomicity is documented but not closed.
 - **DYT-3550 (point-in-time queries on embedded) is not implementable** in the recursive-CTE port today. The engine × backend matrix has a structural hole.
 - **"Embedded" is ~150 MB unpacked.** `pyarrow>=18` (90–120 MB) + `lancedb>=0.25` native (25 MB) + Arrow C++ runtime. Calling this "no native deps" overpromises — it is "no server", which is a different claim.
@@ -71,7 +71,7 @@ Kuzu was acquired by Apple in October 2025 and the upstream repository is archiv
 
 ### 6. Default embedded URI routing is a v0.10 code change
 
-`MemoryLake("memory://")` currently treats the argument as the PostgreSQL `database_url`. The README quickstart has been corrected in v0.9.0 to recommend `MemoryLake()` (no positional arg) for the production stack and `KHORA_STORAGE_BACKEND=sqlite_lance` for the embedded stack. Routing a `memory://` URI to the recommended embedded stack at the lake constructor is a behavioural change tracked separately for v0.10.
+`Khora("memory://")` currently treats the argument as the PostgreSQL `database_url`. The README quickstart has been corrected in v0.9.0 to recommend `Khora()` (no positional arg) for the production stack and `KHORA_STORAGE_BACKEND=sqlite_lance` for the embedded stack. Routing a `memory://` URI to the recommended embedded stack at the lake constructor is a behavioural change tracked separately for v0.10.
 
 ### 7. Defer sqlite-vec / pgserver to v0.10
 

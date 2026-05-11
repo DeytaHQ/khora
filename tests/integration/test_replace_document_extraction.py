@@ -1,7 +1,7 @@
 """End-to-end replace-via-remember() integration tests (DYT-2675, ADR-056).
 
 Exercises the document-replacement lifecycle through the public
-``MemoryLake.remember()`` / ``VectorCypherEngine.remember()`` API surface,
+``Khora.remember()`` / ``VectorCypherEngine.remember()`` API surface,
 against a real Postgres + Neo4j stack. The sibling file
 ``test_coordinator_replace_document_extraction.py`` tests the coordinator
 primitive directly; this file tests the public entry point where an
@@ -24,7 +24,7 @@ Scenarios (one test method each):
    the traversal applies the ``valid_until`` predicate and visible
    otherwise. Anchored to raw Cypher that mirrors
    ``DualNodeManager.get_entity_neighborhoods`` (dual_nodes.py:595-600)
-   because neither ``MemoryLake.recall()`` nor
+   because neither ``Khora.recall()`` nor
    ``GraphBackend.get_neighborhoods_batch`` expose ``prefer_current``
    publicly (ADR-056 §Decision 6, plan open question #1).
 8. Backward compat: when ``external_id=None``, checksum dedup still
@@ -68,7 +68,7 @@ from khora.extraction.extractors.base import (
     ExtractedRelationship,
     ExtractionResult,
 )
-from khora.memory_lake import MemoryLake, RememberResult
+from khora.khora import Khora, RememberResult
 
 EMBED_DIM = 4
 
@@ -229,7 +229,7 @@ async def _get_relationship(
     reason="set NEO4J_INTEGRATION_TEST=1 to run against real backends (requires make dev)",
 )
 class TestReplaceViaRememberIntegration:
-    """End-to-end replace lifecycle through ``MemoryLake.remember()``."""
+    """End-to-end replace lifecycle through ``Khora.remember()``."""
 
     # ------------------------------------------------------------------
     # Fixtures
@@ -255,7 +255,7 @@ class TestReplaceViaRememberIntegration:
         )
 
     @pytest.fixture(scope="class")
-    async def lake(self) -> AsyncIterator[MemoryLake]:
+    async def lake(self) -> AsyncIterator[Khora]:
         database_url = os.environ.get(
             "KHORA_DATABASE_URL",
             "postgresql+asyncpg://khora:khora@localhost:5432/khora",
@@ -279,7 +279,7 @@ class TestReplaceViaRememberIntegration:
         # Skip selective extraction threshold so every chunk is extracted.
         config.pipeline.selective_extraction = False
 
-        lake = MemoryLake(config, run_migrations=False)
+        lake = Khora(config, run_migrations=False)
         await lake.connect()
         try:
             yield lake
@@ -287,7 +287,7 @@ class TestReplaceViaRememberIntegration:
             await lake.disconnect()
 
     @pytest.fixture
-    async def namespace_id(self, lake: MemoryLake) -> UUID:
+    async def namespace_id(self, lake: Khora) -> UUID:
         ns = await lake.create_namespace()
         return ns.namespace_id
 
@@ -295,7 +295,7 @@ class TestReplaceViaRememberIntegration:
     # Scenario helpers
     # ------------------------------------------------------------------
 
-    def _graph_driver(self, lake: MemoryLake) -> Any:
+    def _graph_driver(self, lake: Khora) -> Any:
         graph = lake.storage.graph
         assert graph is not None, "graph backend must be configured"
         driver = getattr(graph, "_driver", None)
@@ -304,7 +304,7 @@ class TestReplaceViaRememberIntegration:
 
     async def _remember(
         self,
-        lake: MemoryLake,
+        lake: Khora,
         *,
         namespace_id: UUID,
         content: str,
@@ -323,7 +323,7 @@ class TestReplaceViaRememberIntegration:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_golden_path_replaces_with_same_external_id(self, lake: MemoryLake, namespace_id: UUID) -> None:
+    async def test_golden_path_replaces_with_same_external_id(self, lake: Khora, namespace_id: UUID) -> None:
         """v1 (alice, bob, KNOWS) → v2 (alice, carol): bob + KNOWS retire, alice remaps, carol net-new."""
         driver = self._graph_driver(lake)
         ns = str(await lake.storage.resolve_namespace(namespace_id))
@@ -415,7 +415,7 @@ class TestReplaceViaRememberIntegration:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_cosourced_entity_survives_retirement(self, lake: MemoryLake, namespace_id: UUID) -> None:
+    async def test_cosourced_entity_survives_retirement(self, lake: Khora, namespace_id: UUID) -> None:
         """Dave is written by doc A and doc B; replacing A (minus Dave) leaves Dave alive and sole-sourced to B."""
         driver = self._graph_driver(lake)
         ns = str(await lake.storage.resolve_namespace(namespace_id))
@@ -481,7 +481,7 @@ class TestReplaceViaRememberIntegration:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_cosourced_relationship_survives_retirement(self, lake: MemoryLake, namespace_id: UUID) -> None:
+    async def test_cosourced_relationship_survives_retirement(self, lake: Khora, namespace_id: UUID) -> None:
         """KNOWS(alice,bob) is asserted by docs A + B; replacing A without KNOWS leaves the edge alive."""
         driver = self._graph_driver(lake)
         ns = str(await lake.storage.resolve_namespace(namespace_id))
@@ -543,7 +543,7 @@ class TestReplaceViaRememberIntegration:
     @pytest.mark.asyncio
     async def test_atomic_chunk_replacement_pg_rolls_back(
         self,
-        lake: MemoryLake,
+        lake: Khora,
         namespace_id: UUID,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -632,7 +632,7 @@ class TestReplaceViaRememberIntegration:
     @pytest.mark.asyncio
     async def test_graph_failure_marks_failed_then_heals(
         self,
-        lake: MemoryLake,
+        lake: Khora,
         namespace_id: UUID,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -710,9 +710,7 @@ class TestReplaceViaRememberIntegration:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_concurrent_external_id_converges_to_single_document(
-        self, lake: MemoryLake, namespace_id: UUID
-    ) -> None:
+    async def test_concurrent_external_id_converges_to_single_document(self, lake: Khora, namespace_id: UUID) -> None:
         """Two parallel remember() calls with the same external_id converge on one document.
 
         Per engine.py:641-652, the loser catches IntegrityError and
@@ -780,10 +778,10 @@ class TestReplaceViaRememberIntegration:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_recall_filter_symmetry_prefer_current(self, lake: MemoryLake, namespace_id: UUID) -> None:
+    async def test_recall_filter_symmetry_prefer_current(self, lake: Khora, namespace_id: UUID) -> None:
         """Retired edges are hidden when prefer_current=True, visible otherwise (ADR-056 §Decision 6).
 
-        ``MemoryLake.recall()`` does not expose ``prefer_current`` as a
+        ``Khora.recall()`` does not expose ``prefer_current`` as a
         public kwarg (see plan §6 open question #1). The graph-backend
         ``get_neighborhoods_batch`` also does not take ``prefer_current``;
         only ``DualNodeManager.get_entity_neighborhoods`` (used by the
@@ -878,7 +876,7 @@ class TestReplaceViaRememberIntegration:
     @pytest.mark.asyncio
     async def test_backward_compat_external_id_none_checksum_dedup(
         self,
-        lake: MemoryLake,
+        lake: Khora,
         namespace_id: UUID,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:

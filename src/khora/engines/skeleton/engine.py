@@ -30,7 +30,7 @@ from khora.core.models import (
 )
 from khora.engines._storage_config import build_storage_config
 from khora.extraction.embedders import LiteLLMEmbedder
-from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
+from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
 from khora.telemetry import trace, trace_span

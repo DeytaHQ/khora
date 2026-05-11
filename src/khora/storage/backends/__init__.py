@@ -1,4 +1,4 @@
-"""Storage backend implementations for Khora Memory Lake."""
+"""Storage backend implementations for Khora."""
 
 from __future__ import annotations
 

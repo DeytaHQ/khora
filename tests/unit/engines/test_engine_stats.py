@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.memory_lake import Stats
+from khora.khora import Stats
 
 
 def _make_mock_storage(

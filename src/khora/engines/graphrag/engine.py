@@ -22,7 +22,7 @@ from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import Document, DocumentMetadata, Entity, MemoryNamespace
 from khora.engines._storage_config import build_storage_config
 from khora.extraction.embedders import LiteLLMEmbedder
-from khora.memory_lake import BatchResult, RecallResult, RememberResult, Stats
+from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import HybridQueryEngine, QueryConfig, SearchMode
 from khora.query.temporal_detection import (
     TemporalCategory,
@@ -90,7 +90,7 @@ class ExtractionQualityMetrics:
 class GraphRAGEngine:
     """GraphRAG engine - full-featured engine using knowledge graphs, vectors, and LLM extraction.
 
-    This is the default engine for MemoryLake. It provides:
+    This is the default engine for Khora. It provides:
     - Document chunking (fixed, semantic, recursive, conversation-aware)
     - Entity and relationship extraction using LLMs
     - Vector similarity search via pgvector
@@ -407,7 +407,7 @@ class GraphRAGEngine:
         # for RECENCY / STATE_QUERY categories when no explicit filter exists.
         query_temporal_filter = temporal_filter  # may already be set by caller
         if query_temporal_filter is not None:
-            # MemoryLake passes a SkeletonTemporalFilter (occurred_after/occurred_before).
+            # Khora passes a SkeletonTemporalFilter (occurred_after/occurred_before).
             # Convert to QueryTemporalFilter (start_time/end_time) expected by query engine.
             # Only update if conversion succeeds — preserves already-query-shaped filters.
             from khora.query.temporal_resolver import to_query_temporal_filter

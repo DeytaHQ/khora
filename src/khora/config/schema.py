@@ -544,7 +544,7 @@ class PipelineSettings(BaseSettings):
     pending_processor_enabled: bool = Field(
         default=True,
         description="Retained for backwards compatibility. No longer auto-consulted on connect() — "
-        "the processor must now be started explicitly via MemoryLake.start_pending_processor(). "
+        "the processor must now be started explicitly via Khora.start_pending_processor(). "
         "Setting this env var has no effect on processor startup.",
     )
     pending_processor_max_concurrent: int = Field(

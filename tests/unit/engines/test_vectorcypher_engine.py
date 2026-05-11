@@ -14,7 +14,7 @@ from khora.engines.vectorcypher.engine import (
     VectorCypherConfig,
     VectorCypherEngine,
 )
-from khora.memory_lake import RecallResult
+from khora.khora import RecallResult
 
 
 class TestVectorCypherConfig:
@@ -1073,7 +1073,7 @@ class TestVectorCypherEngineRemember:
     @pytest.mark.asyncio
     async def test_remember_batch_routes_mixed_external_ids(self, connected_engine: VectorCypherEngine) -> None:
         """DYT-2674: remember_batch dispatches matched external_id docs to replace path."""
-        from khora.memory_lake import RememberResult
+        from khora.khora import RememberResult
 
         namespace_id = uuid4()
         matched_doc_id = uuid4()
@@ -1142,7 +1142,7 @@ class TestVectorCypherEngineRemember:
     @pytest.mark.asyncio
     async def test_remember_batch_streaming_external_id_prefilter(self, connected_engine: VectorCypherEngine) -> None:
         """DYT-2674: streaming pipeline removes external_id-matched docs from chunk/embed stages."""
-        from khora.memory_lake import RememberResult
+        from khora.khora import RememberResult
 
         namespace_id = uuid4()
         matched_doc_id = uuid4()

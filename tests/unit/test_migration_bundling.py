@@ -1,7 +1,7 @@
 """Unit tests for migration bundling (DYT-567).
 
 Tests that Alembic migrations are bundled in the khora package and
-can be run programmatically via run_migrations() / MemoryLake(run_migrations=True).
+can be run programmatically via run_migrations() / Khora(run_migrations=True).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import pytest
 
 import khora.db.migrations
 from khora.db.session import MigrationResult, _DatabaseAheadError, _run_migrations_sync, run_migrations
-from khora.memory_lake import MemoryLake
+from khora.khora import Khora
 
 # Derive migrations directory from the installed package — not relative to this test file
 _MIGRATIONS_DIR = Path(khora.db.migrations.__file__).parent
@@ -25,7 +25,7 @@ _MIGRATIONS_DIR = Path(khora.db.migrations.__file__).parent
 
 
 def _mock_config() -> MagicMock:
-    """Minimal mock KhoraConfig for MemoryLake tests."""
+    """Minimal mock KhoraConfig for Khora tests."""
     cfg = MagicMock()
     cfg.database_url = "postgresql://localhost/testdb"
     cfg.llm.embedding_model = "text-embedding-3-small"
@@ -268,35 +268,35 @@ class TestRunMigrationsAsync:
 
 
 # ---------------------------------------------------------------------------
-# MemoryLake.__init__ with run_migrations parameter
+# Khora.__init__ with run_migrations parameter
 # ---------------------------------------------------------------------------
 
 
-class TestMemoryLakeInitMigrations:
-    """Tests for MemoryLake.__init__() run_migrations parameter."""
+class TestKhoraInitMigrations:
+    """Tests for Khora.__init__() run_migrations parameter."""
 
     @pytest.mark.unit
     def test_run_migrations_default_false(self):
         """run_migrations defaults to False."""
-        with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-            lake = MemoryLake()
+        with patch("khora.khora.load_config", return_value=_mock_config()):
+            lake = Khora()
         assert lake._run_migrations is False
 
     @pytest.mark.unit
     def test_run_migrations_true(self):
         """run_migrations=True is stored on the instance."""
-        with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-            lake = MemoryLake(run_migrations=True)
+        with patch("khora.khora.load_config", return_value=_mock_config()):
+            lake = Khora(run_migrations=True)
         assert lake._run_migrations is True
 
 
 # ---------------------------------------------------------------------------
-# MemoryLake.connect() — migration integration
+# Khora.connect() — migration integration
 # ---------------------------------------------------------------------------
 
 
-class TestMemoryLakeConnectMigrations:
-    """Tests for MemoryLake.connect() migration integration."""
+class TestKhoraConnectMigrations:
+    """Tests for Khora.connect() migration integration."""
 
     @pytest.mark.unit
     async def test_connect_runs_migrations_on_success(self):
@@ -321,11 +321,11 @@ class TestMemoryLakeConnectMigrations:
             return mock_engine
 
         with (
-            patch("khora.memory_lake.load_config", return_value=_mock_config()),
+            patch("khora.khora.load_config", return_value=_mock_config()),
             patch("khora.db.session.run_migrations", side_effect=fake_run_migrations),
             patch("khora.engines.create_engine", side_effect=fake_create_engine),
         ):
-            lake = MemoryLake(run_migrations=True)
+            lake = Khora(run_migrations=True)
             await lake.connect()
 
         assert call_order == ["migrations", "create_engine"]
@@ -343,10 +343,10 @@ class TestMemoryLakeConnectMigrations:
         )
 
         with (
-            patch("khora.memory_lake.load_config", return_value=_mock_config()),
+            patch("khora.khora.load_config", return_value=_mock_config()),
             patch("khora.db.session.run_migrations", AsyncMock(return_value=migration_result)),
         ):
-            lake = MemoryLake(run_migrations=True)
+            lake = Khora(run_migrations=True)
             with pytest.raises(RuntimeError, match="migration table locked"):
                 await lake.connect()
 
@@ -359,11 +359,11 @@ class TestMemoryLakeConnectMigrations:
         mock_engine.connect = AsyncMock()
 
         with (
-            patch("khora.memory_lake.load_config", return_value=_mock_config()),
+            patch("khora.khora.load_config", return_value=_mock_config()),
             patch("khora.engines.create_engine", return_value=mock_engine),
             patch("khora.db.session.run_migrations") as mock_mig,
         ):
-            lake = MemoryLake()
+            lake = Khora()
             await lake.connect()
 
         mock_mig.assert_not_called()
@@ -1066,12 +1066,12 @@ class TestRunMigrationsSyncSkippedAhead:
 
 
 # ---------------------------------------------------------------------------
-# MemoryLake.connect() — already connected (idempotent)
+# Khora.connect() — already connected (idempotent)
 # ---------------------------------------------------------------------------
 
 
-class TestMemoryLakeConnectIdempotent:
-    """Tests for MemoryLake.connect() idempotency."""
+class TestKhoraConnectIdempotent:
+    """Tests for Khora.connect() idempotency."""
 
     @pytest.mark.unit
     async def test_connect_already_connected_is_noop(self):
@@ -1080,10 +1080,10 @@ class TestMemoryLakeConnectIdempotent:
         mock_engine.connect = AsyncMock()
 
         with (
-            patch("khora.memory_lake.load_config", return_value=_mock_config()),
+            patch("khora.khora.load_config", return_value=_mock_config()),
             patch("khora.engines.create_engine", return_value=mock_engine) as mock_create,
         ):
-            lake = MemoryLake(run_migrations=True)
+            lake = Khora(run_migrations=True)
             # Simulate already connected
             lake._connected = True
             lake._engine = mock_engine

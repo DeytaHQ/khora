@@ -23,12 +23,12 @@ For a descriptive query like "wrought-iron tower built for the 1889 World's Fair
 The threshold chain was:
 
 ```
-MemoryLake.recall(min_similarity=0.5)        # caller-facing default
+Khora.recall(min_similarity=0.5)        # caller-facing default
     → QueryConfig(min_chunk_similarity=0.3)   # internal default
     → pgvector WHERE similarity >= 0.3        # DB-level filter
 ```
 
-When using `MemoryLake.recall()` without arguments, the `0.5` default overrode the `QueryConfig` default of `0.3`, making things even worse.
+When using `Khora.recall()` without arguments, the `0.5` default overrode the `QueryConfig` default of `0.3`, making things even worse.
 
 For comparison: Cognee applies no threshold at all — it returns whatever pgvector finds, ranked by distance, and lets the caller decide what's "good enough."
 
@@ -60,14 +60,14 @@ For paraphrased queries, entity linking often found nothing (no exact or fuzzy m
 
 ### Similarity Thresholds (P0)
 
-The `MemoryLake.recall()` default `min_similarity` changed from `0.5` to `0.0`. The `QueryConfig` defaults for `min_chunk_similarity` and `min_entity_similarity` changed from `0.3` to `0.05`.
+The `Khora.recall()` default `min_similarity` changed from `0.5` to `0.0`. The `QueryConfig` defaults for `min_chunk_similarity` and `min_entity_similarity` changed from `0.3` to `0.05`.
 
-Setting `min_similarity=0.0` at the `MemoryLake` level means: don't filter at the database level, let the ranking pipeline (RRF fusion, reranking) decide what's relevant. The small `0.05` default in `QueryConfig` is a noise floor — it filters out truly random matches without discarding anything a human might consider relevant.
+Setting `min_similarity=0.0` at the `Khora` level means: don't filter at the database level, let the ranking pipeline (RRF fusion, reranking) decide what's relevant. The small `0.05` default in `QueryConfig` is a noise floor — it filters out truly random matches without discarding anything a human might consider relevant.
 
 If you have a use case where you want strict filtering (e.g., only returning very confident matches), you can still pass `min_similarity=0.7` explicitly. The change only affects the default behavior.
 
 Files changed:
-- `memory_lake.py`: `min_similarity` parameter default `0.5` → `0.0`
+- `khora.py`: `min_similarity` parameter default `0.5` → `0.0`
 - `query/engine.py`: `QueryConfig.min_chunk_similarity` default `0.3` → `0.05`
 - `query/engine.py`: `QueryConfig.min_entity_similarity` default `0.3` → `0.05`
 - `config/schema.py`: `QuerySettings.min_chunk_similarity` default `0.3` → `0.05`

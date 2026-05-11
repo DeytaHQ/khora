@@ -1,4 +1,4 @@
-"""Incremental update manager for Khora Memory Lake.
+"""Incremental update manager for Khora.
 
 Handles change detection and incremental processing of documents.
 """

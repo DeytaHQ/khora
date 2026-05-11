@@ -80,10 +80,10 @@ Choose GraphRAG instead when:
 The main engine class implementing `MemoryEngineProtocol`:
 
 ```python
-from khora import MemoryLake
+from khora import Khora
 
 # Use VectorCypher engine explicitly
-async with MemoryLake("postgresql://...", engine="vectorcypher") as lake:
+async with Khora("postgresql://...", engine="vectorcypher") as lake:
     # Store with temporal context
     result = await lake.remember(
         "Meeting notes from Q1 planning with John",
@@ -438,15 +438,15 @@ config = VectorCypherConfig(
 )
 ```
 
-### Via `engine_kwargs` (MemoryLake Constructor)
+### Via `engine_kwargs` (Khora Constructor)
 
-The recommended way to pass `VectorCypherConfig` is through the `engine_kwargs` parameter on `MemoryLake`:
+The recommended way to pass `VectorCypherConfig` is through the `engine_kwargs` parameter on `Khora`:
 
 ```python
-from khora import MemoryLake
+from khora import Khora
 from khora.engines.vectorcypher import VectorCypherConfig
 
-async with MemoryLake(
+async with Khora(
     "postgresql://localhost/khora",
     engine="vectorcypher",
     engine_kwargs={"vectorcypher_config": VectorCypherConfig(
@@ -636,7 +636,7 @@ uv run alembic upgrade head
 
 **Temporal SQL pushdown.** Relative date expressions in queries ("last 7 days", "since March") are detected by the temporal classifier and translated into SQL WHERE clauses that filter at the database level before vector search. This reduces the candidate set and improves both latency and relevance for time-scoped queries. Controlled by `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN`.
 
-**VectorCypher is now the default engine** when creating a `MemoryLake` without an explicit `engine=` argument.
+**VectorCypher is now the default engine** when creating a `Khora` without an explicit `engine=` argument.
 
 ## Related Documentation
 

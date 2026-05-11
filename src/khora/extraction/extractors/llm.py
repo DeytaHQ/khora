@@ -797,7 +797,7 @@ class LLMEntityExtractor(EntityExtractor):
                             latency_ms=_latency,
                         )
 
-                        from khora.memory_lake import LLMUsage
+                        from khora.khora import LLMUsage
                         from khora.telemetry.context import record_usage
 
                         record_usage(
@@ -940,7 +940,7 @@ class LLMEntityExtractor(EntityExtractor):
                     latency_ms=_latency,
                 )
 
-                from khora.memory_lake import LLMUsage
+                from khora.khora import LLMUsage
                 from khora.telemetry.context import record_usage
 
                 record_usage(
@@ -1717,7 +1717,7 @@ Return ONLY valid JSON, no other text."""
                             metadata={"batch_size": len(texts)},
                         )
 
-                        from khora.memory_lake import LLMUsage
+                        from khora.khora import LLMUsage
                         from khora.telemetry.context import record_usage
 
                         record_usage(

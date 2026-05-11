@@ -332,8 +332,8 @@ For some use cases, you might use both engines:
 
 ```python
 # Example: Dual-engine setup (conceptual)
-async with MemoryLake(db_url, engine="skeleton") as skeleton_lake:
-    async with MemoryLake(db_url, engine="graphrag") as graphrag_lake:
+async with Khora(db_url, engine="skeleton") as skeleton_lake:
+    async with Khora(db_url, engine="graphrag") as graphrag_lake:
         # Fast ingestion via Skeleton Construction
         await skeleton_lake.remember(content, title="Event")
 

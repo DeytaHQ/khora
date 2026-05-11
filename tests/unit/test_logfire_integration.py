@@ -5,7 +5,7 @@ Validates that:
 - trace_span() emits real spans when logfire is present (mocked)
 - Decorated functions (instrument_llm, instrument_storage, pipeline_stage)
   emit logfire spans with correct names and attributes
-- MemoryLake.remember/recall/forget/remember_batch create top-level spans
+- Khora.remember/recall/forget/remember_batch create top-level spans
 - No content strings leak into span attributes
 """
 
@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.memory_lake import BatchResult, MemoryLake, RecallResult, RememberResult
+from khora.khora import BatchResult, Khora, RecallResult, RememberResult
 from khora.telemetry import NoOpCollector
 from khora.telemetry.instrument import instrument_llm, instrument_storage, pipeline_stage
 from khora.telemetry.logfire_integration import LogfireSpan, NoOpSpan, trace_span
@@ -99,9 +99,9 @@ def _mock_engine() -> MagicMock:
     return mock_eng
 
 
-def _make_lake(*, connected: bool = False) -> MemoryLake:
-    with patch("khora.memory_lake.load_config", return_value=_mock_config()):
-        lake = MemoryLake()
+def _make_lake(*, connected: bool = False) -> Khora:
+    with patch("khora.khora.load_config", return_value=_mock_config()):
+        lake = Khora()
     if connected:
         lake._connected = True
         lake._engine = _mock_engine()
@@ -417,8 +417,8 @@ class TestNoOpBehavior:
 # =========================================================================
 
 
-class TestMemoryLakeSpans:
-    """Tests that MemoryLake methods create correct top-level logfire spans."""
+class TestKhoraSpans:
+    """Tests that Khora methods create correct top-level logfire spans."""
 
     @pytest.mark.asyncio
     async def test_remember_creates_span(self):
@@ -440,7 +440,7 @@ class TestMemoryLakeSpans:
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.memory_lake.trace_span") as mock_span_fn,
+            patch("khora.khora.trace_span") as mock_span_fn,
         ):
             # Use a real context manager that yields None so the code runs
             from contextlib import contextmanager
@@ -485,7 +485,7 @@ class TestMemoryLakeSpans:
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.memory_lake.trace_span") as mock_span_fn,
+            patch("khora.khora.trace_span") as mock_span_fn,
         ):
             from contextlib import contextmanager
 
@@ -514,7 +514,7 @@ class TestMemoryLakeSpans:
         ns_id = uuid4()
         lake._engine.forget = AsyncMock(return_value=True)
 
-        with patch("khora.memory_lake.trace_span") as mock_span_fn:
+        with patch("khora.khora.trace_span") as mock_span_fn:
             from contextlib import contextmanager
 
             @contextmanager
@@ -552,7 +552,7 @@ class TestMemoryLakeSpans:
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.memory_lake.trace_span") as mock_span_fn,
+            patch("khora.khora.trace_span") as mock_span_fn,
         ):
             from contextlib import contextmanager
 
@@ -599,7 +599,7 @@ class TestSpanAttributeWhitelist:
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.memory_lake.trace_span") as mock_span_fn,
+            patch("khora.khora.trace_span") as mock_span_fn,
         ):
             from contextlib import contextmanager
 
@@ -642,7 +642,7 @@ class TestSpanAttributeWhitelist:
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
-            patch("khora.memory_lake.trace_span") as mock_span_fn,
+            patch("khora.khora.trace_span") as mock_span_fn,
         ):
             from contextlib import contextmanager
 

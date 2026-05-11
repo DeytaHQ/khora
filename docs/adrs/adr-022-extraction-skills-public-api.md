@@ -9,7 +9,7 @@
 Khora's expertise system (`khora.extraction.skills`) defines the domain-knowledge
 dataclasses used to drive entity and relationship extraction. Downstream
 consumers construct these objects directly — either from YAML via the loader,
-or programmatically — and pass them into `MemoryLake.remember()` /
+or programmatically — and pass them into `Khora.remember()` /
 `remember_batch()` via the `expertise` parameter.
 
 The original ADR-022 (0.5.0 release) stabilized three dataclasses as the

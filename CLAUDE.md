@@ -1,6 +1,6 @@
 # Khora
 
-Memory Lake library: knowledge graphs + vector search + PostgreSQL for unified knowledge storage. **Library, not an application.**
+Khora library: knowledge graphs + vector search + PostgreSQL for unified knowledge storage. **Library, not an application.**
 
 ## Commands
 
@@ -42,7 +42,7 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 
 ### Key Entry Points
 
-- `memory_lake.py` — `remember()`, `recall()`, `forget()`, `remember_batch()`. Accepts `expertise: ExpertiseConfig`
+- `khora.py` — `remember()`, `recall()`, `forget()`, `remember_batch()`. Accepts `expertise: ExpertiseConfig`
 - `extraction/skills/base.py` — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` (ADR-022 stable)
 - `storage/coordinator.py` — `transaction()` for atomic multi-backend ops
 - `storage/backends/base.py` — `GraphBackend` protocol (implement for new backends)
@@ -137,12 +137,12 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 ## Gotchas
 
 ### Migrations & Schema
-- **Never use `create_tables()`** — deprecated, bypasses Alembic. Use `run_migrations()` or `MemoryLake(run_migrations=True)`. Create new migrations with `uv run alembic revision --autogenerate -m "desc"`
+- **Never use `create_tables()`** — deprecated, bypasses Alembic. Use `run_migrations()` or `Khora(run_migrations=True)`. Create new migrations with `uv run alembic revision --autogenerate -m "desc"`
 - **Version table:** `khora_alembic_version` (not `alembic_version`) — avoids conflicts with downstream apps
 - **Advisory lock:** `run_migrations()` uses `pg_advisory_xact_lock` (ID `6001515088189075507`), 60s timeout
 - **Migrations bundled** in `src/khora/db/migrations/`, not `alembic/`. Root `alembic.ini` is dev-only
 - **Skip-ahead:** When multiple services share a DB with different Khora versions, `run_migrations()` detects if the DB revision is unknown (ahead) and skips gracefully — returns `MigrationResult(success=True, skipped=True)`. Signaled via `_DatabaseAheadError` from `env.py` to `session.py`
-- **Fresh-DB behavior:** On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrations()` / `MemoryLake(run_migrations=True)` correctly creates all tables from scratch. Prior to v0.6.6 (DYT-1447), querying the missing version table inside an explicit transaction caused `InFailedSQLTransactionError`. The fix uses `information_schema.tables` to check table existence before querying it — never issuing a statement that could abort the transaction.
+- **Fresh-DB behavior:** On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrations()` / `Khora(run_migrations=True)` correctly creates all tables from scratch. Prior to v0.6.6 (DYT-1447), querying the missing version table inside an explicit transaction caused `InFailedSQLTransactionError`. The fix uses `information_schema.tables` to check table existence before querying it — never issuing a statement that could abort the transaction.
 
 ### UUID & Type Handling
 - **ORM:** all 52 UUID columns use `as_uuid=True` — native `uuid.UUID`, never `str()` wrap

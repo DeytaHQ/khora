@@ -38,7 +38,7 @@ def _get_recall_histogram() -> Any:
                 _recall_histogram = metric_histogram(
                     "khora.memory.recall.duration",
                     unit="s",
-                    description="End-to-end MemoryLake.recall() latency.",
+                    description="End-to-end Khora.recall() latency.",
                 )
     return _recall_histogram
 
@@ -51,7 +51,7 @@ def _get_ingest_histogram() -> Any:
                 _ingest_histogram = metric_histogram(
                     "khora.memory.ingest.duration",
                     unit="s",
-                    description="End-to-end MemoryLake.remember()/remember_batch() latency.",
+                    description="End-to-end Khora.remember()/remember_batch() latency.",
                 )
     return _ingest_histogram
 

@@ -4,6 +4,54 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.10.0] — Rename `MemoryLake` → `Khora`, drop "Memory Lake" branding
+
+### Changed — BREAKING
+
+- **`MemoryLake` → `Khora`.** The top-level facade class is now `Khora`.
+  Import path: `from khora import Khora` (was `from khora import MemoryLake`).
+  Submodule path: `khora.khora.Khora` (was `khora.memory_lake.MemoryLake`).
+- **Module rename:** `src/khora/memory_lake.py` → `src/khora/khora.py`.
+  All public result types (`RememberResult`, `RecallResult`, `BatchResult`,
+  `Stats`, `LLMUsage`, `DocumentResult`) moved with it and remain importable
+  from `khora` at the top level (preferred) or `khora.khora` (submodule).
+- **No deprecation shim.** `from khora import MemoryLake` and
+  `from khora.memory_lake import …` raise `ImportError` on 0.10.0+.
+  Downstream consumers (`genesis`, `khora-benchmarks`) migrate via
+  coordinated PRs after this release (DYT-3967, DYT-3968). Both
+  pre-pinned `khora<0.10` (DYT-3969) to avoid Renovate auto-bumps.
+- **LLM prompts** in `khora.query.understanding` now say "knowledge base"
+  instead of "memory lake" (`COMPREHENSIVE_UNDERSTANDING_PROMPT`,
+  `LIGHTWEIGHT_UNDERSTANDING_PROMPT`). Sent verbatim to the LLM.
+- **Telemetry `owner` field** changed on four facade spans
+  (`khora.recall`, `khora.remember`, `khora.remember_batch`, `khora.forget`):
+  `"owner": "memory_lake"` → `"owner": "khora"`. Internal grouping label;
+  not part of the public stability contract.
+
+### Unchanged (deliberately)
+
+- `khora.memory.*` metric names (`khora.memory.recall.duration`,
+  `khora.memory.ingest.duration`) — generic concept of memory storage,
+  not the retired brand. Operator dashboards keep working.
+- `khora_alembic_version` table name and advisory lock id
+  `6001515088189075507` — schema continuity.
+- SurrealDB `memory_namespace` table name — unrelated to the brand.
+- `KHORA_` env-var prefix.
+
+### Migration
+
+```diff
+- from khora import MemoryLake
++ from khora import Khora
+
+- async with MemoryLake(config) as lake:
++ async with Khora(config) as lake:
+      ...
+```
+
+See ADR-027 for rationale and ADR-024 (revised) for the full public-API
+contract.
+
 ## [Unreleased] — Recall API time bounds honored
 
 ### Fixed — API-supplied `temporal_filter` no longer dropped (DYT-3605)

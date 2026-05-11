@@ -39,7 +39,7 @@ def _make_persona(**overrides) -> PersonaConfig:
 
 
 def _make_mock_lake() -> MagicMock:
-    """Create a mock MemoryLake."""
+    """Create a mock Khora."""
     lake = MagicMock()
 
     # recall returns a result with chunks
@@ -117,7 +117,7 @@ class TestChatEngineInit:
     """Tests for ChatEngine initialization."""
 
     def test_stores_persona_and_lake(self) -> None:
-        """Init stores persona, memory_lake, and model."""
+        """Init stores persona, khora, and model."""
         persona = _make_persona()
         lake = _make_mock_lake()
 
