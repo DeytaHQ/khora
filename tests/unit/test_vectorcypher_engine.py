@@ -2,7 +2,7 @@
 
 Verifies that VectorCypherEngine.search_entities() uses
 ``search_similar_entities()`` + ``get_entities_batch()`` on
-StorageCoordinator (the same pattern as GraphRAG and Skeleton engines).
+StorageCoordinator (the same pattern as the Skeleton engine).
 """
 
 from __future__ import annotations

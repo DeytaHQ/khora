@@ -366,7 +366,6 @@ class TestProtocolSignatures:
         [
             "khora.engines.vectorcypher.engine.VectorCypherEngine",
             "khora.engines.skeleton.engine.SkeletonConstructionEngine",
-            "khora.engines.graphrag.engine.GraphRAGEngine",
         ],
     )
     def test_engine_remember_has_chunk_strategy(self, engine_path: str) -> None:
@@ -385,7 +384,6 @@ class TestProtocolSignatures:
         [
             "khora.engines.vectorcypher.engine.VectorCypherEngine",
             "khora.engines.skeleton.engine.SkeletonConstructionEngine",
-            "khora.engines.graphrag.engine.GraphRAGEngine",
         ],
     )
     def test_engine_remember_batch_has_chunk_strategy(self, engine_path: str) -> None:

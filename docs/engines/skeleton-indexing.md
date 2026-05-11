@@ -431,5 +431,5 @@ state = {
 ## Related Documentation
 
 - [Khora Engine](khora-engine.md) - Overview of the Khora engine
-- [Engine Comparison](engine-comparison.md) - Cost comparison with GraphRAG
+- [Engine Comparison](engine-comparison.md) - Cost comparison with VectorCypher and Chronicle
 - [References](../REFERENCES.md) - KET-RAG paper citation

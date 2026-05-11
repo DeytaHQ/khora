@@ -52,7 +52,7 @@ Programmatic values take priority over environment variables.
 | `weaviate` | Weaviate vector store | `weaviate-client>=4.20.1` |
 | `sqlite` | SQLite embedded relational + vector | `aiosqlite>=0.20.0` |
 | `lancedb` | LanceDB embedded vector store | `lancedb>=0.17.0`, `pyarrow` |
-| `sqlite-lance` | **[experimental]** Unified SQLite + LanceDB embedded backend. Recommended embedded stack; covers VectorCypher / GraphRAG / Skeleton / Chronicle | `lancedb>=0.17.0`, `aiosqlite>=0.20.0`, `pyarrow` |
+| `sqlite-lance` | **[experimental]** Unified SQLite + LanceDB embedded backend. Recommended embedded stack; covers VectorCypher / Skeleton / Chronicle | `lancedb>=0.17.0`, `aiosqlite>=0.20.0`, `pyarrow` |
 | `binary-readers` | PDF / docx / xlsx readers (used by khora-cli and downstream ingestors) | `pymupdf`, `openpyxl`, `python-docx` |
 | `parquet` | Parquet readers | `pyarrow>=18.0.0` |
 | `nlp` | spaCy-based sentence splitting | `spacy>=3.8` |
@@ -136,7 +136,7 @@ omit `storage_backend` to get the original behavior.
 
 ## Embedded backends (experimental)
 
-The embedded paths (`sqlite_lance` and `surrealdb`) are marked **experimental in v0.9.0**. They are appropriate for demos, evaluation, tests, and small single-user CLIs. They are not the deployment story for v0.9.0; for production, use PostgreSQL + pgvector (+ Neo4j for VectorCypher / GraphRAG). See [ADR-025](adrs/adr-025-embedded-backend-realignment.md) for the rationale.
+The embedded paths (`sqlite_lance` and `surrealdb`) are marked **experimental in v0.9.0**. They are appropriate for demos, evaluation, tests, and small single-user CLIs. They are not the deployment story for v0.9.0; for production, use PostgreSQL + pgvector (+ Neo4j for VectorCypher). See [ADR-025](adrs/adr-025-embedded-backend-realignment.md) for the rationale.
 
 ### SQLite + LanceDB (recommended embedded stack)
 

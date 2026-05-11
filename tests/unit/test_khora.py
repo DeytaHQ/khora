@@ -966,9 +966,9 @@ class TestSimplifiedConstructor:
     def test_init_with_engine_parameter(self) -> None:
         """Init with explicit engine parameter."""
         with patch("khora.khora.load_config", return_value=_mock_config()):
-            lake = Khora(engine="graphrag")
+            lake = Khora(engine="chronicle")
 
-        assert lake._engine_name == "graphrag"
+        assert lake._engine_name == "chronicle"
 
 
 # ---------------------------------------------------------------------------
@@ -1238,7 +1238,10 @@ class TestEngineRegistry:
         from khora.engines import list_engines
 
         engines = list_engines()
-        assert "graphrag" in engines
+        assert "vectorcypher" in engines
+        assert "chronicle" in engines
+        assert "skeleton" in engines
+        assert "graphrag" not in engines
 
     def test_register_engine(self) -> None:
         """register_engine adds new engine to registry."""

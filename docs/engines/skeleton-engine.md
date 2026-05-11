@@ -1,6 +1,6 @@
 # Skeleton Construction Engine
 
-The **Skeleton Construction engine** is a temporal-first memory engine optimized for event streams, chat histories, and time-sensitive data. Unlike the GraphRAG engine which focuses on knowledge graph construction, Skeleton Construction prioritizes temporal relationships and cost-efficient retrieval through skeleton-based indexing.
+The **Skeleton Construction engine** is a temporal-first memory engine optimized for event streams, chat histories, and time-sensitive data. Unlike the VectorCypher engine which focuses on knowledge graph construction, Skeleton Construction prioritizes temporal relationships and cost-efficient retrieval through skeleton-based indexing.
 
 ## When to Use Skeleton Construction
 
@@ -12,11 +12,11 @@ Choose the Skeleton Construction engine when:
 - **Freshness is critical**: Bi-temporal model tracks both event time and ingestion time
 - **Structured filters needed**: Filter by author, channel, tags, time ranges
 
-Choose GraphRAG instead when:
+Choose VectorCypher instead when:
 
 - Building long-term knowledge bases with rich entity relationships
 - Graph traversal and entity exploration are primary use cases
-- Upfront extraction cost is acceptable for better retrieval quality
+- Upfront extraction cost is acceptable for better retrieval quality (use `engine_kwargs={"skeleton_core_ratio": 1.0}` for full 100% extraction)
 
 ## Architecture Overview
 
@@ -196,7 +196,8 @@ for chunk_id in core_chunk_ids:
 
 | Approach | LLM Calls per 1000 docs |
 |----------|-------------------------|
-| Full extraction (GraphRAG) | ~1000 |
+| Full extraction (VectorCypher with `skeleton_core_ratio=1.0`) | ~1000 |
+| Default VectorCypher (selective, 70%) | ~700 |
 | Skeleton indexing (Skeleton) | ~100 |
 
 ### LazyEntityExpander (`src/khora/engines/skeleton/skeleton.py`)
@@ -353,7 +354,7 @@ results = await engine.recall(query, ns_id, mode=SearchMode.VECTOR)
 results = await engine.recall(query, ns_id, mode=SearchMode.HYBRID)
 
 # Note: SearchMode.GRAPH is not supported in Skeleton Construction engine
-# Use GraphRAG engine for graph-based queries
+# Use VectorCypher engine for graph-based queries
 ```
 
 ## Configuration
@@ -405,18 +406,18 @@ temporal:
 
 ## Performance Characteristics
 
-| Metric | Skeleton Construction | GraphRAG |
-|--------|----------------------|----------|
-| LLM calls per 1000 docs | ~100 | ~1000 |
+| Metric | Skeleton Construction | VectorCypher |
+|--------|----------------------|--------------|
+| LLM calls per 1000 docs | ~100 | ~700 (default) / ~1000 (`skeleton_core_ratio=1.0`) |
 | Ingestion latency | Lower | Higher |
 | Infrastructure | PostgreSQL only | PostgreSQL + Neo4j |
-| Temporal queries | Native (bi-temporal) | Basic (created_at) |
+| Temporal queries | Native (bi-temporal) | Per-category |
 | Entity relationships | On-demand | Pre-computed |
 | Graph traversal | Limited | Full support |
 
 ## Related Documentation
 
-- [Engine Comparison](engine-comparison.md) - Detailed GraphRAG vs Skeleton comparison
+- [Engine Comparison](engine-comparison.md) - Detailed VectorCypher vs Skeleton comparison
 - [Temporal Model](temporal-model.md) - Deep dive into bi-temporal design
 - [Skeleton Indexing](skeleton-indexing.md) - PageRank-based core selection
 - [Hybrid Search](hybrid-search.md) - Vector + BM25 fusion details

@@ -324,7 +324,7 @@ def to_query_temporal_filter(
 ) -> Any | None:
     """Convert a skeleton TemporalFilter to a ``khora.query.temporal.TemporalFilter``.
 
-    Useful for engines (GraphRAG, Chronicle) that pass the filter into
+    Useful for engines (VectorCypher, Chronicle) that pass the filter into
     ``HybridQueryEngine`` or ``_temporal_channel`` which read
     ``start_time`` / ``end_time``.
 

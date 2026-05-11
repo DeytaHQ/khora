@@ -118,69 +118,6 @@ class TestChronicleStats:
 
 
 # =========================================================================
-# GraphRAG
-# =========================================================================
-
-
-class TestGraphRAGStats:
-    """Tests for GraphRAGEngine.stats()."""
-
-    def _make_engine(self, storage: AsyncMock) -> object:
-        from khora.engines.graphrag.engine import GraphRAGEngine
-
-        config = MagicMock()
-        config.get_postgresql_url.return_value = "postgresql://localhost/test"
-        config.get_graph_config.return_value = MagicMock()
-        config.get_vector_config.return_value = MagicMock()
-        config.storage.postgresql_pool_size = 5
-        config.storage.postgresql_max_overflow = 10
-        config.storage.embedding_dimension = 1536
-        config.llm.model = "gpt-4o-mini"
-        config.llm.embedding_model = "text-embedding-3-small"
-        config.llm.embedding_dimension = 1536
-        config.llm.timeout = 30
-        config.llm.max_retries = 3
-        config.llm.max_concurrent_llm_calls = 5
-        config.pipeline.chunking_strategy = "recursive"
-        config.pipeline.chunk_size = 1000
-        config.pipeline.chunk_overlap = 200
-        config.pipeline.extract_entities = True
-        config.telemetry_database_url = None
-        config.telemetry_service_name = "test"
-
-        engine = GraphRAGEngine(config)
-        engine._connected = True
-        engine._storage = storage
-        return engine
-
-    @pytest.mark.asyncio
-    async def test_stats_includes_last_activity_at(self) -> None:
-        """stats() returns last_activity_at from storage."""
-        ts = datetime(2026, 4, 7, 12, 0, 0, tzinfo=UTC)
-        storage = _make_mock_storage(last_activity_at=ts)
-        engine = self._make_engine(storage)
-
-        result = await engine.stats(uuid4())
-
-        assert isinstance(result, Stats)
-        assert result.documents == 5
-        assert result.last_activity_at == ts
-
-    @pytest.mark.asyncio
-    async def test_stats_get_document_stats_fallback(self) -> None:
-        """stats() handles AttributeError on get_document_stats gracefully."""
-        storage = _make_mock_storage()
-        storage.get_document_stats = AsyncMock(side_effect=AttributeError)
-        engine = self._make_engine(storage)
-
-        result = await engine.stats(uuid4())
-
-        assert result.documents == 0
-        assert result.last_activity_at is None
-        assert result.chunks == 20
-
-
-# =========================================================================
 # Skeleton
 # =========================================================================
 
