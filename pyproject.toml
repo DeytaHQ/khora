@@ -231,11 +231,24 @@ invalid-await = "warn"                 # 3 errors, surrealdb SDK stubs missing a
 unused-ignore-comment = "warn"         # 1 warning, stale type: ignore comment
 
 [tool.uv]
+# Reproducibility: ignore PyPI releases uploaded within the last 7 days.
+# Relative pin (re-evaluated on every ``uv sync`` / ``uv lock``) so a
+# fresh sync cannot silently pull a brand-new upstream release that
+# hasn't had time to stabilise. Requires uv >= 0.7 for relative-duration
+# support in ``exclude-newer``.
+exclude-newer = "7 days"
+# Per-package overrides: security-critical packages opt out of the 7-day
+# staging window so a same-week CVE fix isn't held back. Use sparingly —
+# every entry here is an explicit "we trust this package enough to skip
+# the staging window".
+exclude-newer-package = { urllib3 = "0 days" }  # CVE-2026-44431 / CVE-2026-44432
 constraint-dependencies = [
     # Security: CVE-2026-25645 fixed in 2.33.0
     "requests>=2.33.0",
     # Security: CVE-2026-4539 (no listed fix; pin to latest)
     "pygments>=2.20.0",
+    # Security: CVE-2026-44431 / CVE-2026-44432 fixed in 2.7.0
+    "urllib3>=2.7.0",
 ]
 
 [tool.uv.sources]
