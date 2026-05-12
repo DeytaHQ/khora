@@ -1,7 +1,7 @@
 [project]
 name = "khora"
 dynamic = ["version"]
-description = "Khora — knowledge graph + vector + SQL storage library"
+description = "Knowledge memory library for long-horizon AI agents — hybrid retrieval over documents, embeddings, and graph relationships"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
