@@ -138,8 +138,8 @@ class LiteLLMConfig(BaseModel):
         gt=0,
         description="Total cap on simultaneous connections in the shared "
         "aiohttp session, summed across all hosts. Default 200 covers a "
-        "Khora mixing OpenAI + Anthropic + reranker hosts at the "
-        "concurrency the caller configures.",
+        "Khora pipeline mixing OpenAI + Anthropic + reranker hosts at "
+        "typical high-throughput ingestion concurrency.",
     )
     max_connections_per_host: int = Field(
         default=0,

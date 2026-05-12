@@ -175,6 +175,12 @@ jobs:
         run: |
           uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-report=xml:coverage-integration.xml --cov-fail-under=30 -m integration
 
+      - name: Generate JSON coverage for floor check
+        run: uv run coverage json -o coverage.json
+
+      - name: Check per-path coverage floors
+        run: uv run python scripts/check_coverage_floors.py
+
       - name: Upload integration coverage to Codecov
         uses: codecov/codecov-action@v5
         if: always()
