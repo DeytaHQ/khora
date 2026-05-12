@@ -2845,12 +2845,21 @@ class VectorCypherEngine:
         """Find entities related to a given entity via graph traversal."""
         dual_nodes = self._get_dual_nodes()
         if dual_nodes is None:
-            # SurrealDB: use storage coordinator's graph backend
+            # Graph-only backends (sqlite_lance, surrealdb): no chunk-entity
+            # dual graph, so traversal goes through the GraphBackendProtocol
+            # directly. ``get_neighborhood`` returns the seed plus connected
+            # entities up to ``depth``; strip the seed and apply a flat score
+            # (per-hop distance is not exposed cheaply by all backends).
             storage = self._get_storage()
-            if storage.graph:
-                related = await storage.graph.get_related_entities(entity_id, namespace_id)
-                return [(e, 1.0) for e in related[:limit]]
-            return []
+            if storage.graph is None:
+                return []
+            neighborhood = await storage.graph.get_neighborhood(
+                entity_id,
+                depth=max_depth,
+                limit=limit,
+            )
+            entities = neighborhood.get("entities", [])
+            return [(e, 1.0) for e in entities if e.id != entity_id][:limit]
 
         neighborhoods = await dual_nodes.get_entity_neighborhoods(
             entity_ids=[entity_id],
