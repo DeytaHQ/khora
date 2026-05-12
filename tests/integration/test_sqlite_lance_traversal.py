@@ -23,6 +23,7 @@ from khora.core.models import Entity, MemoryNamespace, Relationship
 from tests.integration._sqlite_lance_fixtures import build_sqlite_lance_coordinator
 
 pytestmark = [
+    pytest.mark.embedded,
     pytest.mark.integration,
     pytest.mark.skipif(not _HAS_EMBEDDED, reason="aiosqlite/lancedb not installed"),
 ]

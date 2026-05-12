@@ -7,7 +7,7 @@
 #   make dev               # Start development environment
 #   make test              # Run tests with coverage
 
-.PHONY: help dev dev-down test test-unit test-integration lint format typecheck prek clean \
+.PHONY: help dev dev-down test test-unit test-embedded test-integration test-soak lint format typecheck prek clean \
         rust-build rust-dev rust-test rust-bench rust-clean \
         docker-run docker-down docker-clean
 
@@ -21,7 +21,9 @@ help:
 	@echo "  make dev-down         Stop databases"
 	@echo "  make test             Run tests with coverage (unit parallel + integration serial)"
 	@echo "  make test-unit        Run unit tests in parallel (-n auto)"
-	@echo "  make test-integration Run integration tests serially"
+	@echo "  make test-embedded    Run SQLite+LanceDB embedded-stack tests (no Docker)"
+	@echo "  make test-integration Run integration tests serially (needs make dev)"
+	@echo "  make test-soak        Run long-running soak/burn-in tests"
 	@echo "  make lint             Run linting (ruff, ty)"
 	@echo "  make typecheck        Run type checking (ty)"
 	@echo "  make format           Format code (ruff)"
@@ -79,6 +81,16 @@ test-unit:
 # Run integration tests serial; appends to .coverage from test-unit and emits the report.
 test-integration:
 	uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-fail-under=30 -m integration
+
+# Run SQLite+LanceDB embedded-stack tests only (no Docker required).
+# Useful for fast feedback on the embedded path without spinning up Postgres/Neo4j.
+test-embedded:
+	uv run pytest -m embedded -v
+
+# Run long-running soak/burn-in tests. Coverage is disabled because these tests
+# already run long and we don't want coverage instrumentation skewing timing.
+test-soak:
+	uv run pytest -m soak --no-cov
 
 # Run type checking
 typecheck:
