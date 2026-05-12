@@ -999,6 +999,18 @@ wheels = [
 ]
 
 [[package]]
+name = "hypothesis"
+version = "6.152.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "sortedcontainers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/09/f5219c8fd75ff1f270a6f691df651c206e9316b9d0ce2cbd8b6f82844e1e/hypothesis-6.152.6.tar.gz", hash = "sha256:4a3f21e9a7349a17616626e9010f04360b02e6bf8ff15fdc7c53e76d5517c1e8", size = 467945, upload-time = "2026-05-11T13:12:59.888Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5f/1c/ed568eca3a963dc3e447b01961ae653e0d6f107c2cfd77b3f2b1a5cfc520/hypothesis-6.152.6-py3-none-any.whl", hash = "sha256:b20ffc532e5f2901229348d10ed7cb37fd9723ebf4799df663d2dce1cdce4e32", size = 533724, upload-time = "2026-05-11T13:12:56.182Z" },
+]
+
+[[package]]
 name = "idna"
 version = "3.13"
 source = { registry = "https://pypi.org/simple" }
@@ -1197,6 +1209,7 @@ binary-readers = [
 ]
 dev = [
     { name = "coverage" },
+    { name = "hypothesis" },
     { name = "prek" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1270,6 +1283,7 @@ weaviate = [
 [package.dev-dependencies]
 dev = [
     { name = "aiosqlite" },
+    { name = "hypothesis" },
     { name = "prek" },
     { name = "psutil" },
     { name = "pytest" },
@@ -1296,6 +1310,7 @@ requires-dist = [
     { name = "coverage", marker = "extra == 'dev'", specifier = ">=7.13.4" },
     { name = "dateparser", specifier = ">=1.2.0" },
     { name = "httpx", marker = "extra == 'all-backends'", specifier = ">=0.28.1" },
+    { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.140.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "khora-accel", marker = "extra == 'rust'", editable = "rust/khora-accel" },
     { name = "kuzu", marker = "extra == 'all-backends'", specifier = ">=0.11.3" },
@@ -1352,6 +1367,7 @@ provides-extras = ["accel", "age", "all-backends", "binary-readers", "dev", "emb
 [package.metadata.requires-dev]
 dev = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
+    { name = "hypothesis", specifier = ">=6.140.0" },
     { name = "prek", specifier = ">=0.3.3" },
     { name = "psutil", specifier = ">=5.9.0" },
     { name = "pytest", specifier = ">=9.0.3" },
@@ -3059,6 +3075,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372, upload-time = "2024-02-25T23:20:04.057Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235, upload-time = "2024-02-25T23:20:01.196Z" },
+]
+
+[[package]]
+name = "sortedcontainers"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
 ]
 
 [[package]]

@@ -24,6 +24,7 @@ rather than raise, matching the sibling SurrealDB adapter's policy.
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -32,6 +33,7 @@ import pyarrow as pa
 from loguru import logger
 
 from khora.core.models import Chunk, ChunkMetadata, Entity
+from khora.exceptions import EmbeddingError
 from khora.storage.backends._fts5 import escape_fts5_query
 
 from ._helpers import from_json_text, to_json_text, uuid_to_text
@@ -59,6 +61,38 @@ def _parse_dt(val: str | None) -> datetime | None:
     if not val:
         return None
     return datetime.fromisoformat(val)
+
+
+def _validate_embedding(embedding: list[float], expected_dim: int, *, context: str) -> None:
+    """Reject embeddings that LanceDB would silently mangle or PyArrow would
+    reject with a cryptic schema error.
+
+    Catches three real-world mis-configurations: an embedder returning ``[]``
+    (early-exit path), a wrong-dim vector (model swap without config update),
+    and a NaN-containing vector (numerical-instability bug upstream of khora).
+    All raise :class:`khora.exceptions.EmbeddingError` with a message that
+    names the offending shape — much friendlier than a five-frame Arrow trace.
+    """
+    if not embedding:
+        raise EmbeddingError(
+            f"{context}: refusing to store an empty embedding (expected dim={expected_dim}). "
+            f"Check the embedder for an early-exit path on whitespace/short input."
+        )
+    if len(embedding) != expected_dim:
+        raise EmbeddingError(
+            f"{context}: embedding dim={len(embedding)} but storage configured for dim={expected_dim}. "
+            f"This usually means the embedder model was changed without updating "
+            f"`config.storage.embedding_dimension`."
+        )
+    # math.isnan is the cheapest scalar check; NaN can corrupt LanceDB ANN
+    # training silently and produces wildly wrong cosine scores.
+    if any(math.isnan(x) for x in embedding):
+        raise EmbeddingError(
+            f"{context}: embedding contains NaN at index "
+            f"{next(i for i, x in enumerate(embedding) if math.isnan(x))}. "
+            f"Cosine similarity is undefined for NaN — check the embedder for "
+            f"numerical instability on this input."
+        )
 
 
 class SQLiteLanceVectorAdapter:
@@ -159,6 +193,11 @@ class SQLiteLanceVectorAdapter:
                 )
             )
             if c.embedding:
+                _validate_embedding(
+                    list(c.embedding),
+                    self._handle.config.embedding_dimension,
+                    context=f"chunk id={c.id}",
+                )
                 lance_rows.append(
                     {
                         "id": uuid_to_text(c.id),
@@ -545,6 +584,11 @@ class SQLiteLanceVectorAdapter:
         LanceDB has no in-place vector update, so we delete any existing
         row with the same id and then add.
         """
+        _validate_embedding(
+            list(embedding),
+            self._handle.config.embedding_dimension,
+            context=f"entity id={entity_id}",
+        )
         tbl = await self._entities_table()
         eid_text = uuid_to_text(entity_id)
         async with self._lance_write_lock:

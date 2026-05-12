@@ -23,27 +23,21 @@ How to run locally::
 No Docker / Postgres / Neo4j needed — the embedded stack is pure
 in-process SQLite (``aiosqlite``) and LanceDB (``lancedb``).
 
-## State on ``main`` (2026-05-01)
+## State
 
-VectorCypher's ``connect()`` path branches between Neo4j (default) and
-SurrealDB (``is_surrealdb`` flag). There is no third arm for
-``sqlite_lance`` — passing ``backend="sqlite_lance"`` falls into the
-Neo4j arm and raises ``ValueError: Neo4j URL is required``. This is
-filed as **DYT-3560** (parented under DYT-3545) and is the load-bearing
-gap for v0.9.0's "embedded VectorCypher" story.
+VectorCypher's embedded ``sqlite_lance`` path is wired and 7/10 tests
+in this module pass cleanly. Three tests remain ``xfail`` for known
+backend gaps (each xfail carries an explanatory string):
 
-Until DYT-3560 lands, *every* test in this module is expected to xfail
-at fixture setup (``kb.connect()``). They are written end-to-end so
-that when DYT-3560 wires the embedded path, the same tests serve as the
-acceptance suite without rewriting them.
+* ``test_vc_two_hop_traversal`` — multi-hop CTE traversal correctness
+  on the SQL-emulated graph.
+* ``test_vc_temporal_filter`` — temporal pushdown on the embedded path.
+* ``test_vc_prefer_current_via_cte`` — ``prefer_current`` honoring on
+  CTE traversal.
 
-In addition, two scenario-specific xfails reference R1/R2:
-* DYT-3548 (PR #473) — multi-hop CTE traversal correctness.
-* DYT-3549 (PR #472) — ``prefer_current`` honoring on CTE traversal.
-
-When DYT-3560 lands, flip the module-level ``xfail`` to a per-test
-filter and re-run; expected R1/R2-related tests will keep their
-narrower xfail markers.
+The remaining xfails track concrete behavioural gaps, not a wiring
+issue. They are written end-to-end so that when the underlying paths
+land, the same tests serve as the acceptance suite without rewriting.
 """
 
 from __future__ import annotations
@@ -450,6 +444,32 @@ async def test_vc_recall_empty_namespace(kb: Khora) -> None:
     result = await kb.recall("anything", namespace=ns, limit=5)
     assert result.chunks == []
     assert result.metadata.get("engine") == "vectorcypher"
+
+
+async def test_vc_recall_handles_punctuated_query(kb: Khora, namespace_id: UUID) -> None:
+    """Regression for issue #526 at the **vectorcypher engine layer**.
+
+    PR #528's escape_fts5_query fix was verified at the storage adapter
+    layer. This test routes punctuated / FTS5-operator queries through
+    the full Khora.recall() → vectorcypher engine (which fuses vector +
+    BM25). Catches a future regression that introduces a fusion path
+    bypassing the escape.
+    """
+    await _remember(
+        kb,
+        namespace_id=namespace_id,
+        content="Marie Curie won the Nobel Prize in Physics in 1903.",
+    )
+    for query in (
+        "What did Curie win?",
+        "Curie: Nobel",
+        "Curie (Nobel)",
+        "Curie AND Physics",
+        'say "hello" Curie',
+        "Curie*",
+    ):
+        result = await kb.recall(query, namespace=namespace_id, limit=3)
+        assert isinstance(result.chunks, list), f"recall must not raise on {query!r}"
 
 
 async def test_vc_dual_node_persistence(kb: Khora, namespace_id: UUID) -> None:
