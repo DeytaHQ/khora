@@ -23,6 +23,7 @@ from pydantic import SecretStr
 from khora.config._secrets import redact_dsn
 from khora.config.schema import (
     KhoraConfig,
+    LLMSettings,
     MemgraphConfig,
     Neo4jConfig,
     NeptuneConfig,
@@ -112,6 +113,52 @@ class TestSecretStrFieldTypes:
         parsed = ParsedNeo4jUrl.parse("bolt://user:hunter2@h:7687")
         assert isinstance(parsed.password, SecretStr)
         assert parsed.password.get_secret_value() == "hunter2"
+
+    def test_neo4j_config_url_is_secretstr(self) -> None:
+        cfg = Neo4jConfig(url="bolt://user:hunter2@h:7687")
+        assert isinstance(cfg.url, SecretStr)
+        assert cfg.url.get_secret_value() == "bolt://user:hunter2@h:7687"
+
+    def test_memgraph_config_url_is_secretstr(self) -> None:
+        cfg = MemgraphConfig(url="bolt://user:hunter2@h:7687")
+        assert isinstance(cfg.url, SecretStr)
+        assert cfg.url.get_secret_value() == "bolt://user:hunter2@h:7687"
+
+    def test_neptune_config_url_is_secretstr(self) -> None:
+        cfg = NeptuneConfig(url="bolt://user:hunter2@h:8182")
+        assert isinstance(cfg.url, SecretStr)
+        assert cfg.url.get_secret_value() == "bolt://user:hunter2@h:8182"
+
+    def test_surrealdb_config_url_is_secretstr(self) -> None:
+        cfg = SurrealDBConfig(url="ws://user:hunter2@h:8000")
+        assert isinstance(cfg.url, SecretStr)
+        assert cfg.url.get_secret_value() == "ws://user:hunter2@h:8000"
+
+    def test_surrealdb_vector_config_url_is_secretstr(self) -> None:
+        cfg = SurrealDBVectorConfig(url="ws://user:hunter2@h:8000")
+        assert isinstance(cfg.url, SecretStr)
+        assert cfg.url.get_secret_value() == "ws://user:hunter2@h:8000"
+
+    def test_llm_settings_has_no_v1_scope_secret_fields(self) -> None:
+        """v1-scope guard: LLMSettings carries no secret-typed fields today.
+
+        ``LLMSettings.api_key_env`` is an env-var-name pointer (per ADR-084
+        §📌 baseline scope-inflation note), so it stays plain ``str``. If a
+        future refactor adds an in-scope field (e.g. ``api_key: str``), this
+        test must be updated to either re-type it as ``SecretStr`` or to
+        explicitly carve it out — locking down the v1-scope boundary in
+        the test surface so the change cannot land silently.
+        """
+        settings = LLMSettings()
+        # api_key_env is a pointer (env-var name), not a secret value.
+        assert isinstance(settings.api_key_env, str)
+        # Enumerate every field and assert nothing has slipped into v1-scope
+        # without being typed as SecretStr.
+        for name, field in LLMSettings.model_fields.items():
+            assert field.annotation is not SecretStr, (
+                f"LLMSettings.{name} is typed as SecretStr — update this v1-scope "
+                "guard test (it is now in-scope and must be enumerated explicitly)."
+            )
 
 
 @pytest.mark.unit

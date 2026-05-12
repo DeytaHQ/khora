@@ -62,9 +62,9 @@ class SurrealDBVectorAdapter:
         """Create an adapter from a configuration dictionary.
 
         Expected keys mirror :class:`SurrealDBConnection` init args, plus
-        optional ``hnsw_ef_search``. ADR-084 boundary: ``password`` is
-        unwrapped from ``pydantic.SecretStr`` if needed so the driver
-        receives a plaintext credential.
+        optional ``hnsw_ef_search``. ADR-084 boundary: ``password`` and
+        ``url`` are unwrapped from ``pydantic.SecretStr`` if needed so the
+        driver receives plaintext credentials / DSN.
         """
         from pydantic import SecretStr
 
@@ -74,7 +74,7 @@ class SurrealDBVectorAdapter:
         for key in ("mode", "path", "url", "namespace", "database", "user", "password"):
             if key in config:
                 value = config[key]
-                if key == "password" and isinstance(value, SecretStr):
+                if key in ("password", "url") and isinstance(value, SecretStr):
                     value = value.get_secret_value()
                 conn_kwargs[key] = value
 

@@ -139,7 +139,8 @@ class TestSurrealDBConfig:
 
         cfg = SurrealDBConfig(mode="remote", url="ws://localhost:8000")
         assert cfg.mode == "remote"
-        assert cfg.url == "ws://localhost:8000"
+        # ADR-084: url is SecretStr — unwrap to compare plaintext.
+        assert cfg.url.get_secret_value() == "ws://localhost:8000"
 
     def test_config_in_graph_union(self) -> None:
         from khora.config.schema import StorageSettings
@@ -174,7 +175,7 @@ class TestSurrealDBConfig:
         cfg = SurrealDBConfig(mode="remote", url="ws://localhost:8000")
         settings = StorageSettings(backend="surrealdb", surrealdb=cfg)
         assert settings.surrealdb is not None
-        assert settings.surrealdb.url == "ws://localhost:8000"
+        assert settings.surrealdb.url.get_secret_value() == "ws://localhost:8000"
 
     def test_vector_config_union(self) -> None:
         from khora.config.schema import SurrealDBVectorConfig

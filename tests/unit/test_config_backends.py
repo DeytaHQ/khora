@@ -27,7 +27,8 @@ class TestStorageSettingsBackwardsCompat:
             neo4j_database="mydb",
         )
         assert isinstance(settings.graph, Neo4jConfig)
-        assert settings.graph.url == "bolt://localhost:7687"
+        # ADR-084: url is SecretStr — unwrap to compare plaintext.
+        assert settings.graph.url.get_secret_value() == "bolt://localhost:7687"
         assert settings.graph.user == "admin"
         # ADR-084: password is SecretStr — unwrap to compare plaintext.
         assert settings.graph.password.get_secret_value() == "secret"
@@ -39,7 +40,7 @@ class TestStorageSettingsBackwardsCompat:
             embedding_dimension=768,
         )
         assert isinstance(settings.vector, PgVectorConfig)
-        assert settings.vector.url == "postgresql://localhost:5432/vectors"
+        assert settings.vector.url.get_secret_value() == "postgresql://localhost:5432/vectors"
         assert settings.vector.embedding_dimension == 768
 
     def test_new_style_graph_config_takes_precedence(self):
@@ -78,7 +79,7 @@ class TestDiscriminatedUnionParsing:
             }
         )
         assert isinstance(settings.graph, MemgraphConfig)
-        assert settings.graph.url == "bolt://mg:7687"
+        assert settings.graph.url.get_secret_value() == "bolt://mg:7687"
 
     def test_neptune_config_from_dict(self):
         settings = StorageSettings.model_validate(
@@ -108,7 +109,7 @@ class TestDiscriminatedUnionParsing:
             }
         )
         assert isinstance(settings.graph, AGEConfig)
-        assert settings.graph.url == "postgresql://localhost:5432/khora"
+        assert settings.graph.url.get_secret_value() == "postgresql://localhost:5432/khora"
         assert settings.graph.graph_name == "my_graph"
 
     def test_pgvector_is_default_vector_backend(self):
@@ -183,7 +184,7 @@ class TestKhoraConfigGraphHelpers:
         )
         graph = config.get_graph_config()
         assert isinstance(graph, Neo4jConfig)
-        assert graph.url == "bolt://localhost:7687"
+        assert graph.url.get_secret_value() == "bolt://localhost:7687"
         assert graph.user == "neo4j"
         # ADR-084: password is SecretStr — unwrap to compare plaintext.
         assert graph.password.get_secret_value() == "pass"
@@ -204,7 +205,7 @@ class TestKhoraConfigGraphHelpers:
         )
         vector = config.get_vector_config()
         assert isinstance(vector, PgVectorConfig)
-        assert vector.url == "postgresql://localhost:5432/khora"
+        assert vector.url.get_secret_value() == "postgresql://localhost:5432/khora"
 
 
 @pytest.mark.unit

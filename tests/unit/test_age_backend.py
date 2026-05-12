@@ -294,7 +294,7 @@ class TestAGEConfig:
             pool_size=5,
             max_overflow=10,
         )
-        assert config.url == "postgresql://localhost:5432/khora"
+        assert config.url.get_secret_value() == "postgresql://localhost:5432/khora"
         assert config.graph_name == "my_graph"
         assert config.pool_size == 5
         assert config.max_overflow == 10

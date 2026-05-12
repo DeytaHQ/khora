@@ -88,7 +88,7 @@ class Neo4jConfig(BaseModel):
     """Neo4j graph backend configuration."""
 
     backend: Literal["neo4j"] = "neo4j"
-    url: str | None = Field(default=None, description="Neo4j connection URL (bolt:// or neo4j://)")
+    url: SecretStr | None = Field(default=None, description="Neo4j connection URL (bolt:// or neo4j://)")
     user: str = Field(default="neo4j", description="Neo4j username")
     password: SecretStr = Field(default=SecretStr(""), description="Neo4j password")
     database: str = Field(default="neo4j", description="Neo4j database name")
@@ -170,7 +170,7 @@ class MemgraphConfig(BaseModel):
     """Memgraph graph backend configuration."""
 
     backend: Literal["memgraph"] = "memgraph"
-    url: str | None = Field(default=None, description="Memgraph connection URL (bolt://)")
+    url: SecretStr | None = Field(default=None, description="Memgraph connection URL (bolt://)")
     user: str = Field(default="memgraph", description="Memgraph username")
     password: SecretStr = Field(default=SecretStr(""), description="Memgraph password")
 
@@ -183,7 +183,7 @@ class NeptuneConfig(BaseModel):
     """
 
     backend: Literal["neptune"] = "neptune"
-    url: str | None = Field(default=None, description="Neptune Bolt endpoint (bolt://cluster:8182)")
+    url: SecretStr | None = Field(default=None, description="Neptune Bolt endpoint (bolt://cluster:8182)")
     user: str = Field(default="", description="Username (empty for IAM auth)")
     password: SecretStr = Field(default=SecretStr(""), description="Password (empty for IAM auth)")
     iam_auth: bool = Field(default=False, description="Use AWS IAM SigV4 authentication")
@@ -200,7 +200,7 @@ class SurrealDBConfig(BaseModel):
 
     backend: Literal["surrealdb"] = "surrealdb"
     mode: str = Field(default="memory", description="Connection mode: memory, embedded, or remote")
-    url: str | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
+    url: SecretStr | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
     path: str | None = Field(default=None, description="Database file path (for embedded mode)")
     namespace: str = Field(default="khora", description="SurrealDB namespace")
     database: str = Field(default="default", description="SurrealDB database")
@@ -258,7 +258,7 @@ class AGEConfig(BaseModel):
     """
 
     backend: Literal["age"] = "age"
-    url: str | None = Field(default=None, description="PostgreSQL URL (can share with relational backend)")
+    url: SecretStr | None = Field(default=None, description="PostgreSQL URL (can share with relational backend)")
     graph_name: str = Field(default="khora_graph", description="Name of the AGE graph")
     pool_size: int = Field(default=10, description="Connection pool size")
     max_overflow: int = Field(default=20, description="Max overflow connections")
@@ -290,7 +290,7 @@ class PgVectorConfig(BaseModel):
     """pgvector vector backend configuration."""
 
     backend: Literal["pgvector"] = "pgvector"
-    url: str | None = Field(default=None, description="pgvector connection URL")
+    url: SecretStr | None = Field(default=None, description="pgvector connection URL")
     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
 
 
@@ -302,7 +302,7 @@ class SurrealDBVectorConfig(BaseModel):
 
     backend: Literal["surrealdb"] = "surrealdb"
     mode: str = Field(default="memory", description="Connection mode: memory, embedded, or remote")
-    url: str | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
+    url: SecretStr | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
     path: str | None = Field(default=None, description="Database file path (for embedded mode)")
     namespace: str = Field(default="khora", description="SurrealDB namespace")
     database: str = Field(default="default", description="SurrealDB database")
@@ -986,7 +986,7 @@ class KhoraConfig(BaseSettings):
         # Check new-style graph config first
         graph = self.storage.graph
         if isinstance(graph, Neo4jConfig) and graph.url:
-            return graph.url
+            return _secret_value(graph.url) or None
         # Fall back to legacy fields
         if self.storage.neo4j_url is not None:
             value = _secret_value(self.storage.neo4j_url)
@@ -1105,9 +1105,9 @@ class KhoraConfig(BaseSettings):
         """
         vector = self.storage.vector
         if isinstance(vector, PgVectorConfig) and not vector.url:
-            # Populate from legacy fields. ``pgvector_url`` is ``SecretStr`` post
-            # ADR-084 re-typing; ``PgVectorConfig.url`` remains a plain ``str``
-            # at the backend boundary, so unwrap here.
+            # Populate from legacy fields. Both ``pgvector_url`` and
+            # ``PgVectorConfig.url`` are ``SecretStr`` post ADR-084 re-typing;
+            # unwrap the legacy field here so Pydantic re-wraps consistently.
             url = _secret_value(self.storage.pgvector_url) or self.get_postgresql_url()
             return PgVectorConfig(
                 url=url,
