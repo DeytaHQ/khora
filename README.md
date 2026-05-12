@@ -116,7 +116,7 @@ Start at [docs/README.md](docs/README.md). Key entry points:
 - [Architecture](docs/architecture/overview.md) — how the pieces fit.
 - [Engines](docs/engines/engine-comparison.md) — VectorCypher, Skeleton, Chronicle.
 - [Migrations](docs/migrations.md) — Alembic workflow for library users.
-- [Downstream consumers](docs/consumers.md) — how genesis, khora-cli, khora-explorer, khora-benchmarks consume khora.
+- [Downstream consumers](docs/consumers.md) — how khora-cli, khora-explorer, and khora-benchmarks consume khora.
 
 ## Development
 

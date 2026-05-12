@@ -52,19 +52,15 @@ from khora.config.schema import KhoraConfig
 
 This surface is codified by [ADR-022](adrs/adr-022-extraction-skills-public-api.md).
 
-## Internal consumers
-
-### genesis
-
-Uses `Khora` through the stable top-level surface (ADR-024) plus `lake.storage` for direct backend access. Also imports `LLMUsage` for cost tracking (DYT-645 contract shared with Poros/Peras). Pins a specific khora version per deploy; follows khora's major releases.
+## Other consumers
 
 ### khora-benchmarks
 
 Benchmarks khora's retrieval engines. Imports include private modules (`khora.engines.vectorcypher`, `khora.extraction.chunkers`) documented as **unstable** in ADR-024 — benchmarks pin an exact khora version on purpose.
 
-### anima, ttoj
+### Service consumers
 
-Thin consumers of the top-level `Khora` surface. No private imports.
+Production services consume khora through the stable top-level surface (ADR-024) plus `lake.storage` for direct backend access. `LLMUsage` is shared as a stable cost-tracking contract.
 
 ## Migration from pre-v0.8 khora
 
@@ -90,7 +86,7 @@ Two ADRs formalise what you can depend on:
 - [ADR-022](adrs/adr-022-extraction-skills-public-api.md) — `ExpertiseConfig` and friends from `khora.extraction.skills.base`.
 - [ADR-024](adrs/adr-024-memory-lake-public-api.md) — top-level `khora` re-exports (`Khora`, results, `SearchMode`, etc.).
 
-Both are append-only in minor releases. Breaking changes require a major bump **and** coordinated releases across genesis, khora-benchmarks, khora-explorer, and khora-cli.
+Both are append-only in minor releases. Breaking changes require a major bump **and** coordinated releases across khora-benchmarks, khora-explorer, and khora-cli.
 
 ## Integration checklist
 
