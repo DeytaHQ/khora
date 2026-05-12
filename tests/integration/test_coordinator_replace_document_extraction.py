@@ -1,4 +1,4 @@
-"""Real-backend integration tests for ``StorageCoordinator.replace_document_extraction`` (DYT-2673).
+"""Real-backend integration tests for ``StorageCoordinator.replace_document_extraction``.
 
 Exercises the full document-replacement lifecycle against a running Postgres
 + Neo4j stack:

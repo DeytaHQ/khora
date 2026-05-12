@@ -1,4 +1,4 @@
-# Soak / burn-in harness (DYT-3545)
+# Soak / burn-in harness
 
 Long-running ingest + recall workload that asserts release-blocking SLOs:
 

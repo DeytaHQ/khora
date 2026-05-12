@@ -407,7 +407,7 @@ class Neo4jBackend(GraphBackendBase):
         self._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
         self._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
 
-        # DYT-2625: apply operator-requested neo4j driver verbosity so services
+        # Apply operator-requested neo4j driver verbosity so services
         # that configure their own loguru sinks (bypassing khora's
         # setup_logging) still get driver logs when they build a backend.
         # Imported lazily to avoid any import-cycle surprises.
@@ -2570,7 +2570,7 @@ RETURN count(r) AS updated
         # Project relationship properties in Cypher: [r*1..N] binds a list
         # of relationships per path, so collect(r) yields list-of-lists.
         # Projecting via list comprehension avoids raw Relationship objects
-        # that serialize as opaque tuples (DYT-2629).
+        # that serialize as opaque tuples.
         query = f"""
         UNWIND $entity_ids AS eid
         MATCH (center:Entity {{id: eid}})

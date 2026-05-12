@@ -1260,7 +1260,7 @@ class TestEngineRegistry:
 
 
 # ---------------------------------------------------------------------------
-# include_sources feature (DYT-506)
+# include_sources feature
 # ---------------------------------------------------------------------------
 
 
@@ -2274,7 +2274,7 @@ class TestSubmitBatch:
 
     @pytest.mark.asyncio
     async def test_pending_external_id_requeues_for_processing(self) -> None:
-        """PENDING document with same external_id is re-queued, not failed (DYT-3075)."""
+        """PENDING document with same external_id is re-queued, not failed."""
         from khora.core.models.document import Document, DocumentStatus
 
         ns_id = uuid4()
@@ -2321,7 +2321,7 @@ class TestSubmitBatch:
 
     @pytest.mark.asyncio
     async def test_completed_external_id_reported_as_skipped(self) -> None:
-        """COMPLETED document with same external_id is skipped, not re-processed (DYT-3075)."""
+        """COMPLETED document with same external_id is skipped, not re-processed."""
         from khora.core.models.document import Document, DocumentStatus
 
         ns_id = uuid4()
@@ -2368,7 +2368,7 @@ class TestSubmitBatch:
 
     @pytest.mark.asyncio
     async def test_failed_external_id_resets_to_pending_and_reprocesses(self) -> None:
-        """FAILED document with same external_id is reset to PENDING and re-processed (DYT-3075)."""
+        """FAILED document with same external_id is reset to PENDING and re-processed."""
         from khora.core.models.document import Document, DocumentStatus
 
         ns_id = uuid4()
@@ -2572,7 +2572,7 @@ class TestSubmitBatch:
 
     @pytest.mark.asyncio
     async def test_archived_external_id_skipped_by_default(self) -> None:
-        """ARCHIVED document with same external_id is skipped by default (DYT-3077).
+        """ARCHIVED document with same external_id is skipped by default.
 
         ARCHIVED means 'not actively used'. Silently re-activating it on any
         batch submission that includes its external_id violates that semantic.
@@ -2621,7 +2621,7 @@ class TestSubmitBatch:
 
     @pytest.mark.asyncio
     async def test_archived_external_id_reprocessed_when_flag_set(self) -> None:
-        """ARCHIVED document is reset to PENDING and re-processed when reprocess_archived=True (DYT-3077)."""
+        """ARCHIVED document is reset to PENDING and re-processed when reprocess_archived=True."""
         from khora.core.models.document import Document, DocumentStatus
 
         ns_id = uuid4()
@@ -2680,7 +2680,7 @@ class TestSubmitBatch:
 
     @pytest.mark.asyncio
     async def test_archived_reprocess_update_document_failure_goes_to_failed(self) -> None:
-        """When reprocess_archived=True and update_document raises, the doc goes to pre_failed_docs (DYT-3077)."""
+        """When reprocess_archived=True and update_document raises, the doc goes to pre_failed_docs."""
         from khora.core.models.document import Document, DocumentStatus
 
         ns_id = uuid4()
@@ -2716,7 +2716,7 @@ class TestSubmitBatch:
 
 
 # ---------------------------------------------------------------------------
-# _GlobalChunkSemaphore (DYT-3111)
+# _GlobalChunkSemaphore
 # ---------------------------------------------------------------------------
 
 
@@ -2804,7 +2804,7 @@ class TestGlobalChunkSemaphore:
 
 
 # ---------------------------------------------------------------------------
-# Global semaphore initialization in submit_batch (DYT-3111)
+# Global semaphore initialization in submit_batch
 # ---------------------------------------------------------------------------
 
 
@@ -3088,7 +3088,7 @@ class TestSubmitBatchGlobalSemaphore:
 
 
 # ---------------------------------------------------------------------------
-# Tests for acquire/release in _process_document (DYT-3111 M-3/M-4)
+# Tests for acquire/release in _process_document (M-3/M-4)
 # ---------------------------------------------------------------------------
 
 
@@ -3252,7 +3252,7 @@ class TestProcessDocumentSemaphore:
 
 
 # ---------------------------------------------------------------------------
-# Unified pending processor (DYT-3305)
+# Unified pending processor
 # ---------------------------------------------------------------------------
 
 
@@ -3505,14 +3505,14 @@ class TestPendingProcessor:
 
 
 # ---------------------------------------------------------------------------
-# DYT-3787: undefined-table detection for fresh-DB orphan recovery
+# Undefined-table detection for fresh-DB orphan recovery
 # ---------------------------------------------------------------------------
 
 
 class TestIsUndefinedTableError:
     """Tests for `_is_undefined_table_error` — used by `_run_pending_processor`
     to silence the "memory_namespaces does not exist" ERROR on fresh ephemeral
-    DBs (DYT-3787)."""
+    DBs."""
 
     def test_detects_undefined_table_via_sqlstate_attribute(self) -> None:
         from khora.khora import _is_undefined_table_error

@@ -1,4 +1,4 @@
-"""Chronicle PostgreSQL integration tests (DYT-3545).
+"""Chronicle PostgreSQL integration tests.
 
 Chronicle is one of khora's two production-ready engines but had zero
 integration coverage on a real PostgreSQL stack. These tests wire up
@@ -539,7 +539,7 @@ async def test_chronicle_recall_metadata_completeness(kb: Khora, namespace_id: U
     # channels sub-dict structure
     assert set(md["channels"].keys()) == {"semantic", "bm25", "temporal", "entity"}
 
-    # abstention_signals sub-dict structure (CLAUDE.md / DYT-3145 contract)
+    # abstention_signals sub-dict structure (CLAUDE.md / contract)
     expected_signals = {
         "entities_empty",
         "chunks_empty",

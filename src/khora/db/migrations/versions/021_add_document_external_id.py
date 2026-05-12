@@ -4,7 +4,7 @@ Revision ID: 021_add_document_external_id
 Revises: 020_partial_index_dedup_active
 Create Date: 2026-04-14
 
-DYT-2427: Add external_id column (nullable) and partial composite index
+Add external_id column (nullable) and partial composite index
 (namespace_id, external_id) WHERE external_id IS NOT NULL for future
 dedup-by-external_id support (Phase 2).
 """

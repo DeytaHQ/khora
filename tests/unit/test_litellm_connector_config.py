@@ -1,4 +1,4 @@
-"""Unit tests for LiteLLM shared aiohttp connector configuration (DYT-3599)."""
+"""Unit tests for LiteLLM shared aiohttp connector configuration."""
 
 from __future__ import annotations
 

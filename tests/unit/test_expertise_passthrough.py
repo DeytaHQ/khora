@@ -1,4 +1,4 @@
-"""Unit tests for DYT-697: Expertise API pass-through.
+"""Unit tests for: Expertise API pass-through.
 
 Tests the full chain from Khora → Engine → process_document
 for expertise and extraction_config_hash parameters.
@@ -52,7 +52,7 @@ def _sample_expertise(*, expansion_enabled: bool = False) -> ExpertiseConfig:
 
 
 class TestTopLevelExports:
-    """DYT-699: ExpertiseConfig types importable from khora top-level."""
+    """ExpertiseConfig types importable from khora top-level."""
 
     def test_expertise_config_importable(self) -> None:
         from khora import ExpertiseConfig as EC
@@ -83,7 +83,7 @@ class TestTopLevelExports:
 
 
 class TestRememberWithExpertise:
-    """DYT-700: remember() accepts expertise and extraction_config_hash."""
+    """remember() accepts expertise and extraction_config_hash."""
 
     @pytest.mark.asyncio
     async def test_remember_passes_expertise_to_engine(self) -> None:
@@ -185,7 +185,7 @@ class TestRememberWithExpertise:
 
 
 class TestRememberBatchWithExpertise:
-    """DYT-700: remember_batch() accepts expertise and extraction_config_hash."""
+    """remember_batch() accepts expertise and extraction_config_hash."""
 
     @pytest.mark.asyncio
     async def test_remember_batch_passes_expertise(self) -> None:
@@ -260,7 +260,7 @@ class TestRememberBatchWithExpertise:
 
 
 class TestDocumentModelExtractionConfigHash:
-    """DYT-701: extraction_config_hash on DocumentModel and domain Document."""
+    """extraction_config_hash on DocumentModel and domain Document."""
 
     def test_domain_document_has_extraction_config_hash(self) -> None:
         """Domain Document supports extraction_config_hash field."""
@@ -308,7 +308,7 @@ class TestDocumentModelExtractionConfigHash:
 
 
 class TestExpansionControl:
-    """DYT-700: Expansion enabled when expertise.expansion.enabled is True."""
+    """Expansion enabled when expertise.expansion.enabled is True."""
 
     def test_expansion_config_enabled_flag(self) -> None:
         """ExpansionConfig enabled flag is accessible."""
@@ -358,7 +358,7 @@ class TestEngineProtocolCompat:
 
 
 class TestMigration:
-    """DYT-701: Migration adds extraction_config_hash column."""
+    """Migration adds extraction_config_hash column."""
 
     def test_migration_file_exists(self) -> None:
         """Migration 015 exists and has correct revision chain."""

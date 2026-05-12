@@ -1,4 +1,4 @@
-"""Skeleton SQLite + LanceDB integration tests (DYT-3545).
+"""Skeleton SQLite + LanceDB integration tests.
 
 Mirrors ``tests/integration/matrix/test_skeleton_pg.py`` (PR #474) for the
 embedded stack. Skeleton has no graph component, so the embedded subset is
@@ -201,7 +201,7 @@ async def _recall(kb: Khora, query: str, **kwargs: Any) -> Any:
     Mirrors ``_recall`` in ``test_skeleton_pg.py``: the wrapper sidesteps
     BM25 weighting under HYBRID so top-k ordering tests aren't affected by
     the blend weight. ``test_skeleton_recall_default_hybrid_mode`` exercises
-    the default-HYBRID path explicitly (DYT-3555).
+    the default-HYBRID path explicitly.
     """
     kwargs.setdefault("mode", SearchMode.VECTOR)
     return await kb.recall(query, **kwargs)
@@ -286,7 +286,7 @@ async def test_skeleton_recall_top_k_ordering(kb: Khora, namespace_id: UUID) -> 
         "``engine.recall`` while ``kb.remember`` resolves it to the "
         "row-level ``id`` before persisting. ``khora_chunks.namespace_id`` "
         "therefore stores the row-level id and the recall filter misses. "
-        "Same issue lurks behind PG's DYT-3556 xfail; needs a separate "
+        "Same issue lurks behind PG's xfail; needs a separate "
         "ticket to either resolve at the engine boundary or update the "
         "test contract."
     ),
@@ -332,7 +332,7 @@ async def test_skeleton_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
     """Two docs 5d vs 20d apart, "last 7 days" → recent only.
 
     Skeleton's single-doc ``remember()`` ignores ``metadata['occurred_at']``
-    (DYT-3557 — only ``remember_batch`` reads it). To dodge that here we
+    (only ``remember_batch`` reads it). To dodge that here we
     use ``remember_batch``, which reads the field and passes it through to
     ``TemporalChunk.occurred_at``. Mirrors the dodge documented in
     ``test_skeleton_pg.py`` but avoids the SQL-update workaround since
@@ -430,10 +430,10 @@ async def test_skeleton_recall_metadata_keys(kb: Khora, namespace_id: UUID) -> N
 
 
 async def test_skeleton_recall_default_hybrid_mode(kb: Khora, namespace_id: UUID) -> None:
-    """Default ``Khora.recall(...)`` works on HYBRID — DYT-3555 regression.
+    """Default ``Khora.recall(...)`` works on HYBRID — regression.
 
     Pre-fix, ``SkeletonConstructionEngine.recall`` referenced a non-existent
-    ``SearchMode.KEYWORD`` member, crashing on default HYBRID. DYT-3555
+    ``SearchMode.KEYWORD`` member, crashing on default HYBRID.
     added the enum member; this test exercises the default path on the
     embedded backend so the regression coverage extends past PG.
     """

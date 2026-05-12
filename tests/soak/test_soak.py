@@ -1,4 +1,4 @@
-"""Soak / burn-in harness for the Khora v0.9.0 release sign-off (DYT-3545).
+"""Soak / burn-in harness for the Khora v0.9.0 release sign-off.
 
 Per the Devil's Advocate audit (`/tmp/khora-embedded-critique.md`) and the
 ``CLAUDE.md`` "Logging" gotcha: loguru 0.7.3's queue is unbounded. Under

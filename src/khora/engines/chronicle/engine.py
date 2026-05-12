@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 ChronicleStorageBackend = Literal["pgvector", "lancedb"]
 
 
-# --- Abstention metrics (DYT-3145 Phase 4) ---
+# --- Abstention metrics (Phase 4) ---
 # Module-level instruments so every recall() shares one OTel handle.
 # No namespace label — Phase 0 audit identified 438 distinct namespaces,
 # emitting per-namespace would blow cardinality. Aggregate-only by design.
@@ -1486,7 +1486,7 @@ class ChronicleEngine:
         context_parts = [chunk.content for chunk, _score in chunks_with_scores]
         context_text = "\n\n---\n\n".join(context_parts[:limit])
 
-        # ── Abstention signals (DYT-3145) ───────────────────────────────
+        # ── Abstention signals ───────────────────────────────
         # Passive metadata for downstream consumers (LLM answer-generation)
         # to decide whether to refuse vs answer.  Does NOT alter retrieval.
         entity_hits: list[tuple[Entity, float]] = []  # Phase 2: entity-level results
@@ -1547,7 +1547,7 @@ class ChronicleEngine:
         # strongest signal that retrieval failed.
         combined = 0.3 * float(entities_empty) + 0.4 * float(chunks_below_min) + 0.3 * float(top_score_low)
 
-        # Aggregate metrics (DYT-3145 Phase 4). Per-signal counter increments
+        # Aggregate metrics (Phase 4). Per-signal counter increments
         # 0-4 times per recall; histogram observed once per recall. Both are
         # aggregate-only — no namespace_id label (cardinality safety).
         if entities_empty:
@@ -1897,7 +1897,7 @@ class ChronicleEngine:
         # Apply temporal filter post-hydration. get_chunks_batch has no
         # WHERE-clause hook, so we filter by COALESCE(source_timestamp,
         # created_at) here to match the pgvector pushdown rule used by the
-        # other channels (DYT-3547).
+        # other channels.
         if created_after is not None or created_before is not None:
             filtered_map: dict[UUID, Chunk] = {}
             for cid, chunk in chunks_map.items():

@@ -1,4 +1,4 @@
-"""DYT-2624 — tests for the correctness fixes to Neo4j pool metrics.
+"""Tests for the correctness fixes to Neo4j pool metrics.
 
 Covers the three problems identified in the ticket:
 1. ``khora.neo4j.pool.acquire_duration`` records *real* pool acquisition

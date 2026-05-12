@@ -1,4 +1,4 @@
-"""Cold-pool Neo4j acquire-duration smoke test (DYT-2624 AC2).
+"""Cold-pool Neo4j acquire-duration smoke test (AC2).
 
 Verifies that ``khora.neo4j.pool.acquire_duration`` records strictly less
 than wall-clock for N parallel ``RETURN 1`` calls on a cold pool.

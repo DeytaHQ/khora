@@ -2832,7 +2832,7 @@ class TestSurrealDBEventStoreOperations:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# Phase 3 optimizations (DYT-626)
+# Phase 3 optimizations
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -2973,7 +2973,7 @@ class TestSurrealDBCrashSafeDefaults:
 class TestSurrealDBBatchOptimizations:
     """Tests verifying batch operations use efficient queries.
 
-    Batch optimisations (DYT-626 Phase 3): ``create_relationships_batch``
+    Batch optimisations (Phase 3): ``create_relationships_batch``
     now uses a single ``FOR $rel IN $rels { RELATE ... }`` SurrealQL call
     instead of N individual round-trips.
     """
@@ -3748,7 +3748,7 @@ class TestSurrealDBGetDocumentsByChecksums:
 
 
 # ---------------------------------------------------------------------------
-# SurrealDB optimizations (DYT-1121)
+# SurrealDB optimizations
 # ---------------------------------------------------------------------------
 
 

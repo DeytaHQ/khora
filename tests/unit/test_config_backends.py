@@ -121,7 +121,7 @@ class TestDiscriminatedUnionParsing:
 
 @pytest.mark.unit
 class TestNeo4jConfigQueryTimeout:
-    """Tests for the Neo4jConfig.query_timeout field (DYT-1948)."""
+    """Tests for the Neo4jConfig.query_timeout field."""
 
     def test_default_query_timeout_is_5_seconds(self):
         """Default query_timeout caps long-running graph reads at 5 s."""
@@ -207,7 +207,7 @@ class TestKhoraConfigGraphHelpers:
 
 @pytest.mark.unit
 class TestGetNeo4jCredentials:
-    """Regression tests for DYT-2049: Neo4j credentials must flow through when split from URL."""
+    """Regression tests for: Neo4j credentials must flow through when split from URL."""
 
     def test_get_neo4j_password_prefers_explicit_graph_password_over_credential_free_url(self) -> None:
         graph = Neo4jConfig(url="bolt://localhost:7687", user="neo4j", password="secretpass")

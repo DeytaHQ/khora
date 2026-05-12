@@ -424,7 +424,7 @@ class VectorCypherEngine:
         # Create embedder
         # Connector fields are forwarded so YAML-configured values reach the
         # shared aiohttp session via configure_litellm — without this hop they
-        # would be silently dropped (DYT-3599).
+        # would be silently dropped.
         llm_config = LiteLLMConfig(
             model=self._config.llm.model,
             embedding_model=self._config.llm.embedding_model,
@@ -699,7 +699,7 @@ class VectorCypherEngine:
             # Concurrent race on `(namespace_id, external_id)`: another caller
             # inserted the same external_id between our lookup and this
             # create. The partial UNIQUE index ``ix_documents_namespace_external_id_unique``
-            # (DYT-2672) converts the race into a deterministic conflict.
+            # converts the race into a deterministic conflict.
             # Retry the lookup and route to replace so the loser still
             # succeeds against the winner's row.
             if external_id is None:
@@ -1144,7 +1144,7 @@ class VectorCypherEngine:
             is_conversation: When True, use a lower min_extraction_tokens threshold
                 (15 instead of 50) so short conversational messages still get entity
                 extraction. This enables graph retrieval for LoCoMo-style benchmarks
-                where messages are typically 10-50 words. (DYT-469)
+                where messages are typically 10-50 words.
 
         Returns:
             Tuple of (entities_with_embeddings, relationships, entity_chunk_links)
@@ -1154,7 +1154,7 @@ class VectorCypherEngine:
         if not chunks:
             return [], [], []
 
-        # DYT-469: Use lower threshold for conversation batches.
+        # Use lower threshold for conversation batches.
         # Short conversational messages (10-50 words) contain critical entities
         # (people, places, activities) that must be extracted for graph retrieval.
         # Without extraction, these chunks are invisible to graph search.
@@ -1259,7 +1259,7 @@ class VectorCypherEngine:
 
         Builds chunks / entities / relationships in-memory, then performs the
         full VectorCypher storage-side replace that ``replace_document_extraction``
-        alone does not cover. The coordinator primitive (DYT-2673) handles the
+        alone does not cover. The coordinator primitive handles the
         ``chunks`` table + Neo4j entity / relationship retire / remap / upsert,
         but VectorCypher also owns ``khora_chunks`` (via ``TemporalVectorStore``)
         and Neo4j ``:Chunk`` nodes (via ``DualNodeManager``). This method:
@@ -2940,7 +2940,7 @@ class VectorCypherEngine:
         except (AttributeError, NotImplementedError):
             pass
 
-        # Run independent counts in parallel (DYT-2116)
+        # Run independent counts in parallel
         chunk_result, entity_result, rel_result = await asyncio.gather(
             storage.count_chunks(namespace_id),
             storage.count_entities(namespace_id),

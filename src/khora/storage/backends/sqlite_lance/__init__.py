@@ -1,4 +1,4 @@
-"""SQLite + LanceDB embedded unified backend (DYT-2724)."""
+"""SQLite + LanceDB embedded unified backend."""
 
 from __future__ import annotations
 

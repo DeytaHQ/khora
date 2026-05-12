@@ -1,4 +1,4 @@
-"""DYT-3545 coverage: ``khora.engines._storage_config.build_storage_config``.
+"""Coverage: ``khora.engines._storage_config.build_storage_config``.
 
 Pins the three branches of the unified-backend selector (surrealdb,
 sqlite_lance, postgres) plus the ``skip_graph`` toggle. The module is

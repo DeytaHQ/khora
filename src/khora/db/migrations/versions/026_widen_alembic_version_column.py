@@ -4,7 +4,7 @@ Revision ID: 026_widen_alembic_version_column
 Revises: 025_add_document_extraction_params
 Create Date: 2026-05-01
 
-DYT-3546: Alembic's default version_num column is VARCHAR(32). Khora
+Alembic's default version_num column is VARCHAR(32). Khora
 revision IDs (e.g. "022_promote_external_id_index_unique" = 38 chars)
 exceed that, causing INSERT failures on fresh databases. env.py now
 creates the table at width 64 from the start; this migration widens

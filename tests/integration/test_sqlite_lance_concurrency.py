@@ -1,4 +1,4 @@
-"""Concurrency integration tests for sqlite_lance entity key gate (DYT-2734).
+"""Concurrency integration tests for sqlite_lance entity key gate.
 
 Verifies ``_SQLiteLanceEntityKeyGate`` serializes overlapping
 ``(namespace_id, name, entity_type)`` upserts so N concurrent tasks

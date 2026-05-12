@@ -1,4 +1,4 @@
-"""Real-Neo4j integration tests for ``Neo4jBackend.remap_source_document_ids_batch`` (DYT-2670).
+"""Real-Neo4j integration tests for ``Neo4jBackend.remap_source_document_ids_batch``.
 
 Verifies that source_document_ids arrays on entities and relationships are
 correctly remapped (old doc UUID swapped for new) against a running Neo4j

@@ -1,4 +1,4 @@
-"""Tests for DYT-1953: count_documents, get_last_activity_at, get_document_stats, and engine stats().
+"""Tests for: count_documents, get_last_activity_at, get_document_stats, and engine stats().
 
 Covers:
 - Engine stats() methods returning last_activity_at for all 4 engines
@@ -245,7 +245,7 @@ class TestVectorCypherEngineStats:
 
     @pytest.mark.asyncio
     async def test_stats_routes_chunks_through_storage(self) -> None:
-        """stats() gets chunk count from storage.count_chunks (DYT-2116)."""
+        """stats() gets chunk count from storage.count_chunks."""
         ts = datetime(2026, 1, 10, 9, 0, 0, tzinfo=UTC)
         engine = self._make_engine()
         engine._connected = True

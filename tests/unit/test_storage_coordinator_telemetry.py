@@ -1,4 +1,4 @@
-"""Regression tests for ``_record_storage_op`` namespace_id propagation (DYT-3398).
+"""Regression tests for ``_record_storage_op`` namespace_id propagation.
 
 Background: a Feb-2026 refactor (``c948760``) replaced per-method telemetry
 recording in ``storage/coordinator.py`` with a generic decorator that dropped

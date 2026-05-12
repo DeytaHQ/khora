@@ -2,7 +2,7 @@
 
 Mirrors ``test_chronicle_pg.py`` for the embedded stack. Chronicle on
 sqlite_lance was broken at the persistence layer until issue #529 (PR
-#528, DYT-4051) wired ``write_events`` / ``write_facts`` /
+#528) wired ``write_events`` / ``write_facts`` /
 ``query_active_facts_for_subject`` through the relational adapter when
 the coordinator's vector adapter (LanceDB) doesn't carry chronicle
 methods. This file is the matrix-tier regression test for that fix.
@@ -259,7 +259,7 @@ async def test_chronicle_events_and_facts_persist_via_engine(
 ) -> None:
     """Regression for issue #529 at the **engine layer**.
 
-    The DYT-4051 fix in PR #528 wired chronicle persistence through the
+    The fix in PR #528 wired chronicle persistence through the
     relational adapter on the embedded path. The integration test in that
     PR exercised the storage layer only (``coord.write_events`` directly).
     This test verifies the same fix end-to-end through

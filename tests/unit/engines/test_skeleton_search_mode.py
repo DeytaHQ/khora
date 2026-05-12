@@ -1,4 +1,4 @@
-"""Unit tests for ``SearchMode`` + Skeleton recall mode dispatch (DYT-3555).
+"""Unit tests for ``SearchMode`` + Skeleton recall mode dispatch.
 
 Pre-fix, ``SkeletonConstructionEngine.recall`` referenced a non-existent
 ``SearchMode.KEYWORD`` member. Any call with ``mode != VECTOR`` (HYBRID is
@@ -26,7 +26,7 @@ from khora.query import SearchMode
 
 
 def test_search_mode_has_keyword_member() -> None:
-    """SearchMode must expose KEYWORD (DYT-3555)."""
+    """SearchMode must expose KEYWORD."""
     # Attribute access — what the buggy ``elif`` does at engine.py:441.
     assert hasattr(SearchMode, "KEYWORD")
     assert SearchMode.KEYWORD is SearchMode["KEYWORD"]

@@ -436,7 +436,7 @@ async def acompletion(
         latency_ms=_latency,
     )
 
-    # DYT-645: Extractors call litellm.acompletion() directly, not this helper.
+    # Extractors call litellm.acompletion() directly, not this helper.
     # If they switch to this helper, remove their own record_usage() calls to
     # avoid double-counting.
     from khora.khora import LLMUsage
@@ -509,7 +509,7 @@ async def aembedding(
         metadata={"batch_size": len(text)},
     )
 
-    # DYT-645: Embedders call litellm.aembedding() directly, not this helper.
+    # Embedders call litellm.aembedding() directly, not this helper.
     # If they switch to this helper, remove their own record_usage() calls to
     # avoid double-counting.
     from khora.khora import LLMUsage

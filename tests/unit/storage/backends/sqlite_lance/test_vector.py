@@ -1,4 +1,4 @@
-"""Tests for :class:`SQLiteLanceVectorAdapter` (DYT-2730)."""
+"""Tests for :class:`SQLiteLanceVectorAdapter`."""
 
 from __future__ import annotations
 

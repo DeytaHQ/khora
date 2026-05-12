@@ -1,4 +1,4 @@
-"""DYT-3545 coverage: ``SkeletonConstructionEngine`` happy paths and helpers.
+"""Coverage: ``SkeletonConstructionEngine`` happy paths and helpers.
 
 Pre-PR coverage of ``engines/skeleton/engine.py`` was 36%. The big
 uncovered surfaces are:

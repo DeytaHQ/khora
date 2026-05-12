@@ -329,7 +329,7 @@ class TestDocumentCRUD:
         assert fetched.id == doc.id
 
     async def test_get_document_by_checksum_excludes_failed(self, relational: SQLiteRelationalBackend):
-        """FAILED documents should not be returned by checksum lookup (DYT-2381)."""
+        """FAILED documents should not be returned by checksum lookup."""
         ns = _make_namespace()
         await relational.create_namespace(ns)
 

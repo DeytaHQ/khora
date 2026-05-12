@@ -73,7 +73,7 @@ _SQLITE_PRAGMAS: tuple[tuple[str, str], ...] = (
 )
 
 
-# SQLite-specific Table mirrors for the Chronicle schema (DYT-4051).
+# SQLite-specific Table mirrors for the Chronicle schema.
 #
 # The ORM models in khora.db.models declare Postgres-only types on these
 # tables — ``ChronicleEventModel.embedding: Vector(1536)`` and
@@ -661,7 +661,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             await session.commit()
 
     # =========================================================================
-    # Chronicle engine: events + facts (DYT-4051)
+    # Chronicle engine: events + facts
     #
     # pgvector implements these on its vector adapter because it owns the
     # `embedding` column on chronicle_events. The sqlite_lance vector adapter

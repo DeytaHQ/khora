@@ -1,4 +1,4 @@
-"""Tests for DYT-2381: PostgreSQL backend excludes FAILED documents from checksum lookups.
+"""Tests for: PostgreSQL backend excludes FAILED documents from checksum lookups.
 
 Verifies that get_document_by_checksum() and get_documents_by_checksums() filter out
 FAILED documents so they can be re-ingested.
@@ -58,7 +58,7 @@ def _make_backend(session_mock) -> PostgreSQLBackend:
 
 @pytest.mark.unit
 class TestGetDocumentByChecksumExcludesFailed:
-    """Verify get_document_by_checksum filters out FAILED documents (DYT-2381)."""
+    """Verify get_document_by_checksum filters out FAILED documents."""
 
     @pytest.mark.asyncio
     async def test_returns_none_when_only_failed_exists(self) -> None:
@@ -112,7 +112,7 @@ class TestGetDocumentByChecksumExcludesFailed:
 
 @pytest.mark.unit
 class TestGetDocumentsByChecksumsExcludesFailed:
-    """Verify get_documents_by_checksums filters out FAILED documents (DYT-2381)."""
+    """Verify get_documents_by_checksums filters out FAILED documents."""
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_only_failed_exist(self) -> None:

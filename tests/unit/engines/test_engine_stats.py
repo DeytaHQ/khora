@@ -253,7 +253,7 @@ class TestVectorCypherStats:
 
     @pytest.mark.asyncio
     async def test_stats_uses_storage_for_chunks(self) -> None:
-        """stats() uses storage.count_chunks for chunk count (DYT-2116)."""
+        """stats() uses storage.count_chunks for chunk count."""
         storage = _make_mock_storage(chunk_count=42)
         engine = self._make_engine(storage)
 

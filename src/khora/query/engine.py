@@ -54,7 +54,7 @@ class SearchMode(Enum):
     GRAPH = auto()  # Graph traversal only
     HYBRID = auto()  # Combine vector and graph
     ALL = auto()  # Vector, graph, and keyword
-    KEYWORD = auto()  # BM25 / keyword-only (used by Skeleton; DYT-3555)
+    KEYWORD = auto()  # BM25 / keyword-only (used by Skeleton)
 
 
 @dataclass

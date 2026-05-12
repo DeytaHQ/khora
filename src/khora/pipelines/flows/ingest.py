@@ -1051,7 +1051,7 @@ async def process_document(
         # Step 4 & 5: Store chunks and entities in parallel
         # Chunks go to pgvector, entities go to graph+vector - independent writes
 
-        # DYT-3558: snapshot of pre-upsert (extraction-time) entity ID -> (name, entity_type)
+        # Snapshot of pre-upsert (extraction-time) entity ID -> (name, entity_type)
         # populated inside _store_entities, read by _store_relationships's fallback.
         pre_upsert_name_type: dict[str, tuple[str, str]] = {}
 
@@ -1127,7 +1127,7 @@ async def process_document(
                 pre_upsert_ids = [str(e.id) for e in entities]
                 # Also snapshot (name, entity_type) per pre-upsert ID — used by the
                 # _store_relationships fallback when a relationship references an
-                # entity UUID that was canonicalised away by the upsert. (DYT-3558)
+                # entity UUID that was canonicalised away by the upsert.
                 pre_upsert_name_type.update({str(e.id): (e.name, e.entity_type) for e in entities})
                 logger.debug(f"Document {document.id}: upserting {len(entities)} entities")
 
@@ -1198,7 +1198,7 @@ async def process_document(
                     stored_id = name_type_to_stored.get(key)
                     if stored_id:
                         entity_id_mapping[str(orig_entity.id)] = stored_id
-                # DYT-3558: also map the *pre-upsert* (extraction-time) IDs to the
+                # Also map the *pre-upsert* (extraction-time) IDs to the
                 # canonical IDs. Neo4j's MERGE may rewrite entity.id in-place when
                 # an entity already exists from a previous document, after which
                 # the loop above only ever sees canonical → canonical. Relationships
@@ -1290,7 +1290,7 @@ async def process_document(
             from uuid import UUID
 
             async def _resolve_via_db(unmapped_id: str) -> str | None:
-                """DYT-3558 defense-in-depth fallback: resolve an unmapped extraction-time
+                """Defense-in-depth fallback: resolve an unmapped extraction-time
                 UUID by looking up (namespace, name, type) in the storage backend.
 
                 Used when entity_id_mapping lacks an entry for a relationship endpoint

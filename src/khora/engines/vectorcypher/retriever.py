@@ -190,7 +190,7 @@ def _has_target_date(
 ) -> bool:
     """Return True if the recall request carries a point-in-time target date.
 
-    Used to gate the embedded sqlite_lance backend (DYT-3550) which lacks
+    Used to gate the embedded sqlite_lance backend which lacks
     bi-temporal version columns. Both inputs are duck-typed because the
     same attribute names (``occurred_after`` / ``occurred_before``) are
     shared between the user-facing temporal filter and the
@@ -249,7 +249,7 @@ class VectorCypherRetriever:
                 ``get_entity_neighborhoods``. ``None`` disables the timeout.
             backend: Storage backend identifier (e.g., ``"postgres"``,
                 ``"surrealdb"``, ``"sqlite_lance"``). Used to gate features
-                that aren't implemented on the embedded backend (DYT-3550).
+                that aren't implemented on the embedded backend.
         """
         self._vector_store = vector_store
         self._neo4j_driver = neo4j_driver
@@ -322,7 +322,7 @@ class VectorCypherRetriever:
         with trace_span("khora.vectorcypher.retrieve", namespace_id=str(namespace_id)) as span:
             limit = limit or self._config.max_chunks
 
-            # DYT-3550: gate point-in-time / historical queries on the embedded
+            # Gate point-in-time / historical queries on the embedded
             # backend. The sqlite_lance schema lacks ``version_valid_from/to``
             # columns, so ``_version_filter_entities`` would silently fall
             # through and return current-state results — a correctness bug.
@@ -2245,7 +2245,7 @@ class VectorCypherRetriever:
                 vector_weight = self._config.temporal_vector_weight
                 graph_weight = self._config.temporal_graph_weight
 
-                # DYT-470: Adapt fusion weights when graph returns zero/few results.
+                # Adapt fusion weights when graph returns zero/few results.
                 # When graph retrieval yields nothing (common for short conversational
                 # messages without entity extraction), using graph-heavy weights (0.3/0.7)
                 # dilutes good vector results and hurts ranking.

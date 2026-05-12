@@ -1,4 +1,4 @@
-"""Unit tests for migration bundling (DYT-567).
+"""Unit tests for migration bundling.
 
 Tests that Alembic migrations are bundled in the khora package and
 can be run programmatically via run_migrations() / Khora(run_migrations=True).
@@ -825,7 +825,7 @@ class TestDoRunMigrationsAheadDetection:
         pg_catalog_result.scalar.return_value = table_exists
 
         if table_exists:
-            # Width check returns 64 — already wide enough, no ALTER issued. (DYT-3546)
+            # Width check returns 64 — already wide enough, no ALTER issued.
             width_result = MagicMock()
             width_result.scalar.return_value = 64
 
@@ -892,7 +892,7 @@ class TestDoRunMigrationsAheadDetection:
         Previously this would leave the PostgreSQL transaction in ABORTED state
         (InFailedSQLTransactionError) because querying a missing table inside an
         explicit transaction aborts it. The fix checks information_schema.tables first
-        so no statement ever fails inside the transaction. (DYT-1447)
+        so no statement ever fails inside the transaction.
         """
         env = _load_env_functions()
         conn = self._setup_conn(None, table_exists=False)
@@ -913,7 +913,7 @@ class TestDoRunMigrationsAheadDetection:
 
         Covers M1: version SELECT failure (e.g. permission denied) after table presence
         confirmed. The exception is swallowed and ahead-detection is skipped so that
-        migrations can still proceed. (DYT-1447)
+        migrations can still proceed.
         """
         env = _load_env_functions()
         conn = MagicMock()
@@ -925,7 +925,7 @@ class TestDoRunMigrationsAheadDetection:
         existence_result = MagicMock()
         existence_result.scalar.return_value = True  # table exists
 
-        # Width check: column already wide enough — no ALTER. (DYT-3546)
+        # Width check: column already wide enough — no ALTER.
         width_result = MagicMock()
         width_result.scalar.return_value = 64
 
@@ -967,7 +967,7 @@ class TestDoRunMigrationsAheadDetection:
     def test_widens_version_num_when_too_narrow(self):
         """Issues ALTER TABLE when existing version_num column is narrower than 64.
 
-        Covers DYT-3546: existing PostgreSQL deployments may have the version_num
+        Covers: existing PostgreSQL deployments may have the version_num
         column at the Alembic default VARCHAR(32). env.py widens it in-place
         before running migrations so that subsequent revision IDs >32 chars fit.
         """

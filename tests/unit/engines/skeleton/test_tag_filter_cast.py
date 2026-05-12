@@ -1,4 +1,4 @@
-"""DYT-3556: tag filter literal must be cast to ``VARCHAR[]`` for PostgreSQL.
+"""Tag filter literal must be cast to ``VARCHAR[]`` for PostgreSQL.
 
 The ``khora_chunks.tags`` column is ``ARRAY(String)`` (compiles to
 ``character varying[]``), but asyncpg infers Python ``list[str]`` literals as

@@ -1,4 +1,4 @@
-"""Real-Neo4j integration test for ``Neo4jBackend.get_neighborhoods_batch`` (DYT-2629).
+"""Real-Neo4j integration test for ``Neo4jBackend.get_neighborhoods_batch``.
 
 This test exercises the full Cypher → driver → ``result.data()`` →
 relationship property extraction path against a running Neo4j instance to verify
@@ -49,7 +49,7 @@ from khora.storage.backends.neo4j import Neo4jBackend
     reason="set NEO4J_INTEGRATION_TEST=1 to run against real Neo4j (requires make dev)",
 )
 class TestNeo4jGetNeighborhoodsBatchIntegration:
-    """End-to-end regression lock for DYT-2629 against a real Neo4j."""
+    """End-to-end regression lock for against a real Neo4j."""
 
     @pytest.mark.asyncio
     async def test_returns_relationships_with_properties_depth_1(self) -> None:

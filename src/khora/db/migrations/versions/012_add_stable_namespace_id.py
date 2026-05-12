@@ -1,4 +1,4 @@
-"""Add stable namespace_id column to memory_namespaces (DYT-396).
+"""Add stable namespace_id column to memory_namespaces.
 
 Revision ID: 012_add_stable_namespace_id
 Revises: 011_drop_namespace_slug

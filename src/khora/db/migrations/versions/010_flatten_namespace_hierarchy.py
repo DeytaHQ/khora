@@ -1,4 +1,4 @@
-"""Flatten multi-tenancy to namespace-only (DYT-220).
+"""Flatten multi-tenancy to namespace-only.
 
 Revision ID: 010_flatten_namespace_hierarchy
 Revises: 009_temporal_search_indexes

@@ -1,4 +1,4 @@
-"""DYT-3550: gate point-in-time queries on the embedded sqlite_lance backend.
+"""Gate point-in-time queries on the embedded sqlite_lance backend.
 
 The embedded layer has no ``version_valid_from/to`` columns, so the
 ``_version_filter_entities`` path would silently fall through and return

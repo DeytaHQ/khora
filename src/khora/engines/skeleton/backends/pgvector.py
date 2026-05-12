@@ -567,8 +567,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
             # The ``tags`` column is declared as ``ARRAY(String)`` which compiles
             # to ``character varying[]``, but asyncpg infers a list-of-str literal
             # as ``text[]``. PostgreSQL has no ``varchar[] @> text[]`` operator,
-            # so we cast the literal to ``varchar[]`` explicitly to match. See
-            # DYT-3556.
+            # so we cast the literal to ``varchar[]`` explicitly to match.
             conditions.append(khora_chunks_table.c.tags.contains(cast(f.tags, ARRAY(String))))
 
         # Handle additional filters

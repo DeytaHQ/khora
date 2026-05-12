@@ -1,4 +1,4 @@
-"""Tests for DYT-2674: PostgreSQL backend get_document_by_external_id.
+"""Tests for: PostgreSQL backend get_document_by_external_id.
 
 Verifies status-agnostic lookup (unlike get_document_by_checksum) and the
 None short-circuit guard — both required for the replace dispatch.
@@ -64,7 +64,7 @@ def _make_backend(session_mock) -> PostgreSQLBackend:
 
 @pytest.mark.unit
 class TestGetDocumentByExternalId:
-    """DYT-2674: lookup must return rows regardless of status."""
+    """Lookup must return rows regardless of status."""
 
     @pytest.mark.asyncio
     async def test_returns_none_when_missing(self) -> None:

@@ -121,7 +121,7 @@ def install_neo4j_logfire_handler() -> bool:
     driver DEBUG records are dropped by the sink filter. Attaching a
     dedicated ``LogfireLoggingHandler`` directly on the ``neo4j`` logger
     bypasses the sink-level filter — records reach Logfire alongside the
-    existing stderr handler installed by downstream services (DYT-2721).
+    existing stderr handler installed by downstream services.
 
     No-op when ``logfire`` is not installed, or when
     ``KHORA_NEO4J_LOG_LEVEL`` is unset/empty. Idempotent: removes any

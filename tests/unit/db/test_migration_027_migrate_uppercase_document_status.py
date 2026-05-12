@@ -1,4 +1,4 @@
-"""DYT-3736: ``027_migrate_uppercase_document_status``.
+"""``027_migrate_uppercase_document_status``.
 
 Pins the three branches of the migration:
 

@@ -4,7 +4,7 @@ Revision ID: 016_widen_extraction_config_hash
 Revises: 015_add_extraction_config_hash
 Create Date: 2026-03-22
 
-DYT-761: The original DYT-697 widening was reverted by the DYT-752 merge.
+The original widening was reverted by the merge.
 VARCHAR(255) accommodates compound keys and longer hash algorithms.
 """
 

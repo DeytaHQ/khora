@@ -4,7 +4,7 @@ Revision ID: 023_add_document_relationship_count
 Revises: 022_promote_external_id_index_unique
 Create Date: 2026-04-25
 
-DYT-3076: Track persisted relationship count on Document so that
+Track persisted relationship count on Document so that
 skipped DocumentResult entries can report the correct
 relationships_created value instead of always returning 0.
 """

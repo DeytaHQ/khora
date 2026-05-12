@@ -1,4 +1,4 @@
-"""VectorCypher SQLite+LanceDB integration tests (DYT-3545 / PR-D).
+"""VectorCypher SQLite+LanceDB integration tests (PR-D).
 
 VectorCypher is one of khora's two production-ready engines and v0.9.0
 declares **SQLite + LanceDB** the default *embedded* stack. These tests
@@ -359,7 +359,7 @@ async def test_vc_two_hop_traversal(kb: Khora, namespace_id: UUID) -> None:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="DYT-3562: VectorCypher embedded path doesn't push temporal filter to LanceDB query",
+    reason="VectorCypher embedded path doesn't push temporal filter to LanceDB query",
 )
 async def test_vc_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
     """Two docs at different ``occurred_at``; recall with ``last 7 days`` filter
@@ -533,7 +533,7 @@ async def test_vc_prefer_current_via_cte(kb: Khora, namespace_id: UUID) -> None:
     NOT return C's content.
 
     This tests Graphiti-style bi-temporal invalidation pushed through the
-    SQLite-CTE traversal. R2 (DYT-3549) is the fix that makes
+    SQLite-CTE traversal. R2 is the fix that makes
     ``prefer_current`` honor expired/invalidated edges in the CTE. Until
     that lands, the CTE happily walks expired edges, so this test is
     expected to fail even after DYT-3560 wires the VC embedded path.
@@ -580,4 +580,4 @@ async def test_vc_prefer_current_via_cte(kb: Khora, namespace_id: UUID) -> None:
     )
 
     text_blob = result.context_text.lower() + " ".join(c.content for c, _ in result.chunks).lower()
-    assert "polonium" not in text_blob, "expired edge leaked through prefer_current=True (DYT-3549 R2 fix not in main)"
+    assert "polonium" not in text_blob, "expired edge leaked through prefer_current=True (R2 fix not in main)"

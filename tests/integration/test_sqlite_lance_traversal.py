@@ -1,4 +1,4 @@
-"""Graph traversal integration tests for sqlite_lance (DYT-2734).
+"""Graph traversal integration tests for sqlite_lance.
 
 Builds a 3-hop entity graph directly via the graph adapter (bypasses LLM
 extraction) and exercises ``find_paths`` / ``get_neighborhood`` /

@@ -1,4 +1,4 @@
-"""DYT-3545 coverage: ``StorageCoordinator`` not-configured guard paths.
+"""Coverage: ``StorageCoordinator`` not-configured guard paths.
 
 Pre-PR coverage of ``coordinator.py`` was 62%. The missing lines are
 mostly the ``if not self.X: raise RuntimeError(...)`` guards on every

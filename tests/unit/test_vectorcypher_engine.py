@@ -1,4 +1,4 @@
-"""Unit tests for VectorCypher engine — entity search (DYT-180).
+"""Unit tests for VectorCypher engine — entity search.
 
 Verifies that VectorCypherEngine.search_entities() uses
 ``search_similar_entities()`` + ``get_entities_batch()`` on
@@ -66,7 +66,7 @@ def _mock_storage_coordinator() -> MagicMock:
 
 @pytest.mark.unit
 class TestVectorCypherSearchEntities:
-    """Tests for VectorCypherEngine.search_entities (DYT-180)."""
+    """Tests for VectorCypherEngine.search_entities."""
 
     @pytest.mark.asyncio
     async def test_search_entities_uses_correct_storage_methods(self) -> None:

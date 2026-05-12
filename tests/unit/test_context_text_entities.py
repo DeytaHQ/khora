@@ -1,9 +1,9 @@
 """Tests for entity and relationship inclusion in context_text.
 
-DYT-524: Verifies that RecallResult.context_text includes an entity section
+Verifies that RecallResult.context_text includes an entity section
 when entities are present in the recall result.
 
-DYT-563: Verifies relationship formatting in context_text and RecallResult
+Verifies relationship formatting in context_text and RecallResult
 relationship support.
 """
 
@@ -21,7 +21,7 @@ from khora.query.engine import format_entity_section, format_relationship_sectio
 
 @pytest.mark.unit
 class TestGetContextTextIncludesEntities:
-    """DYT-524: verify that entity data appears in RecallResult.context_text."""
+    """Verify that entity data appears in RecallResult.context_text."""
 
     def test_chunks_and_entities(self) -> None:
         """When both chunks and entities are present, context_text has both."""
@@ -200,7 +200,7 @@ class TestContextTextEntityRegressions:
 
 @pytest.mark.unit
 class TestRelationshipFormatting:
-    """DYT-563: format_relationship_section and RecallResult relationship support."""
+    """format_relationship_section and RecallResult relationship support."""
 
     def test_format_relationship_section_basic(self) -> None:
         """Arrow format with description: '- Alice --FOUNDED--> Acme Corp: Founded the company'."""

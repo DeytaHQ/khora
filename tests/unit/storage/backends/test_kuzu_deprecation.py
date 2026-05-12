@@ -1,4 +1,4 @@
-"""DYT-3545: Kuzu backend deprecation (removal scheduled for khora 0.10.0).
+"""Kuzu backend deprecation (removal scheduled for khora 0.10.0).
 
 Verifies that instantiating ``KuzuBackend`` emits a ``DeprecationWarning``
 even when the optional ``kuzu`` package is not installed (the warning
