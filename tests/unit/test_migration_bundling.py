@@ -29,8 +29,8 @@ def _mock_config() -> MagicMock:
     from pydantic import SecretStr
 
     cfg = MagicMock()
-    # ADR-084: database_url is SecretStr on KhoraConfig; tests must mock the
-    # same type so unwrap call sites (Khora.connect()) don't AttributeError.
+    # database_url is SecretStr on KhoraConfig; tests must mock the same type
+    # so unwrap call sites (Khora.connect()) don't AttributeError.
     cfg.database_url = SecretStr("postgresql://localhost/testdb")
     cfg.llm.embedding_model = "text-embedding-3-small"
     return cfg

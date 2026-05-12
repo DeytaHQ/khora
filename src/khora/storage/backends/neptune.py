@@ -62,8 +62,8 @@ class NeptuneBackend(GraphBackendBase):
     def from_config(cls, config: Any) -> NeptuneBackend:
         """Create a NeptuneBackend from a NeptuneConfig object.
 
-        ADR-084 boundary: ``config.password`` and ``config.url`` are unwrapped
-        from ``SecretStr`` here so the driver receives plaintext.
+        ``config.password`` and ``config.url`` are unwrapped from
+        ``SecretStr`` here so the driver receives plaintext.
         """
         from pydantic import SecretStr
 

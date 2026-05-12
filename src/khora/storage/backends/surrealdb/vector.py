@@ -62,9 +62,9 @@ class SurrealDBVectorAdapter:
         """Create an adapter from a configuration dictionary.
 
         Expected keys mirror :class:`SurrealDBConnection` init args, plus
-        optional ``hnsw_ef_search``. ADR-084 boundary: ``password`` and
-        ``url`` are unwrapped from ``pydantic.SecretStr`` if needed so the
-        driver receives plaintext credentials / DSN.
+        optional ``hnsw_ef_search``. ``password`` and ``url`` are unwrapped
+        from ``pydantic.SecretStr`` if needed so the driver receives
+        plaintext credentials / DSN.
         """
         from pydantic import SecretStr
 

@@ -253,8 +253,8 @@ def _run_migrations_sync(database_url: str | None = None) -> MigrationResult:
             skipped=True,
         )
     except Exception as e:
-        # ADR-084 §⚠️: scrub plaintext DSN userinfo from error messages before
-        # they hit logs or the returned MigrationResult.error string.
+        # Scrub plaintext DSN userinfo from error messages before they hit
+        # logs or the returned MigrationResult.error string.
         from khora.config._secrets import redact_dsn
 
         elapsed = time.monotonic() - start

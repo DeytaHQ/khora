@@ -15,11 +15,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 def _secret_value(value: SecretStr | str | None, default: str = "") -> str:
     """Return the plain-text value of a ``SecretStr`` (or pass-through ``str``).
 
-    ADR-084 boundary helper: storage-backend engine factories unwrap
-    ``SecretStr`` exactly once when handing credentials to the underlying
-    driver. Accepts ``str`` as a back-compat fallback so legacy call sites
-    that still pass plain strings continue to work during the migration
-    window.
+    Storage-backend engine factories unwrap ``SecretStr`` exactly once when
+    handing credentials to the underlying driver. Accepts ``str`` as a
+    back-compat fallback so legacy call sites that still pass plain strings
+    continue to work during the migration window.
     """
     if value is None:
         return default
@@ -966,9 +965,9 @@ class KhoraConfig(BaseSettings):
     def get_postgresql_url(self) -> str | None:
         """Get PostgreSQL URL from config (plaintext, for driver consumption).
 
-        Boundary unwrap for ``SecretStr`` per ADR-084: callers receive a plain
-        string suitable for handing to SQLAlchemy / asyncpg. Returns ``None``
-        when neither ``storage.postgresql_url`` nor ``database_url`` is set.
+        Boundary unwrap for ``SecretStr``: callers receive a plain string
+        suitable for handing to SQLAlchemy / asyncpg. Returns ``None`` when
+        neither ``storage.postgresql_url`` nor ``database_url`` is set.
         """
         if self.storage.postgresql_url is not None:
             return _secret_value(self.storage.postgresql_url) or None
@@ -979,8 +978,8 @@ class KhoraConfig(BaseSettings):
     def _get_raw_neo4j_url(self) -> str | None:
         """Get raw Neo4j URL (may contain credentials).
 
-        Boundary unwrap for ``SecretStr`` per ADR-084. Callers feed this URL
-        into ``ParsedNeo4jUrl.parse`` (which itself splits the URL into
+        Boundary unwrap for ``SecretStr``. Callers feed this URL into
+        ``ParsedNeo4jUrl.parse`` (which itself splits the URL into
         cleaned-URL + credentials before forwarding to the driver).
         """
         # Check new-style graph config first
@@ -1042,7 +1041,7 @@ class KhoraConfig(BaseSettings):
     def get_neo4j_password(self) -> str:
         """Get Neo4j password (plaintext, for driver consumption).
 
-        Boundary unwrap for ``SecretStr`` per ADR-084.
+        Boundary unwrap for ``SecretStr``.
 
         Precedence: password embedded in ``Neo4jConfig.url`` (or the legacy
         ``neo4j_url``) wins. Otherwise, falls back to the separately-configured
@@ -1106,8 +1105,8 @@ class KhoraConfig(BaseSettings):
         vector = self.storage.vector
         if isinstance(vector, PgVectorConfig) and not vector.url:
             # Populate from legacy fields. Both ``pgvector_url`` and
-            # ``PgVectorConfig.url`` are ``SecretStr`` post ADR-084 re-typing;
-            # unwrap the legacy field here so Pydantic re-wraps consistently.
+            # ``PgVectorConfig.url`` are ``SecretStr``; unwrap the legacy
+            # field here so Pydantic re-wraps consistently.
             url = _secret_value(self.storage.pgvector_url) or self.get_postgresql_url()
             return PgVectorConfig(
                 url=url,

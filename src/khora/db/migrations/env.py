@@ -243,9 +243,9 @@ def run_migrations_offline() -> None:
 async def run_async_migrations() -> None:
     """Run migrations in 'online' mode with async engine.
 
-    ADR-084 §⚠️ Edge Cases: connection-setup errors raised by the underlying
-    driver often embed the plaintext DSN (asyncpg in particular formats the
-    full ``postgresql://user:pass@host/db`` string into its
+    Connection-setup errors raised by the underlying driver often embed the
+    plaintext DSN (asyncpg in particular formats the full
+    ``postgresql://user:pass@host/db`` string into its
     ``InvalidPasswordError`` / ``CannotConnectNowError`` messages). Wrap the
     exception path with ``redact_dsn`` so the userinfo segment never reaches
     log sinks or Logfire span attributes.

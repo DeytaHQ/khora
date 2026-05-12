@@ -12,7 +12,7 @@ class TelemetryConfig(BaseModel):
 
     database_url: SecretStr | None = Field(
         default=None,
-        description="PostgreSQL URL for telemetry database (ADR-084 SecretStr)",
+        description="PostgreSQL URL for telemetry database (SecretStr)",
     )
     service_name: str = Field(
         default="khora",

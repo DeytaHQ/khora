@@ -1,8 +1,8 @@
-"""ADR-084 v1-scope SecretStr re-typing — contract tests.
+"""SecretStr re-typing — contract tests.
 
 Covers:
 
-* every v1-scope Pydantic password / DSN field is typed as
+* every Pydantic password / DSN field is typed as
   :class:`pydantic.SecretStr` (or ``SecretStr | None``).
 * ``repr()`` and ``model_dump_json()`` of those fields never leak the
   underlying plaintext.
@@ -37,7 +37,7 @@ from khora.telemetry.config import TelemetryConfig
 
 @pytest.mark.unit
 class TestSecretStrFieldTypes:
-    """Every v1-scope Pydantic password / DSN field is typed as SecretStr."""
+    """Every Pydantic password / DSN field is typed as SecretStr."""
 
     def test_neo4j_config_password_is_secretstr(self) -> None:
         cfg = Neo4jConfig(password="hunter2")
@@ -139,15 +139,14 @@ class TestSecretStrFieldTypes:
         assert isinstance(cfg.url, SecretStr)
         assert cfg.url.get_secret_value() == "ws://user:hunter2@h:8000"
 
-    def test_llm_settings_has_no_v1_scope_secret_fields(self) -> None:
-        """v1-scope guard: LLMSettings carries no secret-typed fields today.
+    def test_llm_settings_has_no_secret_fields(self) -> None:
+        """Guard: LLMSettings carries no secret-typed fields today.
 
-        ``LLMSettings.api_key_env`` is an env-var-name pointer (per ADR-084
-        §📌 baseline scope-inflation note), so it stays plain ``str``. If a
-        future refactor adds an in-scope field (e.g. ``api_key: str``), this
-        test must be updated to either re-type it as ``SecretStr`` or to
-        explicitly carve it out — locking down the v1-scope boundary in
-        the test surface so the change cannot land silently.
+        ``LLMSettings.api_key_env`` is an env-var-name pointer, so it stays
+        plain ``str``. If a future refactor adds an in-scope field (e.g.
+        ``api_key: str``), this test must be updated to either re-type it as
+        ``SecretStr`` or to explicitly carve it out — locking down the
+        boundary in the test surface so the change cannot land silently.
         """
         settings = LLMSettings()
         # api_key_env is a pointer (env-var name), not a secret value.
@@ -156,8 +155,8 @@ class TestSecretStrFieldTypes:
         # without being typed as SecretStr.
         for name, field in LLMSettings.model_fields.items():
             assert field.annotation is not SecretStr, (
-                f"LLMSettings.{name} is typed as SecretStr — update this v1-scope "
-                "guard test (it is now in-scope and must be enumerated explicitly)."
+                f"LLMSettings.{name} is typed as SecretStr — update this guard "
+                "test (it is now in-scope and must be enumerated explicitly)."
             )
 
 

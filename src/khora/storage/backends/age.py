@@ -64,8 +64,8 @@ class AGEBackend(GraphBackendBase):
     def from_config(cls, config: Any) -> AGEBackend:
         """Create an AGEBackend from an AGEConfig object.
 
-        ADR-084 boundary: if ``config.url`` is a ``SecretStr`` it is unwrapped
-        exactly here so the SQLAlchemy engine receives a plaintext DSN.
+        If ``config.url`` is a ``SecretStr`` it is unwrapped exactly here so
+        the SQLAlchemy engine receives a plaintext DSN.
         """
         from pydantic import SecretStr
 

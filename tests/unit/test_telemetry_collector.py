@@ -60,7 +60,7 @@ class TestTelemetryConfig:
     def test_from_env_with_url(self):
         with patch.dict("os.environ", {"KHORA_TELEMETRY_DATABASE_URL": "postgresql://localhost/telemetry"}):
             cfg = TelemetryConfig.from_env()
-            # ADR-084: database_url is SecretStr — unwrap to compare plaintext.
+            # database_url is SecretStr — unwrap to compare plaintext.
             assert cfg.database_url.get_secret_value() == "postgresql://localhost/telemetry"
 
     def test_from_env_custom_service(self):

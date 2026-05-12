@@ -194,9 +194,8 @@ class SurrealDBGraphAdapter:
     def from_config(cls, config: dict[str, Any]) -> SurrealDBGraphAdapter:
         """Create an adapter from a configuration dictionary.
 
-        ADR-084 boundary: ``password`` is unwrapped from
-        ``pydantic.SecretStr`` if needed so the driver receives a plaintext
-        credential.
+        ``password`` is unwrapped from ``pydantic.SecretStr`` if needed so
+        the driver receives a plaintext credential.
         """
         from pydantic import SecretStr
 

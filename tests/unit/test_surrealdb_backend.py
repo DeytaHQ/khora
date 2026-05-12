@@ -139,7 +139,7 @@ class TestSurrealDBConfig:
 
         cfg = SurrealDBConfig(mode="remote", url="ws://localhost:8000")
         assert cfg.mode == "remote"
-        # ADR-084: url is SecretStr — unwrap to compare plaintext.
+        # url is SecretStr — unwrap to compare plaintext.
         assert cfg.url.get_secret_value() == "ws://localhost:8000"
 
     def test_config_in_graph_union(self) -> None:
@@ -154,7 +154,7 @@ class TestSurrealDBConfig:
 
         cfg = SurrealDBConfig()
         assert cfg.user == "root"
-        # ADR-084: password is SecretStr — unwrap to compare plaintext.
+        # password is SecretStr — unwrap to compare plaintext.
         assert cfg.password.get_secret_value() == "root"
 
     def test_storage_backend_field(self) -> None:

@@ -478,9 +478,9 @@ class Neo4jBackend(GraphBackendBase):
     def from_config(cls, config: Any) -> Neo4jBackend:
         """Create a Neo4jBackend from a Neo4jConfig object.
 
-        ADR-084 boundary: ``config.password`` and ``config.url`` are
-        ``pydantic.SecretStr`` (or a plain ``str`` if a non-Pydantic dataclass
-        is passed). Unwrap exactly here so the driver receives plaintext.
+        ``config.password`` and ``config.url`` are ``pydantic.SecretStr``
+        (or a plain ``str`` if a non-Pydantic dataclass is passed). Unwrap
+        exactly here so the driver receives plaintext.
         """
         from pydantic import SecretStr
 

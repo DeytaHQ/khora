@@ -125,8 +125,8 @@ class SurrealDBTemporalStore(TemporalVectorStore):
                     "or pass surrealdb_config explicitly."
                 )
 
-            # ADR-084 boundary: SurrealDBConfig.url and .password are SecretStr;
-            # unwrap exactly here so the driver receives plaintext.
+            # SurrealDBConfig.url and .password are SecretStr; unwrap exactly
+            # here so the driver receives plaintext.
             from pydantic import SecretStr as _SecretStr
 
             surreal_url = surreal_cfg.url

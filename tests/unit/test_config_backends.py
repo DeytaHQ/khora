@@ -27,10 +27,10 @@ class TestStorageSettingsBackwardsCompat:
             neo4j_database="mydb",
         )
         assert isinstance(settings.graph, Neo4jConfig)
-        # ADR-084: url is SecretStr — unwrap to compare plaintext.
+        # url is SecretStr — unwrap to compare plaintext.
         assert settings.graph.url.get_secret_value() == "bolt://localhost:7687"
         assert settings.graph.user == "admin"
-        # ADR-084: password is SecretStr — unwrap to compare plaintext.
+        # password is SecretStr — unwrap to compare plaintext.
         assert settings.graph.password.get_secret_value() == "secret"
         assert settings.graph.database == "mydb"
 
@@ -186,7 +186,7 @@ class TestKhoraConfigGraphHelpers:
         assert isinstance(graph, Neo4jConfig)
         assert graph.url.get_secret_value() == "bolt://localhost:7687"
         assert graph.user == "neo4j"
-        # ADR-084: password is SecretStr — unwrap to compare plaintext.
+        # password is SecretStr — unwrap to compare plaintext.
         assert graph.password.get_secret_value() == "pass"
 
     def test_get_graph_config_kuzu(self):
@@ -283,7 +283,7 @@ class TestParsedNeo4jUrl:
 
     def test_parse_respects_default_password_when_url_has_none(self) -> None:
         parsed = ParsedNeo4jUrl.parse("bolt://localhost:7687", default_password="fallbackpass")
-        # ADR-084: ParsedNeo4jUrl.password is SecretStr — unwrap to compare.
+        # ParsedNeo4jUrl.password is SecretStr — unwrap to compare.
         assert parsed.password.get_secret_value() == "fallbackpass"
 
     def test_parse_embedded_password_overrides_default(self) -> None:

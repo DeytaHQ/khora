@@ -1,10 +1,4 @@
-"""Secret-redaction helpers for log / exception output.
-
-Local implementation mirroring the ``deyta_core.adr084.redact_dsn`` signature
-from ADR-084. Khora is OSS and does not (yet) depend on deyta-core; when
-DYT-3993 lands the deyta-core footprint, callers can switch the import over
-without changing semantics.
-"""
+"""Secret-redaction helpers for log / exception output."""
 
 from __future__ import annotations
 
@@ -12,7 +6,6 @@ import re
 
 # Matches the userinfo segment of a URI: ``://user:password@``. Captures
 # nothing — substitution replaces the whole match with ``://[REDACTED]@``.
-# Pattern verbatim from ADR-084 §🤝.
 _DSN_USERINFO_RE = re.compile(r"://[\w\-.]+:[^@/]+@")
 
 

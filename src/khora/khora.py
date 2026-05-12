@@ -428,8 +428,8 @@ class Khora:
                 db_path = self._config.storage.sqlite_lance.db_path
                 db_url = f"sqlite+aiosqlite:///{db_path}"
             else:
-                # ADR-084 boundary: database_url is a SecretStr; unwrap for the
-                # Alembic runner (it forwards into SQLAlchemy create_async_engine).
+                # database_url is a SecretStr; unwrap for the Alembic runner
+                # (it forwards into SQLAlchemy create_async_engine).
                 db_url = self._config.database_url.get_secret_value() if self._config.database_url is not None else None
             result = await _run_migrations(db_url)
             if not result.success:

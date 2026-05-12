@@ -239,7 +239,7 @@ class StorageFactory:
             backend_name = getattr(vector_config, "backend", None)
             if backend_name == "pgvector":
                 # PgVectorBackend has a specialized constructor
-                # ADR-084 boundary: PgVectorConfig.url is a SecretStr; unwrap here.
+                # PgVectorConfig.url is a SecretStr; unwrap here.
                 from pydantic import SecretStr as _SecretStr
 
                 url = getattr(vector_config, "url", None)
@@ -332,7 +332,7 @@ class StorageFactory:
         from pydantic import SecretStr as _SecretStr
 
         def _surrealdb_cache_key(cfg: Any) -> str:
-            # ADR-084: unwrap SecretStr url so cache keys are plain strings.
+            # Unwrap SecretStr url so cache keys are plain strings.
             raw_url = getattr(cfg, "url", None)
             if isinstance(raw_url, _SecretStr):
                 raw_url = raw_url.get_secret_value()
@@ -407,8 +407,8 @@ class StorageFactory:
 
             # Create a shared SurrealDB connection for all four adapters
             try:
-                # ADR-084 boundary: SurrealDBConfig.password is a SecretStr;
-                # unwrap exactly here so the driver receives the plaintext.
+                # SurrealDBConfig.password is a SecretStr; unwrap exactly
+                # here so the driver receives the plaintext.
                 from pydantic import SecretStr as _SecretStr
 
                 from .backends.surrealdb.connection import SurrealDBConnection
