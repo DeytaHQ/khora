@@ -38,7 +38,7 @@ uv run khora-explorer validate my_ontology.yaml
 uv run khora-explorer preview my_ontology.yaml
 ```
 
-Prior to v0.7.52 these lived under `uv run khora ontology …` and the underlying `khora.discovery` package. They were extracted because ontology construction needs a heavier dependency set (PDF/HTML scraping, Firecrawl fallback, multi-provider LLM routing) than a memory-lake library should carry.
+Prior to v0.7.52 these lived under `uv run khora ontology …` and the underlying `khora.discovery` package. They were extracted because ontology construction needs a heavier dependency set (PDF/HTML scraping, Firecrawl fallback, multi-provider LLM routing) than this library should carry.
 
 khora-explorer imports:
 
@@ -50,17 +50,15 @@ from khora.extraction.skills.base import (
 from khora.config.schema import KhoraConfig
 ```
 
-This surface is codified by [ADR-022](adrs/adr-022-extraction-skills-public-api.md).
-
 ## Other consumers
 
 ### khora-benchmarks
 
-Benchmarks khora's retrieval engines. Imports include private modules (`khora.engines.vectorcypher`, `khora.extraction.chunkers`) documented as **unstable** in ADR-024 — benchmarks pin an exact khora version on purpose.
+Benchmarks khora's retrieval engines. Imports include private modules (`khora.engines.vectorcypher`, `khora.extraction.chunkers`) which are **unstable** — benchmarks pin an exact khora version on purpose.
 
 ### Service consumers
 
-Production services consume khora through the stable top-level surface (ADR-024) plus `lake.storage` for direct backend access. `LLMUsage` is shared as a stable cost-tracking contract.
+Production services consume khora through the stable top-level surface plus `kb.storage` for direct backend access. `LLMUsage` is shared as a stable cost-tracking contract.
 
 ## Migration from pre-v0.8 khora
 
@@ -81,10 +79,10 @@ The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseC
 
 ## Stability contract
 
-Two ADRs formalise what you can depend on:
+Two surfaces are codified as the public API:
 
-- [ADR-022](adrs/adr-022-extraction-skills-public-api.md) — `ExpertiseConfig` and friends from `khora.extraction.skills.base`.
-- [ADR-024](adrs/adr-024-memory-lake-public-api.md) — top-level `khora` re-exports (`Khora`, results, `SearchMode`, etc.).
+- `ExpertiseConfig` and friends from `khora.extraction.skills.base`.
+- Top-level `khora` re-exports (`Khora`, results, `SearchMode`, etc.).
 
 Both are append-only in minor releases. Breaking changes require a major bump **and** coordinated releases across khora-benchmarks, khora-explorer, and khora-cli.
 

@@ -234,7 +234,7 @@ def _load_config_from_env() -> SoakConfig:
     )
 
 
-async def _build_embedded_lake(tmp_path: Path) -> Khora:
+async def _build_embedded_kb(tmp_path: Path) -> Khora:
     cfg = KhoraConfig()
     cfg.storage.backend = "sqlite_lance"
     cfg.storage.sqlite_lance = SQLiteLanceConfig(
@@ -245,9 +245,9 @@ async def _build_embedded_lake(tmp_path: Path) -> Khora:
     cfg.llm.embedding_dimension = EMBED_DIM
     cfg.storage.embedding_dimension = EMBED_DIM
     cfg.pipelines.chunk_size = 1024
-    lake = Khora(cfg, engine="skeleton", run_migrations=True)
-    await lake.connect()
-    return lake
+    kb = Khora(cfg, engine="skeleton", run_migrations=True)
+    await kb.connect()
+    return kb
 
 
 def _seed_query_pool() -> list[str]:
@@ -256,7 +256,7 @@ def _seed_query_pool() -> list[str]:
         "neural network",
         "graph database",
         "vector search",
-        "knowledge lake",
+        "knowledge kb",
         "embedding model",
         "alice and bob",
         "carol presented",
@@ -267,12 +267,12 @@ def _seed_query_pool() -> list[str]:
     return base_terms
 
 
-async def _ingest_one(lake: Khora, namespace_id: UUID, seq: int) -> None:
+async def _ingest_one(kb: Khora, namespace_id: UUID, seq: int) -> None:
     content = (
         f"Soak document #{seq} talks about widget-{seq % 50} and gear-{seq % 13}. "
         f"It references concepts like neural network, graph database, and vector search."
     )
-    await lake.remember(
+    await kb.remember(
         content=content,
         namespace=namespace_id,
         title=f"soak-{seq}",
@@ -282,9 +282,9 @@ async def _ingest_one(lake: Khora, namespace_id: UUID, seq: int) -> None:
     )
 
 
-async def _recall_one(lake: Khora, namespace_id: UUID, seq: int, queries: list[str]) -> int:
+async def _recall_one(kb: Khora, namespace_id: UUID, seq: int, queries: list[str]) -> int:
     q = queries[seq % len(queries)]
-    result = await lake.recall(query=q, namespace=namespace_id, limit=10)
+    result = await kb.recall(query=q, namespace=namespace_id, limit=10)
     return len(result.chunks)
 
 
@@ -324,7 +324,7 @@ class _SoakResult:
 
 async def _drive_soak(
     *,
-    lake: Khora,
+    kb: Khora,
     namespace_id: UUID,
     cfg: SoakConfig,
     tracker: _LoguruErrorTracker,
@@ -373,7 +373,7 @@ async def _drive_soak(
         op_started = time.perf_counter()
         try:
             if is_recall:
-                await _recall_one(lake, namespace_id, seq, queries)
+                await _recall_one(kb, namespace_id, seq, queries)
                 latency_ms = (time.perf_counter() - op_started) * 1000.0
                 all_recall_ms.append(latency_ms)
                 if elapsed < cfg.warmup_s:
@@ -382,7 +382,7 @@ async def _drive_soak(
                     final_recall_ms.append(latency_ms)
                 recalls_executed += 1
             else:
-                await _ingest_one(lake, namespace_id, seq)
+                await _ingest_one(kb, namespace_id, seq)
                 docs_ingested += 1
         except Exception as exc:  # noqa: BLE001 — this is the SLO assertion
             exceptions += 1
@@ -524,18 +524,18 @@ async def test_soak_sqlite_lance(tmp_path: Path, loguru_tracker: _LoguruErrorTra
     set ``KHORA_SOAK_DURATION_S=14400`` to drive the full 4-hour gate.
     """
     cfg = _load_config_from_env()
-    lake = await _build_embedded_lake(tmp_path)
+    kb = await _build_embedded_kb(tmp_path)
     try:
-        ns = await lake.create_namespace()
+        ns = await kb.create_namespace()
         result = await _drive_soak(
-            lake=lake,
+            kb=kb,
             namespace_id=ns.namespace_id,
             cfg=cfg,
             tracker=loguru_tracker,
             stack_label="sqlite-lance",
         )
     finally:
-        await lake.disconnect()
+        await kb.disconnect()
 
     _emit_summary(result)
     _assert_slos(result, cfg)
@@ -557,24 +557,24 @@ async def test_soak_postgres_neo4j(loguru_tracker: _LoguruErrorTracker) -> None:
     pg_url = os.environ["KHORA_SOAK_PG_URL"]
     graph_url = os.environ.get("KHORA_GRAPH_URL")
 
-    lake = Khora(
+    kb = Khora(
         pg_url,
         graph_url=graph_url,
         engine="vectorcypher",
         run_migrations=True,
     )
-    await lake.connect()
+    await kb.connect()
     try:
-        ns = await lake.create_namespace()
+        ns = await kb.create_namespace()
         result = await _drive_soak(
-            lake=lake,
+            kb=kb,
             namespace_id=ns.namespace_id,
             cfg=cfg,
             tracker=loguru_tracker,
             stack_label="pg-neo4j",
         )
     finally:
-        await lake.disconnect()
+        await kb.disconnect()
 
     _emit_summary(result)
     _assert_slos(result, cfg)

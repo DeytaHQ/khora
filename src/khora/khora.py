@@ -308,24 +308,24 @@ class Khora:
 
     Usage:
         # Simplest - from env vars (KHORA_DATABASE_URL)
-        async with Khora() as lake:
-            await lake.remember("Important fact...", namespace=namespace_id,
+        async with Khora() as kb:
+            await kb.remember("Important fact...", namespace=namespace_id,
                 entity_types=["PERSON", "CONCEPT"], relationship_types=["RELATES_TO"])
 
         # Common - explicit database URL
-        async with Khora("postgresql://localhost/mydb") as lake:
-            results = await lake.recall("What do I know about...", namespace=namespace_id)
+        async with Khora("postgresql://localhost/mydb") as kb:
+            results = await kb.recall("What do I know about...", namespace=namespace_id)
 
         # With graph backend
-        async with Khora("postgresql://...", graph_url="bolt://localhost:7687") as lake:
+        async with Khora("postgresql://...", graph_url="bolt://localhost:7687") as kb:
             ...
 
         # Explicit engine selection (same as default)
-        async with Khora("postgresql://...", engine="vectorcypher") as lake:
+        async with Khora("postgresql://...", engine="vectorcypher") as kb:
             ...
 
         # Full config
-        async with Khora(KhoraConfig(...)) as lake:
+        async with Khora(KhoraConfig(...)) as kb:
             ...
     """
 
@@ -354,19 +354,19 @@ class Khora:
 
         Examples:
             # Simplest - from env vars
-            lake = Khora()
+            kb = Khora()
 
             # Common - explicit database
-            lake = Khora("postgresql://localhost/mydb")
+            kb = Khora("postgresql://localhost/mydb")
 
             # With graph
-            lake = Khora("postgresql://...", graph_url="bolt://...")
+            kb = Khora("postgresql://...", graph_url="bolt://...")
 
             # Explicit engine selection
-            lake = Khora("postgresql://...", engine="vectorcypher")
+            kb = Khora("postgresql://...", engine="vectorcypher")
 
             # Full config
-            lake = Khora(KhoraConfig(...))
+            kb = Khora(KhoraConfig(...))
         """
         # Handle overloaded first argument
         if isinstance(database_url, KhoraConfig):
@@ -784,10 +784,10 @@ class Khora:
         by the high-level API.
 
         For common operations, prefer the Khora convenience methods:
-        - lake.get_document() for document retrieval
-        - lake.list_documents() for document listing
-        - lake.search_entities() for entity search
-        - lake.stats() for namespace statistics
+        - kb.get_document() for document retrieval
+        - kb.list_documents() for document listing
+        - kb.search_entities() for entity search
+        - kb.stats() for namespace statistics
         """
         engine = self._get_engine()
         if hasattr(engine, "_storage") and engine._storage:
@@ -906,7 +906,7 @@ class Khora:
             with trace_span("khora.remember", namespace_id=str(namespace_id), content_length=len(content)):
                 # NOTE: expertise and extraction_config_hash are always forwarded,
                 # even when None. Custom engines registered via register_engine()
-                # must accept these kwargs to remain compatible (ADR-022).
+                # must accept these kwargs to remain compatible.
                 result = await self._get_engine().remember(
                     content,
                     namespace_id,
@@ -1114,7 +1114,7 @@ class Khora:
         # This satisfies the durability contract — if the process crashes after
         # submit_batch() returns, the PENDING records survive for recovery.
         #
-        # ADR-068 Decision 1 — self-healing for existing documents:
+        # Self-healing for existing documents:
         # Instead of failing on duplicate external_id, detect and dispatch:
         #   PENDING    → skip insert, re-queue for processing (self-heal stalled docs)
         #   COMPLETED  → skip entirely, report success (already done)
@@ -1470,7 +1470,7 @@ class Khora:
         *,
         namespace: str | UUID,
     ) -> bool:
-        """Remove a memory from the lake.
+        """Remove a memory.
 
         Args:
             document_id: ID of the document to remove
@@ -1737,9 +1737,9 @@ class Khora:
             async def on_entity(event):
                 print(f"New entity: {event.data.get('name')}")
 
-            sub_id = lake.subscribe("entity.created", on_entity)
-            await lake.remember("Acme Corp announced...", ...)
-            lake.unsubscribe(sub_id)
+            sub_id = kb.subscribe("entity.created", on_entity)
+            await kb.remember("Acme Corp announced...", ...)
+            kb.unsubscribe(sub_id)
         """
         return self._get_hook_dispatcher().subscribe(
             event_type,
@@ -1808,13 +1808,13 @@ async def khora(
     """Context manager for one-off Khora usage.
 
     Usage:
-        async with khora() as lake:
-            await lake.remember("Hello, world!")
-            result = await lake.recall("greeting")
+        async with khora() as kb:
+            await kb.remember("Hello, world!")
+            result = await kb.recall("greeting")
     """
-    lake = Khora(config)
+    kb = Khora(config)
     try:
-        await lake.connect()
-        yield lake
+        await kb.connect()
+        yield kb
     finally:
-        await lake.disconnect()
+        await kb.disconnect()

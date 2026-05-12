@@ -22,7 +22,7 @@ import pytest
 from khora.extraction.chunkers import ChunkStrategy, create_chunker
 from khora.khora import RememberResult
 
-from .helpers import RESOLVE_ROW_ID, make_lake
+from .helpers import RESOLVE_ROW_ID, make_kb
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -88,8 +88,8 @@ class TestKhoraFacadeThreading:
     @pytest.mark.asyncio
     async def test_remember_threads_chunk_strategy(self) -> None:
         """remember() forwards chunk_strategy to engine.remember()."""
-        lake = make_lake(connected=True)
-        engine = lake._engine
+        kb = make_kb(connected=True)
+        engine = kb._engine
         ns_id = uuid4()
         engine.remember.return_value = RememberResult(
             document_id=uuid4(),
@@ -99,7 +99,7 @@ class TestKhoraFacadeThreading:
             relationships_created=0,
         )
 
-        await lake.remember(
+        await kb.remember(
             "hello world",
             namespace=ns_id,
             entity_types=["PERSON"],
@@ -114,8 +114,8 @@ class TestKhoraFacadeThreading:
     @pytest.mark.asyncio
     async def test_remember_default_chunk_strategy_is_none(self) -> None:
         """remember() passes None when chunk_strategy not specified."""
-        lake = make_lake(connected=True)
-        engine = lake._engine
+        kb = make_kb(connected=True)
+        engine = kb._engine
         engine.remember.return_value = RememberResult(
             document_id=uuid4(),
             namespace_id=RESOLVE_ROW_ID,
@@ -124,7 +124,7 @@ class TestKhoraFacadeThreading:
             relationships_created=0,
         )
 
-        await lake.remember(
+        await kb.remember(
             "hello world",
             namespace=uuid4(),
             entity_types=["PERSON"],
@@ -139,8 +139,8 @@ class TestKhoraFacadeThreading:
         """remember_batch() forwards chunk_strategy to engine.remember_batch()."""
         from khora.khora import BatchResult
 
-        lake = make_lake(connected=True)
-        engine = lake._engine
+        kb = make_kb(connected=True)
+        engine = kb._engine
         engine.remember_batch.return_value = BatchResult(
             total=1,
             processed=1,
@@ -151,7 +151,7 @@ class TestKhoraFacadeThreading:
             relationships=0,
         )
 
-        await lake.remember_batch(
+        await kb.remember_batch(
             [{"content": "doc1"}],
             namespace=uuid4(),
             entity_types=["PERSON"],
@@ -167,8 +167,8 @@ class TestKhoraFacadeThreading:
         """remember_batch() passes None when chunk_strategy not specified."""
         from khora.khora import BatchResult
 
-        lake = make_lake(connected=True)
-        engine = lake._engine
+        kb = make_kb(connected=True)
+        engine = kb._engine
         engine.remember_batch.return_value = BatchResult(
             total=1,
             processed=1,
@@ -179,7 +179,7 @@ class TestKhoraFacadeThreading:
             relationships=0,
         )
 
-        await lake.remember_batch(
+        await kb.remember_batch(
             [{"content": "doc1"}],
             namespace=uuid4(),
             entity_types=["PERSON"],

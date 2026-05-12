@@ -6,7 +6,7 @@ Create Date: 2026-04-14
 
 DYT-2427: Add external_id column (nullable) and partial composite index
 (namespace_id, external_id) WHERE external_id IS NOT NULL for future
-dedup-by-external_id support (Phase 2, ADR-050).
+dedup-by-external_id support (Phase 2).
 """
 
 from collections.abc import Sequence

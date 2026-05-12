@@ -437,7 +437,7 @@ The Slack skill (`extraction/skills/builtin/slack.yaml`) is designed for ingesti
 ### Via Khora
 
 ```python
-result = await lake.remember(
+result = await kb.remember(
     content,
     expertise="saas_expert",  # Name or path
 )

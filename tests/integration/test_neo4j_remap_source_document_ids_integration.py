@@ -403,8 +403,8 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
     async def test_entity_remap_idempotent_on_retry(self) -> None:
         """Running the same remap twice must not duplicate new_doc_id.
 
-        Regression: ADR-056 §Decision #8 self-heal can retry the replace
-        lifecycle, so the remap Cypher must be safe to re-apply.
+        Regression: the self-heal path can retry the replace lifecycle,
+        so the remap Cypher must be safe to re-apply.
         """
         url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
         user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")

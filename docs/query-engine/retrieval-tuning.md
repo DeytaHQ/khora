@@ -16,7 +16,7 @@ The zero-result failures weren't caused by a single bug. Three independent issue
 
 ### Problem 1: Similarity Threshold Too High
 
-The most impactful issue. When you called `lake.recall("some query")`, the default `min_similarity` was `0.5`. This value propagated down to pgvector as a hard `WHERE similarity >= 0.5` filter at the database level. Any chunk with cosine similarity below 0.5 was silently discarded before Khora even had a chance to rank it.
+The most impactful issue. When you called `kb.recall("some query")`, the default `min_similarity` was `0.5`. This value propagated down to pgvector as a hard `WHERE similarity >= 0.5` filter at the database level. Any chunk with cosine similarity below 0.5 was silently discarded before Khora even had a chance to rank it.
 
 For a descriptive query like "wrought-iron tower built for the 1889 World's Fair in Paris", the embedding similarity to a document about the Eiffel Tower might be 0.35–0.49. That's clearly relevant — a human would call it a match — but the threshold threw it away.
 
@@ -145,7 +145,7 @@ All thresholds can be overridden per-query or via environment variables:
 
 ```python
 # Per-query override
-result = await lake.recall(
+result = await kb.recall(
     "specific query",
     min_similarity=0.3,  # stricter than default
 )

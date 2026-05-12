@@ -275,13 +275,13 @@ More overlap = more redundancy = better boundary handling, but larger storage.
 
 ```python
 # Use semantic chunking (default)
-await lake.remember(content, chunk_strategy="semantic")
+await kb.remember(content, chunk_strategy="semantic")
 
 # Use recursive for structured docs
-await lake.remember(content, chunk_strategy="recursive", chunk_size=1024)
+await kb.remember(content, chunk_strategy="recursive", chunk_size=1024)
 
 # Use fixed for speed
-await lake.remember(content, chunk_strategy="fixed", chunk_size=512)
+await kb.remember(content, chunk_strategy="fixed", chunk_size=512)
 ```
 
 ### Direct Usage

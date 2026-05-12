@@ -9,7 +9,7 @@ Library consumers (genesis, khora-cli, khora-benchmarks, custom services) need K
 ### 1. Let Khora run them for you
 
 ```python
-async with Khora(run_migrations=True) as lake:
+async with Khora(run_migrations=True) as kb:
     ...
 ```
 

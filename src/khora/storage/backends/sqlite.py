@@ -527,10 +527,10 @@ class SQLiteRelationalBackend:
         return self._row_to_document(row)
 
     async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
-        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+        """Get a document by (namespace_id, external_id).
 
         Status is NOT filtered so FAILED rows can self-heal on the next
-        successful replace (ADR-056 §Decision #8).
+        successful replace.
         """
         if external_id is None:
             return None
@@ -559,7 +559,7 @@ class SQLiteRelationalBackend:
         return result
 
     async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
-        """Batch lookup by ``(namespace_id, external_id)`` — ADR-056.
+        """Batch lookup by ``(namespace_id, external_id)``.
 
         Status is NOT filtered (self-heal contract). Skips empty / None entries.
         """

@@ -77,11 +77,11 @@ The engine's `recall()` method runs detection automatically when no explicit `Te
 
 ```python
 # Automatic — the engine classifies the query and adapts retrieval
-results = await lake.recall("What instrument does Alice currently play?")
+results = await kb.recall("What instrument does Alice currently play?")
 # → STATE_QUERY: recency_weight=0.5, temporal_sort=True
 
 # Explicit override — skips automatic detection
-results = await lake.recall(
+results = await kb.recall(
     "product updates",
     temporal_filter=TemporalFilter.last_days(7)
 )
@@ -126,7 +126,7 @@ You can also set recency bias explicitly via the API:
 
 ```python
 # All content, but prefer recent
-results = await lake.recall(
+results = await kb.recall(
     "team updates",
     recency_bias=0.3  # Boost recent content
 )
@@ -262,19 +262,19 @@ Timestamp priority (first available wins):
 
 ```python
 # The engine detects temporal intent and adapts automatically
-results = await lake.recall("What team is Alice on currently?")
+results = await kb.recall("What team is Alice on currently?")
 # → STATE_QUERY: high recency, temporal sort
 
-results = await lake.recall("Which project started first?")
+results = await kb.recall("Which project started first?")
 # → ORDINAL: low recency, temporal sort
 
-results = await lake.recall("How many times has the team restructured?")
+results = await kb.recall("How many times has the team restructured?")
 # → AGGREGATE: no recency, broad recall
 
-results = await lake.recall("What's the latest deployment status?")
+results = await kb.recall("What's the latest deployment status?")
 # → RECENCY: high recency, 7-day decay window
 
-results = await lake.recall("Did Alice switch teams?")
+results = await kb.recall("Did Alice switch teams?")
 # → CHANGE: moderate recency, temporal sort
 ```
 
@@ -282,7 +282,7 @@ results = await lake.recall("Did Alice switch teams?")
 
 ```python
 # Override automatic detection with a specific time range
-results = await lake.recall(
+results = await kb.recall(
     "incident reports",
     temporal_filter=TemporalFilter.last_hours(6),
     recency_bias=0.5
@@ -292,7 +292,7 @@ results = await lake.recall(
 ### Quarterly Review
 
 ```python
-results = await lake.recall(
+results = await kb.recall(
     "quarterly planning",
     temporal_filter=TemporalFilter.between(
         datetime(2024, 10, 1),
@@ -304,7 +304,7 @@ results = await lake.recall(
 ### Historical Research
 
 ```python
-results = await lake.recall(
+results = await kb.recall(
     "team structure",
     temporal_filter=TemporalFilter(
         operator=TemporalOperator.DURING,
@@ -320,7 +320,7 @@ results = await lake.recall(
 from khora.query import QueryConfig
 from khora.query.temporal import TemporalFilter
 
-results = await lake.recall(
+results = await kb.recall(
     "product decisions",
     config=QueryConfig(
         mode=SearchMode.HYBRID,
@@ -336,7 +336,7 @@ results = await lake.recall(
 Query results include information about temporal filtering:
 
 ```python
-result = await lake.recall(query, temporal_filter=filter)
+result = await kb.recall(query, temporal_filter=filter)
 
 if result.temporal_info:
     print(f"Filter applied: {result.temporal_info.filter_applied}")

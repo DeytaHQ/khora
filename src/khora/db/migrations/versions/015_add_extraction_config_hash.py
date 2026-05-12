@@ -4,7 +4,7 @@ Revision ID: 015_add_extraction_config_hash
 Revises: 014_sync_document_status_enum
 Create Date: 2026-03-22
 
-Supports ontology-aware re-extraction (ADR-018). The column stores a hash of the
+Supports ontology-aware re-extraction. The column stores a hash of the
 extraction configuration used when a document was last processed, enabling
 selective re-extraction when the ontology or extraction config changes.
 

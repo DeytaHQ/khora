@@ -241,8 +241,8 @@ QueryResult(
 ```python
 from khora import Khora, SearchMode
 
-async with Khora() as lake:
-    results = await lake.recall(
+async with Khora() as kb:
+    results = await kb.recall(
         "machine learning applications",
         mode=SearchMode.HYBRID,
         limit=10
@@ -258,7 +258,7 @@ async with Khora() as lake:
 from khora.query import QueryConfig
 from khora.query.temporal import TemporalFilter
 
-results = await lake.recall(
+results = await kb.recall(
     "product updates",
     config=QueryConfig(
         mode=SearchMode.HYBRID,
@@ -279,7 +279,7 @@ results = await lake.recall(
 For complex questions, enable multi-step exploration:
 
 ```python
-results = await lake.recall(
+results = await kb.recall(
     "What's our competitive strategy?",
     config=QueryConfig(enable_agentic=True)
 )

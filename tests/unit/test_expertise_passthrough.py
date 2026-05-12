@@ -19,7 +19,7 @@ from khora.extraction.skills import (
 )
 from khora.khora import BatchResult, RememberResult
 
-from .helpers import make_lake
+from .helpers import make_kb
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -88,7 +88,7 @@ class TestRememberWithExpertise:
     @pytest.mark.asyncio
     async def test_remember_passes_expertise_to_engine(self) -> None:
         """expertise param is forwarded to the engine."""
-        lake = make_lake(connected=True)
+        kb = make_kb(connected=True)
         ns_id = uuid4()
         expertise = _sample_expertise()
 
@@ -99,13 +99,13 @@ class TestRememberWithExpertise:
             entities_extracted=2,
             relationships_created=1,
         )
-        lake._engine.remember = AsyncMock(return_value=mock_result)
+        kb._engine.remember = AsyncMock(return_value=mock_result)
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await lake.remember(
+            result = await kb.remember(
                 "Alice works for Acme Corp",
                 namespace=ns_id,
                 entity_types=["PERSON", "COMPANY"],
@@ -114,13 +114,13 @@ class TestRememberWithExpertise:
             )
 
         assert result == mock_result
-        call_kwargs = lake._engine.remember.call_args.kwargs
+        call_kwargs = kb._engine.remember.call_args.kwargs
         assert call_kwargs["expertise"] is expertise
 
     @pytest.mark.asyncio
     async def test_remember_passes_extraction_config_hash(self) -> None:
         """extraction_config_hash param is forwarded to the engine."""
-        lake = make_lake(connected=True)
+        kb = make_kb(connected=True)
         ns_id = uuid4()
 
         mock_result = RememberResult(
@@ -130,13 +130,13 @@ class TestRememberWithExpertise:
             entities_extracted=0,
             relationships_created=0,
         )
-        lake._engine.remember = AsyncMock(return_value=mock_result)
+        kb._engine.remember = AsyncMock(return_value=mock_result)
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            await lake.remember(
+            await kb.remember(
                 "test content",
                 namespace=ns_id,
                 entity_types=["PERSON"],
@@ -144,13 +144,13 @@ class TestRememberWithExpertise:
                 extraction_config_hash="abc123def456",
             )
 
-        call_kwargs = lake._engine.remember.call_args.kwargs
+        call_kwargs = kb._engine.remember.call_args.kwargs
         assert call_kwargs["extraction_config_hash"] == "abc123def456"
 
     @pytest.mark.asyncio
     async def test_remember_none_expertise_backward_compat(self) -> None:
         """Calling without expertise (None) preserves backward compatibility."""
-        lake = make_lake(connected=True)
+        kb = make_kb(connected=True)
         ns_id = uuid4()
 
         mock_result = RememberResult(
@@ -160,13 +160,13 @@ class TestRememberWithExpertise:
             entities_extracted=0,
             relationships_created=0,
         )
-        lake._engine.remember = AsyncMock(return_value=mock_result)
+        kb._engine.remember = AsyncMock(return_value=mock_result)
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await lake.remember(
+            result = await kb.remember(
                 "test content",
                 namespace=ns_id,
                 entity_types=["PERSON"],
@@ -174,7 +174,7 @@ class TestRememberWithExpertise:
             )
 
         assert result == mock_result
-        call_kwargs = lake._engine.remember.call_args.kwargs
+        call_kwargs = kb._engine.remember.call_args.kwargs
         assert call_kwargs["expertise"] is None
         assert call_kwargs["extraction_config_hash"] is None
 
@@ -190,7 +190,7 @@ class TestRememberBatchWithExpertise:
     @pytest.mark.asyncio
     async def test_remember_batch_passes_expertise(self) -> None:
         """expertise param is forwarded to the engine for batch."""
-        lake = make_lake(connected=True)
+        kb = make_kb(connected=True)
         ns_id = uuid4()
         expertise = _sample_expertise()
 
@@ -203,7 +203,7 @@ class TestRememberBatchWithExpertise:
             entities=4,
             relationships=2,
         )
-        lake._engine.remember_batch = AsyncMock(return_value=mock_result)
+        kb._engine.remember_batch = AsyncMock(return_value=mock_result)
 
         docs = [
             {"content": "Alice works for Acme"},
@@ -214,7 +214,7 @@ class TestRememberBatchWithExpertise:
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await lake.remember_batch(
+            result = await kb.remember_batch(
                 docs,
                 namespace=ns_id,
                 entity_types=["PERSON", "COMPANY"],
@@ -224,24 +224,24 @@ class TestRememberBatchWithExpertise:
             )
 
         assert result == mock_result
-        call_kwargs = lake._engine.remember_batch.call_args.kwargs
+        call_kwargs = kb._engine.remember_batch.call_args.kwargs
         assert call_kwargs["expertise"] is expertise
         assert call_kwargs["extraction_config_hash"] == "batch_hash_123"
 
     @pytest.mark.asyncio
     async def test_remember_batch_none_expertise_backward_compat(self) -> None:
         """Calling remember_batch without expertise preserves backward compat."""
-        lake = make_lake(connected=True)
+        kb = make_kb(connected=True)
         ns_id = uuid4()
 
         mock_result = BatchResult(total=1, processed=1, skipped=0, failed=0, chunks=2, entities=1, relationships=0)
-        lake._engine.remember_batch = AsyncMock(return_value=mock_result)
+        kb._engine.remember_batch = AsyncMock(return_value=mock_result)
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await lake.remember_batch(
+            result = await kb.remember_batch(
                 [{"content": "test"}],
                 namespace=ns_id,
                 entity_types=["PERSON"],
@@ -249,7 +249,7 @@ class TestRememberBatchWithExpertise:
             )
 
         assert result == mock_result
-        call_kwargs = lake._engine.remember_batch.call_args.kwargs
+        call_kwargs = kb._engine.remember_batch.call_args.kwargs
         assert call_kwargs["expertise"] is None
         assert call_kwargs["extraction_config_hash"] is None
 

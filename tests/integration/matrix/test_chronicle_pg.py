@@ -216,7 +216,7 @@ def _patch_llm(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-async def lake(_migrations_once: None) -> AsyncIterator[Khora]:
+async def kb(_migrations_once: None) -> AsyncIterator[Khora]:
     """Per-test Chronicle Khora bound to live PG.
 
     Function-scoped because the storage coordinator caches engine pools by
@@ -233,29 +233,29 @@ async def lake(_migrations_once: None) -> AsyncIterator[Khora]:
     config.pipelines.extract_entities = True
     config.pipelines.selective_extraction = False
 
-    lake = Khora(config, engine="chronicle", run_migrations=False)
-    await lake.connect()
+    kb = Khora(config, engine="chronicle", run_migrations=False)
+    await kb.connect()
     try:
-        yield lake
+        yield kb
     finally:
-        await lake.disconnect()
+        await kb.disconnect()
 
 
 @pytest.fixture
-async def namespace_id(lake: Khora) -> UUID:
-    ns = await lake.create_namespace()
+async def namespace_id(kb: Khora) -> UUID:
+    ns = await kb.create_namespace()
     return ns.namespace_id
 
 
 async def _remember(
-    lake: Khora,
+    kb: Khora,
     *,
     namespace_id: UUID,
     content: str,
     title: str = "",
     expertise: ExpertiseConfig | None = None,
 ) -> Any:
-    return await lake.remember(
+    return await kb.remember(
         content=content,
         namespace=namespace_id,
         title=title,
@@ -270,7 +270,7 @@ async def _remember(
 # ---------------------------------------------------------------------------
 
 
-async def test_chronicle_remember_recall_roundtrip(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_remember_recall_roundtrip(kb: Khora, namespace_id: UUID) -> None:
     """Ingest 3 docs, recall, assert ingested text appears in context."""
     contents = [
         "Alice met Bob at the Python conference in Berlin on March 15th.",
@@ -278,9 +278,9 @@ async def test_chronicle_remember_recall_roundtrip(lake: Khora, namespace_id: UU
         "Dan organized the after-party that lasted until midnight.",
     ]
     for c in contents:
-        await _remember(lake, namespace_id=namespace_id, content=c)
+        await _remember(kb, namespace_id=namespace_id, content=c)
 
-    result = await lake.recall("Python conference Berlin", namespace=namespace_id, limit=10)
+    result = await kb.recall("Python conference Berlin", namespace=namespace_id, limit=10)
 
     assert result.metadata.get("engine") == "chronicle"
     assert len(result.chunks) >= 1, "expected at least one chunk back"
@@ -288,23 +288,23 @@ async def test_chronicle_remember_recall_roundtrip(lake: Khora, namespace_id: UU
     assert "Python conference" in result.context_text
 
 
-async def test_chronicle_four_channels_contribute(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_four_channels_contribute(kb: Khora, namespace_id: UUID) -> None:
     """Each applicable channel reports a non-zero hit count for a hybrid query."""
     _plan_extraction("Alice", entities=[("Alice", "PERSON"), ("Berlin", "LOCATION")])
     _plan_extraction("Carol", entities=[("Carol", "PERSON")])
 
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="Alice met Bob in Berlin at the Python conference.",
     )
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="Carol gave a lightning talk on graph databases.",
     )
 
-    result = await lake.recall("Alice Berlin", namespace=namespace_id, limit=10)
+    result = await kb.recall("Alice Berlin", namespace=namespace_id, limit=10)
 
     channels = result.metadata["channels"]
     # Semantic + temporal always run on HYBRID. BM25 + entity also run for
@@ -319,16 +319,16 @@ async def test_chronicle_four_channels_contribute(lake: Khora, namespace_id: UUI
     assert channels["entity"] >= 1, f"entity channel empty: {channels}"
 
 
-async def test_chronicle_abstention_signals_on_topic(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_abstention_signals_on_topic(kb: Khora, namespace_id: UUID) -> None:
     """Query matches corpus → ``should_abstain`` is False, combined < 0.5."""
     _plan_extraction("Alice", entities=[("Alice", "PERSON")])
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="Alice gave a keynote on distributed databases at the conference.",
     )
 
-    result = await lake.recall("Alice keynote conference", namespace=namespace_id, limit=5)
+    result = await kb.recall("Alice keynote conference", namespace=namespace_id, limit=5)
 
     sig = result.metadata["abstention_signals"]
     assert sig["chunks_empty"] is False
@@ -336,7 +336,7 @@ async def test_chronicle_abstention_signals_on_topic(lake: Khora, namespace_id: 
     assert sig["combined_score"] < 0.5, f"combined too high: {sig}"
 
 
-async def test_chronicle_abstention_signals_off_topic(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_abstention_signals_off_topic(kb: Khora, namespace_id: UUID) -> None:
     """Query unrelated to corpus → at least one weak-signal flag fires.
 
     With deterministic identical embeddings every chunk has cosine=1.0, so
@@ -348,12 +348,12 @@ async def test_chronicle_abstention_signals_off_topic(lake: Khora, namespace_id:
     """
     # Deliberately don't register any extraction → no entities surface.
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="The weather report mentioned rain on Saturday.",
     )
 
-    result = await lake.recall("quantum chromodynamics gauge symmetry", namespace=namespace_id, limit=5)
+    result = await kb.recall("quantum chromodynamics gauge symmetry", namespace=namespace_id, limit=5)
 
     sig = result.metadata["abstention_signals"]
     # Required keys present.
@@ -371,7 +371,7 @@ async def test_chronicle_abstention_signals_off_topic(lake: Khora, namespace_id:
 
 
 async def test_chronicle_temporal_filter_pushdown(
-    lake: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch
+    kb: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Backdate one chunk by 20 days, leave another at 5 days, query "last 7 days".
 
@@ -385,8 +385,8 @@ async def test_chronicle_temporal_filter_pushdown(
     SQL pushdown contract here, and assert the 20-day exclusion as
     ``xfail(strict=True)`` to surface the gap loudly. See PR description.
     """
-    r_recent = await _remember(lake, namespace_id=namespace_id, content="recent doc about Falcon launch.")
-    r_old = await _remember(lake, namespace_id=namespace_id, content="old doc about Falcon launch.")
+    r_recent = await _remember(kb, namespace_id=namespace_id, content="recent doc about Falcon launch.")
+    r_old = await _remember(kb, namespace_id=namespace_id, content="old doc about Falcon launch.")
 
     # Backdate "old" chunks 20 days; "recent" stays at now (~5 days for test
     # determinism — though "now" already satisfies the 7-day filter).
@@ -406,7 +406,7 @@ async def test_chronicle_temporal_filter_pushdown(
 
     # Spy on coordinator.search_similar_chunks to confirm SQL-level pushdown.
     captured: list[dict[str, Any]] = []
-    coord = lake._engine._storage  # type: ignore[union-attr]
+    coord = kb._engine._storage  # type: ignore[union-attr]
     real = coord.search_similar_chunks
 
     async def _spy(*args: Any, **kwargs: Any) -> Any:
@@ -419,7 +419,7 @@ async def test_chronicle_temporal_filter_pushdown(
     # SkeletonTemporalFilter with occurred_after, which Chronicle's temporal
     # channel forwards as created_after to search_similar_chunks (engine.py:1700-1733).
     seven_days_ago = datetime.now(UTC) - timedelta(days=7)
-    await lake.recall(
+    await kb.recall(
         "Falcon launch",
         namespace=namespace_id,
         limit=10,
@@ -443,10 +443,10 @@ async def test_chronicle_temporal_filter_pushdown(
     # all four channels honor the filter — see test_chronicle_temporal_old_doc_excluded.
 
 
-async def test_chronicle_temporal_old_doc_excluded(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_temporal_old_doc_excluded(kb: Khora, namespace_id: UUID) -> None:
     """Document older than the temporal_filter window must not appear in chunks."""
-    r_recent = await _remember(lake, namespace_id=namespace_id, content="recent doc about Falcon launch.")
-    r_old = await _remember(lake, namespace_id=namespace_id, content="old doc about Falcon launch.")
+    r_recent = await _remember(kb, namespace_id=namespace_id, content="recent doc about Falcon launch.")
+    r_old = await _remember(kb, namespace_id=namespace_id, content="old doc about Falcon launch.")
 
     eng = create_async_engine(DATABASE_URL)
     try:
@@ -463,7 +463,7 @@ async def test_chronicle_temporal_old_doc_excluded(lake: Khora, namespace_id: UU
         await eng.dispose()
 
     seven_days_ago = datetime.now(UTC) - timedelta(days=7)
-    result = await lake.recall(
+    result = await kb.recall(
         "Falcon launch",
         namespace=namespace_id,
         limit=10,
@@ -473,7 +473,7 @@ async def test_chronicle_temporal_old_doc_excluded(lake: Khora, namespace_id: UU
     assert r_old.document_id not in returned_doc_ids
 
 
-async def test_chronicle_entity_anchored_routing(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_entity_anchored_routing(kb: Khora, namespace_id: UUID) -> None:
     """ "Who is Alice?" → ENTITY_ANCHORED routing classification.
 
     The router's classification depends on the heuristic match against the
@@ -485,28 +485,28 @@ async def test_chronicle_entity_anchored_routing(lake: Khora, namespace_id: UUID
     """
     _plan_extraction("Alice", entities=[("Alice", "PERSON")])
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="Alice is a senior researcher specializing in graph databases.",
     )
 
-    result = await lake.recall("Who is Alice?", namespace=namespace_id, limit=5)
+    result = await kb.recall("Who is Alice?", namespace=namespace_id, limit=5)
 
     assert result.metadata["routing"] == "entity_anchored", (
         f"expected entity_anchored, got {result.metadata['routing']!r}"
     )
 
 
-async def test_chronicle_namespace_isolation(lake: Khora) -> None:
+async def test_chronicle_namespace_isolation(kb: Khora) -> None:
     """Two namespaces, queries don't cross-bleed."""
-    ns_a = (await lake.create_namespace()).namespace_id
-    ns_b = (await lake.create_namespace()).namespace_id
+    ns_a = (await kb.create_namespace()).namespace_id
+    ns_b = (await kb.create_namespace()).namespace_id
 
-    await _remember(lake, namespace_id=ns_a, content="alpha document about kangaroos")
-    await _remember(lake, namespace_id=ns_b, content="bravo document about penguins")
+    await _remember(kb, namespace_id=ns_a, content="alpha document about kangaroos")
+    await _remember(kb, namespace_id=ns_b, content="bravo document about penguins")
 
-    result_a = await lake.recall("animals", namespace=ns_a, limit=10)
-    result_b = await lake.recall("animals", namespace=ns_b, limit=10)
+    result_a = await kb.recall("animals", namespace=ns_a, limit=10)
+    result_b = await kb.recall("animals", namespace=ns_b, limit=10)
 
     a_text = " ".join(c.content for c, _ in result_a.chunks)
     b_text = " ".join(c.content for c, _ in result_b.chunks)
@@ -517,11 +517,11 @@ async def test_chronicle_namespace_isolation(lake: Khora) -> None:
     assert "kangaroos" not in b_text, "namespace_a content leaked into namespace_b"
 
 
-async def test_chronicle_recall_metadata_completeness(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_recall_metadata_completeness(kb: Khora, namespace_id: UUID) -> None:
     """All RecallResult.metadata keys documented in CLAUDE.md must be present."""
-    await _remember(lake, namespace_id=namespace_id, content="A simple sentence about apples.")
+    await _remember(kb, namespace_id=namespace_id, content="A simple sentence about apples.")
 
-    result = await lake.recall("apples", namespace=namespace_id, limit=5)
+    result = await kb.recall("apples", namespace=namespace_id, limit=5)
 
     md = result.metadata
     expected_top_level = {
@@ -551,11 +551,11 @@ async def test_chronicle_recall_metadata_completeness(lake: Khora, namespace_id:
     assert set(md["abstention_signals"].keys()) == expected_signals
 
 
-async def test_chronicle_concurrent_remember(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_concurrent_remember(kb: Khora, namespace_id: UUID) -> None:
     """5 concurrent ingests in one namespace, no integrity errors."""
     contents = [f"document number {i} mentions widget-{i}" for i in range(5)]
     results = await asyncio.gather(
-        *(_remember(lake, namespace_id=namespace_id, content=c) for c in contents),
+        *(_remember(kb, namespace_id=namespace_id, content=c) for c in contents),
         return_exceptions=True,
     )
 
@@ -568,6 +568,6 @@ async def test_chronicle_concurrent_remember(lake: Khora, namespace_id: UUID) ->
     assert len(doc_ids) == 5, f"expected 5 distinct documents, got {doc_ids}"
 
     # All five recoverable via recall.
-    result = await lake.recall("widget", namespace=namespace_id, limit=20)
+    result = await kb.recall("widget", namespace=namespace_id, limit=20)
     contents_returned = {c.content for c, _ in result.chunks}
     assert len(contents_returned) >= 5

@@ -14,7 +14,7 @@ make dev               # Start postgres + neo4j
 uv run alembic upgrade head                       # Run migrations
 ```
 
-CLI tooling (`extract`, `search`) lives in the separate [khora-cli](https://github.com/DeytaHQ/khora-cli) package (`uv pip install khora-cli`). Ontology tooling (construct / validate / preview) lives in [khora-explorer](https://github.com/DeytaHQ/khora-explorer) (`uv pip install khora-explorer`). khora itself is a pure memory-lake library.
+CLI tooling (`extract`, `search`) lives in the separate [khora-cli](https://github.com/DeytaHQ/khora-cli) package (`uv pip install khora-cli`). Ontology tooling (construct / validate / preview) lives in [khora-explorer](https://github.com/DeytaHQ/khora-explorer) (`uv pip install khora-explorer`). khora is a Python library.
 
 ## Test Commands
 
@@ -45,7 +45,7 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 ### Key Entry Points
 
 - `khora.py` — `remember()`, `recall()`, `forget()`, `remember_batch()`. Accepts `expertise: ExpertiseConfig`
-- `extraction/skills/base.py` — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` (ADR-022 stable)
+- `extraction/skills/base.py` — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`
 - `storage/coordinator.py` — `transaction()` for atomic multi-backend ops
 - `storage/backends/base.py` — `GraphBackend` protocol (implement for new backends)
 - `storage/backends/surrealdb/` — Unified SurrealDB backend
@@ -245,21 +245,21 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **`enqueue=True` is not a free latency win.** See `scripts/bench_logger_enqueue.py`: on fast buffered sinks, the pickle + IPC overhead dominates a userspace memcpy, so enqueue is ~5× slower per call than sync. On slow sinks with sustained throughput (no idle between bursts), enqueue does not help either — the kernel pipe fills and the producer blocks. Enqueue wins only in the realistic case: slow sink + idle between bursts (a request handler doing async I/O between log calls), where p99 event-loop stalls drop ~25-40% (≈15-18 ms → ≈11 ms, run-dependent) and wall time drops ~23% (2058 ms → 1593 ms) on the handler-shaped scenario. Keep this in mind when evaluating logging overhead on hot paths.
 
 ### Telemetry
-- **Public contract lives at `docs/telemetry-contract.json`** (with sibling explainer `docs/telemetry-contract.md`). When you add a span (`trace_span`), pipeline stage (`pipeline_stage` / `record_pipeline_stage`), metric (`metric_counter` / `metric_histogram` / `metric_gauge_callback`), event-type field, or new public export to `khora.telemetry.__all__`, you MUST update the contract JSON in the same PR. CI fails otherwise via `tests/unit/telemetry/test_contract.py` (10-test drift gate that walks the codebase with ripgrep). See `docs/adrs/adr-026-telemetry-contract.md` for the design rationale.
+- **Public contract lives at `docs/telemetry-contract.json`** (with sibling explainer `docs/telemetry-contract.md`). When you add a span (`trace_span`), pipeline stage (`pipeline_stage` / `record_pipeline_stage`), metric (`metric_counter` / `metric_histogram` / `metric_gauge_callback`), event-type field, or new public export to `khora.telemetry.__all__`, you MUST update the contract JSON in the same PR. CI fails otherwise via `tests/unit/telemetry/test_contract.py` (10-test drift gate that walks the codebase with ripgrep).
 - **Public vs internal stability tags.** Items tagged `stability: public` in the contract are part of the OSS API surface — renaming or removing them requires a major version bump and prior coordination with downstream consumers (khora-benchmarks, khora-explorer, khora-cli). Items tagged `internal` may be renamed freely as long as the JSON is updated. Top-level engine entry points (`khora.recall`, `khora.remember`, `khora.vectorcypher.retrieve`) and operator-facing metrics (`khora.memory.recall.duration`, `khora.llm.tokens`, etc.) are public. Inner-loop spans (`khora.vectorcypher.coherence_boost`, `khora.vectorcypher.rrf_fusion`, etc.) are internal.
 - **Cardinality rule — never put `namespace_id` on a metric.** It is a span attribute and a log field only. Phase-0 audit measured 438 distinct namespace IDs over the production retention window in one deployment; Logfire and Prometheus bill per series, so a `namespace_id` label produces an unbounded cost curve. The same rule applies to any other attribute with cardinality ~O(tenants).
 - **Free-text span attributes.** Use `khora.telemetry.bounded_text_hash` (added in #504) for any free-text value (raw user query, document content, chunk text) — it returns a SHA1[:8] hash. Never put raw text on a span attribute: it is both a privacy hazard and a cardinality bomb.
 - **OTel semconv adopted for new attributes.** `gen_ai.*` for LLM (model, prompt tokens, completion tokens), `db.*` for storage backends, `code.*` for stack info. Keeps khora vendor-neutral over the OTel exporter chain.
 - **Two existing LLM instrumentation patterns — pick whichever the surrounding code uses, do not introduce a third.** (a) Pass `_telemetry_op="<op>"` through `khora.config.llm.acompletion`; the wrapper records the call automatically. (b) Inline `record_llm_call(...)` after a direct `litellm.acompletion` call. The 9 call sites that existed before #508 plus the 6 added in #508 (HyDE, listwise rerank, fact extraction, fact reconcile, event extraction; chat was already wired) all follow one of these two patterns.
 - **`khora.log.queue.depth` is a proxy.** It exports the loguru-handler-error count, not the real enqueue-queue size — `loguru>=0.7.3` does not expose `qsize()`. The metric *name* is in the public contract because dashboards depend on it; the implementation can switch to a real reading when loguru exposes one. Do not "fix" this by removing the metric.
-- **`coordinator.transaction()` cross-store atomicity remains partial on embedded** (see ADR-025). Span instrumentation does not promise transactional semantics it does not have — do not annotate spans in a way that implies all-or-nothing writes across SQL + LanceDB on the embedded path.
+- **`coordinator.transaction()` cross-store atomicity remains partial on embedded.** Span instrumentation does not promise transactional semantics it does not have — do not annotate spans in a way that implies all-or-nothing writes across SQL + LanceDB on the embedded path.
 - **Telemetry collector is opt-in.** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording; without it, `NoOpCollector` is used (zero cost). Logfire integration is gated by `_HAS_LOGFIRE` — `trace_span()` yields a no-op when the optional `logfire` extra is absent.
 
 ### Downstream
-- The sibling packages `khora-cli`, `khora-explorer`, and `khora-benchmarks` consume khora's public API. `lake.storage` is a stable public API.
+- The sibling packages `khora-cli`, `khora-explorer`, and `khora-benchmarks` consume khora's public API. `kb.storage` is a stable public API.
 - **LLMUsage contract:** `LLMUsage` fields are part of the stable public API and are consumed by external cost-tracking integrations — changes require coordination.
-- **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination (consumed by khora-explorer, khora-benchmarks). See `docs/adrs/adr-022-extraction-skills-public-api.md`. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract.
-- Stable public API is codified in ADR-024 (memory-lake surface) and ADR-022 (extraction skills). Any breaking change to symbols listed there requires coordinated release with khora-cli, khora-explorer, khora-benchmarks. See `docs/adrs/adr-024-memory-lake-public-api.md`; `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface.
+- **ExpertiseConfig contract:** stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination (consumed by khora-explorer, khora-benchmarks). `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract.
+- Any breaking change to the stable public API requires coordinated release with khora-cli, khora-explorer, khora-benchmarks. `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface.
 - `scripts/` vendored from TTOJ — skip in audits
 
 

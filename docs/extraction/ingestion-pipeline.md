@@ -397,7 +397,7 @@ staging_semaphore = asyncio.Semaphore(20)
 These are configurable:
 
 ```python
-result = await lake.remember_batch(
+result = await kb.remember_batch(
     documents,
     max_concurrent_documents=10,
     max_concurrent_extractions=20
@@ -424,7 +424,7 @@ for doc, result in zip(docs, results):
 Check for failures in the result:
 
 ```python
-result = await lake.remember_batch(documents)
+result = await kb.remember_batch(documents)
 
 print(f"Processed: {result['processed_documents']}")
 print(f"Skipped (duplicates): {result['skipped_documents']}")
@@ -436,7 +436,7 @@ print(f"Failed: {result['failed_documents']}")
 ### Simple Ingestion
 
 ```python
-result = await lake.remember(
+result = await kb.remember(
     "Your content here...",
     title="Document Title",
     source="manual"
@@ -455,7 +455,7 @@ documents = [
     {"content": "Doc 2...", "title": "Doc 2", "source": "upload"},
 ]
 
-result = await lake.remember_batch(
+result = await kb.remember_batch(
     documents,
     max_concurrent=10,
 )
@@ -466,7 +466,7 @@ result = await lake.remember_batch(
 ### With Custom Configuration
 
 ```python
-result = await lake.remember(
+result = await kb.remember(
     content,
     chunk_strategy="recursive",
     chunk_size=1024,
