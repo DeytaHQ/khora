@@ -104,7 +104,8 @@ jobs:
 
       # Stamp the git tag version into Cargo.toml — single source of truth
       # for khora-accel. maturin reads version from Cargo.toml when the
-      # pyproject's `dynamic = ["version"]` is set.
+      # pyproject's `dynamic = ["version"]` is set. (No fetch-tags needed:
+      # the version is taken from ${GITHUB_REF}, not from `git describe`.)
       - name: Set version from tag
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
@@ -123,8 +124,11 @@ jobs:
       - name: Build sdist
         run: maturin sdist --manifest-path rust/khora-accel/Cargo.toml --out dist
 
+      # skip-existing handles re-runs of an already-published version cleanly.
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   # ============================================================================
   # Publish khora — pure-Python wheel + sdist to PyPI via Trusted Publishing.
@@ -148,8 +152,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
         with:
-          # Full history required for hatch-vcs to derive version from git tags.
+          # Full history + tag refs required for hatch-vcs to derive version
+          # from git tags. fetch-depth alone is not enough on actions/checkout
+          # v4+: tag refs are skipped unless fetch-tags is set explicitly.
+          # Without this, hatch-vcs sees no tag and falls back to "next-dev"
+          # → e.g. 0.10.3.dev0 instead of 0.10.2.
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -178,7 +187,12 @@ jobs:
       # hatch-vcs reads the version from the most recent git tag automatically.
       # Produces both dist/*.whl and dist/*.tar.gz for upload.
       - name: Build wheel and sdist
-        run: python -m build
+        run: |
+          python -m build
+          ls -la dist/
 
+      # skip-existing handles re-runs of an already-published version cleanly.
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
