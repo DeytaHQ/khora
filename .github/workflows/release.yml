@@ -1,18 +1,34 @@
-# Release pipeline — verify CI is green, then publish khora + khora-accel in parallel.
+# Release pipeline — verify CI is green, then publish khora-accel + khora to PyPI.
 #
-# Trigger: v[0-9]* tag push (e.g. v0.5.0, v1.0.0-rc1) plus manual dispatch.
+# Trigger: v[0-9]* tag push (e.g. v0.10.2, v1.0.0-rc1) plus manual dispatch.
 # This is the ONLY workflow that runs on tag push; ci.yml handles PRs and branches.
 #
-# Pipeline:
-#   verify-ci-green ──> build-accel (3 platforms × 2 Python versions) ──┬──> publish-khora
-#                                                                       └──> publish-accel
+# Pipeline (serialized):
+#   verify-ci-green ──> publish-accel ──> publish-khora
 #
 # verify-ci-green confirms ci.yml already passed for the tagged SHA on main.
 # Re-running the full test suite at tag time was ~10 min of redundant work.
 # Tag arbitrary commits at your own risk: if no successful CI run exists for
 # the SHA, the release fails fast with a clear error.
 #
-# Authentication: GitHub OIDC federation — no long-lived AWS credentials.
+# Authentication: PyPI Trusted Publishing via GitHub OIDC — no API tokens, no
+# AWS credentials. Each publish job runs under the `pypi` deployment
+# environment, which the pypi.org trusted-publisher config is bound to.
+#
+# khora-accel ships as an sdist only (no platform-wheel matrix). PyPI users
+# compile the Rust extension at install time via maturin's PEP 517 backend.
+#
+# Version lockstep: khora and khora-accel are released at identical versions.
+#   - khora-accel: `Set version from tag` seds rust/khora-accel/Cargo.toml.
+#   - khora: hatch-vcs derives version from the git tag automatically, and
+#     `Pin khora-accel to release version` seds pyproject.toml so the
+#     published khora wheel hard-requires khora-accel == ${tag-version}.
+#
+# Publish order: accel first, then khora. Serializing prevents the skew where
+# `khora==X.Y.Z` lands on PyPI but its `khora-accel==X.Y.Z` dependency hasn't
+# (because the accel job failed mid-flight) — installers would see a broken
+# resolution.
+#
 # Concurrency: one release at a time; never cancel in-flight publishes.
 
 name: Release
@@ -24,7 +40,6 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: read
 
 concurrency:
@@ -68,14 +83,67 @@ jobs:
           echo "Found ${runs} successful ci.yml run(s) for ${SHA} — proceeding with release."
 
   # ============================================================================
-  # Publish khora — pure Python wheel to CodeArtifact.
-  # Runs in parallel with publish-accel after build-accel completes.
-  # hatch-vcs derives the version from the git tag.
+  # Publish khora-accel — source distribution (sdist) to PyPI via Trusted
+  # Publishing. No platform-wheel matrix: end users compile the Rust extension
+  # at install time via maturin's PEP 517 backend.
+  #
+  # Runs FIRST (before publish-khora) so that the moment khora==X.Y.Z appears
+  # on PyPI, its khora-accel==X.Y.Z dependency is already resolvable.
+  # ============================================================================
+  publish-accel:
+    needs: verify-ci-green
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: pypi
+    permissions:
+      id-token: write   # required for PyPI OIDC trusted publishing
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # Stamp the git tag version into Cargo.toml — single source of truth
+      # for khora-accel. maturin reads version from Cargo.toml when the
+      # pyproject's `dynamic = ["version"]` is set.
+      - name: Set version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Publishing khora-accel version: $VERSION"
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" rust/khora-accel/Cargo.toml
+          rm -f rust/khora-accel/Cargo.toml.bak
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install maturin
+        run: pip install 'maturin>=1.5,<2.0'
+
+      - name: Build sdist
+        run: maturin sdist --manifest-path rust/khora-accel/Cargo.toml --out dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  # ============================================================================
+  # Publish khora — pure-Python wheel + sdist to PyPI via Trusted Publishing.
+  #
+  # Runs AFTER publish-accel so that resolvers seeing khora==X.Y.Z can always
+  # also resolve its khora-accel==X.Y.Z dep.
+  #
+  # hatch-vcs derives khora's version from the git tag automatically.
+  # The `Pin khora-accel to release version` step rewrites pyproject.toml so
+  # the published wheel/sdist hard-pins khora-accel==X.Y.Z (lockstep contract).
   # ============================================================================
   publish-khora:
-    needs: build-accel
+    needs: publish-accel
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
+    environment: pypi
+    permissions:
+      id-token: write   # required for PyPI OIDC trusted publishing
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -94,133 +162,23 @@ jobs:
           enable-cache: true
 
       - name: Install build dependencies
-        run: uv pip install build twine --system
+        run: uv pip install build --system
 
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::956322716887:role/github-actions-codeartifact-publish
-          aws-region: us-west-2
-
-      - name: Get CodeArtifact authorization token
-        run: |
-          TOKEN=$(aws codeartifact get-authorization-token --domain deyta --query authorizationToken --output text)
-          echo "::add-mask::$TOKEN"
-          echo "CA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
-
-      # hatch-vcs reads the version from the most recent git tag automatically.
-      - name: Build wheel
-        run: python -m build
-
-      - name: Publish to CodeArtifact
-        env:
-          CA_REPOSITORY_URL: https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/
-          CA_TOKEN: ${{ env.CA_TOKEN }}
-        run: ./.github/scripts/publish-codeartifact.sh dist/*
-
-  # ============================================================================
-  # Build khora-accel — native wheels for 3 platforms × 2 Python versions via maturin.
-  # Runs after the CI-green precondition. Builds must complete before either
-  # publish job starts.
-  # ============================================================================
-  build-accel:
-    needs: verify-ci-green
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.13", "3.14"]
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-          - aarch64-apple-darwin
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      # Stamp the git tag version into Cargo.toml (single source of truth).
-      - name: Set version from tag
+      # Lockstep: pin khora-accel to the exact release version in pyproject.toml
+      # so that `pip install khora==X.Y.Z` always pulls khora-accel==X.Y.Z.
+      # Edits only the `rust` extra; other khora-accel mentions (if any) untouched.
+      - name: Pin khora-accel to release version
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          echo "Publishing khora-accel version: $VERSION"
-          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" rust/khora-accel/Cargo.toml
-          rm -f rust/khora-accel/Cargo.toml.bak
+          echo "Pinning khora-accel == $VERSION in pyproject.toml"
+          sed -i.bak -E "s|\"khora-accel[^\"]*\"|\"khora-accel==${VERSION}\"|g" pyproject.toml
+          rm -f pyproject.toml.bak
+          grep -n "khora-accel" pyproject.toml
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "${{ matrix.python }}"
+      # hatch-vcs reads the version from the most recent git tag automatically.
+      # Produces both dist/*.whl and dist/*.tar.gz for upload.
+      - name: Build wheel and sdist
+        run: python -m build
 
-      # --interpreter ensures the manylinux container uses the correct Python
-      # (not the default 3.8), matching requires-python.
-      - name: Build wheel
-        uses: PyO3/maturin-action@v1
-        with:
-          target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python${{ matrix.python }}
-          working-directory: rust/khora-accel
-          manylinux: auto
-          sccache: 'true'
-
-      - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheel-${{ matrix.target }}-cp${{ matrix.python }}
-          path: rust/khora-accel/dist/*.whl
-
-  # ============================================================================
-  # Publish khora-accel — upload all platform wheels to CodeArtifact.
-  # ============================================================================
-  publish-accel:
-    needs: build-accel
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Download all wheel artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: wheel-*
-          merge-multiple: true
-          path: dist/
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: false
-
-      - name: Install twine
-        run: uv pip install twine --system
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::956322716887:role/github-actions-codeartifact-publish
-          aws-region: us-west-2
-
-      - name: Get CodeArtifact authorization token
-        run: |
-          TOKEN=$(aws codeartifact get-authorization-token --domain deyta --query authorizationToken --output text)
-          echo "::add-mask::$TOKEN"
-          echo "CA_TOKEN=$TOKEN" >> "$GITHUB_ENV"
-
-      - name: Publish to CodeArtifact
-        env:
-          CA_REPOSITORY_URL: https://deyta-956322716887.d.codeartifact.us-west-2.amazonaws.com/pypi/packages/
-          CA_TOKEN: ${{ env.CA_TOKEN }}
-        run: ./.github/scripts/publish-codeartifact.sh dist/*
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

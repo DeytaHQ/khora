@@ -2,98 +2,92 @@
 
 ## Tag Naming
 
-Tags follow semantic versioning: `v{major}.{minor}.{patch}` (e.g., `v0.5.0`).
+Tags follow semantic versioning: `v{major}.{minor}.{patch}` (e.g., `v0.10.2`).
 
-The `v` prefix is required — it triggers the publish workflows.
+The `v` prefix is required — it triggers the publish workflow.
 
 ## Versioning
 
-Versions are derived automatically from git tags — no files need manual version bumps.
+`khora` and `khora-accel` are released at **identical versions**, always. This is enforced mechanically at release time — see "Version lockstep" below.
 
 | Package | How version is set |
 |---------|-------------------|
 | `khora` | `hatch-vcs` reads the most recent git tag at build time |
-| `khora-accel` | `release.yml` extracts the tag and stamps it into `Cargo.toml` before maturin builds |
+| `khora-accel` | `release.yml` extracts the tag and stamps it into `rust/khora-accel/Cargo.toml` before maturin builds |
 
 At runtime, `khora.__version__` reads the installed package version via `importlib.metadata`.
 
-In development (no tag on current commit), the version will be something like `0.5.5.dev3`.
+In development (no tag on current commit), the version will be something like `0.10.3.dev3`.
 
-## Dev Releases (automatic)
+## Where Packages Are Published
 
-Every merge to `main` publishes a dev release to CodeArtifact via `ci.yml`:
+Both packages publish to **public PyPI** under the **Deyta** organization:
 
-| Package | Version example | How |
-|---------|----------------|-----|
-| `khora` | `0.5.5.dev14` | `hatch-vcs` with `local_scheme = "no-local-version"` in pyproject.toml |
-| `khora-accel` | `0.5.5-dev.14` (semver) → `0.5.5.dev14` (wheel) | `git describe` → stamp `Cargo.toml` → maturin |
+- https://pypi.org/project/khora/
+- https://pypi.org/project/khora-accel/
 
-Dev versions are PEP 440 pre-releases. Downstream projects that pin `>=X.Y.Z.dev0` will pick them up.
+Install: `pip install khora` (or `uv pip install khora`).
 
-## Stable Releases (tag-triggered)
+`khora-accel` ships as an **sdist only** (no platform wheels) — installers compile the Rust extension at install time via maturin's PEP 517 backend. **Requires a Rust toolchain** (`rustup` with stable `cargo` on PATH) on the install host.
 
-1. Create and push a tag:
+## Authentication
+
+PyPI Trusted Publishing via GitHub OIDC — no API tokens, no secrets in the repo. Each publish job runs under the `pypi` GitHub deployment environment, which is bound to the trusted-publisher configuration on pypi.org for both projects.
+
+## Releasing
+
+1. Make sure `main` is green in CI.
+2. Create and push a tag:
    ```bash
-   git tag v0.6.0
-   git push origin v0.6.0
+   git tag v0.10.2
+   git push origin v0.10.2
    ```
-2. The `release.yml` workflow triggers automatically:
+3. The `release.yml` workflow triggers automatically and serializes:
 
-| Job | Package | What it does |
-|----------|---------|-------------|
-| `publish-khora` | `khora` | Builds a pure Python wheel via `hatch-vcs` and publishes to CodeArtifact |
-| `publish-accel` | `khora-accel` | Builds native wheels for 3 platforms (Linux x64/ARM64, macOS ARM64) and publishes to CodeArtifact |
+   | Step | Package | What it does |
+   |------|---------|-------------|
+   | `verify-ci-green` | — | Confirms ci.yml passed for the tagged SHA |
+   | `publish-accel` | `khora-accel` | `maturin sdist` → publish to PyPI |
+   | `publish-khora` | `khora` | Pins `khora-accel == ${tag}` in pyproject.toml, then `python -m build` (wheel + sdist) → publish to PyPI |
 
-The workflow uses OIDC authentication — no secrets required.
+   Publish order is **accel first, then khora** so that the moment `khora==X.Y.Z` appears on PyPI, its `khora-accel==X.Y.Z` dependency is already resolvable.
 
 ### Manual Publish
 
 The workflow supports `workflow_dispatch` for manual re-runs from the GitHub Actions UI.
 
+## Version Lockstep
+
+khora's `pyproject.toml` declares `khora-accel >= X.Y.Z` (a loose floor) in the `rust` extra. At release time, the `Pin khora-accel to release version` step in `release.yml` rewrites this to `khora-accel == ${tag}` before building the khora wheel. Consequence: the published khora wheel always hard-pins khora-accel to the exact same version.
+
+If you ever need to break this lockstep (e.g. ship a khora hotfix that uses an older khora-accel), edit pyproject.toml on the release branch and remove or override the sed step in release.yml for that release.
+
 ## Verification
 
-After the workflows complete, confirm packages are available:
+After the workflow completes, confirm packages are visible:
 
 ```bash
-aws codeartifact list-package-versions \
-  --domain deyta \
-  --repository packages \
-  --format pypi \
-  --package khora
-
-aws codeartifact list-package-versions \
-  --domain deyta \
-  --repository packages \
-  --format pypi \
-  --package khora-accel
+curl -s https://pypi.org/pypi/khora/json | jq '.releases | keys[-3:]'
+curl -s https://pypi.org/pypi/khora-accel/json | jq '.releases | keys[-3:]'
 ```
 
-## Downstream Projects (always-latest)
+Or open https://pypi.org/project/khora/${VERSION}/ in a browser.
 
-For internal projects like `khora-benchmarks` that should always track the latest dev release, add this to their `pyproject.toml`:
+## Dev Releases
 
-```toml
-[project]
-dependencies = [
-    "khora>=0.5.0.dev0",        # .dev0 opts into pre-releases
-    "khora-accel>=0.5.0.dev0",
-]
+There are no automatic dev/pre-release publishes. Only tag pushes publish to PyPI. To consume in-flight changes from `main` before a tag, install from git:
 
-[tool.uv]
-upgrade-package = ["khora", "khora-accel"]
+```bash
+pip install git+https://github.com/DeytaHQ/khora.git@main
 ```
 
-The `>=X.Y.Z.dev0` specifier tells uv to accept dev/pre-release versions for these packages (under the default `if-necessary-or-explicit` prerelease strategy).
-
-The `upgrade-package` setting makes every `uv sync` re-resolve these packages to the latest available version, ignoring the lockfile pin. No CLI flags needed — plain `uv sync` does the right thing.
-
-> **Note:** This will update `uv.lock` on every `uv sync` when a newer dev version is available. With frequent merges to main, expect lockfile changes daily. This is intentional — commit the updates as part of normal workflow. If lockfile churn is disruptive, pin to a specific dev version instead (e.g., `khora==0.5.5.dev14`).
+This requires repo access for as long as the repository is private.
 
 ## Troubleshooting
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| OIDC credential error | IAM role trust policy misconfigured | Check `github-actions-codeartifact-publish` role in AWS |
-| Twine upload 403 | Expired or invalid CodeArtifact token | Re-run the workflow; tokens are generated per-run |
-| Version shows `0.0.0` or `dev` | No git tags reachable from HEAD | Ensure you've pushed tags: `git push origin --tags` |
-| khora-accel build fails on one platform | Platform-specific compilation issue | Check build logs; other platforms still complete |
+| `Trusted publishing exchange failure` | Environment name, workflow filename, or repo owner doesn't match the pypi.org trusted-publisher config | Check the per-project Publishing settings on pypi.org match `release.yml`, `pypi`, `DeytaHQ`, `khora` |
+| `File already exists` | Re-running release for a version that already published | Bump to the next patch; PyPI does not allow overwriting |
+| Version shows `0.0.0` or `dev` | No git tags reachable from HEAD | `git push origin --tags`; verify `hatch-vcs` sees the tag (`uv run python -c "import khora; print(khora.__version__)"`) |
+| khora-accel sdist install fails for a user | No Rust toolchain on the install host | Install `rustup`, ensure `cargo` is on `PATH`, retry; long-term we may add a prebuilt wheel matrix |

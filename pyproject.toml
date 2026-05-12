@@ -99,7 +99,7 @@ logfire = ["logfire>=4.0"]
 nlp = ["spacy>=3.8.0"]
 # Rust-accelerated operations (requires Rust toolchain to build from source)
 rust = [
-    "khora-accel>=0.1.0",
+    "khora-accel>=0.10.2",
 ]
 # SurrealDB unified backend (graph + vector + relational in one DB)
 surrealdb = ["surrealdb>=2.0.0a1"]
