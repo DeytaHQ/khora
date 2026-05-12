@@ -461,3 +461,28 @@ async def test_skeleton_concurrent_remember(kb: Khora, namespace_id: UUID) -> No
     result = await _recall(kb, "widget", namespace=namespace_id, limit=20)
     contents_returned = {c.content for c, _ in result.chunks}
     assert len(contents_returned) >= 5
+
+
+async def test_skeleton_recall_handles_punctuated_query(kb: Khora, namespace_id: UUID) -> None:
+    """Regression for issue #526 at the **engine layer**.
+
+    PR #528's escape_fts5_query fix was verified at the storage adapter
+    layer; this test pushes punctuated / FTS5-operator queries through
+    the full Khora.recall() → skeleton engine path. Catches a future
+    regression that introduces a new fusion path bypassing the escape.
+    """
+    await _remember(
+        kb,
+        namespace_id=namespace_id,
+        content="alpha document with widget reference and falcon launch.",
+    )
+    for query in (
+        "What about widget?",
+        "widget: please",
+        "widget (please)",
+        "widget AND alpha",
+        'say "hello" widget',
+        "widget*",
+    ):
+        result = await _recall(kb, query, namespace=namespace_id, limit=3)
+        assert isinstance(result.chunks, list), f"recall must not raise on {query!r}"
