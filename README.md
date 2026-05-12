@@ -10,7 +10,7 @@
 
 Khora is a knowledge memory library for long-horizon AI agents, with pluggable retrieval engines and storage backends to fit different workloads. It stores knowledge as documents, embeddings, and graph relationships, and retrieves it through hybrid search (vector + graph + keyword), reranking, and temporal context.
 
-Khora is a **library, not an application**. Tooling lives in sibling packages:
+Khora is a **library, not an application**. Tooling lives in sibling packages (coming soon...):
 
 - [khora-service](https://github.com/DeytaHQ/khora-service) — runs Khora as a long-lived service.
 - [khora-explorer](https://github.com/DeytaHQ/khora-explorer) — tooling for ontology construction and exploration.
