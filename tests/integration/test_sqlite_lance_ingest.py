@@ -137,6 +137,171 @@ class TestSQLiteLanceIngest:
         finally:
             await coord.disconnect()
 
+    async def test_chronicle_events_and_facts_persist(self, tmp_path: Path) -> None:
+        """Regression for issue #529: chronicle write/query on sqlite_lance.
+
+        Before the fix the coordinator dispatched chronicle methods only to
+        the vector adapter (LanceDB), which doesn't implement them — every
+        write was silently dropped and queries raised. After the fix the
+        coordinator falls back to the relational adapter, which writes to
+        the chronicle_events / memory_facts tables migration 024 already
+        created on SQLite.
+        """
+        from datetime import UTC, datetime
+
+        from khora.engines.chronicle.compression import MemoryFact
+        from khora.engines.chronicle.events import ChronicleEvent
+
+        coord = await build_sqlite_lance_coordinator(tmp_path)
+        try:
+            ns = await coord.create_namespace(MemoryNamespace())
+            # Seed a document + chunk so the chronicle FK target exists.
+            doc = _make_document(ns.id, idx=0, topic="curie")
+            await coord.create_document(doc)
+            chunk = _make_chunk(ns.id, doc.id, idx=0, content=doc.content)
+            await coord.create_chunks_batch([chunk])
+
+            # --- write_events / query_events round-trip ---------------------
+            ev1 = ChronicleEvent(
+                chunk_id=chunk.id,
+                namespace_id=ns.id,
+                subject="Marie Curie",
+                verb="won",
+                object="Nobel Prize",
+                observation_date=datetime.now(UTC),
+                referenced_date=datetime(1903, 12, 10, tzinfo=UTC),
+                confidence=0.95,
+                source_text="Marie Curie won the Nobel Prize in Physics in 1903.",
+            )
+            ev2 = ChronicleEvent(
+                chunk_id=chunk.id,
+                namespace_id=ns.id,
+                subject="Marie Curie",
+                verb="discovered",
+                object="radium",
+                observation_date=datetime.now(UTC),
+                confidence=0.9,
+                source_text="Curie discovered radium.",
+            )
+            event_ids = await coord.write_events([ev1, ev2], namespace_id=ns.id)
+            assert len(event_ids) == 2
+            assert event_ids == [ev1.id, ev2.id]
+
+            events = await coord.query_events(ns.id, subject="Marie Curie", limit=10)
+            assert len(events) == 2
+            verbs = {e.verb for e in events}
+            assert verbs == {"won", "discovered"}
+
+            # --- write_facts / query_active_facts_for_subject ---------------
+            f1 = MemoryFact(
+                namespace_id=ns.id,
+                subject="Marie Curie",
+                predicate="won",
+                object_="Nobel Prize",
+                fact_text="Marie Curie won the Nobel Prize.",
+                confidence=0.95,
+                source_chunk_ids=[chunk.id],
+            )
+            f2 = MemoryFact(
+                namespace_id=ns.id,
+                subject="Marie Curie",
+                predicate="discovered",
+                object_="radium",
+                fact_text="Marie Curie discovered radium.",
+                confidence=0.9,
+                source_chunk_ids=[chunk.id],
+            )
+            fact_ids = await coord.write_facts([f1, f2], namespace_id=ns.id)
+            assert len(fact_ids) == 2
+
+            facts = await coord.query_active_facts_for_subject(ns.id, "Marie Curie")
+            assert len(facts) == 2
+            assert all(f.is_active for f in facts)
+            assert {f.predicate for f in facts} == {"won", "discovered"}
+            # source_chunk_ids round-trip as UUIDs even though SQLite stores them as JSON.
+            for f in facts:
+                assert chunk.id in f.source_chunk_ids
+
+            # --- supersede_fact flips is_active ----------------------------
+            # FK constraint: superseded_by must reference an existing fact;
+            # write a replacement first.
+            replacement = MemoryFact(
+                namespace_id=ns.id,
+                subject="Marie Curie",
+                predicate="won",
+                object_="Nobel Prize in Physics",
+                fact_text="Marie Curie won the Nobel Prize in Physics.",
+                confidence=0.99,
+                source_chunk_ids=[chunk.id],
+            )
+            await coord.write_facts([replacement], namespace_id=ns.id)
+            await coord.supersede_fact(f1.id, replacement.id)
+
+            active = await coord.query_active_facts_for_subject(ns.id, "Marie Curie")
+            # f2 + replacement should remain active; f1 was superseded.
+            assert {f.id for f in active} == {f2.id, replacement.id}
+
+            # --- namespace isolation: another namespace sees nothing ------
+            other = await coord.create_namespace(MemoryNamespace())
+            assert await coord.query_events(other.id, subject="Marie Curie") == []
+            assert await coord.query_active_facts_for_subject(other.id, "Marie Curie") == []
+
+            # --- empty inputs short-circuit (no SQL emitted) ----------------
+            assert await coord.write_events([], namespace_id=ns.id) == []
+            assert await coord.write_facts([], namespace_id=ns.id) == []
+        finally:
+            await coord.disconnect()
+
+    async def test_fulltext_bm25_handles_punctuation_in_query(self, tmp_path: Path) -> None:
+        """Regression for issue #526: natural-language queries with `?`, `:`, etc.
+
+        Before the fix, ``search_fulltext_chunks(ns, "What did Curie win?")``
+        raised ``sqlite3.OperationalError: fts5: syntax error near "?"``. The
+        primary assertion here is "no crash"; the secondary assertion is that
+        recall is preserved for a single token surrounded by FTS5 metachars.
+        """
+        coord = await build_sqlite_lance_coordinator(tmp_path)
+        try:
+            ns = await coord.create_namespace(MemoryNamespace())
+            topics = ["quantum", "mesoscopic", "zettabyte", "isotropic", "tungsten"]
+            await _seed_ingest(coord, ns.id, topics)
+
+            # These inputs would have raised fts5 syntax errors prior to the fix.
+            # Single-token queries each contain "zettabyte" wrapped in FTS5 metachars;
+            # post-fix the chunk should still surface.
+            for query in (
+                "zettabyte?",  # `?` was the original crash
+                "zettabyte:",  # `:` is FTS5 column filter
+                "(zettabyte)",  # `(` `)` are grouping operators
+                "zettabyte*",  # `*` is prefix operator
+                "-zettabyte",  # leading `-` is FTS5 NOT in some contexts
+            ):
+                results = await coord.search_fulltext_chunks(ns.id, query, limit=5)
+                assert results, f"expected ≥1 hit for query {query!r}"
+                assert any("zettabyte" in c.content.lower() for c, _ in results), (
+                    f"expected the zettabyte chunk to surface for {query!r}"
+                )
+
+            # Multi-word natural-language queries containing FTS5 keywords/punctuation
+            # must not raise. Recall depends on the seeded content; we only assert
+            # that the call returns (a list, possibly empty).
+            for query in (
+                "What did Curie win?",  # the issue #526 repro
+                "zettabyte AND mesoscopic",  # `AND` as bareword operator
+                "zettabyte OR mesoscopic",  # `OR` as bareword operator
+                "zettabyte NEAR mesoscopic",  # `NEAR` as bareword operator
+                'say "hello"',  # embedded double quotes
+            ):
+                results = await coord.search_fulltext_chunks(ns.id, query, limit=5)
+                assert isinstance(results, list), f"call must return a list (no crash) for {query!r}"
+
+            # Empty / whitespace-only query short-circuits (no crash, no hits).
+            for empty_query in ("", "   ", "\t\n"):
+                results = await coord.search_fulltext_chunks(ns.id, empty_query, limit=5)
+                assert results == [], f"expected empty result for {empty_query!r}"
+        finally:
+            await coord.disconnect()
+
     async def test_hybrid_both_modalities_contribute(self, tmp_path: Path) -> None:
         """Vector + BM25 each return the right chunk; a naive merge covers both."""
         coord = await build_sqlite_lance_coordinator(tmp_path)

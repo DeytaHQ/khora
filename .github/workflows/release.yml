@@ -71,9 +71,14 @@ jobs:
         run: |
           set -euo pipefail
           echo "Checking for successful ci.yml run on SHA $SHA..."
+          # GitHub's `?status=success` URL filter has a stale-index window of
+          # ~30-60s after a run finishes — observed on v0.10.2, where CI was
+          # green but the filter returned zero. Fetching unfiltered and
+          # selecting on `.conclusion == "success"` reads the per-run record
+          # directly and is consistent immediately on completion.
           runs=$(gh api \
-            "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&status=success&per_page=10" \
-            --jq '.total_count // 0')
+            "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=10" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
           if [ "$runs" -eq 0 ]; then
             echo "::error::No successful ci.yml run found for SHA ${SHA}."
             echo "::error::Tag pushes assume CI has already validated the commit on main."

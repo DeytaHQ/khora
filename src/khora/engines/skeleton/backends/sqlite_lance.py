@@ -38,6 +38,7 @@ from khora.engines.skeleton.backends import (
     TemporalSearchResult,
     TemporalVectorStore,
 )
+from khora.storage.backends._fts5 import escape_fts5_query
 from khora.storage.backends.sqlite_lance._helpers import (
     from_json_text,
     to_json_text,
@@ -493,12 +494,15 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
     ) -> list[TemporalSearchResult]:
         # FTS5 MATCH; SQLite's bm25() is lower-is-better — negate so the
         # semantics match the PG/SurrealDB siblings.
+        match_expr = escape_fts5_query(query_text)
+        if not match_expr:
+            return []
         sql_parts = [
             "SELECT c.*, bm25(khora_chunks_fts) AS bm FROM khora_chunks_fts "
             "JOIN khora_chunks c ON c.rowid = khora_chunks_fts.rowid "
             "WHERE khora_chunks_fts MATCH ? AND c.namespace_id = ?"
         ]
-        params: list[Any] = [query_text, uuid_to_text(namespace_id)]
+        params: list[Any] = [match_expr, uuid_to_text(namespace_id)]
 
         filter_sql, filter_params = self._build_filter_clause(temporal_filter, alias="c")
         if filter_sql:

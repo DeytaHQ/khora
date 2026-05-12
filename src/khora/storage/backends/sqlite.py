@@ -22,6 +22,7 @@ from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, 
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.core.models.entity import Entity
 from khora.core.models.tenancy import TenancyMode
+from khora.storage.backends._fts5 import escape_fts5_query
 from khora.storage.backends.base import PaginatedResult
 
 # ---------------------------------------------------------------------------
@@ -1073,13 +1074,14 @@ class SQLiteVectorBackend:
         language: str = "english",
     ) -> list[tuple[Chunk, float]]:
         """Full-text search via FTS5."""
-        # FTS5 MATCH uses simple tokenizer; sanitize query for safety
-        safe_query = query_text.replace('"', '""')
+        match_expr = escape_fts5_query(query_text)
+        if not match_expr:
+            return []
         cursor = await self._conn.execute(
             "SELECT f.chunk_id, f.rank FROM chunks_fts f "
             "WHERE chunks_fts MATCH ? AND f.namespace_id = ? "
             "ORDER BY f.rank LIMIT ?",
-            (safe_query, str(namespace_id), limit),
+            (match_expr, str(namespace_id), limit),
         )
         fts_rows = await cursor.fetchall()
         if not fts_rows:

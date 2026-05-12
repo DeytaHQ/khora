@@ -32,6 +32,7 @@ import pyarrow as pa
 from loguru import logger
 
 from khora.core.models import Chunk, ChunkMetadata, Entity
+from khora.storage.backends._fts5 import escape_fts5_query
 
 from ._helpers import from_json_text, to_json_text, uuid_to_text
 
@@ -394,13 +395,15 @@ class SQLiteLanceVectorAdapter:
         return value matches the "higher is better" semantics used by
         the pgvector and SurrealDB siblings.
         """
-        safe_query = query_text.replace('"', '""')
+        match_expr = escape_fts5_query(query_text)
+        if not match_expr:
+            return []
         sql_parts = [
             "SELECT c.*, bm25(chunks_fts) AS bm FROM chunks_fts "
             "JOIN chunks c ON c.rowid = chunks_fts.rowid "
             "WHERE chunks_fts MATCH ? AND c.namespace_id = ?"
         ]
-        params: list[Any] = [safe_query, uuid_to_text(namespace_id)]
+        params: list[Any] = [match_expr, uuid_to_text(namespace_id)]
         if created_after is not None:
             sql_parts.append("AND COALESCE(c.source_timestamp, c.created_at) >= ?")
             params.append(_dt_to_str(created_after))

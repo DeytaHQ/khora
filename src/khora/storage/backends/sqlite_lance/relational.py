@@ -18,17 +18,37 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from loguru import logger
-from sqlalchemy import delete, event, func, or_, select, update
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    MetaData,
+    String,
+    Table,
+    Text,
+    delete,
+    event,
+    func,
+    insert,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.types import Uuid
 
 from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.db.models import DocumentModel, MemoryNamespaceModel, SyncCheckpointModel
+from khora.engines.chronicle.compression import MemoryFact
+from khora.engines.chronicle.events import ChronicleEvent
 from khora.storage.backends.base import PaginatedResult
 from khora.storage.backends.mixins import AsyncSessionMixin
 
@@ -50,6 +70,54 @@ _SQLITE_PRAGMAS: tuple[tuple[str, str], ...] = (
     ("cache_size", "-64000"),
     ("temp_store", "MEMORY"),
     ("busy_timeout", "5000"),
+)
+
+
+# SQLite-specific Table mirrors for the Chronicle schema (DYT-4051).
+#
+# The ORM models in khora.db.models declare Postgres-only types on these
+# tables — ``ChronicleEventModel.embedding: Vector(1536)`` and
+# ``MemoryFactModel.source_chunk_ids: ARRAY(UUID)``. Migration 024 already
+# gates these out of the SQLite schema (no embedding column, source_chunk_ids
+# becomes ``sa.JSON``). But the ORM column types' bind processors run in
+# Python before SQLAlchemy emits SQL — so an ORM-style insert routes the
+# values through the Postgres processor and fails. Defining standalone
+# ``Table`` objects with SQLite-shaped column types lets Core inserts/selects
+# use the right processors. We rely on ``Uuid`` (SQLAlchemy's dialect-aware
+# UUID type), which stores as TEXT(32) on SQLite, matching migration 024's
+# ``sa.String(36)`` close enough for round-trips.
+_chronicle_metadata = MetaData()
+_chronicle_events_sqlite = Table(
+    "chronicle_events",
+    _chronicle_metadata,
+    Column("id", Uuid(as_uuid=True), primary_key=True),
+    Column("namespace_id", Uuid(as_uuid=True), nullable=False),
+    Column("chunk_id", Uuid(as_uuid=True), nullable=False),
+    Column("subject", String(512), nullable=False),
+    Column("verb", String(255), nullable=False),
+    Column("object", String(512), nullable=True),
+    Column("observation_date", DateTime(timezone=True), nullable=False),
+    Column("referenced_date", DateTime(timezone=True), nullable=True),
+    Column("relative_offset", String(255), nullable=True),
+    Column("confidence", Float, nullable=False),
+    Column("source_text", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+_memory_facts_sqlite = Table(
+    "memory_facts",
+    _chronicle_metadata,
+    Column("id", Uuid(as_uuid=True), primary_key=True),
+    Column("namespace_id", Uuid(as_uuid=True), nullable=False),
+    Column("subject", String(512), nullable=False),
+    Column("predicate", String(255), nullable=False),
+    Column("object", String(512), nullable=False),
+    Column("fact_text", Text, nullable=False),
+    Column("confidence", Float, nullable=False),
+    Column("is_active", Boolean, nullable=False),
+    Column("superseded_by", Uuid(as_uuid=True), nullable=True),
+    Column("source_chunk_ids", JSON, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
 
@@ -591,3 +659,196 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
                 )
                 session.add(model)
             await session.commit()
+
+    # =========================================================================
+    # Chronicle engine: events + facts (DYT-4051)
+    #
+    # pgvector implements these on its vector adapter because it owns the
+    # `embedding` column on chronicle_events. The sqlite_lance vector adapter
+    # is LanceDB and has no SQL session, so the coordinator falls back here.
+    #
+    # Migration 024 already created chronicle_events + memory_facts on SQLite
+    # (sans `embedding` column, dialect-gated). We use SQLAlchemy Core inserts/
+    # selects with explicit column lists rather than ORM ``session.add`` /
+    # ``select(Model)`` so the SQL emitted matches the SQLite schema — the ORM
+    # models declare a Postgres-only ``embedding Vector(1536)`` column and a
+    # ``source_chunk_ids ARRAY(UUID)`` column that would otherwise blow up
+    # against the SQLite tables.
+    # =========================================================================
+
+    async def write_events(
+        self,
+        events: list[ChronicleEvent],
+        *,
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Insert chronicle_events rows; returns inserted IDs in input order."""
+        if not events:
+            return []
+        now = datetime.now(UTC)
+        ids: list[UUID] = []
+        rows: list[dict[str, object]] = []
+        for ev in events:
+            ev_id = ev.id or uuid4()
+            ids.append(ev_id)
+            rows.append(
+                {
+                    "id": ev_id,
+                    "namespace_id": namespace_id,
+                    "chunk_id": ev.chunk_id,
+                    "subject": ev.subject,
+                    "verb": ev.verb,
+                    "object": ev.object or None,
+                    "observation_date": ev.observation_date or now,
+                    "referenced_date": ev.referenced_date,
+                    "relative_offset": ev.relative_offset or None,
+                    "confidence": float(ev.confidence),
+                    "source_text": ev.source_text or "",
+                    "created_at": now,
+                }
+            )
+        async with self._get_session() as session:
+            await session.execute(insert(_chronicle_events_sqlite), rows)
+            await session.commit()
+        return ids
+
+    async def write_facts(
+        self,
+        facts: list[MemoryFact],
+        *,
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Insert memory_facts rows; returns inserted IDs in input order."""
+        if not facts:
+            return []
+        now = datetime.now(UTC)
+        ids: list[UUID] = []
+        rows: list[dict[str, object]] = []
+        for f in facts:
+            fact_id = f.id or uuid4()
+            ids.append(fact_id)
+            # SQLite stores source_chunk_ids as JSON; the JSON column type
+            # serialises a Python list of UUID-strings on bind.
+            chunk_ids_json = [str(cid) for cid in (f.source_chunk_ids or [])]
+            rows.append(
+                {
+                    "id": fact_id,
+                    "namespace_id": namespace_id,
+                    "subject": f.subject or "",
+                    "predicate": f.predicate or "",
+                    "object": f.object_ or "",
+                    "fact_text": f.fact_text or "",
+                    "confidence": float(f.confidence),
+                    "is_active": bool(f.is_active),
+                    "superseded_by": f.superseded_by,
+                    "source_chunk_ids": chunk_ids_json,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            )
+        async with self._get_session() as session:
+            await session.execute(insert(_memory_facts_sqlite), rows)
+            await session.commit()
+        return ids
+
+    async def query_events(
+        self,
+        namespace_id: UUID,
+        *,
+        subject: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+    ) -> list[ChronicleEvent]:
+        """Query chronicle_events filtered by subject and referenced_date range."""
+        t = _chronicle_events_sqlite
+        stmt = select(t).where(t.c.namespace_id == namespace_id)
+        if subject is not None:
+            stmt = stmt.where(t.c.subject == subject)
+        if since is not None:
+            stmt = stmt.where(t.c.referenced_date >= since)
+        if until is not None:
+            stmt = stmt.where(t.c.referenced_date <= until)
+        stmt = stmt.order_by(t.c.referenced_date.desc().nullslast()).limit(limit)
+        async with self._get_session() as session:
+            result = await session.execute(stmt)
+            return [
+                ChronicleEvent(
+                    id=row.id,
+                    chunk_id=row.chunk_id,
+                    namespace_id=row.namespace_id,
+                    subject=row.subject,
+                    verb=row.verb,
+                    object=row.object or "",
+                    observation_date=row.observation_date,
+                    referenced_date=row.referenced_date,
+                    relative_offset=row.relative_offset or "",
+                    confidence=float(row.confidence),
+                    source_text=row.source_text or "",
+                )
+                for row in result.all()
+            ]
+
+    async def query_active_facts_for_subject(
+        self,
+        namespace_id: UUID,
+        subject: str,
+    ) -> list[MemoryFact]:
+        """Return all active (not superseded) memory facts for a subject."""
+        t = _memory_facts_sqlite
+        stmt = (
+            select(t)
+            .where(
+                t.c.namespace_id == namespace_id,
+                t.c.subject == subject,
+                t.c.is_active.is_(True),
+            )
+            .order_by(t.c.created_at.desc())
+        )
+        async with self._get_session() as session:
+            result = await session.execute(stmt)
+            return [_row_to_memory_fact(row) for row in result.all()]
+
+    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID) -> None:
+        """Mark a fact inactive and link it to its replacement."""
+        t = _memory_facts_sqlite
+        async with self._get_session() as session:
+            await session.execute(
+                update(t)
+                .where(t.c.id == fact_id)
+                .values(is_active=False, superseded_by=superseded_by, updated_at=datetime.now(UTC))
+            )
+            await session.commit()
+
+
+def _row_to_memory_fact(row: object) -> MemoryFact:
+    """Build a MemoryFact dataclass from a SQLAlchemy Core ``Row``.
+
+    Tolerates ``source_chunk_ids`` arriving as either a JSON-decoded list of
+    UUID strings (SQLite) or already-parsed list of ``UUID`` objects (some
+    JSON deserialisers).
+    """
+    raw_chunk_ids = getattr(row, "source_chunk_ids", None) or []
+    chunk_ids: list[UUID] = []
+    for cid in raw_chunk_ids:
+        if isinstance(cid, UUID):
+            chunk_ids.append(cid)
+        else:
+            try:
+                chunk_ids.append(UUID(str(cid)))
+            except (ValueError, TypeError):
+                continue
+    return MemoryFact(
+        id=row.id,
+        namespace_id=row.namespace_id,
+        subject=row.subject or "",
+        predicate=row.predicate or "",
+        object_=row.object or "",
+        fact_text=row.fact_text or "",
+        confidence=float(row.confidence),
+        is_active=bool(row.is_active),
+        superseded_by=row.superseded_by,
+        source_chunk_ids=chunk_ids,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )

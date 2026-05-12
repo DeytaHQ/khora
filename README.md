@@ -8,11 +8,12 @@
 
 > *"Khora is the receptacle, the space, the matrix in which all things come to be."* — Plato, *Timaeus*
 
-Khora is a **Khora** library for Python 3.13+. It stores knowledge as a mix of documents, vectors, and graph relationships and retrieves it through hybrid search (vector + graph + keyword), reranking, and temporal context.
+Khora is a knowledge memory library for long-horizon AI agents, with pluggable retrieval engines and storage backends to fit different workloads. It stores knowledge as documents, embeddings, and graph relationships, and retrieves it through hybrid search (vector + graph + keyword), reranking, and temporal context.
 
-Khora is a **library, not an application**. CLI tooling lives in sibling packages:
+Khora is a **library, not an application**. CLI tooling lives in sibling packages (more to follow):
 
 - [khora-cli](https://github.com/DeytaHQ/khora-cli) — `extract` / `search` commands for ingesting files and querying namespaces.
+- **khora-service** — runs Khora as a long-lived service (coming soon).
 - [khora-explorer](https://github.com/DeytaHQ/khora-explorer) — ontology construction (`construct` / `validate` / `preview`).
 
 ## Install
@@ -115,7 +116,7 @@ Start at [docs/README.md](docs/README.md). Key entry points:
 - [Architecture](docs/architecture/overview.md) — how the pieces fit.
 - [Engines](docs/engines/engine-comparison.md) — VectorCypher, Skeleton, Chronicle.
 - [Migrations](docs/migrations.md) — Alembic workflow for library users.
-- [Downstream consumers](docs/consumers.md) — how genesis, khora-cli, khora-explorer, khora-benchmarks consume khora.
+- [Downstream consumers](docs/consumers.md) — how khora-cli, khora-explorer, and khora-benchmarks consume khora.
 
 ## Development
 

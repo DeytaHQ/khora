@@ -705,7 +705,7 @@ class ChronicleEngine:
                 )
             except Exception as exc:
                 logger.warning(
-                    "Event extraction failed for chunk %s: %s",
+                    "Event extraction failed for chunk {}: {}",
                     chunk.id,
                     exc,
                 )
@@ -733,7 +733,7 @@ class ChronicleEngine:
         try:
             vectors = await embedder.embed_batch([ev.summary for ev in targets])
         except Exception as exc:
-            logger.warning("Event summary embedding failed: %s", exc)
+            logger.warning("Event summary embedding failed: {}", exc)
             return
         for ev, vec in zip(targets, vectors):
             ev.embedding = vec
@@ -764,9 +764,9 @@ class ChronicleEngine:
         try:
             await self._get_storage().write_events(events, namespace_id=namespace_id)
         except Exception as exc:
-            logger.warning("write_events failed (skipping event persistence): %s", exc)
+            logger.warning("write_events failed (skipping event persistence): {}", exc)
             return 0
-        logger.debug("Persisted %d chronicle events across %d chunks", len(events), len(chunks))
+        logger.debug("Persisted {} chronicle events across {} chunks", len(events), len(chunks))
         return len(events)
 
     # =========================================================================
@@ -832,7 +832,7 @@ class ChronicleEngine:
                 )
             except Exception as exc:
                 logger.warning(
-                    "Fact extraction failed for chunk %s: %s",
+                    "Fact extraction failed for chunk {}: {}",
                     chunk.id,
                     exc,
                 )
@@ -892,7 +892,7 @@ class ChronicleEngine:
                     existing = await storage.query_active_facts_for_subject(namespace_id, subject)
                 except Exception as exc:
                     logger.warning(
-                        "query_active_facts_for_subject failed for subject %r: %s — falling back to ADD",
+                        "query_active_facts_for_subject failed for subject {!r}: {} — falling back to ADD",
                         subject,
                         exc,
                     )
@@ -924,7 +924,7 @@ class ChronicleEngine:
             try:
                 await storage.write_facts(facts_to_write, namespace_id=namespace_id)
             except Exception as exc:
-                logger.warning("write_facts failed during reconciliation: %s", exc)
+                logger.warning("write_facts failed during reconciliation: {}", exc)
                 return 0
 
         # Supersede old → new for UPDATEs.
@@ -932,7 +932,7 @@ class ChronicleEngine:
             try:
                 await storage.supersede_fact(old_id, new_fact.id)
             except Exception as exc:
-                logger.warning("supersede_fact failed for %s -> %s: %s", old_id, new_fact.id, exc)
+                logger.warning("supersede_fact failed for {} -> {}: {}", old_id, new_fact.id, exc)
 
         # DELETE: mark the old fact inactive without a replacement. The
         # storage contract takes a UUID for ``superseded_by``; passing the
@@ -942,7 +942,7 @@ class ChronicleEngine:
             try:
                 await storage.supersede_fact(old_id, old_id)
             except Exception as exc:
-                logger.warning("supersede_fact (delete) failed for %s: %s", old_id, exc)
+                logger.warning("supersede_fact (delete) failed for {}: {}", old_id, exc)
 
         return len(facts_to_write)
 
@@ -977,9 +977,9 @@ class ChronicleEngine:
         try:
             await self._get_storage().write_facts(new_facts, namespace_id=namespace_id)
         except Exception as exc:
-            logger.warning("write_facts failed (skipping fact persistence): %s", exc)
+            logger.warning("write_facts failed (skipping fact persistence): {}", exc)
             return 0
-        logger.debug("Persisted %d memory facts across %d chunks (no reconcile)", len(new_facts), len(chunks))
+        logger.debug("Persisted {} memory facts across {} chunks (no reconcile)", len(new_facts), len(chunks))
         return len(new_facts)
 
     # =========================================================================
@@ -1208,7 +1208,7 @@ class ChronicleEngine:
                     end_time=resolved.end,
                 )
                 logger.debug(
-                    "Temporal resolver: %r -> %s to %s (confidence=%.2f)",
+                    "Temporal resolver: {!r} -> {} to {} (confidence={:.2f})",
                     resolved.expression,
                     resolved.start,
                     resolved.end,
@@ -1248,7 +1248,7 @@ class ChronicleEngine:
                     # the entity surface just gets a stronger pull during fusion.
                     _rrf_w_entity *= 2.0
             except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("Chronicle router failed, running all channels: %s", exc)
+                logger.warning("Chronicle router failed, running all channels: {}", exc)
                 routing_complexity = "fallback"
 
         # Extract temporal bounds once and forward them to every channel.
@@ -1459,7 +1459,7 @@ class ChronicleEngine:
                 )
                 chunks_with_scores = reranked
             except Exception as e:
-                logger.warning("Chronicle cross-encoder reranking failed: %s", e)
+                logger.warning("Chronicle cross-encoder reranking failed: {}", e)
             timings["reranking_ms"] = (time.perf_counter() - start) * 1000
 
         # ── Cross-session expansion ─────────────────────────────────────
@@ -1614,7 +1614,7 @@ class ChronicleEngine:
 
         if not self._temporal_use_events or not has_signal:
             logger.debug(
-                "temporal channel: chunk_fallback (use_events=%s, has_signal=%s)",
+                "temporal channel: chunk_fallback (use_events={}, has_signal={})",
                 self._temporal_use_events,
                 has_signal,
             )
@@ -1631,14 +1631,14 @@ class ChronicleEngine:
                 limit=max(limit * 4, 1),
             )
         except Exception as exc:
-            logger.debug("temporal channel: query_events failed (%s); falling back to chunks", exc)
+            logger.debug("temporal channel: query_events failed ({}); falling back to chunks", exc)
             return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
 
         if not events:
             logger.debug("temporal channel: no events for namespace; falling back to chunks")
             return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
 
-        logger.debug("temporal channel: events (%d candidates in scope)", len(events))
+        logger.debug("temporal channel: events ({} candidates in scope)", len(events))
 
         # Pre-compute event-summary cosines in one batched call.
         cosine_by_index: dict[int, float] = {}
@@ -1659,7 +1659,7 @@ class ChronicleEngine:
                         original_idx = indexed_embeddings[local_idx][0]
                         cosine_by_index[original_idx] = float(score)
                 except Exception as exc:
-                    logger.debug("temporal channel: cosine batch failed (%s); falling back to no-cosine", exc)
+                    logger.debug("temporal channel: cosine batch failed ({}); falling back to no-cosine", exc)
 
         cw = self._temporal_event_cosine_weight
         tw = 1.0 - cw
@@ -1678,15 +1678,15 @@ class ChronicleEngine:
             if cosine is None and proximity is None:
                 # No usable signal on this event — skip entirely.
                 if getattr(ev, "embedding", None) is None and ref_date is None:
-                    logger.debug("temporal channel: event %s has neither embedding nor referenced_date", idx)
+                    logger.debug("temporal channel: event {} has neither embedding nor referenced_date", idx)
                 continue
 
             if cosine is None:
                 if getattr(ev, "embedding", None) is None:
-                    logger.debug("temporal channel: event %s missing embedding; using proximity only", idx)
+                    logger.debug("temporal channel: event {} missing embedding; using proximity only", idx)
                 combined = proximity if proximity is not None else 0.0
             elif proximity is None:
-                logger.debug("temporal channel: event %s missing referenced_date; using cosine only", idx)
+                logger.debug("temporal channel: event {} missing referenced_date; using cosine only", idx)
                 combined = cosine
             else:
                 combined = cosine * cw + proximity * tw
@@ -1713,7 +1713,7 @@ class ChronicleEngine:
         try:
             chunks_map = await storage.get_chunks_batch(top_chunk_ids)
         except Exception as exc:
-            logger.debug("temporal channel: get_chunks_batch failed (%s)", exc)
+            logger.debug("temporal channel: get_chunks_batch failed ({})", exc)
             return []
 
         scored: list[tuple[Chunk, float]] = [
@@ -1844,14 +1844,14 @@ class ChronicleEngine:
                 limit=10,
             )
         except Exception as e:
-            logger.warning("Entity channel: search_similar_entities failed: %s", e)
+            logger.warning("Entity channel: search_similar_entities failed: {}", e)
             return []
 
         if not entity_results:
             logger.debug("Entity channel: no similar entities found")
             return []
 
-        logger.debug("Entity channel: found %d similar entities", len(entity_results))
+        logger.debug("Entity channel: found {} similar entities", len(entity_results))
 
         # Step 2: Get the source chunk IDs from matching entities
         entity_ids = [eid for eid, _score in entity_results]
@@ -1860,10 +1860,10 @@ class ChronicleEngine:
         try:
             entities = await storage.get_entities_batch(entity_ids)
         except Exception as e:
-            logger.warning("Entity channel: get_entities_batch failed for %d IDs: %s", len(entity_ids), e)
+            logger.warning("Entity channel: get_entities_batch failed for {} IDs: {}", len(entity_ids), e)
             return []
 
-        logger.debug("Entity channel: resolved %d/%d entities", len(entities), len(entity_ids))
+        logger.debug("Entity channel: resolved {}/{} entities", len(entities), len(entity_ids))
 
         # Surface resolved entities for the recall fusion site so consumers
         # can see *which* entities the channel matched, not just the chunks
@@ -1891,7 +1891,7 @@ class ChronicleEngine:
         try:
             chunks_map = await storage.get_chunks_batch(chunk_ids)
         except Exception as e:
-            logger.warning("Entity channel: get_chunks_batch failed for %d IDs: %s", len(chunk_ids), e)
+            logger.warning("Entity channel: get_chunks_batch failed for {} IDs: {}", len(chunk_ids), e)
             return []
 
         # Apply temporal filter post-hydration. get_chunks_batch has no
@@ -1953,7 +1953,7 @@ class ChronicleEngine:
         else:
             results = [(chunk, chunk_scores[cid]) for chunk, cid in ordered_chunks]
 
-        logger.debug("Entity channel: returning %d chunks (after relevance gate)", len(results))
+        logger.debug("Entity channel: returning {} chunks (after relevance gate)", len(results))
         return results
 
     async def _collect_entities(
@@ -1994,7 +1994,7 @@ class ChronicleEngine:
             try:
                 resolved = await self._get_storage().get_entities_by_names_batch(namespace_id, unresolved_subjects)
             except Exception as exc:
-                logger.debug("collect_entities: get_entities_by_names_batch failed (%s)", exc)
+                logger.debug("collect_entities: get_entities_by_names_batch failed ({})", exc)
                 resolved = {}
             for name, entity in resolved.items():
                 event_score = temporal_event_subjects.get(name, 0.0)
@@ -2113,7 +2113,7 @@ class ChronicleEngine:
                 added += 1
 
         if added > 0:
-            logger.debug("Cross-session expansion: added %d chunks from other sessions", added)
+            logger.debug("Cross-session expansion: added {} chunks from other sessions", added)
 
         return expanded
 

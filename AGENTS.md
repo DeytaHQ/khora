@@ -58,95 +58,41 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 - `exceptions.py` — `KhoraError` hierarchy with domain-specific exceptions
 - `telemetry/` — Optional PostgreSQL-backed telemetry collector + `@trace` decorator
 
-## Doc Conventions (overrides workflow.md)
+## Issue tracking & workflow
 
-**Do not maintain `docs/AI_CHANGELOG.md` in this repo.** The shared workflow doc references it, but khora deliberately opts out: do not create the file, do not append entries, do not include it in PRs. Commit messages and merged-PR titles are the changelog of record.
+khora is open source. **All khora work is tracked in GitHub Issues** at https://github.com/DeytaHQ/khora/issues. Use `gh issue` from the CLI or the GitHub web UI.
 
-## Workflow Reference
+Workflow for any change:
 
-<!-- Shared workflow doc installed by TTOJ at .claude/docs/workflow.md.      -->
-<!-- This file is auto-deployed; edits will be overwritten on ttoj update.   -->
-<!-- Project-specific overrides belong in CLAUDE.md.                         -->
+1. Create or pick a GitHub issue describing the work.
+2. Create a feature branch off `main` (`<initials>/<short-desc>`).
+3. Open a PR against `main`. Include `Fixes #<n>` in the body to auto-close the issue on merge.
+4. Run `make format && make test` locally; CI must be green before merge.
+5. Squash-merge by default. The `release.yml` workflow publishes to PyPI on `v*` tag push (see `docs/RELEASE.md`).
 
-## Default Branch Detection
-
-Different repos use different default branches (`main`, `staging`, etc.). **Always detect the repo's default branch dynamically** rather than assuming a specific branch name:
-
-```bash
-DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
-```
-
-Use `$DEFAULT_BRANCH` wherever this document refers to "the default branch." This ensures the workflow works regardless of whether the repo targets `main`, `staging`, or any other branch.
-
-## Workflow Lifecycle
-
-Every feature, bugfix, or task follows: **Linear ticket → branch → implement → PR → done**.
-
-If your project uses Linear (has `project.linear_team` in `.ttoj.toml`):
-
-### Starting work
-1. Search Linear for an existing ticket matching the task. If none exists, create one.
-2. Assign yourself (or the requesting user) to the ticket.
-3. Move the ticket to **In Progress**.
-4. Create a branch from the repo's default branch following the branch naming convention below. For hotfixes, branch from `main`.
-5. Begin implementation.
-
-### During work
-- Commit early and often with descriptive messages.
-- Keep the Linear ticket updated if scope changes or blockers arise.
-- If you discover sub-tasks, create child issues in Linear.
-
-### Finishing work
-1. Run any project-defined lint/format/test commands.
-2. Commit all changes with a clear message.
-3. Push the branch and create a PR following PR standards below. PRs target the default branch; only hotfixes target `main`.
-4. Add the PR link as a comment on the Linear ticket.
-5. The ticket stays **In Progress** until the PR is merged, then move to **Done**.
+**Do not maintain `docs/AI_CHANGELOG.md` in this repo.** Commit messages and merged-PR titles are the changelog of record.
 
 ## Git Conventions
 
 ### Branch naming
-Format: `{initials}/{TICKET-ID}-{kebab-description}`
-Examples: `nn/DYT-42-add-auth`, `ms/DYT-108-fix-pagination`
-
-The `initials` and `TICKET-ID` are required. Every branch must trace back to a Linear ticket. TTOJ stores the engineer-specific branch prefix in `.ttoj.toml`.
+Format: `{initials}/{short-description}` (e.g. `ib/fix-fts5-escape`). If the work has a GitHub issue, reference it in the PR body (`Fixes #<n>`) rather than encoding it in the branch name.
 
 ### Commit messages
-- Use imperative mood: "Add feature", not "Added feature"
-- First line: concise summary under 72 characters
-- Format: `{TICKET-ID}: {description}` (e.g., `DYT-42: Add auth middleware`)
-- Body (optional): explain *why*, not *what*
-- Reference the Linear ticket ID when relevant
+- Use imperative mood: "Add feature", not "Added feature".
+- First line: concise summary under 72 characters.
+- Body (optional): explain *why*, not *what*. Reference the GitHub issue when relevant (`Fixes #<n>`).
 
 ### Branching strategy
-- `main` = production. The repo's default branch is the PR target (detect via `gh repo view`).
-- Feature branches are created from the default branch. For hotfixes, branch from `main`.
-- PRs **always** target the default branch, unless it's a hotfix.
-- Hotfixes: branch from `main`, PR targets `main` (production deploy).
-
-### Rules
-- Never force-push to `main`, the default branch, or shared branches.
-- Rebase feature branches on the PR target branch (the default branch, or `main` for hotfixes) before opening a PR when possible.
+- `main` is the default branch and the PR target.
+- Feature branches are created from `main`.
+- Never force-push to `main` or shared branches.
+- Rebase feature branches onto `main` before opening a PR when possible.
 - Delete branches after merge.
-
-## Linear Integration
-
-Use the Linear MCP tools (`list_issues`, `save_issue`, `save_comment`, etc.) for all ticket operations.
-
-### Status transitions
-- **Backlog** → **Todo** → **In Progress** → **Done**
-- Other states: **Canceled**, **Duplicate**
-- Move to In Progress when you start working.
-- Move to Done only after the PR is merged.
-
-### Linking
-- Always add the PR URL as a comment on the Linear ticket.
-- Include the ticket ID (e.g., `DYT-42`) in the PR title.
 
 ## PR Standards
 
 ### Title format
-`TICKET-ID: Short imperative description` (e.g., `DYT-42: Add JWT authentication`)
+`Short imperative description` (e.g., `Add JWT authentication`). Tag with `Fixes #<n>` in the body when closing an issue.
 
 ### Body structure
 ```
@@ -157,114 +103,24 @@ Use the Linear MCP tools (`list_issues`, `save_issue`, `save_comment`, etc.) for
 - How to verify the changes work
 ```
 
-- PRs target the repo's default branch; hotfix PRs target `main`.
-- Keep it concise. The code should speak for itself.
-
-## Multi-Agent Coordination
-
-When working as part of an agent team:
-
-- Claim tasks explicitly via TaskUpdate before starting work.
-- Never modify files owned by another agent without coordinating first.
-- Avoid editing the same file concurrently. If unavoidable, coordinate line ranges.
-- If two agents disagree on approach, escalate to the team lead.
-
-### Agent Identity
-
-All Claude Code agents share the same Linear account, so assignment alone cannot distinguish which agent is working on which issue. **Every agent session MUST generate a unique session ID at startup** and include it in all Linear comments.
-
-**At the start of every session**, generate a 6-character hex ID (e.g., the first 6 characters of a UUID). Use this ID consistently in every Linear comment you post.
-
-Format: `` `agent-<6-char-hex>` `` (e.g., `agent-a1b2c3`)
-
-### Claim Before Coding
-
-If your project uses Linear (has `project.linear_team` in `.ttoj.toml`), post a Linear comment with your session ID before writing any code:
-
-```
-🤖 Agent `<session-id>` starting work. Branch: `<branch-name>`
-```
-
-This is the only reliable way to signal ownership when all agents share the same Linear account. Moving the ticket to In Progress alone is not sufficient — another agent may do the same concurrently.
-
-### Worktree Usage
-
-**Never use `git checkout` to switch branches in the main repo.** Always create a worktree:
-
-```bash
-DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
-git worktree add .claude/worktrees/{TICKET-ID}-short-desc -b {initials}/{TICKET-ID}-short-desc "$DEFAULT_BRANCH"
-cd .claude/worktrees/{TICKET-ID}-short-desc
-# Run project-specific install (e.g., bun install, npm install)
-# Re-deploy TTOJ surface (.ttoj/ is not shared across worktrees):
-uv run ttoj install -p .
-```
-
-Rules:
-- Each agent gets its own worktree directory under `.claude/worktrees/`
-- Run dependency install and `ttoj install` in a new worktree before building or testing
-- Clean up worktrees after PRs are merged: `git worktree remove .claude/worktrees/{TICKET-ID}-short-desc`
+Keep it concise. The code should speak for itself.
 
 ## Pre-Submission Checklist
 
 Before creating a PR, verify:
 
-- [ ] Lint/format passes with zero errors
-- [ ] Tests pass (all relevant tests)
-- [ ] No `any` types in changed files (TypeScript projects)
+- [ ] `make format && make test` pass locally
 - [ ] No secrets, API keys, or credentials in code (use env vars)
-- [ ] No `console.log` left in production code (use structured logger)
-- [ ] New endpoints/pipelines have logging following patterns/logging.md
-- [ ] Logfire instrumentation added for new library clients (FastAPI, httpx, SQLAlchemy, etc.) (Python/Logfire projects)
-- [ ] `logger.add()` used for Logfire (never `logger.configure()`) (Python/Logfire projects)
-- [ ] PR created with description and Linear issue link
-- [ ] Linear issue updated (status, comment with PR link)
-
-Projects may define additional checklist items in their CLAUDE.md.
-
-## PRD & ADR
-
-Major features require a PRD in `docs/prds/`. Significant architectural decisions require an ADR in `docs/adrs/`. Use `/plan:create` and `/plan:adr` to scaffold these documents. See the TTOJ repo for templates.
-
-## Agent Teams
-
-Use `/team:feature`, `/team:bugfix`, or `/team:review` for purpose-built teams. Default to single-agent work unless the task clearly benefits from parallelism. Role definitions are in the TTOJ repo under `content/templates/team-profiles/` and are available via the `/team:*` commands.
-
-## Slack Integration
-
-Commands post to team-wide default channels (deployed via TTOJ):
-- `/done` → `#pull-requests` — PR opened notification with detailed context in thread.
-- `/automerge` → `#pull-requests` — merge success or CI failure.
-- `/plan:create` → `#engineering` — optionally shares a PRD summary with goals and requirements in thread.
-- `/slack-notify` — sends an ad-hoc message to any channel or user.
-
-Default channels are configured per-project via TTOJ. Commands never fail due to Slack errors.
-
-Codex uses the same `slack-notify.py` backend through its own installed skills (`slack-pr-notify`, `slack-merge-notify`, `slack-prd-notify`, `slack-notify`). The notification behavior is identical across both hosts.
-
-## Orchestrated Workflow
-
-The recommended command sequence for feature development:
-
-1. `/plan:create` — scaffold a PRD (optionally share on Slack)
-2. `/plan:adr` — document key decisions (if needed)
-3. `/plan:expand` — break PRD into Linear tickets
-4. `/workflow` — pick a ticket, create branch, start work
-5. Implement (solo or `/team:feature`)
-6. `/done` — commit, PR, update Linear, notify Slack
-7. `/audit` — review the PR
+- [ ] No `print()` or `console.log` left in production code (use the structured logger)
+- [ ] Logfire instrumentation added for new library clients where applicable (FastAPI, httpx, SQLAlchemy, etc.)
+- [ ] PR description references the GitHub issue (`Fixes #<n>`) when relevant
 
 ## Tool Preferences
 
 - **Documentation lookup**: Use Context7 MCP for up-to-date library docs.
-- **Linear operations**: Use Linear MCP tools (list_issues, save_issue, save_comment, etc.).
-- **GitHub operations**: Use `gh` CLI for PRs, issues, and repo operations.
-- **File operations**: Prefer dedicated Claude Code tools (Read, Write, Edit, Grep, Glob) over shell equivalents.
+- **GitHub operations**: Use `gh` CLI for issues, PRs, and repo operations.
+- **File operations**: Prefer dedicated tools (Read, Write, Edit, Grep, Glob) over shell equivalents.
 - **Web research**: Use WebSearch/WebFetch for current information beyond training data.
-
-## Team Configuration
-
-Default team profiles are deployed to `.ttoj/templates/team-profiles/` and referenced by the `/team:*` commands. To customize team composition for this project, edit the deployed profiles or create project-specific overrides in `.claude/commands/team/`.
 
 ## Conventions
 
@@ -390,7 +246,7 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 
 ### Telemetry
 - **Public contract lives at `docs/telemetry-contract.json`** (with sibling explainer `docs/telemetry-contract.md`). When you add a span (`trace_span`), pipeline stage (`pipeline_stage` / `record_pipeline_stage`), metric (`metric_counter` / `metric_histogram` / `metric_gauge_callback`), event-type field, or new public export to `khora.telemetry.__all__`, you MUST update the contract JSON in the same PR. CI fails otherwise via `tests/unit/telemetry/test_contract.py` (10-test drift gate that walks the codebase with ripgrep). See `docs/adrs/adr-026-telemetry-contract.md` for the design rationale.
-- **Public vs internal stability tags.** Items tagged `stability: public` in the contract are part of the OSS API surface — renaming or removing them requires a major version bump and prior coordination with downstream consumers (genesis, khora-benchmarks, khora-explorer, khora-cli). Items tagged `internal` may be renamed freely as long as the JSON is updated. Top-level engine entry points (`khora.recall`, `khora.remember`, `khora.vectorcypher.retrieve`) and operator-facing metrics (`khora.memory.recall.duration`, `khora.llm.tokens`, etc.) are public. Inner-loop spans (`khora.vectorcypher.coherence_boost`, `khora.vectorcypher.rrf_fusion`, etc.) are internal.
+- **Public vs internal stability tags.** Items tagged `stability: public` in the contract are part of the OSS API surface — renaming or removing them requires a major version bump and prior coordination with downstream consumers (khora-benchmarks, khora-explorer, khora-cli). Items tagged `internal` may be renamed freely as long as the JSON is updated. Top-level engine entry points (`khora.recall`, `khora.remember`, `khora.vectorcypher.retrieve`) and operator-facing metrics (`khora.memory.recall.duration`, `khora.llm.tokens`, etc.) are public. Inner-loop spans (`khora.vectorcypher.coherence_boost`, `khora.vectorcypher.rrf_fusion`, etc.) are internal.
 - **Cardinality rule — never put `namespace_id` on a metric.** It is a span attribute and a log field only. Phase-0 audit measured 438 distinct namespace IDs over the production retention window in one deployment; Logfire and Prometheus bill per series, so a `namespace_id` label produces an unbounded cost curve. The same rule applies to any other attribute with cardinality ~O(tenants).
 - **Free-text span attributes.** Use `khora.telemetry.bounded_text_hash` (added in #504) for any free-text value (raw user query, document content, chunk text) — it returns a SHA1[:8] hash. Never put raw text on a span attribute: it is both a privacy hazard and a cardinality bomb.
 - **OTel semconv adopted for new attributes.** `gen_ai.*` for LLM (model, prompt tokens, completion tokens), `db.*` for storage backends, `code.*` for stack info. Keeps khora vendor-neutral over the OTel exporter chain.
@@ -400,10 +256,10 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **Telemetry collector is opt-in.** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording; without it, `NoOpCollector` is used (zero cost). Logfire integration is gated by `_HAS_LOGFIRE` — `trace_span()` yields a no-op when the optional `logfire` extra is absent.
 
 ### Downstream
-- `genesis` and `khora-benchmarks` depend on khora. `lake.storage` is a stable public API
-- **LLMUsage contract:** `LLMUsage` fields are consumed by Poros/Peras for cost tracking (DYT-645) — changes require coordination
-- **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination (consumed by khora-explorer, genesis, khora-benchmarks). See `docs/adrs/adr-022-extraction-skills-public-api.md`. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract
-- Stable public API is codified in ADR-024 (memory-lake surface) and ADR-022 (extraction skills). Any breaking change to symbols listed there requires coordinated release with genesis, khora-benchmarks, khora-explorer, khora-cli. See `docs/adrs/adr-024-memory-lake-public-api.md`; `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface
+- The sibling packages `khora-cli`, `khora-explorer`, and `khora-benchmarks` consume khora's public API. `lake.storage` is a stable public API.
+- **LLMUsage contract:** `LLMUsage` fields are part of the stable public API and are consumed by external cost-tracking integrations — changes require coordination.
+- **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination (consumed by khora-explorer, khora-benchmarks). See `docs/adrs/adr-022-extraction-skills-public-api.md`. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract.
+- Stable public API is codified in ADR-024 (memory-lake surface) and ADR-022 (extraction skills). Any breaking change to symbols listed there requires coordinated release with khora-cli, khora-explorer, khora-benchmarks. See `docs/adrs/adr-024-memory-lake-public-api.md`; `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface.
 - `scripts/` vendored from TTOJ — skip in audits
 
 
