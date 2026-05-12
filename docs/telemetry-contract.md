@@ -10,7 +10,7 @@ telemetry public surface. It is enforced by
   removals, or signature changes require a major version bump.
 - **`event_types`** — Pydantic models (`LLMEvent`, `StorageEvent`,
   `PipelineEvent`) with their full field set. These rows ship to Postgres and
-  are read by downstream tooling (Poros / Peras cost tracking, dashboards).
+  are read by downstream tooling (cost tracking, dashboards).
   Adding a field with a default is non-breaking; removing or renaming a
   field is breaking.
 - **`collector_methods`** — the recording surface
