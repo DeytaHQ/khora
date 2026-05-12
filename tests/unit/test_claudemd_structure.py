@@ -127,9 +127,16 @@ class TestContentPreservation:
     def test_make_commands_present(self, claude_md_content: str, command: str) -> None:
         assert command in claude_md_content, f"Missing make command: {command}"
 
-    def test_workflow_import(self, claude_md_content: str) -> None:
-        """The @import for workflow.md must be present."""
-        assert "@.claude/docs/workflow.md" in claude_md_content
+    def test_workflow_section(self, claude_md_content: str) -> None:
+        """CLAUDE.md must describe the issue-tracking + PR workflow inline.
+
+        The repo used to inline a shared workflow doc via
+        ``@.claude/docs/workflow.md``; that mechanism was retired when khora
+        moved its issue tracking to GitHub Issues for the OSS release. The
+        equivalent guidance now lives directly in CLAUDE.md.
+        """
+        assert "GitHub Issues" in claude_md_content
+        assert "github.com/DeytaHQ/khora/issues" in claude_md_content
 
 
 # ---------------------------------------------------------------------------

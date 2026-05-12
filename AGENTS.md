@@ -256,7 +256,8 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **Telemetry collector is opt-in.** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording; without it, `NoOpCollector` is used (zero cost). Logfire integration is gated by `_HAS_LOGFIRE` — `trace_span()` yields a no-op when the optional `logfire` extra is absent.
 
 ### Downstream
-- The sibling packages `khora-cli`, `khora-explorer`, and `khora-benchmarks` consume khora's public API. `LLMUsage` is also consumed by external cost-tracking integrations — changes require coordination.
+- The sibling packages `khora-cli`, `khora-explorer`, and `khora-benchmarks` consume khora's public API. `lake.storage` is a stable public API.
+- **LLMUsage contract:** `LLMUsage` fields are part of the stable public API and are consumed by external cost-tracking integrations — changes require coordination.
 - **ExpertiseConfig contract:** ADR-022 stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination (consumed by khora-explorer, khora-benchmarks). See `docs/adrs/adr-022-extraction-skills-public-api.md`. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract.
 - Stable public API is codified in ADR-024 (memory-lake surface) and ADR-022 (extraction skills). Any breaking change to symbols listed there requires coordinated release with khora-cli, khora-explorer, khora-benchmarks. See `docs/adrs/adr-024-memory-lake-public-api.md`; `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface.
 - `scripts/` vendored from TTOJ — skip in audits
