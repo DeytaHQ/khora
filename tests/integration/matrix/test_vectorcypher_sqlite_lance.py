@@ -79,6 +79,7 @@ from khora.khora import Khora
 EMBED_DIM = 32  # matches the sqlite_lance default and the existing fixture helper
 
 pytestmark = [
+    pytest.mark.embedded,
     pytest.mark.integration,
     pytest.mark.skipif(not _HAS_EMBEDDED, reason="aiosqlite/lancedb not installed"),
 ]

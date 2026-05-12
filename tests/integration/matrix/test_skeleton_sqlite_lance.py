@@ -52,6 +52,7 @@ EMBED_DIM = 32  # small dim keeps LanceDB index build cheap in tmp_path
 
 
 pytestmark = [
+    pytest.mark.embedded,
     pytest.mark.integration,
     pytest.mark.skipif(
         not _HAS_EMBEDDED,

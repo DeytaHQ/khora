@@ -27,6 +27,7 @@ from tests.integration._sqlite_lance_fixtures import (
 )
 
 pytestmark = [
+    pytest.mark.embedded,
     pytest.mark.integration,
     pytest.mark.skipif(not _HAS_EMBEDDED, reason="aiosqlite/lancedb not installed"),
 ]

@@ -157,6 +157,7 @@ markers = [
     "e2e: End-to-end tests",
     "slow: Slow tests (skipped by default; run with -m slow)",
     "soak: Long-running soak/burn-in tests (skipped by default; run with -m soak --no-cov)",
+    "embedded: Tests that exercise the SQLite+LanceDB embedded stack (no Docker required)",
 ]
 asyncio_mode = "auto"
 
