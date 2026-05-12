@@ -1,0 +1,57 @@
+# Codecov configuration for khora.
+#
+# Two upload flows in ci.yml — `unit` (fast, runs on every PR) and
+# `integration` (Postgres/Neo4j, also every PR). Combined coverage is the
+# meaningful number; each flag is reported separately so a regression on
+# either side surfaces directly in the PR comment.
+
+codecov:
+  require_ci_to_pass: true
+
+coverage:
+  precision: 1
+  round: down
+  range: "30...85"
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: false
+      unit:
+        flags: [unit]
+        target: auto
+        threshold: 1%
+      integration:
+        flags: [integration]
+        target: auto
+        threshold: 2%
+    patch:
+      default:
+        target: 60%
+        threshold: 10%
+        informational: true
+
+flags:
+  unit:
+    paths:
+      - src/khora/
+    carryforward: true
+  integration:
+    paths:
+      - src/khora/
+    carryforward: true
+
+comment:
+  layout: "header, diff, flags, components, footer"
+  behavior: default
+  require_changes: false
+  require_base: false
+  require_head: true
+
+# Don't post on bot PRs (renovate/dependabot) — they only bump deps.
+ignore:
+  - "tests/**"
+  - "scripts/**"
+  - "docs/**"
+  - "src/khora/db/migrations/versions/*.py"
