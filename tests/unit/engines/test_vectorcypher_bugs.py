@@ -439,3 +439,72 @@ class TestCrossWindowEntityCountInflation:
         assert total_entity_count == 3, (
             f"Expected 3 unique entities, got {total_entity_count}. Counting is wrong even when entities are distinct."
         )
+
+
+# ---------------------------------------------------------------------------
+# Bug #5: find_related_entities fallback called a non-existent method
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestFindRelatedEntitiesGraphOnlyBackend:
+    """Regression for https://github.com/DeytaHQ/khora/issues/533.
+
+    When VectorCypher runs on a graph-only backend (sqlite_lance, surrealdb)
+    `_get_dual_nodes()` returns None and the engine falls back to calling
+    a method on the storage graph adapter. Previously the fallback called
+    ``storage.graph.get_related_entities(...)`` — a method that exists on
+    **no** backend. Result: ``AttributeError: 'SQLiteLanceGraphAdapter'
+    object has no attribute 'get_related_entities'``.
+
+    The fix uses ``get_neighborhood(...)`` which IS implemented across all
+    three graph backends (sqlite_lance, surrealdb, neo4j).
+    """
+
+    async def test_fallback_uses_get_neighborhood_not_get_related_entities(self) -> None:
+        from khora.core.models import Entity
+        from khora.engines.vectorcypher.engine import VectorCypherEngine
+
+        seed_id = uuid4()
+        ns_id = uuid4()
+        neighbor_a = Entity(id=uuid4(), namespace_id=ns_id, name="A", entity_type="MODULE")
+        neighbor_b = Entity(id=uuid4(), namespace_id=ns_id, name="B", entity_type="MODULE")
+        seed = Entity(id=seed_id, namespace_id=ns_id, name="seed", entity_type="MODULE")
+
+        # Mock the graph backend. It must NOT expose `get_related_entities`;
+        # only `get_neighborhood`. spec= enforces this — accessing the dead
+        # method would raise AttributeError on the mock too.
+        graph = MagicMock()
+        graph.get_neighborhood = AsyncMock(
+            return_value={"entities": [seed, neighbor_a, neighbor_b], "relationships": []},
+        )
+        # Refuse the dead method explicitly so we'd catch any regression that
+        # re-introduces the old call.
+        del graph.get_related_entities
+
+        storage = MagicMock()
+        storage.graph = graph
+
+        engine = object.__new__(VectorCypherEngine)  # bypass __init__
+        engine._get_dual_nodes = lambda: None  # type: ignore[method-assign]
+        engine._get_storage = lambda: storage  # type: ignore[method-assign]
+
+        result = await engine.find_related_entities(seed_id, ns_id, max_depth=2, limit=10)
+
+        # Seed must be stripped; both neighbors returned with flat score.
+        assert {e.id for e, _ in result} == {neighbor_a.id, neighbor_b.id}
+        assert all(score == 1.0 for _, score in result)
+        graph.get_neighborhood.assert_awaited_once_with(seed_id, depth=2, limit=10)
+
+    async def test_fallback_returns_empty_when_graph_backend_missing(self) -> None:
+        from khora.engines.vectorcypher.engine import VectorCypherEngine
+
+        storage = MagicMock()
+        storage.graph = None  # no graph backend configured
+
+        engine = object.__new__(VectorCypherEngine)
+        engine._get_dual_nodes = lambda: None  # type: ignore[method-assign]
+        engine._get_storage = lambda: storage  # type: ignore[method-assign]
+
+        result = await engine.find_related_entities(uuid4(), uuid4())
+        assert result == []
