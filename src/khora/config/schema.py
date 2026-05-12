@@ -600,10 +600,17 @@ class QuerySettings(BaseSettings):
     graph_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Weight for graph search in fusion")
     keyword_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight for keyword search in fusion")
 
-    # Temporal settings
+    # Temporal settings.
+    # `recency_weight` and `recency_decay_days` were tightened in DYT-3780
+    # from (0.2, 30) to (0.35, 7) after BEAM 100K showed the four weakest
+    # categories (event_ordering, contradiction_resolution, temporal_reasoning,
+    # knowledge_update) all share a weak-recency / supersession root cause —
+    # 30-day half-life is wider than most session lifetimes, and 0.2 is too
+    # gentle to break ties between an old fact and its in-session update.
+    # `apply_recency_bias` still defaults False: callers must opt in.
     apply_recency_bias: bool = Field(default=False, description="Apply recency bias to results")
-    recency_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight of recency in scoring")
-    recency_decay_days: float = Field(default=30.0, ge=1.0, description="Days for recency score to decay by half")
+    recency_weight: float = Field(default=0.35, ge=0.0, le=1.0, description="Weight of recency in scoring")
+    recency_decay_days: float = Field(default=7.0, ge=1.0, description="Days for recency score to decay by half")
 
     # Query understanding
     enable_understanding: bool = Field(default=True, description="Enable LLM-based query understanding")
