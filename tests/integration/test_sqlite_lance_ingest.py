@@ -1,4 +1,4 @@
-"""End-to-end ingest + search integration tests for sqlite_lance (DYT-2734).
+"""End-to-end ingest + search integration tests for sqlite_lance.
 
 Exercises the full ``StorageCoordinator`` stack against a live SQLite +
 LanceDB pair in ``tmp_path``.  No mocks at the storage layer; LLM +
@@ -370,7 +370,7 @@ class TestSQLiteLanceIngest:
 
     async def test_chunk_insert_with_unknown_document_id_fails(self, tmp_path: Path) -> None:
         """FKs must be enforced: a chunk pointing at a non-existent document
-        cannot be inserted.  After the DYT-2749 drift fix, UUIDs on both
+        cannot be inserted.  After the drift fix, UUIDs on both
         sides (``chunks.document_id`` and ``documents.id``) share the same
         format (32-char hex) and SQLite's FK checker can compare them.
         """

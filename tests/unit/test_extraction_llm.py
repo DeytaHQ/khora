@@ -155,7 +155,7 @@ class TestExtractJsonFromText:
     def test_no_mutual_recursion_with_parse_response(self) -> None:
         """_extract_json_from_text must not recurse via _parse_response.
 
-        Regression test for DYT-3395: when _extract_json_from_text called
+        Regression test for: when _extract_json_from_text called
         _parse_response(json.dumps(data)), re-serialization could produce
         a string that _strip_json_fences/_repair_json mangled back into
         invalid JSON, causing _parse_response → _extract_json_from_text →
@@ -632,7 +632,7 @@ class TestSharedExtractor:
 
 
 # ---------------------------------------------------------------------------
-# Recursive bisection on output truncation (DYT-3079)
+# Recursive bisection on output truncation
 # ---------------------------------------------------------------------------
 
 

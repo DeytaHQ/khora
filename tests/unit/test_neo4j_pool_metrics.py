@@ -166,7 +166,7 @@ class TestSessionContextManager:
     async def test_records_acquisition_time(self) -> None:
         """_session records the legacy construction-time histogram.
 
-        NOTE: as of DYT-2624 the session is wrapped in ``_InstrumentedSession``;
+        NOTE: as of the session is wrapped in ``_InstrumentedSession``;
         the inner session is exposed via ``_inner`` for tests that need to
         assert identity.
         """
@@ -286,7 +286,7 @@ class TestSessionContextManager:
     async def test_slow_acquisition_logs_warning(self) -> None:
         """_session logs a warning when a real pool acquire takes > 5s.
 
-        As of DYT-2624 the slow-acquire threshold is evaluated inside the
+        As of the slow-acquire threshold is evaluated inside the
         ``session._connect`` wrap (one observation per real pool bind), not
         from session construction.
         """

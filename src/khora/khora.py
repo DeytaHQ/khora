@@ -400,7 +400,7 @@ class Khora:
         # Global chunk semaphore shared across all concurrent submit_batch calls.
         # Initialized on first submit_batch call that sets max_chunks_in_flight.
         self._chunk_semaphore: _GlobalChunkSemaphore | None = None
-        # Unified pending processor (DYT-3305): replaces both _submit_batch_worker
+        # Unified pending processor: replaces both _submit_batch_worker
         # and _recover_pending_documents with a single mechanism.
         self._processor_queue: asyncio.Queue[_ProcessorItem] = asyncio.Queue()
         self._processor_task: asyncio.Task | None = None
@@ -489,7 +489,7 @@ class Khora:
             self._processor_task = None
 
     async def _run_pending_processor(self) -> None:
-        """Unified pending processor (DYT-3305).
+        """Unified pending processor.
 
         Replaces both ``_submit_batch_worker`` (inline processing) and
         ``_recover_pending_documents`` (startup recovery) with a single
@@ -1120,7 +1120,7 @@ class Khora:
         #   COMPLETED  → skip entirely, report success (already done)
         #   FAILED     → reset to PENDING + update content, re-queue for processing
         #   ARCHIVED   → skip by default (preserves intentional archival); set
-        #                reprocess_archived=True to re-activate explicitly (DYT-3077)
+        #                reprocess_archived=True to re-activate explicitly
         #   PROCESSING → skip to avoid race with active worker (M1)
         pending_docs: list[Document] = []
         pending_doc_data: list[dict[str, Any]] = []
@@ -1209,7 +1209,7 @@ class Khora:
 
                 # PENDING, FAILED, or ARCHIVED (reprocess_archived=True): reset to PENDING and re-process.
                 # Update content + metadata so the re-run uses the latest submitted values
-                # (fixes empty-source issue observed in soak test — DYT-3075).
+                # (fixes empty-source issue observed in soak test).
                 prior_status = existing.status
                 # H1: Track FAILED and ARCHIVED docs — they may have prior extraction
                 # state (chunks, graph entities) that must be cleared before re-processing

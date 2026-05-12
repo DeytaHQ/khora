@@ -1,8 +1,8 @@
-"""Tests for IVF-PQ index retraining on corpus growth (DYT-3580).
+"""Tests for IVF-PQ index retraining on corpus growth.
 
 The vector adapter trains the LanceDB ANN index lazily on first search
 once the table has at least ``_ANN_INDEX_THRESHOLD`` (5000) rows. Before
-DYT-3580 the ``_chunks_indexed`` flag became sticky and the index was
+The ``_chunks_indexed`` flag became sticky and the index was
 never rebuilt, so a long-running embedded process that ingested 50k
 chunks queried against an index trained on the first 5k.
 

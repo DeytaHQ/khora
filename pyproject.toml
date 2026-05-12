@@ -147,7 +147,7 @@ addopts = [
     "--cov=khora",
     "--cov-branch",
     "--cov-report=term-missing",
-    # DYT-3545: 82% target on changed surface; aggregate gate set to honest current floor
+    # 82% target on changed surface; aggregate gate set to honest current floor
     "--cov-fail-under=53",
     "-m",
     "not slow",
@@ -266,6 +266,6 @@ dev = [
     "rapidfuzz>=3.14.3",  # For ty type checking of optional accel module
     "spacy>=3.8.11",
     "aiosqlite>=0.20.0",  # For SQLite backend tests
-    "psutil>=5.9.0",  # DYT-3545: RSS sampling for soak harness
-    "hypothesis>=6.140.0",  # PR-C: property-based tests for retrieval invariants
+    "psutil>=5.9.0",  # RSS sampling for soak harness
+    "hypothesis>=6.140.0",  # property-based tests for retrieval invariants
 ]

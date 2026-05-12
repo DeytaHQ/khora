@@ -108,7 +108,7 @@ class SQLiteLanceVectorAdapter:
         # next opportunity will train if the corpus is large enough. We
         # retrain once the row count grows by ``retrain_factor`` so a
         # long-running process doesn't keep querying a stale index after
-        # the corpus has 10x'd (DYT-3580).
+        # the corpus has 10x'd.
         self._chunks_at_last_index: int | None = None
         self._entities_at_last_index: int | None = None
         # In-flight retrain tasks — kept so we don't schedule a second
@@ -383,7 +383,7 @@ class SQLiteLanceVectorAdapter:
         # truth for chunk metadata and tracks ``source_timestamp`` (LanceDB
         # only stores ``created_at``), so we re-apply the bounds here using
         # ``COALESCE(source_timestamp, created_at)`` — matches the pgvector
-        # backend's column-precedence rule (DYT-3547 / PR #470). Half-open
+        # backend's column-precedence rule (PR #470). Half-open
         # interval ``>= start AND < end`` to match the Chronicle pushdown
         # contract.
         sql_parts = [f"SELECT * FROM chunks WHERE id IN ({','.join('?' for _ in id_order)})"]  # noqa: S608

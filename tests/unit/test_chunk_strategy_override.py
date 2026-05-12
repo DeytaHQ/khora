@@ -1,4 +1,4 @@
-"""Unit tests for per-call chunk_strategy override (DYT-1124).
+"""Unit tests for per-call chunk_strategy override.
 
 Tests verify:
 - Khora facade threads chunk_strategy to engine (remember + remember_batch)

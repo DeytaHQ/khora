@@ -76,7 +76,7 @@ def _record_storage_op(operation: str, backend: str = "postgresql"):
     Measures wall-clock time and records success/error via the global
     telemetry collector.  Best-effort extracts ``namespace_id`` from the
     decorated method's arguments via :func:`_extract_namespace_id` so
-    ``storage_events.namespace_id`` is populated downstream (DYT-3398).
+    ``storage_events.namespace_id`` is populated downstream.
     """
 
     span_name = f"khora.storage.{operation}"

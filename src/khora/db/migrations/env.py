@@ -36,7 +36,7 @@ VERSION_TABLE = "khora_alembic_version"
 
 # version_num column width. Alembic's default is 32, but Khora revision IDs
 # (e.g. "022_promote_external_id_index_unique") exceed that. Widened to 64.
-# (DYT-3546)
+#
 VERSION_NUM_LENGTH = 64
 
 # Advisory lock ID — deterministic int64 from hashlib, unique to khora migrations
@@ -46,7 +46,7 @@ LOCK_ID = int.from_bytes(hashlib.md5(b"khora_migrations", usedforsecurity=False)
 # Override Alembic's hardcoded String(32) for the version table. This ensures
 # fresh databases get a wider column on initial CREATE — without this, the
 # first revision longer than 32 chars would fail on INSERT. Existing databases
-# are widened by migration 026_widen_alembic_version_column. (DYT-3546)
+# are widened by migration 026_widen_alembic_version_column.
 def _version_table_impl(
     self: DefaultImpl,
     *,
@@ -165,7 +165,7 @@ def do_run_migrations(connection: Connection) -> None:
         # Use information_schema.tables (SQL-standard, respects search_path) to check
         # existence before querying the version table. Querying a missing table inside
         # an explicit transaction puts PostgreSQL into ABORTED state, preventing
-        # context.run_migrations() from running (InFailedSQLTransactionError). (DYT-1447)
+        # context.run_migrations() from running (InFailedSQLTransactionError).
         if is_sqlite:
             table_exists = connection.execute(
                 text("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=:table)"),
@@ -182,7 +182,7 @@ def do_run_migrations(connection: Connection) -> None:
         # "022_promote_external_id_index_unique") exceed 32 chars, so the next
         # migration step would fail when Alembic writes the new revision. Widen
         # in-place before running migrations. Idempotent: skipped if already wide.
-        # (DYT-3546)
+        #
         if is_postgres and table_exists:
             current_width = connection.execute(
                 text(
@@ -208,7 +208,7 @@ def do_run_migrations(connection: Connection) -> None:
             except Exception:
                 # Version SELECT failed after table was confirmed present (e.g. permission
                 # denied, transient error). Treat as no current revision so migrations
-                # can still proceed. (DYT-1447)
+                # can still proceed.
                 logger.warning(
                     "Could not read current revision from %s — proceeding without ahead-detection.",
                     VERSION_TABLE,

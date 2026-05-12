@@ -1,4 +1,4 @@
-"""Real-Neo4j integration test for ``Neo4jBackend.retire_orphaned_relationships_batch`` (DYT-2669).
+"""Real-Neo4j integration test for ``Neo4jBackend.retire_orphaned_relationships_batch``.
 
 This test exercises the full Cypher retire path against a running Neo4j
 instance, verifying that sole-sourced relationships are soft-retired

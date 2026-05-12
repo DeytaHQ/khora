@@ -1,4 +1,4 @@
-"""SQLite event store adapter — DYT-2731.
+"""SQLite event store adapter.
 
 Append-only event log backed by the ``memory_events`` SQLite table
 (created by Alembic migration ``000_initial_schema`` under the

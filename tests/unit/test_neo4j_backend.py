@@ -60,7 +60,7 @@ class TestNeo4jBackendInit:
 
 @pytest.mark.unit
 class TestNeo4jBackendLogLevelFromEnv:
-    """DYT-2625: Neo4jBackend.__init__ applies KHORA_NEO4J_LOG_LEVEL from env."""
+    """Neo4jBackend.__init__ applies KHORA_NEO4J_LOG_LEVEL from env."""
 
     @pytest.fixture
     def _reset_neo4j_logger_level(self):
@@ -111,7 +111,7 @@ class TestNeo4jBackendFromConfig:
         config.query_timeout = 3.5
         config.entity_write_concurrency = 16
         config.relationship_write_concurrency = 8
-        # DYT-2624 additions: prevent MagicMock auto-attrs from leaking into
+        # Additions: prevent MagicMock auto-attrs from leaking into
         # the ``max(50, min(60_000, ...))`` clamp on pool_sampler_interval_ms.
         config.pool_sampler_enabled = False
         config.pool_sampler_interval_ms = 500
@@ -222,7 +222,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchTimeout:
 
 @pytest.mark.unit
 class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
-    """Tests for get_neighborhoods_batch relationship data handling (DYT-2629)."""
+    """Tests for get_neighborhoods_batch relationship data handling."""
 
     @pytest.mark.asyncio
     async def test_returns_empty_dict_for_empty_entity_ids(self) -> None:
@@ -634,7 +634,7 @@ def _make_rel_props(**overrides: Any) -> dict[str, Any]:
 
 @pytest.mark.unit
 class TestNeo4jBackendGetEntityRelationships:
-    """Tests for get_entity_relationships (DYT-2626)."""
+    """Tests for get_entity_relationships."""
 
     @pytest.mark.asyncio
     async def test_returns_relationships_from_properties_dict(self) -> None:
@@ -694,7 +694,7 @@ class TestNeo4jBackendGetEntityRelationships:
         to ``RETURN r``, ``result.data()`` serializes the Relationship value as a
         3-tuple (start_dict, rel_type, end_dict) and ``_record_to_relationship``
         indexes it with string keys — raising TypeError. Pinning this prevents
-        the DYT-2626 regression from silently returning.
+        the regression from silently returning.
         """
         driver, session = _make_neo4j_driver()
 

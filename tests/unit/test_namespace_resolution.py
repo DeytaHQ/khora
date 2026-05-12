@@ -1,6 +1,6 @@
 """Unit tests for stable namespace ID resolution and version creation.
 
-Tests DYT-396 (schema/model changes) and DYT-397 (resolution logic).
+Tests (schema/model changes) and (resolution logic).
 """
 
 from __future__ import annotations
@@ -288,7 +288,7 @@ class TestNamespaceVersionLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# PostgreSQLBackend.resolve_namespace — DYT-487
+# PostgreSQLBackend.resolve_namespace —
 # ---------------------------------------------------------------------------
 
 
@@ -357,12 +357,12 @@ class TestPostgresResolveNamespace:
 
 
 # ---------------------------------------------------------------------------
-# Idempotent resolve_namespace (coordinator level) — DYT-487
+# Idempotent resolve_namespace (coordinator level) —
 # ---------------------------------------------------------------------------
 
 
 class TestIdempotentResolveNamespace:
-    """Tests for idempotent resolve_namespace (DYT-487).
+    """Tests for idempotent resolve_namespace.
 
     resolve_namespace should accept EITHER a stable namespace_id OR an
     internal row-level id and always return the internal id.
@@ -442,7 +442,7 @@ class TestIdempotentResolveNamespace:
 
 
 # ---------------------------------------------------------------------------
-# Public API entry points resolve namespace — DYT-487
+# Public API entry points resolve namespace —
 # ---------------------------------------------------------------------------
 
 

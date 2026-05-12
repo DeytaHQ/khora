@@ -1,4 +1,4 @@
-"""Real-Neo4j integration test for relationship valid_until filtering in get_entity_neighborhoods (DYT-2671).
+"""Real-Neo4j integration test for relationship valid_until filtering in get_entity_neighborhoods.
 
 This test exercises the valid_until filtering in DualNodeManager.get_entity_neighborhoods()
 to verify that:

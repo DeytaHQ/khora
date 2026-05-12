@@ -1,6 +1,6 @@
 """Tests that Alembic migrations run cleanly against a fresh SQLite database.
 
-DYT-2727: Verify the dialect gate keeps Postgres-only DDL from breaking
+Verify the dialect gate keeps Postgres-only DDL from breaking
 SQLite (sqlite_lance backend) while leaving Postgres behaviour intact.
 """
 

@@ -4,7 +4,7 @@ Revision ID: 025_add_document_extraction_params
 Revises: 024_chronicle_events_and_facts
 Create Date: 2026-04-28
 
-DYT-3305: Store extraction parameters (skill_name, entity_types,
+Store extraction parameters (skill_name, entity_types,
 relationship_types, expertise, chunk_strategy) on each PENDING document
 so the unified pending processor can reconstruct the original extraction
 intent without hardcoding defaults.

@@ -4,7 +4,7 @@ Revision ID: 017_temporal_coalesce_index
 Revises: 016_widen_extraction_config_hash
 Create Date: 2026-03-23
 
-DYT-830: Temporal queries ("what happened in last 7 days?") take 40+ seconds
+Temporal queries ("what happened in last 7 days?") take 40+ seconds
 because search_similar and search_fulltext filter on
 COALESCE(source_timestamp, created_at) but no index covers that expression.
 PostgreSQL cannot use the existing (namespace_id, created_at) or

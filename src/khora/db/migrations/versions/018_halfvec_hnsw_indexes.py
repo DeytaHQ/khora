@@ -4,7 +4,7 @@ Revision ID: 018_halfvec_hnsw_indexes
 Revises: 017_temporal_coalesce_index
 Create Date: 2026-03-28
 
-DYT-1346: Create halfvec HNSW expression indexes that cast embedding columns
+Create halfvec HNSW expression indexes that cast embedding columns
 to halfvec(1536), using halfvec_cosine_ops.  Float16 precision yields ~50%
 smaller index size with minimal recall loss.  Requires pgvector >= 0.7.0.
 

@@ -1,4 +1,4 @@
-"""Unit tests for DYT-2428: external_id pass-through.
+"""Unit tests for: external_id pass-through.
 
 Tests the full chain from Khora → Engine for the external_id parameter.
 """
@@ -22,7 +22,7 @@ from .helpers import RESOLVE_ROW_ID, make_kb
 
 @pytest.mark.unit
 class TestRememberWithExternalId:
-    """DYT-2428: remember() accepts and forwards external_id."""
+    """remember() accepts and forwards external_id."""
 
     @pytest.mark.asyncio
     async def test_remember_passes_external_id_to_engine(self) -> None:
@@ -85,7 +85,7 @@ class TestRememberWithExternalId:
 
 @pytest.mark.unit
 class TestRememberBatchWithExternalId:
-    """DYT-2428: remember_batch() passes doc dicts through (including external_id)."""
+    """remember_batch() passes doc dicts through (including external_id)."""
 
     @pytest.mark.asyncio
     async def test_remember_batch_passes_docs_with_external_id(self) -> None:
@@ -202,7 +202,7 @@ class TestExternalIdSignatures:
 
 @pytest.mark.unit
 class TestDocumentModelExternalId:
-    """DYT-2428: Document domain model supports external_id."""
+    """Document domain model supports external_id."""
 
     def test_document_accepts_external_id(self) -> None:
         """Document can be constructed with external_id."""

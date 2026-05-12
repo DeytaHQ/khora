@@ -1,4 +1,4 @@
-"""Factory wiring test for the sqlite_lance backend (DYT-2732).
+"""Factory wiring test for the sqlite_lance backend.
 
 Exercises the full ``StorageFactory`` -> ``StorageCoordinator`` path
 with ``backend='sqlite_lance'``: one ``EmbeddedStorageHandle`` shared

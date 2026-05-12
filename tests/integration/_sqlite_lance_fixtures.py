@@ -1,4 +1,4 @@
-"""Shared fixture helpers for sqlite_lance integration tests (DYT-2734).
+"""Shared fixture helpers for sqlite_lance integration tests.
 
 These are plain helpers — NOT pytest fixtures — used by the sqlite_lance
 integration modules to spin up a fully-migrated embedded coordinator

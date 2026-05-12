@@ -10,9 +10,9 @@ Production-readiness is **per (engine × stack)**, not per engine. The same engi
 
 | Engine        | PostgreSQL + pgvector + Neo4j  | PostgreSQL + pgvector (no graph) | SQLite + LanceDB (embedded) | SurrealDB (unified)        |
 |---------------|--------------------------------|----------------------------------|-----------------------------|----------------------------|
-| VectorCypher  | **Production-ready**           | n/a (graph required)             | Experimental (DYT-3560)     | Experimental               |
+| VectorCypher  | **Production-ready**           | n/a (graph required)             | Experimental     | Experimental               |
 | Chronicle     | n/a (graph not required)       | **Production-ready**             | Experimental                | Experimental               |
-| Skeleton      | n/a (graph not required)       | Available                        | Experimental (DYT-3561)     | Experimental               |
+| Skeleton      | n/a (graph not required)       | Available                        | Experimental     | Experimental               |
 
 - **Production-ready** — qualified for production deployment in v0.9.0; covered by integration and e2e tests; documented gotchas have known mitigations.
 - **Available** — supported, exercised in tests, but has not been stamped production-ready in v0.9.0. Equivalent retrieval semantics; less load-tested.

@@ -10,7 +10,7 @@ import pytest
 from khora.khora import BatchResult, LLMUsage, RecallResult, RememberResult
 
 # ---------------------------------------------------------------------------
-# LLMUsage dataclass (DYT-646)
+# LLMUsage dataclass
 # ---------------------------------------------------------------------------
 
 
@@ -65,7 +65,7 @@ class TestLLMUsage:
 
 
 # ---------------------------------------------------------------------------
-# Result types include llm_usage field (DYT-649)
+# Result types include llm_usage field
 # ---------------------------------------------------------------------------
 
 
@@ -128,7 +128,7 @@ class TestResultLLMUsageField:
 
 
 # ---------------------------------------------------------------------------
-# Usage accumulator (DYT-647)
+# Usage accumulator
 # ---------------------------------------------------------------------------
 
 

@@ -361,7 +361,7 @@ class TestVectorCypherEngineRemember:
     async def test_remember_without_external_id_skips_external_lookup(
         self, connected_engine: VectorCypherEngine
     ) -> None:
-        """DYT-2674: external_id=None path is byte-identical to today — no external lookup."""
+        """external_id=None path is byte-identical to today — no external lookup."""
         namespace_id = uuid4()
         doc_id = uuid4()
 
@@ -389,7 +389,7 @@ class TestVectorCypherEngineRemember:
 
     @pytest.mark.asyncio
     async def test_remember_external_id_no_match_falls_through(self, connected_engine: VectorCypherEngine) -> None:
-        """DYT-2674: external_id with no existing match goes through create path."""
+        """external_id with no existing match goes through create path."""
         namespace_id = uuid4()
         doc_id = uuid4()
 
@@ -422,7 +422,7 @@ class TestVectorCypherEngineRemember:
 
     @pytest.mark.asyncio
     async def test_remember_external_id_match_dispatches_to_replace(self, connected_engine: VectorCypherEngine) -> None:
-        """DYT-2674: matched external_id routes to coordinator.replace_document_extraction."""
+        """Matched external_id routes to coordinator.replace_document_extraction."""
         from khora.storage.coordinator import ReplaceResult
 
         namespace_id = uuid4()
@@ -486,7 +486,7 @@ class TestVectorCypherEngineRemember:
     async def test_remember_via_replace_wipes_and_writes_vectorcypher_stores(
         self, connected_engine: VectorCypherEngine
     ) -> None:
-        """DYT-2674: _remember_via_replace must wipe + rewrite khora_chunks and :Chunk nodes.
+        """_remember_via_replace must wipe + rewrite khora_chunks and :Chunk nodes.
 
         The coordinator's replace_document_extraction only touches the `chunks`
         table and Neo4j :Entity/:Relationship nodes. VectorCypher's create path
@@ -584,7 +584,7 @@ class TestVectorCypherEngineRemember:
     async def test_remember_via_replace_surreal_unified_skips_neo4j_chunk_nodes(
         self, connected_engine: VectorCypherEngine
     ) -> None:
-        """DYT-2674: when dual_nodes is None (SurrealDB unified), :Chunk-node writes are skipped.
+        """When dual_nodes is None (SurrealDB unified), :Chunk-node writes are skipped.
 
         The SurrealDB unified backend owns chunk + graph linkage on its own
         adapter; the VectorCypher engine must not call DualNodeManager methods
@@ -658,7 +658,7 @@ class TestVectorCypherEngineRemember:
     async def test_remember_via_replace_links_entities_to_chunks_after_coordinator(
         self, connected_engine: VectorCypherEngine
     ) -> None:
-        """DYT-2674: MENTIONED_IN edges for new entities → new chunks are created after coordinator."""
+        """MENTIONED_IN edges for new entities → new chunks are created after coordinator."""
         from khora.core.models import Entity
         from khora.engines.vectorcypher.dual_nodes import EntityChunkLink
         from khora.storage.coordinator import ReplaceResult
@@ -749,7 +749,7 @@ class TestVectorCypherEngineRemember:
     async def test_remember_via_replace_resets_entity_source_chunk_ids(
         self, connected_engine: VectorCypherEngine
     ) -> None:
-        """DYT-2674 / review H4: after coordinator, engine calls the graph backend's
+        """Review H4: after coordinator, engine calls the graph backend's
         reset_entity_source_chunk_ids_batch so survivor/net-new entities' source_chunk_ids
         reflect ONLY the new extraction (not the Neo4j MERGE append-with-tail behavior)."""
         from khora.core.models import Entity
@@ -913,7 +913,7 @@ class TestVectorCypherEngineRemember:
     async def test_remember_via_replace_resets_relationship_source_chunk_ids(
         self, connected_engine: VectorCypherEngine
     ) -> None:
-        """DYT-2674 / review H4 (relationship side): after coordinator + entity reset,
+        """Review H4 (relationship side): after coordinator + entity reset,
         engine calls the graph backend's reset_relationship_source_chunk_ids_batch with
         entity name+type keys so survivor relationships (with persisted-but-unknown
         endpoint ids) still resolve correctly."""
@@ -1023,7 +1023,7 @@ class TestVectorCypherEngineRemember:
     async def test_remember_via_replace_marks_failed_on_temporal_store_error(
         self, connected_engine: VectorCypherEngine
     ) -> None:
-        """DYT-2674: if temporal store wipe/write fails, document is marked FAILED and error re-raised."""
+        """If temporal store wipe/write fails, document is marked FAILED and error re-raised."""
         namespace_id = uuid4()
         old_doc_id = uuid4()
 
@@ -1072,7 +1072,7 @@ class TestVectorCypherEngineRemember:
 
     @pytest.mark.asyncio
     async def test_remember_batch_routes_mixed_external_ids(self, connected_engine: VectorCypherEngine) -> None:
-        """DYT-2674: remember_batch dispatches matched external_id docs to replace path."""
+        """remember_batch dispatches matched external_id docs to replace path."""
         from khora.khora import RememberResult
 
         namespace_id = uuid4()
@@ -1141,7 +1141,7 @@ class TestVectorCypherEngineRemember:
 
     @pytest.mark.asyncio
     async def test_remember_batch_streaming_external_id_prefilter(self, connected_engine: VectorCypherEngine) -> None:
-        """DYT-2674: streaming pipeline removes external_id-matched docs from chunk/embed stages."""
+        """Streaming pipeline removes external_id-matched docs from chunk/embed stages."""
         from khora.khora import RememberResult
 
         namespace_id = uuid4()
@@ -2033,7 +2033,7 @@ class TestProcessDocumentWindowing:
 
 @pytest.mark.unit
 class TestVectorCypherEngineApiTemporalFilter:
-    """DYT-3605: API-supplied temporal_filter synthesizes an EXPLICIT signal."""
+    """API-supplied temporal_filter synthesizes an EXPLICIT signal."""
 
     @pytest.fixture
     def engine_with_mocked_retriever(self) -> VectorCypherEngine:

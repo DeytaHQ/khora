@@ -1,4 +1,4 @@
-"""DYT-3547 regression: temporal filter must reach all 4 Chronicle channels.
+"""Regression: temporal filter must reach all 4 Chronicle channels.
 
 Pre-fix, only the temporal channel forwarded ``created_after``/``created_before``
 to the SQL layer; semantic + BM25 + entity channels scanned the full namespace,
@@ -140,7 +140,7 @@ def _routing(complexity: QueryComplexity) -> RoutingDecision:
 
 @pytest.mark.unit
 class TestChronicleTemporalPushdown:
-    """Regression: every channel must forward the temporal bounds (DYT-3547)."""
+    """Regression: every channel must forward the temporal bounds."""
 
     @pytest.mark.asyncio
     async def test_semantic_channel_forwards_temporal_bounds(self) -> None:

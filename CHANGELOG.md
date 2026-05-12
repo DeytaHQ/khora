@@ -28,7 +28,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Fixed
 
-- **Lockstep version computation** (PR #527, DYT-4045). The DYT-4026 release pipeline sed'd `pyproject.toml` on the runner before `python -m build`, leaving the working tree dirty. `setuptools_scm` (via hatch-vcs) treated `dirty` at a tag as "ahead of tag" → bumped the patch → produced `0.10.4.dev0` instead of `0.10.3`. Removed the runtime sed; the lockstep `khora-accel == X.Y.Z` pin in `pyproject.toml`'s `rust` extra is now committed alongside the `khora-accel/Cargo.toml` version bump.
+- **Lockstep version computation** (PR #527). The release pipeline sed'd `pyproject.toml` on the runner before `python -m build`, leaving the working tree dirty. `setuptools_scm` (via hatch-vcs) treated `dirty` at a tag as "ahead of tag" → bumped the patch → produced `0.10.4.dev0` instead of `0.10.3`. Removed the runtime sed; the lockstep `khora-accel == X.Y.Z` pin in `pyproject.toml`'s `rust` extra is now committed alongside the `khora-accel/Cargo.toml` version bump.
 
 ### Status
 
@@ -39,7 +39,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Fixed
 
-- **`actions/checkout@v6` did not fetch tag refs** (PR #525, DYT-4029). `fetch-depth: 0` controls history depth, not tags; without `fetch-tags: true`, `git describe` saw no tag on the runner and `hatch-vcs` fell back to "next-dev". The v0.10.2 release published khora as `0.10.3.dev0` for this reason. Added `fetch-tags: true` to the khora checkout step; added `skip-existing: true` to both PyPI publish steps for safer re-runs.
+- **`actions/checkout@v6` did not fetch tag refs** (PR #525). `fetch-depth: 0` controls history depth, not tags; without `fetch-tags: true`, `git describe` saw no tag on the runner and `hatch-vcs` fell back to "next-dev". The v0.10.2 release published khora as `0.10.3.dev0` for this reason. Added `fetch-tags: true` to the khora checkout step; added `skip-existing: true` to both PyPI publish steps for safer re-runs.
 
 ### Status
 
@@ -49,7 +49,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Changed
 
-- **Publishing target**: moved from AWS CodeArtifact to **public PyPI** under the Deyta organization (PR #524, DYT-4026). Uses PyPI Trusted Publishing via GitHub OIDC — no API tokens, no AWS, no secrets in the repo. `pypa/gh-action-pypi-publish@release/v1` with an environment-bound trusted publisher per project.
+- **Publishing target**: moved from AWS CodeArtifact to **public PyPI** under the Deyta organization (PR #524). Uses PyPI Trusted Publishing via GitHub OIDC — no API tokens, no AWS, no secrets in the repo. `pypa/gh-action-pypi-publish@release/v1` with an environment-bound trusted publisher per project.
 - **khora-accel** now ships as an **sdist only** (no platform-wheel matrix). Users compile the Rust extension at install time via maturin's PEP 517 backend; requires a Rust toolchain (`rustup`) on the install host.
 - **Version lockstep**: khora and khora-accel are always released at identical versions. The published khora wheel pins `khora-accel == X.Y.Z` exact.
 - **Publish order**: serialized `publish-accel → publish-khora` so khora's wheel can only land on PyPI if accel is already resolvable.
@@ -114,8 +114,8 @@ deprecation shim was higher than the breaking-change cost of a hard removal.
 - **No deprecation shim.** `from khora import MemoryLake` and
   `from khora.memory_lake import …` raise `ImportError` on 0.10.0+.
   Downstream consumers (`genesis`, `khora-benchmarks`) migrate via
-  coordinated PRs after this release (DYT-3967, DYT-3968). Both
-  pre-pinned `khora<0.10` (DYT-3969) to avoid Renovate auto-bumps.
+  coordinated PRs after this release (DYT-3967). Both
+  pre-pinned `khora<0.10` to avoid Renovate auto-bumps.
 - **LLM prompts** in `khora.query.understanding` now say "knowledge base"
   instead of "memory lake" (`COMPREHENSIVE_UNDERSTANDING_PROMPT`,
   `LIGHTWEIGHT_UNDERSTANDING_PROMPT`). Sent verbatim to the LLM.
@@ -148,7 +148,7 @@ deprecation shim was higher than the breaking-change cost of a hard removal.
 
 ## [Unreleased] — Recall API time bounds honored
 
-### Fixed — API-supplied `temporal_filter` no longer dropped (DYT-3605)
+### Fixed — API-supplied `temporal_filter` no longer dropped
 
 Callers passing an explicit `temporal_filter` to `MemoryLake.recall()` had their bounds silently bypassed in two places:
 
@@ -161,7 +161,7 @@ Both engines now synthesize an `EXPLICIT`-category `TemporalSignal` with `confid
 
 ## [Unreleased] — Connector throughput restoration
 
-### Performance — restore pre-0.9.0 LiteLLM throughput (DYT-3599)
+### Performance — restore pre-0.9.0 LiteLLM throughput
 
 The shared aiohttp session introduced in DYT-3156 (v0.9.0) was created with hard-coded `TCPConnector(limit=20, limit_per_host=10)`. `limit_per_host=10` silently throttled all OpenAI / Anthropic / etc. requests to 10 in flight per host, regardless of caller-configured concurrency. Downstream services (e.g. Genesis with `max_concurrent_llm_calls=200`) regressed ~5–20× on wall-time after upgrading to 0.9.x because the shared session became the dominant ceiling on parallel LLM/embedding calls.
 
@@ -179,8 +179,8 @@ Defaults restore pre-0.9.0 throughput: total cap is generous, no per-host thrott
 
 ### Out of scope (related but tracked separately)
 
-* DYT-3079's `_bisect_and_extract` issues up to 2N LLM calls when truncation is detected — amplifies any concurrency change downstream. Not touched here.
-* DYT-3305's unified pending processor spawns 20 background workers on every `MemoryLake.connect()` even for engines that never call `submit_batch`. Idle but not free. Not touched here.
+* `_bisect_and_extract` issues up to 2N LLM calls when truncation is detected — amplifies any concurrency change downstream. Not touched here.
+* unified pending processor spawns 20 background workers on every `MemoryLake.connect()` even for engines that never call `submit_batch`. Idle but not free. Not touched here.
 
 ---
 
@@ -210,7 +210,7 @@ Telemetry workstream (PRs #504–#509) shipped after the v0.9.1 tag. It hardens 
 
 ## [0.9.0] — 2026-05-02 — Embedded Backend Realignment, Production-Readiness Scoping
 
-### Embedded backend overhaul (DYT-3545 family)
+### Embedded backend overhaul
 
 The v0.9.0 embedded path lands as a complete-but-experimental SQLite + LanceDB stack covering all four engines (VectorCypher, GraphRAG, Skeleton, Chronicle). Engine × embedded integration tests now exist for all four engines; the prior "unverified embedded code path" gap from the audit is closed.
 
@@ -226,20 +226,20 @@ See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md#produc
 
 ### Embedded engine wiring
 
-- DYT-3560 (#482): VectorCypher wired to the `sqlite_lance` backend.
-- DYT-3561 (#481): Skeleton wired to the `sqlite_lance` backend with a temporal-store adapter.
-- DYT-3562: GraphRAG embedded path pushes the temporal filter into the LanceDB WHERE — was previously post-hoc and xfail-pinned.
-- DYT-3578 (#486): Temporal filter pushed into SQLite-side WHERE in the GraphRAG embedded chunk fetch path.
-- DYT-3581: VectorCypher honours `metadata['occurred_at']` on the embedded path (parity with `remember_batch`).
+- (#482): VectorCypher wired to the `sqlite_lance` backend.
+- (#481): Skeleton wired to the `sqlite_lance` backend with a temporal-store adapter.
+- GraphRAG embedded path pushes the temporal filter into the LanceDB WHERE — was previously post-hoc and xfail-pinned.
+- (#486): Temporal filter pushed into SQLite-side WHERE in the GraphRAG embedded chunk fetch path.
+- VectorCypher honours `metadata['occurred_at']` on the embedded path (parity with `remember_batch`).
 
 ### Embedded retrieval correctness
 
-- DYT-3547: Chronicle channels (BM25 / semantic / temporal / entity) now share the same `created_after`/`created_before` bounds — fixes channel divergence that broke RRF fusion.
-- DYT-3548: Recursive-CTE graph traversal switched from node-visited to edge-visited tracking (mirrors Neo4j `MATCH [*1..N]`).
-- DYT-3549: `valid_until > now` filter inlined into both anchor and recursive arms of the CTE.
-- DYT-3555 / DYT-3556: Skeleton tag-cast and `occurred_at` parsing fixes (`Skeleton.remember()` parity with `remember_batch()`, DYT-3557).
-- DYT-3558: Embedded compensating-delete-on-failure logging hardened.
-- DYT-3579 (#485): LanceDB IVF-PQ index now retrains once the corpus grows past `retrain_factor × (rows at last training)`. Configurable via `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` (default `2.0`). Fixes silent recall degradation as the corpus grows past the initial training threshold (5k rows). Set ≤ `1.0` to disable.
+- Chronicle channels (BM25 / semantic / temporal / entity) now share the same `created_after`/`created_before` bounds — fixes channel divergence that broke RRF fusion.
+- Recursive-CTE graph traversal switched from node-visited to edge-visited tracking (mirrors Neo4j `MATCH [*1..N]`).
+- `valid_until > now` filter inlined into both anchor and recursive arms of the CTE.
+- DYT-3555 / DYT-3556: Skeleton tag-cast and `occurred_at` parsing fixes (`Skeleton.remember()` parity with `remember_batch()`).
+- Embedded compensating-delete-on-failure logging hardened.
+- (#485): LanceDB IVF-PQ index now retrains once the corpus grows past `retrain_factor × (rows at last training)`. Configurable via `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` (default `2.0`). Fixes silent recall degradation as the corpus grows past the initial training threshold (5k rows). Set ≤ `1.0` to disable.
 
 ### Embedded warts (documented, not fixed)
 
@@ -277,7 +277,7 @@ Two deferred decisions for v0.10 address the embedded warts:
 ### Changed
 - **Breaking**: khora is now a pure memory-lake library. `uv run khora ...` is no longer a valid command; use `uv pip install khora-cli` and `uv run khora-cli extract` / `search` instead.
 - `khora.discovery.extraction` → `khora.extraction.binary_readers` (binary file reader consumed by khora-cli)
-- Documentation rework post-extraction (DYT-2714): short, library-focused `README.md`; new `docs/README.md` index, `docs/configuration.md`, `docs/api-reference.md`, `docs/migrations.md`, and `docs/consumers.md`; removed stale `khora extract` / `khora search` / `khora ontology` references from the top-level docs in favour of pointers to `khora-cli` and `khora-explorer`.
+- Documentation rework post-extraction: short, library-focused `README.md`; new `docs/README.md` index, `docs/configuration.md`, `docs/api-reference.md`, `docs/migrations.md`, and `docs/consumers.md`; removed stale `khora extract` / `khora search` / `khora ontology` references from the top-level docs in favour of pointers to `khora-cli` and `khora-explorer`.
 
 ### New graph backends
 - AWS Neptune with Bolt protocol + IAM SigV4 auth (#272)
@@ -381,7 +381,7 @@ Two deferred decisions for v0.10 address the embedded warts:
 
 ### Bug fixes
 
-- Fix `run_migrations()` on fresh PostgreSQL database — use `information_schema.tables` (#201, DYT-1447)
+- Fix `run_migrations()` on fresh PostgreSQL database — use `information_schema.tables` (#201)
 - Reduce extraction batch size from 10 to 5 and make configurable (#195)
 - Move per-document extraction log lines from INFO to DEBUG (#196)
 
@@ -751,7 +751,7 @@ New fields in `QuerySettings`: `enable_temporal_resolver` (default `True`),
 ### Fixed
 
 - VectorCypher entity search called a non-existent coordinator method,
-  causing `AttributeError` on entity-heavy queries (DYT-180) (#26)
+  causing `AttributeError` on entity-heavy queries (#26)
 
 ---
 

@@ -222,7 +222,7 @@ class TestMetadataSerializedForNeo4j:
 
 
 # ---------------------------------------------------------------------------
-# Bug #3: Non-scalar metadata silently dropped (DYT-1114)
+# Bug #3: Non-scalar metadata silently dropped
 # ---------------------------------------------------------------------------
 
 
@@ -334,12 +334,12 @@ class TestNonScalarMetadataPreserved:
         source = inspect.getsource(VectorCypherEngine)
         assert "isinstance(v, (str, int, float, bool))" not in source, (
             "VectorCypher engine still contains the isinstance scalar filter "
-            "that drops non-scalar metadata — DYT-1114 fix not applied"
+            "that drops non-scalar metadata — fix not applied"
         )
 
 
 # ---------------------------------------------------------------------------
-# Bug #4: Cross-window entity count inflation (DYT-3064)
+# Bug #4: Cross-window entity count inflation
 # ---------------------------------------------------------------------------
 
 
@@ -368,7 +368,7 @@ class TestCrossWindowEntityCountInflation:
         # deduplication, inflating the count when an entity appears in >1 window.
         assert 'results["entities"] += len(all_entities)' not in source, (
             'Engine still uses results["entities"] += len(all_entities) directly '
-            "inside the window loop — cross-window entity count inflation not fixed (DYT-3064)"
+            "inside the window loop — cross-window entity count inflation not fixed"
         )
 
     def test_seen_entity_keys_dedup_logic(self) -> None:

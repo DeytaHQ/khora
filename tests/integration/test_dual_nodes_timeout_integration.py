@@ -1,4 +1,4 @@
-"""Composition-level integration test for DYT-1948 Neo4j query timeout.
+"""Composition-level integration test for Neo4j query timeout.
 
 Verifies end-to-end wiring from ``KhoraConfig`` → VectorCypher engine
 pattern → ``DualNodeManager`` → ``unit_of_work`` decoration → ``ClientError``

@@ -166,7 +166,7 @@ class TestStageDocumentsBatchDedupe:
 
     @pytest.mark.asyncio
     async def test_failed_doc_not_treated_as_duplicate(self) -> None:
-        """FAILED doc excluded by storage layer -> new doc created (DYT-2381).
+        """FAILED doc excluded by storage layer -> new doc created.
 
         The storage layer now filters out FAILED docs from checksum lookups,
         so get_documents_by_checksums returns empty. stage_documents_batch
@@ -184,7 +184,7 @@ class TestStageDocumentsBatchDedupe:
 
     @pytest.mark.asyncio
     async def test_failed_and_completed_docs_mixed(self) -> None:
-        """COMPLETED doc skipped, FAILED doc (filtered out) gets re-created (DYT-2381).
+        """COMPLETED doc skipped, FAILED doc (filtered out) gets re-created.
 
         - doc 0: checksum matches a COMPLETED doc in DB -> None (skipped)
         - doc 1: checksum had a FAILED doc, storage filtered it out -> new doc created

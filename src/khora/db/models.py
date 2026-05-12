@@ -155,7 +155,7 @@ class DocumentModel(Base):
     # Ontology-aware re-extraction
     extraction_config_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
 
-    # Extraction parameters for deferred/crash-recovery processing (DYT-3305).
+    # Extraction parameters for deferred/crash-recovery processing.
     extraction_params: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     # Timestamps

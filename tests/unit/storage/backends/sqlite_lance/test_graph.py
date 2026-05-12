@@ -1,4 +1,4 @@
-"""Tests for :class:`SQLiteLanceGraphAdapter` (DYT-2729)."""
+"""Tests for :class:`SQLiteLanceGraphAdapter`."""
 
 from __future__ import annotations
 
@@ -725,7 +725,7 @@ class TestTraversal:
 
 
 # ---------------------------------------------------------------------------
-# prefer_current — every-edge predicate (DYT-3549)
+# prefer_current — every-edge predicate
 #
 # Mirrors the Neo4j Cypher pattern in ``engines/vectorcypher/dual_nodes.py:599``:
 #     all(r IN relationships(path) WHERE r.valid_until IS NULL OR r.valid_until > _now)

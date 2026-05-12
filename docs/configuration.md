@@ -149,7 +149,7 @@ Documented scale ceiling — performance and recall degrade noticeably above the
 Known gaps and warts:
 
 - **Partial atomicity in `coordinator.transaction()`** — only the SQL session is enrolled; LanceDB writes happen post-commit with compensating-delete-on-failure. A crash between SQLite commit and Lance write can leave orphaned vectors or missing embeddings; reconciliation runs on the next ingest.
-- **Point-in-time queries are not supported** on the embedded stack (DYT-3550). The CTE port does not expose the equivalent of pgvector's PIT semantics.
+- **Point-in-time queries are not supported** on the embedded stack. The CTE port does not expose the equivalent of pgvector's PIT semantics.
 - **FTS5 covers chunks only** — entity-anchored recall falls back to `LIKE` / JSON-equality. Recommend the PostgreSQL stack for entity-heavy corpora.
 - **Install footprint** is ~130–180 MB unpacked (pyarrow + lancedb native + Arrow C++ runtime). "Embedded" means "no server", not "no native deps".
 - **IVF-PQ retraining** is automatic when the corpus grows past `retrain_factor × (rows at last training)`. Tune via `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` (see below).
@@ -165,7 +165,7 @@ Vector index tuning fields on the `sqlite_lance` storage config:
 | `KHORA_STORAGE_SQLITE_LANCE__LANCE_INDEX` | `auto` | `auto` / `ivf_pq` / `hnsw` / `brute`. |
 | `KHORA_STORAGE_SQLITE_LANCE__IVF_PARTITIONS` | `null` (auto) | IVF partition count. |
 | `KHORA_STORAGE_SQLITE_LANCE__HNSW_M` | `16` | HNSW `M`. |
-| `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` | `2.0` | Rebuild the LanceDB ANN index once the row count grows to `retrain_factor × (rows at last training)`. Default `2.0` retrains when the corpus has doubled. Set ≤ `1.0` to disable retraining. Added in v0.9.0 (DYT-3579). |
+| `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` | `2.0` | Rebuild the LanceDB ANN index once the row count grows to `retrain_factor × (rows at last training)`. Default `2.0` retrains when the corpus has doubled. Set ≤ `1.0` to disable retraining. Added in v0.9.0. |
 
 ### SurrealDB (experimental, unified store)
 

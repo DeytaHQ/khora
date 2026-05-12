@@ -162,7 +162,7 @@ def setup_logging(
     # handler is wired up so the new level actually reaches loguru sinks.
     apply_neo4j_log_level_from_env()
 
-    # Forward neo4j stdlib DEBUG records to Logfire (DYT-2904). The main
+    # Forward neo4j stdlib DEBUG records to Logfire. The main
     # loguru sink filters at INFO, so records must be routed directly via
     # a dedicated ``LogfireLoggingHandler`` on the ``neo4j`` logger. The
     # try/except is belt-and-suspenders for logfire SDK-level bugs — a

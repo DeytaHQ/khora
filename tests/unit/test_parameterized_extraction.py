@@ -1,4 +1,4 @@
-"""Unit tests for parameterized extraction (DYT-262).
+"""Unit tests for parameterized extraction.
 
 Tests that entity_types and relationship_types parameters are correctly
 threaded through the extraction pipeline: Khora -> Engine -> Extractor -> Prompt.

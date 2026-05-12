@@ -1,10 +1,10 @@
-"""DYT-3581: ``VectorCypherEngine.remember`` honors ``metadata['occurred_at']``.
+"""``VectorCypherEngine.remember`` honors ``metadata['occurred_at']``.
 
 Pre-DYT-3581 the single-doc ``remember()`` path silently dropped
 ``metadata['occurred_at']`` and stamped chunks with ``datetime.now(UTC)``,
 while ``remember_batch`` (engine.py:2118-2120) parsed the same key. These
 tests pin the symmetry so the bug can't regress. Mirrors PR #484
-(DYT-3557) for the Skeleton engine.
+for the Skeleton engine.
 """
 
 from __future__ import annotations

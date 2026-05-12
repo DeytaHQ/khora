@@ -1,4 +1,4 @@
-"""Protocol compliance matrix for storage backends (DYT-2733).
+"""Protocol compliance matrix for storage backends.
 
 Runs all storage backends through the same parameterized test matrix to
 prove feature parity with the four core protocols:
@@ -12,7 +12,7 @@ prove feature parity with the four core protocols:
 fixture structure is ready to extend — adding Postgres / Neo4j / SurrealDB
 is a matter of new backend-specific fixtures and extra ``params=[...]``
 entries on the protocol-level fixtures. Full cross-backend compliance runs
-in integration tests (DYT-2734) with live services; this file keeps the
+in integration tests with live services; this file keeps the
 unit suite hermetic.
 
 The existing per-adapter tests in ``tests/unit/storage/backends/sqlite_lance/``

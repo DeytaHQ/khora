@@ -1,4 +1,4 @@
-"""Tests for ENTITY_ANCHORED router classification (DYT-3147)."""
+"""Tests for ENTITY_ANCHORED router classification."""
 
 from __future__ import annotations
 

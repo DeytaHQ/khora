@@ -1,4 +1,4 @@
-"""Unit tests for Chronicle abstention OTel metrics (DYT-3145 Phase 4).
+"""Unit tests for Chronicle abstention OTel metrics (Phase 4).
 
 Asserts that ``_compute_abstention_signals`` increments the per-signal
 counter for each firing signal and observes the combined score on every

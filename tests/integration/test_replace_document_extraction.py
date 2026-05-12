@@ -1,4 +1,4 @@
-"""End-to-end replace-via-remember() integration tests (DYT-2675).
+"""End-to-end replace-via-remember() integration tests.
 
 Exercises the document-replacement lifecycle through the public
 ``Khora.remember()`` / ``VectorCypherEngine.remember()`` API surface,

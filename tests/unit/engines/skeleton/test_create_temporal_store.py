@@ -1,4 +1,4 @@
-"""DYT-3545 coverage: ``khora.engines.skeleton.backends.create_temporal_store``.
+"""Coverage: ``khora.engines.skeleton.backends.create_temporal_store``.
 
 Pins the dispatch table for the four supported backends (pgvector, weaviate,
 surrealdb, sqlite_lance) plus the validation errors. Each branch is covered

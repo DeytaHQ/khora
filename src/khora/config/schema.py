@@ -190,7 +190,7 @@ class SurrealDBConfig(BaseModel):
 
 
 class SQLiteLanceConfig(BaseModel):
-    """SQLite + LanceDB embedded unified backend configuration (DYT-2724).
+    """SQLite + LanceDB embedded unified backend configuration.
 
     Pairs an on-disk SQLite database (graph + relational + event store)
     with a sibling LanceDB directory (vector search). Zero infrastructure —
@@ -539,7 +539,7 @@ class PipelineSettings(BaseSettings):
         "mention_count <= this value. Set to 0 to skip all single-mention entities of these types.",
     )
 
-    # Unified PENDING document processor (DYT-3305).
+    # Unified PENDING document processor.
     # Replaces the separate _submit_batch_worker and _recover_pending_documents paths.
     pending_processor_enabled: bool = Field(
         default=True,

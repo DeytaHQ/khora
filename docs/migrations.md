@@ -58,7 +58,7 @@ This is signalled internally by a `_DatabaseAheadError` from `env.py` to `sessio
 
 ## Fresh-database behaviour
 
-On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrations()` / `Khora(run_migrations=True)` creates every table from scratch. The implementation checks for the table's existence via `information_schema.tables` rather than issuing a raw query that would abort the transaction (fixed in v0.6.6, DYT-1447).
+On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrations()` / `Khora(run_migrations=True)` creates every table from scratch. The implementation checks for the table's existence via `information_schema.tables` rather than issuing a raw query that would abort the transaction (fixed in v0.6.6).
 
 ## What about `create_tables()`?
 

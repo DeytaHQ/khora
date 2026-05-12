@@ -447,7 +447,7 @@ class TestRetrieverCaching:
 
 @pytest.mark.unit
 class TestSimpleRetrieveScoreNormalization:
-    """Regression tests for DYT-1733: simple path score normalization.
+    """Regression tests for: simple path score normalization.
 
     Before the fix, _simple_retrieve() returned raw RRF scores (~0.009-0.016)
     while the complex path returned normalized [0,1] scores. This caused
@@ -521,7 +521,7 @@ class TestSimpleRetrieveScoreNormalization:
 
         # Simulate 5 results with small raw scores typical of RRF (the bug scenario)
         # RRF scores with k=60: rank 1 = 1/61 ≈ 0.016, rank 5 ≈ 0.009.
-        # These reproduce the DYT-1733 bug where all scores cluster below 0.05.
+        # These reproduce the bug where all scores cluster below 0.05.
         raw_scores = [0.016, 0.014, 0.012, 0.010, 0.009]
         mock_results = []
         for score in raw_scores:
@@ -1026,7 +1026,7 @@ class TestLLMRerankConfidenceGate:
 
 @pytest.mark.unit
 class TestExplicitTemporalSignalSkipsFallback:
-    """DYT-3605: when the caller asserts an EXPLICIT temporal_signal carrying a
+    """When the caller asserts an EXPLICIT temporal_signal carrying a
     parsed date filter, the retriever's "sparse-results" re-run-without-filter
     fallback (engine.py-side, line ~754) MUST be skipped. Sparse results are
     the correct signal in this path — the data may simply not exist in that

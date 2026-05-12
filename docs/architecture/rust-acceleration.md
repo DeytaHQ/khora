@@ -114,7 +114,7 @@ Greedy Maximal Marginal Relevance for diversity-aware result selection.
 **Algorithm:**
 - **Incremental max-similarity tracking** — maintains a running `max_sim[i]` for each unselected candidate, updated as new items are selected. Complexity is O(k*n) instead of O(k*n*k).
 - **Cache-friendly layout** — embeddings stored in a flat contiguous buffer for vectorized access.
-- **Safe iterator dot product** — inner `dot_f32` function uses `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`, a safe iterator chain that the compiler auto-vectorizes on x86-64 with SSE/AVX. Replaced a previous `unsafe get_unchecked` implementation (DYT-299) to eliminate undefined-behavior risk while preserving equivalent codegen.
+- **Safe iterator dot product** — inner `dot_f32` function uses `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`, a safe iterator chain that the compiler auto-vectorizes on x86-64 with SSE/AVX. Replaced a previous `unsafe get_unchecked` implementation to eliminate undefined-behavior risk while preserving equivalent codegen.
 
 **Rust techniques:**
 - **GIL release** — `py.allow_threads(|| { ... })` during the entire selection loop.

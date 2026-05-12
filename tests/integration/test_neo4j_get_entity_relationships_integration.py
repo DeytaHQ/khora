@@ -1,4 +1,4 @@
-"""Real-Neo4j integration test for ``Neo4jBackend.get_entity_relationships`` (DYT-2626).
+"""Real-Neo4j integration test for ``Neo4jBackend.get_entity_relationships``.
 
 This test exercises the full Cypher → driver → ``result.data()`` →
 ``_record_to_relationship`` serialization path against a running Neo4j
@@ -59,7 +59,7 @@ from khora.storage.backends.neo4j import Neo4jBackend
     reason="set NEO4J_INTEGRATION_TEST=1 to run against real Neo4j (requires make dev)",
 )
 class TestNeo4jGetEntityRelationshipsIntegration:
-    """End-to-end regression lock for DYT-2626 against a real Neo4j."""
+    """End-to-end regression lock for against a real Neo4j."""
 
     @pytest.mark.asyncio
     async def test_returns_relationship_through_real_driver(self) -> None:

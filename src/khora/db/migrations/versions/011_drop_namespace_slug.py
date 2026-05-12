@@ -1,4 +1,4 @@
-"""Drop slug, name, description columns from memory_namespaces (DYT-315).
+"""Drop slug, name, description columns from memory_namespaces.
 
 Revision ID: 011_drop_namespace_slug
 Revises: 010_flatten_namespace_hierarchy

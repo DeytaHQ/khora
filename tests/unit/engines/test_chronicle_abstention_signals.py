@@ -1,4 +1,4 @@
-"""Unit tests for Chronicle abstention signals (DYT-3145).
+"""Unit tests for Chronicle abstention signals.
 
 Tests the pure ``_compute_abstention_signals`` helper plus an integration
 test that asserts ``RecallResult.metadata["abstention_signals"]`` is

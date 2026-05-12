@@ -366,7 +366,7 @@ class TestEntityOps:
 
 
 class TestCountEntities:
-    """Tests for count_entities fallback order (DYT-2116)."""
+    """Tests for count_entities fallback order."""
 
     @pytest.mark.asyncio
     async def test_count_entities_prefers_vector(self) -> None:
@@ -454,7 +454,7 @@ class TestRelationshipOps:
 
 
 class TestCountRelationships:
-    """Tests for count_relationships delegation (DYT-2631)."""
+    """Tests for count_relationships delegation."""
 
     @pytest.mark.asyncio
     async def test_count_relationships_delegates_to_graph(self) -> None:
@@ -580,7 +580,7 @@ class TestBatchOps:
 
 
 class TestDocumentSourcesBatch:
-    """Tests for get_document_sources_batch (DYT-506)."""
+    """Tests for get_document_sources_batch."""
 
     @pytest.mark.asyncio
     async def test_get_document_sources_batch(self) -> None:
@@ -646,7 +646,7 @@ def _make_coordinator_with_fake_txn(
 
 
 class TestReplaceDocumentExtraction:
-    """Unit tests for StorageCoordinator.replace_document_extraction (DYT-2673)."""
+    """Unit tests for StorageCoordinator.replace_document_extraction."""
 
     @pytest.mark.asyncio
     async def test_happy_path_mixed_retire_survive_net_new(self) -> None:

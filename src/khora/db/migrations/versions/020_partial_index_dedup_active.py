@@ -4,7 +4,7 @@ Revision ID: 020_partial_index_dedup_active
 Revises: 019_document_last_activity_index
 Create Date: 2026-04-14
 
-DYT-2381: Add partial index (namespace_id, checksum) WHERE status != 'failed'
+Add partial index (namespace_id, checksum) WHERE status != 'failed'
 on documents table. This allows dedup lookups to skip failed documents without
 scanning rows that will never match.
 """

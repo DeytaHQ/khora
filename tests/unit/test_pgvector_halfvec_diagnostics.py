@@ -1,4 +1,4 @@
-"""Unit tests for the halfvec-index diagnostics on PgVectorBackend (DYT-3787).
+"""Unit tests for the halfvec-index diagnostics on PgVectorBackend.
 
 The connect path used to log a single WARNING — `halfvec HNSW indexes not found —
 falling back to full-precision vectors. Run migrations to create them.` — for

@@ -1,4 +1,4 @@
-"""DYT-3545 coverage: ``StorageFactory.create_coordinator`` dispatch paths.
+"""Coverage: ``StorageFactory.create_coordinator`` dispatch paths.
 
 Pre-PR coverage of ``factory.py`` was 54%. The big uncovered surfaces are
 the unified-backend branches: ``surrealdb``, ``sqlite_lance``, and

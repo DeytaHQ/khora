@@ -1,4 +1,4 @@
-"""Skeleton PostgreSQL integration tests (DYT-3545).
+"""Skeleton PostgreSQL integration tests.
 
 Skeleton is the second of khora's two production-ready engines and (per the
 DB-prod audit) had zero dedicated integration coverage. These tests wire up
@@ -357,7 +357,7 @@ async def test_skeleton_recall_with_metadata_filter(kb: Khora, namespace_id: UUI
     needed metadata filtering today. If/when Khora grows a ``filters``
     parameter, this test should switch to using it.
 
-    DYT-3556 — the filter literal is now cast to ``ARRAY(String)`` so that
+    The filter literal is now cast to ``ARRAY(String)`` so that
     PostgreSQL's ``@>`` operator matches the ``character varying[]`` column.
     """
     await _remember(
@@ -400,7 +400,7 @@ async def test_skeleton_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
     """Two docs with ``occurred_at`` 5d vs 20d apart, "last 7 days" → recent only.
 
     Skeleton.remember (single-doc) ignores ``metadata['occurred_at']``
-    (DYT-3557 — only ``remember_batch`` reads it), so we backdate via direct
+    (only ``remember_batch`` reads it), so we backdate via direct
     SQL after ingest, mirroring the chronicle-pg pattern. This isolates the
     test to the question we actually care about: does
     ``TemporalFilter.occurred_after`` reach the storage layer and gate the
@@ -505,7 +505,7 @@ async def test_skeleton_recall_metadata_keys(kb: Khora, namespace_id: UUID) -> N
 
 
 async def test_skeleton_recall_default_hybrid_mode(kb: Khora, namespace_id: UUID) -> None:
-    """Default ``Khora.recall(...)`` against Skeleton works on HYBRID — DYT-3555.
+    """Default ``Khora.recall(...)`` against Skeleton works on HYBRID.
 
     Pre-fix, ``SkeletonConstructionEngine.recall`` (engine.py:441) referenced
     a non-existent ``SearchMode.KEYWORD`` member, which crashed with

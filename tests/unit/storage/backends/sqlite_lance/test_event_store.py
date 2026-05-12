@@ -1,4 +1,4 @@
-"""Tests for :class:`SQLiteLanceEventStoreAdapter` (DYT-2731)."""
+"""Tests for :class:`SQLiteLanceEventStoreAdapter`."""
 
 from __future__ import annotations
 

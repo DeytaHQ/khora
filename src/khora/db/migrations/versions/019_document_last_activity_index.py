@@ -4,7 +4,7 @@ Revision ID: 019_document_last_activity_index
 Revises: 018_halfvec_hnsw_indexes
 Create Date: 2026-04-07
 
-DYT-1953: Add composite index (namespace_id, created_at) on documents table
+Add composite index (namespace_id, created_at) on documents table
 to optimize queries for namespace statistics, particularly get_last_activity_at()
 which uses MAX(created_at) with namespace_id filtering.
 """

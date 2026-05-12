@@ -1,4 +1,4 @@
-"""Integration tests for windowed processing and submit_batch (DYT-3055).
+"""Integration tests for windowed processing and submit_batch.
 
 Eight scenarios:
 1. Windowed processing splits correctly — total chunks > max_chunks_in_flight
@@ -230,7 +230,7 @@ class TestWindowedProcessingIntegration:
             await kb.disconnect()
 
     # ------------------------------------------------------------------
-    # 9. Cross-window entity count not inflated (DYT-3064)
+    # 9. Cross-window entity count not inflated
     # ------------------------------------------------------------------
 
     async def test_cross_window_entity_count_not_inflated(self) -> None:
@@ -277,7 +277,7 @@ class TestWindowedProcessingIntegration:
             # 2 unique entities extracted (UniqueEntity + Alice), not 3
             assert result.entities == 2, (
                 f"expected 2 unique entities (UniqueEntity + Alice), got {result.entities}. "
-                "Cross-window entity count inflation not fixed (DYT-3064)."
+                "Cross-window entity count inflation not fixed."
             )
         finally:
             await kb.disconnect()

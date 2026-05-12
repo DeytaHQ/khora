@@ -1,8 +1,8 @@
-"""SQLite graph adapter for the embedded SQLite + LanceDB backend (DYT-2729).
+"""SQLite graph adapter for the embedded SQLite + LanceDB backend.
 
 Implements :class:`khora.storage.backends.base.GraphBackendProtocol` on
 raw SQL over the ``entities``, ``relationships`` and ``episodes`` tables
-created by the Alembic migrations (DYT-2727).  Traversal is expressed as
+created by the Alembic migrations.  Traversal is expressed as
 SQLite recursive CTEs — no Cypher, no graph engine required.
 
 Vector storage is **not** handled here: entity embeddings live in

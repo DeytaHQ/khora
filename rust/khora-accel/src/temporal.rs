@@ -668,7 +668,7 @@ mod tests {
         assert!(conf >= 0.7);
     }
 
-    // DYT-2143: Enterprise domain STATE_QUERY patterns
+    // Enterprise domain STATE_QUERY patterns
     #[test]
     fn test_state_current_status() {
         assert_eq!(detect_temporal_category("What is the current status of the Acme deal?"), 2);
@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(detect_temporal_category("How has the current deal stage changed?"), 6);
     }
 
-    // DYT-2145: Verify compound patterns don't over-trigger on recency lookups
+    // Verify compound patterns don't over-trigger on recency lookups
     #[test]
     fn test_current_quota_not_state_query() {
         // "current quota" should NOT match — it's a simple recency lookup

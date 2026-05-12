@@ -1,4 +1,4 @@
-"""Real-Neo4j integration tests for ``Neo4jBackend.retire_orphaned_entities_batch`` (DYT-2668).
+"""Real-Neo4j integration tests for ``Neo4jBackend.retire_orphaned_entities_batch``.
 
 These tests exercise the full retire → snapshot → temporal-query path against
 a running Neo4j instance, verifying that :EntityVersion nodes, [:SUPERSEDES]

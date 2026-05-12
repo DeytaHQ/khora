@@ -1,4 +1,4 @@
-"""Integration tests for the unique (namespace_id, external_id) partial index (DYT-2672).
+"""Integration tests for the unique (namespace_id, external_id) partial index.
 
 Validates migration 022 which promotes the partial composite index on
 (namespace_id, external_id) WHERE external_id IS NOT NULL to UNIQUE.

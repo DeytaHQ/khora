@@ -1,4 +1,4 @@
-"""Unit tests for DYT-3558: ingest drops relationships when an entity is re-canonicalised.
+"""Unit tests for: ingest drops relationships when an entity is re-canonicalised.
 
 When an entity is upserted a second time, Neo4j's MERGE syncs the in-memory
 ``Entity.id`` to the canonical (already-stored) UUID. Relationships built
@@ -127,7 +127,7 @@ def _storage_with_canonicalisation(canonical_by_name_type: dict[tuple[str, str],
 
 @pytest.mark.asyncio
 async def test_relationship_lands_when_endpoint_re_canonicalised() -> None:
-    """The DYT-3558 regression: a relationship whose endpoints were
+    """The regression: a relationship whose endpoints were
     re-canonicalised by the upsert must still reach the graph backend.
     """
     from khora.pipelines.flows.ingest import process_document

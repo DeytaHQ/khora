@@ -4,7 +4,7 @@ Revision ID: 022_promote_external_id_index_unique
 Revises: 021_add_document_external_id
 Create Date: 2026-04-21
 
-DYT-2672: Promote the partial composite index (namespace_id, external_id)
+Promote the partial composite index (namespace_id, external_id)
 WHERE external_id IS NOT NULL to a UNIQUE constraint, enabling idempotent
 upsert-by-external_id.
 

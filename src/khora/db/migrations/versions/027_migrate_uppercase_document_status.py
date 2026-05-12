@@ -4,7 +4,7 @@ Revision ID: 027_migrate_uppercase_document_status
 Revises: 026_widen_alembic_version_column
 Create Date: 2026-05-05
 
-DYT-3736: Staging contains ~19 000 rows with uppercase status values
+Staging contains ~19 000 rows with uppercase status values
 (PENDING, PROCESSING, COMPLETED, FAILED, ARCHIVED) written by an early
 Khora version that used enum .name instead of .value. The canonical
 DocumentStatus enum defines lowercase values only. This migration

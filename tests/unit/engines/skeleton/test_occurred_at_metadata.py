@@ -1,4 +1,4 @@
-"""DYT-3557: ``Skeleton.remember`` honors ``metadata['occurred_at']``.
+"""``Skeleton.remember`` honors ``metadata['occurred_at']``.
 
 Pre-DYT-3557 the single-doc ``remember()`` path silently dropped
 ``metadata['occurred_at']`` and stamped chunks with ``datetime.now(UTC)``,
