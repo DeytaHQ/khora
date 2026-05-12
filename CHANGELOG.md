@@ -4,6 +4,35 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.10.6] — Test-infra expansion, dependency staging window, docs cleanup
+
+### Added
+
+- **Embedded test footprint** (PR-A / #536) — matrix tests for the SQLite+LanceDB stack covering VectorCypher, Skeleton, and Chronicle.
+- **Embedded backend hardening** (PR-B / #537) — typed `EmbeddingError` validation in `khora.storage.backends.sqlite_lance.vector` so malformed inputs surface at the boundary instead of failing deep inside LanceDB.
+- **Property-based tests** (PR-C / #538) — Hypothesis tests pinning Chronicle abstention `combined_score`, FTS5 escape parseability, MMR λ-direction (khora's λ=1 ⇒ pure relevance convention), and SQLite FTS5 `bm25()` sign handling.
+- **Test infrastructure** (PR-D / #540) — `embedded` pytest marker, `scripts/check_coverage_floors.py` per-path coverage gate wired into CI, `make test-embedded` / `make test-soak` targets, and a top-level `CONTRIBUTING.md`.
+- **Codecov split flags** (#539) — unit and integration uploads land separately so PRs that only touch unit-tested paths still get a Codecov diff comment. `codecov.yml` carries auto-target project status with sensible thresholds.
+- **`uv exclude-newer = "7 days"` policy** (#548) — `uv lock` ignores PyPI releases uploaded within the last 7 days, re-evaluated every sync. `exclude-newer-package = { urllib3 = "0 days" }` lets same-week CVE fixes through; pattern reusable for future security-critical updates.
+
+### Changed
+
+- **Docs cleanup** — README, `docs/configuration.md`, `docs/README.md`, and `docs/architecture/{overview,storage-backends}.md` no longer reference the deprecated `kuzu` extra (#550). README sibling-package list trimmed; `khora-service` linked to its GitHub repo (#531). README description language: "library, not an application; tooling lives in sibling packages."
+- **Docstring scrub** (#547) — `LiteLLMConfig.max_total_connections` description now uses vendor-neutral phrasing ("typical high-throughput ingestion concurrency"). Internal-service name removed from public API surface.
+- **Release pipeline** (#532) — `release.yml` auto-creates GitHub releases on tag push with auto-generated notes from merged PRs.
+
+### Fixed
+
+- **`find_related_entities` fallback** (#535) — VectorCypher's graph-only fallback called a non-existent backend method on `sqlite_lance` / `surrealdb`. Falls back gracefully now.
+
+### Removed
+
+- **Memory Lake branding residue** (#534) — final pass on examples, tests, and inline strings. No public API changes.
+
+### Infrastructure
+
+- **kuzu still ships as an optional extra**, but is no longer advertised in user-facing docs (the upstream repository was archived after Apple's acquisition in October 2025).
+
 ## [0.10.5] — FTS5 escape, Chronicle sqlite_lance persistence, loguru placeholders
 
 ### Fixed
