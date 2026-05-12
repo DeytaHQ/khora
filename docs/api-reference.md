@@ -239,7 +239,7 @@ A custom engine **must** implement the full `MemoryEngineProtocol` from `src/kho
 
 ## Expertise
 
-`ExpertiseConfig` is a stable sibling API maintained in coordination with khora-explorer and khora-benchmarks.
+`ExpertiseConfig` is a stable sibling API maintained in coordination with khora-explorer.
 
 ```python
 from khora import ExpertiseConfig, EntityTypeConfig, RelationshipTypeConfig
@@ -285,6 +285,6 @@ except KhoraError as exc:
 
 ## Stability guarantee
 
-Symbols imported from the top-level `khora` namespace and `khora.extraction.skills` are stable. Additive changes land in minor releases; breaking changes require a major version bump and coordinated release with khora-benchmarks, khora-explorer, and khora-cli.
+Symbols imported from the top-level `khora` namespace and `khora.extraction.skills` are stable. Additive changes land in minor releases; breaking changes require a major version bump and coordinated release with khora-cli and khora-explorer.
 
 Private imports (`khora.engines.vectorcypher`, `khora.query.engine`, `khora.pipelines.flows`, etc.) are **not** stable and can change between minor versions.

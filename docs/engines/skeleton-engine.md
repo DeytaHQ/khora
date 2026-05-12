@@ -387,10 +387,10 @@ KHORA_QUERY_HYBRID_ALPHA=0.7
 KHORA_QUERY_RECENCY_DECAY_DAYS=30
 ```
 
-### Via Genesis YAML
+### Via YAML
 
 ```yaml
-# config/skeleton/genesis.yaml
+# config/skeleton/khora.yaml
 engine:
   name: skeleton
   backend: pgvector

@@ -151,8 +151,8 @@ class PgVectorBackend(AsyncSessionMixin):
             elif not await self._check_halfvec_indexes():
                 self._halfvec_available = False
                 # Distinguish "fresh DB, migrations not run yet" (benign — common path
-                # for ephemeral per-run databases like khora-benchmarks-service) from
-                # "tables exist but indexes are missing" (real misconfiguration).
+                # for ephemeral per-run databases) from "tables exist but indexes are
+                # missing" (real misconfiguration).
                 if not await self._halfvec_target_tables_exist():
                     logger.info(
                         "halfvec HNSW indexes not yet created (fresh DB) — using full-precision "

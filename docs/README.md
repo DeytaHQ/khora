@@ -7,7 +7,7 @@ Khora is a knowledge memory library. This directory contains everything beyond t
 - [Configuration](configuration.md) — `KHORA_*` environment variables, `KhoraConfig`, installation extras.
 - [API reference](api-reference.md) — public `Khora` methods and result types.
 - [Migrations](migrations.md) — Alembic workflow for library users (PostgreSQL backends only).
-- [Consumers](consumers.md) — how downstream packages (khora-cli, khora-explorer, khora-benchmarks) use khora.
+- [Consumers](consumers.md) — how downstream packages (e.g. khora-cli, khora-explorer) use khora.
 
 ## Architecture
 

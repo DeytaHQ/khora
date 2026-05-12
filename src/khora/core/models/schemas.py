@@ -135,8 +135,8 @@ def register_attribute_schema(
 ) -> None:
     """Register a Pydantic attribute schema for an entity type.
 
-    Downstream projects (e.g. genesis) use this to add domain-specific
-    schemas without modifying khora core.
+    Downstream projects use this to add domain-specific schemas without
+    modifying khora core.
 
     Args:
         entity_type: Canonical entity type name (e.g. "TICKET")

@@ -1,7 +1,7 @@
 """LiteLLM configuration for unified LLM access.
 
 Provides a unified interface to all LLM providers (OpenAI, Anthropic, Google, etc.)
-with fallbacks and routing. Based on the memoryman/potemkin pattern.
+with fallbacks and routing.
 """
 
 from __future__ import annotations
