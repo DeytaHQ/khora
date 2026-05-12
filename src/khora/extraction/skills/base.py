@@ -613,12 +613,11 @@ class ExtractionSkill:
         )
 
 
-# Public API contract. Downstream consumers (khora-explorer,
-# genesis, khora-benchmarks) depend on these symbols. Changes to any class
-# listed here — renaming fields, removing fields, or changing field types —
-# require a major version bump and prior coordination. Additive changes
-# (new optional fields with defaults) are permitted in patch/minor releases
-# provided from_dict round-trips existing payloads.
+# Public API contract. Downstream consumers depend on these symbols.
+# Changes to any class listed here — renaming fields, removing fields, or
+# changing field types — require a major version bump and prior coordination.
+# Additive changes (new optional fields with defaults) are permitted in
+# patch/minor releases provided from_dict round-trips existing payloads.
 __all__ = [
     # Stable expertise configuration
     "ExpertiseConfig",

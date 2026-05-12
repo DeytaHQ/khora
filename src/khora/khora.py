@@ -91,8 +91,8 @@ if TYPE_CHECKING:
     from khora.storage import StorageConfig, StorageCoordinator
 
 
-# DYT-645: LLMUsage is a public API type consumed by Poros (DYT-650) and Peras (DYT-651).
-# Changes to field names or types require coordination with those projects.
+# LLMUsage is a public API type consumed by external cost-tracking integrations.
+# Changes to field names or types require a coordinated release.
 @dataclass(slots=True, frozen=True)
 class LLMUsage:
     """A single LLM API call's token usage.
@@ -509,7 +509,7 @@ class Khora:
             if _is_undefined_table_error(exc):
                 # Fresh DB — `memory_namespaces` hasn't been created yet, so there
                 # are no namespaces and therefore no orphaned PENDING docs. Common
-                # path on per-run ephemeral databases (e.g. khora-benchmarks-service).
+                # path on per-run ephemeral databases.
                 logger.debug(
                     "pending_processor: skipping orphan recovery on fresh DB (memory_namespaces table not yet created)"
                 )

@@ -1523,7 +1523,7 @@ async def ingest_documents(
     _staging_elapsed = _batch_time.perf_counter() - _staging_t0
 
     # Build mapping from staged doc ID to original dict for per-doc overrides
-    # (e.g. _skill_name, _extraction_context set by callers like Genesis)
+    # (e.g. _skill_name, _extraction_context set by callers)
     doc_originals: dict[UUID, dict[str, Any]] = {}
     for orig, staged in zip(documents, staged_results):
         if staged is not None:

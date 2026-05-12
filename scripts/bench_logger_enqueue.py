@@ -27,7 +27,7 @@ Six scenarios across two sink types and three duty cycles:
   rotating-file rotation events, anything making real syscalls).
 * **handler/slow**: ``slow-sink`` plus a 5ms ``await asyncio.sleep`` between
   batches, modelling a request handler doing other async work between log
-  bursts. This is the realistic Khora / Peras workload. Without *some* idle
+  bursts. This is the realistic Khora workload. Without *some* idle
   time for the background thread to drain, ``slow-sink`` applies sustained
   backpressure through the IPC pipe and enqueue's wins evaporate.
 

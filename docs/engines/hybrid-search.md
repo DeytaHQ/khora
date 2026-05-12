@@ -439,7 +439,7 @@ KHORA_QUERY_DEFAULT_LIMIT=10
 KHORA_QUERY_MIN_SIMILARITY=0.0
 ```
 
-### Via Genesis YAML
+### Via YAML
 
 ```yaml
 query:

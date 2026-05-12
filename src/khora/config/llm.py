@@ -1,7 +1,7 @@
 """LiteLLM configuration for unified LLM access.
 
 Provides a unified interface to all LLM providers (OpenAI, Anthropic, Google, etc.)
-with fallbacks and routing. Based on the memoryman/potemkin pattern.
+with fallbacks and routing.
 """
 
 from __future__ import annotations
@@ -139,7 +139,7 @@ class LiteLLMConfig(BaseModel):
         description="Total cap on simultaneous connections in the shared "
         "aiohttp session, summed across all hosts. Default 200 covers a "
         "Khora mixing OpenAI + Anthropic + reranker hosts at the "
-        "concurrency genesis configures.",
+        "concurrency the caller configures.",
     )
     max_connections_per_host: int = Field(
         default=0,

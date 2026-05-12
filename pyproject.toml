@@ -86,9 +86,9 @@ all-backends = [
 reranking = [
     "sentence-transformers>=3.0.0",
 ]
-# Binary file readers (PDF, Excel, Word text extraction) — used by khora-cli and downstream consumers
+# Binary file readers (PDF, Excel, Word text extraction) — used by khora-cli
 binary-readers = ["pymupdf>=1.25.0", "openpyxl>=3.1.0", "python-docx>=1.1.0"]
-# Parquet file support (used by khora-cli and downstream consumers)
+# Parquet file support (used by khora-cli)
 parquet = ["pyarrow>=18.0.0"]
 # Accelerated CPU operations (numpy for cosine sim, rapidfuzz for string matching)
 accel = [
@@ -126,8 +126,8 @@ raw-options.local_scheme = "no-local-version"
 packages = ["src/khora"]
 
 # Sdist excludes dev-only tree.  ``.claude/docs/workflow.md`` is an absolute
-# symlink into the TTOJ repo on developer machines; tarfile rejects absolute
-# symlinks during sdist creation, so the whole .claude/ tree is excluded.
+# symlink on some developer machines; tarfile rejects absolute symlinks
+# during sdist creation, so the whole .claude/ tree is excluded.
 [tool.hatch.build.targets.sdist]
 exclude = [
     ".claude",

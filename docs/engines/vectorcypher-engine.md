@@ -472,10 +472,10 @@ KHORA_NEO4J_PASSWORD=password
 KHORA_ENGINE_NAME=vectorcypher
 ```
 
-### Via Genesis YAML
+### Via YAML
 
 ```yaml
-# config/vectorcypher/genesis.yaml
+# config/vectorcypher/khora.yaml
 engine:
   name: vectorcypher
 

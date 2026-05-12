@@ -31,7 +31,7 @@ telemetry public surface. It is enforced by
 
 - **public** — appears in dashboards, alerts, or downstream code that we
   don't control. Cannot break without a coordinated major version bump
-  (genesis, khora-benchmarks, khora-cli, khora-explorer).
+  across downstream consumers (e.g. khora-cli, khora-explorer).
 - **internal** — emitted today, but the names are not part of the public
   contract. Rename freely; just keep this file in sync with the codebase.
 
@@ -61,9 +61,8 @@ not bump it.
 
 ## OSS implication
 
-khora and anima are independent OSS packages. Per
-[architectural decision], we do **not** extract a shared
-`deyta-telemetry` library. Each package owns its own
-`telemetry-contract.json` and its own drift gate. Downstream consumers
-may rely on the names tagged `public` in this file remaining stable
-within a major version line.
+khora owns its own `telemetry-contract.json` and its own drift gate;
+related OSS packages are expected to do the same rather than depend on
+a shared telemetry library. Downstream consumers may rely on the names
+tagged `public` in this file remaining stable within a major version
+line.

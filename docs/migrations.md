@@ -4,7 +4,7 @@ Khora ships its own Alembic migrations bundled inside the package at `src/khora/
 
 ## Who runs migrations?
 
-Library consumers (genesis, khora-cli, khora-benchmarks, custom services) need Khora's schema to exist before calling `Khora()`. Two options:
+Library consumers (e.g. khora-cli and custom services) need Khora's schema to exist before calling `Khora()`. Two options:
 
 ### 1. Let Khora run them for you
 

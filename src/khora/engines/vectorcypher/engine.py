@@ -350,7 +350,7 @@ class VectorCypherEngine:
             neo4j_url = self._config.get_neo4j_url()
             if not neo4j_url:
                 raise ValueError(
-                    "Neo4j URL is required for VectorCypher engine. Set GENESIS_NEO4J_URL or configure graph_config."
+                    "Neo4j URL is required for VectorCypher engine. Set KHORA_NEO4J_URL or configure graph_config."
                 )
 
             neo4j_cfg = self._config.get_graph_config()
@@ -1522,9 +1522,9 @@ class VectorCypherEngine:
         #    source_chunk_ids, so without this step survivor entities keep
         #    retired chunk UUIDs and net-new entities accumulate stale UUIDs
         #    from prior documents. Downstream consumers that read
-        #    ``len(entity.source_chunk_ids)`` as a mention count (Poros /
-        #    Peras per DYT-645; genesis analytics) would double-count across
-        #    replaces. SET is idempotent; safe for both survivors and net-new.
+        #    ``len(entity.source_chunk_ids)`` as a mention count would
+        #    double-count across replaces. SET is idempotent; safe for both
+        #    survivors and net-new.
         graph = storage.graph
         reset_source_chunk_ids = getattr(graph, "reset_entity_source_chunk_ids_batch", None) if graph else None
         if reset_source_chunk_ids is not None and new_entities:
