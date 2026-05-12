@@ -4,6 +4,61 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.10.5] — FTS5 escape, Chronicle sqlite_lance persistence, loguru placeholders
+
+### Fixed
+
+- **FTS5 syntax error on punctuated queries** (#526). `Khora.recall("What did Curie win?", …)` against `sqlite_lance` raised `sqlite3.OperationalError: fts5: syntax error near "?"`. New `escape_fts5_query` helper at `khora.storage.backends._fts5` is now wired into all three FTS5 sites (`engines/skeleton/backends/sqlite_lance.py`, `storage/backends/sqlite_lance/vector.py`, `storage/backends/sqlite.py`). Tokenizes on whitespace, wraps each token as a quoted FTS5 phrase, caps at 64 tokens. Recall semantics preserved.
+- **Chronicle persistence on `sqlite_lance`** (#529). `Khora.remember()` previously dropped every event and fact (`0 events, 0 facts` in logs) because the coordinator dispatched chronicle methods exclusively to `self.vector`, and `sqlite_lance`'s vector adapter is LanceDB (no SQL session). `write_events`, `write_facts`, `query_events`, `query_active_facts_for_subject`, `supersede_fact` now live on `SQLiteLanceRelationalAdapter` using dedicated SQLite `Table` objects to bypass the ORM's Postgres-only `Vector(1536)` and `ARRAY(UUID)` column types. Coordinator falls back from vector → relational; pgvector path unchanged.
+- **Loguru `%s` placeholder format** (#530). 25 logger format strings in `chronicle/engine.py` used stdlib-`logging`-style `%s/%r/%d` placeholders that loguru doesn't substitute (they printed literally). Converted to loguru's `{}` / `{!r}` / `{:.2f}` placeholders.
+
+### Release tooling
+
+- `verify-ci-green` no longer trips on the GitHub workflow-runs index lag; checks `.conclusion == "success"` via jq instead of `?status=success` URL filter (~30-60s stale window after CI completion was observed on the v0.10.2 tag push).
+- `release.yml` now creates a GitHub release automatically on tag push with auto-generated notes.
+
+### OSS prep
+
+- All khora work tracked in **GitHub Issues**, not Linear (CLAUDE.md / AGENTS.md inline a short GitHub workflow).
+- Public-surface docs (`CLAUDE.md`, `AGENTS.md`, `README.md`, `docs/consumers.md`) no longer reference internal Deyta projects.
+- PyPI long description: "Knowledge memory library for long-horizon AI agents — hybrid retrieval over documents, embeddings, and graph relationships."
+- Sibling packages on PyPI: `khora-cli`, `khora-explorer`, `khora-service` (coming soon).
+
+## [0.10.4] — First clean PyPI release after the migration
+
+### Fixed
+
+- **Lockstep version computation** (PR #527, DYT-4045). The DYT-4026 release pipeline sed'd `pyproject.toml` on the runner before `python -m build`, leaving the working tree dirty. `setuptools_scm` (via hatch-vcs) treated `dirty` at a tag as "ahead of tag" → bumped the patch → produced `0.10.4.dev0` instead of `0.10.3`. Removed the runtime sed; the lockstep `khora-accel == X.Y.Z` pin in `pyproject.toml`'s `rust` extra is now committed alongside the `khora-accel/Cargo.toml` version bump.
+
+### Status
+
+- First post-migration release where **both** `khora` and `khora-accel` wheels published cleanly to PyPI at the same version with the lockstep contract verified end-to-end (wheel METADATA contains `Requires-Dist: khora-accel==0.10.4`).
+- Updated `CLAUDE.md` → Version Bumps to require updating all three files (`Cargo.toml`, `Cargo.lock`, `pyproject.toml` pin) in the same PR.
+
+## [0.10.3] — Partial release (khora-accel only)
+
+### Fixed
+
+- **`actions/checkout@v6` did not fetch tag refs** (PR #525, DYT-4029). `fetch-depth: 0` controls history depth, not tags; without `fetch-tags: true`, `git describe` saw no tag on the runner and `hatch-vcs` fell back to "next-dev". The v0.10.2 release published khora as `0.10.3.dev0` for this reason. Added `fetch-tags: true` to the khora checkout step; added `skip-existing: true` to both PyPI publish steps for safer re-runs.
+
+### Status
+
+- `khora-accel 0.10.3` published to PyPI; `khora 0.10.3` was **not** published (the lockstep-sed bug fixed in 0.10.4 produced `0.10.4.dev0` for khora). Use 0.10.4+ for the matched-pair install.
+
+## [0.10.2] — Publishing migrated to PyPI
+
+### Changed
+
+- **Publishing target**: moved from AWS CodeArtifact to **public PyPI** under the Deyta organization (PR #524, DYT-4026). Uses PyPI Trusted Publishing via GitHub OIDC — no API tokens, no AWS, no secrets in the repo. `pypa/gh-action-pypi-publish@release/v1` with an environment-bound trusted publisher per project.
+- **khora-accel** now ships as an **sdist only** (no platform-wheel matrix). Users compile the Rust extension at install time via maturin's PEP 517 backend; requires a Rust toolchain (`rustup`) on the install host.
+- **Version lockstep**: khora and khora-accel are always released at identical versions. The published khora wheel pins `khora-accel == X.Y.Z` exact.
+- **Publish order**: serialized `publish-accel → publish-khora` so khora's wheel can only land on PyPI if accel is already resolvable.
+- `ci.yml` dev-publish jobs removed; only tag pushes publish.
+
+### Status
+
+- `khora-accel 0.10.2` published to PyPI; `khora 0.10.2` was **not** published (the `fetch-tags` bug fixed in 0.10.3 produced `0.10.3.dev0` for khora). Use 0.10.4+ for the matched-pair install.
+
 ## [0.10.1] — Remove `graphrag` engine
 
 ### Removed — BREAKING

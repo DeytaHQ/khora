@@ -199,3 +199,46 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
+
+  # ============================================================================
+  # Create the GitHub release for this tag with auto-generated notes.
+  #
+  # Runs after both PyPI uploads succeed so the release page never advertises
+  # a version that didn't actually land. Notes are populated by GitHub from the
+  # merged PRs between this tag and the previous tag. The release is marked
+  # latest only when the version isn't a pre-release (we let `gh release`
+  # default to "latest = newest semver".)
+  # ============================================================================
+  github-release:
+    needs: publish-khora
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write   # required to create the release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG=${GITHUB_REF#refs/tags/}
+          # Skip pre-release tags from the "latest" pointer (e.g. v1.0.0-rc1).
+          if [[ "$TAG" == *-* ]]; then
+            LATEST_FLAG="--latest=false"
+          else
+            LATEST_FLAG="--latest"
+          fi
+          # Idempotent: if a release for this tag already exists (manual
+          # backfill or workflow re-run), update it in place instead of failing.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refreshing generated notes."
+            gh release edit "$TAG" --generate-notes $LATEST_FLAG
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes $LATEST_FLAG
+          fi
