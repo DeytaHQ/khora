@@ -62,14 +62,21 @@ class SurrealDBVectorAdapter:
         """Create an adapter from a configuration dictionary.
 
         Expected keys mirror :class:`SurrealDBConnection` init args, plus
-        optional ``hnsw_ef_search``.
+        optional ``hnsw_ef_search``. ADR-084 boundary: ``password`` is
+        unwrapped from ``pydantic.SecretStr`` if needed so the driver
+        receives a plaintext credential.
         """
+        from pydantic import SecretStr
+
         from khora.storage.backends.surrealdb.connection import SurrealDBConnection
 
         conn_kwargs: dict[str, Any] = {}
         for key in ("mode", "path", "url", "namespace", "database", "user", "password"):
             if key in config:
-                conn_kwargs[key] = config[key]
+                value = config[key]
+                if key == "password" and isinstance(value, SecretStr):
+                    value = value.get_secret_value()
+                conn_kwargs[key] = value
 
         connection = SurrealDBConnection(**conn_kwargs)
         return cls(connection, hnsw_ef_search=config.get("hnsw_ef_search", 100))

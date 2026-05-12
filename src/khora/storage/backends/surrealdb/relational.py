@@ -53,6 +53,11 @@ class SurrealDBRelationalAdapter:
         ``password``.  All are optional and fall back to SurrealDBConnection
         defaults.
         """
+        from pydantic import SecretStr
+
+        password = config.get("password", "root")
+        if isinstance(password, SecretStr):
+            password = password.get_secret_value()
         conn = SurrealDBConnection(
             mode=config.get("mode", "memory"),
             path=config.get("path"),
@@ -60,7 +65,7 @@ class SurrealDBRelationalAdapter:
             namespace=config.get("namespace", "khora"),
             database=config.get("database", "default"),
             user=config.get("user", "root"),
-            password=config.get("password", "root"),
+            password=password,
         )
         return cls(connection=conn)
 

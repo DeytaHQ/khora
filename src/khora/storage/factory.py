@@ -395,12 +395,19 @@ class StorageFactory:
 
             # Create a shared SurrealDB connection for all four adapters
             try:
+                # ADR-084 boundary: SurrealDBConfig.password is a SecretStr;
+                # unwrap exactly here so the driver receives the plaintext.
+                from pydantic import SecretStr as _SecretStr
+
                 from .backends.surrealdb.connection import SurrealDBConnection
                 from .backends.surrealdb.event_store import SurrealDBEventStoreAdapter
                 from .backends.surrealdb.graph import SurrealDBGraphAdapter
                 from .backends.surrealdb.relational import SurrealDBRelationalAdapter
                 from .backends.surrealdb.vector import SurrealDBVectorAdapter
 
+                surreal_password = getattr(surreal_config, "password", "root")
+                if isinstance(surreal_password, _SecretStr):
+                    surreal_password = surreal_password.get_secret_value()
                 conn = SurrealDBConnection(
                     mode=getattr(surreal_config, "mode", "memory"),
                     path=getattr(surreal_config, "path", None),
@@ -408,7 +415,7 @@ class StorageFactory:
                     namespace=getattr(surreal_config, "namespace", "khora"),
                     database=getattr(surreal_config, "database", "default"),
                     user=getattr(surreal_config, "user", "root"),
-                    password=getattr(surreal_config, "password", "root"),
+                    password=surreal_password,
                     sync_data=getattr(surreal_config, "sync_data", True),
                 )
                 return StorageCoordinator(

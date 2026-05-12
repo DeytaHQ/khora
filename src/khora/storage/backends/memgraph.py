@@ -52,11 +52,20 @@ class MemgraphBackend(GraphBackendBase):
 
     @classmethod
     def from_config(cls, config: Any) -> MemgraphBackend:
-        """Create a MemgraphBackend from a MemgraphConfig object."""
+        """Create a MemgraphBackend from a MemgraphConfig object.
+
+        ADR-084 boundary: ``config.password`` is unwrapped from ``SecretStr``
+        here so the driver receives a plaintext credential.
+        """
+        from pydantic import SecretStr
+
+        password = config.password
+        if isinstance(password, SecretStr):
+            password = password.get_secret_value()
         return cls(
             url=config.url or "bolt://localhost:7687",
             user=config.user,
-            password=config.password,
+            password=password,
         )
 
     # ------------------------------------------------------------------

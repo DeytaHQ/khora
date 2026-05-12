@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import os
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class TelemetryConfig(BaseModel):
     """Configuration for the telemetry subsystem."""
 
-    database_url: str | None = Field(
+    database_url: SecretStr | None = Field(
         default=None,
-        description="PostgreSQL URL for telemetry database",
+        description="PostgreSQL URL for telemetry database (ADR-084 SecretStr)",
     )
     service_name: str = Field(
         default="khora",

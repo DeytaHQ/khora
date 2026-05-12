@@ -153,7 +153,8 @@ class TestSurrealDBConfig:
 
         cfg = SurrealDBConfig()
         assert cfg.user == "root"
-        assert cfg.password == "root"
+        # ADR-084: password is SecretStr — unwrap to compare plaintext.
+        assert cfg.password.get_secret_value() == "root"
 
     def test_storage_backend_field(self) -> None:
         from khora.config.schema import StorageSettings

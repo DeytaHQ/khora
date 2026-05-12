@@ -26,8 +26,12 @@ _MIGRATIONS_DIR = Path(khora.db.migrations.__file__).parent
 
 def _mock_config() -> MagicMock:
     """Minimal mock KhoraConfig for Khora tests."""
+    from pydantic import SecretStr
+
     cfg = MagicMock()
-    cfg.database_url = "postgresql://localhost/testdb"
+    # ADR-084: database_url is SecretStr on KhoraConfig; tests must mock the
+    # same type so unwrap call sites (Khora.connect()) don't AttributeError.
+    cfg.database_url = SecretStr("postgresql://localhost/testdb")
     cfg.llm.embedding_model = "text-embedding-3-small"
     return cfg
 

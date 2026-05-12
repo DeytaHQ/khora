@@ -29,7 +29,8 @@ class TestStorageSettingsBackwardsCompat:
         assert isinstance(settings.graph, Neo4jConfig)
         assert settings.graph.url == "bolt://localhost:7687"
         assert settings.graph.user == "admin"
-        assert settings.graph.password == "secret"
+        # ADR-084: password is SecretStr — unwrap to compare plaintext.
+        assert settings.graph.password.get_secret_value() == "secret"
         assert settings.graph.database == "mydb"
 
     def test_legacy_pgvector_fields_migrated(self):
@@ -184,7 +185,8 @@ class TestKhoraConfigGraphHelpers:
         assert isinstance(graph, Neo4jConfig)
         assert graph.url == "bolt://localhost:7687"
         assert graph.user == "neo4j"
-        assert graph.password == "pass"
+        # ADR-084: password is SecretStr — unwrap to compare plaintext.
+        assert graph.password.get_secret_value() == "pass"
 
     def test_get_graph_config_kuzu(self):
         config = KhoraConfig(
@@ -280,18 +282,19 @@ class TestParsedNeo4jUrl:
 
     def test_parse_respects_default_password_when_url_has_none(self) -> None:
         parsed = ParsedNeo4jUrl.parse("bolt://localhost:7687", default_password="fallbackpass")
-        assert parsed.password == "fallbackpass"
+        # ADR-084: ParsedNeo4jUrl.password is SecretStr — unwrap to compare.
+        assert parsed.password.get_secret_value() == "fallbackpass"
 
     def test_parse_embedded_password_overrides_default(self) -> None:
         parsed = ParsedNeo4jUrl.parse("bolt://user:embedded@localhost:7687", default_password="fallback")
-        assert parsed.password == "embedded"
+        assert parsed.password.get_secret_value() == "embedded"
 
     def test_parse_neo4j_scheme_preserved(self) -> None:
         """``neo4j://`` routing URLs are parsed and reconstructed with scheme intact."""
         parsed = ParsedNeo4jUrl.parse("neo4j://user:pass@cluster.example.com:7687")
         assert parsed.url == "neo4j://cluster.example.com:7687"
         assert parsed.user == "user"
-        assert parsed.password == "pass"
+        assert parsed.password.get_secret_value() == "pass"
 
     def test_parse_explicit_empty_password_falls_through_to_default(self) -> None:
         """A URL like ``bolt://user:@host:7687`` (trailing colon, no password)
@@ -301,6 +304,6 @@ class TestParsedNeo4jUrl:
         most servers, so falling through to a configured default is the
         sensible behavior.
         """
-        parsed = ParsedNeo4jUrl.parse("bolt://user:@localhost:7687", default_password="fallback")
+        parsed = ParsedNeo4jUrl.parse("bolt://user:@localhost:7687", default_password="fallback")  # noqa: E501
         assert parsed.user == "user"
-        assert parsed.password == "fallback"
+        assert parsed.password.get_secret_value() == "fallback"

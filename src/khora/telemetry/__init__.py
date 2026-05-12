@@ -90,7 +90,10 @@ async def init_telemetry(config: TelemetryConfig | None = None) -> TelemetryColl
 
     from .session import create_telemetry_engine
 
-    engine = create_telemetry_engine(config.database_url)
+    # ADR-084 boundary: TelemetryConfig.database_url is a SecretStr; unwrap
+    # exactly here so the SQLAlchemy engine receives the plaintext DSN.
+    database_url = config.database_url.get_secret_value()
+    engine = create_telemetry_engine(database_url)
     _collector = TelemetryCollector(
         engine,
         service_name=config.service_name,
