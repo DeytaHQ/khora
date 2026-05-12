@@ -114,6 +114,7 @@ Before creating a PR, verify:
 - [ ] No `print()` or `console.log` left in production code (use the structured logger)
 - [ ] Logfire instrumentation added for new library clients where applicable (FastAPI, httpx, SQLAlchemy, etc.)
 - [ ] PR description references the GitHub issue (`Fixes #<n>`) when relevant
+- [ ] For version-bump PRs: `CHANGELOG.md` entry added; `rust/khora-accel/Cargo.toml`, `rust/Cargo.lock`, and `pyproject.toml` rust-extra pin all updated together (see Version Bumps above)
 
 ## Tool Preferences
 
@@ -126,12 +127,18 @@ Before creating a PR, verify:
 
 ### Version Bumps
 
-Khora uses `hatch-vcs` — the package version comes from git tags (`git tag vX.Y.Z`). Only khora-accel needs a manual version in source:
+Khora uses `hatch-vcs` — khora's version comes from git tags (`git tag vX.Y.Z`). khora-accel has its version in source. **khora and khora-accel are always released at the same version (lockstep contract)** — the matching pin in `pyproject.toml`'s `rust` extra enforces this for installers.
+
+Per release:
 
 1. `rust/khora-accel/Cargo.toml` — update `version = "X.Y.Z"`
-2. Run `cargo generate-lockfile` in `rust/khora-accel/` to update `rust/Cargo.lock`
-3. Commit both `Cargo.toml` and `Cargo.lock` in the same PR
-4. After merge: `git tag vX.Y.Z && git push origin vX.Y.Z`
+2. `pyproject.toml` (root) — update `khora-accel == X.Y.Z` in the `rust` extra to match
+3. Run `cargo generate-lockfile` in `rust/khora-accel/` to update `rust/Cargo.lock`
+4. `CHANGELOG.md` — prepend a `## [X.Y.Z] — <one-line headline>` entry above the previous version with `### Fixed` / `### Changed` / `### Added` / `### Removed` sections as appropriate
+5. Commit all four in the same PR
+6. After merge: `git tag vX.Y.Z && git push origin vX.Y.Z`. The release pipeline publishes to PyPI and auto-creates a GitHub release at `github.com/DeytaHQ/khora/releases/tag/vX.Y.Z` with notes generated from merged PRs since the previous tag.
+
+Why all four together? The release pipeline does NOT modify `pyproject.toml` at runtime — that would dirty the working tree and confuse hatch-vcs into producing a `.devN` version. The lockstep pin must already be correct in the committed source. The CHANGELOG entry must also be present in the tagged commit so users browsing PyPI or the source tarball can see what changed.
 
 ### Before Creating PRs
 

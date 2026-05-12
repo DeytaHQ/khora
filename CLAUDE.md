@@ -81,10 +81,11 @@ Per release:
 1. `rust/khora-accel/Cargo.toml` — update `version = "X.Y.Z"`
 2. `pyproject.toml` (root) — update `khora-accel == X.Y.Z` in the `rust` extra to match
 3. Run `cargo generate-lockfile` in `rust/khora-accel/` to update `rust/Cargo.lock`
-4. Commit all three in the same PR
-5. After merge: `git tag vX.Y.Z && git push origin vX.Y.Z`
+4. `CHANGELOG.md` — prepend a `## [X.Y.Z] — <one-line headline>` entry above the previous version with `### Fixed` / `### Changed` / `### Added` / `### Removed` sections as appropriate
+5. Commit all four in the same PR
+6. After merge: `git tag vX.Y.Z && git push origin vX.Y.Z`. The release pipeline publishes to PyPI and auto-creates a GitHub release at `github.com/DeytaHQ/khora/releases/tag/vX.Y.Z` with notes generated from merged PRs since the previous tag.
 
-Why all three together? The release pipeline does NOT modify pyproject.toml at runtime — that would dirty the working tree and confuse hatch-vcs into producing a `.devN` version. The lockstep pin must already be correct in the committed source.
+Why all four together? The release pipeline does NOT modify `pyproject.toml` at runtime — that would dirty the working tree and confuse hatch-vcs into producing a `.devN` version. The lockstep pin must already be correct in the committed source. The CHANGELOG entry must also be present in the tagged commit so users browsing PyPI or the source tarball can see what changed.
 
 ### Before Creating PRs
 
