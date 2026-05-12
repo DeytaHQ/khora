@@ -13,7 +13,7 @@ import pytest
 
 from khora.khora import BatchResult, RememberResult
 
-from .helpers import RESOLVE_ROW_ID, make_lake
+from .helpers import RESOLVE_ROW_ID, make_kb
 
 # ---------------------------------------------------------------------------
 # 1. Khora.remember() with external_id
@@ -27,7 +27,7 @@ class TestRememberWithExternalId:
     @pytest.mark.asyncio
     async def test_remember_passes_external_id_to_engine(self) -> None:
         """external_id param is forwarded to the engine."""
-        lake = make_lake(connected=True)
+        kb = make_kb(connected=True)
         ns_id = uuid4()
 
         mock_result = RememberResult(
@@ -37,9 +37,9 @@ class TestRememberWithExternalId:
             entities_extracted=2,
             relationships_created=1,
         )
-        lake._engine.remember = AsyncMock(return_value=mock_result)
+        kb._engine.remember = AsyncMock(return_value=mock_result)
 
-        result = await lake.remember(
+        result = await kb.remember(
             "Alice works for Acme Corp",
             namespace=ns_id,
             entity_types=["PERSON", "COMPANY"],
@@ -48,13 +48,13 @@ class TestRememberWithExternalId:
         )
 
         assert result == mock_result
-        call_kwargs = lake._engine.remember.call_args.kwargs
+        call_kwargs = kb._engine.remember.call_args.kwargs
         assert call_kwargs["external_id"] == "ext-123"
 
     @pytest.mark.asyncio
     async def test_remember_without_external_id_backward_compat(self) -> None:
         """Calling without external_id omits it from engine kwargs (backward compat)."""
-        lake = make_lake(connected=True)
+        kb = make_kb(connected=True)
         ns_id = uuid4()
 
         mock_result = RememberResult(
@@ -64,9 +64,9 @@ class TestRememberWithExternalId:
             entities_extracted=0,
             relationships_created=0,
         )
-        lake._engine.remember = AsyncMock(return_value=mock_result)
+        kb._engine.remember = AsyncMock(return_value=mock_result)
 
-        result = await lake.remember(
+        result = await kb.remember(
             "test content",
             namespace=ns_id,
             entity_types=["PERSON"],
@@ -74,7 +74,7 @@ class TestRememberWithExternalId:
         )
 
         assert result == mock_result
-        call_kwargs = lake._engine.remember.call_args.kwargs
+        call_kwargs = kb._engine.remember.call_args.kwargs
         assert call_kwargs["external_id"] is None
 
 
@@ -90,7 +90,7 @@ class TestRememberBatchWithExternalId:
     @pytest.mark.asyncio
     async def test_remember_batch_passes_docs_with_external_id(self) -> None:
         """Doc dicts with external_id are forwarded unchanged to the engine."""
-        lake = make_lake(connected=True)
+        kb = make_kb(connected=True)
         ns_id = uuid4()
 
         mock_result = BatchResult(
@@ -102,14 +102,14 @@ class TestRememberBatchWithExternalId:
             entities=2,
             relationships=1,
         )
-        lake._engine.remember_batch = AsyncMock(return_value=mock_result)
+        kb._engine.remember_batch = AsyncMock(return_value=mock_result)
 
         docs = [
             {"content": "Alice works for Acme", "external_id": "ext-1"},
             {"content": "Bob works for Globex", "external_id": "ext-2"},
         ]
 
-        result = await lake.remember_batch(
+        result = await kb.remember_batch(
             docs,
             namespace=ns_id,
             entity_types=["PERSON", "COMPANY"],
@@ -117,7 +117,7 @@ class TestRememberBatchWithExternalId:
         )
 
         assert result == mock_result
-        call_args = lake._engine.remember_batch.call_args
+        call_args = kb._engine.remember_batch.call_args
         passed_docs = call_args.args[0]
         assert passed_docs[0]["external_id"] == "ext-1"
         assert passed_docs[1]["external_id"] == "ext-2"
@@ -125,7 +125,7 @@ class TestRememberBatchWithExternalId:
     @pytest.mark.asyncio
     async def test_remember_batch_mixed_docs(self) -> None:
         """Batch with some docs having external_id and some without."""
-        lake = make_lake(connected=True)
+        kb = make_kb(connected=True)
         ns_id = uuid4()
 
         mock_result = BatchResult(
@@ -137,14 +137,14 @@ class TestRememberBatchWithExternalId:
             entities=2,
             relationships=1,
         )
-        lake._engine.remember_batch = AsyncMock(return_value=mock_result)
+        kb._engine.remember_batch = AsyncMock(return_value=mock_result)
 
         docs = [
             {"content": "Alice works for Acme", "external_id": "ext-1"},
             {"content": "Bob works for Globex"},
         ]
 
-        result = await lake.remember_batch(
+        result = await kb.remember_batch(
             docs,
             namespace=ns_id,
             entity_types=["PERSON", "COMPANY"],
@@ -152,7 +152,7 @@ class TestRememberBatchWithExternalId:
         )
 
         assert result == mock_result
-        call_args = lake._engine.remember_batch.call_args
+        call_args = kb._engine.remember_batch.call_args
         passed_docs = call_args.args[0]
         assert passed_docs[0]["external_id"] == "ext-1"
         assert "external_id" not in passed_docs[1]

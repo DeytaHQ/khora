@@ -48,7 +48,7 @@ class ChatEngine:
             agentic_search: Whether to use multi-step agentic search
         """
         self.persona = persona
-        self.lake = khora
+        self.khora = khora
         self.llm_model = llm_model
         self.agentic_search = agentic_search
 
@@ -88,7 +88,7 @@ class ChatEngine:
         logger.debug(f"Processing chat query: {query[:50]}...")
 
         # 1. Search Khora for relevant context
-        recall_result = await self.lake.recall(
+        recall_result = await self.khora.recall(
             query,
             namespace=namespace_id,
             limit=10,
@@ -118,7 +118,7 @@ class ChatEngine:
                     source = doc_cache[doc_id_str]
                 else:
                     try:
-                        doc = await self.lake.get_document(chunk.document_id)
+                        doc = await self.khora.get_document(chunk.document_id)
                         if doc and doc.metadata:
                             source = doc.metadata.custom.get("source_system", "")
                             if not source:

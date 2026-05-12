@@ -370,7 +370,7 @@ for attempt in range(self._max_retries):
 ### Via Khora
 
 ```python
-result = await lake.remember(
+result = await kb.remember(
     content,
     extraction_model="gpt-4o-mini",
     skill_name="general_entities",

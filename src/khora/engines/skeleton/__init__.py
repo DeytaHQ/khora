@@ -10,9 +10,9 @@ The Skeleton Construction engine is optimized for:
 
 Usage:
     # Default backend (pgvector)
-    async with Khora(db_url, engine="skeleton") as lake:
-        await lake.remember("content", title="Doc", entity_types=[...], relationship_types=[...])
-        results = await lake.recall("query", temporal_filter=TemporalFilter.relative_days(-1))
+    async with Khora(db_url, engine="skeleton") as kb:
+        await kb.remember("content", title="Doc", entity_types=[...], relationship_types=[...])
+        results = await kb.recall("query", temporal_filter=TemporalFilter.relative_days(-1))
 
     # Weaviate backend (advanced filtering)
     async with Khora(
@@ -20,8 +20,8 @@ Usage:
         engine="skeleton",
         backend="weaviate",
         weaviate_url="http://localhost:8080",
-    ) as lake:
-        results = await lake.recall(
+    ) as kb:
+        results = await kb.recall(
             "query",
             filters={"occurred_at": {"gte": "2024-01-01"}, "author": {"eq": "alice"}},
             hybrid_alpha=0.7,

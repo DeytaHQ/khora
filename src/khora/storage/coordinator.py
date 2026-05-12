@@ -145,10 +145,10 @@ class TransactionContext:
 class ReplaceResult:
     """Outcome of ``StorageCoordinator.replace_document_extraction()``.
 
-    Per ADR-056 §API Contracts: counts describe the write footprint of a
-    successful document-replacement lifecycle — chunks hard-replaced in
-    pgvector, new entities/relationships persisted to the graph, and
-    orphaned/surviving graph state retired or remapped.
+    Counts describe the write footprint of a successful document-replacement
+    lifecycle — chunks hard-replaced in pgvector, new entities/relationships
+    persisted to the graph, and orphaned/surviving graph state retired or
+    remapped.
     """
 
     document_id: UUID
@@ -481,7 +481,7 @@ class StorageCoordinator:
         new_entities: list[Entity],
         new_relationships: list[Relationship],
     ) -> ReplaceResult:
-        """Replace the extraction footprint of a document (ADR-056).
+        """Replace the extraction footprint of a document.
 
         Orchestrates the document-replacement lifecycle:
 
@@ -490,16 +490,16 @@ class StorageCoordinator:
            Embedding is assumed to have happened before this call.
         2. After Postgres commits, run graph-side retirement / remap against
            the graph backend — best-effort, not part of the PG transaction.
-           Orphaned entities (ADR-056 §3) are snapshotted into
-           ``:EntityVersion``; orphaned relationships (§4) get ``valid_until``
-           stamped in place; survivors (§5) have their ``source_document_ids``
-           arrays swapped from old to new doc UUID. Net-new entities and
-           relationships are upserted/created via the existing MERGE paths.
+           Orphaned entities are snapshotted into ``:EntityVersion``; orphaned
+           relationships get ``valid_until`` stamped in place; survivors have
+           their ``source_document_ids`` arrays swapped from old to new doc
+           UUID. Net-new entities and relationships are upserted/created via
+           the existing MERGE paths.
         3. On success the document is marked ``COMPLETED``; on any exception
            it is marked ``FAILED`` with the error string and the exception is
            re-raised unwrapped, mirroring ``remember()`` (``ingest.py:1356``).
            A ``FAILED`` document self-heals on the next successful replace
-           against the same ``external_id`` per ADR §Decision #8.
+           against the same ``external_id``.
 
         Args:
             namespace_id: Namespace owning the document.
@@ -746,11 +746,11 @@ class StorageCoordinator:
         return await self.relational.get_document_by_checksum(namespace_id, checksum)
 
     async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
-        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+        """Get a document by (namespace_id, external_id).
 
         Unlike ``get_document_by_checksum``, this lookup returns documents in
         any status (including ``FAILED`` and ``PROCESSING``) so callers can
-        self-heal on the next successful replace (ADR-056 §Decision #8).
+        self-heal on the next successful replace.
         """
         if not self.relational:
             raise RuntimeError("Relational backend not configured")

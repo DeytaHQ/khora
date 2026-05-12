@@ -344,15 +344,15 @@ This enables:
 ```python
 from khora import Khora
 
-async with Khora() as lake:
+async with Khora() as kb:
     # List all entities
-    entities = await lake.list_entities()
+    entities = await kb.list_entities()
 
     # Filter by type
-    people = await lake.list_entities(entity_type="PERSON")
+    people = await kb.list_entities(entity_type="PERSON")
 
     # List in specific namespace
-    entities = await lake.list_entities(
+    entities = await kb.list_entities(
         namespace=namespace_id,
         limit=100,
     )
@@ -362,7 +362,7 @@ async with Khora() as lake:
 
 ```python
 # Get entities related to a specific entity
-related = await lake.find_related_entities(
+related = await kb.find_related_entities(
     entity_id,
     max_depth=2,      # Traverse up to 2 hops
     limit=20,
@@ -376,7 +376,7 @@ for entity, score in related:
 
 ```python
 # Get entity neighborhood (graph context)
-neighborhood = await lake.storage.get_neighborhood(
+neighborhood = await kb.storage.get_neighborhood(
     entity_id,
     depth=2,
     relationship_types=["WORKS_FOR", "MANAGES"],
@@ -401,7 +401,7 @@ entity = Entity(
     attributes={"industry": "Technology"},
 )
 
-await lake.storage.create_entity(entity)
+await kb.storage.create_entity(entity)
 ```
 
 ## Entity Unique Constraint

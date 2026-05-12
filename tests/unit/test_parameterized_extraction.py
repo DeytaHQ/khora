@@ -100,18 +100,18 @@ def _mock_engine() -> MagicMock:
     return mock_eng
 
 
-def _make_lake(*, connected: bool = False):
+def _make_kb(*, connected: bool = False):
     """Create a Khora with mocked config, optionally pre-connected."""
     from khora.khora import Khora
 
     with patch("khora.khora.load_config", return_value=_mock_config()):
-        lake = Khora()
+        kb = Khora()
 
     if connected:
-        lake._connected = True
-        lake._engine = _mock_engine()
+        kb._connected = True
+        kb._engine = _mock_engine()
 
-    return lake
+    return kb
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +389,7 @@ class TestKhoraRememberThreadsTypes:
         """engine.remember() is called with entity_types and relationship_types."""
         from khora.khora import RememberResult
 
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
 
         mock_result = RememberResult(
@@ -399,21 +399,21 @@ class TestKhoraRememberThreadsTypes:
             entities_extracted=0,
             relationships_created=0,
         )
-        lake._engine.remember = AsyncMock(return_value=mock_result)
+        kb._engine.remember = AsyncMock(return_value=mock_result)
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            await lake.remember(
+            await kb.remember(
                 "Olaparib targets BRCA1.",
                 namespace=ns_id,
                 entity_types=["DRUG", "GENE"],
                 relationship_types=["TARGETS"],
             )
 
-        lake._engine.remember.assert_awaited_once()
-        call_kwargs = lake._engine.remember.call_args
+        kb._engine.remember.assert_awaited_once()
+        call_kwargs = kb._engine.remember.call_args
         assert call_kwargs.kwargs["entity_types"] == ["DRUG", "GENE"]
         assert call_kwargs.kwargs["relationship_types"] == ["TARGETS"]
 
@@ -431,7 +431,7 @@ class TestKhoraRememberBatchThreadsTypes:
         """engine.remember_batch() is called with entity_types and relationship_types."""
         from khora.khora import BatchResult
 
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
 
         mock_result = BatchResult(
@@ -443,21 +443,21 @@ class TestKhoraRememberBatchThreadsTypes:
             entities=0,
             relationships=0,
         )
-        lake._engine.remember_batch = AsyncMock(return_value=mock_result)
+        kb._engine.remember_batch = AsyncMock(return_value=mock_result)
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            await lake.remember_batch(
+            await kb.remember_batch(
                 [{"content": "Olaparib targets BRCA1."}],
                 namespace=ns_id,
                 entity_types=["DRUG"],
                 relationship_types=["TARGETS"],
             )
 
-        lake._engine.remember_batch.assert_awaited_once()
-        call_kwargs = lake._engine.remember_batch.call_args
+        kb._engine.remember_batch.assert_awaited_once()
+        call_kwargs = kb._engine.remember_batch.call_args
         assert call_kwargs.kwargs["entity_types"] == ["DRUG"]
         assert call_kwargs.kwargs["relationship_types"] == ["TARGETS"]
 
@@ -469,31 +469,31 @@ class TestKhoraRememberBatchThreadsTypes:
 
 @pytest.mark.unit
 class TestRememberRequiresOntologyParams:
-    """Verify that calling lake.remember() without entity_types or relationship_types raises TypeError."""
+    """Verify that calling kb.remember() without entity_types or relationship_types raises TypeError."""
 
     async def test_remember_missing_entity_types_raises(self) -> None:
         """remember() without entity_types raises TypeError."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
 
         with pytest.raises(TypeError):
-            await lake.remember("some text", namespace=ns_id, relationship_types=["KNOWS"])
+            await kb.remember("some text", namespace=ns_id, relationship_types=["KNOWS"])
 
     async def test_remember_missing_relationship_types_raises(self) -> None:
         """remember() without relationship_types raises TypeError."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
 
         with pytest.raises(TypeError):
-            await lake.remember("some text", namespace=ns_id, entity_types=["PERSON"])
+            await kb.remember("some text", namespace=ns_id, entity_types=["PERSON"])
 
     async def test_remember_missing_both_raises(self) -> None:
         """remember() without either ontology param raises TypeError."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
 
         with pytest.raises(TypeError):
-            await lake.remember("some text", namespace=ns_id)
+            await kb.remember("some text", namespace=ns_id)
 
 
 # ---------------------------------------------------------------------------
@@ -503,15 +503,15 @@ class TestRememberRequiresOntologyParams:
 
 @pytest.mark.unit
 class TestRememberBatchRequiresOntologyParams:
-    """Verify that calling lake.remember_batch() without entity_types or relationship_types raises TypeError."""
+    """Verify that calling kb.remember_batch() without entity_types or relationship_types raises TypeError."""
 
     async def test_remember_batch_missing_entity_types_raises(self) -> None:
         """remember_batch() without entity_types raises TypeError."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
 
         with pytest.raises(TypeError):
-            await lake.remember_batch(
+            await kb.remember_batch(
                 [{"content": "text"}],
                 namespace=ns_id,
                 relationship_types=["KNOWS"],
@@ -519,11 +519,11 @@ class TestRememberBatchRequiresOntologyParams:
 
     async def test_remember_batch_missing_relationship_types_raises(self) -> None:
         """remember_batch() without relationship_types raises TypeError."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
 
         with pytest.raises(TypeError):
-            await lake.remember_batch(
+            await kb.remember_batch(
                 [{"content": "text"}],
                 namespace=ns_id,
                 entity_types=["PERSON"],
@@ -531,8 +531,8 @@ class TestRememberBatchRequiresOntologyParams:
 
     async def test_remember_batch_missing_both_raises(self) -> None:
         """remember_batch() without either ontology param raises TypeError."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
 
         with pytest.raises(TypeError):
-            await lake.remember_batch([{"content": "text"}], namespace=ns_id)
+            await kb.remember_batch([{"content": "text"}], namespace=ns_id)

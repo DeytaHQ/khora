@@ -69,9 +69,9 @@ The main engine class implementing `MemoryEngineProtocol`:
 from khora import Khora
 
 # Use Skeleton Construction engine explicitly
-async with Khora("postgresql://...", engine="skeleton") as lake:
+async with Khora("postgresql://...", engine="skeleton") as kb:
     # Store with temporal context
-    result = await lake.remember(
+    result = await kb.remember(
         "Meeting notes from quarterly review",
         title="Q1 Review",
         metadata={
@@ -82,7 +82,7 @@ async with Khora("postgresql://...", engine="skeleton") as lake:
     )
 
     # Recall with temporal and structured filters
-    results = await lake.recall(
+    results = await kb.recall(
         "What decisions were made?",
         temporal_filter={
             "occurred_after": "2024-01-01",

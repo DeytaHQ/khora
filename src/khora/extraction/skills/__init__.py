@@ -20,8 +20,8 @@ Example usage:
     )
 
     # Use with Khora
-    async with Khora() as lake:
-        result = await lake.remember(content, expertise=expertise)
+    async with Khora() as kb:
+        result = await kb.remember(content, expertise=expertise)
 """
 
 from __future__ import annotations

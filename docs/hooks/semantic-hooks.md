@@ -8,12 +8,12 @@ Semantic hooks let you subscribe to events during document ingestion and receive
 from khora import Khora
 from khora.hooks import SemanticFilter
 
-async with Khora(db_url) as lake:
+async with Khora(db_url) as kb:
     # Simple: get notified on every new entity
     async def on_entity(event):
         print(f"New entity: {event.data.get('name')} ({event.data.get('entity_type')})")
 
-    lake.subscribe("entity.created", on_entity)
+    kb.subscribe("entity.created", on_entity)
 
     # Advanced: semantic filter for specific entity types
     filter = SemanticFilter(
@@ -21,10 +21,10 @@ async with Khora(db_url) as lake:
         description="Any mention of a competitor company",
         entity_types=["ORGANIZATION"],
     )
-    lake.subscribe("entity.created", on_entity, filter=filter)
+    kb.subscribe("entity.created", on_entity, filter=filter)
 
     # Ingestion triggers callbacks
-    await lake.remember("Acme Corp announced a partnership with Globex.", namespace=ns_id)
+    await kb.remember("Acme Corp announced a partnership with Globex.", namespace=ns_id)
 ```
 
 ## 3-Level Filter Cascade
@@ -106,17 +106,17 @@ SemanticFilter(
 
 ## API
 
-### `lake.subscribe(event_type, callback, filter=None)`
+### `kb.subscribe(event_type, callback, filter=None)`
 
 Register a callback for an event type. Returns a subscription ID.
 
-### `lake.unsubscribe(subscription_id)`
+### `kb.unsubscribe(subscription_id)`
 
 Remove a subscription.
 
-### `lake.hooks`
+### `kb.hooks`
 
-Access the underlying `HookDispatcher` for advanced usage (e.g., `lake.hooks.clear()`).
+Access the underlying `HookDispatcher` for advanced usage (e.g., `kb.hooks.clear()`).
 
 ## Related Documentation
 

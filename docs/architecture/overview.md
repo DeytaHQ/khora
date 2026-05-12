@@ -147,18 +147,18 @@ Your primary interface. Lives at `src/khora/khora.py`.
 ```python
 from khora import Khora
 
-async with Khora() as lake:
+async with Khora() as kb:
     # Store something
-    result = await lake.remember(
+    result = await kb.remember(
         "Einstein developed relativity while working at the patent office.",
         title="Einstein Biography"
     )
 
     # Find it later
-    results = await lake.recall("Who developed the theory of relativity?")
+    results = await kb.recall("Who developed the theory of relativity?")
 
     # Remove if needed
-    await lake.forget(result.document_id)
+    await kb.forget(result.document_id)
 ```
 
 Khora handles all the complexity of coordinating three databases, running extraction pipelines, and combining search results. You just tell it what to remember and what to recall.
@@ -200,7 +200,7 @@ Each namespace has two IDs:
 Public API methods accept `namespace_id` and resolve to the active version's `id` automatically via `resolve_namespace()`. You can also look up a namespace by its stable ID:
 
 ```python
-ns = await lake.get_namespace_by_stable_id(stable_namespace_id)
+ns = await kb.get_namespace_by_stable_id(stable_namespace_id)
 ```
 
 ## Event Sourcing: Nothing is Forgotten

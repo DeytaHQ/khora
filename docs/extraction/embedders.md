@@ -166,10 +166,10 @@ No API key needed - just run Ollama locally.
 
 ```python
 # Uses configured default embedding model
-await lake.remember("Your content...")
+await kb.remember("Your content...")
 
 # Override for specific content
-await lake.remember(
+await kb.remember(
     "Your content...",
     embedding_model="text-embedding-3-large"
 )

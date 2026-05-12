@@ -1,11 +1,11 @@
-"""Real-backend integration tests for ``StorageCoordinator.replace_document_extraction`` (DYT-2673, ADR-056).
+"""Real-backend integration tests for ``StorageCoordinator.replace_document_extraction`` (DYT-2673).
 
 Exercises the full document-replacement lifecycle against a running Postgres
 + Neo4j stack:
 
 - Happy path with mixed retire / survive / net-new entity and relationship sets
 - Graph-side failure → document lands in ``FAILED``; next successful replace
-  heals it back to ``COMPLETED`` (ADR §Decision #8 self-heal)
+  heals it back to ``COMPLETED`` (self-heal)
 
 Gated by ``NEO4J_INTEGRATION_TEST=1`` because CI does not provision Neo4j.
 
@@ -198,7 +198,7 @@ class TestReplaceDocumentExtractionIntegration:
     async def test_graph_failure_marks_document_failed_then_heals(
         self, coord: StorageCoordinator, namespace_id, monkeypatch
     ) -> None:
-        """Graph-side failure → FAILED; next successful replace → COMPLETED (ADR §8 self-heal)."""
+        """Graph-side failure → FAILED; next successful replace → COMPLETED (self-heal)."""
         old_doc = Document(
             namespace_id=namespace_id,
             content="seed",

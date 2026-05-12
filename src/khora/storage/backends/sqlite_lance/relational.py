@@ -508,10 +508,10 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             return self._document_model_to_domain(model) if model else None
 
     async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
-        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+        """Get a document by (namespace_id, external_id).
 
         Status is NOT filtered so FAILED rows can self-heal on the next
-        successful replace (ADR-056 §Decision #8).
+        successful replace.
         """
         if external_id is None:
             return None
@@ -548,7 +548,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             return {m.checksum: self._document_model_to_domain(m) for m in models}
 
     async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
-        """Batch lookup by ``(namespace_id, external_id)`` — ADR-056. Status-agnostic."""
+        """Batch lookup by ``(namespace_id, external_id)``. Status-agnostic."""
         filtered = [e for e in external_ids if e]
         if not filtered:
             return {}

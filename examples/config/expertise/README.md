@@ -19,8 +19,8 @@ This directory contains example expertise configurations for Khora's knowledge g
    loader = ExpertiseLoader()
    expertise = loader.load_file("~/.khora/expertise/my_expertise.yaml")
 
-   async with Khora() as lake:
-       result = await lake.remember(content, expertise=expertise)
+   async with Khora() as kb:
+       result = await kb.remember(content, expertise=expertise)
    ```
 
 ## Configuration Format
@@ -207,8 +207,8 @@ expertise = ExpertiseConfig(
 )
 
 # Use directly
-async with Khora() as lake:
-    result = await lake.remember(content, expertise=expertise)
+async with Khora() as kb:
+    result = await kb.remember(content, expertise=expertise)
 
 # Or register for reuse
 from khora.extraction.skills import register_expertise

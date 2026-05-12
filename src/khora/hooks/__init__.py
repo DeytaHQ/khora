@@ -9,12 +9,12 @@ Example usage::
     from khora import Khora
     from khora.hooks import EventType, SemanticFilter
 
-    async with Khora(db_url) as lake:
+    async with Khora(db_url) as kb:
         # Simple: subscribe to all entity creation events
         async def on_entity(event):
             print(f"New entity: {event.data.get('name')}")
 
-        lake.subscribe(EventType.ENTITY_CREATED, on_entity)
+        kb.subscribe(EventType.ENTITY_CREATED, on_entity)
 
         # Advanced: semantic filter with embedding pre-screen
         filter = SemanticFilter(
@@ -22,10 +22,10 @@ Example usage::
             description="Any mention of a competitor company",
             entity_types=["ORGANIZATION"],
         )
-        lake.subscribe(EventType.ENTITY_CREATED, on_entity, filter=filter)
+        kb.subscribe(EventType.ENTITY_CREATED, on_entity, filter=filter)
 
         # Ingest — callbacks fire automatically
-        await lake.remember("Acme Corp announced a new product...")
+        await kb.remember("Acme Corp announced a new product...")
 """
 
 from __future__ import annotations

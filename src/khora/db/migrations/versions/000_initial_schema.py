@@ -38,7 +38,7 @@ depends_on: str | Sequence[str] | None = None
 # - ENUM   -> VARCHAR(64) with CHECK constraint implied at ORM layer
 # - Vector -> column is omitted; LanceDB owns embedding storage for sqlite_lance
 #
-# This keeps functional parity for memory-lake operations. Embeddings on SQLite
+# This keeps functional parity for khora operations. Embeddings on SQLite
 # live in a separate LanceDB table keyed by chunk/entity id (DYT-2728+).
 
 

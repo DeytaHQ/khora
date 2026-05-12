@@ -1642,7 +1642,7 @@ RETURN current.id AS id
     ) -> int:
         """Overwrite ``source_chunk_ids`` on entities to the supplied values.
 
-        ADR-056: the Phase 2 replace lifecycle handles survivor entities via
+        The Phase 2 replace lifecycle handles survivor entities via
         ``remap_source_document_ids_batch`` (source_document_ids only) and
         net-new entities via ``upsert_entities_batch`` whose ``ON MATCH`` clause
         *appends* `source_chunk_ids` with a 250-element tail. On a document
@@ -1692,7 +1692,7 @@ RETURN count(e) AS updated
         """Overwrite ``source_chunk_ids`` on relationships to the supplied values.
 
         Sibling to :meth:`reset_entity_source_chunk_ids_batch` for the
-        relationship side of the ADR-056 replace lifecycle. Same
+        relationship side of the replace lifecycle. Same
         ``(old + new)[-250..]`` append issue at ``create_relationships_batch``'s
         ``ON MATCH`` clause (see ``neo4j.py`` relationship MERGE).
 
@@ -2843,7 +2843,7 @@ RETURN count(r) AS updated
         Idempotent on repeated application against the same
         ``(old_doc_id, new_doc_id)`` pair: if ``new_doc_id`` is already
         present in the array, the append is suppressed so a retry never
-        duplicates it. ADR-056 §Decision #8 self-heal can retry the
+        duplicates it. Self-heal can retry the
         replace lifecycle and the caller's remap payload will re-include
         surviving entity/relationship rows, so this method must be
         safe to run repeatedly.
@@ -2909,7 +2909,7 @@ RETURN count(r) AS updated
         Returns:
             (entities, relationships) where each record carries the identity
             fields and the current ``source_document_ids`` length sufficient to
-            apply the ADR-056 §3/§4 retirement filter.
+            apply the retirement filter.
         """
         doc_id_str = str(document_id)
         ns_id_str = str(namespace_id)

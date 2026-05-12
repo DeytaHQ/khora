@@ -72,7 +72,7 @@ def llm_cost_counter() -> _RecordingCounter:
 
 
 # ---------------------------------------------------------------------------
-# Helpers cribbed from test_logfire_integration.py to build a minimal lake
+# Helpers cribbed from test_logfire_integration.py to build a minimal kb
 # ---------------------------------------------------------------------------
 
 
@@ -110,12 +110,12 @@ def _mock_engine() -> MagicMock:
     return eng
 
 
-def _make_lake() -> Khora:
+def _make_kb() -> Khora:
     with patch("khora.khora.load_config", return_value=_mock_config()):
-        lake = Khora()
-    lake._connected = True
-    lake._engine = _mock_engine()
-    return lake
+        kb = Khora()
+    kb._connected = True
+    kb._engine = _mock_engine()
+    return kb
 
 
 # ---------------------------------------------------------------------------
@@ -126,9 +126,9 @@ def _make_lake() -> Khora:
 @pytest.mark.asyncio
 async def test_recall_emits_duration_histogram(recall_histogram: _RecordingHistogram) -> None:
     """recall() emits one observation on the recall histogram on success."""
-    lake = _make_lake()
+    kb = _make_kb()
     ns_id = uuid4()
-    lake._engine.recall = AsyncMock(
+    kb._engine.recall = AsyncMock(
         return_value=RecallResult(
             query="q",
             namespace_id=ns_id,
@@ -138,13 +138,13 @@ async def test_recall_emits_duration_histogram(recall_histogram: _RecordingHisto
         )
     )
 
-    await lake.recall("q", namespace=ns_id)
+    await kb.recall("q", namespace=ns_id)
 
     assert len(recall_histogram.observations) == 1
     value, attrs = recall_histogram.observations[0]
     assert value >= 0.0
     assert attrs["status"] == "success"
-    assert attrs["engine"] == lake._engine_name
+    assert attrs["engine"] == kb._engine_name
     assert "mode" in attrs
 
 
@@ -153,12 +153,12 @@ async def test_recall_error_path_emits_status_error(
     recall_histogram: _RecordingHistogram,
 ) -> None:
     """Engine error must still emit the histogram with status=error."""
-    lake = _make_lake()
+    kb = _make_kb()
     ns_id = uuid4()
-    lake._engine.recall = AsyncMock(side_effect=RuntimeError("boom"))
+    kb._engine.recall = AsyncMock(side_effect=RuntimeError("boom"))
 
     with pytest.raises(RuntimeError, match="boom"):
-        await lake.recall("q", namespace=ns_id)
+        await kb.recall("q", namespace=ns_id)
 
     assert len(recall_histogram.observations) == 1
     _, attrs = recall_histogram.observations[0]

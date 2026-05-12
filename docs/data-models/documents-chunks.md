@@ -12,7 +12,7 @@ class Document:
     id: UUID
     namespace_id: UUID
     content: str
-    external_id: str | None = None  # Caller-supplied source identity (ADR-050)
+    external_id: str | None = None  # Caller-supplied source identity
     metadata: DocumentMetadata
     status: DocumentStatus = DocumentStatus.PENDING
 
@@ -201,8 +201,8 @@ chunk_overlap = 50
 ```python
 from khora import Khora
 
-async with Khora() as lake:
-    result = await lake.remember(
+async with Khora() as kb:
+    result = await kb.remember(
         "Einstein developed the theory of relativity in 1905.",
         title="Physics History",
         source="wikipedia",
@@ -218,12 +218,12 @@ async with Khora() as lake:
 
 ```python
 # Get document by ID
-doc = await lake.storage.get_document(document_id)
+doc = await kb.storage.get_document(document_id)
 print(f"Status: {doc.status}")
 print(f"Chunk count: {doc.chunk_count}")
 
 # Get chunks for a document
-chunks = await lake.storage.get_document_chunks(document_id)
+chunks = await kb.storage.get_document_chunks(document_id)
 for chunk in chunks:
     print(f"Chunk {chunk.index}: {chunk.content[:100]}...")
 ```
@@ -237,7 +237,7 @@ documents = [
     {"content": "Third document...", "title": "Doc 3"},
 ]
 
-result = await lake.remember_batch(
+result = await kb.remember_batch(
     documents,
     skill_name="general_entities",
     max_concurrent=10,
@@ -251,7 +251,7 @@ print(f"Skipped (duplicates): {result['skipped_documents']}")
 
 ```python
 # Remove document and all associated data
-await lake.forget(document_id)
+await kb.forget(document_id)
 
 # This removes:
 # - The document
@@ -281,7 +281,7 @@ CREATE TABLE documents (
     id UUID PRIMARY KEY,
     namespace_id UUID NOT NULL,
     content TEXT,
-    external_id VARCHAR(512),      -- Caller-supplied source identity (ADR-050)
+    external_id VARCHAR(512),      -- Caller-supplied source identity
     status VARCHAR(20) DEFAULT 'pending',
     metadata JSONB,
     chunk_count INTEGER DEFAULT 0,

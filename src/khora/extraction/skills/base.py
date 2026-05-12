@@ -346,8 +346,8 @@ class ExpertiseConfig:
         expertise = loader.load_file("saas_expert.yaml")
 
         # Use with Khora
-        async with Khora() as lake:
-            result = await lake.remember(content, expertise=expertise)
+        async with Khora() as kb:
+            result = await kb.remember(content, expertise=expertise)
 
         # Or define programmatically
         expertise = ExpertiseConfig(
@@ -613,14 +613,14 @@ class ExtractionSkill:
         )
 
 
-# Public API contract (ADR-022). Downstream consumers (khora-explorer,
+# Public API contract. Downstream consumers (khora-explorer,
 # genesis, khora-benchmarks) depend on these symbols. Changes to any class
 # listed here — renaming fields, removing fields, or changing field types —
 # require a major version bump and prior coordination. Additive changes
 # (new optional fields with defaults) are permitted in patch/minor releases
 # provided from_dict round-trips existing payloads.
 __all__ = [
-    # Stable expertise configuration (ADR-022)
+    # Stable expertise configuration
     "ExpertiseConfig",
     "EntityTypeConfig",
     "RelationshipTypeConfig",
@@ -634,6 +634,6 @@ __all__ = [
     # Supporting types (stable: InferenceCondition is a field of InferenceRule)
     "InferenceCondition",
     "ConfidenceLevel",
-    # Legacy pre-ADR-022 API (kept for backward compatibility)
+    # Legacy API (kept for backward compatibility)
     "ExtractionSkill",
 ]

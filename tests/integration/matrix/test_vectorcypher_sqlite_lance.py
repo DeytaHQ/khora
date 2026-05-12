@@ -33,7 +33,7 @@ filed as **DYT-3560** (parented under DYT-3545) and is the load-bearing
 gap for v0.9.0's "embedded VectorCypher" story.
 
 Until DYT-3560 lands, *every* test in this module is expected to xfail
-at fixture setup (``lake.connect()``). They are written end-to-end so
+at fixture setup (``kb.connect()``). They are written end-to-end so
 that when DYT-3560 wires the embedded path, the same tests serve as the
 acceptance suite without rewriting them.
 
@@ -175,7 +175,7 @@ def _patch_llm(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-async def lake(tmp_path: Path) -> AsyncIterator[Khora]:
+async def kb(tmp_path: Path) -> AsyncIterator[Khora]:
     """Per-test VectorCypher Khora on a fresh embedded stack.
 
     Each test gets its own ``tmp_path`` for isolation — sqlite_lance
@@ -198,13 +198,13 @@ async def lake(tmp_path: Path) -> AsyncIterator[Khora]:
     config.pipelines.extract_entities = True
     config.pipelines.selective_extraction = False
 
-    lake = Khora(config, engine="vectorcypher", run_migrations=True)
-    await lake.connect()
+    kb = Khora(config, engine="vectorcypher", run_migrations=True)
+    await kb.connect()
     try:
-        yield lake
+        yield kb
     finally:
         try:
-            await lake.disconnect()
+            await kb.disconnect()
         except Exception:
             # Disconnect can throw if connect partially succeeded; the
             # xfail marker is what matters at the test boundary.
@@ -212,8 +212,8 @@ async def lake(tmp_path: Path) -> AsyncIterator[Khora]:
 
 
 @pytest.fixture
-async def namespace_id(lake: Khora) -> UUID:
-    ns = await lake.create_namespace()
+async def namespace_id(kb: Khora) -> UUID:
+    ns = await kb.create_namespace()
     return ns.namespace_id
 
 
@@ -223,13 +223,13 @@ def _no_event_extraction() -> ExpertiseConfig:
 
 
 async def _remember(
-    lake: Khora,
+    kb: Khora,
     *,
     namespace_id: UUID,
     content: str,
     title: str = "",
 ) -> Any:
-    return await lake.remember(
+    return await kb.remember(
         content=content,
         namespace=namespace_id,
         title=title,
@@ -244,7 +244,7 @@ async def _remember(
 # ---------------------------------------------------------------------------
 
 
-async def test_vc_remember_recall_roundtrip(lake: Khora, namespace_id: UUID) -> None:
+async def test_vc_remember_recall_roundtrip(kb: Khora, namespace_id: UUID) -> None:
     """Ingest 3 docs, recall, assert ingested text appears in ``context_text``."""
     contents = [
         "Alice met Bob at the Python conference in Berlin.",
@@ -252,9 +252,9 @@ async def test_vc_remember_recall_roundtrip(lake: Khora, namespace_id: UUID) -> 
         "Dan organized the after-party that lasted until midnight.",
     ]
     for c in contents:
-        await _remember(lake, namespace_id=namespace_id, content=c)
+        await _remember(kb, namespace_id=namespace_id, content=c)
 
-    result = await lake.recall("Python conference Berlin", namespace=namespace_id, limit=10)
+    result = await kb.recall("Python conference Berlin", namespace=namespace_id, limit=10)
 
     assert result.metadata.get("engine") == "vectorcypher"
     assert len(result.chunks) >= 1, "expected at least one chunk back"
@@ -262,16 +262,16 @@ async def test_vc_remember_recall_roundtrip(lake: Khora, namespace_id: UUID) -> 
     assert "Python conference" in result.context_text
 
 
-async def test_vc_namespace_isolation(lake: Khora) -> None:
+async def test_vc_namespace_isolation(kb: Khora) -> None:
     """Two namespaces, recall does not cross-bleed."""
-    ns_a = (await lake.create_namespace()).namespace_id
-    ns_b = (await lake.create_namespace()).namespace_id
+    ns_a = (await kb.create_namespace()).namespace_id
+    ns_b = (await kb.create_namespace()).namespace_id
 
-    await _remember(lake, namespace_id=ns_a, content="alpha document about kangaroos")
-    await _remember(lake, namespace_id=ns_b, content="bravo document about penguins")
+    await _remember(kb, namespace_id=ns_a, content="alpha document about kangaroos")
+    await _remember(kb, namespace_id=ns_b, content="bravo document about penguins")
 
-    result_a = await lake.recall("animals", namespace=ns_a, limit=10)
-    result_b = await lake.recall("animals", namespace=ns_b, limit=10)
+    result_a = await kb.recall("animals", namespace=ns_a, limit=10)
+    result_b = await kb.recall("animals", namespace=ns_b, limit=10)
 
     a_text = " ".join(c.content for c, _ in result_a.chunks)
     b_text = " ".join(c.content for c, _ in result_b.chunks)
@@ -282,14 +282,14 @@ async def test_vc_namespace_isolation(lake: Khora) -> None:
     assert "kangaroos" not in b_text, "namespace_a leaked into namespace_b"
 
 
-async def test_vc_entity_extraction(lake: Khora, namespace_id: UUID) -> None:
+async def test_vc_entity_extraction(kb: Khora, namespace_id: UUID) -> None:
     """Ingest a doc with a known entity → entity persists in the embedded graph.
 
     Queries the SQLite-CTE graph adapter directly via
     ``coord.graph.list_entities`` to confirm the entity was actually
     written (not just returned by the LLM stub).
 
-    Note on dual-IDs (ADR-024): ``MemoryNamespace`` carries two UUIDs —
+    Note on dual-IDs: ``MemoryNamespace`` carries two UUIDs —
     ``namespace_id`` (stable) is what ``Khora.recall`` accepts, but
     the graph rows key on ``namespace.id`` (row-level FK), so we resolve
     before the direct lookup. Names are lowercased by
@@ -301,12 +301,12 @@ async def test_vc_entity_extraction(lake: Khora, namespace_id: UUID) -> None:
         relationships=[("Ada Lovelace", "Analytical Engine", "WORKED_ON")],
     )
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="Ada Lovelace wrote the first algorithm intended for the Analytical Engine.",
     )
 
-    coord = lake._engine._storage  # type: ignore[union-attr]
+    coord = kb._engine._storage  # type: ignore[union-attr]
     row_ns_id = await coord.resolve_namespace(namespace_id)
     entities = await coord.graph.list_entities(row_ns_id, limit=100)
     names = {e.name for e in entities}
@@ -325,7 +325,7 @@ async def test_vc_entity_extraction(lake: Khora, namespace_id: UUID) -> None:
     ),
     raises=Exception,
 )
-async def test_vc_two_hop_traversal(lake: Khora, namespace_id: UUID) -> None:
+async def test_vc_two_hop_traversal(kb: Khora, namespace_id: UUID) -> None:
     """3 connected docs (A→B→C), query about A surfaces C via 2-hop traversal."""
     _plan_extraction(
         "Alice",
@@ -343,12 +343,12 @@ async def test_vc_two_hop_traversal(lake: Khora, namespace_id: UUID) -> None:
         relationships=[("Carol", "graph databases", "RESEARCHES")],
     )
 
-    await _remember(lake, namespace_id=namespace_id, content="Alice knows Bob from college.")
-    await _remember(lake, namespace_id=namespace_id, content="Bob and Carol collaborate on research projects.")
-    await _remember(lake, namespace_id=namespace_id, content="Carol presented findings on graph databases.")
+    await _remember(kb, namespace_id=namespace_id, content="Alice knows Bob from college.")
+    await _remember(kb, namespace_id=namespace_id, content="Bob and Carol collaborate on research projects.")
+    await _remember(kb, namespace_id=namespace_id, content="Carol presented findings on graph databases.")
 
     # Force ≥ 2-hop expansion via graph_depth=2.
-    result = await lake.recall(
+    result = await kb.recall(
         "Alice",
         namespace=namespace_id,
         limit=10,
@@ -366,24 +366,24 @@ async def test_vc_two_hop_traversal(lake: Khora, namespace_id: UUID) -> None:
     strict=True,
     reason="DYT-3562: VectorCypher embedded path doesn't push temporal filter to LanceDB query",
 )
-async def test_vc_temporal_filter(lake: Khora, namespace_id: UUID) -> None:
+async def test_vc_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
     """Two docs at different ``occurred_at``; recall with ``last 7 days`` filter
     only returns the recent one.
 
     ``Khora.remember()`` does not surface ``occurred_at`` on its public
-    API (engines accept it but the lake-level wrapper does not forward it),
+    API (engines accept it but the kb-level wrapper does not forward it),
     so we ingest both docs at ``now`` and then back-date one chunk's
     ``source_timestamp`` directly in SQLite — same pattern as
     ``test_skeleton_pg`` for the production stack.
     """
     now = datetime.now(UTC)
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="recent doc about Falcon launch in May 2026.",
     )
     r_old = await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="old doc about Falcon launch in 2024.",
     )
@@ -391,7 +391,7 @@ async def test_vc_temporal_filter(lake: Khora, namespace_id: UUID) -> None:
     # Back-date the "old" doc's chunks via the embedded SQLite handle.
     # The sqlite_lance backend stores UUIDs as 32-char hex (no dashes),
     # so we must match that form when filtering on ``document_id``.
-    coord = lake._engine._storage  # type: ignore[union-attr]
+    coord = kb._engine._storage  # type: ignore[union-attr]
     handle = coord.vector._handle  # type: ignore[union-attr]
     backdated_iso = (now - timedelta(days=400)).isoformat()
     await handle.sqlite.execute(
@@ -401,7 +401,7 @@ async def test_vc_temporal_filter(lake: Khora, namespace_id: UUID) -> None:
     await handle.sqlite.commit()
 
     seven_days_ago = now - timedelta(days=7)
-    result = await lake.recall(
+    result = await kb.recall(
         "Falcon launch",
         namespace=namespace_id,
         limit=10,
@@ -412,11 +412,11 @@ async def test_vc_temporal_filter(lake: Khora, namespace_id: UUID) -> None:
     assert r_old.document_id not in returned_doc_ids, f"old document leaked through temporal filter: {returned_doc_ids}"
 
 
-async def test_vc_recall_metadata_keys(lake: Khora, namespace_id: UUID) -> None:
+async def test_vc_recall_metadata_keys(kb: Khora, namespace_id: UUID) -> None:
     """``RecallResult.metadata`` exposes the keys VC documents on every recall."""
-    await _remember(lake, namespace_id=namespace_id, content="A simple sentence about apples.")
+    await _remember(kb, namespace_id=namespace_id, content="A simple sentence about apples.")
 
-    result = await lake.recall("apples", namespace=namespace_id, limit=5)
+    result = await kb.recall("apples", namespace=namespace_id, limit=5)
 
     md = result.metadata
     # Engine identifier is the only key VC promises across every code
@@ -430,11 +430,11 @@ async def test_vc_recall_metadata_keys(lake: Khora, namespace_id: UUID) -> None:
     # informational rather than load-bearing on the embedded path.
 
 
-async def test_vc_concurrent_remember(lake: Khora, namespace_id: UUID) -> None:
+async def test_vc_concurrent_remember(kb: Khora, namespace_id: UUID) -> None:
     """5 concurrent ingests in one namespace, no integrity errors."""
     contents = [f"document number {i} mentions widget-{i}" for i in range(5)]
     results = await asyncio.gather(
-        *(_remember(lake, namespace_id=namespace_id, content=c) for c in contents),
+        *(_remember(kb, namespace_id=namespace_id, content=c) for c in contents),
         return_exceptions=True,
     )
     errors = [r for r in results if isinstance(r, Exception)]
@@ -443,15 +443,15 @@ async def test_vc_concurrent_remember(lake: Khora, namespace_id: UUID) -> None:
     assert len(doc_ids) == 5, f"expected 5 distinct documents, got {doc_ids}"
 
 
-async def test_vc_recall_empty_namespace(lake: Khora) -> None:
+async def test_vc_recall_empty_namespace(kb: Khora) -> None:
     """Recall on a fresh empty namespace returns an empty (but well-formed) result."""
-    ns = (await lake.create_namespace()).namespace_id
-    result = await lake.recall("anything", namespace=ns, limit=5)
+    ns = (await kb.create_namespace()).namespace_id
+    result = await kb.recall("anything", namespace=ns, limit=5)
     assert result.chunks == []
     assert result.metadata.get("engine") == "vectorcypher"
 
 
-async def test_vc_dual_node_persistence(lake: Khora, namespace_id: UUID) -> None:
+async def test_vc_dual_node_persistence(kb: Khora, namespace_id: UUID) -> None:
     """Ingest one doc with an entity → confirm the dual-node markers VectorCypher
     writes (chunk-node + entity-node + MENTIONED_IN-style edge) are persisted in
     the embedded graph.
@@ -471,12 +471,12 @@ async def test_vc_dual_node_persistence(lake: Khora, namespace_id: UUID) -> None
         relationships=[("Marie Curie", "radium", "DISCOVERED")],
     )
     r = await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="Marie Curie discovered radium and polonium in 1898.",
     )
 
-    coord = lake._engine._storage  # type: ignore[union-attr]
+    coord = kb._engine._storage  # type: ignore[union-attr]
     row_ns_id = await coord.resolve_namespace(namespace_id)
 
     # Entity persistence: both names land in the graph (lowercased).
@@ -507,7 +507,7 @@ async def test_vc_dual_node_persistence(lake: Khora, namespace_id: UUID) -> None
     ),
     raises=Exception,
 )
-async def test_vc_prefer_current_via_cte(lake: Khora, namespace_id: UUID) -> None:
+async def test_vc_prefer_current_via_cte(kb: Khora, namespace_id: UUID) -> None:
     """3-hop A→B→C with B's outgoing edge expired; ``prefer_current=True`` must
     NOT return C's content.
 
@@ -533,11 +533,11 @@ async def test_vc_prefer_current_via_cte(lake: Khora, namespace_id: UUID) -> Non
         relationships=[("Pierre", "polonium", "STUDIES")],
     )
 
-    await _remember(lake, namespace_id=namespace_id, content="Marie collaborated with Pierre.")
-    await _remember(lake, namespace_id=namespace_id, content="Pierre researched polonium extensively.")
+    await _remember(kb, namespace_id=namespace_id, content="Marie collaborated with Pierre.")
+    await _remember(kb, namespace_id=namespace_id, content="Pierre researched polonium extensively.")
 
     # Manually expire the Pierre→polonium edge in the embedded graph.
-    coord = lake._engine._storage  # type: ignore[union-attr]
+    coord = kb._engine._storage  # type: ignore[union-attr]
     row_ns_id = await coord.resolve_namespace(namespace_id)
     rels = await coord.graph.list_relationships(row_ns_id, limit=100)
     target_rel = next(
@@ -550,7 +550,7 @@ async def test_vc_prefer_current_via_cte(lake: Khora, namespace_id: UUID) -> Non
     target_rel.valid_to = datetime.now(UTC) - timedelta(days=1)
     await coord.graph.create_relationships_batch(row_ns_id, [target_rel])
 
-    result = await lake.recall(
+    result = await kb.recall(
         "Marie",
         namespace=namespace_id,
         limit=10,

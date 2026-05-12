@@ -76,18 +76,18 @@ async def main():
         "postgresql://khora:khora@localhost:5434/khora",
         engine="chronicle",
         run_migrations=True,
-    ) as lake:
-        ns = await lake.create_namespace("conversations")
+    ) as kb:
+        ns = await kb.create_namespace("conversations")
 
         # Store conversation turns
-        await lake.remember(
+        await kb.remember(
             "Alice: We should switch to quarterly releases. "
             "Bob: I agree, monthly is too frequent.",
             namespace=ns.namespace_id,
             metadata={"occurred_at": "2026-03-15T10:00:00Z"},
         )
 
-        await lake.remember(
+        await kb.remember(
             "Alice: Actually, let's stick with monthly releases. "
             "The team prefers the faster cadence.",
             namespace=ns.namespace_id,
@@ -95,7 +95,7 @@ async def main():
         )
 
         # Temporal query — Chronicle uses recency to find the latest stance
-        result = await lake.recall(
+        result = await kb.recall(
             "What is Alice's current position on release cadence?",
             namespace=ns.namespace_id,
         )
@@ -107,10 +107,10 @@ asyncio.run(main())
 ### With Embedded SurrealDB (Zero Infrastructure)
 
 ```python
-async with Khora("memory://", engine="chronicle") as lake:
-    ns = await lake.create_namespace("demo")
-    await lake.remember("...", namespace=ns.namespace_id)
-    result = await lake.recall("...", namespace=ns.namespace_id)
+async with Khora("memory://", engine="chronicle") as kb:
+    ns = await kb.create_namespace("demo")
+    await kb.remember("...", namespace=ns.namespace_id)
+    result = await kb.recall("...", namespace=ns.namespace_id)
 ```
 
 ## Comparison with Other Engines

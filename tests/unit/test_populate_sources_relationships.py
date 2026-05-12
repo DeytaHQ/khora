@@ -49,13 +49,13 @@ def _mock_engine() -> MagicMock:
     return mock_eng
 
 
-def _make_lake() -> Khora:
+def _make_kb() -> Khora:
     """Create a connected Khora with mocked internals."""
     with patch("khora.khora.load_config", return_value=_mock_config()):
-        lake = Khora()
-    lake._connected = True
-    lake._engine = _mock_engine()
-    return lake
+        kb = Khora()
+    kb._connected = True
+    kb._engine = _mock_engine()
+    return kb
 
 
 @pytest.mark.unit
@@ -65,7 +65,7 @@ class TestPopulateSourcesRelationships:
     @pytest.mark.asyncio
     async def test_populate_sources_with_relationships(self) -> None:
         """Relationships with source_document_ids get source_documents populated."""
-        lake = _make_lake()
+        kb = _make_kb()
         ns_id = uuid4()
         doc_id = uuid4()
 
@@ -78,17 +78,17 @@ class TestPopulateSourcesRelationships:
         )
 
         src = DocumentSource(id=doc_id, title="Contract")
-        lake._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id: src})
+        kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id: src})
 
-        await lake._populate_sources([], [], [(rel, 0.8)])
+        await kb._populate_sources([], [], [(rel, 0.8)])
 
         assert rel.source_documents == {doc_id: src}
-        lake._engine._storage.get_document_sources_batch.assert_awaited_once()
+        kb._engine._storage.get_document_sources_batch.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_populate_sources_relationships_empty_doc_ids(self) -> None:
         """Relationships with no source_document_ids get source_documents=None."""
-        lake = _make_lake()
+        kb = _make_kb()
 
         rel = Relationship(
             namespace_id=uuid4(),
@@ -99,28 +99,28 @@ class TestPopulateSourcesRelationships:
         )
 
         # No doc IDs to fetch → get_document_sources_batch should not be called
-        lake._engine._storage.get_document_sources_batch = AsyncMock(return_value={})
+        kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={})
 
-        await lake._populate_sources([], [], [(rel, 0.5)])
+        await kb._populate_sources([], [], [(rel, 0.5)])
 
         assert rel.source_documents is None
-        lake._engine._storage.get_document_sources_batch.assert_not_awaited()
+        kb._engine._storage.get_document_sources_batch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_populate_sources_empty_relationships_noop(self) -> None:
         """Empty relationships list doesn't cause errors."""
-        lake = _make_lake()
-        lake._engine._storage.get_document_sources_batch = AsyncMock(return_value={})
+        kb = _make_kb()
+        kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={})
 
         # Should not raise
-        await lake._populate_sources([], [], [])
+        await kb._populate_sources([], [], [])
 
-        lake._engine._storage.get_document_sources_batch.assert_not_awaited()
+        kb._engine._storage.get_document_sources_batch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_populate_sources_mixed(self) -> None:
         """Chunks, entities, and relationships all populated in one call."""
-        lake = _make_lake()
+        kb = _make_kb()
         ns_id = uuid4()
         doc_id_1 = uuid4()
         doc_id_2 = uuid4()
@@ -144,13 +144,13 @@ class TestPopulateSourcesRelationships:
         src_1 = DocumentSource(id=doc_id_1, title="Doc 1")
         src_2 = DocumentSource(id=doc_id_2, title="Doc 2")
         src_3 = DocumentSource(id=doc_id_3, title="Doc 3")
-        lake._engine._storage.get_document_sources_batch = AsyncMock(
+        kb._engine._storage.get_document_sources_batch = AsyncMock(
             return_value={doc_id_1: src_1, doc_id_2: src_2, doc_id_3: src_3}
         )
 
-        await lake._populate_sources([(chunk, 0.9)], [(entity, 0.8)], [(rel, 0.7)])
+        await kb._populate_sources([(chunk, 0.9)], [(entity, 0.8)], [(rel, 0.7)])
 
         assert chunk.source_document is src_1
         assert entity.source_documents == {doc_id_2: src_2}
         assert rel.source_documents == {doc_id_3: src_3}
-        lake._engine._storage.get_document_sources_batch.assert_awaited_once()
+        kb._engine._storage.get_document_sources_batch.assert_awaited_once()

@@ -38,9 +38,9 @@ def _make_persona(**overrides) -> PersonaConfig:
     )
 
 
-def _make_mock_lake() -> MagicMock:
+def _make_mock_kb() -> MagicMock:
     """Create a mock Khora."""
-    lake = MagicMock()
+    kb = MagicMock()
 
     # recall returns a result with chunks
     mock_chunk = MagicMock()
@@ -49,15 +49,15 @@ def _make_mock_lake() -> MagicMock:
 
     mock_recall = MagicMock()
     mock_recall.chunks = [(mock_chunk, 0.95)]
-    lake.recall = AsyncMock(return_value=mock_recall)
+    kb.recall = AsyncMock(return_value=mock_recall)
 
     # get_document returns a doc with metadata
     mock_doc = MagicMock()
     mock_doc.metadata.custom = {"source_system": "confluence"}
     mock_doc.metadata.source = "confluence/page"
-    lake.get_document = AsyncMock(return_value=mock_doc)
+    kb.get_document = AsyncMock(return_value=mock_doc)
 
-    return lake
+    return kb
 
 
 def _make_litellm_response(content: str = "Generated response") -> MagicMock:
@@ -116,33 +116,33 @@ class TestChatResponse:
 class TestChatEngineInit:
     """Tests for ChatEngine initialization."""
 
-    def test_stores_persona_and_lake(self) -> None:
+    def test_stores_persona_and_kb(self) -> None:
         """Init stores persona, khora, and model."""
         persona = _make_persona()
-        lake = _make_mock_lake()
+        kb = _make_mock_kb()
 
-        engine = ChatEngine(persona, lake, llm_model="gpt-4o-mini")
+        engine = ChatEngine(persona, kb, llm_model="gpt-4o-mini")
 
         assert engine.persona is persona
-        assert engine.lake is lake
+        assert engine.khora is kb
         assert engine.llm_model == "gpt-4o-mini"
         assert engine.agentic_search is False
 
     def test_default_model(self) -> None:
         """Default LLM model is gpt-4o."""
         persona = _make_persona()
-        lake = _make_mock_lake()
+        kb = _make_mock_kb()
 
-        engine = ChatEngine(persona, lake)
+        engine = ChatEngine(persona, kb)
 
         assert engine.llm_model == "gpt-4o"
 
     def test_creates_history_manager(self) -> None:
         """Init creates HistoryManager with persona settings."""
         persona = _make_persona(max_history_turns=30, compress_after=15, keep_recent=5)
-        lake = _make_mock_lake()
+        kb = _make_mock_kb()
 
-        engine = ChatEngine(persona, lake)
+        engine = ChatEngine(persona, kb)
 
         assert engine.history_manager.max_turns == 30
         assert engine.history_manager.compress_after == 15
@@ -151,18 +151,18 @@ class TestChatEngineInit:
     def test_creates_prompt_generator(self) -> None:
         """Init creates PromptGenerator with persona."""
         persona = _make_persona()
-        lake = _make_mock_lake()
+        kb = _make_mock_kb()
 
-        engine = ChatEngine(persona, lake)
+        engine = ChatEngine(persona, kb)
 
         assert engine.prompt_generator.persona is persona
 
     def test_agentic_search_flag(self) -> None:
         """Agentic search flag is stored."""
         persona = _make_persona()
-        lake = _make_mock_lake()
+        kb = _make_mock_kb()
 
-        engine = ChatEngine(persona, lake, agentic_search=True)
+        engine = ChatEngine(persona, kb, agentic_search=True)
 
         assert engine.agentic_search is True
 
@@ -178,8 +178,8 @@ class TestChatEngineChat:
     async def test_chat_returns_chat_response(self) -> None:
         """chat() returns a ChatResponse with correct fields."""
         persona = _make_persona(compression_enabled=False)
-        lake = _make_mock_lake()
-        engine = ChatEngine(persona, lake)
+        kb = _make_mock_kb()
+        engine = ChatEngine(persona, kb)
 
         ns_id = uuid4()
         mock_response = _make_litellm_response("The answer is 42.")
@@ -202,10 +202,10 @@ class TestChatEngineChat:
         assert result.metadata["model"] == "gpt-4o"
 
     async def test_chat_calls_recall(self) -> None:
-        """chat() calls lake.recall() with the query."""
+        """chat() calls kb.recall() with the query."""
         persona = _make_persona(compression_enabled=False)
-        lake = _make_mock_lake()
-        engine = ChatEngine(persona, lake)
+        kb = _make_mock_kb()
+        engine = ChatEngine(persona, kb)
 
         ns_id = uuid4()
         mock_response = _make_litellm_response()
@@ -221,7 +221,7 @@ class TestChatEngineChat:
 
             await engine.chat("test query", namespace_id=ns_id)
 
-        lake.recall.assert_awaited_once_with(
+        kb.recall.assert_awaited_once_with(
             "test query",
             namespace=ns_id,
             limit=10,
@@ -235,8 +235,8 @@ class TestChatEngineChat:
             temperature=0.3,
             compression_enabled=False,
         )
-        lake = _make_mock_lake()
-        engine = ChatEngine(persona, lake, llm_model="gpt-4o-mini")
+        kb = _make_mock_kb()
+        engine = ChatEngine(persona, kb, llm_model="gpt-4o-mini")
 
         ns_id = uuid4()
         mock_response = _make_litellm_response()
@@ -261,8 +261,8 @@ class TestChatEngineChat:
     async def test_chat_records_telemetry(self) -> None:
         """chat() records telemetry via get_collector()."""
         persona = _make_persona(compression_enabled=False)
-        lake = _make_mock_lake()
-        engine = ChatEngine(persona, lake)
+        kb = _make_mock_kb()
+        engine = ChatEngine(persona, kb)
 
         ns_id = uuid4()
         mock_response = _make_litellm_response()
@@ -289,8 +289,8 @@ class TestChatEngineChat:
     async def test_chat_with_existing_conversation_id(self) -> None:
         """chat() uses provided conversation_id."""
         persona = _make_persona(compression_enabled=False)
-        lake = _make_mock_lake()
-        engine = ChatEngine(persona, lake)
+        kb = _make_mock_kb()
+        engine = ChatEngine(persona, kb)
 
         ns_id = uuid4()
         conv_id = uuid4()
@@ -316,8 +316,8 @@ class TestChatEngineChat:
     async def test_chat_sources_in_response(self) -> None:
         """chat() includes search results as sources."""
         persona = _make_persona(compression_enabled=False)
-        lake = _make_mock_lake()
-        engine = ChatEngine(persona, lake)
+        kb = _make_mock_kb()
+        engine = ChatEngine(persona, kb)
 
         ns_id = uuid4()
         mock_response = _make_litellm_response()
@@ -349,8 +349,8 @@ class TestChatEngineClearConversation:
     def test_delegates_to_history_manager(self) -> None:
         """clear_conversation() delegates to history manager."""
         persona = _make_persona()
-        lake = _make_mock_lake()
-        engine = ChatEngine(persona, lake)
+        kb = _make_mock_kb()
+        engine = ChatEngine(persona, kb)
 
         conv_id = uuid4()
         engine.history_manager.clear = MagicMock()

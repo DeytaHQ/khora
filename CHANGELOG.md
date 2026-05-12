@@ -145,8 +145,6 @@ deprecation shim was higher than the breaking-change cost of a hard removal.
       ...
 ```
 
-See ADR-027 for rationale and ADR-024 (revised) for the full public-API
-contract.
 
 ## [Unreleased] — Recall API time bounds honored
 
@@ -188,7 +186,7 @@ Defaults restore pre-0.9.0 throughput: total cap is generous, no per-host thrott
 
 ## [Unreleased] — Telemetry Public Surface, OSS Observability Contract
 
-Telemetry workstream (PRs #504–#509) shipped after the v0.9.1 tag. It hardens cardinality safety, codifies the public observability surface as a JSON contract enforced by a CI drift gate, fixes a silent regression that had been zeroing out `storage_events.namespace_id` since February 2026, and broadens metric coverage. See [ADR-026](docs/adrs/adr-026-telemetry-contract.md) for the design rationale and the OSS implication: public telemetry names are now API and break the same way any other public symbol does.
+Telemetry workstream (PRs #504–#509) shipped after the v0.9.1 tag. It hardens cardinality safety, codifies the public observability surface as a JSON contract enforced by a CI drift gate, fixes a silent regression that had been zeroing out `storage_events.namespace_id` since February 2026, and broadens metric coverage. The OSS implication: public telemetry names are now API and break the same way any other public symbol does.
 
 ### Added
 
@@ -214,7 +212,7 @@ Telemetry workstream (PRs #504–#509) shipped after the v0.9.1 tag. It hardens 
 
 ### Embedded backend overhaul (DYT-3545 family)
 
-The v0.9.0 embedded path lands as a complete-but-experimental SQLite + LanceDB stack covering all four engines (VectorCypher, GraphRAG, Skeleton, Chronicle). Engine × embedded integration tests now exist for all four engines; the prior "unverified embedded code path" gap from the audit is closed. See [ADR-025](docs/adrs/adr-025-embedded-backend-realignment.md) for the strategic rationale.
+The v0.9.0 embedded path lands as a complete-but-experimental SQLite + LanceDB stack covering all four engines (VectorCypher, GraphRAG, Skeleton, Chronicle). Engine × embedded integration tests now exist for all four engines; the prior "unverified embedded code path" gap from the audit is closed.
 
 **Production-readiness scoping (per stack, not per engine).** Stamping is now per `(engine × storage stack)`:
 
@@ -255,7 +253,7 @@ See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md#produc
 
 ### v0.10 roadmap
 
-ADR-025 enumerates two deferred decisions for v0.10 to address the embedded warts:
+Two deferred decisions for v0.10 address the embedded warts:
 
 - **sqlite-vec** as a candidate to collapse the SQLite + LanceDB dual-store into a single in-SQLite-transaction vector store (eliminates partial atomicity, drops install footprint from ~150 MB to ~5 MB).
 - **`pgserver` (embedded Postgres)** as a candidate for true production-parity embedded mode (HNSW recall, real ACID, zero schema fork).
@@ -267,7 +265,7 @@ ADR-025 enumerates two deferred decisions for v0.10 to address the embedded wart
 ## [Unreleased] — Graph Backends, Temporal Precision, Discovery Agent Overhaul
 
 ### Added
-- ADR-024 codifying the khora public API surface consumed by downstream packages (genesis, khora-benchmarks, khora-explorer, khora-cli). See `docs/adrs/adr-024-memory-lake-public-api.md`.
+- Codified the khora public API surface consumed by downstream packages (genesis, khora-benchmarks, khora-explorer, khora-cli).
 
 ### Removed
 - `khora` console script and CLI subcommands (`extract`, `search`) — moved to [khora-cli](https://github.com/DeytaHQ/khora-cli). Install with `uv pip install khora-cli` and run `uv run khora-cli extract` / `uv run khora-cli search`.
@@ -542,7 +540,7 @@ features from 0.4.0 and 0.5.0 internal versions.
 
 ### Expertise & extraction API
 
-- `ExpertiseConfig` as stable public API (ADR-022) with YAML loading,
+- `ExpertiseConfig` as stable public API with YAML loading,
   composition, and registry (#96)
 - `LLMUsage` type for token/cost tracking in `RememberResult` and `BatchResult`
 - `expertise` parameter pass-through on `remember()` and `remember_batch()`

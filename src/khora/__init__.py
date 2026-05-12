@@ -9,40 +9,40 @@ Example usage:
     # Simplest - from env vars (KHORA_DATABASE_URL)
     from khora import Khora
 
-    async with Khora() as lake:
-        await lake.remember("Important information to store")
-        results = await lake.recall("query about information")
+    async with Khora() as kb:
+        await kb.remember("Important information to store")
+        results = await kb.recall("query about information")
 
     # Common - explicit database URL
-    async with Khora("postgresql://localhost/mydb") as lake:
-        await lake.remember("content", title="My Document")
-        results = await lake.recall("query", limit=20)
+    async with Khora("postgresql://localhost/mydb") as kb:
+        await kb.remember("content", title="My Document")
+        results = await kb.recall("query", limit=20)
 
     # With graph backend
     async with Khora(
         "postgresql://localhost/mydb",
         graph_url="bolt://localhost:7687",
-    ) as lake:
-        results = await lake.recall("query", mode=SearchMode.GRAPH)
+    ) as kb:
+        results = await kb.recall("query", mode=SearchMode.GRAPH)
 
     # Batch ingestion with automatic optimization
-    async with Khora(database_url) as lake:
-        result = await lake.remember_batch(documents)
+    async with Khora(database_url) as kb:
+        result = await kb.remember_batch(documents)
         print(f"Processed {result.processed} docs, {result.entities} entities")
 
     # Raw search without LLM features (for benchmarks)
-    results = await lake.recall(query, mode=SearchMode.ALL, raw=True)
+    results = await kb.recall(query, mode=SearchMode.ALL, raw=True)
 
     # Chronicle engine — temporal-semantic recall, no graph DB needed
-    async with Khora("postgresql://localhost/mydb", engine="chronicle") as lake:
-        ns = await lake.create_namespace()
-        await lake.remember(
+    async with Khora("postgresql://localhost/mydb", engine="chronicle") as kb:
+        ns = await kb.create_namespace()
+        await kb.remember(
             "Alice met Bob at the conference on March 15th.",
             namespace=ns.namespace_id,
             entity_types=["PERSON", "EVENT"],
             relationship_types=["ATTENDED"],
         )
-        result = await lake.recall("Who did Alice meet?", namespace=ns.namespace_id)
+        result = await kb.recall("Who did Alice meet?", namespace=ns.namespace_id)
 """
 
 from .config import KhoraConfig
@@ -83,7 +83,7 @@ __all__ = [
     "create_engine",
     "list_engines",
     "register_engine",
-    # Expertise types — stable public API (ADR-022)
+    # Expertise types — stable public API
     "ExpertiseConfig",
     "EntityTypeConfig",
     "RelationshipTypeConfig",

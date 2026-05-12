@@ -121,7 +121,7 @@ print(f"Summary: {result.summary}")
 ### Via Khora
 
 ```python
-result = await lake.recall(
+result = await kb.recall(
     "product strategy",
     config=QueryConfig(
         enable_agentic=True,

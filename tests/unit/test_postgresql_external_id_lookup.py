@@ -1,7 +1,7 @@
 """Tests for DYT-2674: PostgreSQL backend get_document_by_external_id.
 
 Verifies status-agnostic lookup (unlike get_document_by_checksum) and the
-None short-circuit guard — both required for the ADR-056 replace dispatch.
+None short-circuit guard — both required for the replace dispatch.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ class TestGetDocumentByExternalId:
 
     @pytest.mark.asyncio
     async def test_returns_failed_document(self) -> None:
-        """A FAILED row MUST be returned (enables self-heal per ADR-056 §Decision #8)."""
+        """A FAILED row MUST be returned (enables self-heal)."""
         ns_id = uuid4()
         model = _mock_document_model(namespace_id=ns_id, external_id="ext-42", status=DocumentStatus.FAILED)
         session = AsyncMock()

@@ -166,17 +166,17 @@ class TestWindowedProcessingIntegration:
         config = _make_config()
         vc_config = VectorCypherConfig(max_chunks_in_flight=2)
 
-        lake = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
-        await lake.connect()
+        kb = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
+        await kb.connect()
         try:
-            ns = await lake.create_namespace()
+            ns = await kb.create_namespace()
             ns_id = ns.namespace_id
             ext = uuid4().hex[:8]
 
             docs = [{"content": _short_content(i), "external_id": f"winsplit-{ext}-{i}"} for i in range(3)]
 
             with _capture_loguru("DEBUG") as messages:
-                result = await lake.remember_batch(
+                result = await kb.remember_batch(
                     docs,
                     namespace=ns_id,
                     entity_types=["PERSON"],
@@ -191,7 +191,7 @@ class TestWindowedProcessingIntegration:
                 "expected windowed-processing debug log; got:\n" + "\n".join(messages)
             )
         finally:
-            await lake.disconnect()
+            await kb.disconnect()
 
     # ------------------------------------------------------------------
     # 2. Single-document exceeds window
@@ -203,17 +203,17 @@ class TestWindowedProcessingIntegration:
         config = _make_config(chunk_size=100, chunk_overlap=0)
         vc_config = VectorCypherConfig(max_chunks_in_flight=2)
 
-        lake = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
-        await lake.connect()
+        kb = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
+        await kb.connect()
         try:
-            ns = await lake.create_namespace()
+            ns = await kb.create_namespace()
             ns_id = ns.namespace_id
             ext = uuid4().hex[:8]
 
             docs = [{"content": _multi_chunk_content(), "external_id": f"exceeds-{ext}"}]
 
             with _capture_loguru("WARNING") as messages:
-                result = await lake.remember_batch(
+                result = await kb.remember_batch(
                     docs,
                     namespace=ns_id,
                     entity_types=["PERSON"],
@@ -227,7 +227,7 @@ class TestWindowedProcessingIntegration:
                 "exceeds" in m and "max_chunks_in_flight" in m and "single-document window" in m for m in messages
             ), "expected single-document-window warning; got:\n" + "\n".join(messages)
         finally:
-            await lake.disconnect()
+            await kb.disconnect()
 
     # ------------------------------------------------------------------
     # 9. Cross-window entity count not inflated (DYT-3064)
@@ -245,10 +245,10 @@ class TestWindowedProcessingIntegration:
         config = _make_config()
         vc_config = VectorCypherConfig(max_chunks_in_flight=1, enable_smart_resolution=False)
 
-        lake = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
-        await lake.connect()
+        kb = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
+        await kb.connect()
         try:
-            ns = await lake.create_namespace()
+            ns = await kb.create_namespace()
             ns_id = ns.namespace_id
             ext = uuid4().hex[:8]
 
@@ -264,7 +264,7 @@ class TestWindowedProcessingIntegration:
                 {"content": f"{marker_alice} second time", "external_id": f"cw-{ext}-2"},
             ]
 
-            result = await lake.remember_batch(
+            result = await kb.remember_batch(
                 docs,
                 namespace=ns_id,
                 entity_types=["PERSON", "CONCEPT"],
@@ -280,7 +280,7 @@ class TestWindowedProcessingIntegration:
                 "Cross-window entity count inflation not fixed (DYT-3064)."
             )
         finally:
-            await lake.disconnect()
+            await kb.disconnect()
 
     # ------------------------------------------------------------------
     # 3. Window=None preserves current behavior
@@ -292,16 +292,16 @@ class TestWindowedProcessingIntegration:
         # Default VectorCypherConfig has max_chunks_in_flight=None
         vc_config = VectorCypherConfig(max_chunks_in_flight=None)
 
-        lake = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
-        await lake.connect()
+        kb = Khora(config, run_migrations=False, engine_kwargs={"vectorcypher_config": vc_config})
+        await kb.connect()
         try:
-            ns = await lake.create_namespace()
+            ns = await kb.create_namespace()
             ns_id = ns.namespace_id
             ext = uuid4().hex[:8]
 
             docs = [{"content": _short_content(i), "external_id": f"nowin-{ext}-{i}"} for i in range(3)]
 
-            result = await lake.remember_batch(
+            result = await kb.remember_batch(
                 docs,
                 namespace=ns_id,
                 entity_types=["PERSON"],
@@ -313,7 +313,7 @@ class TestWindowedProcessingIntegration:
             assert result.failed == 0
             assert result.total == 3
         finally:
-            await lake.disconnect()
+            await kb.disconnect()
 
 
 # ---------------------------------------------------------------------------
@@ -337,48 +337,48 @@ class TestSubmitBatchIntegration:
         )
 
     @pytest.fixture
-    async def lake_ns(self) -> Any:
-        """Yield (lake, stable_ns_id, row_ns_id) and disconnect after each test.
+    async def kb_ns(self) -> Any:
+        """Yield (kb, stable_ns_id, row_ns_id) and disconnect after each test.
 
         - stable_ns_id: pass to submit_batch / remember_batch (public API)
         - row_ns_id: use for direct storage queries (get_document_by_external_id,
           count_entities, etc.) — the documents are stored under this ID
         """
         config = _make_config()
-        _lake = Khora(config, run_migrations=False)
-        await _lake.connect()
-        _lake.start_pending_processor()
-        ns = await _lake.create_namespace()
+        _kb = Khora(config, run_migrations=False)
+        await _kb.connect()
+        _kb.start_pending_processor()
+        ns = await _kb.create_namespace()
         stable_id = ns.namespace_id
-        row_id = await _lake.storage.resolve_namespace(stable_id)
+        row_id = await _kb.storage.resolve_namespace(stable_id)
         try:
-            yield _lake, stable_id, row_id
+            yield _kb, stable_id, row_id
         finally:
-            await _lake.disconnect()
+            await _kb.disconnect()
 
     # ------------------------------------------------------------------
     # 4. submit_batch returns immediately; documents PENDING at return
     # ------------------------------------------------------------------
 
-    async def test_returns_handle_documents_pending(self, lake_ns: Any) -> None:
+    async def test_returns_handle_documents_pending(self, kb_ns: Any) -> None:
         """submit_batch returns a BatchHandle before processing; docs are PENDING in DB."""
-        lake, stable_ns_id, row_ns_id = lake_ns
+        kb, stable_ns_id, row_ns_id = kb_ns
         processing_started = asyncio.Event()
         processing_can_proceed = asyncio.Event()
 
-        original_process = lake._get_engine().process_staged_document
+        original_process = kb._get_engine().process_staged_document
 
         async def _gated_process(doc: Any, **kwargs: Any) -> Any:
             processing_started.set()
             await processing_can_proceed.wait()
             return await original_process(doc, **kwargs)
 
-        lake._get_engine().process_staged_document = _gated_process
+        kb._get_engine().process_staged_document = _gated_process
         ext_id = f"pending-test-{uuid4().hex[:8]}"
         handle = None
         try:
             docs = [{"content": _short_content(0), "external_id": ext_id}]
-            handle = await lake.submit_batch(
+            handle = await kb.submit_batch(
                 docs,
                 on_result=lambda c, t, r: None,
                 namespace=stable_ns_id,
@@ -393,7 +393,7 @@ class TestSubmitBatchIntegration:
 
             # Wait until processing starts, then inspect DB (use row_ns_id for direct query)
             await asyncio.wait_for(processing_started.wait(), timeout=5.0)
-            doc_in_db = await lake.storage.get_document_by_external_id(row_ns_id, ext_id)
+            doc_in_db = await kb.storage.get_document_by_external_id(row_ns_id, ext_id)
             assert doc_in_db is not None, "document must exist in DB after submit_batch returns"
             assert doc_in_db.status in (
                 DocumentStatus.PENDING,
@@ -401,7 +401,7 @@ class TestSubmitBatchIntegration:
             ), f"expected PENDING or PROCESSING, got {doc_in_db.status}"
         finally:
             processing_can_proceed.set()
-            lake._get_engine().process_staged_document = original_process
+            kb._get_engine().process_staged_document = original_process
             if handle is not None:
                 await asyncio.wait_for(handle.wait(), timeout=30.0)
 
@@ -409,9 +409,9 @@ class TestSubmitBatchIntegration:
     # 5. on_result callback fires per document
     # ------------------------------------------------------------------
 
-    async def test_on_result_fires_per_document(self, lake_ns: Any) -> None:
+    async def test_on_result_fires_per_document(self, kb_ns: Any) -> None:
         """on_result fires once per document with correct DocumentResult fields."""
-        lake, stable_ns_id, _row_ns_id = lake_ns
+        kb, stable_ns_id, _row_ns_id = kb_ns
         namespace_id = stable_ns_id
         results: list[DocumentResult] = []
         call_args: list[tuple[int, int]] = []
@@ -423,7 +423,7 @@ class TestSubmitBatchIntegration:
         ext = uuid4().hex[:8]
         docs = [{"content": _short_content(i), "external_id": f"cb-{ext}-{i}"} for i in range(3)]
 
-        handle = await lake.submit_batch(
+        handle = await kb.submit_batch(
             docs,
             on_result=_on_result,
             namespace=namespace_id,
@@ -444,9 +444,9 @@ class TestSubmitBatchIntegration:
     # 6. Multiple submit_batch calls — independent callbacks
     # ------------------------------------------------------------------
 
-    async def test_multiple_batches_dont_interfere(self, lake_ns: Any) -> None:
+    async def test_multiple_batches_dont_interfere(self, kb_ns: Any) -> None:
         """Two concurrent submit_batch calls each receive only their own callbacks."""
-        lake, stable_ns_id, _row_ns_id = lake_ns
+        kb, stable_ns_id, _row_ns_id = kb_ns
         namespace_id = stable_ns_id
         results_a: list[DocumentResult] = []
         results_b: list[DocumentResult] = []
@@ -454,7 +454,7 @@ class TestSubmitBatchIntegration:
         ext_a = uuid4().hex[:8]
         ext_b = uuid4().hex[:8]
 
-        handle_a = await lake.submit_batch(
+        handle_a = await kb.submit_batch(
             [
                 {"content": _short_content(0), "external_id": f"multi-a-{ext_a}-0"},
                 {"content": _short_content(1), "external_id": f"multi-a-{ext_a}-1"},
@@ -465,7 +465,7 @@ class TestSubmitBatchIntegration:
             relationship_types=["KNOWS"],
             chunk_strategy="fixed",
         )
-        handle_b = await lake.submit_batch(
+        handle_b = await kb.submit_batch(
             [
                 {"content": _short_content(2), "external_id": f"multi-b-{ext_b}-0"},
             ],
@@ -490,11 +490,11 @@ class TestSubmitBatchIntegration:
     # 7. Crash recovery — PENDING documents survive task cancellation
     # ------------------------------------------------------------------
 
-    async def test_crash_recovery_pending_documents_survive(self, lake_ns: Any) -> None:
+    async def test_crash_recovery_pending_documents_survive(self, kb_ns: Any) -> None:
         """PENDING documents written before submit_batch returns survive cancellation."""
-        lake, stable_ns_id, row_ns_id = lake_ns
+        kb, stable_ns_id, row_ns_id = kb_ns
         processing_started = asyncio.Event()
-        original_process = lake._get_engine().process_staged_document
+        original_process = kb._get_engine().process_staged_document
         ext_id = f"crash-{uuid4().hex[:8]}"
 
         async def _blocking_process(doc: Any, **kwargs: Any) -> Any:
@@ -502,11 +502,11 @@ class TestSubmitBatchIntegration:
             await asyncio.sleep(3600)  # blocks until cancelled
             return await original_process(doc, **kwargs)
 
-        lake._get_engine().process_staged_document = _blocking_process
+        kb._get_engine().process_staged_document = _blocking_process
         try:
             docs = [{"content": _short_content(0), "external_id": ext_id}]
 
-            await lake.submit_batch(
+            await kb.submit_batch(
                 docs,
                 on_result=lambda c, t, r: None,
                 namespace=stable_ns_id,
@@ -516,44 +516,44 @@ class TestSubmitBatchIntegration:
             )
 
             # Document must be in DB immediately (durability contract)
-            doc_before = await lake.storage.get_document_by_external_id(row_ns_id, ext_id)
+            doc_before = await kb.storage.get_document_by_external_id(row_ns_id, ext_id)
             assert doc_before is not None, "document must be in DB after submit_batch returns"
 
             # Wait until processing has started before cancelling
             await asyncio.wait_for(processing_started.wait(), timeout=5.0)
 
             # Simulate crash: cancel background tasks
-            for task in list(lake._bg_tasks):
+            for task in list(kb._bg_tasks):
                 task.cancel()
             await asyncio.sleep(0.1)
 
             # Document must still be in DB (PENDING)
-            doc_after = await lake.storage.get_document_by_external_id(row_ns_id, ext_id)
+            doc_after = await kb.storage.get_document_by_external_id(row_ns_id, ext_id)
             assert doc_after is not None, "PENDING document must survive task cancellation"
             assert doc_after.status in (
                 DocumentStatus.PENDING,
                 DocumentStatus.PROCESSING,
             ), f"expected PENDING/PROCESSING after crash, got {doc_after.status}"
         finally:
-            lake._get_engine().process_staged_document = original_process
+            kb._get_engine().process_staged_document = original_process
             # Cancel any remaining tasks to avoid warnings
-            for task in list(lake._bg_tasks):
+            for task in list(kb._bg_tasks):
                 task.cancel()
 
     # ------------------------------------------------------------------
     # 8. Entity dedup across separate submit_batch calls
     # ------------------------------------------------------------------
 
-    async def test_entity_dedup_across_separate_batches(self, lake_ns: Any) -> None:
+    async def test_entity_dedup_across_separate_batches(self, kb_ns: Any) -> None:
         """Same entity in two separate submit_batch calls is deduplicated to one row."""
-        lake, stable_ns_id, row_ns_id = lake_ns
+        kb, stable_ns_id, row_ns_id = kb_ns
         namespace_id = stable_ns_id
         marker = f"alice-dedup-{uuid4().hex[:8]}"
         _plan_extraction(marker, entities=[("Alice", "PERSON")])
 
         ext = uuid4().hex[:8]
 
-        handle_a = await lake.submit_batch(
+        handle_a = await kb.submit_batch(
             [{"content": f"{marker} first mention", "external_id": f"dedup-a-{ext}"}],
             on_result=lambda c, t, r: None,
             namespace=namespace_id,
@@ -563,7 +563,7 @@ class TestSubmitBatchIntegration:
         )
         await asyncio.wait_for(handle_a.wait(), timeout=60.0)
 
-        handle_b = await lake.submit_batch(
+        handle_b = await kb.submit_batch(
             [{"content": f"{marker} second mention", "external_id": f"dedup-b-{ext}"}],
             on_result=lambda c, t, r: None,
             namespace=namespace_id,
@@ -576,7 +576,7 @@ class TestSubmitBatchIntegration:
         assert handle_a.failed == 0
         assert handle_b.failed == 0
 
-        graph = lake.storage.graph
+        graph = kb.storage.graph
         assert graph is not None, "graph backend required for entity count check"
         entity_count = await graph.count_entities(row_ns_id)
         assert entity_count == 1, f"expected 1 entity (Alice deduplicated), got {entity_count}"
