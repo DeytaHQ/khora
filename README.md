@@ -13,7 +13,7 @@ Khora is a knowledge memory library for long-horizon AI agents, with pluggable r
 Khora is a **library, not an application**. CLI tooling lives in sibling packages (more to follow):
 
 - [khora-cli](https://github.com/DeytaHQ/khora-cli) — `extract` / `search` commands for ingesting files and querying namespaces.
-- **khora-service** — runs Khora as a long-lived service (coming soon).
+- [khora-service](https://github.com/DeytaHQ/khora-service) — runs Khora as a long-lived service.
 - [khora-explorer](https://github.com/DeytaHQ/khora-explorer) — ontology construction (`construct` / `validate` / `preview`).
 
 ## Install
