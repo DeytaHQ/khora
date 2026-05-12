@@ -199,3 +199,101 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
+
+  # ============================================================================
+  # Smoke-install the published wheel and run the happy path.
+  #
+  # Why this job exists: `make test` and CI run against the source tree, not
+  # against the published artifact. Two v0.10.x releases shipped broken wheels
+  # to PyPI (a `dev0` suffix from hatch-vcs misconfig, a missing `khora-accel`
+  # version pin) because the build-from-source test suite couldn't observe
+  # those problems. This job pulls `khora[sqlite-lance]==${VERSION}` from PyPI
+  # in a clean checkout-less workspace and exercises the happy path end-to-end.
+  #
+  # Failure here means the published wheel is broken; the release should be
+  # yanked and re-cut. We deliberately use the ubuntu-latest runner (not a
+  # slim Docker image) because khora-accel ships sdist-only and needs Rust to
+  # build on install — Rust is pre-installed on ubuntu-latest.
+  # ============================================================================
+  smoke-install:
+    needs: publish-khora
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install published wheel from PyPI
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Smoke-installing khora==${VERSION} from PyPI..."
+          # PyPI's CDN can lag a few seconds behind the upload — retry a few
+          # times rather than failing on a transient miss.
+          for attempt in 1 2 3 4 5; do
+            if pip install --upgrade "khora[sqlite-lance]==${VERSION}"; then
+              break
+            fi
+            echo "pip install attempt $attempt failed; sleeping 10s..."
+            sleep 10
+          done
+          pip show khora | grep -E "^(Name|Version):"
+          pip show khora-accel | grep -E "^(Name|Version):"
+
+      - name: Run smoke script (Khora.remember + recall round-trip)
+        run: |
+          python - <<'PY'
+          import asyncio, tempfile
+          from pathlib import Path
+
+          import khora
+          from khora import Khora
+          from khora.config import KhoraConfig
+          from khora.config.schema import SQLiteLanceConfig
+
+          print(f"khora version: {khora.__version__}")
+
+          async def main() -> None:
+              with tempfile.TemporaryDirectory() as tmp:
+                  tmp_path = Path(tmp)
+                  cfg = KhoraConfig()
+                  cfg.storage.backend = "sqlite_lance"
+                  cfg.storage.sqlite_lance = SQLiteLanceConfig(
+                      db_path=str(tmp_path / "khora.db"),
+                      lance_path=str(tmp_path / "khora.lance"),
+                      embedding_dimension=32,
+                  )
+                  cfg.llm.embedding_dimension = 32
+                  cfg.storage.embedding_dimension = 32
+                  cfg.neo4j_url = None
+                  # Stub the embedder so this smoke runs without an OPENAI key.
+                  from khora.extraction.embedders.litellm import LiteLLMEmbedder
+
+                  async def _stub_embed_batch(self, texts):
+                      return [[1.0] + [0.0] * 31 for _ in texts]
+
+                  async def _stub_embed(self, text):
+                      return [1.0] + [0.0] * 31
+
+                  LiteLLMEmbedder.embed_batch = _stub_embed_batch
+                  LiteLLMEmbedder.embed = _stub_embed
+
+                  async with Khora(cfg, engine="skeleton", run_migrations=True) as kb:
+                      ns = await kb.create_namespace()
+                      result = await kb.remember(
+                          "Smoke-install end-to-end test from release.yml.",
+                          namespace=ns.namespace_id,
+                          entity_types=["CONCEPT"],
+                          relationship_types=["RELATES_TO"],
+                      )
+                      assert result.chunks_created >= 1, "no chunks created"
+                      recall = await kb.recall("smoke-install", namespace=ns.namespace_id, limit=3)
+                      assert recall.chunks, "recall returned no chunks"
+                      print(f"OK: {result.chunks_created} chunks ingested, {len(recall.chunks)} recalled")
+
+          asyncio.run(main())
+          PY
