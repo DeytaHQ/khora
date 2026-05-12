@@ -400,7 +400,7 @@ class ChronicleEngine:
     1. ``namespace.config_overrides["events"]["enabled"]`` — runtime override
        on the namespace, useful for opt-out without changing the global expertise.
     2. ``expertise.events.enabled`` — the ``ExpertiseConfig`` default
-       (``True`` per ADR-022 unless overridden).
+       (``True`` unless overridden).
 
     When neither is set the extractor runs (default-on). Per-chunk extraction
     failures are swallowed with a warning so a single bad LLM call cannot
@@ -411,10 +411,10 @@ class ChronicleEngine:
         await engine.connect()
 
         # Or via Khora facade:
-        async with Khora(db_url, engine="chronicle") as lake:
-            await lake.remember(content, namespace=ns_id,
+        async with Khora(db_url, engine="chronicle") as kb:
+            await kb.remember(content, namespace=ns_id,
                 entity_types=["PERSON"], relationship_types=["KNOWS"])
-            result = await lake.recall("query", namespace=ns_id)
+            result = await kb.recall("query", namespace=ns_id)
     """
 
     def __init__(
@@ -655,7 +655,7 @@ class ChronicleEngine:
 
         Per-namespace ``config_overrides["events"]["enabled"]`` beats
         ``expertise.events.enabled``; both default to True (default-on) when
-        absent, mirroring ADR-022.
+        absent.
         """
         if namespace is not None and namespace.config_overrides:
             ns_events = namespace.config_overrides.get("events")
@@ -1018,7 +1018,7 @@ class ChronicleEngine:
             skill_name: Extraction skill to use
             entity_types: Entity types to extract
             relationship_types: Relationship types to extract
-            expertise: Optional expertise config (ADR-022)
+            expertise: Optional expertise config
             extraction_config_hash: Optional hash for change detection
             chunk_strategy: Override chunking strategy for this call
 
@@ -2164,7 +2164,7 @@ class ChronicleEngine:
             on_progress: Callback(processed_count, total_count)
             entity_types: Entity types to extract
             relationship_types: Relationship types to extract
-            expertise: Optional expertise config (ADR-022)
+            expertise: Optional expertise config
             extraction_config_hash: Hash for change detection
             chunk_strategy: Override chunking strategy
             extraction_batch_size: Max texts per LLM extraction call (None = pipeline default)

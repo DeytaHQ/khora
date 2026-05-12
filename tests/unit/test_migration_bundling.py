@@ -279,15 +279,15 @@ class TestKhoraInitMigrations:
     def test_run_migrations_default_false(self):
         """run_migrations defaults to False."""
         with patch("khora.khora.load_config", return_value=_mock_config()):
-            lake = Khora()
-        assert lake._run_migrations is False
+            kb = Khora()
+        assert kb._run_migrations is False
 
     @pytest.mark.unit
     def test_run_migrations_true(self):
         """run_migrations=True is stored on the instance."""
         with patch("khora.khora.load_config", return_value=_mock_config()):
-            lake = Khora(run_migrations=True)
-        assert lake._run_migrations is True
+            kb = Khora(run_migrations=True)
+        assert kb._run_migrations is True
 
 
 # ---------------------------------------------------------------------------
@@ -325,11 +325,11 @@ class TestKhoraConnectMigrations:
             patch("khora.db.session.run_migrations", side_effect=fake_run_migrations),
             patch("khora.engines.create_engine", side_effect=fake_create_engine),
         ):
-            lake = Khora(run_migrations=True)
-            await lake.connect()
+            kb = Khora(run_migrations=True)
+            await kb.connect()
 
         assert call_order == ["migrations", "create_engine"]
-        assert lake._connected is True
+        assert kb._connected is True
 
     @pytest.mark.unit
     async def test_connect_raises_on_migration_failure(self):
@@ -346,11 +346,11 @@ class TestKhoraConnectMigrations:
             patch("khora.khora.load_config", return_value=_mock_config()),
             patch("khora.db.session.run_migrations", AsyncMock(return_value=migration_result)),
         ):
-            lake = Khora(run_migrations=True)
+            kb = Khora(run_migrations=True)
             with pytest.raises(RuntimeError, match="migration table locked"):
-                await lake.connect()
+                await kb.connect()
 
-        assert lake._connected is False
+        assert kb._connected is False
 
     @pytest.mark.unit
     async def test_connect_skips_migrations_when_false(self):
@@ -363,11 +363,11 @@ class TestKhoraConnectMigrations:
             patch("khora.engines.create_engine", return_value=mock_engine),
             patch("khora.db.session.run_migrations") as mock_mig,
         ):
-            lake = Khora()
-            await lake.connect()
+            kb = Khora()
+            await kb.connect()
 
         mock_mig.assert_not_called()
-        assert lake._connected is True
+        assert kb._connected is True
 
 
 # ---------------------------------------------------------------------------
@@ -1083,12 +1083,12 @@ class TestKhoraConnectIdempotent:
             patch("khora.khora.load_config", return_value=_mock_config()),
             patch("khora.engines.create_engine", return_value=mock_engine) as mock_create,
         ):
-            lake = Khora(run_migrations=True)
+            kb = Khora(run_migrations=True)
             # Simulate already connected
-            lake._connected = True
-            lake._engine = mock_engine
+            kb._connected = True
+            kb._engine = mock_engine
 
-            await lake.connect()
+            await kb.connect()
 
         # create_engine should NOT have been called (short-circuited)
         mock_create.assert_not_called()

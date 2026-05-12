@@ -11,15 +11,15 @@ All your data is scoped to namespaces. When you call `remember()` or `recall()`,
 ```python
 from khora import Khora
 
-async with Khora() as lake:
+async with Khora() as kb:
     # Store in a specific namespace (required)
-    await lake.remember(
+    await kb.remember(
         "Important document content...",
         namespace=namespace_id
     )
 
     # Search within that namespace (required)
-    results = await lake.recall(
+    results = await kb.recall(
         "What's in those documents?",
         namespace=namespace_id
     )
@@ -44,12 +44,12 @@ You can't accidentally see another namespace's data.
 ```python
 from khora import Khora
 
-async with Khora() as lake:
+async with Khora() as kb:
     # Create a namespace via the public API
-    namespace = await lake.create_namespace()
+    namespace = await kb.create_namespace()
 
     # Now store data using the stable namespace_id
-    await lake.remember(
+    await kb.remember(
         "Important content...",
         namespace=namespace.namespace_id
     )
@@ -72,13 +72,13 @@ Child table foreign keys (documents, chunks, entities) reference `id`, not `name
 
 ```python
 # By stable namespace_id (recommended)
-ns = await lake.get_namespace_by_stable_id(stable_namespace_id)
+ns = await kb.get_namespace_by_stable_id(stable_namespace_id)
 
 # By row-level UUID
-ns = await lake.storage.get_namespace(namespace_id)
+ns = await kb.storage.get_namespace(namespace_id)
 
 # List all (active only by default)
-result = await lake.storage.list_namespaces()
+result = await kb.storage.list_namespaces()
 namespaces = result.items
 ```
 
@@ -110,12 +110,12 @@ The swap is atomic. One moment users see v1, the next they see v2. No downtime, 
 ### How to Do It
 
 ```python
-async with Khora() as lake:
+async with Khora() as kb:
     # 1. Get current namespace by UUID
-    current = await lake.storage.get_namespace(current_namespace_id)
+    current = await kb.storage.get_namespace(current_namespace_id)
 
     # 2. Create new version
-    new_version = await lake.storage.create_namespace_version(
+    new_version = await kb.storage.create_namespace_version(
         previous_version=current
     )
     # new_version.version = 2
@@ -123,19 +123,19 @@ async with Khora() as lake:
 
     # 3. Populate the new version
     for doc in all_your_documents:
-        await lake.remember(
+        await kb.remember(
             doc.content,
             namespace=new_version.id
         )
 
     # 4. Verify everything looks good
-    test_results = await lake.recall("test query", namespace=new_version.id)
+    test_results = await kb.recall("test query", namespace=new_version.id)
     assert len(test_results.chunks) > 0
 
     # 5. Swap! Activate new, deactivate old
     new_version.is_active = True
-    await lake.storage.update_namespace(new_version)
-    await lake.storage.deactivate_namespace(current.id)
+    await kb.storage.update_namespace(new_version)
+    await kb.storage.deactivate_namespace(current.id)
 ```
 
 ### Rollback
@@ -145,8 +145,8 @@ Made a mistake? Swap back:
 ```python
 # Reactivate the old version
 old_version.is_active = True
-await lake.storage.update_namespace(old_version)
-await lake.storage.deactivate_namespace(new_version.id)
+await kb.storage.update_namespace(old_version)
+await kb.storage.deactivate_namespace(new_version.id)
 ```
 
 Keep old versions around until you're confident the new one is working.
@@ -185,17 +185,17 @@ This enables incremental sync:
 
 ```python
 # Get last checkpoint
-checkpoint = await lake.storage.get_sync_checkpoint(namespace_id, "slack")
+checkpoint = await kb.storage.get_sync_checkpoint(namespace_id, "slack")
 
 # Fetch only new messages
 new_messages = await slack_client.get_messages(since=checkpoint)
 
 # Process them...
 for msg in new_messages:
-    await lake.remember(msg.content, namespace=namespace_id)
+    await kb.remember(msg.content, namespace=namespace_id)
 
 # Update checkpoint
-await lake.storage.set_sync_checkpoint(
+await kb.storage.set_sync_checkpoint(
     namespace_id,
     "slack",
     str(new_messages[-1].timestamp)
@@ -208,10 +208,10 @@ Need to search multiple namespaces? (Note: this bypasses isolation - make sure y
 
 ```python
 all_results = []
-result = await lake.storage.list_namespaces()
+result = await kb.storage.list_namespaces()
 for namespace in result.items:
     if namespace.is_active and user_can_access(namespace):
-        results = await lake.recall(query, namespace=namespace.id)
+        results = await kb.recall(query, namespace=namespace.id)
         all_results.extend(results.chunks)
 
 # Re-rank the combined results

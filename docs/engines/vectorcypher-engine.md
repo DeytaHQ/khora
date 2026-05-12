@@ -80,9 +80,9 @@ The main engine class implementing `MemoryEngineProtocol`:
 from khora import Khora
 
 # Use VectorCypher engine explicitly
-async with Khora("postgresql://...", engine="vectorcypher") as lake:
+async with Khora("postgresql://...", engine="vectorcypher") as kb:
     # Store with temporal context
-    result = await lake.remember(
+    result = await kb.remember(
         "Meeting notes from Q1 planning with John",
         title="Q1 Planning",
         metadata={
@@ -92,7 +92,7 @@ async with Khora("postgresql://...", engine="vectorcypher") as lake:
     )
 
     # Recall with graph-enhanced retrieval
-    results = await lake.recall(
+    results = await kb.recall(
         "What did we discuss with John about planning?",
         graph_depth=2,  # Expand 2 hops in graph
     )
@@ -124,10 +124,10 @@ All read methods (`recall()`, `get_entity()`, `list_entities()`, `find_related_e
 
 ```python
 # Default: no source metadata (zero overhead)
-results = await lake.recall("query")
+results = await kb.recall("query")
 
 # With sources: populates source_document metadata on chunks/entities
-results = await lake.recall("query", include_sources=True)
+results = await kb.recall("query", include_sources=True)
 for chunk, score in results.chunks:
     print(chunk.source_document)  # DocumentSource with title, source, etc.
 ```
@@ -452,9 +452,9 @@ async with Khora(
         fusion_complex_graph_weight=0.7,
         retriever_min_entity_similarity=0.25,
     )},
-) as lake:
-    result = await lake.remember("content")
-    results = await lake.recall("query")
+) as kb:
+    result = await kb.remember("content")
+    results = await kb.recall("query")
 ```
 
 The `engine_kwargs` dict is forwarded directly to the `VectorCypherEngine` constructor, which accepts `vectorcypher_config` as a keyword argument.

@@ -99,13 +99,13 @@ def _mock_engine() -> MagicMock:
     return mock_eng
 
 
-def _make_lake(*, connected: bool = False) -> Khora:
+def _make_kb(*, connected: bool = False) -> Khora:
     with patch("khora.khora.load_config", return_value=_mock_config()):
-        lake = Khora()
+        kb = Khora()
     if connected:
-        lake._connected = True
-        lake._engine = _mock_engine()
-    return lake
+        kb._connected = True
+        kb._engine = _mock_engine()
+    return kb
 
 
 def _make_mock_trace_span():
@@ -413,7 +413,7 @@ class TestNoOpBehavior:
 
 
 # =========================================================================
-# 4. Memory lake span tests
+# 4. Khora span tests
 # =========================================================================
 
 
@@ -423,9 +423,9 @@ class TestKhoraSpans:
     @pytest.mark.asyncio
     async def test_remember_creates_span(self):
         """remember() creates a logfire span with namespace_id and content_length."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
-        lake._engine.remember = AsyncMock(
+        kb._engine.remember = AsyncMock(
             return_value=RememberResult(
                 document_id=uuid4(),
                 namespace_id=ns_id,
@@ -453,7 +453,7 @@ class TestKhoraSpans:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.remember(
+            await kb.remember(
                 "Hello, this is test content",
                 namespace=ns_id,
                 title="Test",
@@ -470,9 +470,9 @@ class TestKhoraSpans:
     @pytest.mark.asyncio
     async def test_recall_creates_span(self):
         """recall() creates a bounded logfire span — query_hash + query_length, no raw query."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
-        lake._engine.recall = AsyncMock(
+        kb._engine.recall = AsyncMock(
             return_value=RecallResult(
                 query="test query",
                 namespace_id=ns_id,
@@ -495,7 +495,7 @@ class TestKhoraSpans:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.recall("test query", namespace=ns_id)
+            await kb.recall("test query", namespace=ns_id)
 
         mock_span_fn.assert_called_once()
         call_args = mock_span_fn.call_args
@@ -509,10 +509,10 @@ class TestKhoraSpans:
     @pytest.mark.asyncio
     async def test_forget_creates_span(self):
         """forget() creates a logfire span with document_id."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         doc_id = uuid4()
         ns_id = uuid4()
-        lake._engine.forget = AsyncMock(return_value=True)
+        kb._engine.forget = AsyncMock(return_value=True)
 
         with patch("khora.khora.trace_span") as mock_span_fn:
             from contextlib import contextmanager
@@ -523,7 +523,7 @@ class TestKhoraSpans:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.forget(doc_id, namespace=ns_id)
+            await kb.forget(doc_id, namespace=ns_id)
 
         mock_span_fn.assert_called_once()
         call_args = mock_span_fn.call_args
@@ -533,9 +533,9 @@ class TestKhoraSpans:
     @pytest.mark.asyncio
     async def test_remember_batch_creates_span(self):
         """remember_batch() creates a logfire span with namespace_id and batch_size."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
-        lake._engine.remember_batch = AsyncMock(
+        kb._engine.remember_batch = AsyncMock(
             return_value=BatchResult(
                 total=3,
                 processed=3,
@@ -562,7 +562,7 @@ class TestKhoraSpans:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.remember_batch(
+            await kb.remember_batch(
                 docs,
                 namespace=ns_id,
                 entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
@@ -582,9 +582,9 @@ class TestSpanAttributeWhitelist:
     @pytest.mark.asyncio
     async def test_remember_does_not_leak_content(self):
         """remember() span attributes contain content_length, not the content itself."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
-        lake._engine.remember = AsyncMock(
+        kb._engine.remember = AsyncMock(
             return_value=RememberResult(
                 document_id=uuid4(),
                 namespace_id=ns_id,
@@ -609,7 +609,7 @@ class TestSpanAttributeWhitelist:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.remember(
+            await kb.remember(
                 secret_content,
                 namespace=ns_id,
                 entity_types=["PERSON", "ORGANIZATION", "LOCATION"],
@@ -626,10 +626,10 @@ class TestSpanAttributeWhitelist:
     @pytest.mark.asyncio
     async def test_recall_does_not_leak_query(self):
         """recall() span attributes record query_hash + query_length, never the raw query."""
-        lake = _make_lake(connected=True)
+        kb = _make_kb(connected=True)
         ns_id = uuid4()
         secret_query = "what was the password the CEO mentioned in slack yesterday"
-        lake._engine.recall = AsyncMock(
+        kb._engine.recall = AsyncMock(
             return_value=RecallResult(
                 query=secret_query,
                 namespace_id=ns_id,
@@ -652,7 +652,7 @@ class TestSpanAttributeWhitelist:
 
             mock_span_fn.side_effect = tracking_span
 
-            await lake.recall(secret_query, namespace=ns_id)
+            await kb.recall(secret_query, namespace=ns_id)
 
         call_args = mock_span_fn.call_args
         for val in call_args[1].values():

@@ -1,4 +1,4 @@
-"""End-to-end replace-via-remember() integration tests (DYT-2675, ADR-056).
+"""End-to-end replace-via-remember() integration tests (DYT-2675).
 
 Exercises the document-replacement lifecycle through the public
 ``Khora.remember()`` / ``VectorCypherEngine.remember()`` API surface,
@@ -17,7 +17,7 @@ Scenarios (one test method each):
 4. Atomic chunk replacement: Postgres failure rolls back the chunk write
    and graph mutations do not leak through.
 5. Graph-side failure marks the document ``FAILED``; the next successful
-   replace self-heals it to ``COMPLETED`` (ADR §Decision #8).
+   replace self-heals it to ``COMPLETED``.
 6. Concurrent ``remember()`` calls with the same ``external_id`` converge
    on a single document (engine.py:641 IntegrityError -> _remember_via_replace).
 7. ``prefer_current`` filter symmetry — retired edges are excluded when
@@ -26,7 +26,7 @@ Scenarios (one test method each):
    ``DualNodeManager.get_entity_neighborhoods`` (dual_nodes.py:595-600)
    because neither ``Khora.recall()`` nor
    ``GraphBackend.get_neighborhoods_batch`` expose ``prefer_current``
-   publicly (ADR-056 §Decision 6, plan open question #1).
+   publicly.
 8. Backward compat: when ``external_id=None``, checksum dedup still
    returns ``duplicate=True`` without routing through the replace path.
 
@@ -255,7 +255,7 @@ class TestReplaceViaRememberIntegration:
         )
 
     @pytest.fixture(scope="class")
-    async def lake(self) -> AsyncIterator[Khora]:
+    async def kb(self) -> AsyncIterator[Khora]:
         database_url = os.environ.get(
             "KHORA_DATABASE_URL",
             "postgresql+asyncpg://khora:khora@localhost:5432/khora",
@@ -279,24 +279,24 @@ class TestReplaceViaRememberIntegration:
         # Skip selective extraction threshold so every chunk is extracted.
         config.pipeline.selective_extraction = False
 
-        lake = Khora(config, run_migrations=False)
-        await lake.connect()
+        kb = Khora(config, run_migrations=False)
+        await kb.connect()
         try:
-            yield lake
+            yield kb
         finally:
-            await lake.disconnect()
+            await kb.disconnect()
 
     @pytest.fixture
-    async def namespace_id(self, lake: Khora) -> UUID:
-        ns = await lake.create_namespace()
+    async def namespace_id(self, kb: Khora) -> UUID:
+        ns = await kb.create_namespace()
         return ns.namespace_id
 
     # ------------------------------------------------------------------
     # Scenario helpers
     # ------------------------------------------------------------------
 
-    def _graph_driver(self, lake: Khora) -> Any:
-        graph = lake.storage.graph
+    def _graph_driver(self, kb: Khora) -> Any:
+        graph = kb.storage.graph
         assert graph is not None, "graph backend must be configured"
         driver = getattr(graph, "_driver", None)
         assert driver is not None, "Neo4j driver must be connected"
@@ -304,13 +304,13 @@ class TestReplaceViaRememberIntegration:
 
     async def _remember(
         self,
-        lake: Khora,
+        kb: Khora,
         *,
         namespace_id: UUID,
         content: str,
         external_id: str | None,
     ) -> RememberResult:
-        return await lake.remember(
+        return await kb.remember(
             content=content,
             namespace=namespace_id,
             entity_types=["PERSON", "CONCEPT"],
@@ -323,10 +323,10 @@ class TestReplaceViaRememberIntegration:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_golden_path_replaces_with_same_external_id(self, lake: Khora, namespace_id: UUID) -> None:
+    async def test_golden_path_replaces_with_same_external_id(self, kb: Khora, namespace_id: UUID) -> None:
         """v1 (alice, bob, KNOWS) → v2 (alice, carol): bob + KNOWS retire, alice remaps, carol net-new."""
-        driver = self._graph_driver(lake)
-        ns = str(await lake.storage.resolve_namespace(namespace_id))
+        driver = self._graph_driver(kb)
+        ns = str(await kb.storage.resolve_namespace(namespace_id))
         ext = f"golden-{uuid4().hex[:8]}"
         alice = f"alice-{uuid4().hex[:6]}"
         bob = f"bob-{uuid4().hex[:6]}"
@@ -338,7 +338,7 @@ class TestReplaceViaRememberIntegration:
             relationships=[(alice, bob, "KNOWS")],
         )
         v1 = await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"v1-golden story about {alice} and {bob}.",
             external_id=ext,
@@ -350,16 +350,16 @@ class TestReplaceViaRememberIntegration:
             relationships=[],
         )
         v2 = await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"v2-golden note mentioning {alice} and {carol}.",
             external_id=ext,
         )
 
-        # Same document id reused across replacements (ADR-056 §API Contracts).
+        # Same document id reused across replacements.
         assert v1.document_id == v2.document_id
 
-        doc = await lake.get_document(v2.document_id)
+        doc = await kb.get_document(v2.document_id)
         assert doc is not None
         assert doc.status == DocumentStatus.COMPLETED
         assert doc.external_id == ext
@@ -406,7 +406,7 @@ class TestReplaceViaRememberIntegration:
 
         # Single document in the namespace (list_documents is paginated
         # but we only wrote one external_id).
-        docs = await lake.list_documents(namespace=namespace_id)
+        docs = await kb.list_documents(namespace=namespace_id)
         matching = [d for d in docs if d.external_id == ext]
         assert len(matching) == 1
 
@@ -415,10 +415,10 @@ class TestReplaceViaRememberIntegration:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_cosourced_entity_survives_retirement(self, lake: Khora, namespace_id: UUID) -> None:
+    async def test_cosourced_entity_survives_retirement(self, kb: Khora, namespace_id: UUID) -> None:
         """Dave is written by doc A and doc B; replacing A (minus Dave) leaves Dave alive and sole-sourced to B."""
-        driver = self._graph_driver(lake)
-        ns = str(await lake.storage.resolve_namespace(namespace_id))
+        driver = self._graph_driver(kb)
+        ns = str(await kb.storage.resolve_namespace(namespace_id))
         ext_a = f"cosource-a-{uuid4().hex[:8]}"
         ext_b = f"cosource-b-{uuid4().hex[:8]}"
         dave = f"dave-{uuid4().hex[:6]}"
@@ -430,7 +430,7 @@ class TestReplaceViaRememberIntegration:
             relationships=[],
         )
         result_a = await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"cs-doc-a mentions {dave}.",
             external_id=ext_a,
@@ -442,7 +442,7 @@ class TestReplaceViaRememberIntegration:
             relationships=[],
         )
         result_b = await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"cs-doc-b also mentions {dave}.",
             external_id=ext_b,
@@ -460,7 +460,7 @@ class TestReplaceViaRememberIntegration:
             relationships=[],
         )
         await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"cs-doc-a-v2 no longer mentions the original person; {eve} stepped in.",
             external_id=ext_a,
@@ -481,10 +481,10 @@ class TestReplaceViaRememberIntegration:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_cosourced_relationship_survives_retirement(self, lake: Khora, namespace_id: UUID) -> None:
+    async def test_cosourced_relationship_survives_retirement(self, kb: Khora, namespace_id: UUID) -> None:
         """KNOWS(alice,bob) is asserted by docs A + B; replacing A without KNOWS leaves the edge alive."""
-        driver = self._graph_driver(lake)
-        ns = str(await lake.storage.resolve_namespace(namespace_id))
+        driver = self._graph_driver(kb)
+        ns = str(await kb.storage.resolve_namespace(namespace_id))
         ext_a = f"rel-a-{uuid4().hex[:8]}"
         ext_b = f"rel-b-{uuid4().hex[:8]}"
         alice = f"alice-{uuid4().hex[:6]}"
@@ -496,7 +496,7 @@ class TestReplaceViaRememberIntegration:
             relationships=[(alice, bob, "KNOWS")],
         )
         await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"rel-doc-a: {alice} knows {bob}.",
             external_id=ext_a,
@@ -508,7 +508,7 @@ class TestReplaceViaRememberIntegration:
             relationships=[(alice, bob, "KNOWS")],
         )
         result_b = await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"rel-doc-b: {alice} also knows {bob}.",
             external_id=ext_b,
@@ -521,7 +521,7 @@ class TestReplaceViaRememberIntegration:
             relationships=[],
         )
         await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"rel-doc-a-v2: {alice} and {bob} appear but the edge is gone.",
             external_id=ext_a,
@@ -543,13 +543,13 @@ class TestReplaceViaRememberIntegration:
     @pytest.mark.asyncio
     async def test_atomic_chunk_replacement_pg_rolls_back(
         self,
-        lake: Khora,
+        kb: Khora,
         namespace_id: UUID,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Raise inside the PG replace txn; chunks table and graph must be unchanged."""
-        driver = self._graph_driver(lake)
-        ns = str(await lake.storage.resolve_namespace(namespace_id))
+        driver = self._graph_driver(kb)
+        ns = str(await kb.storage.resolve_namespace(namespace_id))
         ext = f"rollback-{uuid4().hex[:8]}"
         alice = f"alice-{uuid4().hex[:6]}"
 
@@ -559,7 +559,7 @@ class TestReplaceViaRememberIntegration:
             relationships=[],
         )
         v1 = await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"rollback-v1 doc with {alice}.",
             external_id=ext,
@@ -569,10 +569,10 @@ class TestReplaceViaRememberIntegration:
         # create path writes to the engine-owned ``khora_chunks`` table
         # via TemporalVectorStore, NOT to the coordinator's ``chunks``
         # table, so this count starts at 0 and must stay at 0 after the
-        # aborted replace (ADR-056: PG rollback is the invariant).
-        chunks_before = await lake.storage.get_chunks_by_document(v1.document_id)
+        # aborted replace (PG rollback is the invariant).
+        chunks_before = await kb.storage.get_chunks_by_document(v1.document_id)
 
-        vector_backend = lake.storage.vector
+        vector_backend = kb.storage.vector
         assert vector_backend is not None
         call_count = {"n": 0}
 
@@ -593,7 +593,7 @@ class TestReplaceViaRememberIntegration:
         )
         with pytest.raises(RuntimeError, match="injected vector failure"):
             await self._remember(
-                lake,
+                kb,
                 namespace_id=namespace_id,
                 content=f"rollback-v2 replacement content with {alice} again.",
                 external_id=ext,
@@ -606,12 +606,12 @@ class TestReplaceViaRememberIntegration:
         assert call_count["n"] >= 1, "coordinator txn never invoked vector.create_chunks_batch"
 
         # PG chunks: unchanged by the rolled-back transaction.
-        chunks_after = await lake.storage.get_chunks_by_document(v1.document_id)
+        chunks_after = await kb.storage.get_chunks_by_document(v1.document_id)
         assert len(chunks_after) == len(chunks_before)
 
-        # Document status is FAILED (coordinator's ADR-056 §Decision #8
-        # error path marks the row on exception).
-        failed = await lake.get_document(v1.document_id)
+        # Document status is FAILED (coordinator's error path marks the row
+        # on exception).
+        failed = await kb.get_document(v1.document_id)
         assert failed is not None
         assert failed.status == DocumentStatus.FAILED
 
@@ -632,7 +632,7 @@ class TestReplaceViaRememberIntegration:
     @pytest.mark.asyncio
     async def test_graph_failure_marks_failed_then_heals(
         self,
-        lake: Khora,
+        kb: Khora,
         namespace_id: UUID,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -646,13 +646,13 @@ class TestReplaceViaRememberIntegration:
             relationships=[],
         )
         v1 = await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"heal-v1 with {doomed}.",
             external_id=ext,
         )
 
-        graph = lake.storage.graph
+        graph = kb.storage.graph
         assert graph is not None
         orig_retire = graph.retire_orphaned_entities_batch  # type: ignore[unresolved-attribute]
         call_count = {"n": 0}
@@ -673,13 +673,13 @@ class TestReplaceViaRememberIntegration:
         )
         with pytest.raises(RuntimeError, match="injected graph failure"):
             await self._remember(
-                lake,
+                kb,
                 namespace_id=namespace_id,
                 content="heal-v2 no entities at all.",
                 external_id=ext,
             )
 
-        failed = await lake.get_document(v1.document_id)
+        failed = await kb.get_document(v1.document_id)
         assert failed is not None
         assert failed.status == DocumentStatus.FAILED
 
@@ -691,13 +691,13 @@ class TestReplaceViaRememberIntegration:
             relationships=[],
         )
         await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content="heal-v3 still no entities; retry should heal.",
             external_id=ext,
         )
 
-        healed = await lake.get_document(v1.document_id)
+        healed = await kb.get_document(v1.document_id)
         assert healed is not None
         assert healed.status == DocumentStatus.COMPLETED
         # mark_completed() must also null out the stale error_message from
@@ -710,14 +710,14 @@ class TestReplaceViaRememberIntegration:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_concurrent_external_id_converges_to_single_document(self, lake: Khora, namespace_id: UUID) -> None:
+    async def test_concurrent_external_id_converges_to_single_document(self, kb: Khora, namespace_id: UUID) -> None:
         """Two parallel remember() calls with the same external_id converge on one document.
 
         Per engine.py:641-652, the loser catches IntegrityError and
         re-lookups ``get_document_by_external_id``; if the winner has not
         committed yet, the handler re-raises the IntegrityError. So under
         adversarial race timing one task may legitimately surface
-        IntegrityError (ADR-056 §Decision #9). Accept either outcome:
+        IntegrityError. Accept either outcome:
           (a) both tasks return RememberResult, OR
           (b) one RememberResult + one IntegrityError.
         The invariant in either case is exactly one COMPLETED document
@@ -740,13 +740,13 @@ class TestReplaceViaRememberIntegration:
 
         results = await asyncio.gather(
             self._remember(
-                lake,
+                kb,
                 namespace_id=namespace_id,
                 content=f"conc-left about {alice}.",
                 external_id=ext,
             ),
             self._remember(
-                lake,
+                kb,
                 namespace_id=namespace_id,
                 content=f"conc-right about {bob}.",
                 external_id=ext,
@@ -762,7 +762,7 @@ class TestReplaceViaRememberIntegration:
 
         # Invariant: exactly one document row carries this external_id,
         # in COMPLETED status.
-        docs = await lake.list_documents(namespace=namespace_id)
+        docs = await kb.list_documents(namespace=namespace_id)
         matching = [d for d in docs if d.external_id == ext]
         assert len(matching) == 1
         assert matching[0].status == DocumentStatus.COMPLETED
@@ -778,8 +778,8 @@ class TestReplaceViaRememberIntegration:
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_recall_filter_symmetry_prefer_current(self, lake: Khora, namespace_id: UUID) -> None:
-        """Retired edges are hidden when prefer_current=True, visible otherwise (ADR-056 §Decision 6).
+    async def test_recall_filter_symmetry_prefer_current(self, kb: Khora, namespace_id: UUID) -> None:
+        """Retired edges are hidden when prefer_current=True, visible otherwise.
 
         ``Khora.recall()`` does not expose ``prefer_current`` as a
         public kwarg (see plan §6 open question #1). The graph-backend
@@ -792,8 +792,8 @@ class TestReplaceViaRememberIntegration:
         (``dual_nodes.py:595-600``): a retired edge must filter out when
         ``valid_until`` has passed.
         """
-        driver = self._graph_driver(lake)
-        ns_str = str(await lake.storage.resolve_namespace(namespace_id))
+        driver = self._graph_driver(kb)
+        ns_str = str(await kb.storage.resolve_namespace(namespace_id))
         ext = f"temporal-{uuid4().hex[:8]}"
         alice = f"alice-{uuid4().hex[:6]}"
         bob = f"bob-{uuid4().hex[:6]}"
@@ -804,7 +804,7 @@ class TestReplaceViaRememberIntegration:
             relationships=[(alice, bob, "KNOWS")],
         )
         await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"temporal-v1: {alice} knows {bob}.",
             external_id=ext,
@@ -817,7 +817,7 @@ class TestReplaceViaRememberIntegration:
             relationships=[],
         )
         await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=f"temporal-v2: only {alice} now.",
             external_id=ext,
@@ -876,7 +876,7 @@ class TestReplaceViaRememberIntegration:
     @pytest.mark.asyncio
     async def test_backward_compat_external_id_none_checksum_dedup(
         self,
-        lake: Khora,
+        kb: Khora,
         namespace_id: UUID,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -891,7 +891,7 @@ class TestReplaceViaRememberIntegration:
 
         # Spy on coordinator.replace_document_extraction to ensure the
         # checksum-dedup path never invokes it.
-        storage = lake.storage
+        storage = kb.storage
         orig_replace = storage.replace_document_extraction
         replace_calls = {"n": 0}
 
@@ -902,13 +902,13 @@ class TestReplaceViaRememberIntegration:
         monkeypatch.setattr(storage, "replace_document_extraction", spy_replace)
 
         first = await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=content,
             external_id=None,
         )
         second = await self._remember(
-            lake,
+            kb,
             namespace_id=namespace_id,
             content=content,
             external_id=None,
@@ -919,14 +919,14 @@ class TestReplaceViaRememberIntegration:
         assert second.metadata.get("duplicate") is True
 
         # Only one document row for this checksum in the namespace.
-        docs = await lake.list_documents(namespace=namespace_id)
+        docs = await kb.list_documents(namespace=namespace_id)
         matching = [d for d in docs if d.id == first.document_id]
         assert len(matching) == 1
 
         # No EntityVersion snapshots were produced — the second
         # remember() did NOT route through the replace path.
-        driver = self._graph_driver(lake)
-        ns_str = str(await lake.storage.resolve_namespace(namespace_id))
+        driver = self._graph_driver(kb)
+        ns_str = str(await kb.storage.resolve_namespace(namespace_id))
         versions = await _get_entity_versions(driver, ns_str, alice)
         assert versions == []
 

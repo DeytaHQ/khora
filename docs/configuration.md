@@ -31,7 +31,7 @@ config = KhoraConfig(
     llm=LLMSettings(model="gpt-4o", embedding_model="text-embedding-3-small"),
 )
 
-async with Khora(config) as lake:
+async with Khora(config) as kb:
     ...
 ```
 
@@ -136,7 +136,7 @@ omit `storage_backend` to get the original behavior.
 
 ## Embedded backends (experimental)
 
-The embedded paths (`sqlite_lance` and `surrealdb`) are marked **experimental in v0.9.0**. They are appropriate for demos, evaluation, tests, and small single-user CLIs. They are not the deployment story for v0.9.0; for production, use PostgreSQL + pgvector (+ Neo4j for VectorCypher). See [ADR-025](adrs/adr-025-embedded-backend-realignment.md) for the rationale.
+The embedded paths (`sqlite_lance` and `surrealdb`) are marked **experimental in v0.9.0**. They are appropriate for demos, evaluation, tests, and small single-user CLIs. They are not the deployment story for v0.9.0; for production, use PostgreSQL + pgvector (+ Neo4j for VectorCypher).
 
 ### SQLite + LanceDB (recommended embedded stack)
 

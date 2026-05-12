@@ -214,6 +214,9 @@ jobs:
   # yanked and re-cut. We deliberately use the ubuntu-latest runner (not a
   # slim Docker image) because khora-accel ships sdist-only and needs Rust to
   # build on install — Rust is pre-installed on ubuntu-latest.
+  #
+  # ``github-release`` below blocks on this job so the release page never
+  # advertises a version whose wheel cannot install + import.
   # ============================================================================
   smoke-install:
     needs: publish-khora
@@ -297,3 +300,45 @@ jobs:
 
           asyncio.run(main())
           PY
+
+  # ============================================================================
+  # Create the GitHub release for this tag with auto-generated notes.
+  #
+  # Gated on ``smoke-install`` so the release page never advertises a version
+  # whose wheel cannot install + import. Notes are populated by GitHub from
+  # the merged PRs between this tag and the previous tag. The release is
+  # marked ``latest`` only when the version isn't a pre-release.
+  # ============================================================================
+  github-release:
+    needs: smoke-install
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write   # required to create the release
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG=${GITHUB_REF#refs/tags/}
+          # Skip pre-release tags from the "latest" pointer (e.g. v1.0.0-rc1).
+          if [[ "$TAG" == *-* ]]; then
+            LATEST_FLAG="--latest=false"
+          else
+            LATEST_FLAG="--latest"
+          fi
+          # Idempotent: if a release for this tag already exists (manual
+          # backfill or workflow re-run), update it in place instead of failing.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refreshing generated notes."
+            gh release edit "$TAG" --generate-notes $LATEST_FLAG
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes $LATEST_FLAG
+          fi

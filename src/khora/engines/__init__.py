@@ -46,7 +46,7 @@ def register_engine(name: str, module_path: str, class_name: str) -> None:
 
     Example:
         register_engine("my_engine", "my_package.engine", "MyEngine")
-        async with Khora("postgresql://...", engine="my_engine") as lake:
+        async with Khora("postgresql://...", engine="my_engine") as kb:
             ...
     """
     _ENGINE_REGISTRY[name] = (module_path, class_name)

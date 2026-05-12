@@ -41,13 +41,13 @@ import asyncio
 from khora import Khora
 
 async def main() -> None:
-    async with Khora() as lake:  # reads KHORA_DATABASE_URL / KHORA_NEO4J_URL
-        ns = await lake.create_namespace("demo")
-        await lake.remember(
+    async with Khora() as kb:  # reads KHORA_DATABASE_URL / KHORA_NEO4J_URL
+        ns = await kb.create_namespace("demo")
+        await kb.remember(
             "Marie Curie won the Nobel Prize in Physics in 1903.",
             namespace=ns.namespace_id,
         )
-        result = await lake.recall("What did Curie win?", namespace=ns.namespace_id)
+        result = await kb.recall("What did Curie win?", namespace=ns.namespace_id)
         print(result.context_text)
 
 asyncio.run(main())
@@ -57,12 +57,12 @@ asyncio.run(main())
 
 `submit_batch()` stages documents as PENDING and returns a `BatchHandle` immediately. A background processor picks them up and calls `on_result` per document as each completes.
 
-**The processor is opt-in.** Call `lake.start_pending_processor()` after `connect()` on services that write documents. Read-only services do not need it. The processor can be stopped with `await lake.stop_pending_processor()` and restarted at any time.
+**The processor is opt-in.** Call `kb.start_pending_processor()` after `connect()` on services that write documents. Read-only services do not need it. The processor can be stopped with `await kb.stop_pending_processor()` and restarted at any time.
 
 ```python
-async with Khora() as lake:
-    lake.start_pending_processor()   # opt-in; write-path services only
-    handle = await lake.submit_batch(
+async with Khora() as kb:
+    kb.start_pending_processor()   # opt-in; write-path services only
+    handle = await kb.submit_batch(
         [{"content": "doc 1"}, {"content": "doc 2"}],
         on_result=lambda completed, total, result: print(result),
         namespace=ns_id,
@@ -77,13 +77,13 @@ Khora ships two zero-infrastructure paths. Both are marked **experimental** in v
 - **SQLite + LanceDB** (`pip install khora[sqlite-lance]`, set `KHORA_STORAGE_BACKEND=sqlite_lance`) — recommended embedded stack. Covers VectorCypher, Skeleton, and Chronicle via dialect-aware Alembic migrations and LanceDB-backed vector search. Documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. Known gaps: no point-in-time queries (DYT-3550), partial atomicity in `coordinator.transaction()`, FTS on chunks only. See [configuration.md](docs/configuration.md#embedded-backends-experimental).
 - **SurrealDB** (`pip install khora[surrealdb]`) — unified relational + vector + graph in one store. Python SDK is on the alpha track (`>=2.0.0a1`), and KNN (`<|K|>`) is unreliable in embedded mode (uses brute-force cosine + HNSW fallback). Suitable for experimentation; not recommended for production.
 
-> **Quickstart caveat.** A literal `Khora("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector — there is no `memory://` URL scheme parsed by the lake itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` (or `surrealdb`) and the corresponding `db_path` / connection settings. Routing a true `memory://` URI to the SQLite+LanceDB stack is tracked for v0.10.
+> **Quickstart caveat.** A literal `Khora("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector — there is no `memory://` URL scheme parsed by khora itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` (or `surrealdb`) and the corresponding `db_path` / connection settings. Routing a true `memory://` URI to the SQLite+LanceDB stack is tracked for v0.10.
 
 ## Observability
 
 khora emits OpenTelemetry spans and metrics via [Logfire](https://logfire.pydantic.dev/) and records structured `LLMEvent` / `StorageEvent` / `PipelineEvent` rows to PostgreSQL when a collector is configured. Both integrations are opt-in — without them, all instrumentation is a zero-cost no-op.
 
-- **Public surface is documented in [`docs/telemetry-contract.json`](docs/telemetry-contract.json)** (with explainer at [`docs/telemetry-contract.md`](docs/telemetry-contract.md)). It lists every public span, metric, pipeline stage, event-type field, and `khora.telemetry.__all__` export. Items tagged `stability: public` are part of khora's API surface and follow standard semver — breaking changes require a major version bump. Drift is enforced in CI via `tests/unit/telemetry/test_contract.py`. See [ADR-026](docs/adrs/adr-026-telemetry-contract.md).
+- **Public surface is documented in [`docs/telemetry-contract.json`](docs/telemetry-contract.json)** (with explainer at [`docs/telemetry-contract.md`](docs/telemetry-contract.md)). It lists every public span, metric, pipeline stage, event-type field, and `khora.telemetry.__all__` export. Items tagged `stability: public` are part of khora's API surface and follow standard semver — breaking changes require a major version bump. Drift is enforced in CI via `tests/unit/telemetry/test_contract.py`.
 - **OTel semantic conventions** apply to attributes: `gen_ai.*` for LLM calls, `db.*` for storage, `code.*` for stack info. Vendor-neutral over the OTel exporter chain.
 - **Logfire integration is opt-in via the `[logfire]` extra:**
 
@@ -110,7 +110,7 @@ khora emits OpenTelemetry spans and metrics via [Logfire](https://logfire.pydant
 
 Start at [docs/README.md](docs/README.md). Key entry points:
 
-- [API reference](docs/api-reference.md) — public `Khora` surface (ADR-024).
+- [API reference](docs/api-reference.md) — public `Khora` surface.
 - [Configuration](docs/configuration.md) — `KHORA_*` env vars and `KhoraConfig`.
 - [Architecture](docs/architecture/overview.md) — how the pieces fit.
 - [Engines](docs/engines/engine-comparison.md) — VectorCypher, Skeleton, Chronicle.

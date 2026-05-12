@@ -16,7 +16,7 @@ Production-readiness is **per (engine × stack)**, not per engine. The same engi
 
 - **Production-ready** — qualified for production deployment in v0.9.0; covered by integration and e2e tests; documented gotchas have known mitigations.
 - **Available** — supported, exercised in tests, but has not been stamped production-ready in v0.9.0. Equivalent retrieval semantics; less load-tested.
-- **Experimental** — feature-complete enough for demos, evaluation, and tests on small corpora. Not a deployment story. See the [embedded backend caveats](../configuration.md#embedded-backends-experimental) and [ADR-025](../adrs/adr-025-embedded-backend-realignment.md) for the full list of gaps.
+- **Experimental** — feature-complete enough for demos, evaluation, and tests on small corpora. Not a deployment story. See the [embedded backend caveats](../configuration.md#embedded-backends-experimental) for the full list of gaps.
 
 The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. SurrealDB is experimental on multiple fronts (Python SDK on alpha track, KNN unreliable in embedded mode). The `kuzu` graph backend is **deprecated in 0.9.0** and scheduled for removal in 0.10.
 
@@ -45,14 +45,14 @@ The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunk
 
 ```python
 # VectorCypher: skeleton-selective extraction
-async with Khora(db_url, engine="vectorcypher") as lake:
-    result = await lake.remember(content)
+async with Khora(db_url, engine="vectorcypher") as kb:
+    result = await kb.remember(content)
     print(f"Extracted {result.entities_extracted} entities")
 
 # For 100% extraction (legacy GraphRAG behavior):
 async with Khora(db_url, engine="vectorcypher",
-                 engine_kwargs={"skeleton_core_ratio": 1.0}) as lake:
-    result = await lake.remember(content)
+                 engine_kwargs={"skeleton_core_ratio": 1.0}) as kb:
+    result = await kb.remember(content)
 ```
 
 **Skeleton Construction:**
@@ -63,8 +63,8 @@ async with Khora(db_url, engine="vectorcypher",
 
 ```python
 # Skeleton Construction: minimal extraction, skeleton-based
-async with Khora(db_url, engine="skeleton") as lake:
-    result = await lake.remember(content)
+async with Khora(db_url, engine="skeleton") as kb:
+    result = await kb.remember(content)
     # Entities only extracted for "core" chunks (high PageRank)
 ```
 
@@ -89,10 +89,10 @@ async with Khora(db_url, engine="skeleton") as lake:
 
 ```python
 # Skeleton Construction: store event with occurrence time
-await lake.remember(content, occurred_at=datetime(2024, 1, 15))
+await kb.remember(content, occurred_at=datetime(2024, 1, 15))
 
 # Query: "What happened in January?"
-results = await lake.recall("January events", time_range=("2024-01-01", "2024-01-31"))
+results = await kb.recall("January events", time_range=("2024-01-01", "2024-01-31"))
 ```
 
 **Chronicle:**
@@ -108,8 +108,8 @@ results = await lake.recall("January events", time_range=("2024-01-01", "2024-01
 
 ```python
 # VectorCypher: query routing determines the search path automatically
-results = await lake.recall("Who founded Acme Corp?")  # Multi-hop entity query
-results = await lake.recall("CEO recent news")  # Hybrid vector + temporal
+results = await kb.recall("Who founded Acme Corp?")  # Multi-hop entity query
+results = await kb.recall("CEO recent news")  # Hybrid vector + temporal
 ```
 
 **Skeleton Construction:**
@@ -118,7 +118,7 @@ results = await lake.recall("CEO recent news")  # Hybrid vector + temporal
 
 ```python
 # Skeleton Construction: time-filtered hybrid search
-results = await lake.recall(
+results = await kb.recall(
     "deployment errors",
     time_range=("2024-01-01", "2024-01-31"),
     mode=SearchMode.HYBRID,
@@ -178,17 +178,17 @@ For 1000 documents averaging 5KB each:
 
 ```python
 # Before (graphrag — no longer available)
-async with Khora(db_url, engine="graphrag") as lake:
-    await lake.remember(content)
+async with Khora(db_url, engine="graphrag") as kb:
+    await kb.remember(content)
 
 # After — drop-in: vectorcypher with full extraction
 async with Khora(db_url, engine="vectorcypher",
-                 engine_kwargs={"skeleton_core_ratio": 1.0}) as lake:
-    await lake.remember(content)
+                 engine_kwargs={"skeleton_core_ratio": 1.0}) as kb:
+    await kb.remember(content)
 
 # Or accept default selective extraction (recommended — 30% cheaper):
-async with Khora(db_url, engine="vectorcypher") as lake:
-    await lake.remember(content)
+async with Khora(db_url, engine="vectorcypher") as kb:
+    await kb.remember(content)
 ```
 
 Existing graphrag-ingested data remains queryable via `vectorcypher` against the same database — the table shapes are identical.
@@ -207,14 +207,14 @@ For complex use cases, consider running multiple engines against the same data s
 ```python
 # Example: dual-engine setup (conceptual)
 async def hybrid_query(query: str):
-    async with Khora(db_url, engine="vectorcypher") as kg_lake:
-        async with Khora(db_url, engine="skeleton") as temporal_lake:
+    async with Khora(db_url, engine="vectorcypher") as kg_kb:
+        async with Khora(db_url, engine="skeleton") as temporal_kb:
             # Route entity queries to VectorCypher
             if has_entity_intent(query):
-                return await kg_lake.recall(query)
+                return await kg_kb.recall(query)
             # Route temporal queries to Skeleton
             elif has_temporal_intent(query):
-                return await temporal_lake.recall(query)
+                return await temporal_kb.recall(query)
 ```
 
 ## Performance Benchmarks

@@ -638,7 +638,7 @@ class VectorCypherEngine:
                 except ValueError:
                     pass
 
-        # ADR-056: external_id dispatch — route to replace_document_extraction
+        # external_id dispatch — route to replace_document_extraction
         # when the caller supplied an external_id that already exists in the
         # namespace. Lookup is status-agnostic (COMPLETED / PROCESSING / FAILED)
         # so the replace path self-heals previously failed rows.
@@ -701,7 +701,7 @@ class VectorCypherEngine:
             # create. The partial UNIQUE index ``ix_documents_namespace_external_id_unique``
             # (DYT-2672) converts the race into a deterministic conflict.
             # Retry the lookup and route to replace so the loser still
-            # succeeds against the winner's row (ADR-056 §Decision #9).
+            # succeeds against the winner's row.
             if external_id is None:
                 raise
             existing_after_race = await storage.get_document_by_external_id(namespace_id, external_id)
@@ -964,7 +964,7 @@ class VectorCypherEngine:
         """Clear partial extraction state (khora_chunks + :Chunk nodes) for a FAILED document.
 
         Called by submit_batch before re-queuing a previously-FAILED document to prevent
-        duplicate chunks accumulating on retry (ADR-068 self-heal path, H1 fix).
+        duplicate chunks accumulating on retry (self-heal path, H1 fix).
 
         Best-effort: logs and ignores storage errors so that cleanup failures do not
         block re-processing.
@@ -1264,15 +1264,15 @@ class VectorCypherEngine:
         but VectorCypher also owns ``khora_chunks`` (via ``TemporalVectorStore``)
         and Neo4j ``:Chunk`` nodes (via ``DualNodeManager``). This method:
 
-        1. Reuses ``existing.id`` per ADR-056 §API Contracts ("The same id may
-           be reused across replacements; the row is updated in place") and
-           preserves ``created_at`` / ``source_timestamp`` / ``processed_at``.
+        1. Reuses ``existing.id`` — the same id is reused across replacements;
+           the row is updated in place. Preserves ``created_at`` /
+           ``source_timestamp`` / ``processed_at``.
         2. Chunks + embeds + extracts in-memory (mirrors the create path but
            defers all persistence).
         3. Wipes old ``khora_chunks`` rows and old ``:Chunk`` nodes, writes
            new ones with refreshed embeddings / content / metadata — BEFORE
            the coordinator call so a failure mid-wipe marks the doc FAILED
-           and the next replace self-heals (ADR-056 §Decision #8).
+           and the next replace self-heals.
         4. Delegates to ``coordinator.replace_document_extraction`` for
            atomic PG transaction + graph retire / remap / upsert.
         5. Rebuilds ``MENTIONED_IN`` edges from upserted entities to the
@@ -1462,9 +1462,8 @@ class VectorCypherEngine:
                 if dual_nodes is not None:
                     await dual_nodes.create_chunk_nodes_batch(new_temporal_chunks, namespace_id)
         except Exception as e:
-            # Mirror coordinator's ADR-056 §Decision #8 self-heal semantics:
-            # mark FAILED and re-raise unwrapped so the next successful
-            # replace against the same external_id heals the row.
+            # Self-heal: mark FAILED and re-raise unwrapped so the next
+            # successful replace against the same external_id heals the row.
             new_document.mark_failed(str(e))
             try:
                 await storage.update_document(new_document)
@@ -1516,7 +1515,7 @@ class VectorCypherEngine:
                     raise
 
         # 7. Overwrite ``source_chunk_ids`` to the current extraction's chunk
-        #    UUIDs. ADR-056 decomposes the replace into
+        #    UUIDs. The replace decomposes into
         #    ``upsert_entities_batch`` (net-new only; ON MATCH *appends*
         #    source_chunk_ids[-250..]) + ``remap_source_document_ids_batch``
         #    (survivors; source_document_ids only). Neither replaces
@@ -2013,7 +2012,7 @@ class VectorCypherEngine:
                 progress_count += n
                 on_progress(progress_count, total)
 
-        # ── Stage 0a: external_id dispatch (ADR-056) ────────────────────
+        # ── Stage 0a: external_id dispatch ──────────────────────────────
         # Docs with an external_id that already exists in the namespace are
         # routed to the replace path via self.remember() — which detects the
         # same existing row and calls coordinator.replace_document_extraction.
@@ -2845,12 +2844,21 @@ class VectorCypherEngine:
         """Find entities related to a given entity via graph traversal."""
         dual_nodes = self._get_dual_nodes()
         if dual_nodes is None:
-            # SurrealDB: use storage coordinator's graph backend
+            # Graph-only backends (sqlite_lance, surrealdb): no chunk-entity
+            # dual graph, so traversal goes through the GraphBackendProtocol
+            # directly. ``get_neighborhood`` returns the seed plus connected
+            # entities up to ``depth``; strip the seed and apply a flat score
+            # (per-hop distance is not exposed cheaply by all backends).
             storage = self._get_storage()
-            if storage.graph:
-                related = await storage.graph.get_related_entities(entity_id, namespace_id)
-                return [(e, 1.0) for e in related[:limit]]
-            return []
+            if storage.graph is None:
+                return []
+            neighborhood = await storage.graph.get_neighborhood(
+                entity_id,
+                depth=max_depth,
+                limit=limit,
+            )
+            entities = neighborhood.get("entities", [])
+            return [(e, 1.0) for e in entities if e.id != entity_id][:limit]
 
         neighborhoods = await dual_nodes.get_entity_neighborhoods(
             entity_ids=[entity_id],

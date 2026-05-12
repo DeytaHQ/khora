@@ -47,7 +47,7 @@ class TestSqliteMigrations:
                     )
                     tables = {r[0] for r in result}
 
-                    # Core memory-lake tables must exist.
+                    # Core khora tables must exist.
                     expected = {
                         "memory_namespaces",
                         "documents",

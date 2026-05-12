@@ -209,7 +209,7 @@ Inference rules are configurable through the expertise system. In smart mode, in
 Here's the complete flow for `remember()`:
 
 ```python
-result = await lake.remember(
+result = await kb.remember(
     content="Einstein published his theory of general relativity in 1915...",
     title="Physics History",
     chunk_strategy="semantic",
@@ -251,7 +251,7 @@ extraction_model = "gpt-4o-mini"
 ### Per-Document Overrides
 
 ```python
-await lake.remember(
+await kb.remember(
     content,
     chunk_strategy="recursive",
     chunk_size=1024,
@@ -266,7 +266,7 @@ await lake.remember(
 For large ingestions:
 
 ```python
-results = await lake.remember_batch(
+results = await kb.remember_batch(
     documents,
     max_concurrent_documents=10,     # Process 10 docs at once
     max_concurrent_extractions=20,   # Max 20 LLM calls in flight

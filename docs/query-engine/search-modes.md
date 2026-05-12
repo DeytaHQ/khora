@@ -32,7 +32,7 @@ SearchMode.ALL       # All three methods
 ```python
 # "AI ethics" will find content about
 # "artificial intelligence morality" or "responsible machine learning"
-results = await lake.recall(
+results = await kb.recall(
     "AI ethics in healthcare",
     mode=SearchMode.VECTOR
 )
@@ -58,7 +58,7 @@ results = await lake.recall(
 **Example**:
 ```python
 # Find everything connected to "Machine Learning Team"
-results = await lake.recall(
+results = await kb.recall(
     "Machine Learning Team projects and members",
     mode=SearchMode.GRAPH,
     config=QueryConfig(
@@ -90,7 +90,7 @@ results = await lake.recall(
 **Example**:
 ```python
 # Find content with exactly this error message
-results = await lake.recall(
+results = await kb.recall(
     '"NullPointerException in UserService.java"',
     mode=SearchMode.KEYWORD
 )
@@ -117,7 +117,7 @@ results = await lake.recall(
 **Example**:
 ```python
 # Gets the best of all three methods
-results = await lake.recall(
+results = await kb.recall(
     "quarterly planning with the product team",
     mode=SearchMode.HYBRID
 )
@@ -148,7 +148,7 @@ Default weights:
 
 **Example**:
 ```python
-results = await lake.recall(
+results = await kb.recall(
     "authentication security issues Q4",
     mode=SearchMode.ALL
 )
@@ -204,7 +204,7 @@ QueryConfig(
 Limit results to a time window:
 
 ```python
-results = await lake.recall(
+results = await kb.recall(
     "product decisions",
     mode=SearchMode.HYBRID,
     temporal_filter=TemporalFilter.last_days(30)
@@ -216,7 +216,7 @@ results = await lake.recall(
 Control how deep and what relationships to explore:
 
 ```python
-results = await lake.recall(
+results = await kb.recall(
     "engineering org structure",
     mode=SearchMode.GRAPH,
     config=QueryConfig(
@@ -231,7 +231,7 @@ results = await lake.recall(
 Let the query engine follow up on initial results:
 
 ```python
-results = await lake.recall(
+results = await kb.recall(
     "competitive landscape",
     mode=SearchMode.HYBRID,
     config=QueryConfig(enable_agentic=True)

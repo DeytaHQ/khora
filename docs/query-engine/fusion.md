@@ -251,7 +251,7 @@ def reciprocal_rank_fusion(
 After fusion, you can see where results came from:
 
 ```python
-result = await lake.recall("machine learning applications")
+result = await kb.recall("machine learning applications")
 
 print(f"Vector contributed: {result.search_contributions.vector} results")
 print(f"Graph contributed: {result.search_contributions.graph} results")
@@ -312,9 +312,9 @@ config = RetrieverConfig(
 from khora import Khora, SearchMode
 from khora.query import QueryConfig
 
-async with Khora() as lake:
+async with Khora() as kb:
     # Search with custom fusion settings
-    results = await lake.recall(
+    results = await kb.recall(
         "Einstein's contributions to physics",
         mode=SearchMode.ALL,
         config=QueryConfig(

@@ -83,13 +83,13 @@ def mock_engine() -> MagicMock:
     return mock_eng
 
 
-def make_lake(*, connected: bool = False) -> Khora:
+def make_kb(*, connected: bool = False) -> Khora:
     """Create a Khora with mocked config, optionally pre-connected."""
     with patch("khora.khora.load_config", return_value=mock_config()):
-        lake = Khora()
+        kb = Khora()
 
     if connected:
-        lake._connected = True
-        lake._engine = mock_engine()
+        kb._connected = True
+        kb._engine = mock_engine()
 
-    return lake
+    return kb

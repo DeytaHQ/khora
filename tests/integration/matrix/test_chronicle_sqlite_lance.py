@@ -181,7 +181,7 @@ def _event_fact_extraction() -> ExpertiseConfig:
 
 
 @pytest.fixture
-async def lake(tmp_path: Path) -> AsyncIterator[Khora]:
+async def kb(tmp_path: Path) -> AsyncIterator[Khora]:
     """Per-test Chronicle Khora bound to an embedded SQLite+LanceDB pair."""
     db_path = str(tmp_path / "khora.db")
     lance_path = str(tmp_path / "khora.lance")
@@ -201,29 +201,29 @@ async def lake(tmp_path: Path) -> AsyncIterator[Khora]:
     config.pipelines.extract_entities = True
     config.pipelines.selective_extraction = False
 
-    lake = Khora(config, engine="chronicle", run_migrations=True)
-    await lake.connect()
+    kb = Khora(config, engine="chronicle", run_migrations=True)
+    await kb.connect()
     try:
-        yield lake
+        yield kb
     finally:
-        await lake.disconnect()
+        await kb.disconnect()
 
 
 @pytest.fixture
-async def namespace_id(lake: Khora) -> UUID:
-    ns = await lake.create_namespace()
+async def namespace_id(kb: Khora) -> UUID:
+    ns = await kb.create_namespace()
     return ns.namespace_id
 
 
 async def _remember(
-    lake: Khora,
+    kb: Khora,
     *,
     namespace_id: UUID,
     content: str,
     title: str = "",
     expertise: ExpertiseConfig | None = None,
 ) -> Any:
-    return await lake.remember(
+    return await kb.remember(
         content=content,
         namespace=namespace_id,
         title=title,
@@ -238,7 +238,7 @@ async def _remember(
 # ---------------------------------------------------------------------------
 
 
-async def test_chronicle_remember_recall_roundtrip(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_remember_recall_roundtrip(kb: Khora, namespace_id: UUID) -> None:
     """Ingest 3 docs, recall on a known token, assert the right chunk surfaces."""
     contents = [
         "Marie Curie won the Nobel Prize in Physics in 1903.",
@@ -246,16 +246,16 @@ async def test_chronicle_remember_recall_roundtrip(lake: Khora, namespace_id: UU
         "Radium and polonium were discovered by the Curies.",
     ]
     for c in contents:
-        await _remember(lake, namespace_id=namespace_id, content=c)
+        await _remember(kb, namespace_id=namespace_id, content=c)
 
-    result = await lake.recall("Nobel Prize Physics", namespace=namespace_id, limit=3)
+    result = await kb.recall("Nobel Prize Physics", namespace=namespace_id, limit=3)
     assert result.chunks, "expected at least one chunk back"
     text_blob = " ".join(c.content for c, _ in result.chunks).lower()
     assert "nobel" in text_blob
 
 
 async def test_chronicle_events_and_facts_persist_via_engine(
-    lake: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch
+    kb: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Regression for issue #529 at the **engine layer**.
 
@@ -316,7 +316,7 @@ async def test_chronicle_events_and_facts_persist_via_engine(
     )
 
     result = await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="Marie Curie won the Nobel Prize in Physics in 1903.",
         expertise=_event_fact_extraction(),
@@ -341,7 +341,7 @@ async def test_chronicle_events_and_facts_persist_via_engine(
     )
 
 
-async def test_chronicle_recall_handles_punctuated_query(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_recall_handles_punctuated_query(kb: Khora, namespace_id: UUID) -> None:
     """Regression for issue #526 at the **engine layer**.
 
     The PR #528 fix verified ``escape_fts5_query`` at the storage-adapter
@@ -351,7 +351,7 @@ async def test_chronicle_recall_handles_punctuated_query(lake: Khora, namespace_
     fusion mode that re-calls a raw FTS5 path).
     """
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="Marie Curie won the Nobel Prize in Physics in 1903.",
     )
@@ -364,7 +364,7 @@ async def test_chronicle_recall_handles_punctuated_query(lake: Khora, namespace_
         "Curie AND Nobel",
         'say "hello" Curie',
     ):
-        result = await lake.recall(query, namespace=namespace_id, limit=3)
+        result = await kb.recall(query, namespace=namespace_id, limit=3)
         # chronicle returns chunks as (chunk, score) tuples; we only assert no
         # crash + iterable result here (the substantive #526 regression test
         # is at the storage layer; this catches a future fusion-mode regression
@@ -372,16 +372,16 @@ async def test_chronicle_recall_handles_punctuated_query(lake: Khora, namespace_
         assert isinstance(result.chunks, list), f"recall must not crash on {query!r}"
 
 
-async def test_chronicle_namespace_isolation(lake: Khora) -> None:
+async def test_chronicle_namespace_isolation(kb: Khora) -> None:
     """Multi-tenant correctness: recall in ns1 must not surface ns2 chunks."""
-    ns1 = (await lake.create_namespace()).namespace_id
-    ns2 = (await lake.create_namespace()).namespace_id
+    ns1 = (await kb.create_namespace()).namespace_id
+    ns2 = (await kb.create_namespace()).namespace_id
 
-    await _remember(lake, namespace_id=ns1, content="Marie Curie won the Nobel Prize.")
-    await _remember(lake, namespace_id=ns2, content="Albert Einstein won the Nobel Prize.")
+    await _remember(kb, namespace_id=ns1, content="Marie Curie won the Nobel Prize.")
+    await _remember(kb, namespace_id=ns2, content="Albert Einstein won the Nobel Prize.")
 
-    r1 = await lake.recall("Curie", namespace=ns1, limit=5)
-    r2 = await lake.recall("Einstein", namespace=ns2, limit=5)
+    r1 = await kb.recall("Curie", namespace=ns1, limit=5)
+    r2 = await kb.recall("Einstein", namespace=ns2, limit=5)
 
     text1 = " ".join(c.content for c, _ in r1.chunks).lower()
     text2 = " ".join(c.content for c, _ in r2.chunks).lower()
@@ -389,17 +389,17 @@ async def test_chronicle_namespace_isolation(lake: Khora) -> None:
     assert "curie" not in text2, "ns2 results leaked from ns1"
 
 
-async def test_chronicle_recall_empty_namespace(lake: Khora) -> None:
+async def test_chronicle_recall_empty_namespace(kb: Khora) -> None:
     """A fresh namespace must return an empty result, not raise."""
-    empty_ns = (await lake.create_namespace()).namespace_id
-    result = await lake.recall("anything", namespace=empty_ns, limit=5)
+    empty_ns = (await kb.create_namespace()).namespace_id
+    result = await kb.recall("anything", namespace=empty_ns, limit=5)
     assert result.chunks == []
 
 
-async def test_chronicle_concurrent_remember(lake: Khora, namespace_id: UUID) -> None:
+async def test_chronicle_concurrent_remember(kb: Khora, namespace_id: UUID) -> None:
     """5 concurrent remember() calls land 5 chunks (entity gate doesn't drop)."""
     contents = [f"Document {i}: Marie Curie won the Nobel Prize in Physics ({i})." for i in range(5)]
-    await asyncio.gather(*[_remember(lake, namespace_id=namespace_id, content=c) for c in contents])
+    await asyncio.gather(*[_remember(kb, namespace_id=namespace_id, content=c) for c in contents])
 
-    result = await lake.recall("Marie Curie", namespace=namespace_id, limit=10)
+    result = await kb.recall("Marie Curie", namespace=namespace_id, limit=10)
     assert len(result.chunks) >= 5

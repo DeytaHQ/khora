@@ -1,11 +1,11 @@
 # Khora Documentation
 
-Khora is a memory-lake library. This directory contains everything beyond the quickstart in the top-level [README](../README.md).
+Khora is a knowledge memory library. This directory contains everything beyond the quickstart in the top-level [README](../README.md).
 
 ## Getting started
 
 - [Configuration](configuration.md) — `KHORA_*` environment variables, `KhoraConfig`, installation extras.
-- [API reference](api-reference.md) — public `Khora` methods and result types (ADR-024).
+- [API reference](api-reference.md) — public `Khora` methods and result types.
 - [Migrations](migrations.md) — Alembic workflow for library users (PostgreSQL backends only).
 - [Consumers](consumers.md) — how downstream packages (khora-cli, khora-explorer, khora-benchmarks) use khora.
 
@@ -40,7 +40,7 @@ Pluggable retrieval strategies that implement `MemoryEngineProtocol`.
 - [Conversation chunking](extraction/conversation-chunking.md) — message-aware grouping.
 - [Embedders](extraction/embedders.md) — vector generation via LiteLLM.
 - [Extractors](extraction/extractors.md) — entity and relationship extraction.
-- [Expertise system](extraction/expertise-system.md) — `ExpertiseConfig` for domain-specific extraction (ADR-022).
+- [Expertise system](extraction/expertise-system.md) — `ExpertiseConfig` for domain-specific extraction.
 - [Semantic expansion](extraction/semantic-expansion.md) — entity unification and relationship inference.
 
 ## Query engine
@@ -63,12 +63,6 @@ Pluggable retrieval strategies that implement `MemoryEngineProtocol`.
 ## Hooks
 
 - [Semantic hooks](hooks/semantic-hooks.md) — subscribe to extraction events with 3-level semantic filtering.
-
-## Decisions
-
-- [ADR-022](adrs/adr-022-extraction-skills-public-api.md) — extraction skills public API.
-- [ADR-024](adrs/adr-024-memory-lake-public-api.md) — memory-lake public API (the stable top-level surface).
-- [ADR-025](adrs/adr-025-embedded-backend-realignment.md) — embedded backend realignment for v0.9.0 (production-readiness scoping per stack, sqlite-vec / pgserver deferred to v0.10).
 
 ## Process
 

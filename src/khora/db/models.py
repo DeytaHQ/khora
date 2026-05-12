@@ -152,7 +152,7 @@ class DocumentModel(Base):
     relationship_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Ontology-aware re-extraction (ADR-018)
+    # Ontology-aware re-extraction
     extraction_config_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
 
     # Extraction parameters for deferred/crash-recovery processing (DYT-3305).

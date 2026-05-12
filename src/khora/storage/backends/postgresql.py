@@ -496,13 +496,12 @@ class PostgreSQLBackend(AsyncSessionMixin):
             return self._document_model_to_domain(model) if model else None
 
     async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
-        """Get a document by (namespace_id, external_id) — ADR-056 dispatch.
+        """Get a document by (namespace_id, external_id).
 
         Status is NOT filtered: FAILED rows must be returned so the next
-        successful replace against the same external_id self-heals them
-        (ADR-056 §Decision #8). The partial UNIQUE index
-        ``ix_documents_namespace_external_id_unique`` guarantees at most one
-        row per (namespace_id, external_id).
+        successful replace against the same external_id self-heals them.
+        The partial UNIQUE index ``ix_documents_namespace_external_id_unique``
+        guarantees at most one row per (namespace_id, external_id).
         """
         if external_id is None:
             return None
@@ -534,7 +533,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             return {m.id: self._document_model_to_domain(m) for m in models}
 
     async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
-        """Batch lookup for ``(namespace_id, external_id)`` — ADR-056.
+        """Batch lookup for ``(namespace_id, external_id)``.
 
         Unlike ``get_documents_by_checksums``, does NOT filter by status so
         FAILED / PROCESSING rows are returned too (self-heal contract). The

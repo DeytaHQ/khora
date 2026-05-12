@@ -100,7 +100,7 @@ class EventType(str, Enum):
 |------------|-------------|---------|
 | `system` | Internal system operations | Background cleanup |
 | `user` | User-initiated via UI | Manual document upload |
-| `api` | Programmatic API call | `lake.remember()` from application code |
+| `api` | Programmatic API call | `kb.remember()` from application code |
 | `pipeline` | Prefect pipeline | Ingestion pipeline |
 
 ## Factory Methods
@@ -326,32 +326,32 @@ CREATE INDEX idx_events_type
 
 ```python
 # Get recent events
-events = await lake.storage.get_events(
+events = await kb.storage.get_events(
     namespace_id,
     limit=50,
 )
 
 # Filter by event type
-entity_events = await lake.storage.get_events(
+entity_events = await kb.storage.get_events(
     namespace_id,
     event_types=["entity.created", "entity.merged"],
 )
 
 # Filter by resource
-doc_history = await lake.storage.get_events(
+doc_history = await kb.storage.get_events(
     namespace_id,
     resource_type="document",
     resource_id=document_id,
 )
 
 # Time range query
-recent = await lake.storage.get_events(
+recent = await kb.storage.get_events(
     namespace_id,
     after=datetime.utcnow() - timedelta(hours=24),
 )
 
 # Get correlated events
-transaction_events = await lake.storage.get_events(
+transaction_events = await kb.storage.get_events(
     namespace_id,
     correlation_id=correlation_id,
 )
@@ -363,7 +363,7 @@ transaction_events = await lake.storage.get_events(
 
 ```python
 # Who made changes to this entity?
-events = await lake.storage.get_events(
+events = await kb.storage.get_events(
     namespace_id,
     resource_type="entity",
     resource_id=entity_id,
@@ -379,7 +379,7 @@ for event in events:
 
 ```python
 # Show entity change history
-events = await lake.storage.get_events(
+events = await kb.storage.get_events(
     namespace_id,
     resource_type="entity",
     resource_id=entity_id,
@@ -399,7 +399,7 @@ for event in sorted(events, key=lambda e: e.timestamp):
 
 ```python
 # Get all events from a specific pipeline run
-events = await lake.storage.get_events(
+events = await kb.storage.get_events(
     namespace_id,
     correlation_id=pipeline_correlation_id,
 )

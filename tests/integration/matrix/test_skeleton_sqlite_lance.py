@@ -138,7 +138,7 @@ def _patch_llm(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-async def lake(tmp_path: Path) -> AsyncIterator[Khora]:
+async def kb(tmp_path: Path) -> AsyncIterator[Khora]:
     """Per-test Skeleton Khora bound to an embedded SQLite+LanceDB pair.
 
     The fixture allocates a fresh tmp_path per test; ``run_migrations=True``
@@ -161,29 +161,29 @@ async def lake(tmp_path: Path) -> AsyncIterator[Khora]:
     # Single-chunk documents keep the test deterministic.
     config.pipelines.chunk_size = 1024
 
-    lake = Khora(config, engine="skeleton", run_migrations=True)
-    await lake.connect()
+    kb = Khora(config, engine="skeleton", run_migrations=True)
+    await kb.connect()
     try:
-        yield lake
+        yield kb
     finally:
-        await lake.disconnect()
+        await kb.disconnect()
 
 
 @pytest.fixture
-async def namespace_id(lake: Khora) -> UUID:
-    ns = await lake.create_namespace()
+async def namespace_id(kb: Khora) -> UUID:
+    ns = await kb.create_namespace()
     return ns.namespace_id
 
 
 async def _remember(
-    lake: Khora,
+    kb: Khora,
     *,
     namespace_id: UUID,
     content: str,
     title: str = "",
     metadata: dict[str, Any] | None = None,
 ) -> Any:
-    return await lake.remember(
+    return await kb.remember(
         content=content,
         namespace=namespace_id,
         title=title,
@@ -194,7 +194,7 @@ async def _remember(
     )
 
 
-async def _recall(lake: Khora, query: str, **kwargs: Any) -> Any:
+async def _recall(kb: Khora, query: str, **kwargs: Any) -> Any:
     """Recall wrapper that pins ``mode=SearchMode.VECTOR`` for deterministic ranking.
 
     Mirrors ``_recall`` in ``test_skeleton_pg.py``: the wrapper sidesteps
@@ -203,7 +203,7 @@ async def _recall(lake: Khora, query: str, **kwargs: Any) -> Any:
     the default-HYBRID path explicitly (DYT-3555).
     """
     kwargs.setdefault("mode", SearchMode.VECTOR)
-    return await lake.recall(query, **kwargs)
+    return await kb.recall(query, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +211,7 @@ async def _recall(lake: Khora, query: str, **kwargs: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-async def test_skeleton_remember_recall_roundtrip(lake: Khora, namespace_id: UUID) -> None:
+async def test_skeleton_remember_recall_roundtrip(kb: Khora, namespace_id: UUID) -> None:
     """Ingest 3 docs, recall, assert ingested text appears in context."""
     contents = [
         "alpha document mentions the falcon launch in detail.",
@@ -219,9 +219,9 @@ async def test_skeleton_remember_recall_roundtrip(lake: Khora, namespace_id: UUI
         "charlie document is a side note unrelated to anything else.",
     ]
     for c in contents:
-        await _remember(lake, namespace_id=namespace_id, content=c)
+        await _remember(kb, namespace_id=namespace_id, content=c)
 
-    result = await _recall(lake, "falcon launch", namespace=namespace_id, limit=10)
+    result = await _recall(kb, "falcon launch", namespace=namespace_id, limit=10)
 
     # Skeleton reports its backend type in metadata. Once DYT-3561 lands,
     # the value should be "lancedb" (or whatever name the new backend
@@ -231,16 +231,16 @@ async def test_skeleton_remember_recall_roundtrip(lake: Khora, namespace_id: UUI
     assert "falcon" in result.context_text.lower()
 
 
-async def test_skeleton_namespace_isolation(lake: Khora) -> None:
+async def test_skeleton_namespace_isolation(kb: Khora) -> None:
     """Two namespaces, queries don't cross-bleed."""
-    ns_a = (await lake.create_namespace()).namespace_id
-    ns_b = (await lake.create_namespace()).namespace_id
+    ns_a = (await kb.create_namespace()).namespace_id
+    ns_b = (await kb.create_namespace()).namespace_id
 
-    await _remember(lake, namespace_id=ns_a, content="alpha document about kangaroos in the outback.")
-    await _remember(lake, namespace_id=ns_b, content="bravo document about penguins on the ice.")
+    await _remember(kb, namespace_id=ns_a, content="alpha document about kangaroos in the outback.")
+    await _remember(kb, namespace_id=ns_b, content="bravo document about penguins on the ice.")
 
-    result_a = await _recall(lake, "animals", namespace=ns_a, limit=10)
-    result_b = await _recall(lake, "animals", namespace=ns_b, limit=10)
+    result_a = await _recall(kb, "animals", namespace=ns_a, limit=10)
+    result_b = await _recall(kb, "animals", namespace=ns_b, limit=10)
 
     a_text = " ".join(c.content for c, _ in result_a.chunks)
     b_text = " ".join(c.content for c, _ in result_b.chunks)
@@ -251,25 +251,25 @@ async def test_skeleton_namespace_isolation(lake: Khora) -> None:
     assert "kangaroos" not in b_text, "namespace_a content leaked into namespace_b"
 
 
-async def test_skeleton_recall_top_k_ordering(lake: Khora, namespace_id: UUID) -> None:
+async def test_skeleton_recall_top_k_ordering(kb: Khora, namespace_id: UUID) -> None:
     """Results ordered by descending similarity (combined_score)."""
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="alpha bravo charlie delta echo (high overlap with query)",
     )
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="alpha bravo charlie (medium overlap with query)",
     )
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="alpha (low overlap with query)",
     )
 
-    result = await _recall(lake, "alpha bravo charlie delta echo", namespace=namespace_id, limit=10)
+    result = await _recall(kb, "alpha bravo charlie delta echo", namespace=namespace_id, limit=10)
 
     assert len(result.chunks) >= 3
     scores = [score for _, score in result.chunks]
@@ -282,7 +282,7 @@ async def test_skeleton_recall_top_k_ordering(lake: Khora, namespace_id: UUID) -
     reason=(
         "Engine-level namespace resolution gap (out of scope for DYT-3561): "
         "the test fixture passes the stable ``ns.namespace_id`` straight to "
-        "``engine.recall`` while ``lake.remember`` resolves it to the "
+        "``engine.recall`` while ``kb.remember`` resolves it to the "
         "row-level ``id`` before persisting. ``khora_chunks.namespace_id`` "
         "therefore stores the row-level id and the recall filter misses. "
         "Same issue lurks behind PG's DYT-3556 xfail; needs a separate "
@@ -290,7 +290,7 @@ async def test_skeleton_recall_top_k_ordering(lake: Khora, namespace_id: UUID) -
         "test contract."
     ),
 )
-async def test_skeleton_recall_with_metadata_filter(lake: Khora, namespace_id: UUID) -> None:
+async def test_skeleton_recall_with_metadata_filter(kb: Khora, namespace_id: UUID) -> None:
     """Tag filter restricts recall to chunks carrying the requested tag.
 
     Unlike the PG sibling, the embedded path doesn't hit DYT-3556 (SQLite
@@ -300,19 +300,19 @@ async def test_skeleton_recall_with_metadata_filter(lake: Khora, namespace_id: U
     :meth:`Khora.recall` and calling ``engine.recall`` directly.
     """
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="alpha document tagged group A",
         metadata={"tags": ["group-A"]},
     )
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="alpha document tagged group B",
         metadata={"tags": ["group-B"]},
     )
 
-    engine = lake._get_engine()  # type: ignore[attr-defined]
+    engine = kb._get_engine()  # type: ignore[attr-defined]
     result = await engine.recall(
         "alpha document",
         namespace_id,
@@ -327,7 +327,7 @@ async def test_skeleton_recall_with_metadata_filter(lake: Khora, namespace_id: U
     assert all("group B" not in c.content for c, _ in result.chunks), "group-B chunk leaked through tag filter"
 
 
-async def test_skeleton_temporal_filter(lake: Khora, namespace_id: UUID) -> None:
+async def test_skeleton_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
     """Two docs 5d vs 20d apart, "last 7 days" → recent only.
 
     Skeleton's single-doc ``remember()`` ignores ``metadata['occurred_at']``
@@ -342,7 +342,7 @@ async def test_skeleton_temporal_filter(lake: Khora, namespace_id: UUID) -> None
     ts_recent = (now - timedelta(days=5)).isoformat()
     ts_old = (now - timedelta(days=20)).isoformat()
 
-    batch = await lake.remember_batch(
+    batch = await kb.remember_batch(
         [
             {
                 "content": "recent document about the falcon launch",
@@ -364,7 +364,7 @@ async def test_skeleton_temporal_filter(lake: Khora, namespace_id: UUID) -> None
 
     seven_days_ago = now - timedelta(days=7)
     result = await _recall(
-        lake,
+        kb,
         "falcon launch",
         namespace=namespace_id,
         limit=10,
@@ -378,7 +378,7 @@ async def test_skeleton_temporal_filter(lake: Khora, namespace_id: UUID) -> None
     )
 
 
-async def test_skeleton_remember_batch(lake: Khora, namespace_id: UUID) -> None:
+async def test_skeleton_remember_batch(kb: Khora, namespace_id: UUID) -> None:
     """Bulk-ingest 20 docs in a single ``remember_batch`` call."""
     documents = [
         {
@@ -387,7 +387,7 @@ async def test_skeleton_remember_batch(lake: Khora, namespace_id: UUID) -> None:
         }
         for i in range(20)
     ]
-    batch = await lake.remember_batch(
+    batch = await kb.remember_batch(
         documents,
         namespace=namespace_id,
         entity_types=["PERSON"],
@@ -398,27 +398,27 @@ async def test_skeleton_remember_batch(lake: Khora, namespace_id: UUID) -> None:
     assert batch.failed == 0, f"unexpected failures: {batch}"
     assert batch.chunks >= 20, f"expected ≥20 chunks (one per doc), got {batch.chunks}"
 
-    result = await _recall(lake, "widget batch document", namespace=namespace_id, limit=25)
+    result = await _recall(kb, "widget batch document", namespace=namespace_id, limit=25)
     contents_returned = {c.content for c, _ in result.chunks}
     assert len(contents_returned) >= 20, f"expected ≥20 distinct chunks returned, got {len(contents_returned)}"
 
 
-async def test_skeleton_recall_empty_namespace(lake: Khora) -> None:
+async def test_skeleton_recall_empty_namespace(kb: Khora) -> None:
     """Recall against an empty namespace returns an empty chunks list."""
-    ns = (await lake.create_namespace()).namespace_id
+    ns = (await kb.create_namespace()).namespace_id
 
-    result = await _recall(lake, "anything at all", namespace=ns, limit=10)
+    result = await _recall(kb, "anything at all", namespace=ns, limit=10)
 
     assert result.chunks == []
     assert result.entities == []  # Skeleton never returns entities anyway.
     assert result.metadata.get("backend") is not None
 
 
-async def test_skeleton_recall_metadata_keys(lake: Khora, namespace_id: UUID) -> None:
+async def test_skeleton_recall_metadata_keys(kb: Khora, namespace_id: UUID) -> None:
     """RecallResult.metadata exposes the keys the Skeleton engine documents."""
-    await _remember(lake, namespace_id=namespace_id, content="alpha simple sentence")
+    await _remember(kb, namespace_id=namespace_id, content="alpha simple sentence")
 
-    result = await _recall(lake, "alpha", namespace=namespace_id, limit=5)
+    result = await _recall(kb, "alpha", namespace=namespace_id, limit=5)
 
     md = result.metadata
     expected = {"backend", "hybrid_alpha", "temporal_filter"}
@@ -428,7 +428,7 @@ async def test_skeleton_recall_metadata_keys(lake: Khora, namespace_id: UUID) ->
     assert md["temporal_filter"] is None
 
 
-async def test_skeleton_recall_default_hybrid_mode(lake: Khora, namespace_id: UUID) -> None:
+async def test_skeleton_recall_default_hybrid_mode(kb: Khora, namespace_id: UUID) -> None:
     """Default ``Khora.recall(...)`` works on HYBRID — DYT-3555 regression.
 
     Pre-fix, ``SkeletonConstructionEngine.recall`` referenced a non-existent
@@ -436,19 +436,19 @@ async def test_skeleton_recall_default_hybrid_mode(lake: Khora, namespace_id: UU
     added the enum member; this test exercises the default path on the
     embedded backend so the regression coverage extends past PG.
     """
-    await _remember(lake, namespace_id=namespace_id, content="alpha simple sentence")
-    result = await lake.recall("alpha", namespace=namespace_id, limit=5)
+    await _remember(kb, namespace_id=namespace_id, content="alpha simple sentence")
+    result = await kb.recall("alpha", namespace=namespace_id, limit=5)
 
     assert result.metadata.get("backend") is not None
     # HYBRID maps to ``hybrid_alpha=0.7`` per engine.py:444.
     assert result.metadata.get("hybrid_alpha") == 0.7
 
 
-async def test_skeleton_concurrent_remember(lake: Khora, namespace_id: UUID) -> None:
+async def test_skeleton_concurrent_remember(kb: Khora, namespace_id: UUID) -> None:
     """5 concurrent ingests in one namespace, no integrity errors."""
     contents = [f"document number {i} mentions widget-{i}" for i in range(5)]
     results = await asyncio.gather(
-        *(_remember(lake, namespace_id=namespace_id, content=c) for c in contents),
+        *(_remember(kb, namespace_id=namespace_id, content=c) for c in contents),
         return_exceptions=True,
     )
 
@@ -458,12 +458,12 @@ async def test_skeleton_concurrent_remember(lake: Khora, namespace_id: UUID) -> 
     doc_ids = {r.document_id for r in results}  # type: ignore[union-attr]
     assert len(doc_ids) == 5, f"expected 5 distinct documents, got {doc_ids}"
 
-    result = await _recall(lake, "widget", namespace=namespace_id, limit=20)
+    result = await _recall(kb, "widget", namespace=namespace_id, limit=20)
     contents_returned = {c.content for c, _ in result.chunks}
     assert len(contents_returned) >= 5
 
 
-async def test_skeleton_recall_handles_punctuated_query(lake: Khora, namespace_id: UUID) -> None:
+async def test_skeleton_recall_handles_punctuated_query(kb: Khora, namespace_id: UUID) -> None:
     """Regression for issue #526 at the **engine layer**.
 
     PR #528's escape_fts5_query fix was verified at the storage adapter
@@ -472,7 +472,7 @@ async def test_skeleton_recall_handles_punctuated_query(lake: Khora, namespace_i
     regression that introduces a new fusion path bypassing the escape.
     """
     await _remember(
-        lake,
+        kb,
         namespace_id=namespace_id,
         content="alpha document with widget reference and falcon launch.",
     )
@@ -484,5 +484,5 @@ async def test_skeleton_recall_handles_punctuated_query(lake: Khora, namespace_i
         'say "hello" widget',
         "widget*",
     ):
-        result = await _recall(lake, query, namespace=namespace_id, limit=3)
+        result = await _recall(kb, query, namespace=namespace_id, limit=3)
         assert isinstance(result.chunks, list), f"recall must not raise on {query!r}"

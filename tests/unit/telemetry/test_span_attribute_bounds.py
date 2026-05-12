@@ -61,12 +61,12 @@ def _mock_engine() -> MagicMock:
     return eng
 
 
-def _make_lake() -> Khora:
+def _make_kb() -> Khora:
     with patch("khora.khora.load_config", return_value=_mock_config()):
-        lake = Khora()
-    lake._connected = True
-    lake._engine = _mock_engine()
-    return lake
+        kb = Khora()
+    kb._connected = True
+    kb._engine = _mock_engine()
+    return kb
 
 
 def _capturing_span(captured: list[dict]):
@@ -80,9 +80,9 @@ def _capturing_span(captured: list[dict]):
     return _stub
 
 
-async def _run_recall(lake: Khora, query: str, captured: list[dict]) -> None:
+async def _run_recall(kb: Khora, query: str, captured: list[dict]) -> None:
     ns_id = uuid4()
-    lake._engine.recall = AsyncMock(
+    kb._engine.recall = AsyncMock(
         return_value=RecallResult(
             query=query,
             namespace_id=ns_id,
@@ -96,16 +96,16 @@ async def _run_recall(lake: Khora, query: str, captured: list[dict]) -> None:
         patch("khora.telemetry.context.clear_trace_id"),
         patch("khora.khora.trace_span", side_effect=_capturing_span(captured)),
     ):
-        await lake.recall(query, namespace=ns_id)
+        await kb.recall(query, namespace=ns_id)
 
 
 @pytest.mark.asyncio
 async def test_recall_span_replaces_raw_query_with_hash_and_length():
     captured: list[dict] = []
-    lake = _make_lake()
+    kb = _make_kb()
     long_query = "tell me everything you know about " + "x" * 500
 
-    await _run_recall(lake, long_query, captured)
+    await _run_recall(kb, long_query, captured)
 
     assert len(captured) == 1
     attrs = captured[0]["attrs"]
@@ -120,11 +120,11 @@ async def test_recall_span_replaces_raw_query_with_hash_and_length():
 @pytest.mark.asyncio
 async def test_identical_queries_produce_identical_hashes():
     captured: list[dict] = []
-    lake = _make_lake()
+    kb = _make_kb()
     query = "who knows about project orion"
 
-    await _run_recall(lake, query, captured)
-    await _run_recall(lake, query, captured)
+    await _run_recall(kb, query, captured)
+    await _run_recall(kb, query, captured)
 
     assert len(captured) == 2
     assert captured[0]["attrs"]["query_hash"] == captured[1]["attrs"]["query_hash"]
@@ -140,11 +140,11 @@ async def test_recall_span_attributes_respect_cardinality_budget():
     attribute (e.g. someone adds ``error_message=str(exc)`` to the span).
     """
     captured: list[dict] = []
-    lake = _make_lake()
+    kb = _make_kb()
     # Pathological query: long enough to blow the budget if it leaked through.
     pathological = "A" * 4096
 
-    await _run_recall(lake, pathological, captured)
+    await _run_recall(kb, pathological, captured)
 
     attrs = captured[0]["attrs"]
     for key, value in attrs.items():

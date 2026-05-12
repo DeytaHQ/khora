@@ -1,4 +1,4 @@
-"""Tests for CLAUDE.md structure and content preservation after ADR-035 restructuring."""
+"""Tests for CLAUDE.md structure and content preservation."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def claude_md_content() -> str:
 
 @pytest.mark.unit
 class TestRequiredSections:
-    """CLAUDE.md must follow the ADR-035 standard template sections."""
+    """CLAUDE.md must include the standard template sections."""
 
     @pytest.mark.parametrize(
         "heading",

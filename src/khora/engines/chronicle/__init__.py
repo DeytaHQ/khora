@@ -12,15 +12,15 @@ Key techniques:
 - Temporal decay (Ebbinghaus forgetting curve)
 
 Usage:
-    async with Khora(db_url, engine="chronicle") as lake:
-        ns = await lake.create_namespace()
-        await lake.remember(
+    async with Khora(db_url, engine="chronicle") as kb:
+        ns = await kb.create_namespace()
+        await kb.remember(
             "Alice met Bob at the conference on March 15th.",
             namespace=ns.namespace_id,
             entity_types=["PERSON", "EVENT"],
             relationship_types=["ATTENDED"],
         )
-        result = await lake.recall("Who did Alice meet?", namespace=ns.namespace_id)
+        result = await kb.recall("Who did Alice meet?", namespace=ns.namespace_id)
 """
 
 from __future__ import annotations

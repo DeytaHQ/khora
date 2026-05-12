@@ -450,8 +450,8 @@ class TestIncrementalIngestion:
         After remember() or remember_batch(), the engine should
         call invalidate_caches() so stale BM25 indexes are rebuilt.
         """
-        lake = _make_connected_lake()
-        engine = lake._engine
+        kb = _make_connected_kb()
+        engine = kb._engine
 
         # First ingestion
         engine.remember = AsyncMock(
@@ -468,7 +468,7 @@ class TestIncrementalIngestion:
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            await lake.remember(
+            await kb.remember(
                 "Test content",
                 namespace=NAMESPACE_ID,
                 title="Test",
@@ -484,8 +484,8 @@ class TestIncrementalIngestion:
 
     async def test_remember_then_recall_integration(self) -> None:
         """Full flow: remember content, then recall finds it."""
-        lake = _make_connected_lake()
-        engine = lake._engine
+        kb = _make_connected_kb()
+        engine = kb._engine
 
         doc_id = uuid4()
         engine.remember = AsyncMock(
@@ -512,7 +512,7 @@ class TestIncrementalIngestion:
             patch("khora.telemetry.context.clear_trace_id"),
         ):
             # Remember
-            result = await lake.remember(
+            result = await kb.remember(
                 "Alice Johnson is a senior engineer at Acme Corp.",
                 namespace=NAMESPACE_ID,
                 title="Alice Profile",
@@ -523,14 +523,14 @@ class TestIncrementalIngestion:
             assert result.entities_extracted == 2
 
             # Recall
-            recall_result = await lake.recall("Alice Acme Corp", namespace=NAMESPACE_ID)
+            recall_result = await kb.recall("Alice Acme Corp", namespace=NAMESPACE_ID)
             assert len(recall_result.chunks) == 1
             assert "Alice" in recall_result.context_text
 
     async def test_incremental_remember_batch_then_recall(self) -> None:
         """Full flow: remember_batch twice, then recall finds all content."""
-        lake = _make_connected_lake()
-        engine = lake._engine
+        kb = _make_connected_kb()
+        engine = kb._engine
 
         # Batch 1 result
         batch1_result = BatchResult(total=3, processed=3, skipped=0, failed=0, chunks=3, entities=4, relationships=3)
@@ -577,7 +577,7 @@ class TestIncrementalIngestion:
             patch("khora.telemetry.context.clear_trace_id"),
         ):
             # Ingest batch 1
-            r1 = await lake.remember_batch(
+            r1 = await kb.remember_batch(
                 BATCH_1_DOCS,
                 namespace=NAMESPACE_ID,
                 entity_types=["PERSON", "ORGANIZATION"],
@@ -587,7 +587,7 @@ class TestIncrementalIngestion:
             assert r1.entities == 4
 
             # Ingest batch 2
-            r2 = await lake.remember_batch(
+            r2 = await kb.remember_batch(
                 BATCH_2_DOCS,
                 namespace=NAMESPACE_ID,
                 entity_types=["PERSON", "ORGANIZATION"],
@@ -597,7 +597,7 @@ class TestIncrementalIngestion:
             assert r2.entities == 2
 
             # Recall — should find content from both batches
-            result = await lake.recall("Acme Corp employees", namespace=NAMESPACE_ID)
+            result = await kb.recall("Acme Corp employees", namespace=NAMESPACE_ID)
             assert len(result.chunks) == 4  # All 4 employee docs
             assert len(result.entities) == 5  # All entities including Acme Corp
 
@@ -760,8 +760,8 @@ class TestIncrementalIngestion:
 
     async def test_three_batch_remember_batch_then_recall(self) -> None:
         """Full Khora flow with 3 batches — recall finds content from all."""
-        lake = _make_connected_lake()
-        engine = lake._engine
+        kb = _make_connected_kb()
+        engine = kb._engine
 
         batch_results = [
             BatchResult(total=3, processed=3, skipped=0, failed=0, chunks=3, entities=4, relationships=3),
@@ -814,7 +814,7 @@ class TestIncrementalIngestion:
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            r1 = await lake.remember_batch(
+            r1 = await kb.remember_batch(
                 BATCH_1_DOCS,
                 namespace=NAMESPACE_ID,
                 entity_types=["PERSON", "ORGANIZATION"],
@@ -822,7 +822,7 @@ class TestIncrementalIngestion:
             )
             assert r1.processed == 3
 
-            r2 = await lake.remember_batch(
+            r2 = await kb.remember_batch(
                 BATCH_2_DOCS,
                 namespace=NAMESPACE_ID,
                 entity_types=["PERSON", "ORGANIZATION"],
@@ -830,7 +830,7 @@ class TestIncrementalIngestion:
             )
             assert r2.processed == 2
 
-            r3 = await lake.remember_batch(
+            r3 = await kb.remember_batch(
                 batch3_docs,
                 namespace=NAMESPACE_ID,
                 entity_types=["PERSON", "ORGANIZATION"],
@@ -838,7 +838,7 @@ class TestIncrementalIngestion:
             )
             assert r3.processed == 2
 
-            result = await lake.recall("Acme Corp team", namespace=NAMESPACE_ID)
+            result = await kb.recall("Acme Corp team", namespace=NAMESPACE_ID)
             assert len(result.chunks) == 5
             chunk_texts = [c[0] for c in result.chunks]
             assert any("Alice" in t for t in chunk_texts), "Batch 1 content missing"
@@ -859,12 +859,12 @@ def _find_entity(state: IncrementalStorageState, name: str) -> Entity:
     raise ValueError(f"Entity not found: {name}")
 
 
-def _make_connected_lake() -> Khora:
+def _make_connected_kb() -> Khora:
     """Create a Khora with a mocked engine, pre-connected."""
     with patch("khora.khora.load_config", return_value=_mock_config()):
-        lake = Khora()
+        kb = Khora()
 
-    lake._connected = True
+    kb._connected = True
 
     mock_engine = MagicMock()
     mock_engine._storage = MagicMock()
@@ -876,5 +876,5 @@ def _make_connected_lake() -> Khora:
     mock_engine.recall = AsyncMock()
     mock_engine.remember_batch = AsyncMock()
 
-    lake._engine = mock_engine
-    return lake
+    kb._engine = mock_engine
+    return kb

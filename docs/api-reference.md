@@ -1,6 +1,6 @@
 # API Reference
 
-The public Khora surface is pinned by [ADR-024](adrs/adr-024-memory-lake-public-api.md) and the machine-readable `__all__` in `src/khora/__init__.py`. Everything on this page is stable. Symbols not listed here may change without notice.
+The public Khora surface is pinned by the machine-readable `__all__` in `src/khora/__init__.py`. Everything on this page is stable. Symbols not listed here may change without notice.
 
 ## Top-level imports
 
@@ -22,7 +22,7 @@ from khora import (
     create_engine,
     list_engines,
     register_engine,
-    # Expertise types (ADR-022)
+    # Expertise types
     ExpertiseConfig,
     EntityTypeConfig,
     RelationshipTypeConfig,
@@ -53,24 +53,24 @@ Khora(
 ### Connection
 
 ```python
-async with Khora(...) as lake:
+async with Khora(...) as kb:
     ...                       # connect() / disconnect() called automatically
 
 # or manually
-lake = Khora(...)
-await lake.connect()
+kb = Khora(...)
+await kb.connect()
 try:
     ...
 finally:
-    await lake.disconnect()
+    await kb.disconnect()
 ```
 
 ### Namespaces
 
 ```python
-ns = await lake.create_namespace(namespace_name)                     # returns MemoryNamespace
-ns = await lake.get_namespace(namespace_id: UUID)                    # returns MemoryNamespace | None
-ns = await lake.get_namespace_by_stable_id(namespace_id: str | UUID) # stable-ID lookup
+ns = await kb.create_namespace(namespace_name)                     # returns MemoryNamespace
+ns = await kb.get_namespace(namespace_id: UUID)                    # returns MemoryNamespace | None
+ns = await kb.get_namespace_by_stable_id(namespace_id: str | UUID) # stable-ID lookup
 ```
 
 Namespaces are the sole tenancy boundary. Use `ns.namespace_id` (the stable public ID) everywhere below — not the row-level `ns.id`. See [architecture/multi-tenancy.md](architecture/multi-tenancy.md).
@@ -78,7 +78,7 @@ Namespaces are the sole tenancy boundary. Use `ns.namespace_id` (the stable publ
 ### `remember`
 
 ```python
-result: RememberResult = await lake.remember(
+result: RememberResult = await kb.remember(
     content: str,
     *,
     namespace: str | UUID,
@@ -100,7 +100,7 @@ Ingests content through the 3-phase pipeline (stage → enrich → expand). `chu
 ### `remember_batch`
 
 ```python
-result: BatchResult = await lake.remember_batch(
+result: BatchResult = await kb.remember_batch(
     documents: list[dict[str, Any]],
     *,
     namespace: str | UUID,
@@ -124,7 +124,7 @@ Concurrent ingestion with per-document deduplication and optional expansion. Eac
 ### `recall`
 
 ```python
-result: RecallResult = await lake.recall(
+result: RecallResult = await kb.recall(
     query: str,
     *,
     namespace: str | UUID,
@@ -147,7 +147,7 @@ result: RecallResult = await lake.recall(
 ### `forget`
 
 ```python
-removed: bool = await lake.forget(document_id: UUID, *, namespace: str | UUID)
+removed: bool = await kb.forget(document_id: UUID, *, namespace: str | UUID)
 ```
 
 ### `list_entities` / `find_related_entities`
@@ -157,7 +157,7 @@ Convenience accessors over the underlying engine's graph-view API. Signatures ar
 ### `stats`
 
 ```python
-stats: Stats = await lake.stats(namespace=ns.namespace_id)
+stats: Stats = await kb.stats(namespace=ns.namespace_id)
 # Stats(documents=..., chunks=..., entities=..., relationships=..., last_activity_at=...)
 ```
 
@@ -208,7 +208,7 @@ All result types are frozen slotted dataclasses.
 
 ### `LLMUsage`
 
-`LLMUsage` fields are part of a coordinated contract with Poros/Peras for cost tracking (DYT-645). See ADR-024 for the stability guarantee. Do not mutate instances; they are `frozen`.
+`LLMUsage` fields are part of the stable public API and are consumed by external cost-tracking integrations. Do not mutate instances; they are `frozen`.
 
 ## `SearchMode`
 
@@ -237,9 +237,9 @@ register_engine("my_engine", MyEngineClass) # must implement MemoryEngineProtoco
 
 A custom engine **must** implement the full `MemoryEngineProtocol` from `src/khora/engines/protocol.py`. See [engines/engine-comparison.md](engines/engine-comparison.md) for selection guidance.
 
-## Expertise (ADR-022)
+## Expertise
 
-`ExpertiseConfig` is a stable sibling API maintained in coordination with khora-explorer, genesis, and khora-benchmarks.
+`ExpertiseConfig` is a stable sibling API maintained in coordination with khora-explorer and khora-benchmarks.
 
 ```python
 from khora import ExpertiseConfig, EntityTypeConfig, RelationshipTypeConfig
@@ -255,12 +255,12 @@ expertise = ExpertiseConfig(
     ],
 )
 
-await lake.remember(content, namespace=ns.namespace_id, expertise=expertise,
+await kb.remember(content, namespace=ns.namespace_id, expertise=expertise,
                     entity_types=[t.type for t in expertise.entity_types],
                     relationship_types=[t.type for t in expertise.relationship_types])
 ```
 
-See [extraction/expertise-system.md](extraction/expertise-system.md) and [ADR-022](adrs/adr-022-extraction-skills-public-api.md). The machine-readable contract is `__all__` in `src/khora/extraction/skills/base.py`.
+See [extraction/expertise-system.md](extraction/expertise-system.md). The machine-readable contract is `__all__` in `src/khora/extraction/skills/base.py`.
 
 ## Hooks
 
@@ -278,13 +278,13 @@ All domain errors subclass `KhoraError`. Catch it at system boundaries; internal
 from khora import KhoraError
 
 try:
-    await lake.remember(...)
+    await kb.remember(...)
 except KhoraError as exc:
     ...
 ```
 
 ## Stability guarantee
 
-Symbols imported from the top-level `khora` namespace and `khora.extraction.skills` are covered by ADR-022 and ADR-024. Additive changes land in minor releases; breaking changes require a major version bump and coordinated release with genesis, khora-benchmarks, khora-explorer, and khora-cli.
+Symbols imported from the top-level `khora` namespace and `khora.extraction.skills` are stable. Additive changes land in minor releases; breaking changes require a major version bump and coordinated release with khora-benchmarks, khora-explorer, and khora-cli.
 
 Private imports (`khora.engines.vectorcypher`, `khora.query.engine`, `khora.pipelines.flows`, etc.) are **not** stable and can change between minor versions.
