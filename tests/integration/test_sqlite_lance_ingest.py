@@ -137,6 +137,56 @@ class TestSQLiteLanceIngest:
         finally:
             await coord.disconnect()
 
+    async def test_fulltext_bm25_handles_punctuation_in_query(self, tmp_path: Path) -> None:
+        """Regression for issue #526: natural-language queries with `?`, `:`, etc.
+
+        Before the fix, ``search_fulltext_chunks(ns, "What did Curie win?")``
+        raised ``sqlite3.OperationalError: fts5: syntax error near "?"``. The
+        primary assertion here is "no crash"; the secondary assertion is that
+        recall is preserved for a single token surrounded by FTS5 metachars.
+        """
+        coord = await build_sqlite_lance_coordinator(tmp_path)
+        try:
+            ns = await coord.create_namespace(MemoryNamespace())
+            topics = ["quantum", "mesoscopic", "zettabyte", "isotropic", "tungsten"]
+            await _seed_ingest(coord, ns.id, topics)
+
+            # These inputs would have raised fts5 syntax errors prior to the fix.
+            # Single-token queries each contain "zettabyte" wrapped in FTS5 metachars;
+            # post-fix the chunk should still surface.
+            for query in (
+                "zettabyte?",  # `?` was the original crash
+                "zettabyte:",  # `:` is FTS5 column filter
+                "(zettabyte)",  # `(` `)` are grouping operators
+                "zettabyte*",  # `*` is prefix operator
+                "-zettabyte",  # leading `-` is FTS5 NOT in some contexts
+            ):
+                results = await coord.search_fulltext_chunks(ns.id, query, limit=5)
+                assert results, f"expected ≥1 hit for query {query!r}"
+                assert any("zettabyte" in c.content.lower() for c, _ in results), (
+                    f"expected the zettabyte chunk to surface for {query!r}"
+                )
+
+            # Multi-word natural-language queries containing FTS5 keywords/punctuation
+            # must not raise. Recall depends on the seeded content; we only assert
+            # that the call returns (a list, possibly empty).
+            for query in (
+                "What did Curie win?",  # the issue #526 repro
+                "zettabyte AND mesoscopic",  # `AND` as bareword operator
+                "zettabyte OR mesoscopic",  # `OR` as bareword operator
+                "zettabyte NEAR mesoscopic",  # `NEAR` as bareword operator
+                'say "hello"',  # embedded double quotes
+            ):
+                results = await coord.search_fulltext_chunks(ns.id, query, limit=5)
+                assert isinstance(results, list), f"call must return a list (no crash) for {query!r}"
+
+            # Empty / whitespace-only query short-circuits (no crash, no hits).
+            for empty_query in ("", "   ", "\t\n"):
+                results = await coord.search_fulltext_chunks(ns.id, empty_query, limit=5)
+                assert results == [], f"expected empty result for {empty_query!r}"
+        finally:
+            await coord.disconnect()
+
     async def test_hybrid_both_modalities_contribute(self, tmp_path: Path) -> None:
         """Vector + BM25 each return the right chunk; a naive merge covers both."""
         coord = await build_sqlite_lance_coordinator(tmp_path)
