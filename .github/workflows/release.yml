@@ -173,16 +173,14 @@ jobs:
       - name: Install build dependencies
         run: uv pip install build --system
 
-      # Lockstep: pin khora-accel to the exact release version in pyproject.toml
-      # so that `pip install khora==X.Y.Z` always pulls khora-accel==X.Y.Z.
-      # Edits only the `rust` extra; other khora-accel mentions (if any) untouched.
-      - name: Pin khora-accel to release version
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "Pinning khora-accel == $VERSION in pyproject.toml"
-          sed -i.bak -E "s|\"khora-accel[^\"]*\"|\"khora-accel==${VERSION}\"|g" pyproject.toml
-          rm -f pyproject.toml.bak
-          grep -n "khora-accel" pyproject.toml
+      # Lockstep is enforced at commit time, NOT release time: the same PR that
+      # bumps rust/khora-accel/Cargo.toml also updates the `khora-accel == X.Y.Z`
+      # pin in pyproject.toml's `rust` extra. See CLAUDE.md → Version Bumps.
+      #
+      # Why not sed at release time? `sed` on the runner's pyproject.toml leaves
+      # the working tree dirty. setuptools_scm/hatch-vcs treats `dirty` at a tag
+      # as "ahead of tag" → bumps to next-patch.dev0 (e.g. 0.10.4.dev0 instead
+      # of 0.10.3). This was the bug in DYT-4029.
 
       # hatch-vcs reads the version from the most recent git tag automatically.
       # Produces both dist/*.whl and dist/*.tar.gz for upload.

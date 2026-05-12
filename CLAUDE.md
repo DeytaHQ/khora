@@ -66,12 +66,17 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 
 ### Version Bumps
 
-Khora uses `hatch-vcs` — the package version comes from git tags (`git tag vX.Y.Z`). Only khora-accel needs a manual version in source:
+Khora uses `hatch-vcs` — khora's version comes from git tags (`git tag vX.Y.Z`). khora-accel has its version in source. **khora and khora-accel are always released at the same version (lockstep contract)** — the matching pin in `pyproject.toml`'s `rust` extra enforces this for installers.
+
+Per release:
 
 1. `rust/khora-accel/Cargo.toml` — update `version = "X.Y.Z"`
-2. Run `cargo generate-lockfile` in `rust/khora-accel/` to update `rust/Cargo.lock`
-3. Commit both `Cargo.toml` and `Cargo.lock` in the same PR
-4. After merge: `git tag vX.Y.Z && git push origin vX.Y.Z`
+2. `pyproject.toml` (root) — update `khora-accel == X.Y.Z` in the `rust` extra to match
+3. Run `cargo generate-lockfile` in `rust/khora-accel/` to update `rust/Cargo.lock`
+4. Commit all three in the same PR
+5. After merge: `git tag vX.Y.Z && git push origin vX.Y.Z`
+
+Why all three together? The release pipeline does NOT modify pyproject.toml at runtime — that would dirty the working tree and confuse hatch-vcs into producing a `.devN` version. The lockstep pin must already be correct in the committed source.
 
 ### Before Creating PRs
 

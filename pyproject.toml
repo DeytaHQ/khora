@@ -97,9 +97,11 @@ accel = [
 logfire = ["logfire>=4.0"]
 # NLP tools
 nlp = ["spacy>=3.8.0"]
-# Rust-accelerated operations (requires Rust toolchain to build from source)
+# Rust-accelerated operations (requires Rust toolchain to build from source).
+# LOCKSTEP: this pin must match rust/khora-accel/Cargo.toml's version exactly.
+# Bump both in the same PR. See CLAUDE.md → Version Bumps.
 rust = [
-    "khora-accel>=0.10.3",
+    "khora-accel==0.10.4",
 ]
 # SurrealDB unified backend (graph + vector + relational in one DB)
 surrealdb = ["surrealdb>=2.0.0a1"]
