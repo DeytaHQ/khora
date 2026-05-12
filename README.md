@@ -24,7 +24,7 @@ pip install khora[surrealdb]      # [experimental] unified SurrealDB (single sto
 pip install khora[all-backends]   # everything: Neo4j, SurrealDB, SQLite+LanceDB, Weaviate, AGE
 ```
 
-See [docs/configuration.md](docs/configuration.md) for the full extras list. The `kuzu` extra is **deprecated in 0.9.0** and scheduled for removal in 0.10.
+See [docs/configuration.md](docs/configuration.md) for the full extras list.
 
 ## Production stack
 

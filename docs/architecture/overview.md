@@ -39,7 +39,7 @@ At its heart, Khora combines three different ways of storing and finding informa
 
 **pgvector** enables semantic search - when you ask "what do we know about machine learning?", it finds content that's *conceptually* related, even if it doesn't contain those exact words.
 
-**Graph DB** (Neo4j, Kuzu, Memgraph, or SurrealDB) captures relationships - people, organizations, concepts, and how they connect. When you ask "who works with Alice?", it traverses a graph of knowledge to find the answer.
+**Graph DB** (Neo4j, Memgraph, or SurrealDB) captures relationships - people, organizations, concepts, and how they connect. When you ask "who works with Alice?", it traverses a graph of knowledge to find the answer.
 
 **SurrealDB** is an alternative unified backend that can serve all three roles (relational, vector, graph) in a single database, simplifying deployment at the cost of specialization.
 
