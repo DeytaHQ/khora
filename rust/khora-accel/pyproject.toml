@@ -29,3 +29,10 @@ Issues = "https://github.com/DeytaHQ/khora/issues"
 [tool.maturin]
 features = ["pyo3/extension-module"]
 manifest-path = "Cargo.toml"
+
+[tool.uv]
+# Mirrors the root khora exclude-newer policy so a direct
+# ``uv pip install -e rust/khora-accel/`` cannot silently pull a newer
+# build-time Python dep than the rest of the workspace would resolve.
+# Relative pin: ignore PyPI releases uploaded within the last 7 days.
+exclude-newer = "7 days"
