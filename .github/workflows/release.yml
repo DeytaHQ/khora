@@ -238,7 +238,7 @@ jobs:
           # PyPI's CDN can lag a few seconds behind the upload — retry a few
           # times rather than failing on a transient miss.
           for attempt in 1 2 3 4 5; do
-            if pip install --upgrade "khora[sqlite-lance]==${VERSION}"; then
+            if pip install --upgrade "khora[sqlite-lance,rust]==${VERSION}"; then
               break
             fi
             echo "pip install attempt $attempt failed; sleeping 10s..."
