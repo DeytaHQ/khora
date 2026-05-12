@@ -47,6 +47,7 @@ dev = [
     "ruff>=0.15.2",
     "prek>=0.3.3",
     "ty>=0.0.18",
+    "hypothesis>=6.140.0",
 ]
 # Data storage backends
 postgres = [
@@ -252,4 +253,5 @@ dev = [
     "spacy>=3.8.11",
     "aiosqlite>=0.20.0",  # For SQLite backend tests
     "psutil>=5.9.0",  # DYT-3545: RSS sampling for soak harness
+    "hypothesis>=6.140.0",  # PR-C: property-based tests for retrieval invariants
 ]
