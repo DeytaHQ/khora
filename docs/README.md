@@ -12,7 +12,7 @@ Khora is a knowledge memory library. This directory contains everything beyond t
 ## Architecture
 
 - [Overview](architecture/overview.md) — the three-backend model (PostgreSQL, pgvector, graph DB) and data flow.
-- [Storage backends](architecture/storage-backends.md) — PostgreSQL, pgvector, Neo4j, SurrealDB, AGE, Memgraph, Kuzu, Neptune.
+- [Storage backends](architecture/storage-backends.md) — PostgreSQL, pgvector, Neo4j, SurrealDB, AGE, Memgraph, Neptune.
 - [Multi-tenancy](architecture/multi-tenancy.md) — namespaces, isolation modes.
 - [Event sourcing](architecture/event-sourcing.md) — the immutable audit log.
 - [Rust acceleration](architecture/rust-acceleration.md) — optional `khora-accel` extensions.

@@ -494,35 +494,15 @@ This means you can swap pgvector for SurrealDB, or Neo4j for Memgraph, without c
 
 ## Alternative Graph Backends
 
-Beyond Neo4j, Khora supports three additional graph backends:
+Beyond Neo4j, Khora supports the following additional graph backends:
 
 | Backend | Type | Protocol | Best For |
 |---------|------|----------|----------|
 | **Neo4j** (default) | Server | Bolt/Cypher | Production, multi-user, large graphs |
-| **Kùzu** | Embedded | Cypher | Single-process, CI/testing, edge devices |
 | **Memgraph** | Server | Bolt/Cypher | In-memory, low-latency, streaming |
 | **SurrealDB** | Server/Embedded | WebSocket/HTTP | Unified multi-model (graph + vector + relational in one DB) |
 | **Neptune** | Managed (AWS) | Bolt/OpenCypher | AWS-native, managed, no operational overhead |
 | **AGE** | PostgreSQL extension | Cypher-in-SQL | Graph queries without extra infrastructure |
-
-### Kùzu (Embedded)
-
-Kùzu runs in-process — no server needed. Ideal for testing and small deployments:
-
-```yaml
-storage:
-  graph:
-    backend: kuzu
-    database_path: ./kuzu_db
-```
-
-```python
-from khora.config.schema import KuzuConfig, StorageSettings
-
-settings = StorageSettings(graph=KuzuConfig(database_path="./kuzu_db"))
-```
-
-Note: Kùzu's Python API is synchronous; all calls are wrapped in `asyncio.to_thread()`.
 
 ### Memgraph
 
@@ -669,12 +649,12 @@ await neo4j_backend.ensure_constraints()
 Use discriminated union configs for explicit backend selection:
 
 ```python
-from khora.config.schema import KhoraConfig, StorageSettings, KuzuConfig
+from khora.config.schema import KhoraConfig, StorageSettings, MemgraphConfig
 
 config = KhoraConfig(
     storage=StorageSettings(
         postgresql_url="postgresql://localhost:5432/khora",
-        graph=KuzuConfig(database_path="./kuzu_db"),
+        graph=MemgraphConfig(url="bolt://localhost:7687"),
     )
 )
 ```
@@ -692,7 +672,6 @@ export KHORA_NEO4J_URL="bolt://neo4j:password@localhost:7687"
 
 ```bash
 # Install specific backend
-pip install khora[kuzu]
 pip install khora[memgraph]
 # Install all graph backends
 pip install khora[graph-all]
