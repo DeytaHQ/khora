@@ -36,7 +36,6 @@ VERSION_TABLE = "khora_alembic_version"
 
 # version_num column width. Alembic's default is 32, but Khora revision IDs
 # (e.g. "022_promote_external_id_index_unique") exceed that. Widened to 64.
-#
 VERSION_NUM_LENGTH = 64
 
 # Advisory lock ID — deterministic int64 from hashlib, unique to khora migrations
@@ -182,7 +181,6 @@ def do_run_migrations(connection: Connection) -> None:
         # "022_promote_external_id_index_unique") exceed 32 chars, so the next
         # migration step would fail when Alembic writes the new revision. Widen
         # in-place before running migrations. Idempotent: skipped if already wide.
-        #
         if is_postgres and table_exists:
             current_width = connection.execute(
                 text(
