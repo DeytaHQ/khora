@@ -26,7 +26,7 @@ repos:
         types: [python]
 
       - id: no-agents-md
-        name: refuse AGENTS.md in index (ADR-090)
-        entry: AGENTS.md is gitignored per ADR-090; do not git add -f
+        name: refuse AGENTS.md in index
+        entry: AGENTS.md is gitignored (locally regenerated); do not git add -f
         language: fail
         files: '^AGENTS\.md$'
