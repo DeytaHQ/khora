@@ -48,8 +48,8 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### OSS prep
 
-- All khora work tracked in **GitHub Issues**, not Linear (CLAUDE.md / AGENTS.md inline a short GitHub workflow).
-- Public-surface docs (`CLAUDE.md`, `AGENTS.md`, `README.md`, `docs/consumers.md`) no longer reference internal Deyta projects.
+- All khora work tracked in **GitHub Issues**, not Linear (`CLAUDE.md` inlines a short GitHub workflow).
+- Public-surface docs (`CLAUDE.md`, `README.md`, `docs/consumers.md`) no longer reference internal Deyta projects.
 - PyPI long description: "Knowledge memory library for long-horizon AI agents — hybrid retrieval over documents, embeddings, and graph relationships."
 - Sibling packages on PyPI: `khora-cli`, `khora-explorer`, `khora-service` (coming soon).
 

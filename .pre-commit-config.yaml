@@ -24,3 +24,9 @@ repos:
         language: system
         pass_filenames: false
         types: [python]
+
+      - id: no-agents-md
+        name: refuse AGENTS.md in index
+        entry: AGENTS.md is gitignored (locally regenerated); do not git add -f
+        language: fail
+        files: '^AGENTS\.md$'
