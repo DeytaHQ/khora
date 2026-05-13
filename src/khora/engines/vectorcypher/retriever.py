@@ -162,6 +162,15 @@ class RetrieverConfig:
             "_default": 14,
         }
     )
+    # ``temporal_recency_channel_enabled``: when True, RECENCY/CHANGE queries
+    #   fuse a parallel "recency channel" (pure ORDER BY occurred_at DESC,
+    #   no embedding) alongside the cosine + BM25 channels. Chunks from this
+    #   channel only enter fusion when their cosine similarity to the query
+    #   embedding exceeds ``temporal_query_relevance_floor`` — prevents
+    #   today's irrelevant chunks from muscling into top-K.
+    temporal_recency_channel_enabled: bool = False
+    temporal_query_relevance_floor: float = 0.30
+    temporal_recency_channel_limit: int = 50
 
     # Coherence scoring (penalizes word-shuffled confounders)
     coherence_weight: float = 0.1
@@ -452,6 +461,21 @@ class VectorCypherRetriever:
                 # as raw text (privacy + cardinality), but lets us correlate
                 # synthesis decisions with the request when debugging.
                 span.set_attribute("query_hash", bounded_text_hash(query))
+            # Operator-visible metric — bounded labels only (category enum,
+            # vetoed bool). See docs/telemetry-contract.json §metrics
+            # `khora.query.temporal.floor_applied_total`.
+            if (
+                self._config.temporal_recency_floor_enabled
+                and temporal_signal is not None
+                and temporal_signal.is_temporal
+                and params.default_window_days is not None
+            ):
+                from khora.telemetry.temporal_metrics import record_floor_applied
+
+                record_floor_applied(
+                    category=temporal_signal.category.value,
+                    vetoed=anti_recency_veto,
+                )
 
             # Cache check
             cache_key = ""
@@ -909,6 +933,41 @@ class VectorCypherRetriever:
                             f"CHANGE decomposition added {len(new_chunks)} chunks "
                             f"from sub-query: {current_state_query[:60]}"
                         )
+
+        # Step 6a': Recency channel — pool augmentation (Issue #567 A3).
+        # When RECENCY/CHANGE fires and the flag is enabled, fetch the most
+        # recent N chunks (pure ORDER BY occurred_at DESC, no embedding) and
+        # merge those that exceed the cosine relevance floor into the vector
+        # pool. The existing RRF + recency boost then scores them alongside
+        # the cosine top-K. Two safety properties:
+        #   1. Pool-augmentation only — never replaces cosine candidates.
+        #   2. Relevance gate prevents today's HR-all-hands from muscling
+        #      into the top-K for a niche query (Devil's-Advocate demand #3).
+        if (
+            self._config.temporal_recency_channel_enabled
+            and temporal_signal is not None
+            and temporal_signal.is_temporal
+            and _tp.default_window_days is not None
+        ):
+            recent_chunks = await self._recency_channel_chunks(
+                query_embedding=query_embedding,
+                namespace_id=namespace_id,
+                temporal_filter=temporal_filter,
+            )
+            if recent_chunks:
+                existing_ids = {c[0] for c in vector_chunks}
+                merged_in = [rc for rc in recent_chunks if rc[0] not in existing_ids]
+                if merged_in:
+                    vector_chunks = vector_chunks + merged_in
+                    logger.debug(
+                        "Recency channel merged {} new chunks (relevance>= {}, category={})",
+                        len(merged_in),
+                        self._config.temporal_query_relevance_floor,
+                        temporal_signal.category.value,
+                    )
+                    from khora.telemetry.temporal_metrics import record_recency_channel_fired
+
+                    record_recency_channel_fired(category=temporal_signal.category.value)
 
         # Step 6b: Lazy entity expansion for vector-only chunks
         # Recovers graph coverage lost from low skeleton_core_ratio by doing
@@ -2214,6 +2273,101 @@ class VectorCypherRetriever:
                 )
                 for r in results
             ]
+
+    async def _recency_channel_chunks(
+        self,
+        *,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        temporal_filter: TemporalFilter | None,
+    ) -> list[tuple[UUID, float, Chunk]]:
+        """Issue #567 A3 — pure-recency candidate pool.
+
+        Pulls the N most-recent chunks in the namespace via the
+        ``search_recent_chunks`` SQL (uses the ``ix_chunks_ns_temporal``
+        index from migration 017), then computes per-chunk cosine
+        similarity against ``query_embedding`` and drops anything below
+        ``temporal_query_relevance_floor``. Pool augmentation only — the
+        caller merges results into the existing vector pool.
+
+        Returns ``list[tuple[chunk_id, score, Chunk]]`` matching the
+        shape of ``_vector_search_chunks`` so RRF can fuse it directly.
+        """
+        if self._vector_store is None or not hasattr(self._vector_store, "search_recent_chunks"):
+            return []
+
+        with trace_span(
+            "khora.vectorcypher.recency_channel",
+            namespace_id=str(namespace_id),
+            limit=self._config.temporal_recency_channel_limit,
+        ) as span:
+            try:
+                recent_tuples = await self._vector_store.search_recent_chunks(
+                    namespace_id=namespace_id,
+                    limit=self._config.temporal_recency_channel_limit,
+                    created_after=getattr(temporal_filter, "occurred_after", None),
+                )
+            except Exception as exc:
+                logger.debug("Recency channel SQL failed: {}", exc)
+                span.set_attribute("error", str(exc)[:200])
+                return []
+
+            if not recent_tuples:
+                span.set_attribute("raw_count", 0)
+                return []
+
+            # Filter by cosine relevance against the query embedding.
+            # Devil's-Advocate demand #3: pure-rank fusion without a
+            # relevance gate would let today's irrelevant chunks muscle
+            # into top-K. Drop anything below the configured floor.
+            chunks_with_embedding = [(chunk, getattr(chunk, "embedding", None)) for chunk, _ in recent_tuples]
+            chunks_with_embedding = [(c, e) for c, e in chunks_with_embedding if e is not None]
+            if not chunks_with_embedding:
+                span.set_attribute("raw_count", len(recent_tuples))
+                span.set_attribute("filtered_count", 0)
+                return []
+
+            from khora._accel import batch_cosine_similarity
+
+            sims = batch_cosine_similarity(
+                query_embedding,
+                [emb for _, emb in chunks_with_embedding],
+            )
+            floor = self._config.temporal_query_relevance_floor
+            filtered: list[tuple[UUID, float, Chunk]] = []
+            for (chunk, _emb), sim in zip(chunks_with_embedding, sims, strict=True):
+                if sim < floor:
+                    continue
+                # Re-shape into ``(chunk_id, score, Chunk)`` matching
+                # ``_vector_search_chunks``. The Chunk's metadata.custom
+                # carries ``occurred_at`` for the downstream recency
+                # boost (RRF only uses rank position, so the score is
+                # informational).
+                filtered.append(
+                    (
+                        chunk.id,
+                        float(sim),
+                        Chunk(
+                            id=chunk.id,
+                            namespace_id=chunk.namespace_id,
+                            document_id=chunk.document_id,
+                            content=chunk.content,
+                            metadata=ChunkMetadata(
+                                custom={
+                                    "occurred_at": (
+                                        chunk.occurred_at.isoformat() if getattr(chunk, "occurred_at", None) else None
+                                    ),
+                                    **(getattr(chunk, "metadata", None) or {}),
+                                }
+                            ),
+                            created_at=getattr(chunk, "created_at", None) or getattr(chunk, "occurred_at", None),
+                        ),
+                    )
+                )
+
+            span.set_attribute("raw_count", len(recent_tuples))
+            span.set_attribute("filtered_count", len(filtered))
+            return filtered
 
     async def _bm25_search_chunks(
         self,

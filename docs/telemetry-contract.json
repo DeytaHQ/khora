@@ -434,6 +434,12 @@
       "owner": "vectorcypher"
     },
     {
+      "name": "khora.vectorcypher.recency_channel",
+      "stability": "internal",
+      "owner": "vectorcypher",
+      "_comment": "Wraps the parallel recency-channel SQL + cosine-relevance filter (Issue #567 A3). Attributes: namespace_id (str), limit (int), raw_count (int — chunks returned by ORDER BY occurred_at DESC), filtered_count (int — survivors after the temporal_query_relevance_floor gate)."
+    },
+    {
       "name": "khora.vectorcypher.recency_floor_synthesis",
       "stability": "internal",
       "owner": "vectorcypher",
