@@ -561,7 +561,21 @@ class VectorCypherRetriever:
                     embed_span.set_attribute("cache_hit", _post_hits > _pre_hits)
 
             # Step 3: Vector search for entry points
-            if routing.complexity == QueryComplexity.SIMPLE:
+            if routing.complexity == QueryComplexity.TYPED_ENTITY_RECENT:
+                # Phase C fast path (#569): a single Cypher query that
+                # finds typed entities (ACTION_ITEM, DECISION, BLOCKER,
+                # RISK) ordered by last MENTIONED_IN chunk timestamp.
+                # Falls back to _vectorcypher_retrieve on empty rows.
+                result = await self._typed_entity_recent_retrieve(
+                    query=query,
+                    query_embedding=query_embedding,
+                    namespace_id=namespace_id,
+                    temporal_filter=temporal_filter,
+                    graph_depth=graph_depth,
+                    limit=limit,
+                    routing=routing,
+                )
+            elif routing.complexity == QueryComplexity.SIMPLE:
                 # Simple path: direct chunk retrieval
                 result = await self._simple_retrieve(
                     query=query,
@@ -647,6 +661,178 @@ class VectorCypherRetriever:
                     pass
 
             return result
+
+    async def _typed_entity_recent_retrieve(
+        self,
+        query: str,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        temporal_filter: TemporalFilter | None,
+        graph_depth: int | None,
+        limit: int,
+        routing: RoutingDecision,
+    ) -> VectorCypherResult:
+        """Phase C fast path (#569): typed-entity recency in one Cypher query.
+
+        For queries matching ``(latest|most recent|newest|recent)
+        (action items|decisions|blockers|risks|...)`` the router dispatches
+        here. We run a single Cypher query that:
+
+        1. Matches Entity nodes of the resolved type (ACTION_ITEM, etc.).
+        2. Joins MENTIONED_IN chunks; computes max(c.occurred_at) per entity.
+        3. Returns one evidence chunk per entity (the most recent mention).
+        4. Orders by last_mention DESC.
+
+        For entity types that carry a ``status`` attribute (ACTION_ITEM,
+        COMMITMENT, OPEN_QUESTION), filters out entries whose status is in
+        the "closed" set — we don't want to surface "done" action items as
+        "the latest action items" by default.
+
+        Falls back to ``_vectorcypher_retrieve`` when:
+        - ``self._dual_nodes`` is None (no Neo4j configured).
+        - Cypher returns zero rows (typed entities haven't been extracted
+          on this namespace; the namespace may not have opted into the
+          ``builtin:meetings`` skill yet).
+        """
+        from khora.query.router import TYPED_ENTITY_NOUN_MAP
+
+        # Resolve the entity_type from the query phrase.
+        entity_type: str | None = None
+        lowered = query.lower()
+        for noun, type_name in TYPED_ENTITY_NOUN_MAP.items():
+            if noun in lowered:
+                entity_type = type_name
+                break
+        if entity_type is None:
+            # Pattern matched but our local map missed — fall back.
+            return await self._vectorcypher_retrieve(
+                query=query,
+                query_embedding=query_embedding,
+                namespace_id=namespace_id,
+                temporal_filter=temporal_filter,
+                graph_depth=graph_depth,
+                limit=limit,
+                routing=routing,
+            )
+
+        # No graph layer → fall back.
+        if self._dual_nodes is None:
+            fallback = await self._vectorcypher_retrieve(
+                query=query,
+                query_embedding=query_embedding,
+                namespace_id=namespace_id,
+                temporal_filter=temporal_filter,
+                graph_depth=graph_depth,
+                limit=limit,
+                routing=routing,
+            )
+            fallback.metadata["typed_entity_fast_path_fallback"] = True
+            fallback.metadata["typed_entity_type"] = entity_type
+            return fallback
+
+        # Status filter — only for entity types that carry a status.
+        status_filter = ""
+        types_with_status = {"ACTION_ITEM", "COMMITMENT", "OPEN_QUESTION"}
+        if entity_type in types_with_status:
+            status_filter = "AND (a.status IS NULL OR NOT a.status IN ['done', 'cancelled', 'completed', 'closed']) "
+
+        cypher = f"""
+        MATCH (a:Entity {{entity_type: $entity_type, namespace_id: $namespace_id}})-[:MENTIONED_IN]->(c:Chunk)
+        WHERE 1=1 {status_filter}
+        WITH a, max(c.occurred_at) AS last_mention, collect(c) AS chunks
+        ORDER BY last_mention DESC LIMIT $limit
+        RETURN a AS entity,
+               last_mention,
+               [c IN chunks WHERE c.occurred_at = last_mention][0] AS evidence_chunk
+        """
+
+        async def _work(tx: Any) -> list[dict[str, Any]]:
+            result = await tx.run(
+                cypher,
+                entity_type=entity_type,
+                namespace_id=str(namespace_id),
+                limit=limit,
+            )
+            return [record async for record in result]
+
+        with trace_span(
+            "khora.vectorcypher.typed_entity_recent",
+            entity_type=entity_type,
+            namespace_id=str(namespace_id),
+        ) as fp_span:
+            try:
+                async with self._dual_nodes._session() as session:
+                    rows = await session.execute_read(_work)
+            except Exception as exc:
+                logger.debug("Typed-entity fast path failed: {}; falling back", exc)
+                fallback = await self._vectorcypher_retrieve(
+                    query=query,
+                    query_embedding=query_embedding,
+                    namespace_id=namespace_id,
+                    temporal_filter=temporal_filter,
+                    graph_depth=graph_depth,
+                    limit=limit,
+                    routing=routing,
+                )
+                fallback.metadata["typed_entity_fast_path_fallback"] = True
+                fallback.metadata["typed_entity_type"] = entity_type
+                return fallback
+
+            if not rows:
+                fp_span.set_attribute("row_count", 0)
+                fallback = await self._vectorcypher_retrieve(
+                    query=query,
+                    query_embedding=query_embedding,
+                    namespace_id=namespace_id,
+                    temporal_filter=temporal_filter,
+                    graph_depth=graph_depth,
+                    limit=limit,
+                    routing=routing,
+                )
+                fallback.metadata["typed_entity_fast_path_fallback"] = True
+                fallback.metadata["typed_entity_type"] = entity_type
+                return fallback
+
+            fp_span.set_attribute("row_count", len(rows))
+
+            # Build entities + evidence chunks from rows. Score decays by
+            # rank position so downstream consumers can sort.
+            entities: list[tuple[Entity, float]] = []
+            chunks: list[tuple[Chunk, float]] = []
+            for idx, row in enumerate(rows):
+                e_data: dict[str, Any] | None = row["entity"] if "entity" in row else None
+                c_data: dict[str, Any] | None = row["evidence_chunk"] if "evidence_chunk" in row else None
+                if e_data is None:
+                    continue
+                # Score: linear decay from 1.0 by rank; first row = 1.0.
+                rank_score = max(0.0, 1.0 - (idx / max(len(rows), 1)))
+                entity = Entity(
+                    id=UUID(e_data["id"]),
+                    namespace_id=namespace_id,
+                    name=e_data["name"],
+                    entity_type=e_data["entity_type"],
+                    description=e_data.get("description", ""),
+                )
+                entities.append((entity, rank_score))
+                if c_data is not None:
+                    chunk = Chunk(
+                        id=UUID(c_data["id"]),
+                        namespace_id=namespace_id,
+                        document_id=UUID(c_data["document_id"]),
+                        content=c_data.get("content", ""),
+                        metadata=ChunkMetadata(custom={"occurred_at": c_data.get("occurred_at")}),
+                    )
+                    chunks.append((chunk, rank_score))
+
+            return VectorCypherResult(
+                chunks=chunks,
+                entities=entities,
+                routing_decision=routing,
+                metadata={
+                    "typed_entity_fast_path": True,
+                    "typed_entity_type": entity_type,
+                },
+            )
 
     async def _vectorcypher_retrieve(
         self,
