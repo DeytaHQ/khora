@@ -1093,42 +1093,75 @@ async def process_document(
                     from datetime import UTC, datetime
 
                     from khora.engines.skeleton.backends import TemporalChunk
+                    from khora.telemetry import trace_span
+                    from khora.telemetry.temporal_metrics import record_ingestion_fallback
 
                     doc_metadata: dict[str, Any] = {}
                     if document.metadata and document.metadata.custom:
                         doc_metadata = document.metadata.custom
 
-                    occurred_at = _extract_source_timestamp(doc_metadata) or getattr(document, "created_at", None)
+                    # Determine source of the timestamp for telemetry.
+                    # "metadata" — a connector populated metadata.custom with a
+                    # recognized timestamp field. "ingest_fallback" — we used
+                    # document.created_at (effectively ingest time), which is
+                    # almost always a connector bug for time-sensitive sources.
+                    # Issue #568 Phase B.
+                    _metadata_ts = _extract_source_timestamp(doc_metadata)
+                    occurred_at = _metadata_ts or getattr(document, "created_at", None)
+                    occurred_at_source = "metadata" if _metadata_ts is not None else "ingest_fallback"
+                    _source_type = doc_metadata.get("source_system")
 
-                    temporal_chunks = [
-                        TemporalChunk(
-                            id=chunk.id,
-                            namespace_id=chunk.namespace_id,
-                            document_id=chunk.document_id,
-                            content=chunk.content,
-                            embedding=chunk.embedding,
-                            occurred_at=occurred_at,
-                            created_at=datetime.now(UTC),
-                            source_system=doc_metadata.get("source_system"),
-                            author=doc_metadata.get("author"),
-                            channel=doc_metadata.get("channel"),
-                            tags=doc_metadata.get("tags", []),
-                            confidence=1.0,
-                            metadata=(
-                                {
-                                    "chunk_index": chunk.metadata.chunk_index,
-                                    "start_char": chunk.metadata.start_char,
-                                    "end_char": chunk.metadata.end_char,
-                                    "token_count": chunk.metadata.token_count,
-                                    **chunk.metadata.custom,
-                                }
-                                if chunk.metadata
-                                else {}
-                            ),
-                        )
-                        for chunk in chunks
-                    ]
-                    await temporal_store.create_chunks_batch(temporal_chunks)
+                    with trace_span(
+                        "khora.ingest.chunk_temporal_attribution",
+                        chunk_count=len(chunks),
+                        occurred_at_source=occurred_at_source,
+                        source_type=str(_source_type) if _source_type is not None else "unknown",
+                    ):
+                        if occurred_at_source == "ingest_fallback":
+                            # One metric increment per chunk that falls back.
+                            for _ in chunks:
+                                record_ingestion_fallback(_source_type)
+                            # Throttled WARN log — once per document, only for
+                            # canonical sources that SHOULD provide a timestamp.
+                            # Skip None/"manual" — those are legitimately unbound.
+                            if _source_type in {"slack", "email", "calendar", "salesforce", "jira", "linear"}:
+                                _external_id = doc_metadata.get("source_id") or doc_metadata.get("external_id")
+                                logger.warning(
+                                    f"chunk occurred_at fell back to ingest time — connector "
+                                    f"'{_source_type}' did not provide metadata.custom['sent_at'|"
+                                    f"'occurred_at'|...]. document_id={document.id}, "
+                                    f"external_id={_external_id}"
+                                )
+
+                        temporal_chunks = [
+                            TemporalChunk(
+                                id=chunk.id,
+                                namespace_id=chunk.namespace_id,
+                                document_id=chunk.document_id,
+                                content=chunk.content,
+                                embedding=chunk.embedding,
+                                occurred_at=occurred_at,
+                                created_at=datetime.now(UTC),
+                                source_system=doc_metadata.get("source_system"),
+                                author=doc_metadata.get("author"),
+                                channel=doc_metadata.get("channel"),
+                                tags=doc_metadata.get("tags", []),
+                                confidence=1.0,
+                                metadata=(
+                                    {
+                                        "chunk_index": chunk.metadata.chunk_index,
+                                        "start_char": chunk.metadata.start_char,
+                                        "end_char": chunk.metadata.end_char,
+                                        "token_count": chunk.metadata.token_count,
+                                        **chunk.metadata.custom,
+                                    }
+                                    if chunk.metadata
+                                    else {}
+                                ),
+                            )
+                            for chunk in chunks
+                        ]
+                        await temporal_store.create_chunks_batch(temporal_chunks)
 
         async def _store_entities() -> tuple[list[tuple[Entity, bool]], dict[str, str], list[Entity]]:
             """Store entities with deduplication. Returns (results, id_mapping, entities_needing_embeddings)."""
