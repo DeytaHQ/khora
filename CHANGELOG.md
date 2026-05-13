@@ -4,6 +4,21 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.10.7] — PyPI README rewriting, SecretStr config fields, release-pipeline fixes
+
+### Changed
+
+- **Credential and DSN config fields re-typed as `pydantic.SecretStr`** (#553). Affects `KhoraConfig.storage.*` connection URLs/passwords (Postgres, Neo4j, Memgraph, Neptune, AGE, SurrealDB graph/relational/vector/event-store) and the telemetry collector DSN. Each backend's engine/driver factory unwraps the secret exactly once at the driver edge via the new `khora.config._secrets._secret_value()` helper. Config dumps and log lines now render these fields as `'**********'`; values written to fields still accept `str` for back-compat, but reads return `SecretStr` — callers that previously did `str(cfg.storage.neo4j.password)` and expected the cleartext now need `.get_secret_value()`. Pre-1.0 patch; flagging it explicitly here so downstream consumers can audit.
+- **README rendering on PyPI** (#556). The on-disk README keeps relative links (`docs/configuration.md`) for GitHub readers; `hatch-fancy-pypi-readme` substitution rewrites them to `https://github.com/DeytaHQ/khora/blob/main/...` at wheel/sdist build time so PyPI's project page renders working links. Also adds `[project.urls]` for the PyPI sidebar (Documentation, Source, Issues, Changelog, Releases).
+
+### Fixed
+
+- **`release.yml` smoke-install** (#552). The smoke-install step installed `khora[sqlite-lance]==${VERSION}` and then asserted `pip show khora-accel`, which always failed because `[sqlite-lance]` doesn't pull khora-accel — that's the `[rust]` extra. Tripped the gate on every release since the assertion landed; v0.10.6 had its `github-release` job skipped because of it (workaround: manual `gh release create`). Now installs `khora[sqlite-lance,rust]` so both wheels are verified together.
+
+### OSS prep
+
+- **`CLAUDE.md` scrub** (#555) — final pass for OSS readiness.
+
 ## [0.10.6] — Test-infra expansion, dependency staging window, docs cleanup
 
 ### Added
