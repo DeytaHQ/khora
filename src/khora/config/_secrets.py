@@ -6,7 +6,7 @@ import re
 
 # Matches the userinfo segment of a URI: ``://user:password@``. Captures
 # nothing — substitution replaces the whole match with ``://[REDACTED]@``.
-_DSN_USERINFO_RE = re.compile(r"://[\w\-.]+:[^@/]+@")
+_DSN_USERINFO_RE = re.compile(r"://[^:@/]+:[^@/]+@")
 
 
 def redact_dsn(text: str) -> str:
