@@ -17,6 +17,7 @@ from sqlalchemy import Column, MetaData, PrimaryKeyConstraint, String, Table, po
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from khora.config._secrets import redact_dsn
 from khora.db.models import Base
 from khora.db.session import _DatabaseAheadError
 
@@ -240,24 +241,52 @@ def run_migrations_offline() -> None:
 
 
 async def run_async_migrations() -> None:
-    """Run migrations in 'online' mode with async engine."""
+    """Run migrations in 'online' mode with async engine.
+
+    Connection-setup errors raised by the underlying driver often embed the
+    plaintext DSN (asyncpg in particular formats the full
+    ``postgresql://user:pass@host/db`` string into its
+    ``InvalidPasswordError`` / ``CannotConnectNowError`` messages). Wrap the
+    exception path with ``redact_dsn`` so the userinfo segment never reaches
+    log sinks or Logfire span attributes.
+    """
     url = _get_url()
-    connectable = create_async_engine(url, poolclass=pool.NullPool)
+    try:
+        connectable = create_async_engine(url, poolclass=pool.NullPool)
 
-    async with connectable.connect() as connection:
-        # SQLite: enable foreign keys so FK constraints behave consistently
-        # with Postgres during batch ALTER operations.
-        if connection.dialect.name == "sqlite":
-            await connection.execute(text("PRAGMA foreign_keys = ON"))
-        await connection.run_sync(do_run_migrations)
-        # Explicitly commit — Alembic's "non-transactional DDL" path on SQLite
-        # doesn't issue COMMIT, and SQLAlchemy's async connection does not
-        # auto-commit on close. Without this, all DDL is lost. Safe on Postgres:
-        # the surrounding context.begin_transaction() already commits, and this
-        # is a no-op after commit.
-        await connection.commit()
+        async with connectable.connect() as connection:
+            # SQLite: enable foreign keys so FK constraints behave consistently
+            # with Postgres during batch ALTER operations.
+            if connection.dialect.name == "sqlite":
+                await connection.execute(text("PRAGMA foreign_keys = ON"))
+            await connection.run_sync(do_run_migrations)
+            # Explicitly commit — Alembic's "non-transactional DDL" path on SQLite
+            # doesn't issue COMMIT, and SQLAlchemy's async connection does not
+            # auto-commit on close. Without this, all DDL is lost. Safe on Postgres:
+            # the surrounding context.begin_transaction() already commits, and this
+            # is a no-op after commit.
+            await connection.commit()
 
-    await connectable.dispose()
+        await connectable.dispose()
+    except _DatabaseAheadError:
+        # Sentinel: no DSN content, propagate unchanged for the session.py handler.
+        raise
+    except Exception as exc:
+        redacted = redact_dsn(str(exc))
+        if redacted != str(exc):
+            # Re-raise with redacted message. Try to preserve the original
+            # exception type, but some SQLAlchemy / asyncpg exception types
+            # require multiple positional args (e.g. NoSuchModuleError(name))
+            # — passing just the redacted message would raise TypeError and
+            # lose the original traceback. Fall back to RuntimeError chained
+            # via ``from exc`` so the original is still reachable via
+            # ``__cause__``.
+            try:
+                redacted_exc = type(exc)(redacted)
+            except TypeError:
+                raise RuntimeError(redacted) from exc
+            raise redacted_exc.with_traceback(exc.__traceback__) from None
+        raise
 
 
 def run_migrations_online() -> None:

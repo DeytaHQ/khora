@@ -8,8 +8,23 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Discriminator, Field, Tag, field_validator, model_validator
+from pydantic import BaseModel, Discriminator, Field, SecretStr, Tag, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _secret_value(value: SecretStr | str | None, default: str = "") -> str:
+    """Return the plain-text value of a ``SecretStr`` (or pass-through ``str``).
+
+    Storage-backend engine factories unwrap ``SecretStr`` exactly once when
+    handing credentials to the underlying driver. Accepts ``str`` as a
+    back-compat fallback so legacy call sites that still pass plain strings
+    continue to work during the migration window.
+    """
+    if value is None:
+        return default
+    if isinstance(value, SecretStr):
+        return value.get_secret_value()
+    return value
 
 
 @dataclass
@@ -18,7 +33,7 @@ class ParsedNeo4jUrl:
 
     url: str  # URL without credentials (bolt://host:port)
     user: str
-    password: str
+    password: SecretStr
     database: str
 
     @classmethod
@@ -26,7 +41,7 @@ class ParsedNeo4jUrl:
         cls,
         url: str,
         default_user: str = "neo4j",
-        default_password: str = "",
+        default_password: SecretStr | str = "",
         default_database: str = "neo4j",
     ) -> ParsedNeo4jUrl:
         """Parse a Neo4j URL with optional embedded credentials.
@@ -44,7 +59,12 @@ class ParsedNeo4jUrl:
 
         # Extract user and password from URL
         user = parsed.username or default_user
-        password = parsed.password or default_password
+        if parsed.password:
+            password: SecretStr = SecretStr(parsed.password)
+        elif isinstance(default_password, SecretStr):
+            password = default_password
+        else:
+            password = SecretStr(default_password)
 
         # Extract database from path (e.g., /mydb -> mydb)
         database = parsed.path.lstrip("/") if parsed.path and parsed.path != "/" else default_database
@@ -67,9 +87,9 @@ class Neo4jConfig(BaseModel):
     """Neo4j graph backend configuration."""
 
     backend: Literal["neo4j"] = "neo4j"
-    url: str | None = Field(default=None, description="Neo4j connection URL (bolt:// or neo4j://)")
+    url: SecretStr | None = Field(default=None, description="Neo4j connection URL (bolt:// or neo4j://)")
     user: str = Field(default="neo4j", description="Neo4j username")
-    password: str = Field(default="", description="Neo4j password")
+    password: SecretStr = Field(default=SecretStr(""), description="Neo4j password")
     database: str = Field(default="neo4j", description="Neo4j database name")
     max_connection_pool_size: int = Field(default=100, description="Neo4j connection pool size")
     connection_acquisition_timeout: float = Field(
@@ -149,9 +169,9 @@ class MemgraphConfig(BaseModel):
     """Memgraph graph backend configuration."""
 
     backend: Literal["memgraph"] = "memgraph"
-    url: str | None = Field(default=None, description="Memgraph connection URL (bolt://)")
+    url: SecretStr | None = Field(default=None, description="Memgraph connection URL (bolt://)")
     user: str = Field(default="memgraph", description="Memgraph username")
-    password: str = Field(default="", description="Memgraph password")
+    password: SecretStr = Field(default=SecretStr(""), description="Memgraph password")
 
 
 class NeptuneConfig(BaseModel):
@@ -162,9 +182,9 @@ class NeptuneConfig(BaseModel):
     """
 
     backend: Literal["neptune"] = "neptune"
-    url: str | None = Field(default=None, description="Neptune Bolt endpoint (bolt://cluster:8182)")
+    url: SecretStr | None = Field(default=None, description="Neptune Bolt endpoint (bolt://cluster:8182)")
     user: str = Field(default="", description="Username (empty for IAM auth)")
-    password: str = Field(default="", description="Password (empty for IAM auth)")
+    password: SecretStr = Field(default=SecretStr(""), description="Password (empty for IAM auth)")
     iam_auth: bool = Field(default=False, description="Use AWS IAM SigV4 authentication")
     aws_region: str = Field(default="us-east-1", description="AWS region for IAM auth signing")
     max_connection_pool_size: int = Field(default=100, description="Bolt connection pool size (Neptune max: 1000)")
@@ -179,12 +199,12 @@ class SurrealDBConfig(BaseModel):
 
     backend: Literal["surrealdb"] = "surrealdb"
     mode: str = Field(default="memory", description="Connection mode: memory, embedded, or remote")
-    url: str | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
+    url: SecretStr | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
     path: str | None = Field(default=None, description="Database file path (for embedded mode)")
     namespace: str = Field(default="khora", description="SurrealDB namespace")
     database: str = Field(default="default", description="SurrealDB database")
     user: str = Field(default="root", description="SurrealDB username")
-    password: str = Field(default="root", description="SurrealDB password")
+    password: SecretStr = Field(default=SecretStr("root"), description="SurrealDB password")
     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
     sync_data: bool = Field(default=True, description="Enable SURREAL_SYNC_DATA for crash-safe writes")
 
@@ -237,7 +257,7 @@ class AGEConfig(BaseModel):
     """
 
     backend: Literal["age"] = "age"
-    url: str | None = Field(default=None, description="PostgreSQL URL (can share with relational backend)")
+    url: SecretStr | None = Field(default=None, description="PostgreSQL URL (can share with relational backend)")
     graph_name: str = Field(default="khora_graph", description="Name of the AGE graph")
     pool_size: int = Field(default=10, description="Connection pool size")
     max_overflow: int = Field(default=20, description="Max overflow connections")
@@ -269,7 +289,7 @@ class PgVectorConfig(BaseModel):
     """pgvector vector backend configuration."""
 
     backend: Literal["pgvector"] = "pgvector"
-    url: str | None = Field(default=None, description="pgvector connection URL")
+    url: SecretStr | None = Field(default=None, description="pgvector connection URL")
     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
 
 
@@ -281,12 +301,12 @@ class SurrealDBVectorConfig(BaseModel):
 
     backend: Literal["surrealdb"] = "surrealdb"
     mode: str = Field(default="memory", description="Connection mode: memory, embedded, or remote")
-    url: str | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
+    url: SecretStr | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
     path: str | None = Field(default=None, description="Database file path (for embedded mode)")
     namespace: str = Field(default="khora", description="SurrealDB namespace")
     database: str = Field(default="default", description="SurrealDB database")
     user: str = Field(default="root", description="SurrealDB username")
-    password: str = Field(default="root", description="SurrealDB password")
+    password: SecretStr = Field(default=SecretStr("root"), description="SurrealDB password")
     embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
 
 
@@ -352,7 +372,7 @@ class StorageSettings(BaseSettings):
     )
 
     # PostgreSQL (relational)
-    postgresql_url: str | None = Field(default=None, description="PostgreSQL connection URL")
+    postgresql_url: SecretStr | None = Field(default=None, description="PostgreSQL connection URL")
     postgresql_pool_size: int = Field(default=50, description="PostgreSQL connection pool size")
     postgresql_max_overflow: int = Field(default=30, description="PostgreSQL max overflow connections")
     postgresql_pool_pre_ping: bool = Field(
@@ -367,11 +387,11 @@ class StorageSettings(BaseSettings):
     vector: VectorConfig = Field(default_factory=PgVectorConfig, description="Vector backend configuration")
 
     # Legacy flat fields — kept for backwards compatibility
-    pgvector_url: str | None = Field(default=None, description="[deprecated] pgvector connection URL")
+    pgvector_url: SecretStr | None = Field(default=None, description="[deprecated] pgvector connection URL")
     embedding_dimension: int = Field(default=1536, description="[deprecated] Embedding vector dimension")
-    neo4j_url: str | None = Field(default=None, description="[deprecated] Neo4j connection URL")
+    neo4j_url: SecretStr | None = Field(default=None, description="[deprecated] Neo4j connection URL")
     neo4j_user: str = Field(default="neo4j", description="[deprecated] Neo4j username")
-    neo4j_password: str = Field(default="", description="[deprecated] Neo4j password")
+    neo4j_password: SecretStr = Field(default=SecretStr(""), description="[deprecated] Neo4j password")
     neo4j_database: str = Field(default="neo4j", description="[deprecated] Neo4j database name")
 
     # HNSW index tuning
@@ -871,11 +891,11 @@ class KhoraConfig(BaseSettings):
     # Database for Khora internal state (shortcuts for storage.* URLs)
     # These can be set via KHORA_DATABASE_URL and KHORA_NEO4J_URL environment variables
     # Programmatic values take priority over environment variables
-    database_url: str | None = Field(
+    database_url: SecretStr | None = Field(
         default=None,
         description="PostgreSQL URL for Khora database (shortcut for storage.postgresql_url)",
     )
-    neo4j_url: str | None = Field(
+    neo4j_url: SecretStr | None = Field(
         default=None,
         description="Neo4j URL for graph storage (shortcut for storage.neo4j_url)",
     )
@@ -911,7 +931,7 @@ class KhoraConfig(BaseSettings):
     hooks: Any = Field(default=None, description="Semantic hooks configuration (SemanticHooksConfig)")
 
     # Telemetry
-    telemetry_database_url: str | None = Field(
+    telemetry_database_url: SecretStr | None = Field(
         default=None,
         description="PostgreSQL URL for telemetry database (set KHORA_TELEMETRY_DATABASE_URL to enable)",
     )
@@ -943,17 +963,39 @@ class KhoraConfig(BaseSettings):
         return cls.model_validate(data or {})
 
     def get_postgresql_url(self) -> str | None:
-        """Get PostgreSQL URL from config."""
-        return self.storage.postgresql_url or self.database_url
+        """Get PostgreSQL URL from config (plaintext, for driver consumption).
+
+        Boundary unwrap for ``SecretStr``: callers receive a plain string
+        suitable for handing to SQLAlchemy / asyncpg. Returns ``None`` when
+        neither ``storage.postgresql_url`` nor ``database_url`` is set.
+        """
+        if self.storage.postgresql_url is not None:
+            return _secret_value(self.storage.postgresql_url) or None
+        if self.database_url is not None:
+            return _secret_value(self.database_url) or None
+        return None
 
     def _get_raw_neo4j_url(self) -> str | None:
-        """Get raw Neo4j URL (may contain credentials)."""
+        """Get raw Neo4j URL (may contain credentials).
+
+        Boundary unwrap for ``SecretStr``. Callers feed this URL into
+        ``ParsedNeo4jUrl.parse`` (which itself splits the URL into
+        cleaned-URL + credentials before forwarding to the driver).
+        """
         # Check new-style graph config first
         graph = self.storage.graph
         if isinstance(graph, Neo4jConfig) and graph.url:
-            return graph.url
+            return _secret_value(graph.url) or None
         # Fall back to legacy fields
-        return self.storage.neo4j_url or self.neo4j_url
+        if self.storage.neo4j_url is not None:
+            value = _secret_value(self.storage.neo4j_url)
+            if value:
+                return value
+        if self.neo4j_url is not None:
+            value = _secret_value(self.neo4j_url)
+            if value:
+                return value
+        return None
 
     def _parse_neo4j_url(self) -> ParsedNeo4jUrl | None:
         """Parse Neo4j URL and extract components."""
@@ -997,7 +1039,9 @@ class KhoraConfig(BaseSettings):
         return self.storage.neo4j_user
 
     def get_neo4j_password(self) -> str:
-        """Get Neo4j password.
+        """Get Neo4j password (plaintext, for driver consumption).
+
+        Boundary unwrap for ``SecretStr``.
 
         Precedence: password embedded in ``Neo4jConfig.url`` (or the legacy
         ``neo4j_url``) wins. Otherwise, falls back to the separately-configured
@@ -1006,11 +1050,11 @@ class KhoraConfig(BaseSettings):
         """
         parsed = self._parse_neo4j_url()
         if parsed:
-            return parsed.password
+            return parsed.password.get_secret_value()
         graph = self.storage.graph
         if isinstance(graph, Neo4jConfig):
-            return graph.password
-        return self.storage.neo4j_password
+            return graph.password.get_secret_value()
+        return _secret_value(self.storage.neo4j_password)
 
     def get_neo4j_database(self) -> str:
         """Get Neo4j database name.
@@ -1060,8 +1104,10 @@ class KhoraConfig(BaseSettings):
         """
         vector = self.storage.vector
         if isinstance(vector, PgVectorConfig) and not vector.url:
-            # Populate from legacy fields
-            url = self.storage.pgvector_url or self.get_postgresql_url()
+            # Populate from legacy fields. Both ``pgvector_url`` and
+            # ``PgVectorConfig.url`` are ``SecretStr``; unwrap the legacy
+            # field here so Pydantic re-wraps consistently.
+            url = _secret_value(self.storage.pgvector_url) or self.get_postgresql_url()
             return PgVectorConfig(
                 url=url,
                 embedding_dimension=self.storage.embedding_dimension,

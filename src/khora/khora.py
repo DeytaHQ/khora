@@ -385,7 +385,9 @@ class Khora:
             self._config = load_config()
             # Apply overrides if provided
             if graph_url:
-                self._config.neo4j_url = graph_url
+                from pydantic import SecretStr as _SecretStr
+
+                self._config.neo4j_url = _SecretStr(graph_url)
             if embedding_model != "text-embedding-3-small":
                 self._config.llm.embedding_model = embedding_model
 
@@ -426,7 +428,9 @@ class Khora:
                 db_path = self._config.storage.sqlite_lance.db_path
                 db_url = f"sqlite+aiosqlite:///{db_path}"
             else:
-                db_url = self._config.database_url
+                # database_url is a SecretStr; unwrap for the Alembic runner
+                # (it forwards into SQLAlchemy create_async_engine).
+                db_url = self._config.database_url.get_secret_value() if self._config.database_url is not None else None
             result = await _run_migrations(db_url)
             if not result.success:
                 raise RuntimeError(f"Database migration failed: {result.error}")

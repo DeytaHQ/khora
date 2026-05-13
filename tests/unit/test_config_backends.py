@@ -27,9 +27,11 @@ class TestStorageSettingsBackwardsCompat:
             neo4j_database="mydb",
         )
         assert isinstance(settings.graph, Neo4jConfig)
-        assert settings.graph.url == "bolt://localhost:7687"
+        # url is SecretStr — unwrap to compare plaintext.
+        assert settings.graph.url.get_secret_value() == "bolt://localhost:7687"
         assert settings.graph.user == "admin"
-        assert settings.graph.password == "secret"
+        # password is SecretStr — unwrap to compare plaintext.
+        assert settings.graph.password.get_secret_value() == "secret"
         assert settings.graph.database == "mydb"
 
     def test_legacy_pgvector_fields_migrated(self):
@@ -38,7 +40,7 @@ class TestStorageSettingsBackwardsCompat:
             embedding_dimension=768,
         )
         assert isinstance(settings.vector, PgVectorConfig)
-        assert settings.vector.url == "postgresql://localhost:5432/vectors"
+        assert settings.vector.url.get_secret_value() == "postgresql://localhost:5432/vectors"
         assert settings.vector.embedding_dimension == 768
 
     def test_new_style_graph_config_takes_precedence(self):
@@ -77,7 +79,7 @@ class TestDiscriminatedUnionParsing:
             }
         )
         assert isinstance(settings.graph, MemgraphConfig)
-        assert settings.graph.url == "bolt://mg:7687"
+        assert settings.graph.url.get_secret_value() == "bolt://mg:7687"
 
     def test_neptune_config_from_dict(self):
         settings = StorageSettings.model_validate(
@@ -107,7 +109,7 @@ class TestDiscriminatedUnionParsing:
             }
         )
         assert isinstance(settings.graph, AGEConfig)
-        assert settings.graph.url == "postgresql://localhost:5432/khora"
+        assert settings.graph.url.get_secret_value() == "postgresql://localhost:5432/khora"
         assert settings.graph.graph_name == "my_graph"
 
     def test_pgvector_is_default_vector_backend(self):
@@ -182,9 +184,10 @@ class TestKhoraConfigGraphHelpers:
         )
         graph = config.get_graph_config()
         assert isinstance(graph, Neo4jConfig)
-        assert graph.url == "bolt://localhost:7687"
+        assert graph.url.get_secret_value() == "bolt://localhost:7687"
         assert graph.user == "neo4j"
-        assert graph.password == "pass"
+        # password is SecretStr — unwrap to compare plaintext.
+        assert graph.password.get_secret_value() == "pass"
 
     def test_get_graph_config_kuzu(self):
         config = KhoraConfig(
@@ -202,7 +205,7 @@ class TestKhoraConfigGraphHelpers:
         )
         vector = config.get_vector_config()
         assert isinstance(vector, PgVectorConfig)
-        assert vector.url == "postgresql://localhost:5432/khora"
+        assert vector.url.get_secret_value() == "postgresql://localhost:5432/khora"
 
 
 @pytest.mark.unit
@@ -280,18 +283,19 @@ class TestParsedNeo4jUrl:
 
     def test_parse_respects_default_password_when_url_has_none(self) -> None:
         parsed = ParsedNeo4jUrl.parse("bolt://localhost:7687", default_password="fallbackpass")
-        assert parsed.password == "fallbackpass"
+        # ParsedNeo4jUrl.password is SecretStr — unwrap to compare.
+        assert parsed.password.get_secret_value() == "fallbackpass"
 
     def test_parse_embedded_password_overrides_default(self) -> None:
         parsed = ParsedNeo4jUrl.parse("bolt://user:embedded@localhost:7687", default_password="fallback")
-        assert parsed.password == "embedded"
+        assert parsed.password.get_secret_value() == "embedded"
 
     def test_parse_neo4j_scheme_preserved(self) -> None:
         """``neo4j://`` routing URLs are parsed and reconstructed with scheme intact."""
         parsed = ParsedNeo4jUrl.parse("neo4j://user:pass@cluster.example.com:7687")
         assert parsed.url == "neo4j://cluster.example.com:7687"
         assert parsed.user == "user"
-        assert parsed.password == "pass"
+        assert parsed.password.get_secret_value() == "pass"
 
     def test_parse_explicit_empty_password_falls_through_to_default(self) -> None:
         """A URL like ``bolt://user:@host:7687`` (trailing colon, no password)
@@ -301,6 +305,6 @@ class TestParsedNeo4jUrl:
         most servers, so falling through to a configured default is the
         sensible behavior.
         """
-        parsed = ParsedNeo4jUrl.parse("bolt://user:@localhost:7687", default_password="fallback")
+        parsed = ParsedNeo4jUrl.parse("bolt://user:@localhost:7687", default_password="fallback")  # noqa: E501
         assert parsed.user == "user"
-        assert parsed.password == "fallback"
+        assert parsed.password.get_secret_value() == "fallback"

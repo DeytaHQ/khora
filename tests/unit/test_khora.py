@@ -110,7 +110,7 @@ class TestKhoraInit:
         kb = Khora(cfg)
 
         assert kb._config is cfg
-        assert kb._config.database_url == "postgresql://test"
+        assert kb._config.database_url.get_secret_value() == "postgresql://test"
 
     def test_init_with_storage_config(self) -> None:
         """Init with explicit storage_config uses it directly."""
@@ -912,7 +912,7 @@ class TestSimplifiedConstructor:
             kb = Khora("postgresql://localhost/mydb")
             mock_load.assert_not_called()
 
-        assert kb._config.database_url == "postgresql://localhost/mydb"
+        assert kb._config.database_url.get_secret_value() == "postgresql://localhost/mydb"
 
     def test_init_with_database_url_and_graph_url(self) -> None:
         """Init with both database and graph URLs."""
@@ -922,8 +922,8 @@ class TestSimplifiedConstructor:
                 graph_url="bolt://localhost:7687",
             )
 
-        assert kb._config.database_url == "postgresql://localhost/mydb"
-        assert kb._config.neo4j_url == "bolt://localhost:7687"
+        assert kb._config.database_url.get_secret_value() == "postgresql://localhost/mydb"
+        assert kb._config.neo4j_url.get_secret_value() == "bolt://localhost:7687"
 
     def test_init_with_custom_embedding_model(self) -> None:
         """Init with custom embedding model."""
@@ -944,7 +944,7 @@ class TestSimplifiedConstructor:
         kb = Khora(cfg)
 
         assert kb._config is cfg
-        assert kb._config.database_url == "postgresql://test"
+        assert kb._config.database_url.get_secret_value() == "postgresql://test"
 
     def test_init_with_none_loads_from_env(self) -> None:
         """Init with None loads config from env/file."""
@@ -961,7 +961,7 @@ class TestSimplifiedConstructor:
         with patch("khora.khora.load_config", return_value=mock_cfg):
             kb = Khora(graph_url="bolt://custom:7687")
 
-        assert kb._config.neo4j_url == "bolt://custom:7687"
+        assert kb._config.neo4j_url.get_secret_value() == "bolt://custom:7687"
 
     def test_init_with_engine_parameter(self) -> None:
         """Init with explicit engine parameter."""

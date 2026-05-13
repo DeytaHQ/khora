@@ -239,7 +239,12 @@ class StorageFactory:
             backend_name = getattr(vector_config, "backend", None)
             if backend_name == "pgvector":
                 # PgVectorBackend has a specialized constructor
+                # PgVectorConfig.url is a SecretStr; unwrap here.
+                from pydantic import SecretStr as _SecretStr
+
                 url = getattr(vector_config, "url", None)
+                if isinstance(url, _SecretStr):
+                    url = url.get_secret_value()
                 if not url:
                     logger.warning("pgvector URL not configured, vector backend disabled")
                     return None
@@ -324,13 +329,23 @@ class StorageFactory:
         role: str,
     ) -> Any | None:
         """Create a backend instance from registry via lazy import + from_config()."""
+        from pydantic import SecretStr as _SecretStr
+
+        def _surrealdb_cache_key(cfg: Any) -> str:
+            # Unwrap SecretStr url so cache keys are plain strings.
+            raw_url = getattr(cfg, "url", None)
+            if isinstance(raw_url, _SecretStr):
+                raw_url = raw_url.get_secret_value()
+            url = raw_url or ""
+            path = getattr(cfg, "path", None) or ""
+            mode = getattr(cfg, "mode", "memory")
+            return f"surrealdb:{mode}:{url}:{path}"
+
         if backend_name == "surrealdb":
             # SurrealDB dual-role: reuse instance for same endpoint
-            url = getattr(config, "url", None) or ""
-            path = getattr(config, "path", None) or ""
-            mode = getattr(config, "mode", "memory")
-            cache_key = f"surrealdb:{mode}:{url}:{path}"
+            cache_key = _surrealdb_cache_key(config)
             if cache_key in _surrealdb_instances:
+                mode = getattr(config, "mode", "memory")
                 logger.info(f"Reusing SurrealDB instance for {role} role (mode={mode})")
                 return _surrealdb_instances[cache_key]
 
@@ -346,10 +361,7 @@ class StorageFactory:
         instance = cls.from_config(config)
 
         if backend_name == "surrealdb":
-            url = getattr(config, "url", None) or ""
-            path = getattr(config, "path", None) or ""
-            mode = getattr(config, "mode", "memory")
-            _surrealdb_instances[f"surrealdb:{mode}:{url}:{path}"] = instance
+            _surrealdb_instances[_surrealdb_cache_key(config)] = instance
 
         return instance
 
@@ -395,20 +407,30 @@ class StorageFactory:
 
             # Create a shared SurrealDB connection for all four adapters
             try:
+                # SurrealDBConfig.password is a SecretStr; unwrap exactly
+                # here so the driver receives the plaintext.
+                from pydantic import SecretStr as _SecretStr
+
                 from .backends.surrealdb.connection import SurrealDBConnection
                 from .backends.surrealdb.event_store import SurrealDBEventStoreAdapter
                 from .backends.surrealdb.graph import SurrealDBGraphAdapter
                 from .backends.surrealdb.relational import SurrealDBRelationalAdapter
                 from .backends.surrealdb.vector import SurrealDBVectorAdapter
 
+                surreal_password = getattr(surreal_config, "password", "root")
+                if isinstance(surreal_password, _SecretStr):
+                    surreal_password = surreal_password.get_secret_value()
+                surreal_url = getattr(surreal_config, "url", None)
+                if isinstance(surreal_url, _SecretStr):
+                    surreal_url = surreal_url.get_secret_value()
                 conn = SurrealDBConnection(
                     mode=getattr(surreal_config, "mode", "memory"),
                     path=getattr(surreal_config, "path", None),
-                    url=getattr(surreal_config, "url", None),
+                    url=surreal_url,
                     namespace=getattr(surreal_config, "namespace", "khora"),
                     database=getattr(surreal_config, "database", "default"),
                     user=getattr(surreal_config, "user", "root"),
-                    password=getattr(surreal_config, "password", "root"),
+                    password=surreal_password,
                     sync_data=getattr(surreal_config, "sync_data", True),
                 )
                 return StorageCoordinator(

@@ -192,13 +192,22 @@ class SurrealDBGraphAdapter:
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> SurrealDBGraphAdapter:
-        """Create an adapter from a configuration dictionary."""
+        """Create an adapter from a configuration dictionary.
+
+        ``password`` is unwrapped from ``pydantic.SecretStr`` if needed so
+        the driver receives a plaintext credential.
+        """
+        from pydantic import SecretStr
+
         from khora.storage.backends.surrealdb.connection import SurrealDBConnection
 
         conn_kwargs: dict[str, Any] = {}
         for key in ("mode", "path", "url", "namespace", "database", "user", "password"):
             if key in config:
-                conn_kwargs[key] = config[key]
+                value = config[key]
+                if key == "password" and isinstance(value, SecretStr):
+                    value = value.get_secret_value()
+                conn_kwargs[key] = value
 
         connection = SurrealDBConnection(**conn_kwargs)
         return cls(connection)

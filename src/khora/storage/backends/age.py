@@ -62,9 +62,18 @@ class AGEBackend(GraphBackendBase):
 
     @classmethod
     def from_config(cls, config: Any) -> AGEBackend:
-        """Create an AGEBackend from an AGEConfig object."""
+        """Create an AGEBackend from an AGEConfig object.
+
+        If ``config.url`` is a ``SecretStr`` it is unwrapped exactly here so
+        the SQLAlchemy engine receives a plaintext DSN.
+        """
+        from pydantic import SecretStr
+
+        url = config.url or ""
+        if isinstance(url, SecretStr):
+            url = url.get_secret_value()
         return cls(
-            database_url=config.url or "",
+            database_url=url,
             graph_name=getattr(config, "graph_name", "khora_graph"),
             pool_size=getattr(config, "pool_size", 10),
             max_overflow=getattr(config, "max_overflow", 20),

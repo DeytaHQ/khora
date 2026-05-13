@@ -125,14 +125,24 @@ class SurrealDBTemporalStore(TemporalVectorStore):
                     "or pass surrealdb_config explicitly."
                 )
 
+            # SurrealDBConfig.url and .password are SecretStr; unwrap exactly
+            # here so the driver receives plaintext.
+            from pydantic import SecretStr as _SecretStr
+
+            surreal_url = surreal_cfg.url
+            if isinstance(surreal_url, _SecretStr):
+                surreal_url = surreal_url.get_secret_value()
+            surreal_password = surreal_cfg.password
+            if isinstance(surreal_password, _SecretStr):
+                surreal_password = surreal_password.get_secret_value()
             self._conn = SurrealDBConnection(
                 mode=surreal_cfg.mode,
                 path=surreal_cfg.path,
-                url=surreal_cfg.url,
+                url=surreal_url,
                 namespace=surreal_cfg.namespace,
                 database=surreal_cfg.database,
                 user=surreal_cfg.user,
-                password=surreal_cfg.password,
+                password=surreal_password,
                 sync_data=surreal_cfg.sync_data,
             )
         self._connected = False

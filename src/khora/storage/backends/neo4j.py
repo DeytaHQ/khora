@@ -476,11 +476,24 @@ class Neo4jBackend(GraphBackendBase):
 
     @classmethod
     def from_config(cls, config: Any) -> Neo4jBackend:
-        """Create a Neo4jBackend from a Neo4jConfig object."""
+        """Create a Neo4jBackend from a Neo4jConfig object.
+
+        ``config.password`` and ``config.url`` are ``pydantic.SecretStr``
+        (or a plain ``str`` if a non-Pydantic dataclass is passed). Unwrap
+        exactly here so the driver receives plaintext.
+        """
+        from pydantic import SecretStr
+
+        password = config.password
+        if isinstance(password, SecretStr):
+            password = password.get_secret_value()
+        url = config.url
+        if isinstance(url, SecretStr):
+            url = url.get_secret_value()
         return cls(
-            url=config.url or "",
+            url=url or "",
             user=config.user,
-            password=config.password,
+            password=password,
             database=config.database,
             max_connection_pool_size=getattr(config, "max_connection_pool_size", 100),
             connection_acquisition_timeout=getattr(config, "connection_acquisition_timeout", 60.0),

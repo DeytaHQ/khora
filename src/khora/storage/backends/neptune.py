@@ -60,11 +60,23 @@ class NeptuneBackend(GraphBackendBase):
 
     @classmethod
     def from_config(cls, config: Any) -> NeptuneBackend:
-        """Create a NeptuneBackend from a NeptuneConfig object."""
+        """Create a NeptuneBackend from a NeptuneConfig object.
+
+        ``config.password`` and ``config.url`` are unwrapped from
+        ``SecretStr`` here so the driver receives plaintext.
+        """
+        from pydantic import SecretStr
+
+        password = config.password
+        if isinstance(password, SecretStr):
+            password = password.get_secret_value()
+        url = config.url
+        if isinstance(url, SecretStr):
+            url = url.get_secret_value()
         return cls(
-            url=config.url or "bolt://localhost:8182",
+            url=url or "bolt://localhost:8182",
             user=config.user,
-            password=config.password,
+            password=password,
             iam_auth=config.iam_auth,
             aws_region=config.aws_region,
             max_connection_pool_size=config.max_connection_pool_size,
