@@ -425,9 +425,7 @@ class Khora:
             logger.info("ADR-084: secret typing validated (mode={})", _mode)
         else:
             if _mode == "fail":
-                logger.warning(
-                    "ADR-084: deyta-core not installed — fail-mode requested but enforcement is inactive"
-                )
+                logger.warning("ADR-084: deyta-core not installed — fail-mode requested but enforcement is inactive")
             else:
                 logger.debug("ADR-084: deyta-core not installed, skipping secret typing validation")
 

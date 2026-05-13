@@ -3559,9 +3559,7 @@ class TestKhoraInitDeytaCore:
 
     def test_init_succeeds_without_deyta_core(self) -> None:
         """Khora.__init__ completes without error when deyta-core is absent."""
-        with patch("khora.khora._HAS_DEYTA_CORE", False), patch(
-            "khora.khora.load_config", return_value=_mock_config()
-        ):
+        with patch("khora.khora._HAS_DEYTA_CORE", False), patch("khora.khora.load_config", return_value=_mock_config()):
             kb = Khora()
         assert not kb._connected
 
@@ -3569,9 +3567,11 @@ class TestKhoraInitDeytaCore:
         """mode='warn' with absent deyta-core raises no exception."""
         warn_cfg = MagicMock()
         warn_cfg.secret_typing_mode = "warn"
-        with patch("khora.khora._HAS_DEYTA_CORE", False), patch(
-            "khora.khora.load_config", return_value=_mock_config()
-        ), patch("khora.telemetry.config.TelemetryConfig.from_env", return_value=warn_cfg):
+        with (
+            patch("khora.khora._HAS_DEYTA_CORE", False),
+            patch("khora.khora.load_config", return_value=_mock_config()),
+            patch("khora.telemetry.config.TelemetryConfig.from_env", return_value=warn_cfg),
+        ):
             kb = Khora()
         assert not kb._connected
 
@@ -3579,9 +3579,11 @@ class TestKhoraInitDeytaCore:
         """mode='fail' with absent deyta-core raises no exception (warning emitted instead)."""
         fail_cfg = MagicMock()
         fail_cfg.secret_typing_mode = "fail"
-        with patch("khora.khora._HAS_DEYTA_CORE", False), patch(
-            "khora.khora.load_config", return_value=_mock_config()
-        ), patch("khora.telemetry.config.TelemetryConfig.from_env", return_value=fail_cfg):
+        with (
+            patch("khora.khora._HAS_DEYTA_CORE", False),
+            patch("khora.khora.load_config", return_value=_mock_config()),
+            patch("khora.telemetry.config.TelemetryConfig.from_env", return_value=fail_cfg),
+        ):
             kb = Khora()
         assert not kb._connected
 
@@ -3592,10 +3594,11 @@ class TestKhoraInitDeytaCore:
         mock_validator = MagicMock()
         warn_cfg = MagicMock()
         warn_cfg.secret_typing_mode = "warn"
-        with patch("khora.khora._HAS_DEYTA_CORE", True), patch(
-            "khora.khora._assert_no_str_typed_secrets", mock_validator, create=True
-        ), patch("khora.khora.load_config", return_value=_mock_config()), patch(
-            "khora.telemetry.config.TelemetryConfig.from_env", return_value=warn_cfg
+        with (
+            patch("khora.khora._HAS_DEYTA_CORE", True),
+            patch("khora.khora._assert_no_str_typed_secrets", mock_validator, create=True),
+            patch("khora.khora.load_config", return_value=_mock_config()),
+            patch("khora.telemetry.config.TelemetryConfig.from_env", return_value=warn_cfg),
         ):
             kb = Khora()
         mock_validator.assert_called_once_with(KhoraConfig, mode="warn")
