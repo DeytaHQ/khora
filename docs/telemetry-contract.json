@@ -379,6 +379,12 @@
       "owner": "embedder"
     },
     {
+      "name": "khora.ingest.chunk_temporal_attribution",
+      "stability": "internal",
+      "owner": "ingestion",
+      "_comment": "Wraps temporal-chunk construction in ingest._store_chunks. Attributes: chunk_count (int), occurred_at_source ('metadata'|'ingest_fallback'), source_type (bounded enum from SourceSystem + 'unknown'). Issue #568 Phase B."
+    },
+    {
       "name": "khora.ingestion.entity_dedup",
       "stability": "internal",
       "owner": "ingestion"
@@ -810,6 +816,17 @@
       "histogram_buckets": [0, 1, 7, 30, 90, 365, 3650],
       "labels": [],
       "_comment": "Issue #567 Phase A. Log-bucketed: hour-day-week-month-quarter-year-decade. No labels — global recency-skew signal."
+    },
+    {
+      "name": "khora.ingest.source_timestamp.fallback_count",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Number of chunks whose occurred_at fell back to ingest time because the connector did not populate metadata.custom with a timestamp field. Labels: source_type (bounded enum).",
+      "labels": [
+        {"name": "source_type", "values": ["slack", "email", "calendar", "salesforce", "jira", "linear", "manual", "unknown"], "_comment": "Bounded enum drawn from SourceSystem; off-enum values bucket to 'unknown'."}
+      ],
+      "_comment": "Issue #568 Phase B. NO namespace_id label — cardinality rule."
     }
   ]
 }
