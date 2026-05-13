@@ -24,7 +24,7 @@ from uuid import uuid4
 import pytest
 
 from khora.khora import Khora, RecallResult
-from khora.telemetry.logfire_integration import bounded_text_hash
+from khora.telemetry import bounded_text_hash
 
 ATTR_BUDGET_CHARS = 64
 

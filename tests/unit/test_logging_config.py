@@ -16,13 +16,21 @@ import pytest
 
 from khora import logging_config
 from khora.logging_config import apply_neo4j_log_level_from_env, setup_logging
-from khora.telemetry import logfire_integration
-from khora.telemetry.logfire_integration import (
-    _HAS_LOGFIRE,
-    _NEO4J_LOGFIRE_HANDLER_MARK,
-    install_neo4j_logfire_handler,
+from khora.telemetry._otel import (
+    _NEO4J_LOG_BRIDGE_MARK as _NEO4J_LOGFIRE_HANDLER_MARK,
+)
+from khora.telemetry._otel import (
+    install_neo4j_log_bridge as install_neo4j_logfire_handler,
 )
 
+
+def _logfire_available() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("logfire") is not None
+
+
+_HAS_LOGFIRE = _logfire_available()
 requires_logfire = pytest.mark.skipif(not _HAS_LOGFIRE, reason="logfire not installed")
 
 
@@ -292,15 +300,28 @@ def test_install_neo4j_logfire_handler_noop_when_env_empty(
     assert _marked_neo4j_handlers() == []
 
 
-def test_install_neo4j_logfire_handler_noop_when_logfire_unavailable(
+def test_install_neo4j_log_bridge_falls_back_to_otel_logs_when_no_logfire(
     monkeypatch: pytest.MonkeyPatch,
     _reset_neo4j_handlers: None,
 ) -> None:
-    """When logfire is unavailable, the helper short-circuits cleanly."""
-    monkeypatch.setattr(logfire_integration, "_HAS_LOGFIRE", False)
+    """When logfire is absent, the bridge attaches an OTel logs SDK
+    handler (since the [otel] extra is available in the dev env)."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_logfire(name, *args, **kwargs):
+        if name.startswith("logfire"):
+            raise ImportError(f"forced no-logfire for test: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_logfire)
     monkeypatch.setenv("KHORA_NEO4J_LOG_LEVEL", "DEBUG")
-    assert install_neo4j_logfire_handler() is False
-    assert _marked_neo4j_handlers() == []
+    assert install_neo4j_logfire_handler() is True
+    marked = _marked_neo4j_handlers()
+    assert len(marked) == 1
+    # Should be the OTel logs SDK handler, NOT a LogfireLoggingHandler.
+    assert type(marked[0]).__module__.startswith("opentelemetry")
 
 
 @requires_logfire

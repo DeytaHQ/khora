@@ -23,10 +23,6 @@ from neo4j.exceptions import ConnectionAcquisitionTimeoutError
 
 from khora.storage.backends.neo4j import Neo4jBackend
 from khora.telemetry.metrics import (
-    _NOOP_COUNTER,
-    _NOOP_HISTOGRAM,
-    _NoOpCounter,
-    _NoOpHistogram,
     metric_counter,
     metric_gauge_callback,
     metric_histogram,
@@ -38,85 +34,27 @@ from khora.telemetry.metrics import (
 
 
 @pytest.mark.unit
-class TestNoOpCounter:
-    def test_add_accepts_int(self) -> None:
-        _NOOP_COUNTER.add(1)
+class TestMetricHelpers:
+    """Helpers create OTel instruments via khora's meter scope.
 
-    def test_add_accepts_float_with_attributes(self) -> None:
-        _NOOP_COUNTER.add(3.14, attributes={"key": "val"})
+    When no MeterProvider is configured, OTel's proxy returns no-op
+    instruments — ``.add`` / ``.record`` are silent. We just assert
+    the helpers return *something* callable.
+    """
 
-    def test_singleton_identity(self) -> None:
-        with patch("khora.telemetry.metrics._HAS_LOGFIRE", False):
-            c = metric_counter("test.counter")
-        assert isinstance(c, _NoOpCounter)
+    def test_metric_counter_returns_addable_instrument(self) -> None:
+        c = metric_counter("test.counter", unit="1", description="A counter")
+        c.add(1)
+        c.add(3.14, attributes={"key": "val"})
 
+    def test_metric_histogram_returns_recordable_instrument(self) -> None:
+        h = metric_histogram("test.hist", unit="s", description="Latency")
+        h.record(42)
+        h.record(0.5, attributes={"op": "read"})
 
-@pytest.mark.unit
-class TestNoOpHistogram:
-    def test_record_accepts_int(self) -> None:
-        _NOOP_HISTOGRAM.record(42)
-
-    def test_record_accepts_float_with_attributes(self) -> None:
-        _NOOP_HISTOGRAM.record(0.5, attributes={"op": "read"})
-
-    def test_singleton_identity(self) -> None:
-        with patch("khora.telemetry.metrics._HAS_LOGFIRE", False):
-            h = metric_histogram("test.histogram", unit="s")
-        assert isinstance(h, _NoOpHistogram)
-
-
-@pytest.mark.unit
-class TestMetricHelpersDelegation:
-    """Tests that metric helpers delegate to logfire when present."""
-
-    def test_metric_counter_delegates_to_logfire(self) -> None:
-        mock_logfire = MagicMock()
-        mock_counter = MagicMock()
-        mock_logfire.metric_counter.return_value = mock_counter
-
-        with (
-            patch("khora.telemetry.metrics._HAS_LOGFIRE", True),
-            patch("khora.telemetry.metrics._logfire", mock_logfire),
-        ):
-            result = metric_counter("test.counter", unit="1", description="A counter")
-
-        assert result is mock_counter
-        mock_logfire.metric_counter.assert_called_once_with("test.counter", unit="1", description="A counter")
-
-    def test_metric_histogram_delegates_to_logfire(self) -> None:
-        mock_logfire = MagicMock()
-        mock_histogram = MagicMock()
-        mock_logfire.metric_histogram.return_value = mock_histogram
-
-        with (
-            patch("khora.telemetry.metrics._HAS_LOGFIRE", True),
-            patch("khora.telemetry.metrics._logfire", mock_logfire),
-        ):
-            result = metric_histogram("test.hist", unit="s", description="Latency")
-
-        assert result is mock_histogram
-        mock_logfire.metric_histogram.assert_called_once_with("test.hist", unit="s", description="Latency")
-
-    def test_metric_gauge_callback_delegates_to_logfire(self) -> None:
-        mock_logfire = MagicMock()
-        callback = MagicMock()
-
-        with (
-            patch("khora.telemetry.metrics._HAS_LOGFIRE", True),
-            patch("khora.telemetry.metrics._logfire", mock_logfire),
-        ):
-            metric_gauge_callback("test.gauge", [callback], unit="1", description="A gauge")
-
-        mock_logfire.metric_gauge_callback.assert_called_once_with(
-            "test.gauge", [callback], unit="1", description="A gauge"
-        )
-
-
-@pytest.mark.unit
-class TestMetricGaugeCallback:
-    def test_noop_does_not_raise(self) -> None:
-        """metric_gauge_callback is silent when logfire is absent."""
-        metric_gauge_callback("test.gauge", [lambda _: iter([])])
+    def test_metric_gauge_callback_does_not_raise(self) -> None:
+        """metric_gauge_callback registers an observable gauge with the meter."""
+        metric_gauge_callback("test.gauge", [lambda _: iter([])], unit="1", description="A gauge")
 
 
 # ---------------------------------------------------------------------------
@@ -126,20 +64,23 @@ class TestMetricGaugeCallback:
 
 @pytest.mark.unit
 class TestNeo4jInitMetrics:
+    """The backend creates real OTel instruments via metric_*; when no
+    MeterProvider is configured, those are OTel proxy instruments that
+    silently swallow calls. We assert the instruments are callable —
+    duck-typed against the OTel Counter / Histogram protocol."""
+
     def test_init_creates_metric_instruments(self) -> None:
-        with patch("khora.telemetry.metrics._HAS_LOGFIRE", False):
-            backend = Neo4jBackend("bolt://localhost:7687")
-        assert isinstance(backend._acquisition_histogram, _NoOpHistogram)
-        assert isinstance(backend._session_duration_histogram, _NoOpHistogram)
-        assert isinstance(backend._timeout_counter, _NoOpCounter)
+        backend = Neo4jBackend("bolt://localhost:7687")
+        backend._acquisition_histogram.record(0.1)
+        backend._session_duration_histogram.record(0.2)
+        backend._timeout_counter.add(1)
 
     def test_from_driver_creates_metric_instruments(self) -> None:
         driver = MagicMock()
-        with patch("khora.telemetry.metrics._HAS_LOGFIRE", False):
-            backend = Neo4jBackend.from_driver(driver)
-        assert isinstance(backend._acquisition_histogram, _NoOpHistogram)
-        assert isinstance(backend._session_duration_histogram, _NoOpHistogram)
-        assert isinstance(backend._timeout_counter, _NoOpCounter)
+        backend = Neo4jBackend.from_driver(driver)
+        backend._acquisition_histogram.record(0.1)
+        backend._session_duration_histogram.record(0.2)
+        backend._timeout_counter.add(1)
 
 
 # ---------------------------------------------------------------------------

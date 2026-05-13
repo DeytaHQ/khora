@@ -162,14 +162,14 @@ def setup_logging(
     # handler is wired up so the new level actually reaches loguru sinks.
     apply_neo4j_log_level_from_env()
 
-    # Forward neo4j stdlib DEBUG records to Logfire. The main
-    # loguru sink filters at INFO, so records must be routed directly via
-    # a dedicated ``LogfireLoggingHandler`` on the ``neo4j`` logger. The
-    # try/except is belt-and-suspenders for logfire SDK-level bugs — a
-    # handler install failure must not prevent the process from logging.
+    # Forward neo4j stdlib DEBUG records to the active OTel/Logfire log
+    # backend. The main loguru sink filters at INFO, so records must be
+    # routed directly via a dedicated handler on the ``neo4j`` logger.
+    # The try/except is belt-and-suspenders — a handler install failure
+    # must not prevent the process from logging.
     try:
-        from khora.telemetry.logfire_integration import install_neo4j_logfire_handler
+        from khora.telemetry._otel import install_neo4j_log_bridge
 
-        install_neo4j_logfire_handler()
+        install_neo4j_log_bridge()
     except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("Failed to install neo4j Logfire handler: {}", exc)
+        logger.warning("Failed to install neo4j log bridge: {}", exc)

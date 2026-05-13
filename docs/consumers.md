@@ -122,3 +122,5 @@ For a new downstream consumer:
 3. Run migrations (for PostgreSQL) — pass `run_migrations=True` to `Khora` or invoke `alembic upgrade head` out-of-band. See [migrations.md](migrations.md).
 4. Import only from the symbols listed in [api-reference.md](api-reference.md) unless you are willing to follow khora's internal churn.
 5. Pin Khora by major version. Minor-version upgrades are safe; majors may require coordinated releases.
+6. **Reading credentials back out of `KhoraConfig`?** Credential fields are `pydantic.SecretStr` — call `.get_secret_value()` for the cleartext. `str(cfg.storage.postgresql_url)` returns `'**********'` by design. See [configuration.md](configuration.md#secretstr-typed-credential-fields).
+7. **Need spans/metrics?** Install `khora[otel]` and call `khora.telemetry.configure_telemetry()` at process startup, or rely on env-based auto-bootstrap. See [observability.md](observability.md) for the precedence rules and vendor recipes.

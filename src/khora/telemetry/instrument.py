@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
-from .logfire_integration import trace_span
+from ._otel import trace_span
 
 
 def instrument_llm(operation: str):
