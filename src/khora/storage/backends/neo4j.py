@@ -634,6 +634,11 @@ class Neo4jBackend(GraphBackendBase):
             "FOR (e:Entity) REQUIRE (e.namespace_id, e.name, e.entity_type) IS UNIQUE",
             # Composite: namespace + type (for list queries filtering by type without name)
             "CREATE INDEX entity_ns_type IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.entity_type)",
+            # Composite: namespace + type + created_at (issue #569 typed-entity recency
+            # fast path — supports "latest action items" without scanning all entities
+            # of the namespace).
+            "CREATE INDEX entity_type_recency IF NOT EXISTS "
+            "FOR (e:Entity) ON (e.namespace_id, e.entity_type, e.created_at)",
             # Composite: namespace + valid_from/valid_until (for temporal queries)
             "CREATE INDEX entity_ns_valid_from IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.valid_from)",
             "CREATE INDEX entity_ns_valid_until IF NOT EXISTS FOR (e:Entity) ON (e.namespace_id, e.valid_until)",

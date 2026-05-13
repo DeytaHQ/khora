@@ -112,6 +112,7 @@ class TestQueryComplexityRouterInit:
             "moderate": 0,
             "complex": 0,
             "entity_anchored": 0,
+            "typed_entity_recent": 0,
             "llm_fallback": 0,
         }
 

@@ -289,6 +289,11 @@
       "owner": "vectorcypher"
     },
     {
+      "name": "khora.vectorcypher.typed_entity_recent",
+      "stability": "internal",
+      "owner": "vectorcypher"
+    },
+    {
       "name": "khora.vectorcypher.process_document",
       "stability": "public",
       "owner": "vectorcypher"
