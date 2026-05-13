@@ -6,7 +6,7 @@ Khora is a library. Its stable public API is consumed by several first-party pac
 
 ### khora-cli
 
-[github.com/DeytaHQ/khora-cli](https://github.com/DeytaHQ/khora-cli) — extract and search CLI.
+khora-cli (to be released soon) — extract and search CLI.
 
 ```bash
 uv pip install khora-cli
@@ -29,7 +29,7 @@ from khora.logging_config import setup_logging
 
 ### khora-explorer
 
-[github.com/DeytaHQ/khora-explorer](https://github.com/DeytaHQ/khora-explorer) — ontology construction, validation, and preview.
+khora-explorer (to be released soon) — ontology construction, validation, and preview.
 
 ```bash
 uv pip install khora-explorer
@@ -50,16 +50,6 @@ from khora.extraction.skills.base import (
 from khora.config.schema import KhoraConfig
 ```
 
-## Other consumers
-
-### khora-benchmarks
-
-Benchmarks khora's retrieval engines. Imports include private modules (`khora.engines.vectorcypher`, `khora.extraction.chunkers`) which are **unstable** — benchmarks pin an exact khora version on purpose.
-
-### Service consumers
-
-Production services consume khora through the stable top-level surface plus `kb.storage` for direct backend access. `LLMUsage` is shared as a stable cost-tracking contract.
-
 ## Migration from pre-v0.8 khora
 
 If your project installed `khora` before v0.8.0 and used the CLI:
@@ -79,12 +69,49 @@ The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseC
 
 ## Stability contract
 
-Two surfaces are codified as the public API:
+Two public API surfaces are pinned as stable.
 
-- `ExpertiseConfig` and friends from `khora.extraction.skills.base`.
-- Top-level `khora` re-exports (`Khora`, results, `SearchMode`, etc.).
+### Memory-lake surface — `from khora import …`
 
-Both are append-only in minor releases. Breaking changes require a major bump **and** coordinated releases across khora-benchmarks, khora-explorer, and khora-cli.
+| Category | Symbols |
+| --- | --- |
+| Entry point | `Khora`, `KhoraConfig` |
+| Operation results | `RememberResult`, `RecallResult`, `BatchResult`, `BatchHandle`, `DocumentResult`, `Stats`, `LLMUsage` |
+| Query types | `SearchMode`, `SemanticFilter` |
+| Errors | `KhoraError` |
+| Domain enums at the boundary | `DocumentSource`, `EventType` |
+| Engine registry | `create_engine`, `list_engines`, `register_engine` |
+| Re-exported from the extraction-skill surface | `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` |
+
+Canonical machine-readable contract: `__all__` in `src/khora/__init__.py`.
+
+### Extraction-skill surface — `from khora.extraction.skills import …`
+
+| Category | Symbols |
+| --- | --- |
+| Domain definition | `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig` |
+| Tuning | `ConfidenceConfig`, `ExpansionConfig` |
+| Cross-tool reconciliation | `CorrelationRule`, `InferenceRule`, `InferenceCondition` (supporting type used as `InferenceRule.when`) |
+| Chronicle extraction toggles | `EventExtractionConfig`, `FactExtractionConfig` |
+| Legacy back-compat exports | `ConfidenceLevel` (enum), `ExtractionSkill` (legacy class) — listed in `__all__` and importable for existing consumers, but not extended; new code should not rely on them |
+
+Canonical machine-readable contract: `__all__` in `src/khora/extraction/skills/base.py`.
+
+### Versioning policy
+
+- **Additive changes** are permitted in minor and patch releases: new optional dataclass fields with defaults, new optional keyword arguments to existing methods, new helper modules. Adding a field must preserve existing `from_dict` / `to_dict` round-trips for older payloads.
+- **Breaking changes** require a major version bump: renaming or removing a field/method, changing a type, changing a default in a way that alters observable behaviour, removing a class. Breaking changes coordinate with the published consumer packages (khora-cli, khora-explorer).
+- `from_dict` for extraction-skill dataclasses preserves backward compatibility with historical YAML/JSON payloads for at least one major version after schema evolution.
+
+### What's NOT pinned
+
+- Anything not listed in either `__all__`.
+- Internal models exported from `khora.core.models` — `Document`, `DocumentMetadata`, `Chunk`, `ChunkMetadata`, `Entity`, `Episode`, `Relationship`, `MemoryEvent`. Their shapes are dictated by storage schemas and may evolve; consumers that persist these objects should copy them into their own types.
+- The `khora.chat` module aside from `ChatResponse`. The rest (`ChatEngine`, `ChatMessage`, `ConversationHistory`, `HistoryManager`, `PersonaConfig`, `load_persona_config`, `PromptGenerator`) is evolving; breaking changes are announced in CHANGELOG `### Deprecated` one minor release before removal.
+- The `khora.storage.StorageCoordinator` surface exposed via the `Khora.storage` property. The property exists; its API is not pinned.
+- Anything whose name starts with an underscore.
+
+For full method signatures and dataclass field lists, read the symbols directly (`help(Khora)`, the source on GitHub, or your IDE's type-stub navigation).
 
 ## Integration checklist
 
