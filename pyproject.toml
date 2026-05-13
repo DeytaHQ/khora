@@ -1,8 +1,7 @@
 [project]
 name = "khora"
-dynamic = ["version"]
+dynamic = ["version", "readme"]
 description = "Knowledge memory library for long-horizon AI agents — hybrid retrieval over documents, embeddings, and graph relationships"
-readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [
@@ -35,6 +34,14 @@ dependencies = [
     # Temporal date parsing
     "dateparser>=1.2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/DeytaHQ/khora"
+Documentation = "https://github.com/DeytaHQ/khora/blob/main/docs/README.md"
+Repository = "https://github.com/DeytaHQ/khora"
+Issues = "https://github.com/DeytaHQ/khora/issues"
+Changelog = "https://github.com/DeytaHQ/khora/blob/main/CHANGELOG.md"
+Releases = "https://github.com/DeytaHQ/khora/releases"
 
 [project.optional-dependencies]
 dev = [
@@ -115,12 +122,31 @@ lancedb = ["lancedb>=0.25", "pyarrow>=18.0.0"]
 sqlite-lance = ["lancedb>=0.25", "aiosqlite>=0.20.0", "pyarrow>=18.0.0"]
 
 [build-system]
-requires = ["hatchling", "hatch-vcs"]
+requires = ["hatchling", "hatch-vcs", "hatch-fancy-pypi-readme"]
 build-backend = "hatchling.build"
 
 [tool.hatch.version]
 source = "vcs"
 raw-options.local_scheme = "no-local-version"
+
+# README rewriting for PyPI. README.md on disk uses relative links
+# (``docs/configuration.md``) which work on GitHub but break on PyPI,
+# whose project page renders relative paths against
+# ``https://pypi.org/project/khora/``. The substitution rewrites them
+# to absolute GitHub URLs at build time so the published wheel/sdist
+# carry working links without uglifying the on-disk README.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+
+# Match Markdown links whose target is not already absolute (http/https)
+# nor an in-page anchor (#section). Captures docs/configuration.md,
+# LICENSE, NOTICE, CHANGELOG.md, etc. Rewrites to blob/main/<path>.
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?!https?:|#|mailto:)([^)]+)\)'
+replacement = '](https://github.com/DeytaHQ/khora/blob/main/\1)'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/khora"]
