@@ -434,6 +434,12 @@
       "owner": "vectorcypher"
     },
     {
+      "name": "khora.vectorcypher.recency_floor_synthesis",
+      "stability": "internal",
+      "owner": "vectorcypher",
+      "_comment": "Wraps the synthetic RECENCY/CHANGE date-floor decision in retriever.py. Attributes (set by the retriever, not validated by the drift gate): synthetic_temporal_filter_applied (bool), anti_recency_veto (bool), temporal_floor_days (int|None), recency_channel_fired (bool), recency_reference_mode (str: 'wall_clock'|'corpus_max'). Issue #567 Phase A."
+    },
+    {
       "name": "khora.vectorcypher.reranking",
       "stability": "internal",
       "owner": "vectorcypher"
@@ -765,6 +771,39 @@
       "type": "gauge",
       "stability": "public",
       "unit": "records"
+    },
+    {
+      "name": "khora.query.temporal.floor_applied_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Number of times a synthetic RECENCY/CHANGE temporal filter was applied to a query.",
+      "labels": [
+        {"name": "category", "values": ["none", "explicit", "state_query", "ordinal", "aggregate", "recency", "change"], "_comment": "TemporalCategory enum value."},
+        {"name": "vetoed", "values": ["true", "false"], "_comment": "True when an anti-recency token suppressed the floor."}
+      ],
+      "_comment": "Issue #567 Phase A. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.query.temporal.recency_channel_fired_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Number of times the parallel recency channel was queried.",
+      "labels": [
+        {"name": "category", "values": ["none", "explicit", "state_query", "ordinal", "aggregate", "recency", "change"], "_comment": "TemporalCategory enum value."}
+      ],
+      "_comment": "Issue #567 Phase A. NO namespace_id label."
+    },
+    {
+      "name": "khora.recall.recency.query_to_top1_age_days",
+      "type": "histogram",
+      "stability": "internal",
+      "unit": "d",
+      "description": "Age in days of the top-1 chunk in a recall result.",
+      "histogram_buckets": [0, 1, 7, 30, 90, 365, 3650],
+      "labels": [],
+      "_comment": "Issue #567 Phase A. Log-bucketed: hour-day-week-month-quarter-year-decade. No labels — global recency-skew signal."
     }
   ]
 }

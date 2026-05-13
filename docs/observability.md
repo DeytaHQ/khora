@@ -180,6 +180,27 @@ Highlights:
 OTel semantic conventions apply to attributes: `gen_ai.*` for LLM
 calls, `db.*` for storage backends, `code.*` for stack info.
 
+### Temporal recency (issue #567, Phase A)
+
+Phase A wires three internal metrics and one internal span for the
+synthetic RECENCY/CHANGE date-floor and the parallel recency channel.
+Helpers live in `khora.telemetry.temporal_metrics`:
+
+- `khora.query.temporal.floor_applied_total` (counter) — labels:
+  `category` (TemporalCategory), `vetoed` (`true`/`false`).
+- `khora.query.temporal.recency_channel_fired_total` (counter) —
+  labels: `category`.
+- `khora.recall.recency.query_to_top1_age_days` (histogram, days) —
+  log-bucketed at `[0, 1, 7, 30, 90, 365, 3650]`, no labels.
+- `khora.vectorcypher.recency_floor_synthesis` (span) — wraps the
+  synthetic-filter decision. Attributes:
+  `synthetic_temporal_filter_applied`, `anti_recency_veto`,
+  `temporal_floor_days`, `recency_channel_fired`,
+  `recency_reference_mode`.
+
+`namespace_id` is intentionally **not** a label on any of these
+metrics — see the cardinality rule in `telemetry-contract.md`.
+
 ## Sampling and cost control
 
 The OTel SDK handles sampling transparently. Set
