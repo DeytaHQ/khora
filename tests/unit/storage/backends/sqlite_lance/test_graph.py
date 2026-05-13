@@ -562,7 +562,7 @@ class TestTraversal:
         """A pair of nodes connected by two distinct directed edges
         (A→B via r1, B→A via r2) admits a legitimate 2-hop A→A path
         that traverses each edge exactly once.  Neo4j's ``MATCH [*1..N]``
-        forbids reusing **edges**, not nodes — the pre-DYT-3548 CTE
+        forbids reusing **edges**, not nodes — an earlier CTE
         tracked visited *nodes*, which incorrectly blocked the return
         walk into A and silently dropped this path."""
         ns = uuid4()
@@ -606,7 +606,7 @@ class TestTraversal:
         assert all(p[-1]["data"]["id"] == str(r3.id) for p in paths)
 
     async def test_get_neighborhoods_batch_cyclic_walk_is_bounded(self, adapter: SQLiteLanceGraphAdapter):
-        """Cycle A→B→A (2 parallel directed edges).  The pre-DYT-3548
+        """Cycle A→B→A (2 parallel directed edges).  An earlier
         ``get_neighborhoods_batch`` CTE had NO visited set at all, so
         the recursive arms re-traversed the cycle ``2^depth`` times
         before the trailing ``DISTINCT`` collapsed the rows.  The fix

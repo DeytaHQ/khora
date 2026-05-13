@@ -185,7 +185,7 @@ pub fn detect_temporal_category(query: &str) -> u8 {
             " does it still", " is it still", " am i still", " do i still",
             "'s current ", " current job", " current role", " current position",
             " live now", " work now", " working now", " living now", " doing now",
-            // Enterprise domain patterns (DYT-2143/DYT-2145): compound current-state queries.
+            // Enterprise domain compound current-state query patterns.
             // Generic " current " was too broad — triggered on recency lookups like
             // "current quota" that work better without temporal intelligence.
             " current status", " current stage", " current state",
@@ -307,7 +307,7 @@ pub fn detect_temporal_category_with_confidence(query: &str) -> (u8, f64, Vec<St
             " does it still", " is it still", " am i still", " do i still",
             "'s current ", " current job", " current role", " current position",
             " live now", " work now", " working now", " living now", " doing now",
-            // Enterprise domain patterns (DYT-2143/DYT-2145)
+            // Enterprise domain patterns
             " current status", " current stage", " current state",
             " current health", " current deal", " current project",
             " current plan", " current team",

@@ -1,4 +1,4 @@
-"""DYT-3545 / DYT-3546: ``026_widen_alembic_version_column``.
+"""``026_widen_alembic_version_column``.
 
 Pins the four branches of the migration so a future Alembic refactor
 doesn't silently re-introduce VARCHAR(32) and break long revision IDs:

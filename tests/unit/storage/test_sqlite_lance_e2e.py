@@ -6,8 +6,8 @@ across four adapters (relational, graph, vector, event_store), Alembic
 migrations against the SQLite file, and backend health checks.
 
 Per-adapter write/read contracts are covered by the per-adapter test
-modules (DYT-2728..2731); a ``Khora.remember()`` round-trip will
-be added in DYT-2734 (integration tests).
+modules; a ``Khora.remember()`` round-trip will be added in integration
+tests.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ async def coordinator(tmp_path: Path):
     db_path = str(tmp_path / "khora.db")
     lance_path = str(tmp_path / "khora.lance")
 
-    # DYT-2727 made these migrations dialect-aware; they work on SQLite.
+    # Migrations are dialect-aware; they work on SQLite.
     result = await run_migrations(f"sqlite+aiosqlite:///{db_path}")
     assert result.success, f"migration failed: {result.error}"
 

@@ -3,8 +3,7 @@
 Defines the Arrow schemas for the chunks and entities vector tables and
 provides an idempotent ``ensure_lance_tables`` helper used during
 ``EmbeddedStorageHandle.connect``.  Table bodies and index creation
-beyond the core vector column are deferred to later tickets
-(DYT-2728/2729/2730/2731).
+beyond the core vector column are deferred to later work.
 """
 
 from __future__ import annotations

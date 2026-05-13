@@ -614,7 +614,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         #
         # ``visited`` tracks **edge ids**, not node ids — matches Neo4j's
         # ``MATCH [*1..N]`` semantics, which forbids reusing the same
-        # relationship rather than the same node.  See DYT-3548.
+        # relationship rather than the same node.
         sql = f"""
             WITH RECURSIVE walk(
                 edge_id, src, cur, depth, edge_ids, visited
@@ -784,7 +784,6 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         # not the same node).  Without this, a cycle like A→B→C→A
         # makes the recursion fan out exponentially with depth, even
         # though ``DISTINCT`` masks the row count after the fact.
-        # See DYT-3548.
         sql = f"""
             WITH RECURSIVE walk(seed, cur, depth, direction, edge_id, visited) AS (
                 SELECT r.source_entity_id, r.target_entity_id, 1, 'out', r.id,

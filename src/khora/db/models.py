@@ -490,7 +490,7 @@ class PermissionModel(Base):
     principal_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
     # The resource (what the permission applies to)
-    # Post-DYT-220: resource_type must always be 'namespace' (sole isolation boundary).
+    # resource_type must always be 'namespace' (sole isolation boundary).
     resource_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     resource_id: Mapped[UUIDType] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
 

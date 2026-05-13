@@ -525,7 +525,7 @@ class StorageCoordinator:
         try:
             # 1. Prefetch old graph state and compute retire / survive sets
             #    BEFORE mutating anything.  Doing this up front keeps the
-            #    Python-side filter aligned with the Cypher in DYT-2668/2669.
+            #    Python-side filter aligned with the Cypher.
             fetch = getattr(self.graph, "fetch_document_extraction_state", None)
             if fetch is None:
                 old_entity_records: list[dict[str, Any]] = []

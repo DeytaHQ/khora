@@ -7,8 +7,8 @@ the SQLite database file owned by :class:`EmbeddedStorageHandle` so that
 :meth:`StorageCoordinator.transaction` can share a single session across
 SQL-based adapters via the public ``_session_factory`` attribute.
 
-Schema creation is handled by Alembic (dialect-gated migrations from
-DYT-2727); this adapter assumes tables already exist.
+Schema creation is handled by Alembic (dialect-gated migrations);
+this adapter assumes tables already exist.
 """
 
 from __future__ import annotations

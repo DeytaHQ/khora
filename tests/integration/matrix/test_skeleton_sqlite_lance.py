@@ -224,9 +224,10 @@ async def test_skeleton_remember_recall_roundtrip(kb: Khora, namespace_id: UUID)
 
     result = await _recall(kb, "falcon launch", namespace=namespace_id, limit=10)
 
-    # Skeleton reports its backend type in metadata. Once DYT-3561 lands,
-    # the value should be "lancedb" (or whatever name the new backend
-    # registers under) — assert non-empty rather than pin the string.
+    # Skeleton reports its backend type in metadata. Once the LanceDB-backed
+    # vector path lands, the value should be "lancedb" (or whatever name the
+    # new backend registers under) — assert non-empty rather than pin the
+    # string.
     assert result.metadata.get("backend") is not None
     assert len(result.chunks) >= 1, "expected at least one chunk back"
     assert "falcon" in result.context_text.lower()
@@ -281,7 +282,7 @@ async def test_skeleton_recall_top_k_ordering(kb: Khora, namespace_id: UUID) -> 
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Engine-level namespace resolution gap (out of scope for DYT-3561): "
+        "Engine-level namespace resolution gap: "
         "the test fixture passes the stable ``ns.namespace_id`` straight to "
         "``engine.recall`` while ``kb.remember`` resolves it to the "
         "row-level ``id`` before persisting. ``khora_chunks.namespace_id`` "
@@ -294,9 +295,9 @@ async def test_skeleton_recall_top_k_ordering(kb: Khora, namespace_id: UUID) -> 
 async def test_skeleton_recall_with_metadata_filter(kb: Khora, namespace_id: UUID) -> None:
     """Tag filter restricts recall to chunks carrying the requested tag.
 
-    Unlike the PG sibling, the embedded path doesn't hit DYT-3556 (SQLite
-    serializes ``tags`` as JSON-text — no ``ARRAY(String).contains``
-    incompatibility). The current xfail tracks a separate engine-layer
+    Unlike the PG sibling, the embedded path doesn't hit the ARRAY
+    incompatibility (SQLite serializes ``tags`` as JSON-text — no
+    ``ARRAY(String).contains`` incompatibility). The current xfail tracks a separate engine-layer
     namespace-resolution gap surfaced by this test bypassing
     :meth:`Khora.recall` and calling ``engine.recall`` directly.
     """

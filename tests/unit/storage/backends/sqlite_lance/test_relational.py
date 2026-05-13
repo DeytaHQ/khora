@@ -37,7 +37,7 @@ if _HAS_EMBEDDED:
 async def adapter(migrated_sqlite_db, tmp_path):
     """Migrated SQLite DB + connected relational adapter.
 
-    Uses the real Alembic migration chain (dialect-gated since DYT-2727)
+    Uses the real Alembic migration chain (dialect-gated)
     to validate that the adapter works against the production schema.
     """
     db_path = str(migrated_sqlite_db)

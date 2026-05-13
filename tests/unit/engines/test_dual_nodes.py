@@ -677,7 +677,7 @@ class TestDualNodeManagerGetEntityNeighborhoodsTimeout:
     ) -> None:
         """On timeout, a dedicated trace_span is emitted with structured attrs.
 
-        Replaces the former ``TODO`` telemetry counter —
+        Replaces the former telemetry counter —
         operators can now alert on span name ``*.timeout`` in Logfire/OTEL
         and filter by ``timeout_s``, ``entity_count``, ``depth``, ``code``,
         and ``namespace_id`` attributes.

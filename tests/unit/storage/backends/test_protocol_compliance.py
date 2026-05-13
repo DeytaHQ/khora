@@ -91,7 +91,7 @@ async def _migrate(db_path: Path) -> None:
     The adapters speak the exact schema the migrations produce
     (``chunks.metadata``, no ``embedding`` column on ``chunks`` /
     ``entities``, external-content FTS5 with triggers, 32-char UUID
-    hex) after DYT-2749 — no reshape shim required.
+    hex) — no reshape shim required.
     """
     url = f"sqlite+aiosqlite:///{db_path}"
     result = await run_migrations(url)

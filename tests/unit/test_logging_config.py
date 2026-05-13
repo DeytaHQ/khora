@@ -1,7 +1,7 @@
 """Tests for khora.logging_config — async-safety guards and sink setup.
 
-Added for DYT-2050 to close a coverage gap on setup_logging's enqueue=True
-sink configuration and the atexit drain guard. All tests fully mock the
+Covers setup_logging's enqueue=True sink configuration and the atexit
+drain guard. All tests fully mock the
 loguru logger, atexit.register, and logging.basicConfig so they do not
 mutate global process state.
 """

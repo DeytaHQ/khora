@@ -692,7 +692,7 @@ class TestPoolSampler:
         scheduler jitter (two dropped ticks).
 
         Skipped by default (``@pytest.mark.slow``). To run:
-        ``uv run pytest -m slow tests/unit/test_neo4j_pool_metrics_dyt2624.py``.
+        ``uv run pytest -m slow tests/unit/test_neo4j_pool_metrics_correctness.py``.
         """
         driver = MagicMock()
         pool = MagicMock()
