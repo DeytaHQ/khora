@@ -24,13 +24,19 @@ env:
 
 jobs:
   # ============================================================================
-  # ADR-084: Secret typing check (deyta-core reusable workflow, DYT-3993)
-  # Severity override in .semgrep.yml keeps findings at WARNING during D3-R.
+  # ADR-084: Secret typing check — standalone semgrep, warn-mode (DYT-3993).
+  # Khora is open-source; cannot reference private deyta-core reusable workflows.
+  # Rule lives in .semgrep.yml; severity WARNING keeps CI green during D3-R.
+  # Flip severity to ERROR in D3-C once all str-typed secrets are re-typed.
   # ============================================================================
   secret-typing:
-    uses: DeytaHQ/deyta-core/.github/workflows/secret-typing.yml@v0.4.0
-    with:
-      semgrep_config: .semgrep.yml
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Secret typing check (ADR-084 warn-mode)
+        run: uvx semgrep --config .semgrep.yml src/
 
   # ============================================================================
   # Guard — refuse to track AGENTS.md (mirrors local pre-commit hook)

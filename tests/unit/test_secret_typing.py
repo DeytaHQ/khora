@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 
 from khora.config._secrets import redact_dsn
 from khora.config.schema import (
@@ -32,7 +32,6 @@ from khora.config.schema import (
     SurrealDBConfig,
     SurrealDBVectorConfig,
 )
-from khora.khora import Khora
 from khora.telemetry.config import TelemetryConfig
 
 
@@ -282,75 +281,3 @@ class TestMigrationErrorRedaction:
         assert result.success is False
         assert result.error is not None
         assert "@" not in result.error  # no userinfo at all
-
-
-@pytest.mark.unit
-class TestAdr084NoDeytaCore:
-    """ADR-084 branch coverage when deyta-core is absent (M-4)."""
-
-    def _make_khora(self, monkeypatch: pytest.MonkeyPatch, *, mode: str = "warn") -> Khora:
-        import khora.khora as _mod
-
-        monkeypatch.setattr(_mod, "_HAS_DEYTA_CORE", False)
-        monkeypatch.setenv("KHORA_TELEMETRY_SECRET_TYPING_MODE", mode)
-        return Khora(KhoraConfig(database_url="postgresql://test"))
-
-    def test_init_succeeds_without_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Khora initializes without error when deyta-core is absent in both modes."""
-        kb_warn = self._make_khora(monkeypatch, mode="warn")
-        assert kb_warn._connected is False
-        kb_fail = self._make_khora(monkeypatch, mode="fail")
-        assert kb_fail._connected is False
-
-    def test_fail_mode_emits_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """WARNING is logged when mode='fail' and deyta-core is absent."""
-        from loguru import logger
-
-        captured: list[str] = []
-        handler_id = logger.add(lambda msg: captured.append(str(msg)), level="WARNING")
-        try:
-            self._make_khora(monkeypatch, mode="fail")
-        finally:
-            logger.remove(handler_id)
-
-        assert any("deyta-core not installed" in m and "fail-mode" in m for m in captured), (
-            f"Expected ADR-084 warning about fail-mode; got: {captured}"
-        )
-
-    def test_warn_mode_emits_debug(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """DEBUG is logged when mode='warn' and deyta-core is absent."""
-        from loguru import logger
-
-        captured: list[str] = []
-        handler_id = logger.add(lambda msg: captured.append(str(msg)), level="DEBUG")
-        try:
-            self._make_khora(monkeypatch, mode="warn")
-        finally:
-            logger.remove(handler_id)
-
-        assert any("deyta-core not installed" in m and "skipping" in m for m in captured), (
-            f"Expected ADR-084 debug about skipping; got: {captured}"
-        )
-
-
-@pytest.mark.unit
-class TestTelemetryConfigFromEnv:
-    """Tests for TelemetryConfig.from_env() env-var reading (M-5)."""
-
-    def test_default_mode_is_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When the env var is absent, secret_typing_mode defaults to 'warn'."""
-        monkeypatch.delenv("KHORA_TELEMETRY_SECRET_TYPING_MODE", raising=False)
-        cfg = TelemetryConfig.from_env()
-        assert cfg.secret_typing_mode == "warn"
-
-    def test_fail_mode_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When the env var is 'fail', secret_typing_mode is 'fail'."""
-        monkeypatch.setenv("KHORA_TELEMETRY_SECRET_TYPING_MODE", "fail")
-        cfg = TelemetryConfig.from_env()
-        assert cfg.secret_typing_mode == "fail"
-
-    def test_invalid_value_raises_validation_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """An unrecognised env var value raises Pydantic ValidationError."""
-        monkeypatch.setenv("KHORA_TELEMETRY_SECRET_TYPING_MODE", "ERROR")
-        with pytest.raises(ValidationError):
-            TelemetryConfig.from_env()

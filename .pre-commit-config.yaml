@@ -1,11 +1,4 @@
 repos:
-  # ADR-084: secret typing enforcement (DYT-3993). Severity override in
-  # .semgrep.yml keeps this at WARNING during the D3-R migration window.
-  - repo: https://github.com/DeytaHQ/deyta-core
-    rev: v0.4.0
-    hooks:
-      - id: deyta-secret-typing
-
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
@@ -25,6 +18,13 @@ repos:
 
   - repo: local
     hooks:
+      - id: secret-typing
+        name: ADR-084 secret typing (warn-mode, DYT-3993)
+        entry: uvx semgrep --config .semgrep.yml src/
+        language: system
+        pass_filenames: false
+        types: [python]
+
       - id: ty
         name: ty
         entry: uv run ty check src/
