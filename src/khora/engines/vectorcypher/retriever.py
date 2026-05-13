@@ -17,10 +17,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import os
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
 
 from loguru import logger
@@ -75,6 +76,14 @@ _NEO4J_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     TransientError,
 )
 
+# KHORA_BENCH_MODE forces "relative" recency reference (max(occurred_at) in
+# the result set) regardless of the temporal_reference_wall_clock config
+# flag — used during benchmark replay where the dataset's newest timestamp
+# may be years stale and "wall-clock recency" produces uniformly low scores.
+# Read once at import to avoid an env lookup per recency-score computation
+# on the hot path. Set ``KHORA_BENCH_MODE=true|1|yes`` to enable.
+_BENCH_MODE: bool = os.environ.get("KHORA_BENCH_MODE", "").strip().lower() in {"true", "1", "yes"}
+
 
 @dataclass
 class VectorCypherResult:
@@ -120,6 +129,61 @@ class RetrieverConfig:
     recency_weight: float = 0.2
     recency_decay_days: int = 30
     recency_decay_type: str = "exponential"  # "linear" or "exponential"
+
+    # Issue #567 — temporal recency Phase A. Each flag defaults OFF so the
+    # behavior of an existing-default retriever is unchanged. Operators opt
+    # in by plumbing the matching ``KhoraConfig.query.temporal_*`` field
+    # through when constructing ``RetrieverConfig``.
+    #
+    # ``temporal_reference_wall_clock``: when True, ``_calculate_recency_scores``
+    #   uses ``datetime.now(UTC)`` as the reference instead of the newest
+    #   ``occurred_at`` in the result set. Production-correct; the legacy
+    #   "newest-in-set" reference is preserved only when this flag is False
+    #   or when ``KHORA_BENCH_MODE=true`` overrides for benchmark replay.
+    # ``temporal_recency_floor_enabled``: when True, RECENCY/CHANGE queries
+    #   that lack an explicit date and contain no anti-recency token receive
+    #   a synthesized ``TemporalFilter(occurred_after=now-default_window_days)``.
+    # ``temporal_per_source_decay``: when True, ``_calculate_recency_scores``
+    #   looks up a per-chunk decay window via
+    #   ``chunk.metadata.custom["source_system"]`` against
+    #   ``temporal_default_decay_by_source`` (falling back to ``_default``).
+    # ``temporal_default_decay_by_source``: dict[source_system, decay_days].
+    #   Must include a ``"_default"`` key used when ``source_system`` is
+    #   absent, None, empty, or unknown.
+    temporal_reference_wall_clock: bool = False
+    temporal_recency_floor_enabled: bool = False
+    temporal_per_source_decay: bool = False
+    temporal_default_decay_by_source: dict[str, int] = field(
+        default_factory=lambda: {
+            "slack": 3,
+            "email": 7,
+            "calendar": 14,
+            "salesforce": 180,
+            "_default": 14,
+        }
+    )
+    # ``temporal_recency_channel_enabled``: when True, RECENCY/CHANGE queries
+    #   fuse a parallel "recency channel" (pure ORDER BY occurred_at DESC,
+    #   no embedding) alongside the cosine + BM25 channels. Chunks from this
+    #   channel only enter fusion when their cosine similarity to the query
+    #   embedding exceeds ``temporal_query_relevance_floor`` — prevents
+    #   today's irrelevant chunks from muscling into top-K.
+    temporal_recency_channel_enabled: bool = False
+    # 0.40 default — was 0.30 in the initial Phase A; raised after LoCoMo
+    # --small showed a persistent 4.2pp abstention regression from
+    # just-above-floor chunks diluting the abstention signal. Operators
+    # can override via KHORA_QUERY_TEMPORAL_QUERY_RELEVANCE_FLOOR.
+    temporal_query_relevance_floor: float = 0.40
+    temporal_recency_channel_limit: int = 50
+    # ``temporal_llm_disambiguation_enabled``: when True, queries that
+    #   fire RECENCY/CHANGE in the Aho-Corasick tier AND contain
+    #   ambiguity-trigger tokens are routed to a small-model LLM for a
+    #   final RECENT/HISTORICAL/COUNTERFACTUAL/NEUTRAL classification.
+    #   Floor is vetoed for non-RECENT outputs. Cost bounded by query
+    #   distinct-count (results cached per-query). Targets the LoCoMo
+    #   counterfactual regression seen in PR #571.
+    temporal_llm_disambiguation_enabled: bool = False
+    temporal_llm_disambiguation_model: str | None = None
 
     # Coherence scoring (penalizes word-shuffled confounders)
     coherence_weight: float = 0.1
@@ -182,6 +246,27 @@ def _extract_occurred_at(item: Any) -> str | None:
     elif isinstance(item, dict):
         return item.get("occurred_at")
     return None
+
+
+def _extract_source_system(item: Any) -> str | None:
+    """Extract ``source_system`` string from a Chunk or dict item.
+
+    Returns ``None`` when the value is missing, empty, or the item shape
+    doesn't carry chunk metadata — callers fall back to ``"_default"`` in
+    that case. ``source_system`` is option<string> in the storage schema,
+    so we explicitly treat None and empty strings as "unknown source".
+    """
+    if isinstance(item, Chunk):
+        custom = item.metadata.custom if item.metadata else {}
+        value = custom.get("source_system")
+    elif isinstance(item, dict):
+        value = item.get("source_system")
+    else:
+        return None
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
 
 
 def _has_target_date(
@@ -344,6 +429,100 @@ class VectorCypherRetriever:
                     f"Temporal signal: {temporal_signal.category.value} (confidence={temporal_signal.confidence:.2f})"
                 )
 
+            # Issue #567 A2: synthesize a RECENCY/CHANGE date floor when the
+            # category fires but the upstream resolver (dateparser) couldn't
+            # turn a bare adjective like "latest" / "recent" into a SQL
+            # filter. The veto check happens BEFORE synthesis so historical
+            # queries ("all-time", "ever", "history of …") stay unbounded.
+            #
+            # Synthesis runs at this call site — never inside
+            # ``TemporalResolver.resolve_fast`` — so callers on the EXPLICIT
+            # path (where ``temporal_filter`` is already populated) are
+            # unaffected, and the synthesis decision can use both the
+            # ``RetrieverConfig`` feature flag and the original query text.
+            synthetic_applied = False
+            anti_recency_veto = False
+            llm_veto_intent: str | None = None
+            with trace_span("khora.vectorcypher.recency_floor_synthesis") as synth_span:
+                if (
+                    self._config.temporal_recency_floor_enabled
+                    and temporal_signal is not None
+                    and temporal_signal.is_temporal
+                    and temporal_filter is None
+                    and params.default_window_days is not None
+                ):
+                    from khora.query.temporal_detection import (
+                        TemporalIntent,
+                        classify_temporal_intent_llm,
+                        has_ambiguity_trigger,
+                        has_anti_recency_token,
+                    )
+
+                    veto = False
+                    if has_anti_recency_token(query):
+                        anti_recency_veto = True
+                        veto = True
+                    elif self._config.temporal_llm_disambiguation_enabled and has_ambiguity_trigger(query):
+                        # Tier-3: ambiguity-trigger token present and LLM
+                        # disambiguation is enabled. Defer the final call.
+                        # The LLM is cached per-query so repeat queries
+                        # cost zero.
+                        intent, confidence = await classify_temporal_intent_llm(
+                            query,
+                            model=self._config.temporal_llm_disambiguation_model,
+                        )
+                        if confidence > 0 and intent != TemporalIntent.RECENT:
+                            # HISTORICAL / COUNTERFACTUAL / NEUTRAL → veto.
+                            llm_veto_intent = intent.value
+                            veto = True
+
+                    if not veto:
+                        from khora.engines.skeleton.backends import TemporalFilter as _SynthTF
+
+                        temporal_filter = _SynthTF(
+                            occurred_after=datetime.now(UTC) - timedelta(days=params.default_window_days),
+                        )
+                        synthetic_applied = True
+                        logger.debug(
+                            "Synthesized RECENCY floor: occurred_after={} (window={}d, category={})",
+                            temporal_filter.occurred_after.isoformat(),
+                            params.default_window_days,
+                            temporal_signal.category.value,
+                        )
+                synth_span.set_attribute("synthetic_temporal_filter_applied", synthetic_applied)
+                synth_span.set_attribute("anti_recency_veto", anti_recency_veto)
+                if llm_veto_intent is not None:
+                    synth_span.set_attribute("llm_veto_intent", llm_veto_intent)
+                if params.default_window_days is not None:
+                    synth_span.set_attribute("temporal_floor_days", params.default_window_days)
+                if synthetic_applied or anti_recency_veto:
+                    # bounded_text_hash keeps the query content out of the
+                    # span as raw text (privacy + cardinality), but lets us
+                    # correlate synthesis decisions with the request when
+                    # debugging.
+                    synth_span.set_attribute("query_hash", bounded_text_hash(query))
+
+            # Mirror the synthesis decision onto the parent span too, so
+            # operator dashboards filtering at the top-level retrieve span
+            # don't need to drill into the child.
+            span.set_attribute("synthetic_temporal_filter_applied", synthetic_applied)
+            span.set_attribute("anti_recency_veto", anti_recency_veto)
+            # Operator-visible metric — bounded labels only (category enum,
+            # vetoed bool). See docs/telemetry-contract.json §metrics
+            # `khora.query.temporal.floor_applied_total`.
+            if (
+                self._config.temporal_recency_floor_enabled
+                and temporal_signal is not None
+                and temporal_signal.is_temporal
+                and params.default_window_days is not None
+            ):
+                from khora.telemetry.temporal_metrics import record_floor_applied
+
+                record_floor_applied(
+                    category=temporal_signal.category.value,
+                    vetoed=anti_recency_veto,
+                )
+
             # Cache check
             cache_key = ""
             if self._cache_ttl > 0:
@@ -437,6 +616,36 @@ class VectorCypherRetriever:
 
             span.set_attribute("chunk_count", len(result.chunks))
             span.set_attribute("entity_count", len(result.entities))
+
+            # Record top-1 chunk age — feeds the
+            # ``khora.recall.recency.query_to_top1_age_days`` histogram so
+            # operators can spot temporal-quality drift in production
+            # (the dashboard slices it by temporal_category via the span
+            # parent context). Only fires when the top chunk carries a
+            # parseable occurred_at; skipped on empty result sets.
+            if result.chunks:
+                try:
+                    # result.chunks may be list[Chunk] or list[tuple[Chunk, score]]
+                    # depending on the path; unwrap defensively.
+                    raw = result.chunks[0]
+                    top_chunk = raw[0] if isinstance(raw, tuple) else raw
+                    occurred_at_iso = None
+                    if getattr(top_chunk, "metadata", None) is not None:
+                        custom = getattr(top_chunk.metadata, "custom", None) or {}
+                        occurred_at_iso = custom.get("occurred_at")
+                    if occurred_at_iso:
+                        occurred_at = datetime.fromisoformat(occurred_at_iso.replace("Z", "+00:00"))
+                        if occurred_at.tzinfo is None:
+                            occurred_at = occurred_at.replace(tzinfo=UTC)
+                        age_days = (datetime.now(UTC) - occurred_at).total_seconds() / 86400.0
+                        from khora.telemetry.temporal_metrics import record_top1_age_days
+
+                        record_top1_age_days(max(age_days, 0.0))
+                except (ValueError, AttributeError, TypeError):
+                    # Metric is best-effort — never fail the recall path
+                    # because top-1 age extraction misfired.
+                    pass
+
             return result
 
     async def _vectorcypher_retrieve(
@@ -800,6 +1009,63 @@ class VectorCypherRetriever:
                             f"CHANGE decomposition added {len(new_chunks)} chunks "
                             f"from sub-query: {current_state_query[:60]}"
                         )
+
+        # Step 6a': Recency channel — pool augmentation (Issue #567 A3).
+        # When RECENCY/CHANGE fires and the flag is enabled, fetch the most
+        # recent N chunks (pure ORDER BY occurred_at DESC, no embedding) and
+        # merge those that exceed the cosine relevance floor into the vector
+        # pool. The existing RRF + recency boost then scores them alongside
+        # the cosine top-K. Three safety properties:
+        #   1. Pool-augmentation only — never replaces cosine candidates.
+        #   2. Relevance gate prevents today's HR-all-hands from muscling
+        #      into the top-K for a niche query (Devil's-Advocate demand #3).
+        #   3. Skipped when the floor synthesis was vetoed — historical /
+        #      counterfactual queries by definition don't benefit from
+        #      injecting recent chunks. Heuristic: when the floor flag is
+        #      on AND the signal is temporal AND the category has a
+        #      default_window AND temporal_filter is still None, synthesis
+        #      was vetoed (by anti-recency token or LLM disambiguation).
+        #      PR #571 LoCoMo --small showed running the channel anyway
+        #      cost ~16.7pp counterfactual_accuracy on a 6-q subset.
+        synthesis_vetoed = (
+            self._config.temporal_recency_floor_enabled
+            and temporal_signal is not None
+            and temporal_signal.is_temporal
+            and _tp.default_window_days is not None
+            and temporal_filter is None
+        )
+        if (
+            self._config.temporal_recency_channel_enabled
+            and temporal_signal is not None
+            and temporal_signal.is_temporal
+            and _tp.default_window_days is not None
+            and not synthesis_vetoed
+        ):
+            # Intentionally pass temporal_filter=None: the recency channel's
+            # job is to surface today's chunks even when the cosine channel
+            # narrowed by the synthesized 14d floor. The cosine relevance gate
+            # (temporal_query_relevance_floor) is the safeguard against
+            # irrelevant-but-fresh chunks muscling in (Devil's-Advocate
+            # follow-up: decouple channel filter from synthesized floor).
+            recent_chunks = await self._recency_channel_chunks(
+                query_embedding=query_embedding,
+                namespace_id=namespace_id,
+                temporal_filter=None,
+            )
+            if recent_chunks:
+                existing_ids = {c[0] for c in vector_chunks}
+                merged_in = [rc for rc in recent_chunks if rc[0] not in existing_ids]
+                if merged_in:
+                    vector_chunks = vector_chunks + merged_in
+                    logger.debug(
+                        "Recency channel merged {} new chunks (relevance>= {}, category={})",
+                        len(merged_in),
+                        self._config.temporal_query_relevance_floor,
+                        temporal_signal.category.value,
+                    )
+                    from khora.telemetry.temporal_metrics import record_recency_channel_fired
+
+                    record_recency_channel_fired(category=temporal_signal.category.value)
 
         # Step 6b: Lazy entity expansion for vector-only chunks
         # Recovers graph coverage lost from low skeleton_core_ratio by doing
@@ -2106,6 +2372,104 @@ class VectorCypherRetriever:
                 for r in results
             ]
 
+    async def _recency_channel_chunks(
+        self,
+        *,
+        query_embedding: list[float],
+        namespace_id: UUID,
+        temporal_filter: TemporalFilter | None,
+    ) -> list[tuple[UUID, float, Chunk]]:
+        """Issue #567 A3 — pure-recency candidate pool.
+
+        Pulls the N most-recent chunks in the namespace via the
+        ``search_recent_chunks`` SQL (uses the ``ix_chunks_ns_temporal``
+        index from migration 017), then computes per-chunk cosine
+        similarity against ``query_embedding`` and drops anything below
+        ``temporal_query_relevance_floor``. Pool augmentation only — the
+        caller merges results into the existing vector pool.
+
+        Returns ``list[tuple[chunk_id, score, Chunk]]`` matching the
+        shape of ``_vector_search_chunks`` so RRF can fuse it directly.
+        """
+        if self._vector_store is None or not hasattr(self._vector_store, "search_recent_chunks"):
+            return []
+
+        with trace_span(
+            "khora.vectorcypher.recency_channel",
+            namespace_id=str(namespace_id),
+            limit=self._config.temporal_recency_channel_limit,
+        ) as span:
+            try:
+                recent_tuples = await self._vector_store.search_recent_chunks(
+                    namespace_id=namespace_id,
+                    limit=self._config.temporal_recency_channel_limit,
+                    created_after=getattr(temporal_filter, "occurred_after", None),
+                )
+            except Exception as exc:
+                logger.debug("Recency channel SQL failed: {}", exc)
+                span.set_attribute("error", str(exc)[:200])
+                return []
+
+            if not recent_tuples:
+                span.set_attribute("raw_count", 0)
+                return []
+
+            # Filter by cosine relevance against the query embedding.
+            # Devil's-Advocate demand #3: pure-rank fusion without a
+            # relevance gate would let today's irrelevant chunks muscle
+            # into top-K. Drop anything below the configured floor.
+            chunks_with_embedding = [(chunk, getattr(chunk, "embedding", None)) for chunk, _ in recent_tuples]
+            chunks_with_embedding = [(c, e) for c, e in chunks_with_embedding if e is not None]
+            if not chunks_with_embedding:
+                span.set_attribute("raw_count", len(recent_tuples))
+                span.set_attribute("filtered_count", 0)
+                return []
+
+            from khora._accel import batch_cosine_similarity
+
+            floor = self._config.temporal_query_relevance_floor
+            # batch_cosine_similarity returns list[(index, similarity)]
+            # already filtered by ``threshold``. We pass the floor directly
+            # so the floor gate happens inside Rust/NumPy, not in Python.
+            sim_pairs = batch_cosine_similarity(
+                query_embedding,
+                [emb for _, emb in chunks_with_embedding],
+                threshold=floor,
+            )
+            filtered: list[tuple[UUID, float, Chunk]] = []
+            for idx, sim in sim_pairs:
+                chunk, _emb = chunks_with_embedding[idx]
+                # Re-shape into ``(chunk_id, score, Chunk)`` matching
+                # ``_vector_search_chunks``. The Chunk's metadata.custom
+                # carries ``occurred_at`` for the downstream recency
+                # boost (RRF only uses rank position, so the score is
+                # informational).
+                filtered.append(
+                    (
+                        chunk.id,
+                        float(sim),
+                        Chunk(
+                            id=chunk.id,
+                            namespace_id=chunk.namespace_id,
+                            document_id=chunk.document_id,
+                            content=chunk.content,
+                            metadata=ChunkMetadata(
+                                custom={
+                                    "occurred_at": (
+                                        chunk.occurred_at.isoformat() if getattr(chunk, "occurred_at", None) else None
+                                    ),
+                                    **(getattr(chunk, "metadata", None) or {}),
+                                }
+                            ),
+                            created_at=getattr(chunk, "created_at", None) or getattr(chunk, "occurred_at", None),
+                        ),
+                    )
+                )
+
+            span.set_attribute("raw_count", len(recent_tuples))
+            span.set_attribute("filtered_count", len(filtered))
+            return filtered
+
     async def _bm25_search_chunks(
         self,
         query: str,
@@ -2358,25 +2722,45 @@ class VectorCypherRetriever:
         results: list[FusedResult],
         *,
         decay_days_override: int | None = None,
+        reference_mode: Literal["wall_clock", "relative"] | None = None,
     ) -> dict[UUID, float]:
         """Calculate recency scores for temporal boosting.
 
-        Uses *relative* recency: the reference time is the newest occurred_at
-        in the result set (not wall-clock time).  This ensures benchmark data
-        from any era produces meaningful discrimination and that live data
-        (where max ≈ now) behaves identically to the old implementation.
+        Reference time selection (issue #567 A1):
+        - ``reference_mode="wall_clock"`` uses ``datetime.now(UTC)`` —
+          production-correct: if all retrieved chunks are old, the newest
+          stale chunk must NOT receive ``recency=1.0``.
+        - ``reference_mode="relative"`` uses ``max(occurred_at)`` over the
+          result set — required for benchmark replay where the dataset's
+          newest timestamp may be years in the past.
+        - ``reference_mode=None`` (default) resolves via:
+          ``KHORA_BENCH_MODE`` env var (read once at import) forces
+          ``"relative"`` unconditionally; otherwise the
+          ``RetrieverConfig.temporal_reference_wall_clock`` flag selects
+          ``"wall_clock"`` (True) or ``"relative"`` (False — legacy).
+
+        Decay window selection (issue #567 A4):
+        - When ``RetrieverConfig.temporal_per_source_decay`` is True, each
+          chunk's decay window is looked up from
+          ``temporal_default_decay_by_source[chunk.metadata.custom['source_system']]``
+          with fallback to the ``"_default"`` key when ``source_system`` is
+          None, empty, or absent from the dict.
+        - When the flag is False, behaviour is unchanged:
+          ``decay_days_override or self._config.recency_decay_days``.
 
         Args:
             results: Fused results with items containing occurred_at
-            decay_days_override: Override for decay_days (e.g. 7 for RECENCY category)
+            decay_days_override: Override for decay_days (e.g. 7 for RECENCY
+                category). Ignored when per-source decay is enabled.
+            reference_mode: Explicit override for the wall-clock vs relative
+                reference decision; ``None`` resolves from config + env.
 
         Returns:
             Dict mapping item_id -> recency score (0-1)
         """
-        decay_days = decay_days_override or self._config.recency_decay_days
         scores: dict[UUID, float] = {}
 
-        # First pass: extract all occurred_at timestamps and find the max
+        # First pass: extract all occurred_at timestamps.
         parsed_times: dict[UUID, datetime] = {}
         for r in results:
             occurred_at_str = _extract_occurred_at(r.item)
@@ -2389,12 +2773,49 @@ class VectorCypherRetriever:
                 except (ValueError, TypeError):
                     pass
 
-        # Relative reference: newest item in result set, fallback to wall-clock
-        now = max(parsed_times.values()) if parsed_times else datetime.now(UTC)
+        # Resolve reference mode from explicit arg → bench env → config flag.
+        # Bench-mode env wins to keep benchmark replays deterministic even
+        # when the production-correct config flag is otherwise True.
+        if reference_mode is None:
+            if _BENCH_MODE:
+                effective_mode: Literal["wall_clock", "relative"] = "relative"
+            elif self._config.temporal_reference_wall_clock:
+                effective_mode = "wall_clock"
+            else:
+                effective_mode = "relative"
+        else:
+            effective_mode = reference_mode
 
-        # Second pass: compute recency scores relative to reference time
+        if effective_mode == "wall_clock":
+            now = datetime.now(UTC)
+        else:  # "relative"
+            now = max(parsed_times.values()) if parsed_times else datetime.now(UTC)
+
+        # Per-source decay lookup.
+        per_source = self._config.temporal_per_source_decay
+        decay_map = self._config.temporal_default_decay_by_source if per_source else None
+
+        def _decay_for(item: Any) -> float:
+            """Resolve the decay window (in days) for a single result item."""
+            if not per_source or decay_map is None:
+                return float(decay_days_override or self._config.recency_decay_days)
+            src = _extract_source_system(item)
+            if src is not None and src in decay_map:
+                return float(decay_map[src])
+            # Fall back to the dict's _default, then to the static config
+            # recency_decay_days if _default is somehow absent.
+            fallback = decay_map.get("_default")
+            if fallback is None:
+                return float(self._config.recency_decay_days)
+            return float(fallback)
+
+        # Second pass: compute recency scores relative to reference time.
         for r in results:
             if r.item_id in parsed_times:
+                decay_days = _decay_for(r.item)
+                # Guard against pathological decay=0 (would div-by-zero).
+                if decay_days <= 0:
+                    decay_days = float(self._config.recency_decay_days)
                 days_old = (now - parsed_times[r.item_id]).total_seconds() / 86400.0
                 if self._config.recency_decay_type == "exponential":
                     half_life_lambda = math.log(2) / decay_days

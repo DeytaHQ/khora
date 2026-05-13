@@ -497,6 +497,17 @@ class VectorCypherEngine:
             llm_reranking_model=self._vc_config.llm_reranking_model,
             llm_reranking_top_n=self._vc_config.llm_reranking_top_n,
             llm_reranking_confidence_threshold=self._vc_config.llm_reranking_confidence_threshold,
+            # Issue #567 Phase A — pull temporal flags from KhoraConfig.query.
+            # All default OFF; operators opt in per-namespace.
+            temporal_reference_wall_clock=self._config.query.temporal_reference_wall_clock,
+            temporal_recency_floor_enabled=self._config.query.temporal_recency_floor_enabled,
+            temporal_per_source_decay=self._config.query.temporal_per_source_decay,
+            temporal_default_decay_by_source=dict(self._config.query.temporal_default_decay_by_source),
+            temporal_recency_channel_enabled=self._config.query.temporal_recency_channel_enabled,
+            temporal_query_relevance_floor=self._config.query.temporal_query_relevance_floor,
+            temporal_recency_channel_limit=self._config.query.temporal_recency_channel_limit,
+            temporal_llm_disambiguation_enabled=self._config.query.temporal_llm_disambiguation_enabled,
+            temporal_llm_disambiguation_model=self._config.query.temporal_llm_disambiguation_model,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,
