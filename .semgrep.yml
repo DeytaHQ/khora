@@ -1,0 +1,11 @@
+# ADR-084: Typed Secret Handling — severity override for migration window (DYT-3993).
+# The upstream rule (deyta-core) defaults to ERROR; we downgrade to WARNING so CI
+# remains green while D3-R re-types the v1-scope fields.  Remove this file once
+# all str-typed secrets are re-typed (D3-C).
+rules:
+  - id: deyta-secret-typing-str-password
+    severity: WARNING
+    options:
+      # Inherit all other rule properties from the upstream deyta-core rule;
+      # only the severity is overridden here.
+      override: true

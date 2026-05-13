@@ -25,6 +25,13 @@ from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
 
+try:
+    from deyta_core import assert_no_str_typed_secrets as _assert_no_str_typed_secrets
+
+    _HAS_DEYTA_CORE = True
+except ImportError:
+    _HAS_DEYTA_CORE = False
+
 
 def _is_undefined_table_error(exc: BaseException) -> bool:
     """Return True if *exc* is (or wraps) a Postgres "undefined table" error.
@@ -406,6 +413,18 @@ class Khora:
         # and _recover_pending_documents with a single mechanism.
         self._processor_queue: asyncio.Queue[_ProcessorItem] = asyncio.Queue()
         self._processor_task: asyncio.Task | None = None
+
+        # ADR-084: validate that no Pydantic config fields carrying secret-pattern
+        # names are typed as plain str.  Runs in "warn" mode during the D3-R
+        # migration window so CI stays green; switches to "fail" in D3-C.
+        from khora.telemetry.config import TelemetryConfig as _TelemetryConfig
+
+        _mode = _TelemetryConfig.from_env().secret_typing_mode
+        if _HAS_DEYTA_CORE:
+            _assert_no_str_typed_secrets(KhoraConfig, mode=_mode)
+            logger.info("ADR-084: secret typing validated (mode={})", _mode)
+        else:
+            logger.debug("ADR-084: deyta-core not installed, skipping secret typing validation")
 
     async def connect(self) -> None:
         """Connect to all storage backends."""

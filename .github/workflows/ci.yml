@@ -24,6 +24,15 @@ env:
 
 jobs:
   # ============================================================================
+  # ADR-084: Secret typing check (deyta-core reusable workflow, DYT-3993)
+  # Severity override in .semgrep.yml keeps findings at WARNING during D3-R.
+  # ============================================================================
+  secret-typing:
+    uses: DeytaHQ/deyta-core/.github/workflows/secret-typing.yml@v0.4.0
+    with:
+      semgrep_config: .semgrep.yml
+
+  # ============================================================================
   # Guard — refuse to track AGENTS.md (mirrors local pre-commit hook)
   # ============================================================================
   no-agents-md:
