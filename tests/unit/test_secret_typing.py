@@ -204,6 +204,22 @@ class TestRedactDsn:
                 "bolt://neo4j:hunter2@cluster.example.com:7687",
                 "bolt://[REDACTED]@cluster.example.com:7687",
             ),
+            # Non-standard userinfo characters (service-account-style ``+``,
+            # ``~``, and percent-encoded bytes) must still be scrubbed — the
+            # username class mirrors the password class (``[^:@/]+``) so any
+            # RFC-3986 userinfo char the URL parser accepts is redacted.
+            (
+                "postgresql://app+prod:hunter2@db:5432/app",
+                "postgresql://[REDACTED]@db:5432/app",
+            ),
+            (
+                "postgresql://user~name:hunter2@db:5432/app",
+                "postgresql://[REDACTED]@db:5432/app",
+            ),
+            (
+                "postgresql://a%2Bb:hunter2@db:5432/app",
+                "postgresql://[REDACTED]@db:5432/app",
+            ),
             # No userinfo → unchanged
             ("postgresql://localhost:5432/app", "postgresql://localhost:5432/app"),
             # Empty / non-DSN strings → unchanged
