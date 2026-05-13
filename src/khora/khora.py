@@ -26,7 +26,7 @@ from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
 
 try:
-    from deyta_core import assert_no_str_typed_secrets as _assert_no_str_typed_secrets
+    from deyta_core.config import assert_no_str_typed_secrets as _assert_no_str_typed_secrets
 
     _HAS_DEYTA_CORE = True
 except ImportError:
@@ -424,7 +424,12 @@ class Khora:
             _assert_no_str_typed_secrets(KhoraConfig, mode=_mode)
             logger.info("ADR-084: secret typing validated (mode={})", _mode)
         else:
-            logger.debug("ADR-084: deyta-core not installed, skipping secret typing validation")
+            if _mode == "fail":
+                logger.warning(
+                    "ADR-084: deyta-core not installed — fail-mode requested but enforcement is inactive"
+                )
+            else:
+                logger.debug("ADR-084: deyta-core not installed, skipping secret typing validation")
 
     async def connect(self) -> None:
         """Connect to all storage backends."""
