@@ -49,12 +49,22 @@ CATEGORY_MAP: dict[int, TemporalCategory] = {
 
 @dataclass(frozen=True)
 class RetrievalParams:
-    """Category-specific retrieval parameters."""
+    """Category-specific retrieval parameters.
+
+    ``default_window_days`` is the synthetic date floor applied when the
+    user types a bare temporal adjective ("latest", "recent") that the
+    dateparser-based resolver cannot translate into a SQL filter. Only
+    used when ``QuerySettings.temporal_recency_floor_enabled`` is True
+    AND no anti-recency token is present in the query (see
+    :data:`ANTI_RECENCY_TOKENS`). ``None`` means "do not synthesize a
+    floor for this category."
+    """
 
     recency_weight: float
     temporal_sort: bool
     decay_days_override: int | None = None
     recency_floor: float = 0.5  # Default floor for multiplicative recency
+    default_window_days: int | None = None
 
 
 # Category → retrieval behavior mapping
@@ -71,12 +81,71 @@ RETRIEVAL_PARAMS: dict[TemporalCategory, RetrievalParams] = {
     ),
     TemporalCategory.AGGREGATE: RetrievalParams(recency_weight=0.0, temporal_sort=False, recency_floor=0.5),
     TemporalCategory.RECENCY: RetrievalParams(
-        recency_weight=0.5, temporal_sort=True, decay_days_override=3, recency_floor=0.3
+        recency_weight=0.5,
+        temporal_sort=True,
+        decay_days_override=3,
+        recency_floor=0.3,
+        default_window_days=14,
     ),
     TemporalCategory.CHANGE: RetrievalParams(
-        recency_weight=0.4, temporal_sort=True, decay_days_override=14, recency_floor=0.3
+        recency_weight=0.4,
+        temporal_sort=True,
+        decay_days_override=14,
+        recency_floor=0.3,
+        default_window_days=30,
     ),
 }
+
+
+# Tokens that signal the user wants historical / "all-time" results.
+# When any of these is present, RECENCY / CHANGE categories MUST NOT apply
+# a synthetic date floor — even if the category dictionary fires on a
+# separate token in the same query. Caller checks via
+# :func:`has_anti_recency_token`.
+#
+# Examples of queries that SHOULD veto the floor:
+#   "what action items have we ever discussed for Phoenix"
+#   "show me all the meetings we've had over time"
+#   "any history of the budget conversation since the beginning"
+ANTI_RECENCY_TOKENS: frozenset[str] = frozenset(
+    {
+        "ever",
+        "all",
+        "history",
+        "history of",
+        "any time",
+        "anytime",
+        "any",
+        "since the beginning",
+        "over time",
+        "entire",
+        "every",
+        "all-time",
+        "all time",
+        "throughout",
+    }
+)
+
+# Compiled regex — word-boundary match for single-word tokens, raw substring
+# match for multi-word phrases (these are already word-bounded by their spaces).
+_ANTI_RECENCY_SINGLE = frozenset(t for t in ANTI_RECENCY_TOKENS if " " not in t and "-" not in t)
+_ANTI_RECENCY_MULTI = tuple(t for t in ANTI_RECENCY_TOKENS if " " in t or "-" in t)
+_ANTI_RECENCY_WORD_RE = re.compile(r"\b(" + "|".join(_ANTI_RECENCY_SINGLE) + r")\b", re.IGNORECASE)
+
+
+def has_anti_recency_token(query: str) -> bool:
+    """Return True iff *query* contains a token that vetoes the recency floor.
+
+    Used by the RECENCY / CHANGE call sites in the retriever to suppress
+    the synthetic ``default_window_days`` filter when the user explicitly
+    asks for historical or all-time scope.
+    """
+    if not query:
+        return False
+    lowered = query.lower()
+    if any(phrase in lowered for phrase in _ANTI_RECENCY_MULTI):
+        return True
+    return _ANTI_RECENCY_WORD_RE.search(query) is not None
 
 
 @dataclass(frozen=True)
@@ -222,6 +291,7 @@ def get_retrieval_params(signal: TemporalSignal) -> RetrievalParams:
 
 
 __all__ = [
+    "ANTI_RECENCY_TOKENS",
     "CATEGORY_MAP",
     "RETRIEVAL_PARAMS",
     "RetrievalParams",
@@ -229,4 +299,5 @@ __all__ = [
     "TemporalDetector",
     "TemporalSignal",
     "get_retrieval_params",
+    "has_anti_recency_token",
 ]

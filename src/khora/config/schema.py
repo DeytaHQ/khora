@@ -632,6 +632,78 @@ class QuerySettings(BaseSettings):
     recency_weight: float = Field(default=0.35, ge=0.0, le=1.0, description="Weight of recency in scoring")
     recency_decay_days: float = Field(default=7.0, ge=1.0, description="Days for recency score to decay by half")
 
+    # Issue #567 — temporal recency Phase A. All four flags default OFF so the
+    # PR is shippable without changing existing-consumer score distributions.
+    # Operators opt in per-namespace via KHORA_QUERY_TEMPORAL_* env vars.
+    temporal_recency_floor_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, RECENCY/CHANGE queries that lack an explicit date "
+            "and contain no anti-recency token ('ever', 'all', 'history', "
+            "'over time', etc.) get a synthetic date floor from "
+            "RETRIEVAL_PARAMS.default_window_days. See docs/observability.md."
+        ),
+    )
+    temporal_reference_wall_clock: bool = Field(
+        default=False,
+        description=(
+            "When True, _calculate_recency_scores uses datetime.now(UTC) as "
+            "the reference time instead of max(occurred_at in result set). "
+            "The latter is correct for benchmark replay (KHORA_BENCH_MODE) "
+            "but wrong for production where 'recent' means recent-in-wall-clock."
+        ),
+    )
+    temporal_recency_channel_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, RECENCY/CHANGE queries fuse a parallel 'recency "
+            "channel' (ORDER BY COALESCE(source_timestamp, created_at) DESC) "
+            "alongside the cosine and BM25 channels via RRF. Chunks from the "
+            "recency channel only enter fusion when their cosine to the query "
+            "embedding exceeds temporal_query_relevance_floor."
+        ),
+    )
+    temporal_per_source_decay: bool = Field(
+        default=False,
+        description=(
+            "When True, _calculate_recency_scores looks up decay_days per "
+            "chunk via chunk.metadata.custom['source_system'] in "
+            "temporal_default_decay_by_source. Falls back to the category's "
+            "decay_days_override when no per-source entry exists."
+        ),
+    )
+    temporal_query_relevance_floor: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Cosine similarity threshold a chunk must exceed to enter the "
+            "recency-channel fusion. Prevents today's HR-channel chunks from "
+            "muscling into top-K for a niche query."
+        ),
+    )
+    temporal_recency_channel_limit: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        description="Per-channel limit for the parallel recency channel SQL.",
+    )
+    temporal_default_decay_by_source: dict[str, int] = Field(
+        default_factory=lambda: {
+            "slack": 3,
+            "email": 7,
+            "calendar": 14,
+            "salesforce": 180,
+            "_default": 14,
+        },
+        description=(
+            "Per-source decay-days override. Keys are source_system values "
+            "set by connectors via metadata.custom['source_system']. "
+            "'_default' applies when the chunk's source_system is None or "
+            "absent from the dict."
+        ),
+    )
+
     # Query understanding
     enable_understanding: bool = Field(default=True, description="Enable LLM-based query understanding")
     understanding_expand_query: bool = Field(default=True, description="Generate query expansions/reformulations")
