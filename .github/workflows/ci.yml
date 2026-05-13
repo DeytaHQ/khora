@@ -24,6 +24,22 @@ env:
 
 jobs:
   # ============================================================================
+  # Guard — refuse to track AGENTS.md (mirrors local pre-commit hook)
+  # ============================================================================
+  no-agents-md:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Refuse tracked AGENTS.md
+        run: |
+          if git ls-files --error-unmatch AGENTS.md >/dev/null 2>&1; then
+            echo "AGENTS.md must not be tracked (it is gitignored and locally regenerated)."
+            exit 1
+          fi
+
+  # ============================================================================
   # Install — build the venv once, cache it for parallel jobs
   # ============================================================================
   install:
