@@ -2,7 +2,7 @@
 
 Append-only event log backed by the ``memory_events`` SQLite table
 (created by Alembic migration ``000_initial_schema`` under the
-dialect-gated path added in DYT-2727).  Implements
+dialect-gated path).  Implements
 :class:`~khora.storage.backends.base.EventStoreProtocol` without
 SQLAlchemy — direct aiosqlite against the shared
 :class:`EmbeddedStorageHandle`.

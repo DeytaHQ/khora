@@ -621,7 +621,7 @@ class QuerySettings(BaseSettings):
     keyword_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight for keyword search in fusion")
 
     # Temporal settings.
-    # `recency_weight` and `recency_decay_days` were tightened in DYT-3780
+    # `recency_weight` and `recency_decay_days` were tightened
     # from (0.2, 30) to (0.35, 7) after BEAM 100K showed the four weakest
     # categories (event_ordering, contradiction_resolution, temporal_reasoning,
     # knowledge_update) all share a weak-recency / supersession root cause —

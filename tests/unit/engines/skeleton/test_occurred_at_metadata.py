@@ -1,6 +1,6 @@
 """``Skeleton.remember`` honors ``metadata['occurred_at']``.
 
-Pre-DYT-3557 the single-doc ``remember()`` path silently dropped
+Previously the single-doc ``remember()`` path silently dropped
 ``metadata['occurred_at']`` and stamped chunks with ``datetime.now(UTC)``,
 while ``remember_batch`` (lines 746-752) parsed the same key. These tests
 pin the symmetry so the bug can't regress.

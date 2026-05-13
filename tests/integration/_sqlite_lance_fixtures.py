@@ -26,7 +26,7 @@ async def build_sqlite_lance_coordinator(
 ) -> StorageCoordinator:
     """Construct a fully-migrated sqlite_lance coordinator in tmp_path.
 
-    Relies on the real Alembic-migrated schema — after DYT-2749 the raw
+    Relies on the real Alembic-migrated schema — the raw
     adapters align with the migrated column shape (``chunks.metadata``,
     no ``embedding`` column, external-content FTS5 driven by triggers,
     32-char hex UUIDs matching SQLAlchemy ``UUID(as_uuid=True)``), so no

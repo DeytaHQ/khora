@@ -81,7 +81,7 @@ def _build_engine_with_stubs() -> tuple[SkeletonConstructionEngine, AsyncMock]:
 async def test_recall_resolves_hybrid_alpha_per_mode(mode: SearchMode, expected_alpha: float) -> None:
     """Every SearchMode value must resolve a ``hybrid_alpha`` without crashing.
 
-    Pre-DYT-3555, ``mode=HYBRID`` (the Khora default) raised
+    Previously, ``mode=HYBRID`` (the Khora default) raised
     ``AttributeError: SearchMode has no attribute 'KEYWORD'`` because the
     ``elif`` RHS was evaluated whenever the ``if`` branch was False.
     """

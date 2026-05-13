@@ -33,7 +33,7 @@ match the ``make dev`` compose stack:
     KHORA_NEO4J_USERNAME  (default: neo4j)
     KHORA_NEO4J_PASSWORD  (default: password)
 
-The test would fail on the pre-DYT-2626 code because the real driver's
+The test would fail on the pre-fix code because the real driver's
 ``.data()`` method serializes a ``RETURN r`` value as a 3-tuple
 ``(start_dict, rel_type, end_dict)`` — handing
 ``_record_to_relationship`` a tuple instead of a dict and raising

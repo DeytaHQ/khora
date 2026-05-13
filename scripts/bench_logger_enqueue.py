@@ -1,6 +1,6 @@
 """Microbenchmark: loguru sync vs enqueue=True under an async event loop.
 
-This script reproduces the latent async-correctness bug fixed in DYT-2050.
+This script reproduces a latent async-correctness bug in loguru's enqueue model.
 A synchronous loguru sink (the default) blocks the calling thread during the
 write, which means inside ``async def`` code every ``logger.info(...)`` call
 stalls the event loop for the duration of the I/O. Switching the sink to

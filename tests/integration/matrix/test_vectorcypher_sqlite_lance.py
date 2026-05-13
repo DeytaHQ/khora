@@ -313,8 +313,8 @@ async def test_vc_entity_extraction(kb: Khora, namespace_id: UUID) -> None:
     strict=False,
     reason=(
         "VC's sync remember path does not rebind extraction-time entity IDs "
-        "to upsert-resolved IDs (DYT-3558 fixed this only in "
-        "pipelines/flows/ingest.py, not in vectorcypher/engine._run_skeleton_extraction). "
+        "to upsert-resolved IDs (fixed only in pipelines/flows/ingest.py, "
+        "not in vectorcypher/engine._run_skeleton_extraction). "
         "On sqlite_lance, that produces FOREIGN KEY failures when a second "
         "document re-mentions an entity from the first doc."
     ),
@@ -353,7 +353,7 @@ async def test_vc_two_hop_traversal(kb: Khora, namespace_id: UUID) -> None:
     text_blob = result.context_text + " ".join(c.content for c, _ in result.chunks)
     # The 2-hop reachable concept ("graph databases" via Bob→Carol) must
     # surface in the recall result. If this fails the CTE traversal is
-    # not crossing 2 hops — see DYT-3548.
+    # not crossing 2 hops.
     assert "graph databases" in text_blob.lower(), f"2-hop entity not surfaced; got context={text_blob[:300]!r}"
 
 
@@ -524,7 +524,7 @@ async def test_vc_dual_node_persistence(kb: Khora, namespace_id: UUID) -> None:
         "Same root cause as test_vc_two_hop_traversal: VC's sync remember "
         "does not rebind extraction-time entity IDs after upsert resolution, "
         "so a second doc re-mentioning a prior entity hits FOREIGN KEY on "
-        "create_relationships_batch. Tracked alongside DYT-3548/DYT-3549/DYT-3558."
+        "create_relationships_batch."
     ),
     raises=Exception,
 )
@@ -536,7 +536,7 @@ async def test_vc_prefer_current_via_cte(kb: Khora, namespace_id: UUID) -> None:
     SQLite-CTE traversal. R2 is the fix that makes
     ``prefer_current`` honor expired/invalidated edges in the CTE. Until
     that lands, the CTE happily walks expired edges, so this test is
-    expected to fail even after DYT-3560 wires the VC embedded path.
+    expected to fail until the VC embedded path is wired.
 
     The chain: B→C edge has ``valid_to`` in the past → with
     ``prefer_current=True`` it must be skipped → C ("polonium") is

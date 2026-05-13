@@ -1252,7 +1252,7 @@ class ChronicleEngine:
                 routing_complexity = "fallback"
 
         # Extract temporal bounds once and forward them to every channel.
-        # WHY: until DYT-3547 only the temporal channel honored these bounds,
+        # WHY: previously only the temporal channel honored these bounds,
         # so a 20-day-old chunk could leak through a 7-day window via the
         # semantic / BM25 / entity channels. Pgvector's search_similar and
         # search_fulltext already pushdown COALESCE(source_timestamp,

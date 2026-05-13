@@ -477,8 +477,8 @@ async def test_chronicle_entity_anchored_routing(kb: Khora, namespace_id: UUID) 
     """ "Who is Alice?" → ENTITY_ANCHORED routing classification.
 
     The router's classification depends on the heuristic match against the
-    query string — "Who is X?" is the canonical entity-anchored pattern
-    (see DYT-3147). When entity_anchored fires, the entity-channel RRF
+    query string — "Who is X?" is the canonical entity-anchored pattern.
+    When entity_anchored fires, the entity-channel RRF
     weight is doubled (engine.py:1232-1233). We can't easily inspect the
     weight without patching, so we assert the routing label only — the
     weight-doubling is covered by ``test_router_and_fusion.py``.

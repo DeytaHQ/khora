@@ -185,7 +185,7 @@ jobs:
       # Why not sed at release time? `sed` on the runner's pyproject.toml leaves
       # the working tree dirty. setuptools_scm/hatch-vcs treats `dirty` at a tag
       # as "ahead of tag" → bumps to next-patch.dev0 (e.g. 0.10.4.dev0 instead
-      # of 0.10.3). This was the bug in DYT-4029.
+      # of 0.10.3). This is the bug we are working around.
 
       # hatch-vcs reads the version from the most recent git tag automatically.
       # Produces both dist/*.whl and dist/*.tar.gz for upload.

@@ -17,9 +17,9 @@ from loguru import logger
 _drain_registered = False
 
 # Environment variable that, when set to a valid level name, raises the
-# verbosity of the ``neo4j`` stdlib logger at runtime. Added for DYT-2625 so
-# that operators can enable driver-internal DEBUG lines (pool acquire, TLS,
-# routing) without a code change. See README for accepted values.
+# verbosity of the ``neo4j`` stdlib logger at runtime. Lets operators
+# enable driver-internal DEBUG lines (pool acquire, TLS, routing) without
+# a code change. See README for accepted values.
 _NEO4J_LOG_LEVEL_ENV = "KHORA_NEO4J_LOG_LEVEL"
 _NEO4J_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 

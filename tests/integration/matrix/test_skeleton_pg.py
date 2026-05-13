@@ -265,7 +265,7 @@ async def _remember(
 async def _recall(kb: Khora, query: str, **kwargs: Any) -> Any:
     """Recall wrapper that pins ``mode=SearchMode.VECTOR`` for deterministic ranking.
 
-    Pre-DYT-3555 this was a workaround for the ``SearchMode.KEYWORD``
+    Originally this was a workaround for the ``SearchMode.KEYWORD``
     AttributeError on default HYBRID. Post-fix the wrapper still pins
     VECTOR so top-k ordering tests aren't affected by the BM25 blend
     weight (``hybrid_alpha=0.7`` under HYBRID). The default-HYBRID path
@@ -510,7 +510,7 @@ async def test_skeleton_recall_default_hybrid_mode(kb: Khora, namespace_id: UUID
     Pre-fix, ``SkeletonConstructionEngine.recall`` (engine.py:441) referenced
     a non-existent ``SearchMode.KEYWORD`` member, which crashed with
     ``AttributeError`` whenever ``mode != VECTOR`` (HYBRID is the Khora
-    default). DYT-3555 added ``KEYWORD`` to the enum, so this regression
+    default). The fix added ``KEYWORD`` to the enum, so this regression
     test now asserts the default path simply returns a ``RecallResult``.
     """
     await _remember(kb, namespace_id=namespace_id, content="alpha simple sentence")

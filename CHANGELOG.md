@@ -157,9 +157,8 @@ deprecation shim was higher than the breaking-change cost of a hard removal.
   from `khora` at the top level (preferred) or `khora.khora` (submodule).
 - **No deprecation shim.** `from khora import MemoryLake` and
   `from khora.memory_lake import …` raise `ImportError` on 0.10.0+.
-  Downstream consumers (`genesis`, `khora-benchmarks`) migrate via
-  coordinated PRs after this release (DYT-3967). Both
-  pre-pinned `khora<0.10` to avoid Renovate auto-bumps.
+  Downstream consumers migrate via coordinated PRs after this release.
+  Both pre-pinned `khora<0.10` to avoid Renovate auto-bumps.
 - **LLM prompts** in `khora.query.understanding` now say "knowledge base"
   instead of "memory lake" (`COMPREHENSIVE_UNDERSTANDING_PROMPT`,
   `LIGHTWEIGHT_UNDERSTANDING_PROMPT`). Sent verbatim to the LLM.
@@ -207,7 +206,7 @@ Both engines now synthesize an `EXPLICIT`-category `TemporalSignal` with `confid
 
 ### Performance — restore pre-0.9.0 LiteLLM throughput
 
-The shared aiohttp session introduced in DYT-3156 (v0.9.0) was created with hard-coded `TCPConnector(limit=20, limit_per_host=10)`. `limit_per_host=10` silently throttled all OpenAI / Anthropic / etc. requests to 10 in flight per host, regardless of caller-configured concurrency. Downstream services (e.g. Genesis with `max_concurrent_llm_calls=200`) regressed ~5–20× on wall-time after upgrading to 0.9.x because the shared session became the dominant ceiling on parallel LLM/embedding calls.
+The shared aiohttp session introduced in v0.9.0 was created with hard-coded `TCPConnector(limit=20, limit_per_host=10)`. `limit_per_host=10` silently throttled all OpenAI / Anthropic / etc. requests to 10 in flight per host, regardless of caller-configured concurrency. Downstream services (e.g. Genesis with `max_concurrent_llm_calls=200`) regressed ~5–20× on wall-time after upgrading to 0.9.x because the shared session became the dominant ceiling on parallel LLM/embedding calls.
 
 The connector is now configurable through `LiteLLMConfig` and `LLMSettings`:
 
@@ -242,7 +241,7 @@ Telemetry workstream (PRs #504–#509) shipped after the v0.9.1 tag. It hardens 
 
 ### Fixed
 
-- **`storage_events.namespace_id` 100% NULL since Feb 2026.** Restored namespace propagation through the storage telemetry path. The break had survived multiple releases because no operator dashboard was reading the column — DYT-3398 surfaced it during the Phase-0 audit. (#506)
+- **`storage_events.namespace_id` 100% NULL since Feb 2026.** Restored namespace propagation through the storage telemetry path. The break had survived multiple releases because no operator dashboard was reading the column — surfaced during the Phase-0 audit. (#506)
 
 ### OSS implication
 
@@ -281,14 +280,14 @@ See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md#produc
 - Chronicle channels (BM25 / semantic / temporal / entity) now share the same `created_after`/`created_before` bounds — fixes channel divergence that broke RRF fusion.
 - Recursive-CTE graph traversal switched from node-visited to edge-visited tracking (mirrors Neo4j `MATCH [*1..N]`).
 - `valid_until > now` filter inlined into both anchor and recursive arms of the CTE.
-- DYT-3555 / DYT-3556: Skeleton tag-cast and `occurred_at` parsing fixes (`Skeleton.remember()` parity with `remember_batch()`).
+- Skeleton tag-cast and `occurred_at` parsing fixes (`Skeleton.remember()` parity with `remember_batch()`).
 - Embedded compensating-delete-on-failure logging hardened.
 - (#485): LanceDB IVF-PQ index now retrains once the corpus grows past `retrain_factor × (rows at last training)`. Configurable via `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` (default `2.0`). Fixes silent recall degradation as the corpus grows past the initial training threshold (5k rows). Set ≤ `1.0` to disable.
 
 ### Embedded warts (documented, not fixed)
 
 - **Partial atomicity in `coordinator.transaction()`** on embedded — only the SQL session is enrolled; LanceDB writes happen post-commit with compensating deletes.
-- **DYT-3550**: Point-in-time queries are not supported on the embedded stack. The CTE port does not implement PIT semantics. Tracked.
+- **Point-in-time queries** are not supported on the embedded stack. The CTE port does not implement PIT semantics. Tracked.
 - **FTS5 on chunks only** — entity-anchored recall falls back to `LIKE` / JSON-equality on embedded. Use the PostgreSQL stack for entity-heavy corpora.
 
 ### Deprecated

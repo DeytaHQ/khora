@@ -419,7 +419,7 @@ class Khora:
 
             # For the sqlite_lance embedded backend, derive a sqlite+aiosqlite URL
             # from the configured db_path so Alembic migrations target the same
-            # file the adapters use. DYT-2727 made the migrations dialect-aware.
+            # file the adapters use. The migrations are dialect-aware.
             db_url: str | None
             if (
                 getattr(self._config.storage, "backend", "postgres") == "sqlite_lance"
