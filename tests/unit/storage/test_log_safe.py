@@ -8,8 +8,8 @@ from khora.storage._log_safe import _safe_url_for_log
     [
         # (a) URL with user + password
         (
-            "postgresql+asyncpg://peras:ebesspyg7jl0kwkbglto@pgbouncer.example.net/peras",
-            "postgresql+asyncpg://<redacted>@pgbouncer.example.net/peras",
+            "postgresql+asyncpg://testuser:s3cret-fake-token@db.example.net/testdb",
+            "postgresql+asyncpg://<redacted>@db.example.net/testdb",
         ),
         # (b) URL with user only (no password)
         (
@@ -18,8 +18,8 @@ from khora.storage._log_safe import _safe_url_for_log
         ),
         # (c) URL with neither user nor password
         (
-            "postgresql+asyncpg://pgbouncer.example.net/peras",
-            "postgresql+asyncpg://pgbouncer.example.net/peras",
+            "postgresql+asyncpg://db.example.net/testdb",
+            "postgresql+asyncpg://db.example.net/testdb",
         ),
         # (d) URL with non-default port
         (

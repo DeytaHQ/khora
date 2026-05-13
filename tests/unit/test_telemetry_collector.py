@@ -64,9 +64,9 @@ class TestTelemetryConfig:
             assert cfg.database_url.get_secret_value() == "postgresql://localhost/telemetry"
 
     def test_from_env_custom_service(self):
-        with patch.dict("os.environ", {"KHORA_TELEMETRY_SERVICE_NAME": "genesis"}):
+        with patch.dict("os.environ", {"KHORA_TELEMETRY_SERVICE_NAME": "test-service"}):
             cfg = TelemetryConfig.from_env()
-            assert cfg.service_name == "genesis"
+            assert cfg.service_name == "test-service"
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +127,10 @@ class TestTelemetryCollector:
 
     def test_service_name_applied(self):
         engine = MagicMock()
-        collector = TelemetryCollector(engine, service_name="genesis")
+        collector = TelemetryCollector(engine, service_name="test-service")
         collector.record_llm_call(operation="chat")
         _, data = collector._buffer[0]
-        assert data["service_name"] == "genesis"
+        assert data["service_name"] == "test-service"
 
     @pytest.mark.asyncio
     async def test_flush_drains_buffer(self):
