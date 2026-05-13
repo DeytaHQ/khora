@@ -536,6 +536,36 @@ This is a one-time migration for existing data.
 }
 ```
 
+## Canonical metadata fields per source
+
+Connector authors should populate `metadata.custom` with the canonical
+fields below. The ingestion pipeline reads them in
+`_extract_source_timestamp` to build `TemporalChunk.occurred_at`, which
+drives temporal recency scoring + per-source decay. The shape is exported
+as `khora.pipelines.ConnectorMetadata` (a `TypedDict`).
+
+| Source | Upstream field | Map to `metadata.custom` key | Notes |
+|---|---|---|---|
+| Slack message | `ts` (epoch float seconds) | `sent_at` (ISO 8601 UTC) | not `event_ts` |
+| Slack edit | `message.edited.ts` | `valid_from = sent_at`, `valid_until = edited.ts` | bitemporal mirror |
+| Gmail | `internalDate` (epoch ms) | `sent_at` | prefer over `Date` header |
+| Google Calendar event | `start.dateTime` | `occurred_at` | event time, not creation time |
+| Salesforce Activity | `ActivityDate` | `occurred_at` | not `CreatedDate` |
+| Salesforce record edit | `LastModifiedDate` | `updated_at` | secondary |
+| Jira/Linear issue | `createdAt` | `created_at` | comments use `createdAt` as `sent_at` |
+
+Run `validate_connector_metadata()` in your connector CI before calling
+`Khora.remember()`:
+
+```python
+from khora.pipelines import validate_connector_metadata
+
+metadata = {"sent_at": "2026-05-13T14:00:00Z", "source_system": "slack"}
+warnings = validate_connector_metadata(metadata, source_type="slack")
+assert not warnings, warnings
+await kb.remember(content, namespace=ns, metadata=metadata, ...)
+```
+
 ## What's Next?
 
 - **[Chunkers](chunkers.md)** - Text splitting strategies

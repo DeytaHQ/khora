@@ -521,13 +521,35 @@ def compute_checksum(content: str) -> str:
 def _extract_source_timestamp(metadata: dict[str, Any]) -> datetime | None:
     """Extract the original timestamp from source metadata.
 
-    Looks for common timestamp fields and parses them.
-    Priority: sent_at > created_at > timestamp > date
+    Looks for common timestamp fields and parses them. The priority list
+    is implementation-detail; the public contract is
+    ``khora.pipelines.ConnectorMetadata``.
+
+    For event-shaped sources (calendar/meeting/event) ``occurred_at`` is
+    preferred over ``sent_at`` since the event time, not the dispatch
+    time, is the meaningful temporal anchor.
     """
     from datetime import datetime
 
-    # Common timestamp field names in order of preference
-    timestamp_fields = ["sent_at", "created_at", "timestamp", "date", "occurred_at", "started_at"]
+    source_type = metadata.get("source_type")
+    if source_type in {"calendar", "meeting", "event"}:
+        timestamp_fields = [
+            "occurred_at",
+            "started_at",
+            "sent_at",
+            "created_at",
+            "timestamp",
+            "date",
+        ]
+    else:
+        timestamp_fields = [
+            "sent_at",
+            "created_at",
+            "timestamp",
+            "date",
+            "occurred_at",
+            "started_at",
+        ]
 
     for field in timestamp_fields:
         if field in metadata and metadata[field]:
