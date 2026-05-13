@@ -171,6 +171,15 @@ class RetrieverConfig:
     temporal_recency_channel_enabled: bool = False
     temporal_query_relevance_floor: float = 0.30
     temporal_recency_channel_limit: int = 50
+    # ``temporal_llm_disambiguation_enabled``: when True, queries that
+    #   fire RECENCY/CHANGE in the Aho-Corasick tier AND contain
+    #   ambiguity-trigger tokens are routed to a small-model LLM for a
+    #   final RECENT/HISTORICAL/COUNTERFACTUAL/NEUTRAL classification.
+    #   Floor is vetoed for non-RECENT outputs. Cost bounded by query
+    #   distinct-count (results cached per-query). Targets the LoCoMo
+    #   counterfactual regression seen in PR #571.
+    temporal_llm_disambiguation_enabled: bool = False
+    temporal_llm_disambiguation_model: str | None = None
 
     # Coherence scoring (penalizes word-shuffled confounders)
     coherence_weight: float = 0.1
@@ -429,6 +438,7 @@ class VectorCypherRetriever:
             # ``RetrieverConfig`` feature flag and the original query text.
             synthetic_applied = False
             anti_recency_veto = False
+            llm_veto_intent: str | None = None
             with trace_span("khora.vectorcypher.recency_floor_synthesis") as synth_span:
                 if (
                     self._config.temporal_recency_floor_enabled
@@ -437,11 +447,32 @@ class VectorCypherRetriever:
                     and temporal_filter is None
                     and params.default_window_days is not None
                 ):
-                    from khora.query.temporal_detection import has_anti_recency_token
+                    from khora.query.temporal_detection import (
+                        TemporalIntent,
+                        classify_temporal_intent_llm,
+                        has_ambiguity_trigger,
+                        has_anti_recency_token,
+                    )
 
+                    veto = False
                     if has_anti_recency_token(query):
                         anti_recency_veto = True
-                    else:
+                        veto = True
+                    elif self._config.temporal_llm_disambiguation_enabled and has_ambiguity_trigger(query):
+                        # Tier-3: ambiguity-trigger token present and LLM
+                        # disambiguation is enabled. Defer the final call.
+                        # The LLM is cached per-query so repeat queries
+                        # cost zero.
+                        intent, confidence = await classify_temporal_intent_llm(
+                            query,
+                            model=self._config.temporal_llm_disambiguation_model,
+                        )
+                        if confidence > 0 and intent != TemporalIntent.RECENT:
+                            # HISTORICAL / COUNTERFACTUAL / NEUTRAL → veto.
+                            llm_veto_intent = intent.value
+                            veto = True
+
+                    if not veto:
                         from khora.engines.skeleton.backends import TemporalFilter as _SynthTF
 
                         temporal_filter = _SynthTF(
@@ -456,6 +487,8 @@ class VectorCypherRetriever:
                         )
                 synth_span.set_attribute("synthetic_temporal_filter_applied", synthetic_applied)
                 synth_span.set_attribute("anti_recency_veto", anti_recency_veto)
+                if llm_veto_intent is not None:
+                    synth_span.set_attribute("llm_veto_intent", llm_veto_intent)
                 if params.default_window_days is not None:
                     synth_span.set_attribute("temporal_floor_days", params.default_window_days)
                 if synthetic_applied or anti_recency_veto:

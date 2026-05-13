@@ -506,6 +506,8 @@ class VectorCypherEngine:
             temporal_recency_channel_enabled=self._config.query.temporal_recency_channel_enabled,
             temporal_query_relevance_floor=self._config.query.temporal_query_relevance_floor,
             temporal_recency_channel_limit=self._config.query.temporal_recency_channel_limit,
+            temporal_llm_disambiguation_enabled=self._config.query.temporal_llm_disambiguation_enabled,
+            temporal_llm_disambiguation_model=self._config.query.temporal_llm_disambiguation_model,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,

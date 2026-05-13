@@ -688,6 +688,25 @@ class QuerySettings(BaseSettings):
         le=1000,
         description="Per-channel limit for the parallel recency channel SQL.",
     )
+    temporal_llm_disambiguation_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, queries that fire RECENCY/CHANGE in the Aho-Corasick "
+            "tier AND contain ambiguity-trigger tokens ('would', 'if', "
+            "'previously', etc.) are routed to an LLM classifier that "
+            "outputs RECENT/HISTORICAL/COUNTERFACTUAL/NEUTRAL. The "
+            "synthetic floor is vetoed for non-RECENT outputs. Cost is "
+            "bounded by query distinct-count (results cached per-query). "
+            "Targets the LoCoMo counterfactual regression seen in PR #571."
+        ),
+    )
+    temporal_llm_disambiguation_model: str | None = Field(
+        default=None,
+        description=(
+            "Override model for temporal intent classification. None uses "
+            "gpt-4o-mini (small + fast). Pass any LiteLLM-supported model."
+        ),
+    )
     temporal_default_decay_by_source: dict[str, int] = Field(
         default_factory=lambda: {
             "slack": 3,

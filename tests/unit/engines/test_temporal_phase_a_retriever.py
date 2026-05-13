@@ -255,7 +255,7 @@ class TestSyntheticRecencyFilter:
 
     @pytest.mark.asyncio
     async def test_recency_signal_synthesizes_floor(self, synth_retriever: VectorCypherRetriever) -> None:
-        """Happy path: bare 'latest' RECENCY signal → 14-day floor applied."""
+        """Happy path: bare 'latest' RECENCY signal → 30-day floor applied."""
         signal = TemporalSignal(
             is_temporal=True,
             category=TemporalCategory.RECENCY,
@@ -277,8 +277,10 @@ class TestSyntheticRecencyFilter:
         tf = call_kwargs["temporal_filter"]
         assert tf is not None, "Expected a synthesized TemporalFilter"
         assert isinstance(tf, TemporalFilter)
-        # 14-day window for RECENCY, anchored on wall clock.
-        expected = before - timedelta(days=14)
+        # 30-day window for RECENCY, anchored on wall clock. Was 14d in the
+        # initial Phase A commit; widened to 30d after LoCoMo --small showed
+        # the 14d cutoff regressing counterfactual_accuracy by 16.7pp.
+        expected = before - timedelta(days=30)
         delta = abs((tf.occurred_after - expected).total_seconds())
         # Allow a small clock-drift window between the test's `before` and
         # the retriever's datetime.now(UTC) call.
@@ -401,8 +403,13 @@ class TestSyntheticRecencyFilter:
         assert call_kwargs["temporal_filter"] is None
 
     @pytest.mark.asyncio
-    async def test_change_category_uses_30_day_window(self, synth_retriever: VectorCypherRetriever) -> None:
-        """CHANGE has default_window_days=30 → synthesized floor matches."""
+    async def test_change_category_uses_60_day_window(self, synth_retriever: VectorCypherRetriever) -> None:
+        """CHANGE has default_window_days=60 → synthesized floor matches.
+
+        Was 30d in the initial Phase A commit; widened to 60d alongside
+        the RECENCY 14→30 tuning to reduce regression on CHANGE-class
+        historical queries.
+        """
         signal = TemporalSignal(
             is_temporal=True,
             category=TemporalCategory.CHANGE,
@@ -420,5 +427,5 @@ class TestSyntheticRecencyFilter:
         call_kwargs = synth_retriever._vector_store.search.call_args.kwargs
         tf = call_kwargs["temporal_filter"]
         assert tf is not None
-        delta = abs((tf.occurred_after - (before - timedelta(days=30))).total_seconds())
+        delta = abs((tf.occurred_after - (before - timedelta(days=60))).total_seconds())
         assert delta < 5.0
