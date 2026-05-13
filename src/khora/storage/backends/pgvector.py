@@ -420,6 +420,28 @@ class PgVectorBackend(AsyncSessionMixin):
             return 1 - casted_col.cosine_distance(casted_query)
         return 1 - embedding_col.cosine_distance(query_embedding)
 
+    async def _probe_iterative_scan_supported(self) -> bool:
+        """One-time probe: does this Postgres + pgvector support hnsw.iterative_scan?
+
+        pgvector >= 0.8 introduced ``hnsw.iterative_scan`` to fix the HNSW
+        recall collapse that happens when a selective WHERE filter removes
+        most of the candidates returned by the index scan. The probe runs
+        once per backend instance and is cached.
+        """
+        if hasattr(self, "_iterative_scan_supported"):
+            return self._iterative_scan_supported  # type: ignore[attr-defined]
+        if self._engine is None:
+            return False
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(text("SHOW hnsw.iterative_scan"))
+                _ = result.scalar()
+                self._iterative_scan_supported = True
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"hnsw.iterative_scan probe failed (pgvector < 0.8?): {e}")
+            self._iterative_scan_supported = False
+        return self._iterative_scan_supported
+
     @trace(
         "khora.pgvector.search_similar",
         include={"namespace_id", "limit"},
@@ -445,6 +467,16 @@ class PgVectorBackend(AsyncSessionMixin):
         async with self._get_session() as session:
             # Increase HNSW search accuracy for this transaction
             await session.execute(text(f"SET LOCAL hnsw.ef_search = {self._hnsw_ef_search}"))
+
+            # When a temporal WHERE filter is present, the post-index filter can
+            # collapse HNSW recall — enable iterative_scan when pgvector >= 0.8
+            # supports it. ``strict_order`` preserves ORDER BY similarity DESC
+            # invariants relied on by RRF fusion.
+            if (
+                created_after is not None or created_before is not None
+            ) and await self._probe_iterative_scan_supported():
+                await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
+                await session.execute(text("SET LOCAL hnsw.max_scan_tuples = 20000"))
 
             similarity = self._cosine_similarity(ChunkModel.embedding, query_embedding)
 
@@ -480,6 +512,51 @@ class PgVectorBackend(AsyncSessionMixin):
             rows = result.all()
 
             return [(self._chunk_model_to_domain(row.ChunkModel), row.similarity) for row in rows]
+
+    @trace(
+        "khora.pgvector.search_recent_chunks",
+        include={"namespace_id", "limit"},
+        result=lambda r: {"result_count": len(r)},
+    )
+    async def search_recent_chunks(
+        self,
+        namespace_id: UUID,
+        limit: int,
+        *,
+        created_after: datetime | None = None,
+    ) -> list[tuple[Chunk, float | None]]:
+        """Return the most-recent chunks in namespace, no semantic filter.
+
+        Used by VectorCypher / Chronicle as a parallel channel for RECENCY
+        queries, RRF-fused with cosine + BM25. The semantic-relevance gate
+        is applied by the caller (not here) — this method is intentionally
+        a pure recency sort.
+
+        Returns ``(chunk, None)`` tuples to mirror :meth:`search_similar`'s
+        shape; the ``None`` sentinel signals "no cosine score available" so
+        downstream RRF code can branch on it.
+
+        Uses the ``ix_chunks_ns_temporal`` expression index from migration
+        017 (``namespace_id, COALESCE(source_timestamp, created_at)``) so
+        the ORDER BY DESC + LIMIT is index-served.
+        """
+        async with self._get_session() as session:
+            temporal_col = func.coalesce(ChunkModel.source_timestamp, ChunkModel.created_at)
+
+            query = (
+                select(ChunkModel)
+                .where(ChunkModel.namespace_id == namespace_id)
+                .order_by(temporal_col.desc())
+                .limit(limit)
+            )
+
+            if created_after is not None:
+                query = query.where(temporal_col >= created_after)
+
+            result = await session.execute(query)
+            rows = result.scalars().all()
+
+            return [(self._chunk_model_to_domain(model), None) for model in rows]
 
     def _chunk_model_to_domain(self, model: ChunkModel) -> Chunk:
         """Convert ChunkModel to domain Chunk."""
