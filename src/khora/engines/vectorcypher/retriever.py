@@ -169,7 +169,11 @@ class RetrieverConfig:
     #   embedding exceeds ``temporal_query_relevance_floor`` — prevents
     #   today's irrelevant chunks from muscling into top-K.
     temporal_recency_channel_enabled: bool = False
-    temporal_query_relevance_floor: float = 0.30
+    # 0.40 default — was 0.30 in the initial Phase A; raised after LoCoMo
+    # --small showed a persistent 4.2pp abstention regression from
+    # just-above-floor chunks diluting the abstention signal. Operators
+    # can override via KHORA_QUERY_TEMPORAL_QUERY_RELEVANCE_FLOOR.
+    temporal_query_relevance_floor: float = 0.40
     temporal_recency_channel_limit: int = 50
     # ``temporal_llm_disambiguation_enabled``: when True, queries that
     #   fire RECENCY/CHANGE in the Aho-Corasick tier AND contain

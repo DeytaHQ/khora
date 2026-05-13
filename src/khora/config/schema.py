@@ -673,13 +673,16 @@ class QuerySettings(BaseSettings):
         ),
     )
     temporal_query_relevance_floor: float = Field(
-        default=0.30,
+        default=0.40,
         ge=0.0,
         le=1.0,
         description=(
             "Cosine similarity threshold a chunk must exceed to enter the "
             "recency-channel fusion. Prevents today's HR-channel chunks from "
-            "muscling into top-K for a niche query."
+            "muscling into top-K for a niche query. Raised from 0.30 to 0.40 "
+            "after LoCoMo --small (PR #571) showed a persistent 4.2pp "
+            "abstention_accuracy regression from chunks just-above-floor "
+            "diluting the engine's confidence-to-abstain signal."
         ),
     )
     temporal_recency_channel_limit: int = Field(
