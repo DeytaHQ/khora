@@ -55,11 +55,17 @@ Programmatic values take priority over environment variables.
 | `binary-readers` | PDF / docx / xlsx readers (used by khora-cli and downstream ingestors) | `pymupdf`, `openpyxl`, `python-docx` |
 | `parquet` | Parquet readers | `pyarrow>=18.0.0` |
 | `nlp` | spaCy-based sentence splitting | `spacy>=3.8` |
-| `logfire` | Logfire integration + Neo4j pool OTel metrics | `logfire>=4.0` |
+| `otel` | OpenTelemetry SDK + OTLP/HTTP exporter (vendor-neutral) | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` |
+| `otel-grpc` | `khora[otel]` + OTLP/gRPC transport | adds `opentelemetry-exporter-otlp-proto-grpc` |
+| `logfire` | Logfire — managed OTel backend with auto-bootstrap | `logfire>=4.0` |
 | `rust` | Rust acceleration (`khora-accel`) | `khora-accel>=0.1.0` |
-| `all-backends` | Everything graph-and-vector (no logfire/nlp/rust) | — |
+| `all-backends` | Everything graph-and-vector (no observability/nlp/rust) | — |
 
-Combine extras as needed: `pip install 'khora[surrealdb,logfire]'`.
+Combine extras as needed: `pip install 'khora[surrealdb,otel]'`. See
+[observability.md](observability.md) for the full env-var contract,
+precedence rules, and vendor recipes. khora always exposes the OTel
+API; the `[otel]` and `[logfire]` extras determine where spans/metrics
+go.
 
 ## Core settings
 
@@ -91,9 +97,12 @@ Prefix: `KHORA_STORAGE_`. See [architecture/storage-backends.md](architecture/st
 
 Graph and vector backends nest under `storage.graph` and `storage.vector`. The flat fields `KHORA_STORAGE_NEO4J_URL`, `KHORA_STORAGE_NEO4J_USER`, `KHORA_STORAGE_NEO4J_PASSWORD`, `KHORA_STORAGE_PGVECTOR_URL`, and `KHORA_STORAGE_EMBEDDING_DIMENSION` remain supported as a back-compat path and are migrated into the discriminated-union configs automatically.
 
-### Neo4j pool metrics (logfire only)
+### Neo4j pool metrics
 
-With `logfire` installed, the Neo4j backend emits OTel metrics automatically. For high-frequency sub-minute sampling enable:
+With any OTel backend installed (`[otel]` or `[logfire]`), the Neo4j
+backend emits OTel metrics automatically (counter, histogram, observable
+gauges — see [observability.md](observability.md)). For high-frequency
+sub-minute sampling enable:
 
 ```bash
 KHORA_STORAGE__GRAPH__POOL_SAMPLER_ENABLED=true
@@ -135,7 +144,7 @@ omit `storage_backend` to get the original behavior.
 
 ## Embedded backends (experimental)
 
-The embedded paths (`sqlite_lance` and `surrealdb`) are marked **experimental in v0.9.0**. They are appropriate for demos, evaluation, tests, and small single-user CLIs. They are not the deployment story for v0.9.0; for production, use PostgreSQL + pgvector (+ Neo4j for VectorCypher).
+The embedded paths (`sqlite_lance` and `surrealdb`) are marked **experimental**. They are appropriate for demos, evaluation, tests, and small single-user CLIs. They are not the deployment story; for production, use PostgreSQL + pgvector (+ Neo4j for VectorCypher).
 
 ### SQLite + LanceDB (recommended embedded stack)
 
@@ -165,11 +174,11 @@ Vector index tuning fields on the `sqlite_lance` storage config:
 | `KHORA_STORAGE_SQLITE_LANCE__LANCE_INDEX` | `auto` | `auto` / `ivf_pq` / `hnsw` / `brute`. |
 | `KHORA_STORAGE_SQLITE_LANCE__IVF_PARTITIONS` | `null` (auto) | IVF partition count. |
 | `KHORA_STORAGE_SQLITE_LANCE__HNSW_M` | `16` | HNSW `M`. |
-| `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` | `2.0` | Rebuild the LanceDB ANN index once the row count grows to `retrain_factor × (rows at last training)`. Default `2.0` retrains when the corpus has doubled. Set ≤ `1.0` to disable retraining. Added in v0.9.0. |
+| `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` | `2.0` | Rebuild the LanceDB ANN index once the row count grows to `retrain_factor × (rows at last training)`. Default `2.0` retrains when the corpus has doubled. Set ≤ `1.0` to disable retraining. |
 
 ### SurrealDB (experimental, unified store)
 
-The SurrealDB backend is feature-complete (relational + vector + graph + KV in a single store) but is **experimental in v0.9.0**:
+The SurrealDB backend is feature-complete (relational + vector + graph + KV in a single store) but is **experimental**:
 
 - Python SDK is pinned to `>=2.0.0a1` — alpha track for SurrealDB 3.x compatibility.
 - KNN expression `<|K|>` is unreliable in embedded mode; the backend falls back to brute-force cosine + HNSW.
@@ -249,7 +258,12 @@ Prefix: `KHORA_TENANCY_`.
 | `KHORA_TELEMETRY_DATABASE_URL` | — | PostgreSQL URL for the telemetry collector. If unset, the no-op collector is used (zero cost). |
 | `KHORA_TELEMETRY_SERVICE_NAME` | `khora` | Service tag attached to events. |
 
-The `@trace` decorator in `khora.telemetry` is a no-op when `logfire` is not installed.
+The `@trace` decorator and `trace_span()` context manager in
+`khora.telemetry` emit through the OpenTelemetry API. When no real
+`TracerProvider` is installed, OTel returns a `NonRecordingSpan` and
+the helpers are near-free. See [observability.md](observability.md)
+for `configure_telemetry()`, the `[otel]` and `[logfire]` extras, and
+the OTLP env-var contract.
 
 ## Logging
 
@@ -262,3 +276,37 @@ Khora uses loguru. Call `khora.logging_config.setup_logging()` once per process 
 ## Secrets
 
 API keys (OpenAI, Anthropic, etc.) are read from the environment variable named by `KHORA_LLM_API_KEY_ENV` (default `OPENAI_API_KEY`). Khora never reads credentials from disk. Rotate at the environment level — no restart is required beyond whatever your process manager provides.
+
+### SecretStr-typed credential fields
+
+Credential fields on `KhoraConfig` (PostgreSQL DSN, Neo4j password,
+LLM API key, telemetry DSN, etc.) are
+[`pydantic.SecretStr`](https://docs.pydantic.dev/latest/api/types/#pydantic.types.SecretStr).
+This has two operator-visible consequences:
+
+- `repr()` and config-dump output render the value as `'**********'`.
+  Logs, error messages, and `KhoraConfig().model_dump()` no longer
+  leak cleartext credentials.
+- Code that reads the cleartext value must call `.get_secret_value()`
+  explicitly. SQLAlchemy engines and graph drivers receive the
+  cleartext at the boundary; downstream library consumers must do the
+  same. See [consumers.md](consumers.md) for the integration note.
+
+```python
+from khora.config import KhoraConfig
+
+cfg = KhoraConfig()
+print(cfg.storage.postgresql_url)             # SecretStr('**********')
+dsn = cfg.storage.postgresql_url.get_secret_value()   # cleartext, for engine init
+```
+
+## Lockfile policy
+
+khora's `pyproject.toml` includes
+`[tool.uv] exclude-newer = "7 days"` — a relative, evaluated-on-every-sync
+guard against pulling brand-new upstream releases that haven't had
+time to stabilise. Security-critical packages opt out via
+`exclude-newer-package` (currently only `urllib3` for CVE-2026-44431 /
+CVE-2026-44432). Downstream consumers that mirror khora's pin policy
+inherit the same 7-day staging window for transitive dependencies;
+override per-package as needed.

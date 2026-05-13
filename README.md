@@ -28,7 +28,7 @@ See [docs/configuration.md](docs/configuration.md) for the full extras list.
 
 ## Production stack
 
-The production-ready combination in v0.9.0 is **PostgreSQL + pgvector + Neo4j**:
+The production stack is **PostgreSQL + pgvector + Neo4j**:
 
 - **VectorCypher** (default engine) — runs on PostgreSQL + pgvector + Neo4j.
 - **Chronicle** — runs on PostgreSQL + pgvector (no graph DB required).
@@ -72,7 +72,7 @@ async with Khora() as kb:
 
 ## Embedded options (experimental)
 
-Khora ships two zero-infrastructure paths. Both are marked **experimental** in v0.9.0 — fine for demos, evaluation, tests, and small single-user CLIs; not yet stamped as a deployment story.
+Khora ships two zero-infrastructure paths. Both are marked **experimental** — fine for demos, evaluation, tests, and small single-user CLIs; not yet stamped as a deployment story.
 
 - **SQLite + LanceDB** (`pip install khora[sqlite-lance]`, set `KHORA_STORAGE_BACKEND=sqlite_lance`) — recommended embedded stack. Covers VectorCypher, Skeleton, and Chronicle via dialect-aware Alembic migrations and LanceDB-backed vector search. Documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. Known gaps: no point-in-time queries, partial atomicity in `coordinator.transaction()`, FTS on chunks only. See [configuration.md](docs/configuration.md#embedded-backends-experimental).
 - **SurrealDB** (`pip install khora[surrealdb]`) — unified relational + vector + graph in one store. Python SDK is on the alpha track (`>=2.0.0a1`), and KNN (`<|K|>`) is unreliable in embedded mode (uses brute-force cosine + HNSW fallback). Suitable for experimentation; not recommended for production.
@@ -81,30 +81,50 @@ Khora ships two zero-infrastructure paths. Both are marked **experimental** in v
 
 ## Observability
 
-khora emits OpenTelemetry spans and metrics via [Logfire](https://logfire.pydantic.dev/) and records structured `LLMEvent` / `StorageEvent` / `PipelineEvent` rows to PostgreSQL when a collector is configured. Both integrations are opt-in — without them, all instrumentation is a zero-cost no-op.
+khora emits OpenTelemetry spans and metrics through the OTel API.
+The export path is your choice: vanilla OTel SDK (`pip install
+khora[otel]`), [Logfire](https://logfire.pydantic.dev/)
+(`pip install khora[logfire]`), or nothing (zero-cost no-op). Khora
+never installs a `TracerProvider` at import time and never sets
+`service.name` — those belong to the host application.
 
-- **Public surface is documented in [`docs/telemetry-contract.json`](docs/telemetry-contract.json)** (with explainer at [`docs/telemetry-contract.md`](docs/telemetry-contract.md)). It lists every public span, metric, pipeline stage, event-type field, and `khora.telemetry.__all__` export. Items tagged `stability: public` are part of khora's API surface and follow standard semver — breaking changes require a major version bump. Drift is enforced in CI via `tests/unit/telemetry/test_contract.py`.
-- **OTel semantic conventions** apply to attributes: `gen_ai.*` for LLM calls, `db.*` for storage, `code.*` for stack info. Vendor-neutral over the OTel exporter chain.
-- **Logfire integration is opt-in via the `[logfire]` extra:**
+```bash
+pip install khora[otel]
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
+export OTEL_SERVICE_NAME="my-app"
+```
 
-  ```bash
-  pip install khora[logfire]
-  ```
+```python
+from khora.telemetry import configure_telemetry
+configure_telemetry()      # honors OTEL_* env vars
+```
 
-  ```python
-  import logfire
-  from khora import Khora
+See [docs/observability.md](docs/observability.md) for the full env-var
+contract, the precedence rules, vendor recipes (Honeycomb, Datadog,
+Tempo, etc.), sampling guidance, and the troubleshooting checklist.
+The complete telemetry surface lives in
+[`docs/telemetry-contract.json`](docs/telemetry-contract.json) with the
+drift gate enforced by `tests/unit/telemetry/test_contract.py`.
 
-  logfire.configure(service_name="my-service")
-  # khora's @trace decorators and trace_span() context managers
-  # now emit spans automatically; metrics like khora.memory.recall.duration,
-  # khora.llm.tokens, khora.llm.cost_usd, khora.chronicle.abstention_signal
-  # are exported on the standard OTel cadence.
-  ```
+Two separate observability channels live in `khora.telemetry`:
 
-  Without the `logfire` extra installed, `trace_span()` yields a no-op and `metric_*` registrations short-circuit.
-- **Structured event recording is opt-in via `KHORA_TELEMETRY_DATABASE_URL`** (PostgreSQL). When set, `TelemetryCollector` writes `LLMEvent` / `StorageEvent` / `PipelineEvent` rows for downstream cost tracking and incident reconstruction. Without it, `NoOpCollector` is used (zero cost).
-- **Async logging caveat.** Library consumers that import khora without configuring loguru sinks inherit the default sync stderr sink, which blocks the event loop on every log call inside `async def`. Either call `khora.logging_config.setup_logging()` (which configures sinks with `enqueue=True` and registers an `atexit` drain) or configure your own loguru sinks with `enqueue=True` explicitly.
+- **Spans + metrics** via the OTel API (this section).
+- **Structured `LLMEvent` / `StorageEvent` / `PipelineEvent` rows** to
+  a dedicated PostgreSQL database when `KHORA_TELEMETRY_DATABASE_URL`
+  is set. Without it, a `NoOpCollector` is used (zero cost). Wired by
+  `init_telemetry()`, independent of `configure_telemetry()`.
+
+Credential fields on `KhoraConfig` (DSNs, passwords) are
+`pydantic.SecretStr` — `repr()` and config dumps render as
+`'**********'`. Callers that need the cleartext must call
+`.get_secret_value()` explicitly.
+
+**Async logging caveat.** Library consumers that import khora without
+configuring loguru sinks inherit the default sync stderr sink, which
+blocks the event loop on every log call inside `async def`. Either
+call `khora.logging_config.setup_logging()` (which configures sinks
+with `enqueue=True` and registers an `atexit` drain) or configure
+your own loguru sinks with `enqueue=True` explicitly.
 
 ## Documentation
 
@@ -112,6 +132,7 @@ Start at [docs/README.md](docs/README.md). Key entry points:
 
 - [API reference](docs/api-reference.md) — public `Khora` surface.
 - [Configuration](docs/configuration.md) — `KHORA_*` env vars and `KhoraConfig`.
+- [Observability](docs/observability.md) — OTel spans/metrics, `[otel]`/`[logfire]` paths, `configure_telemetry()`.
 - [Architecture](docs/architecture/overview.md) — how the pieces fit.
 - [Engines](docs/engines/engine-comparison.md) — VectorCypher, Skeleton, Chronicle.
 - [Migrations](docs/migrations.md) — Alembic workflow for library users.

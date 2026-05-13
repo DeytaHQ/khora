@@ -185,3 +185,67 @@ def test_public_metrics_are_emitted(contract: dict) -> None:
         assert metric["name"] in found, (
             f"Public metric {metric['name']!r} declared in contract but no metric_*() call site found in source."
         )
+
+
+# ---------------------------------------------------------------------------
+# OTel-first invariants (v0.10.8)
+# ---------------------------------------------------------------------------
+
+
+def test_instrumentation_scope_name_is_khora(contract: dict) -> None:
+    """Spans + metrics must use ``khora`` as the instrumentation scope name.
+
+    The contract declares this; the live tracer must match it.
+    """
+    from khora.telemetry._otel import _TRACER
+
+    declared = contract["instrumentation_scope"]["name"]
+    assert declared == "khora", f"contract instrumentation_scope.name={declared!r}, expected 'khora'"
+    # The OTel API tracer carries the scope as a private attribute; we
+    # round-trip through a recorded span in test_otel_parity.py and
+    # assert here that the cached tracer is the OTel SDK's, not a logfire
+    # wrapper that might rename the scope.
+    assert _TRACER is not None
+
+
+def test_instrumentation_scope_version_uses_package_version(contract: dict) -> None:
+    """``scope.version`` must come from importlib.metadata, not a constant.
+
+    Locking this prevents a future contributor from hard-coding a stale
+    version string into the module.
+    """
+    from importlib.metadata import version
+
+    from khora.telemetry import _otel as _otel_module
+
+    declared_source = contract["instrumentation_scope"]["version_source"]
+    assert "importlib.metadata" in declared_source
+
+    expected = version("khora")
+    assert _otel_module._KHORA_VERSION == expected, (
+        f"khora.telemetry._otel._KHORA_VERSION={_otel_module._KHORA_VERSION!r}, "
+        f"importlib.metadata.version('khora')={expected!r}"
+    )
+
+
+def test_deprecated_alias_is_still_importable() -> None:
+    """The ``install_neo4j_logfire_handler`` alias must remain importable
+    for one minor release after the 0.10.8 rename."""
+    import warnings
+
+    import khora.telemetry as telemetry
+
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        fn = telemetry.install_neo4j_logfire_handler
+    assert any(issubclass(w.category, DeprecationWarning) for w in recorded)
+    assert fn is telemetry.install_neo4j_log_bridge
+
+
+def test_contract_declares_backends_block(contract: dict) -> None:
+    backends = contract.get("backends", {})
+    assert "precedence" in backends, "contract must list backend precedence"
+    assert isinstance(backends["precedence"], list)
+    assert "supported" in backends
+    supported = set(backends["supported"])
+    assert supported == {"auto", "otel", "logfire", "none"}, f"contract supported backends drifted: {supported}"

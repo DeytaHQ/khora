@@ -15,10 +15,10 @@ Production-readiness is **per (engine × stack)**, not per engine. The same engi
 | Skeleton      | n/a (graph not required)       | Available                        | Experimental     | Experimental               |
 
 - **Production-ready** — qualified for production deployment in v0.9.0; covered by integration and e2e tests; documented gotchas have known mitigations.
-- **Available** — supported, exercised in tests, but has not been stamped production-ready in v0.9.0. Equivalent retrieval semantics; less load-tested.
+- **Available** — supported, exercised in tests, but not stamped production-ready. Equivalent retrieval semantics; less load-tested.
 - **Experimental** — feature-complete enough for demos, evaluation, and tests on small corpora. Not a deployment story. See the [embedded backend caveats](../configuration.md#embedded-backends-experimental) for the full list of gaps.
 
-The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. SurrealDB is experimental on multiple fronts (Python SDK on alpha track, KNN unreliable in embedded mode). The `kuzu` graph backend is **deprecated in 0.9.0** and scheduled for removal in 0.10.
+The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. SurrealDB is experimental on multiple fronts (Python SDK on alpha track, KNN unreliable in embedded mode).
 
 ## Quick Comparison
 

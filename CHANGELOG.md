@@ -4,6 +4,122 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.10.8] — OTel-first telemetry, vanilla OpenTelemetry SDK extras, observability docs
+
+Closes [#564](https://github.com/DeytaHQ/khora/issues/564) — make khora's
+observability stack vendor-neutral. Logfire moves from "the only path"
+to "one of several supported backends." Backward-compatible for
+existing `khora[logfire]` users.
+
+### Added
+
+- **`pip install khora[otel]`** — pulls `opentelemetry-sdk` +
+  `opentelemetry-exporter-otlp-proto-http`. Honors the standard
+  `OTEL_*` env vars (`OTEL_EXPORTER_OTLP_ENDPOINT`,
+  `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_HEADERS`,
+  `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
+  `OTEL_TRACES_SAMPLER`, etc.). Ships spans/metrics to any
+  OTLP-compatible collector or vendor (Tempo, Jaeger, Honeycomb,
+  Datadog, New Relic, Dynatrace).
+- **`pip install khora[otel-grpc]`** — composes `khora[otel]` with
+  the gRPC OTLP exporter for sites that prefer Bolt-style transport.
+- **`khora.telemetry.configure_telemetry()`** — single in-code entry
+  point with precedence: caller-supplied providers → existing host
+  provider → `LOGFIRE_TOKEN` env → `OTEL_*` env → no-op. Idempotent;
+  returns a `TelemetryHandle` for inspection and explicit shutdown.
+- **`khora.telemetry.diagnostics()`** — prints active provider class,
+  endpoint, contract version, and the OTel env. Run this first when
+  spans appear to be missing.
+- **`khora.telemetry.shutdown_telemetry_providers()`** — force-flush
+  and shutdown only the providers khora installed; host-owned
+  providers are left untouched.
+- **Resource attribute `khora.telemetry.contract.version`** — exported
+  alongside SDK defaults so dashboards can filter by telemetry-schema
+  version independently of the package version.
+- **`docs/observability.md`** — single canonical observability page.
+  Covers install paths, env-var contract, programmatic config,
+  precedence, sampling/cost guidance, vendor recipes (Honeycomb,
+  Grafana Cloud, Datadog, local Jaeger), and the "I see no spans"
+  troubleshooting checklist.
+- **`tests/unit/telemetry/test_otel_parity.py`** — vanilla-OTel parity
+  gate. Runs against `InMemorySpanExporter` + `InMemoryMetricReader`
+  with no logfire path and asserts every public span/metric is emitted
+  through the OTel API.
+- **`scripts/bench_telemetry_overhead.py`** — regression gate for the
+  no-provider trace/decorator hot path; current baseline ~3 µs/call,
+  budget 5 µs/call.
+- **`tests/integration/test_otel_smoke.py`** — binds an in-process
+  OTLP/HTTP listener, runs `configure_telemetry()`, and asserts spans
+  actually leave the process. Complements the unit-level parity gate.
+
+### Changed
+
+- **`khora.telemetry.trace_span()` yields the real OTel
+  `opentelemetry.trace.Span`** rather than a wrapper. Call-site shape
+  is unchanged (`set_attribute` / `set_attributes` on the OTel Span
+  protocol are identical to the old facade). The `Span` /
+  `LogfireSpan` / `NoOpSpan` ABCs in the previous
+  `logfire_integration.py` module have been removed.
+- **`khora.telemetry.metric_counter` / `metric_histogram` /
+  `metric_gauge_callback`** delegate to the OTel `Meter` directly. No
+  more `_HAS_LOGFIRE` branching; when no MeterProvider is set, OTel's
+  proxy instruments quietly swallow calls.
+- **`@trace` decorator** no longer short-circuits on missing logfire.
+  Spans always open; the OTel API's `NonRecordingSpan` keeps the
+  no-provider path effectively free (~3 µs/call vs. 0.4 µs for a noop
+  context manager — measured, well under any meaningful threshold).
+- **`docs/architecture/overview.md` "Observability" section** rewritten
+  as vendor-neutral OTel-first. Points at `docs/observability.md`
+  instead of inlining Logfire-specific guidance.
+- **`README.md`** "Production stack" and "Embedded options" stamps no
+  longer say "v0.9.0"; "Observability" section condensed to a
+  pointer at `docs/observability.md` and a one-line `[otel]` recipe.
+- **`docs/configuration.md`**: drops "experimental in v0.9.0" / "Added
+  in v0.9.0" stamps; expands the Secrets section with the
+  `SecretStr` / `.get_secret_value()` contract (#553 follow-up);
+  documents the `uv exclude-newer = "7 days"` lockfile policy (#548).
+- **`docs/telemetry-contract.json`** bumped from `1.0` → `1.1`
+  (additive only). Adds `instrumentation_scope`, `resource_attributes`,
+  `backends`, and the new public exports
+  (`configure_telemetry`, `shutdown_telemetry_providers`,
+  `TelemetryHandle`, `diagnostics`, `install_neo4j_log_bridge`).
+- **`release.yml` smoke-install** now also installs `khora[otel]`
+  and verifies the SDK + HTTP exporter import alongside the
+  existing remember/recall round-trip.
+
+### Removed
+
+- **`src/khora/telemetry/logfire_integration.py`** — replaced by
+  `_otel.py` (tracer/meter + `trace_span` + `install_neo4j_log_bridge`),
+  `_attrs.py` (`bounded_text_hash`), and `bootstrap.py`
+  (`configure_telemetry` and friends). All call sites updated.
+- **The `Span` / `LogfireSpan` / `NoOpSpan` ABC hierarchy.** Callers
+  now use `opentelemetry.trace.Span` directly. The migration is
+  source-compatible — the `.set_attribute` / `.set_attributes` shape
+  is identical.
+- **"SurrealDB Phase 1" status note** in
+  `docs/architecture/storage-backends.md` — the backend has been
+  feature-complete since the 2026-03-25 audit.
+- **Last user-facing `kuzu` mention** in
+  `docs/engines/engine-comparison.md`. The `kuzu` extra still ships
+  for downstream callers but is no longer advertised in docs.
+
+### Deprecated
+
+- **`khora.telemetry.install_neo4j_logfire_handler`** — renamed to
+  `install_neo4j_log_bridge` (now picks the OTel logs SDK handler
+  when logfire is absent). The old name is kept as a
+  `DeprecationWarning`-emitting alias for one minor release; will be
+  removed in khora 0.12.
+
+### Internal
+
+- Base install now depends on `opentelemetry-api>=1.27.0` (the wheel
+  is small; the SDK and exporters remain optional). This is what makes
+  `khora.telemetry.metric_counter` / `metric_histogram` /
+  `metric_gauge_callback` callable from any code path without an
+  availability check.
+
 ## [0.10.7] — PyPI README rewriting, SecretStr config fields, release-pipeline fixes
 
 ### Changed

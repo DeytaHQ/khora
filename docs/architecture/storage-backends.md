@@ -604,8 +604,6 @@ src/khora/storage/backends/surrealdb/
 | Development/testing | SurrealDB — easy setup, no multi-DB coordination |
 | Production at scale | PostgreSQL + Neo4j — mature, battle-tested |
 
-> **Status:** SurrealDB support is Phase 1 — the foundation is implemented and functional, but may lack some advanced features available in the PostgreSQL + Neo4j stack.
-
 ## Alternative Vector Backends
 
 | Backend | Type | Best For |

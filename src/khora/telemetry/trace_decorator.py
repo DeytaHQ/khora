@@ -4,8 +4,8 @@ Eliminates boilerplate for the common pattern of opening a span, passing
 function arguments as attributes, running the function, and extracting
 result attributes before returning.
 
-When logfire is not installed, the wrapper short-circuits to a direct
-function call with zero overhead.
+When no real ``TracerProvider`` is installed, the OTel API's
+``NonRecordingSpan`` makes the wrapper effectively free.
 
 Usage::
 
@@ -31,8 +31,7 @@ from uuid import UUID
 
 from loguru import logger
 
-from . import logfire_integration as _li
-from .logfire_integration import trace_span
+from ._otel import trace_span
 
 # Types safe to pass directly as span attributes
 _SAFE_TYPES = (str, int, float, bool, type(None))
@@ -80,7 +79,7 @@ def _make_wrapper(
     exclude: frozenset[str],
     result_extractor: Callable[[Any], dict[str, Any]] | None,
 ) -> Callable:
-    """Build the sync or async wrapper with short-circuit when logfire is absent."""
+    """Build the sync or async wrapper around the trace_span context."""
     sig = inspect.signature(fn)
     param_names = set(sig.parameters.keys()) - {"self", "cls"}
 
@@ -97,8 +96,6 @@ def _make_wrapper(
 
         @functools.wraps(fn)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not _li._HAS_LOGFIRE:
-                return await fn(*args, **kwargs)
             attrs = _extract_span_attributes(sig, args, kwargs, include=include, exclude=exclude)
             with trace_span(span_name, **attrs) as span:
                 ret = await fn(*args, **kwargs)
@@ -114,8 +111,6 @@ def _make_wrapper(
 
         @functools.wraps(fn)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-            if not _li._HAS_LOGFIRE:
-                return fn(*args, **kwargs)
             attrs = _extract_span_attributes(sig, args, kwargs, include=include, exclude=exclude)
             with trace_span(span_name, **attrs) as span:
                 ret = fn(*args, **kwargs)
@@ -156,9 +151,8 @@ def trace(
     converting UUIDs to strings, skipping complex objects).  Optionally
     extracts attributes from the return value.
 
-    When logfire is not installed, the wrapper short-circuits to a direct
-    function call with zero overhead — no span created, no argument
-    extraction.
+    When no real ``TracerProvider`` is installed, the underlying span
+    is OTel's ``NonRecordingSpan`` and attribute writes are dropped.
 
     Argument capture rules:
         - ``self`` / ``cls`` parameters are always skipped.

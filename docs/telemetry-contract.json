@@ -1,7 +1,33 @@
 {
   "_comment": "Khora telemetry public surface contract. See telemetry-contract.md. Items tagged stability=public must not break without a major version bump. Keep this file in sync with the codebase — tests/unit/telemetry/test_contract.py acts as the drift gate.",
-  "version": "1.0",
+  "version": "1.1",
   "service_namespace": "khora",
+  "instrumentation_scope": {
+    "name": "khora",
+    "version_source": "importlib.metadata.version('khora')",
+    "_comment": "Every span and metric carries scope=khora + version=khora package version. service.name belongs to the host application — khora never sets it."
+  },
+  "resource_attributes": [
+    {
+      "name": "khora.telemetry.contract.version",
+      "stability": "public",
+      "value_source": "this file's `version` field",
+      "_comment": "Stable across khora patch releases. Bump alongside the contract version. Lets dashboards filter by telemetry-schema version independently of khora's package version."
+    }
+  ],
+  "backends": {
+    "_comment": "Precedence order applied by khora.telemetry.configure_telemetry(). First match wins.",
+    "precedence": [
+      "backend='none' (explicit opt-out)",
+      "OTEL_SDK_DISABLED=true env",
+      "caller-supplied tracer_provider/meter_provider",
+      "non-default global TracerProvider already installed (host/logfire)",
+      "backend='logfire' or (auto + LOGFIRE_TOKEN/LOGFIRE_SEND_TO_LOGFIRE env + logfire importable)",
+      "backend='otel' or (auto + any OTEL_* env var set)",
+      "no-op"
+    ],
+    "supported": ["auto", "otel", "logfire", "none"]
+  },
   "span_name_regex": "^khora\\.[a-z0-9_]+(\\.[a-z0-9_]+)*$",
   "public_exports": [
     "TelemetryCollector",
@@ -18,11 +44,25 @@
     "collect_usage",
     "trace_span",
     "bounded_text_hash",
-    "install_neo4j_logfire_handler",
+    "install_neo4j_log_bridge",
     "trace",
     "metric_counter",
     "metric_gauge_callback",
-    "metric_histogram"
+    "metric_histogram",
+    "Backend",
+    "TelemetryHandle",
+    "configure_telemetry",
+    "shutdown_telemetry_providers",
+    "diagnostics"
+  ],
+  "deprecated_exports": [
+    {
+      "name": "install_neo4j_logfire_handler",
+      "stability": "deprecated",
+      "alias_for": "install_neo4j_log_bridge",
+      "deprecated_in": "0.10.8",
+      "removal_target": "0.12.0"
+    }
   ],
   "event_types": [
     {

@@ -223,21 +223,37 @@ This enables:
 - **Temporal queries** - What did we know last Tuesday?
 - **Debugging** - Replay events to understand issues
 
-## Observability: Logfire / OpenTelemetry
+## Observability: OpenTelemetry
 
-Khora includes optional Logfire instrumentation for OTEL-compatible distributed tracing. Install with `pip install khora[logfire]`.
+Khora emits spans and metrics through the OpenTelemetry API
+unconditionally. Where they go is determined by which
+`TracerProvider` / `MeterProvider` is installed in the process. Khora
+ships three export paths:
 
-When present, spans are emitted for:
-- LLM extraction calls
-- Entity deduplication passes
-- Skeleton build phases
-- Ingestion pipeline stages
+- `pip install khora[otel]` — vanilla OTel SDK + OTLP/HTTP exporter.
+  Honors the standard `OTEL_*` env vars.
+- `pip install khora[logfire]` — [Logfire](https://logfire.pydantic.dev)
+  auto-bootstrap.
+- No extra installed — the OTel API returns a `NonRecordingSpan` and
+  the cost is near zero.
 
-Two APIs are available:
-- **`@trace` decorator** — Automatic span creation per function. Auto-captures arguments as span attributes.
-- **`trace_span()` context manager** — For complex methods needing mid-function attributes.
+Khora **never** sets `service.name` and **never** installs a provider
+at import time — those concerns belong to the host application.
+Khora identifies itself via the OTel instrumentation scope
+(`scope.name = "khora"`, `scope.version = importlib.metadata.version("khora")`).
 
-When Logfire is not installed, both APIs short-circuit to zero-overhead no-ops. Khora never calls `logfire.configure()` — that's the consumer's responsibility.
+Spans cover LLM extraction calls, entity deduplication, skeleton build
+phases, ingestion pipeline stages, query-engine fusion, and recall
+hot paths. The full public surface is in
+[`telemetry-contract.json`](../telemetry-contract.json) with the drift
+gate enforced by `tests/unit/telemetry/test_contract.py`.
+
+Two helper APIs are available for new instrumentation:
+
+- **`@trace` decorator** — automatic span creation per function;
+  auto-captures arguments as span attributes.
+- **`trace_span()` context manager** — for complex methods needing
+  mid-function attributes.
 
 ```python
 from khora.telemetry import trace, trace_span
@@ -246,6 +262,9 @@ from khora.telemetry import trace, trace_span
 async def search(query: str, namespace_id: UUID) -> list:
     ...
 ```
+
+See [docs/observability.md](../observability.md) for the env-var
+contract, precedence rules, vendor recipes, and troubleshooting.
 
 ## Configuration: Layers of Overrides
 

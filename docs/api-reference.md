@@ -49,6 +49,7 @@ Khora(
 - Pass a PostgreSQL URL, a SurrealDB URL (`memory://`, `surrealkv://…`, `ws://…`), or a full `KhoraConfig`.
 - Pass nothing to read from `KHORA_DATABASE_URL` / `KHORA_NEO4J_URL`.
 - `run_migrations=True` runs Alembic under an advisory lock on connect. See [migrations.md](migrations.md).
+- Credential fields on `KhoraConfig` (DSNs, passwords, API keys) are `pydantic.SecretStr` — `repr()` and `model_dump()` render `'**********'`. Code that reads the cleartext must call `.get_secret_value()`. See the [Secrets section of configuration.md](configuration.md#secretstr-typed-credential-fields).
 
 ### Connection
 

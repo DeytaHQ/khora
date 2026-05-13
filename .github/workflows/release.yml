@@ -238,7 +238,7 @@ jobs:
           # PyPI's CDN can lag a few seconds behind the upload — retry a few
           # times rather than failing on a transient miss.
           for attempt in 1 2 3 4 5; do
-            if pip install --upgrade "khora[sqlite-lance,rust]==${VERSION}"; then
+            if pip install --upgrade "khora[sqlite-lance,rust,otel]==${VERSION}"; then
               break
             fi
             echo "pip install attempt $attempt failed; sleeping 10s..."
@@ -246,6 +246,8 @@ jobs:
           done
           pip show khora | grep -E "^(Name|Version):"
           pip show khora-accel | grep -E "^(Name|Version):"
+          # Verify the [otel] extra pulled the SDK + HTTP exporter.
+          python -c "import opentelemetry.sdk.trace; import opentelemetry.exporter.otlp.proto.http.trace_exporter; print('OTel SDK + HTTP exporter present')"
 
       - name: Run smoke script (Khora.remember + recall round-trip)
         run: |
@@ -297,6 +299,17 @@ jobs:
                       recall = await kb.recall("smoke-install", namespace=ns.namespace_id, limit=3)
                       assert recall.chunks, "recall returned no chunks"
                       print(f"OK: {result.chunks_created} chunks ingested, {len(recall.chunks)} recalled")
+
+              # OTel-first smoke: configure_telemetry returns a handle and
+              # diagnostics() reports the bootstrap state. We avoid hitting
+              # a real endpoint here — just verify the wiring is reachable
+              # from the published wheel.
+              from khora.telemetry import configure_telemetry, diagnostics
+              handle = configure_telemetry(backend="none")
+              assert handle.backend == "none"
+              d = diagnostics()
+              assert d["contract_version"], "telemetry contract version missing"
+              print(f"OK: telemetry diagnostics — contract_version={d['contract_version']}")
 
           asyncio.run(main())
           PY

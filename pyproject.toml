@@ -33,6 +33,11 @@ dependencies = [
     "tenacity>=9.1.4",
     # Temporal date parsing
     "dateparser>=1.2.0",
+    # OpenTelemetry API (small wheel, no SDK). khora emits spans/metrics
+    # via this API unconditionally; export only happens when a real
+    # TracerProvider/MeterProvider is installed (see khora[otel] /
+    # khora[logfire]).
+    "opentelemetry-api>=1.27.0",
 ]
 
 [project.urls]
@@ -102,6 +107,21 @@ accel = [
     "rapidfuzz>=3.0.0",
 ]
 # Observability
+# Vanilla OpenTelemetry SDK + HTTP/Protobuf OTLP exporter. Use this
+# when shipping to any OTel-compatible collector or vendor (Tempo,
+# Jaeger, Honeycomb, Datadog, New Relic, Dynatrace, etc.).
+otel = [
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
+]
+# Optional gRPC transport for OTLP. Pulls in grpcio (~30MB native
+# binary); HTTP is the default and sufficient for most setups.
+otel-grpc = [
+    "khora[otel]",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27.0",
+]
+# Logfire (Pydantic) — a managed OTel backend with auto-bootstrap.
+# Installs its own TracerProvider/MeterProvider on logfire.configure().
 logfire = ["logfire>=4.0"]
 # NLP tools
 nlp = ["spacy>=3.8.0"]
@@ -109,7 +129,7 @@ nlp = ["spacy>=3.8.0"]
 # LOCKSTEP: this pin must match rust/khora-accel/Cargo.toml's version exactly.
 # Bump both in the same PR. See CLAUDE.md → Version Bumps.
 rust = [
-    "khora-accel==0.10.7",
+    "khora-accel==0.10.8",
 ]
 # SurrealDB unified backend (graph + vector + relational in one DB)
 surrealdb = ["surrealdb>=2.0.0a1"]
