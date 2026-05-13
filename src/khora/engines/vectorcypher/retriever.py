@@ -429,38 +429,47 @@ class VectorCypherRetriever:
             # ``RetrieverConfig`` feature flag and the original query text.
             synthetic_applied = False
             anti_recency_veto = False
-            if (
-                self._config.temporal_recency_floor_enabled
-                and temporal_signal is not None
-                and temporal_signal.is_temporal
-                and temporal_filter is None
-                and params.default_window_days is not None
-            ):
-                from khora.query.temporal_detection import has_anti_recency_token
+            with trace_span("khora.vectorcypher.recency_floor_synthesis") as synth_span:
+                if (
+                    self._config.temporal_recency_floor_enabled
+                    and temporal_signal is not None
+                    and temporal_signal.is_temporal
+                    and temporal_filter is None
+                    and params.default_window_days is not None
+                ):
+                    from khora.query.temporal_detection import has_anti_recency_token
 
-                if has_anti_recency_token(query):
-                    anti_recency_veto = True
-                else:
-                    from khora.engines.skeleton.backends import TemporalFilter as _SynthTF
+                    if has_anti_recency_token(query):
+                        anti_recency_veto = True
+                    else:
+                        from khora.engines.skeleton.backends import TemporalFilter as _SynthTF
 
-                    temporal_filter = _SynthTF(
-                        occurred_after=datetime.now(UTC) - timedelta(days=params.default_window_days),
-                    )
-                    synthetic_applied = True
-                    logger.debug(
-                        "Synthesized RECENCY floor: occurred_after={} (window={}d, category={})",
-                        temporal_filter.occurred_after.isoformat(),
-                        params.default_window_days,
-                        temporal_signal.category.value,
-                    )
+                        temporal_filter = _SynthTF(
+                            occurred_after=datetime.now(UTC) - timedelta(days=params.default_window_days),
+                        )
+                        synthetic_applied = True
+                        logger.debug(
+                            "Synthesized RECENCY floor: occurred_after={} (window={}d, category={})",
+                            temporal_filter.occurred_after.isoformat(),
+                            params.default_window_days,
+                            temporal_signal.category.value,
+                        )
+                synth_span.set_attribute("synthetic_temporal_filter_applied", synthetic_applied)
+                synth_span.set_attribute("anti_recency_veto", anti_recency_veto)
+                if params.default_window_days is not None:
+                    synth_span.set_attribute("temporal_floor_days", params.default_window_days)
+                if synthetic_applied or anti_recency_veto:
+                    # bounded_text_hash keeps the query content out of the
+                    # span as raw text (privacy + cardinality), but lets us
+                    # correlate synthesis decisions with the request when
+                    # debugging.
+                    synth_span.set_attribute("query_hash", bounded_text_hash(query))
 
+            # Mirror the synthesis decision onto the parent span too, so
+            # operator dashboards filtering at the top-level retrieve span
+            # don't need to drill into the child.
             span.set_attribute("synthetic_temporal_filter_applied", synthetic_applied)
             span.set_attribute("anti_recency_veto", anti_recency_veto)
-            if synthetic_applied or anti_recency_veto:
-                # bounded_text_hash keeps the query content out of the span
-                # as raw text (privacy + cardinality), but lets us correlate
-                # synthesis decisions with the request when debugging.
-                span.set_attribute("query_hash", bounded_text_hash(query))
             # Operator-visible metric — bounded labels only (category enum,
             # vetoed bool). See docs/telemetry-contract.json §metrics
             # `khora.query.temporal.floor_applied_total`.
@@ -570,6 +579,36 @@ class VectorCypherRetriever:
 
             span.set_attribute("chunk_count", len(result.chunks))
             span.set_attribute("entity_count", len(result.entities))
+
+            # Record top-1 chunk age — feeds the
+            # ``khora.recall.recency.query_to_top1_age_days`` histogram so
+            # operators can spot temporal-quality drift in production
+            # (the dashboard slices it by temporal_category via the span
+            # parent context). Only fires when the top chunk carries a
+            # parseable occurred_at; skipped on empty result sets.
+            if result.chunks:
+                try:
+                    # result.chunks may be list[Chunk] or list[tuple[Chunk, score]]
+                    # depending on the path; unwrap defensively.
+                    raw = result.chunks[0]
+                    top_chunk = raw[0] if isinstance(raw, tuple) else raw
+                    occurred_at_iso = None
+                    if getattr(top_chunk, "metadata", None) is not None:
+                        custom = getattr(top_chunk.metadata, "custom", None) or {}
+                        occurred_at_iso = custom.get("occurred_at")
+                    if occurred_at_iso:
+                        occurred_at = datetime.fromisoformat(occurred_at_iso.replace("Z", "+00:00"))
+                        if occurred_at.tzinfo is None:
+                            occurred_at = occurred_at.replace(tzinfo=UTC)
+                        age_days = (datetime.now(UTC) - occurred_at).total_seconds() / 86400.0
+                        from khora.telemetry.temporal_metrics import record_top1_age_days
+
+                        record_top1_age_days(max(age_days, 0.0))
+                except (ValueError, AttributeError, TypeError):
+                    # Metric is best-effort — never fail the recall path
+                    # because top-1 age extraction misfired.
+                    pass
+
             return result
 
     async def _vectorcypher_retrieve(
@@ -949,10 +988,16 @@ class VectorCypherRetriever:
             and temporal_signal.is_temporal
             and _tp.default_window_days is not None
         ):
+            # Intentionally pass temporal_filter=None: the recency channel's
+            # job is to surface today's chunks even when the cosine channel
+            # narrowed by the synthesized 14d floor. The cosine relevance gate
+            # (temporal_query_relevance_floor) is the safeguard against
+            # irrelevant-but-fresh chunks muscling in (Devil's-Advocate
+            # follow-up: decouple channel filter from synthesized floor).
             recent_chunks = await self._recency_channel_chunks(
                 query_embedding=query_embedding,
                 namespace_id=namespace_id,
-                temporal_filter=temporal_filter,
+                temporal_filter=None,
             )
             if recent_chunks:
                 existing_ids = {c[0] for c in vector_chunks}
@@ -2329,15 +2374,18 @@ class VectorCypherRetriever:
 
             from khora._accel import batch_cosine_similarity
 
-            sims = batch_cosine_similarity(
+            floor = self._config.temporal_query_relevance_floor
+            # batch_cosine_similarity returns list[(index, similarity)]
+            # already filtered by ``threshold``. We pass the floor directly
+            # so the floor gate happens inside Rust/NumPy, not in Python.
+            sim_pairs = batch_cosine_similarity(
                 query_embedding,
                 [emb for _, emb in chunks_with_embedding],
+                threshold=floor,
             )
-            floor = self._config.temporal_query_relevance_floor
             filtered: list[tuple[UUID, float, Chunk]] = []
-            for (chunk, _emb), sim in zip(chunks_with_embedding, sims, strict=True):
-                if sim < floor:
-                    continue
+            for idx, sim in sim_pairs:
+                chunk, _emb = chunks_with_embedding[idx]
                 # Re-shape into ``(chunk_id, score, Chunk)`` matching
                 # ``_vector_search_chunks``. The Chunk's metadata.custom
                 # carries ``occurred_at`` for the downstream recency

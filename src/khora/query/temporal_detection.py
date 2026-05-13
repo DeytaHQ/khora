@@ -109,20 +109,29 @@ RETRIEVAL_PARAMS: dict[TemporalCategory, RetrievalParams] = {
 #   "any history of the budget conversation since the beginning"
 ANTI_RECENCY_TOKENS: frozenset[str] = frozenset(
     {
+        # Bare single-word tokens — these only trigger when they appear
+        # word-bounded in the query. Devil's-Advocate review flagged that
+        # bare "all"/"any"/"every"/"entire" are too common in legitimate
+        # recency queries ("latest from all channels", "any new emails")
+        # to be safe singletons. We keep only tokens that unambiguously
+        # signal historical scope.
         "ever",
-        "all",
         "history",
+        "throughout",
+        # Multi-word phrases — these are unambiguous: a user who types
+        # "all-time" or "since the beginning" is asking for historical
+        # scope, not freshness.
         "history of",
         "any time",
         "anytime",
-        "any",
         "since the beginning",
         "over time",
-        "entire",
-        "every",
         "all-time",
         "all time",
-        "throughout",
+        "all the time",
+        "of all time",
+        "every single",
+        "entire history",
     }
 )
 
