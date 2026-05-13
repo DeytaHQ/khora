@@ -37,6 +37,64 @@ class QueryComplexity(Enum):
     MODERATE = "moderate"  # Shallow graph (depth=1)
     COMPLEX = "complex"  # Full VectorCypher (depth=2-3)
     ENTITY_ANCHORED = "entity_anchored"  # Short factual question anchored to a named entity
+    TYPED_ENTITY_RECENT = "typed_entity_recent"  # "latest action items" structural fast path (issue #569)
+
+
+# Issue #569 — typed-entity recency fast path.
+#
+# Detect queries like "latest action items", "most recent decisions",
+# "recent blockers from the offsite" etc. and route to a single Cypher
+# query that pivots directly on (entity_type, occurred_at DESC) rather
+# than going through vector search → text-similarity fallback.
+#
+# The recency adjective list and typed-noun list are kept narrow on
+# purpose: anything broader risks colliding with the existing ENTITY_ANCHORED
+# / MODERATE paths. New typed-entity nouns should be added here AND have a
+# matching `EntityTypeConfig` in `extraction/skills/builtin/`.
+TYPED_ENTITY_RECENCY_PATTERN = re.compile(
+    r"\b(latest|most\s+recent|newest|recent)\s+"
+    r"(action\s+items?|decisions?|blockers?|risks?|commitments?|open\s+questions?)\b",
+    re.IGNORECASE,
+)
+
+# Map matched query noun phrases to entity_type values used by the
+# extraction layer (see extraction/skills/builtin/). Normalized to lower
+# case and singular-stripped for lookup.
+TYPED_ENTITY_NOUN_MAP: dict[str, str] = {
+    "action item": "ACTION_ITEM",
+    "action items": "ACTION_ITEM",
+    "decision": "DECISION",
+    "decisions": "DECISION",
+    "blocker": "BLOCKER",
+    "blockers": "BLOCKER",
+    "risk": "RISK",
+    "risks": "RISK",
+    "commitment": "COMMITMENT",
+    "commitments": "COMMITMENT",
+    "open question": "OPEN_QUESTION",
+    "open questions": "OPEN_QUESTION",
+}
+
+
+def match_typed_entity_recent(query: str) -> str | None:
+    """Return the matched entity_type if *query* triggers the typed-entity
+    recency fast path, else None.
+
+    The anti-recency veto from :mod:`khora.query.temporal_detection` applies:
+    a query like "what action items have we ever discussed" must NOT
+    route to the fast path because the user is asking for historical scope.
+    """
+    if not query:
+        return None
+    from khora.query.temporal_detection import has_anti_recency_token
+
+    if has_anti_recency_token(query):
+        return None
+    match = TYPED_ENTITY_RECENCY_PATTERN.search(query)
+    if match is None:
+        return None
+    noun = re.sub(r"\s+", " ", match.group(2).strip().lower())
+    return TYPED_ENTITY_NOUN_MAP.get(noun)
 
 
 @dataclass
@@ -240,6 +298,7 @@ COMPLEX|Multi-hop query requiring graph traversal"""
             "moderate": 0,
             "complex": 0,
             "entity_anchored": 0,
+            "typed_entity_recent": 0,
             "llm_fallback": 0,
         }
 
@@ -349,6 +408,22 @@ COMPLEX|Multi-hop query requiring graph traversal"""
         Returns:
             RoutingDecision based on pattern matching
         """
+        # Issue #569 — typed-entity recency fast path. Check before scoring:
+        # the pattern is precise enough that a positive match short-circuits all
+        # other heuristics. The anti-recency veto is handled inside
+        # ``match_typed_entity_recent`` so "what action items have we ever
+        # discussed" still falls through to the regular scoring path.
+        typed_entity_type = match_typed_entity_recent(query)
+        if typed_entity_type is not None:
+            return RoutingDecision(
+                complexity=QueryComplexity.TYPED_ENTITY_RECENT,
+                use_graph=True,
+                graph_depth=self._config.moderate_depth,
+                confidence=0.95,
+                reasoning=f"Heuristic: typed-entity recency fast path ({typed_entity_type})",
+                suggested_entry_limit=self._config.moderate_entry_limit,
+            )
+
         # Score different complexity indicators
         complexity_score = 0.0
         pattern_matches = 0  # Track how many pattern types matched for confidence
@@ -745,13 +820,17 @@ COMPLEX|Multi-hop query requiring graph traversal"""
             "moderate": 0,
             "complex": 0,
             "entity_anchored": 0,
+            "typed_entity_recent": 0,
             "llm_fallback": 0,
         }
 
 
 __all__ = [
+    "TYPED_ENTITY_NOUN_MAP",
+    "TYPED_ENTITY_RECENCY_PATTERN",
     "QueryComplexity",
     "QueryComplexityRouter",
     "RouterConfig",
     "RoutingDecision",
+    "match_typed_entity_recent",
 ]

@@ -1,0 +1,131 @@
+# Meetings & Action-Item Extraction Expertise
+#
+# Opt-in typed entity definitions for meeting transcripts, chat threads,
+# and project-status content. Operators select these by referencing
+# ``builtin:meetings`` (alone or via ``extends``) in their ExpertiseConfig.
+# Not loaded by default — the ``general`` skill remains the default.
+#
+# Designed for HIGH PRECISION over recall: it is better to miss a noisy
+# action item than to fabricate one. The system prompt and per-type
+# descriptions are explicit about this tradeoff. Once a labeled-meeting
+# evaluation set exists, precision/recall can be tuned via
+# ``scripts/measure_action_item_extraction.py``.
+
+name: meetings
+version: "1.0.0"
+description: "Typed extraction for action items, decisions, blockers, and risks from meetings and threads"
+
+system_prompt: |
+  You are an expert extraction system for meeting transcripts, chat threads,
+  and project-status content. You identify typed work artifacts:
+  ACTION_ITEM, DECISION, BLOCKER, RISK — alongside the general entity
+  types (PERSON, ORGANIZATION, etc.).
+
+  HIGH PRECISION OVER RECALL. The downstream system uses these typed
+  entities to answer queries like "what action items are open" and
+  "what decisions were made last week". A false positive (extracting an
+  action item that isn't one) is worse than a false negative (missing a
+  marginal one). When in doubt, do not extract.
+
+  Specific guardrails:
+
+  - ACTION_ITEM: only extract when there is an EXPLICIT commitment by
+    a named (or clearly-implied) person to do a specific thing. Phrases
+    like "we should probably look into X" or "someone needs to check Y"
+    are NOT action items — they are general discussion. Extract only
+    when the text contains language like "I'll do X by Friday",
+    "Alice will own the pricing review", "Bob: investigate the Postgres
+    outage by EOW". Required: a specific task; strongly preferred:
+    an assignee and a due date.
+
+  - DECISION: only extract when the text shows the team AGREED on a
+    specific choice. Brainstorming options, debating tradeoffs, or
+    asking questions is NOT a decision. Look for resolution language:
+    "we decided to ship X", "the team agreed to move to Y",
+    "approved: deprecate Z by Q3". A single person musing aloud is
+    not a decision.
+
+  - BLOCKER: only extract when the text identifies a CONCRETE obstacle
+    that is preventing progress NOW. A "concern" or "risk" is not a
+    blocker. A blocker has the shape: "we cannot ship the migration
+    because the legal review is stuck", "the team is blocked on the
+    API contract from vendor X". General complaints about tooling are
+    not blockers.
+
+  - RISK: a FUTURE potential problem, not a current obstacle. Risks have
+    a likelihood and an impact: "if the vendor misses their date we
+    will slip the launch", "there's a chance the new index won't fit
+    in memory". Vague worries ("this might be hard") are not risks.
+
+  When you do extract one of these typed entities, populate its typed
+  attributes — these are MORE IMPORTANT than the generic description
+  field. An ACTION_ITEM without an assignee is still valid, but you
+  should leave that attribute null rather than guessing.
+
+entity_types:
+  - name: ACTION_ITEM
+    description: "A specific task or commitment assigned to a person, with optional due date and status. Extract only when there is an EXPLICIT commitment by a named person — not vague suggestions or 'we should probably' discussion. High precision required."
+    attributes:
+      required: [name]
+      optional: [assignee, due_by, status, description]
+    identifiers: [name, assignee]
+    aliases: [TASK, TODO, COMMITMENT]
+
+  - name: DECISION
+    description: "A choice the team explicitly agreed to. Extract only when the text shows resolution language ('we decided', 'agreed to', 'approved') — not debate or option-listing. High precision required."
+    attributes:
+      required: [name]
+      optional: [decided_on, rationale, description]
+    identifiers: [name, decided_on]
+    aliases: [AGREEMENT, RESOLUTION, CHOICE]
+
+  - name: BLOCKER
+    description: "A concrete obstacle currently preventing progress, with severity. Extract only when the text identifies a real, present-tense block — not a concern, risk, or general complaint. High precision required."
+    attributes:
+      required: [name]
+      optional: [blocking_for, severity, description]
+    identifiers: [name]
+    aliases: [IMPEDIMENT, OBSTACLE]
+
+  - name: RISK
+    description: "A potential FUTURE problem with likelihood and impact. Extract only when the text identifies a specific contingent threat — not a vague worry. Distinct from BLOCKER (which is present-tense)."
+    attributes:
+      required: [name]
+      optional: [likelihood, impact, description]
+    identifiers: [name]
+    aliases: [THREAT, CONCERN]
+
+relationship_types:
+  - name: ASSIGNED_TO
+    description: "Action item assigned to a person."
+    source_types: [ACTION_ITEM]
+    target_types: [PERSON]
+
+  - name: BLOCKS
+    description: "A blocker is blocking progress on a project, action item, or decision."
+    source_types: [BLOCKER]
+    target_types: [ACTION_ITEM, DECISION, "*"]
+
+  - name: DECIDED_BY
+    description: "Decision attributed to a person or organization."
+    source_types: [DECISION]
+    target_types: [PERSON, ORGANIZATION]
+
+  - name: THREATENS
+    description: "A risk threatens a project, decision, or action item."
+    source_types: [RISK]
+    target_types: ["*"]
+
+# Higher entity threshold than ``general`` (0.5 → 0.7) because the
+# Devil's-Advocate review of Phase C flagged over-extraction risk.
+# Operators who want recall over precision can override.
+confidence:
+  min_entity: 0.7
+  min_relationship: 0.5
+  min_inferred: 0.5
+
+expansion:
+  enabled: true
+  depth: 2
+  cross_tool_unification: true
+  relationship_inference: false
