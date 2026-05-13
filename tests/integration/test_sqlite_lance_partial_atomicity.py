@@ -1,6 +1,6 @@
 """Cross-store partial-atomicity contract test (sqlite_lance).
 
-The embedded coordinator documents (CLAUDE.md gotchas, ADR-025) that
+The embedded coordinator documents (CLAUDE.md gotchas) that
 ``coordinator.transaction()`` does NOT promise full ACID across SQLite
 and LanceDB. The specific contract for the chunk-write path
 (``vector.py:create_chunks_batch``) is:
@@ -88,8 +88,8 @@ async def test_lance_add_failure_leaves_sqlite_consistent(tmp_path: Path, monkey
         # SQLite must have the chunk row even though LanceDB is empty.
         sqlite_chunk = await coord.vector.get_chunk(chunk.id)  # type: ignore[union-attr]
         assert sqlite_chunk is not None, (
-            "ADR-025 contract violated: SQLite chunk row was rolled back after "
-            "LanceDB failure. The documented behaviour is SQLite stays consistent."
+            "Partial-atomicity contract violated: SQLite chunk row was rolled back "
+            "after LanceDB failure. The documented behaviour is SQLite stays consistent."
         )
         assert sqlite_chunk.content == "partial-atomicity content"
 
