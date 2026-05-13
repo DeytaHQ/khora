@@ -17,10 +17,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+import os
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
 
 from loguru import logger
@@ -75,6 +76,14 @@ _NEO4J_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     TransientError,
 )
 
+# KHORA_BENCH_MODE forces "relative" recency reference (max(occurred_at) in
+# the result set) regardless of the temporal_reference_wall_clock config
+# flag — used during benchmark replay where the dataset's newest timestamp
+# may be years stale and "wall-clock recency" produces uniformly low scores.
+# Read once at import to avoid an env lookup per recency-score computation
+# on the hot path. Set ``KHORA_BENCH_MODE=true|1|yes`` to enable.
+_BENCH_MODE: bool = os.environ.get("KHORA_BENCH_MODE", "").strip().lower() in {"true", "1", "yes"}
+
 
 @dataclass
 class VectorCypherResult:
@@ -120,6 +129,39 @@ class RetrieverConfig:
     recency_weight: float = 0.2
     recency_decay_days: int = 30
     recency_decay_type: str = "exponential"  # "linear" or "exponential"
+
+    # Issue #567 — temporal recency Phase A. Each flag defaults OFF so the
+    # behavior of an existing-default retriever is unchanged. Operators opt
+    # in by plumbing the matching ``KhoraConfig.query.temporal_*`` field
+    # through when constructing ``RetrieverConfig``.
+    #
+    # ``temporal_reference_wall_clock``: when True, ``_calculate_recency_scores``
+    #   uses ``datetime.now(UTC)`` as the reference instead of the newest
+    #   ``occurred_at`` in the result set. Production-correct; the legacy
+    #   "newest-in-set" reference is preserved only when this flag is False
+    #   or when ``KHORA_BENCH_MODE=true`` overrides for benchmark replay.
+    # ``temporal_recency_floor_enabled``: when True, RECENCY/CHANGE queries
+    #   that lack an explicit date and contain no anti-recency token receive
+    #   a synthesized ``TemporalFilter(occurred_after=now-default_window_days)``.
+    # ``temporal_per_source_decay``: when True, ``_calculate_recency_scores``
+    #   looks up a per-chunk decay window via
+    #   ``chunk.metadata.custom["source_system"]`` against
+    #   ``temporal_default_decay_by_source`` (falling back to ``_default``).
+    # ``temporal_default_decay_by_source``: dict[source_system, decay_days].
+    #   Must include a ``"_default"`` key used when ``source_system`` is
+    #   absent, None, empty, or unknown.
+    temporal_reference_wall_clock: bool = False
+    temporal_recency_floor_enabled: bool = False
+    temporal_per_source_decay: bool = False
+    temporal_default_decay_by_source: dict[str, int] = field(
+        default_factory=lambda: {
+            "slack": 3,
+            "email": 7,
+            "calendar": 14,
+            "salesforce": 180,
+            "_default": 14,
+        }
+    )
 
     # Coherence scoring (penalizes word-shuffled confounders)
     coherence_weight: float = 0.1
@@ -182,6 +224,27 @@ def _extract_occurred_at(item: Any) -> str | None:
     elif isinstance(item, dict):
         return item.get("occurred_at")
     return None
+
+
+def _extract_source_system(item: Any) -> str | None:
+    """Extract ``source_system`` string from a Chunk or dict item.
+
+    Returns ``None`` when the value is missing, empty, or the item shape
+    doesn't carry chunk metadata — callers fall back to ``"_default"`` in
+    that case. ``source_system`` is option<string> in the storage schema,
+    so we explicitly treat None and empty strings as "unknown source".
+    """
+    if isinstance(item, Chunk):
+        custom = item.metadata.custom if item.metadata else {}
+        value = custom.get("source_system")
+    elif isinstance(item, dict):
+        value = item.get("source_system")
+    else:
+        return None
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
 
 
 def _has_target_date(
@@ -343,6 +406,52 @@ class VectorCypherRetriever:
                 logger.debug(
                     f"Temporal signal: {temporal_signal.category.value} (confidence={temporal_signal.confidence:.2f})"
                 )
+
+            # Issue #567 A2: synthesize a RECENCY/CHANGE date floor when the
+            # category fires but the upstream resolver (dateparser) couldn't
+            # turn a bare adjective like "latest" / "recent" into a SQL
+            # filter. The veto check happens BEFORE synthesis so historical
+            # queries ("all-time", "ever", "history of …") stay unbounded.
+            #
+            # Synthesis runs at this call site — never inside
+            # ``TemporalResolver.resolve_fast`` — so callers on the EXPLICIT
+            # path (where ``temporal_filter`` is already populated) are
+            # unaffected, and the synthesis decision can use both the
+            # ``RetrieverConfig`` feature flag and the original query text.
+            synthetic_applied = False
+            anti_recency_veto = False
+            if (
+                self._config.temporal_recency_floor_enabled
+                and temporal_signal is not None
+                and temporal_signal.is_temporal
+                and temporal_filter is None
+                and params.default_window_days is not None
+            ):
+                from khora.query.temporal_detection import has_anti_recency_token
+
+                if has_anti_recency_token(query):
+                    anti_recency_veto = True
+                else:
+                    from khora.engines.skeleton.backends import TemporalFilter as _SynthTF
+
+                    temporal_filter = _SynthTF(
+                        occurred_after=datetime.now(UTC) - timedelta(days=params.default_window_days),
+                    )
+                    synthetic_applied = True
+                    logger.debug(
+                        "Synthesized RECENCY floor: occurred_after={} (window={}d, category={})",
+                        temporal_filter.occurred_after.isoformat(),
+                        params.default_window_days,
+                        temporal_signal.category.value,
+                    )
+
+            span.set_attribute("synthetic_temporal_filter_applied", synthetic_applied)
+            span.set_attribute("anti_recency_veto", anti_recency_veto)
+            if synthetic_applied or anti_recency_veto:
+                # bounded_text_hash keeps the query content out of the span
+                # as raw text (privacy + cardinality), but lets us correlate
+                # synthesis decisions with the request when debugging.
+                span.set_attribute("query_hash", bounded_text_hash(query))
 
             # Cache check
             cache_key = ""
@@ -2358,25 +2467,45 @@ class VectorCypherRetriever:
         results: list[FusedResult],
         *,
         decay_days_override: int | None = None,
+        reference_mode: Literal["wall_clock", "relative"] | None = None,
     ) -> dict[UUID, float]:
         """Calculate recency scores for temporal boosting.
 
-        Uses *relative* recency: the reference time is the newest occurred_at
-        in the result set (not wall-clock time).  This ensures benchmark data
-        from any era produces meaningful discrimination and that live data
-        (where max ≈ now) behaves identically to the old implementation.
+        Reference time selection (issue #567 A1):
+        - ``reference_mode="wall_clock"`` uses ``datetime.now(UTC)`` —
+          production-correct: if all retrieved chunks are old, the newest
+          stale chunk must NOT receive ``recency=1.0``.
+        - ``reference_mode="relative"`` uses ``max(occurred_at)`` over the
+          result set — required for benchmark replay where the dataset's
+          newest timestamp may be years in the past.
+        - ``reference_mode=None`` (default) resolves via:
+          ``KHORA_BENCH_MODE`` env var (read once at import) forces
+          ``"relative"`` unconditionally; otherwise the
+          ``RetrieverConfig.temporal_reference_wall_clock`` flag selects
+          ``"wall_clock"`` (True) or ``"relative"`` (False — legacy).
+
+        Decay window selection (issue #567 A4):
+        - When ``RetrieverConfig.temporal_per_source_decay`` is True, each
+          chunk's decay window is looked up from
+          ``temporal_default_decay_by_source[chunk.metadata.custom['source_system']]``
+          with fallback to the ``"_default"`` key when ``source_system`` is
+          None, empty, or absent from the dict.
+        - When the flag is False, behaviour is unchanged:
+          ``decay_days_override or self._config.recency_decay_days``.
 
         Args:
             results: Fused results with items containing occurred_at
-            decay_days_override: Override for decay_days (e.g. 7 for RECENCY category)
+            decay_days_override: Override for decay_days (e.g. 7 for RECENCY
+                category). Ignored when per-source decay is enabled.
+            reference_mode: Explicit override for the wall-clock vs relative
+                reference decision; ``None`` resolves from config + env.
 
         Returns:
             Dict mapping item_id -> recency score (0-1)
         """
-        decay_days = decay_days_override or self._config.recency_decay_days
         scores: dict[UUID, float] = {}
 
-        # First pass: extract all occurred_at timestamps and find the max
+        # First pass: extract all occurred_at timestamps.
         parsed_times: dict[UUID, datetime] = {}
         for r in results:
             occurred_at_str = _extract_occurred_at(r.item)
@@ -2389,12 +2518,49 @@ class VectorCypherRetriever:
                 except (ValueError, TypeError):
                     pass
 
-        # Relative reference: newest item in result set, fallback to wall-clock
-        now = max(parsed_times.values()) if parsed_times else datetime.now(UTC)
+        # Resolve reference mode from explicit arg → bench env → config flag.
+        # Bench-mode env wins to keep benchmark replays deterministic even
+        # when the production-correct config flag is otherwise True.
+        if reference_mode is None:
+            if _BENCH_MODE:
+                effective_mode: Literal["wall_clock", "relative"] = "relative"
+            elif self._config.temporal_reference_wall_clock:
+                effective_mode = "wall_clock"
+            else:
+                effective_mode = "relative"
+        else:
+            effective_mode = reference_mode
 
-        # Second pass: compute recency scores relative to reference time
+        if effective_mode == "wall_clock":
+            now = datetime.now(UTC)
+        else:  # "relative"
+            now = max(parsed_times.values()) if parsed_times else datetime.now(UTC)
+
+        # Per-source decay lookup.
+        per_source = self._config.temporal_per_source_decay
+        decay_map = self._config.temporal_default_decay_by_source if per_source else None
+
+        def _decay_for(item: Any) -> float:
+            """Resolve the decay window (in days) for a single result item."""
+            if not per_source or decay_map is None:
+                return float(decay_days_override or self._config.recency_decay_days)
+            src = _extract_source_system(item)
+            if src is not None and src in decay_map:
+                return float(decay_map[src])
+            # Fall back to the dict's _default, then to the static config
+            # recency_decay_days if _default is somehow absent.
+            fallback = decay_map.get("_default")
+            if fallback is None:
+                return float(self._config.recency_decay_days)
+            return float(fallback)
+
+        # Second pass: compute recency scores relative to reference time.
         for r in results:
             if r.item_id in parsed_times:
+                decay_days = _decay_for(r.item)
+                # Guard against pathological decay=0 (would div-by-zero).
+                if decay_days <= 0:
+                    decay_days = float(self._config.recency_decay_days)
                 days_old = (now - parsed_times[r.item_id]).total_seconds() / 86400.0
                 if self._config.recency_decay_type == "exponential":
                     half_life_lambda = math.log(2) / decay_days
