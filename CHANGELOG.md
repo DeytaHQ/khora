@@ -4,6 +4,134 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.11.0] — Temporal retrieval overhaul: scoring fixes + ingestion contract + entity-anchored fast path
+
+Three-phase rework of khora's temporal retrieval, addressing the production
+complaint that queries like *"what are the latest action items from recent
+meetings?"* returned stale records on corporate-data corpora (Slack, email,
+calendar, Salesforce). All new behavior is **feature-flagged off by
+default**; operators opt in per-namespace via `KHORA_QUERY_TEMPORAL_*` env
+vars. Existing consumers see no behavior change unless they enable flags.
+
+Closes [#567](https://github.com/DeytaHQ/khora/issues/567) (Phase A — scoring),
+[#568](https://github.com/DeytaHQ/khora/issues/568) (Phase B — ingestion),
+[#569](https://github.com/DeytaHQ/khora/issues/569) (Phase C — entity-anchored).
+
+### Added
+
+- **Phase A: scoring & retrieval (#567 / PR #571).**
+  - `_calculate_recency_scores(reference_mode="wall_clock" | "relative")` — wall-clock
+    is production-correct (was a relative max-in-set heuristic). `KHORA_BENCH_MODE=true`
+    forces `relative` for benchmark replay.
+  - Synthetic date floor for RECENCY/CHANGE queries with no parseable date
+    (e.g., bare "latest", "recent"). Defaults: RECENCY=30d, CHANGE=60d.
+  - `ANTI_RECENCY_TOKENS` veto list — historical / counterfactual queries
+    ("ever", "history of", "would have", "if we had", "back when", "at one
+    point", etc.) suppress the synthesized floor.
+  - **LLM disambiguation tier** — when Aho-Corasick fires RECENCY/CHANGE
+    AND the query contains an ambiguity-trigger token (`would`, `could`,
+    `if `, `previously`, etc.), a short LLM call classifies the query as
+    RECENT / HISTORICAL / COUNTERFACTUAL / NEUTRAL. Floor vetoed for
+    non-RECENT outputs. Per-query cache; bounded cost.
+  - Parallel "recency channel" — pure `ORDER BY occurred_at DESC LIMIT N`
+    SQL fused via RRF pool augmentation. Cosine relevance floor (0.40
+    default) gates which fresh-but-irrelevant chunks can enter.
+  - Per-source decay dict — Slack 3d / email 7d / calendar 14d / Salesforce
+    180d / `_default` 14d. Looked up via `chunk.metadata.custom["source_system"]`.
+  - pgvector `hnsw.iterative_scan = strict_order` capability-probed and
+    enabled when a temporal filter is set (avoids HNSW recall collapse
+    under selective filters).
+  - New public exports: `TemporalIntent`, `classify_temporal_intent_llm`,
+    `has_anti_recency_token`, `has_ambiguity_trigger`, `ANTI_RECENCY_TOKENS`.
+  - Seven new `QuerySettings.temporal_*` knobs gating each behavior.
+
+- **Phase B: ingestion contract (#568 / PR #573).**
+  - `khora.pipelines.ConnectorMetadata` — public `TypedDict(total=False)`
+    documenting the canonical metadata-field surface for connector authors.
+  - `khora.pipelines.SourceSystem` — `Literal["slack","email","calendar","salesforce","jira","linear","manual"]`.
+  - `khora.pipelines.validate_connector_metadata(metadata, source_type) -> list[str]` —
+    advisory warnings; connector CI runs it pre-ingest.
+  - `khora.pipelines.CANONICAL_TIMESTAMP_FIELDS` — tuple matching the extractor priority.
+  - Source-type-aware timestamp priority: `source_type in {calendar,meeting,event}`
+    now prefers `occurred_at` over `sent_at`.
+  - New span attribute `chunk.occurred_at.source = "metadata" | "ingest_fallback"`
+    on chunk construction. Operators can detect silent connector breakage.
+  - New metric `khora.ingest.source_timestamp.fallback_count` — counter,
+    bounded `source_type` label. Throttled WARN log when a canonical-source
+    connector misses the timestamp.
+  - `docs/extraction/ingestion-pipeline.md` § "Canonical metadata fields
+    per source" — full mapping table per source system.
+
+- **Phase C: entity-anchored fast path (#569 / PR #574).**
+  - New `QueryComplexity.TYPED_ENTITY_RECENT` routes queries matching
+    `(latest|most recent|newest|recent) (action items|decisions|blockers|risks|...)`
+    through a single Cypher fast path.
+  - New retriever method `_typed_entity_recent_retrieve()` — single
+    `MATCH ... MENTIONED_IN ... max(c.occurred_at) ORDER BY DESC` query
+    with status filter for ACTION_ITEM / COMMITMENT / OPEN_QUESTION
+    (excludes done / cancelled / completed / closed). Graceful fallback
+    when no typed entities exist or Neo4j is unavailable.
+  - New opt-in extraction skill `builtin:meetings` with 4 typed entity
+    types: **ACTION_ITEM** (assignee, due_by, status), **DECISION**
+    (decided_on, rationale), **BLOCKER** (blocking_for, severity), **RISK**
+    (likelihood, impact). High-precision prompt with anti-fabrication
+    guardrails.
+  - Composite index migration `028_typed_entity_recency_index` —
+    `(namespace_id, entity_type, created_at DESC)` on `entities`. Plus
+    matching Neo4j `entity_type_recency` index.
+  - Measurement scaffold for action-item extraction precision/recall
+    (`scripts/measure_action_item_extraction.py` + 5-example stub
+    fixture). 50-example expansion gates GA per the Devil's-Advocate
+    review.
+
+### Changed
+
+- **`RetrievalParams.prefer_current` decoupled from `temporal_sort`** (#569).
+  Regression fix: ORDINAL queries ("which came first") no longer filter
+  out historical entities by accident. Per-category: RECENCY / STATE_QUERY
+  / CHANGE → True; NONE / EXPLICIT / ORDINAL / AGGREGATE → False.
+
+### Telemetry contract
+
+Contract version 1.1 → 1.2 (additive only):
+- New spans: `khora.vectorcypher.recency_floor_synthesis`,
+  `khora.vectorcypher.recency_channel`,
+  `khora.vectorcypher.typed_entity_recent`,
+  `khora.ingest.chunk_temporal_attribution`.
+- New metrics: `khora.query.temporal.floor_applied_total`,
+  `khora.query.temporal.recency_channel_fired_total`,
+  `khora.recall.recency.query_to_top1_age_days`,
+  `khora.ingest.source_timestamp.fallback_count`.
+- All bounded labels per the cardinality rule; no `namespace_id` on any metric.
+
+### Benchmark validation (LoCoMo `--small`, 92 questions, 4 iterations)
+
+Final iteration (v4: floor=0.40, recency channel skipped on anti-recency/LLM
+veto) vs baseline:
+
+| Metric | Baseline | Treatment | Δ |
+|---|---:|---:|---:|
+| counterfactual_accuracy | 0.6667 | 0.6667 | ±0 |
+| abstention_accuracy | 0.4583 | 0.4583 | ±0 |
+| answer_accuracy | 0.5382 | 0.5481 | +1.0pp |
+| implicit_inference_accuracy | 0.7917 | 0.7917 | ±0 |
+| mrr | 0.6327 | 0.6401 | +0.7pp |
+| ndcg@15 | 0.6829 | 0.6909 | +0.8pp |
+| recall@15 | 0.8478 | 0.8587 | +1.1pp |
+| mean latency | 342.6ms | 363.3ms | +6% (LLM tier) |
+
+No regressions on counterfactual or abstention; meaningful gains on IR
+metrics. Production-shape benchmark with mixed-era timestamps tracked
+at [DeytaHQ/khora-benchmarks#301](https://github.com/DeytaHQ/khora-benchmarks/issues/301).
+
+### Acknowledgements
+
+Devil's-Advocate review predictions all came true and were addressed:
+- 14d floor regressing counterfactual (#10 in the original review) → tightened
+  defaults + anti-recency veto + LLM disambiguation.
+- Wall-clock switch tanking benchmark replay (#3) → `KHORA_BENCH_MODE` gate.
+- Bare-stopword false positives (#2) → narrowed `ANTI_RECENCY_TOKENS`.
+
 ## [0.10.8] — OTel-first telemetry, vanilla OpenTelemetry SDK extras, observability docs
 
 Closes [#564](https://github.com/DeytaHQ/khora/issues/564) — make khora's
