@@ -1015,15 +1015,31 @@ class VectorCypherRetriever:
         # recent N chunks (pure ORDER BY occurred_at DESC, no embedding) and
         # merge those that exceed the cosine relevance floor into the vector
         # pool. The existing RRF + recency boost then scores them alongside
-        # the cosine top-K. Two safety properties:
+        # the cosine top-K. Three safety properties:
         #   1. Pool-augmentation only — never replaces cosine candidates.
         #   2. Relevance gate prevents today's HR-all-hands from muscling
         #      into the top-K for a niche query (Devil's-Advocate demand #3).
+        #   3. Skipped when the floor synthesis was vetoed — historical /
+        #      counterfactual queries by definition don't benefit from
+        #      injecting recent chunks. Heuristic: when the floor flag is
+        #      on AND the signal is temporal AND the category has a
+        #      default_window AND temporal_filter is still None, synthesis
+        #      was vetoed (by anti-recency token or LLM disambiguation).
+        #      PR #571 LoCoMo --small showed running the channel anyway
+        #      cost ~16.7pp counterfactual_accuracy on a 6-q subset.
+        synthesis_vetoed = (
+            self._config.temporal_recency_floor_enabled
+            and temporal_signal is not None
+            and temporal_signal.is_temporal
+            and _tp.default_window_days is not None
+            and temporal_filter is None
+        )
         if (
             self._config.temporal_recency_channel_enabled
             and temporal_signal is not None
             and temporal_signal.is_temporal
             and _tp.default_window_days is not None
+            and not synthesis_vetoed
         ):
             # Intentionally pass temporal_filter=None: the recency channel's
             # job is to surface today's chunks even when the cosine channel
