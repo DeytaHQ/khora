@@ -58,6 +58,14 @@ class RetrievalParams:
     AND no anti-recency token is present in the query (see
     :data:`ANTI_RECENCY_TOKENS`). ``None`` means "do not synthesize a
     floor for this category."
+
+    ``prefer_current`` is decoupled from ``temporal_sort``. It controls
+    whether the retriever filters out entities/edges whose ``valid_until``
+    has passed. Set True only for categories where historical entities
+    are wrong (STATE_QUERY, RECENCY, CHANGE). ORDINAL queries
+    ("which came first") need historical entities to answer correctly,
+    so ``prefer_current`` is False there even though ``temporal_sort``
+    is True.
     """
 
     recency_weight: float
@@ -65,6 +73,7 @@ class RetrievalParams:
     decay_days_override: int | None = None
     recency_floor: float = 0.5  # Default floor for multiplicative recency
     default_window_days: int | None = None
+    prefer_current: bool = False
 
 
 # Category → retrieval behavior mapping
@@ -73,13 +82,29 @@ class RetrievalParams:
 # Conservative values protect non-temporal categories (implicit_inference,
 # abstention) while still discriminating temporal ones.
 RETRIEVAL_PARAMS: dict[TemporalCategory, RetrievalParams] = {
-    TemporalCategory.NONE: RetrievalParams(recency_weight=0.0, temporal_sort=False, recency_floor=0.5),
-    TemporalCategory.EXPLICIT: RetrievalParams(recency_weight=0.3, temporal_sort=False, recency_floor=0.5),
-    TemporalCategory.STATE_QUERY: RetrievalParams(recency_weight=0.5, temporal_sort=True, recency_floor=0.3),
-    TemporalCategory.ORDINAL: RetrievalParams(
-        recency_weight=0.3, temporal_sort=True, decay_days_override=None, recency_floor=0.5
+    TemporalCategory.NONE: RetrievalParams(
+        recency_weight=0.0, temporal_sort=False, recency_floor=0.5, prefer_current=False
     ),
-    TemporalCategory.AGGREGATE: RetrievalParams(recency_weight=0.0, temporal_sort=False, recency_floor=0.5),
+    TemporalCategory.EXPLICIT: RetrievalParams(
+        recency_weight=0.3, temporal_sort=False, recency_floor=0.5, prefer_current=False
+    ),
+    TemporalCategory.STATE_QUERY: RetrievalParams(
+        recency_weight=0.5, temporal_sort=True, recency_floor=0.3, prefer_current=True
+    ),
+    TemporalCategory.ORDINAL: RetrievalParams(
+        recency_weight=0.3,
+        temporal_sort=True,
+        decay_days_override=None,
+        recency_floor=0.5,
+        # ORDINAL queries ("which came first", "earliest") need historical
+        # entities — filtering by valid_until would discard the very rows
+        # that answer the question. Keep prefer_current=False here even
+        # though temporal_sort is True.
+        prefer_current=False,
+    ),
+    TemporalCategory.AGGREGATE: RetrievalParams(
+        recency_weight=0.0, temporal_sort=False, recency_floor=0.5, prefer_current=False
+    ),
     TemporalCategory.RECENCY: RetrievalParams(
         recency_weight=0.5,
         temporal_sort=True,
@@ -93,6 +118,7 @@ RETRIEVAL_PARAMS: dict[TemporalCategory, RetrievalParams] = {
         # ``classify_temporal_intent_llm``) catches counterfactual phrasings
         # that the anti-recency token list misses.
         default_window_days=30,
+        prefer_current=True,
     ),
     TemporalCategory.CHANGE: RetrievalParams(
         recency_weight=0.4,
@@ -100,6 +126,7 @@ RETRIEVAL_PARAMS: dict[TemporalCategory, RetrievalParams] = {
         decay_days_override=14,
         recency_floor=0.3,
         default_window_days=60,
+        prefer_current=True,
     ),
 }
 

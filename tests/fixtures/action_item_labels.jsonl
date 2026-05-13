@@ -1,0 +1,5 @@
+{"id": "ai-001", "text": "Bob: I'll investigate the Postgres outage by Friday.", "labels": [{"entity_type": "ACTION_ITEM", "name": "investigate the Postgres outage", "assignee": "Bob", "due_by": "Friday", "status": "open"}]}
+{"id": "ai-002", "text": "Alice: I'll send the pricing deck to legal by end of day.", "labels": [{"entity_type": "ACTION_ITEM", "name": "send the pricing deck to legal", "assignee": "Alice", "due_by": "end of day", "status": "open"}]}
+{"id": "ai-003-negative", "text": "Alice: we should probably think about the pricing review at some point.\nBob: yeah, maybe next quarter?", "labels": []}
+{"id": "ai-004-decision", "text": "Team agreed to ship the v2 migration on May 22 after the security review.", "labels": [{"entity_type": "DECISION", "name": "ship the v2 migration on May 22", "decided_on": "today"}]}
+{"id": "ai-005-blocker", "text": "We're blocked on the API contract from vendor Acme — can't ship until they reply.", "labels": [{"entity_type": "BLOCKER", "name": "API contract from vendor Acme", "blocking_for": "ship", "severity": "high"}]}

@@ -875,7 +875,7 @@ class VectorCypherRetriever:
                 entry_entity_ids=[e[0] for e in entry_entities],
                 namespace_id=namespace_id,
                 depth=depth,
-                prefer_current=_tp.temporal_sort,
+                prefer_current=_tp.prefer_current,
             )
         except _NEO4J_TRANSIENT_ERRORS as exc:
             logger.warning(
@@ -939,7 +939,7 @@ class VectorCypherRetriever:
                 temporal_filter=temporal_filter,
                 limit=limit * 2,  # Fetch more for fusion
                 temporal_sort=_tp.temporal_sort,
-                prefer_current=_tp.temporal_sort,
+                prefer_current=_tp.prefer_current,
             )
 
         # Step 6: Wait for parallel vector chunk search to complete
