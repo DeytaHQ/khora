@@ -12,7 +12,7 @@ make dev               # Start postgres + neo4j
 uv run alembic upgrade head                       # Run migrations
 ```
 
-CLI tooling (`extract`, `search`) lives in the separate [khora-cli](https://github.com/DeytaHQ/khora-cli) package (`uv pip install khora-cli`). Ontology tooling (construct / validate / preview) lives in [khora-explorer](https://github.com/DeytaHQ/khora-explorer) (`uv pip install khora-explorer`). khora is a Python library.
+CLI tooling (`extract`, `search`) lives in the separate `khora-cli` package (to be released soon). Ontology tooling (construct / validate / preview) lives in `khora-explorer` (to be released soon). khora is a Python library.
 
 ## Test Commands
 
@@ -26,11 +26,10 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 
 ## Test Infrastructure Isolation
 
-**Never reuse running Docker containers from other projects.** Integration tests must use their own Docker Compose stack (compose file in this repo), not containers from dokimion, other worktrees, or other developer projects. Before running integration tests:
+**Never reuse running Docker containers from other projects.** Integration tests must use their own Docker Compose stack (compose file in this repo), not containers from other worktrees or other developer projects. Before running integration tests:
 
 1. Ensure your test databases are started from THIS repo's compose file
-2. Do NOT connect to containers named `dokimion-*` — those belong to the integration testing platform
-3. If port conflicts arise, stop your own containers or use different ports — never repurpose another project's infrastructure
+2. If port conflicts arise, stop your own containers or use different ports — never repurpose another project's infrastructure
 
 ## Architecture
 
@@ -200,7 +199,7 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 
 ### Telemetry
 - **Public contract lives at `docs/telemetry-contract.json`** (with sibling explainer `docs/telemetry-contract.md`). When you add a span (`trace_span`), pipeline stage (`pipeline_stage` / `record_pipeline_stage`), metric (`metric_counter` / `metric_histogram` / `metric_gauge_callback`), event-type field, or new public export to `khora.telemetry.__all__`, you MUST update the contract JSON in the same PR. CI fails otherwise via `tests/unit/telemetry/test_contract.py` (10-test drift gate that walks the codebase with ripgrep).
-- **Public vs internal stability tags.** Items tagged `stability: public` in the contract are part of the OSS API surface — renaming or removing them requires a major version bump and prior coordination with downstream consumers (khora-benchmarks, khora-explorer, khora-cli). Items tagged `internal` may be renamed freely as long as the JSON is updated. Top-level engine entry points (`khora.recall`, `khora.remember`, `khora.vectorcypher.retrieve`) and operator-facing metrics (`khora.memory.recall.duration`, `khora.llm.tokens`, etc.) are public. Inner-loop spans (`khora.vectorcypher.coherence_boost`, `khora.vectorcypher.rrf_fusion`, etc.) are internal.
+- **Public vs internal stability tags.** Items tagged `stability: public` in the contract are part of the OSS API surface — renaming or removing them requires a major version bump and prior coordination with published consumer packages (khora-cli, khora-explorer). Items tagged `internal` may be renamed freely as long as the JSON is updated. Top-level engine entry points (`khora.recall`, `khora.remember`, `khora.vectorcypher.retrieve`) and operator-facing metrics (`khora.memory.recall.duration`, `khora.llm.tokens`, etc.) are public. Inner-loop spans (`khora.vectorcypher.coherence_boost`, `khora.vectorcypher.rrf_fusion`, etc.) are internal.
 - **Cardinality rule — never put `namespace_id` on a metric.** It is a span attribute and a log field only. Phase-0 audit measured 438 distinct namespace IDs over the production retention window in one deployment; Logfire and Prometheus bill per series, so a `namespace_id` label produces an unbounded cost curve. The same rule applies to any other attribute with cardinality ~O(tenants).
 - **Free-text span attributes.** Use `khora.telemetry.bounded_text_hash` (added in #504) for any free-text value (raw user query, document content, chunk text) — it returns a SHA1[:8] hash. Never put raw text on a span attribute: it is both a privacy hazard and a cardinality bomb.
 - **OTel semconv adopted for new attributes.** `gen_ai.*` for LLM (model, prompt tokens, completion tokens), `db.*` for storage backends, `code.*` for stack info. Keeps khora vendor-neutral over the OTel exporter chain.
@@ -210,8 +209,7 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **Telemetry collector is opt-in.** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording; without it, `NoOpCollector` is used (zero cost). Logfire integration is gated by `_HAS_LOGFIRE` — `trace_span()` yields a no-op when the optional `logfire` extra is absent.
 
 ### Downstream
-- The sibling packages `khora-cli`, `khora-explorer`, and `khora-benchmarks` consume khora's public API. `kb.storage` is a stable public API.
+- The published consumer packages `khora-cli` and `khora-explorer` consume khora's public API. `kb.storage` is a stable public API. The full stability policy is documented in `docs/consumers.md`.
 - **LLMUsage contract:** `LLMUsage` fields are part of the stable public API and are consumed by external cost-tracking integrations — changes require coordination.
-- **ExpertiseConfig contract:** stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination (consumed by khora-explorer, khora-benchmarks). `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract.
-- Any breaking change to the stable public API requires coordinated release with khora-cli, khora-explorer, khora-benchmarks. `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface.
-- `scripts/` is auto-deployed tooling — skip in audits.
+- **ExpertiseConfig contract:** stable API — `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination with published consumer packages. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract.
+- Any breaking change to the stable public API requires coordinated release with published consumer packages. `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface.
