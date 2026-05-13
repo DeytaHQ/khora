@@ -3584,3 +3584,19 @@ class TestKhoraInitDeytaCore:
         ), patch("khora.telemetry.config.TelemetryConfig.from_env", return_value=fail_cfg):
             kb = Khora()
         assert not kb._connected
+
+    def test_init_deyta_core_present_calls_validator(self) -> None:
+        """When deyta-core is present, _assert_no_str_typed_secrets is called with KhoraConfig."""
+        from khora.config import KhoraConfig
+
+        mock_validator = MagicMock()
+        warn_cfg = MagicMock()
+        warn_cfg.secret_typing_mode = "warn"
+        with patch("khora.khora._HAS_DEYTA_CORE", True), patch(
+            "khora.khora._assert_no_str_typed_secrets", mock_validator, create=True
+        ), patch("khora.khora.load_config", return_value=_mock_config()), patch(
+            "khora.telemetry.config.TelemetryConfig.from_env", return_value=warn_cfg
+        ):
+            kb = Khora()
+        mock_validator.assert_called_once_with(KhoraConfig, mode="warn")
+        assert not kb._connected

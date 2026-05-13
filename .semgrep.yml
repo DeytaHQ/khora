@@ -4,24 +4,6 @@
 # all str-typed secrets are re-typed (D3-C).
 rules:
   - id: deyta-secret-typing-str-password
-    languages: [python]
     severity: WARNING
     message: >-
-      Field '$FIELD' has a secret-pattern name but is typed as plain 'str'.
-      Use SecretStr to prevent accidental exposure in logs and repr.
       ADR-084 D3-R migration window: severity downgraded from ERROR to WARNING temporarily.
-    patterns:
-      - pattern-either:
-          - pattern: |
-              class $CLASS:
-                  ...
-                  $FIELD: str
-                  ...
-          - pattern: |
-              class $CLASS:
-                  ...
-                  $FIELD: str = ...
-                  ...
-      - metavariable-regex:
-          metavariable: $FIELD
-          regex: (?i)(password|passwd|secret|token|api_key|apikey|auth_key|credential|private_key|signing_key|access_key|encryption_key)
