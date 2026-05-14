@@ -13,6 +13,7 @@ from loguru import logger
 from khora.core.models.event import EventType, MemoryEvent
 
 from .embedding_filter import EmbeddingFilterCache
+from .match_dsl import matches as _match_dsl
 from .models import HookSubscription, SemanticFilter, SemanticHooksConfig
 
 
@@ -311,7 +312,8 @@ class HookDispatcher:
     def _passes_type_filter(event: MemoryEvent, filter: SemanticFilter) -> bool:
         """Check if an event passes the filter's type constraints.
 
-        Level 0 filtering — zero cost, just list membership checks.
+        Level 0 filtering — zero cost, just list membership checks plus
+        (Phase 2) the optional EventBridge-style ``match`` pattern.
         """
         data = event.data
 
@@ -325,6 +327,11 @@ class HookDispatcher:
         if filter.relationship_types and event.resource_type == "relationship":
             rel_type = data.get("relationship_type", "")
             if rel_type and rel_type not in filter.relationship_types:
+                return False
+
+        # Phase 2 (Item A, Issue #579): structural match DSL.
+        if filter.match is not None:
+            if not _match_dsl(filter.match, data):
                 return False
 
         return True

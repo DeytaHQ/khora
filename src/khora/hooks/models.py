@@ -124,6 +124,12 @@ class SemanticFilter:
     entity_types: list[str] = field(default_factory=list)
     relationship_types: list[str] = field(default_factory=list)
 
+    # EventBridge-style structural filter (Level 0, free). When set, the
+    # dispatcher evaluates this pattern against ``event.data`` after the
+    # entity_types / relationship_types checks. See ``khora.hooks.match_dsl``
+    # for operator reference. None = no structural filter.
+    match: dict[str, Any] | None = None
+
     # Examples for LLM evaluation (Level 2)
     examples: list[str] = field(default_factory=list)
     anti_examples: list[str] = field(default_factory=list)

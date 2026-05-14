@@ -27,6 +27,11 @@ class EventType(str, Enum):
     CHUNK_CREATED = "chunk.created"
     CHUNK_EMBEDDED = "chunk.embedded"
     CHUNK_DELETED = "chunk.deleted"
+    # Fired after all entity events for a single chunk have been dispatched.
+    # Carries the per-chunk entity set so subscribers can express
+    # co-occurrence filters like "alert when X and Y appear in the same
+    # chunk" — single-entity events cannot (Issue #579 Phase 2 Item B).
+    CHUNK_ENTITIES_RESOLVED = "chunk.entities_resolved"
 
     # Entity events
     ENTITY_CREATED = "entity.created"
