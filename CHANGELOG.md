@@ -623,7 +623,7 @@ Two deferred decisions for v0.10 address the embedded warts:
 - Codified the khora public API surface consumed by downstream packages (genesis, khora-benchmarks, khora-explorer, khora-cli).
 
 ### Removed
-- `khora` console script and CLI subcommands (`extract`, `search`) — moved to [khora-cli](https://github.com/DeytaHQ/khora-cli). Install with `uv pip install khora-cli` and run `uv run khora-cli extract` / `uv run khora-cli search`.
+- `khora` console script and CLI subcommands (`extract`, `search`) — moved to khora-cli. Install with `uv pip install khora-cli` and run `uv run khora-cli extract` / `uv run khora-cli search`.
 - `khora ontology` CLI subcommands (moved to khora-explorer)
 - `khora.discovery` package (moved to khora-explorer)
 - `khora.cli` package (entire subtree — `extract`, `search`, `_common`)
