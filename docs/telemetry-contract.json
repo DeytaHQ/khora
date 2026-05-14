@@ -860,9 +860,29 @@
       "type": "counter",
       "stability": "internal",
       "unit": "1",
-      "description": "Number of Level 2 hook evaluations refused by the per-namespace hourly token budget. Each throttle event corresponds to a fail-open outcome on the affected batch.",
+      "description": "Number of Level 2 hook evaluations refused by either the per-namespace or per-subscription hourly token budget. Each throttle event corresponds to a fail-open outcome on the affected batch.",
       "labels": [],
-      "_comment": "Issue #576 Phase 1, Item 7. NO namespace_id label — cardinality rule."
+      "_comment": "Issue #576 Phase 1, Item 7. Extended in #601 with the per-subscription budget. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.hooks.llm.cache_hits_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Level 2 hook evaluations short-circuited by the (filter, event_summary_hash) cache.",
+      "labels": [
+        {"name": "category", "values": ["match", "no_match"], "_comment": "Decision served from cache."}
+      ],
+      "_comment": "Issue #601. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.hooks.llm.cache_misses_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Level 2 hook evaluations that fell through the cache and required (or queued) an LLM call.",
+      "labels": [],
+      "_comment": "Issue #601. NO namespace_id label — cardinality rule."
     }
   ]
 }
