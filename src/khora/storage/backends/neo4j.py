@@ -2909,6 +2909,142 @@ RETURN count(r) AS updated
             async with self._session() as session:
                 await session.execute_write(_remap_relationships)
 
+    async def delete_entities_batch(
+        self,
+        entity_ids: list[UUID],
+        namespace_id: UUID,
+    ) -> int:
+        """Hard-delete entities by id, scoped to a namespace.
+
+        Used by the forget cascade to remove orphan entities (those whose
+        only ``source_document_ids`` value is the document being forgotten).
+        Unlike ``retire_orphaned_entities_batch`` this does not snapshot
+        into :EntityVersion — forget is a GDPR-style removal, not an audit
+        retirement.
+
+        Returns the number of nodes deleted.
+        """
+        if not entity_ids:
+            return 0
+
+        async def _delete(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                """
+                UNWIND $entity_ids AS eid
+                MATCH (e:Entity {id: eid, namespace_id: $namespace_id})
+                DETACH DELETE e
+                RETURN count(e) AS deleted
+                """,
+                entity_ids=[str(eid) for eid in entity_ids],
+                namespace_id=str(namespace_id),
+            )
+            record = await result.single()
+            return record["deleted"] if record else 0
+
+        async with self._session() as session:
+            return await session.execute_write(_delete)
+
+    async def delete_relationships_batch(self, relationship_ids: list[UUID]) -> int:
+        """Hard-delete relationships by their ``id`` property.
+
+        Sibling to :meth:`delete_entities_batch` for the relationship side
+        of the forget cascade. Matches edges across any direction since
+        Cypher's ``-[r]->`` is asymmetric; we use ``()-[r]-()`` and rely on
+        ``WITH DISTINCT`` to dedupe self-loop double-matches (same shape as
+        :meth:`remap_source_document_ids_batch`).
+
+        Returns the number of relationships deleted.
+        """
+        if not relationship_ids:
+            return 0
+
+        async def _delete(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                """
+                UNWIND $relationship_ids AS rid
+                MATCH ()-[r {id: rid}]-()
+                WITH DISTINCT r
+                DELETE r
+                RETURN count(r) AS deleted
+                """,
+                relationship_ids=[str(rid) for rid in relationship_ids],
+            )
+            record = await result.single()
+            return record["deleted"] if record else 0
+
+        async with self._session() as session:
+            return await session.execute_write(_delete)
+
+    async def remove_document_from_entity_sources_batch(
+        self,
+        entity_ids: list[UUID],
+        document_id: UUID,
+        namespace_id: UUID,
+    ) -> int:
+        """Strip ``document_id`` from survivor entities' source arrays.
+
+        Survivors are multi-source entities whose ``source_document_ids``
+        contains more than just the forgotten document; the forget cascade
+        keeps the node but removes the doc_id from ``source_document_ids``.
+
+        Returns the number of entities updated.
+        """
+        if not entity_ids:
+            return 0
+
+        async def _update(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                """
+                UNWIND $entity_ids AS eid
+                MATCH (e:Entity {id: eid, namespace_id: $namespace_id})
+                SET e.source_document_ids =
+                        [d IN coalesce(e.source_document_ids, []) WHERE d <> $doc_id]
+                RETURN count(e) AS updated
+                """,
+                entity_ids=[str(eid) for eid in entity_ids],
+                namespace_id=str(namespace_id),
+                doc_id=str(document_id),
+            )
+            record = await result.single()
+            return record["updated"] if record else 0
+
+        async with self._session() as session:
+            return await session.execute_write(_update)
+
+    async def remove_document_from_relationship_sources_batch(
+        self,
+        relationship_ids: list[UUID],
+        document_id: UUID,
+    ) -> int:
+        """Strip ``document_id`` from survivor relationships' source arrays.
+
+        Sibling to :meth:`remove_document_from_entity_sources_batch` for
+        the edge side of the cascade.
+
+        Returns the number of relationships updated.
+        """
+        if not relationship_ids:
+            return 0
+
+        async def _update(tx: AsyncManagedTransaction) -> int:
+            result = await tx.run(
+                """
+                UNWIND $relationship_ids AS rid
+                MATCH ()-[r {id: rid}]-()
+                WITH DISTINCT r
+                SET r.source_document_ids =
+                        [d IN coalesce(r.source_document_ids, []) WHERE d <> $doc_id]
+                RETURN count(r) AS updated
+                """,
+                relationship_ids=[str(rid) for rid in relationship_ids],
+                doc_id=str(document_id),
+            )
+            record = await result.single()
+            return record["updated"] if record else 0
+
+        async with self._session() as session:
+            return await session.execute_write(_update)
+
     async def fetch_document_extraction_state(
         self, document_id: UUID, *, namespace_id: UUID
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

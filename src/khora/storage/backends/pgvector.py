@@ -17,7 +17,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from khora.core.models import Chunk, ChunkMetadata
-from khora.db.models import Base, ChronicleEventModel, ChunkModel, EntityModel, MemoryFactModel
+from khora.db.models import (
+    Base,
+    ChronicleEventModel,
+    ChunkModel,
+    EntityModel,
+    MemoryFactModel,
+    RelationshipModel,
+)
 from khora.db.schema import sync_enum_values
 from khora.storage.backends.mixins import AsyncSessionMixin
 from khora.telemetry import trace
@@ -402,6 +409,68 @@ class PgVectorBackend(AsyncSessionMixin):
         async with self._get_session() as own_session:
             result = await own_session.execute(delete(ChunkModel).where(ChunkModel.document_id == document_id))
             await own_session.commit()
+            return result.rowcount  # type: ignore[unresolved-attribute]
+
+    async def delete_entities_batch(self, entity_ids: list[UUID]) -> int:
+        """Hard-delete entities by id.
+
+        Used by the forget cascade to remove orphan entities from pgvector
+        after the graph backend has dropped them.
+        """
+        if not entity_ids:
+            return 0
+        async with self._get_session() as session:
+            result = await session.execute(delete(EntityModel).where(EntityModel.id.in_(entity_ids)))
+            await session.commit()
+            return result.rowcount  # type: ignore[unresolved-attribute]
+
+    async def delete_relationships_batch(self, relationship_ids: list[UUID]) -> int:
+        """Hard-delete relationships by id.
+
+        Sibling to :meth:`delete_entities_batch`. ``relationships`` is not
+        actively written by pgvector today (edges live in the graph
+        backend) but the table exists and is kept consistent for any
+        downstream reader or future migration.
+        """
+        if not relationship_ids:
+            return 0
+        async with self._get_session() as session:
+            result = await session.execute(delete(RelationshipModel).where(RelationshipModel.id.in_(relationship_ids)))
+            await session.commit()
+            return result.rowcount  # type: ignore[unresolved-attribute]
+
+    async def remove_document_from_entity_sources(
+        self,
+        entity_ids: list[UUID],
+        document_id: UUID,
+    ) -> int:
+        """Strip ``document_id`` from survivor entities' ``source_document_ids``."""
+        if not entity_ids:
+            return 0
+        async with self._get_session() as session:
+            result = await session.execute(
+                update(EntityModel)
+                .where(EntityModel.id.in_(entity_ids))
+                .values(source_document_ids=func.array_remove(EntityModel.source_document_ids, document_id))
+            )
+            await session.commit()
+            return result.rowcount  # type: ignore[unresolved-attribute]
+
+    async def remove_document_from_relationship_sources(
+        self,
+        relationship_ids: list[UUID],
+        document_id: UUID,
+    ) -> int:
+        """Strip ``document_id`` from survivor relationships' ``source_document_ids``."""
+        if not relationship_ids:
+            return 0
+        async with self._get_session() as session:
+            result = await session.execute(
+                update(RelationshipModel)
+                .where(RelationshipModel.id.in_(relationship_ids))
+                .values(source_document_ids=func.array_remove(RelationshipModel.source_document_ids, document_id))
+            )
+            await session.commit()
             return result.rowcount  # type: ignore[unresolved-attribute]
 
     def _cosine_similarity(self, embedding_col, query_embedding: list[float]):

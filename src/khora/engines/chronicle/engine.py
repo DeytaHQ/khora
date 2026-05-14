@@ -2122,13 +2122,67 @@ class ChronicleEngine:
         storage = self._get_storage()
 
         # Verify namespace if provided
-        if namespace_id:
+        ns_id = namespace_id
+        if ns_id:
             document = await storage.get_document(document_id)
-            if document and document.namespace_id != namespace_id:
-                logger.warning(f"Document {document_id} not in namespace {namespace_id}")
+            if document and document.namespace_id != ns_id:
+                logger.warning(f"Document {document_id} not in namespace {ns_id}")
                 return False
+        else:
+            document = await storage.get_document(document_id)
+            if document is None:
+                return False
+            ns_id = document.namespace_id
+
+        await self._cascade_forget_extraction(document_id, ns_id)
 
         return await storage.delete_document(document_id)
+
+    async def _cascade_forget_extraction(self, document_id: UUID, namespace_id: UUID) -> None:
+        """Drop / decrement entities and relationships extracted from a document.
+
+        Hard-deletes orphans (single-source entities/relationships whose only
+        ``source_document_ids`` entry is ``document_id``) and strips
+        ``document_id`` from survivors' ``source_document_ids`` arrays in
+        both the graph and the vector backends. No-op when the graph backend
+        does not expose ``fetch_document_extraction_state`` (e.g. chronicle
+        pgvector-only deployments where the graph backend is absent).
+        """
+        storage = self._get_storage()
+        graph = storage.graph
+        vector = storage.vector
+        fetch = getattr(graph, "fetch_document_extraction_state", None)
+        if fetch is None:
+            return
+
+        entities, relationships = await fetch(document_id, namespace_id=namespace_id)
+
+        orphan_ent_ids = [UUID(e["id"]) for e in entities if e["source_document_count"] == 1]
+        survive_ent_ids = [UUID(e["id"]) for e in entities if e["source_document_count"] > 1]
+        orphan_rel_ids = [UUID(r["id"]) for r in relationships if r["source_document_count"] == 1]
+        survive_rel_ids = [UUID(r["id"]) for r in relationships if r["source_document_count"] > 1]
+
+        if orphan_ent_ids:
+            await graph.delete_entities_batch(orphan_ent_ids, namespace_id)  # type: ignore[unresolved-attribute]
+            if vector is not None and hasattr(vector, "delete_entities_batch"):
+                await vector.delete_entities_batch(orphan_ent_ids)
+        if orphan_rel_ids:
+            await graph.delete_relationships_batch(orphan_rel_ids)  # type: ignore[unresolved-attribute]
+            if vector is not None and hasattr(vector, "delete_relationships_batch"):
+                await vector.delete_relationships_batch(orphan_rel_ids)
+
+        if survive_ent_ids:
+            await graph.remove_document_from_entity_sources_batch(  # type: ignore[unresolved-attribute]
+                survive_ent_ids, document_id, namespace_id
+            )
+            if vector is not None and hasattr(vector, "remove_document_from_entity_sources"):
+                await vector.remove_document_from_entity_sources(survive_ent_ids, document_id)
+        if survive_rel_ids:
+            await graph.remove_document_from_relationship_sources_batch(  # type: ignore[unresolved-attribute]
+                survive_rel_ids, document_id
+            )
+            if vector is not None and hasattr(vector, "remove_document_from_relationship_sources"):
+                await vector.remove_document_from_relationship_sources(survive_rel_ids, document_id)
 
     @trace("khora.chronicle.remember_batch")
     async def remember_batch(
