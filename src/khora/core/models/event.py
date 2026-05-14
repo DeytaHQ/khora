@@ -58,6 +58,13 @@ class EventType(str, Enum):
     # Query events (for analytics)
     QUERY_EXECUTED = "query.executed"
 
+    # Recall/search events — fired by Khora.recall() so operators can
+    # subscribe to query-level signals without adding query-side filter
+    # mechanics (Phase 1 of #576).
+    RECALL_REQUESTED = "recall.requested"
+    RECALL_RESULTS_READY = "recall.results_ready"
+    RECALL_COMPLETED = "recall.completed"
+
 
 @dataclass
 class MemoryEvent:

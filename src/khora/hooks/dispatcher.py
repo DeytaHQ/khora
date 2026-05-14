@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from typing import Any
 from uuid import UUID
 
 from loguru import logger
@@ -43,11 +44,23 @@ class HookDispatcher:
         dispatcher.unsubscribe(sub_id)
     """
 
-    def __init__(self, *, max_concurrent: int = 10) -> None:
+    def __init__(
+        self,
+        *,
+        max_concurrent: int = 10,
+        callback_timeout_seconds: float = 30.0,
+    ) -> None:
         self._subscriptions: dict[str, list[HookSubscription]] = defaultdict(list)
         self._sub_by_id: dict[UUID, HookSubscription] = {}
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._embedding_cache = EmbeddingFilterCache()
+        self._callback_timeout_seconds = callback_timeout_seconds
+        # Filters waiting for description embedding. Populated on subscribe;
+        # drained by ``Khora.connect()`` via ``embed_pending_filters``.
+        # Closes the gap where operators write ``SemanticFilter(description=...)``
+        # per the docs and Level 1 silently never engages because no code
+        # ever populated ``filter.embedding``. Issue #576 Phase 1, Item 2.
+        self._pending_filters: dict[UUID, SemanticFilter] = {}
 
     # ------------------------------------------------------------------
     # Subscription management
@@ -87,9 +100,17 @@ class HookDispatcher:
         self._subscriptions[key].append(sub)
         self._sub_by_id[sub.id] = sub
 
-        # Register embedding for Level 1 filtering
-        if filter and filter.embedding is not None:
-            self._embedding_cache.register_filter(filter)
+        # Register embedding for Level 1 filtering. If the filter has a
+        # description but no embedding yet, queue it for auto-embedding by
+        # ``embed_pending_filters`` (called from Khora.connect()). Without
+        # this, operators following the docs (which show
+        # ``SemanticFilter(description=...)`` with no manual embed step)
+        # get silently degraded to Level 0. Issue #576 Phase 1, Item 2.
+        if filter:
+            if filter.embedding is not None:
+                self._embedding_cache.register_filter(filter)
+            elif filter.description:
+                self._pending_filters[filter.id] = filter
 
         logger.debug(
             "Hook registered: {} → {} (filter={})",
@@ -117,11 +138,62 @@ class HookDispatcher:
         """Remove all subscriptions."""
         self._subscriptions.clear()
         self._sub_by_id.clear()
+        self._pending_filters.clear()
 
     @property
     def subscription_count(self) -> int:
         """Total number of active subscriptions."""
         return len(self._sub_by_id)
+
+    async def embed_pending_filters(self, embedder: Any) -> int:
+        """Embed any filters that were registered with a description but
+        no precomputed embedding. Drains ``self._pending_filters``.
+
+        Called from ``Khora.connect()`` so operators who write
+        ``SemanticFilter(description="...", similarity_threshold=0.7)``
+        per the docs actually get Level 1 (embedding similarity) gating —
+        prior to Issue #576 Phase 1 they silently fell back to Level 0.
+
+        Filters subscribed after connect() also drain through this when a
+        matching event fires, by re-invoking ``embed_pending_filters``
+        opportunistically. Safe to call multiple times; idempotent.
+
+        Args:
+            embedder: Anything with ``async embed_batch(texts) -> list[list[float]]``.
+                ``khora.extraction.embedders.LiteLLMEmbedder`` is the
+                standard implementation.
+
+        Returns:
+            Number of filters that had their embedding populated this call.
+        """
+        if not self._pending_filters:
+            return 0
+
+        # Snapshot under no lock — registration is append-only; the worst
+        # case is we miss a filter registered concurrently and pick it up
+        # the next call.
+        pending = list(self._pending_filters.values())
+        descriptions = [f.description for f in pending]
+        try:
+            embeddings = await embedder.embed_batch(descriptions)
+        except Exception as exc:
+            logger.warning(
+                "Failed to auto-embed {} pending hook filters: {}. "
+                "Level 1 (cosine similarity) gating will remain inactive "
+                "for these filters until the next call.",
+                len(pending),
+                exc,
+            )
+            return 0
+
+        embedded = 0
+        for filt, emb in zip(pending, embeddings, strict=True):
+            filt.embedding = emb
+            self._embedding_cache.register_filter(filt)
+            self._pending_filters.pop(filt.id, None)
+            embedded += 1
+        logger.debug("Auto-embedded {} hook filters for Level 1 gating", embedded)
+        return embedded
 
     # ------------------------------------------------------------------
     # Event dispatch
@@ -177,11 +249,27 @@ class HookDispatcher:
         if not matching:
             return 0
 
-        # Fire callbacks concurrently with semaphore
+        # Fire callbacks concurrently with semaphore. Each callback is
+        # wrapped in ``asyncio.wait_for`` so a hung operator-supplied
+        # callback can't stall ingest indefinitely — honors the
+        # previously-dead ``callback_timeout_seconds`` config field
+        # (Issue #576 Phase 1, Item 3).
         async def _safe_invoke(sub: HookSubscription) -> None:
             async with self._semaphore:
                 try:
-                    await sub.callback(event)
+                    await asyncio.wait_for(
+                        sub.callback(event),
+                        timeout=self._callback_timeout_seconds,
+                    )
+                except TimeoutError:
+                    cb_name = getattr(sub.callback, "__name__", "callback")
+                    logger.warning(
+                        "Hook callback {} timed out after {}s for event {}.{}",
+                        cb_name,
+                        self._callback_timeout_seconds,
+                        event.event_type.value if isinstance(event.event_type, EventType) else event.event_type,
+                        event.resource_id,
+                    )
                 except Exception:
                     cb_name = getattr(sub.callback, "__name__", "callback")
                     logger.warning(

@@ -1163,6 +1163,12 @@ async def process_document(
                         ]
                         await temporal_store.create_chunks_batch(temporal_chunks)
 
+        # Entity events are built in _store_entities but dispatched AFTER
+        # _embed_entities so the payload can carry data["embedding"]. See
+        # Issue #576 Phase 1 (Level 1 unreachable bug). The list is shared
+        # across both closures via lexical scoping.
+        pending_entity_events: list[MemoryEvent] = []
+
         async def _store_entities() -> tuple[list[tuple[Entity, bool]], dict[str, str], list[Entity]]:
             """Store entities with deduplication. Returns (results, id_mapping, entities_needing_embeddings)."""
             async with pipeline_stage(
@@ -1208,10 +1214,15 @@ async def process_document(
                         f"(missing: {len(missing_ids)}, extra: {len(extra_ids)})"
                     )
 
-                # Dispatch entity hooks for each upserted entity
+                # Build entity events but DEFER dispatch until after
+                # _embed_entities completes, so the event payload can carry
+                # ``data["embedding"]``. Without this, the dispatcher's
+                # Level 1 (embedding-similarity) gate is structurally
+                # unreachable because entity events fire BEFORE the parallel
+                # embedding branch finishes (Issue #576, Phase 1, Item 1).
                 for entity, is_new in upsert_results:
                     event_type = "entity.created" if is_new else "entity.updated"
-                    await storage.dispatch_hook(
+                    pending_entity_events.append(
                         MemoryEvent(
                             namespace_id=document.namespace_id,
                             event_type=EventType(event_type),
@@ -1224,6 +1235,11 @@ async def process_document(
                                 "confidence": entity.confidence,
                                 "is_new": is_new,
                                 "document_id": str(document.id),
+                                # ``embedding`` populated by _embed_entities
+                                # below for entities that got one this run;
+                                # left None for those already embedded or
+                                # filtered out by skip_embedding_entity_types.
+                                "embedding": entity.embedding,
                             },
                         )
                     )
@@ -1334,6 +1350,17 @@ async def process_document(
                 ]
                 await storage.update_entity_embeddings_batch(updates)
                 _ee_ctx["output_count"] = len(embeddable)
+
+                # Backfill ``data["embedding"]`` on any deferred entity
+                # events so the hook dispatcher's Level 1 cosine gate is
+                # reachable (Issue #576). Index by entity.id to handle the
+                # case where a chunk's entity set was reordered.
+                embedding_by_entity_id = {
+                    entity.id: embedding for entity, embedding in zip(embeddable, entity_embeddings)
+                }
+                for evt in pending_entity_events:
+                    if evt.resource_id in embedding_by_entity_id:
+                        evt.data["embedding"] = embedding_by_entity_id[evt.resource_id]
             logger.debug(f"Document {document.id}: generated embeddings for {len(embeddable)} entities")
             return len(embeddable)
 
@@ -1440,6 +1467,12 @@ async def process_document(
             _timed_store_relationships(),
         )
         _phase_times["entity_embed+rel_storage"] = _time.perf_counter() - _t0
+
+        # Dispatch entity events now that embeddings (if any) are populated.
+        # Deferred from _store_entities so Level 1 of the hook cascade is
+        # reachable for entities that needed embedding (Issue #576 Phase 1).
+        for _evt in pending_entity_events:
+            await storage.dispatch_hook(_evt)
 
         # Mark as completed
         document.mark_completed(len(chunks), len(entities), stored_count)

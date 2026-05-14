@@ -454,6 +454,18 @@ class Khora:
             except (AttributeError, TypeError):
                 pass  # Mock or non-standard engine — hooks won't fire
 
+        # Drain any hook filters that were registered with a description
+        # but no precomputed embedding (Issue #576 Phase 1, Item 2). After
+        # this, operators who wrote SemanticFilter(description="...") per
+        # the docs actually get Level 1 (cosine similarity) gating.
+        if hasattr(self, "_hook_dispatcher"):
+            embedder = getattr(self._engine, "_embedder", None)
+            if embedder is not None:
+                try:
+                    await self._hook_dispatcher.embed_pending_filters(embedder)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("Failed to drain pending hook-filter embeddings: {}", exc)
+
         self._connected = True
         logger.info("Khora connected")
 
@@ -1766,9 +1778,14 @@ class Khora:
 
             hooks_config = getattr(self._config, "hooks", None)
             max_concurrent = 10
+            callback_timeout = 30.0
             if hooks_config:
                 max_concurrent = getattr(hooks_config, "max_concurrent_callbacks", 10)
-            self._hook_dispatcher = HookDispatcher(max_concurrent=max_concurrent)
+                callback_timeout = getattr(hooks_config, "callback_timeout_seconds", 30.0)
+            self._hook_dispatcher = HookDispatcher(
+                max_concurrent=max_concurrent,
+                callback_timeout_seconds=callback_timeout,
+            )
         return self._hook_dispatcher
 
     @property
