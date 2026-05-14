@@ -51,6 +51,7 @@ def pagerank(
     damping: float = 0.85,
     max_iter: int = 100,
     tol: float = 1e-6,
+    personalization: list[float] | None = None,
 ) -> list[float]: ...
 def build_chunk_edges(
     n_chunks: int,

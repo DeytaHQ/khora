@@ -240,6 +240,49 @@ class TestPageRank:
         scores = accel.pagerank(4, edges, damping=0.85)
         assert scores[0] > scores[1]
 
+    # -----------------------------------------------------------------------
+    # Personalized PageRank (Issue #597)
+    # -----------------------------------------------------------------------
+
+    def test_ppr_seeded_chain(self):
+        """PPR on a 3-node chain seeded at node 0: seed dominates, then 1, then 2."""
+        edges = [(0, 1, 1.0), (1, 2, 1.0)]
+        scores = accel.pagerank(3, edges, damping=0.85, max_iter=200, tol=1e-8, personalization=[1.0, 0.0, 0.0])
+        assert scores[0] > scores[1]
+        assert scores[1] > scores[2]
+
+    def test_ppr_uniform_matches_default(self):
+        """An explicit uniform personalization vector matches None (standard PageRank)."""
+        edges = [(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)]
+        default = accel.pagerank(3, edges, damping=0.85, max_iter=200, tol=1e-9)
+        uniform = accel.pagerank(3, edges, damping=0.85, max_iter=200, tol=1e-9, personalization=[1.0 / 3] * 3)
+        for d, u in zip(default, uniform, strict=True):
+            assert d == pytest.approx(u, abs=1e-6)
+
+    def test_ppr_length_mismatch_falls_back_to_uniform(self):
+        """Wrong-length vector → uniform fallback; must not raise."""
+        edges = [(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)]
+        scores = accel.pagerank(3, edges, damping=0.85, max_iter=100, tol=1e-6, personalization=[1.0, 0.0])
+        # symmetric cycle + uniform → equal scores
+        assert scores[0] == pytest.approx(scores[1], abs=1e-3)
+        assert scores[1] == pytest.approx(scores[2], abs=1e-3)
+
+    def test_ppr_negatives_clipped(self):
+        """Negative entries clipped to 0; non-negative subset L1-normalized."""
+        edges = [(0, 1, 1.0), (1, 2, 1.0)]
+        # Seed [0.7, -1.0, 0.3] → clipped to [0.7, 0, 0.3] → normalized [0.7, 0, 0.3]
+        scores = accel.pagerank(3, edges, damping=0.85, max_iter=200, tol=1e-8, personalization=[0.7, -1.0, 0.3])
+        # Node 0 has the most mass and seeds node 1 via the edge; node 2 is also
+        # seeded directly and is a sink with no out-edge, so it accumulates more.
+        assert scores[0] > 0
+        assert scores[2] > 0
+
+    def test_ppr_python_fallback_seeded_chain(self, force_python):
+        edges = [(0, 1, 1.0), (1, 2, 1.0)]
+        scores = accel.pagerank(3, edges, damping=0.85, max_iter=200, tol=1e-8, personalization=[1.0, 0.0, 0.0])
+        assert scores[0] > scores[1]
+        assert scores[1] > scores[2]
+
 
 # ---------------------------------------------------------------------------
 # Build chunk edges
