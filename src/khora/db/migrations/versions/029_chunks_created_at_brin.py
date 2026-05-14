@@ -29,7 +29,17 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _is_postgres() -> bool:
+    return op.get_bind().dialect.name == "postgresql"
+
+
 def upgrade() -> None:
+    # BRIN and ``CREATE INDEX CONCURRENTLY`` are Postgres-only. The
+    # sqlite_lance test fixtures run the full Alembic chain against
+    # SQLite, so we skip silently on non-Postgres dialects rather than
+    # emit syntax SQLite cannot parse.
+    if not _is_postgres():
+        return
     with op.get_context().autocommit_block():
         op.execute(
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_chunks_created_brin "
@@ -38,5 +48,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not _is_postgres():
+        return
     with op.get_context().autocommit_block():
         op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_chunks_created_brin")
