@@ -13,7 +13,7 @@ from loguru import logger
 from khora.core.models.event import EventType, MemoryEvent
 
 from .embedding_filter import EmbeddingFilterCache
-from .models import HookSubscription, SemanticFilter
+from .models import HookSubscription, SemanticFilter, SemanticHooksConfig
 
 
 class HookDispatcher:
@@ -49,6 +49,7 @@ class HookDispatcher:
         *,
         max_concurrent: int = 10,
         callback_timeout_seconds: float = 30.0,
+        config: SemanticHooksConfig | None = None,
     ) -> None:
         self._subscriptions: dict[str, list[HookSubscription]] = defaultdict(list)
         self._sub_by_id: dict[UUID, HookSubscription] = {}
@@ -61,6 +62,11 @@ class HookDispatcher:
         # per the docs and Level 1 silently never engages because no code
         # ever populated ``filter.embedding``. Issue #576 Phase 1, Item 2.
         self._pending_filters: dict[UUID, SemanticFilter] = {}
+        # Level 2 (LLM yes/no) — opt-in via SemanticHooksConfig. Issue #576
+        # Phase 1, Item 7. The evaluator is built lazily on first need so
+        # the LiteLLM import only happens when Level 2 actually runs.
+        self._config: SemanticHooksConfig | None = config
+        self._llm_evaluator: Any = None
 
     # ------------------------------------------------------------------
     # Subscription management
@@ -243,6 +249,21 @@ class HookDispatcher:
                     )
                     if not passes:
                         continue
+
+            # Level 2: nano-LLM yes/no (Issue #576 Phase 1, Item 7).
+            # Only engages when:
+            #   - operator opted in via KHORA_HOOKS_LLM_EVALUATION_ENABLED
+            #   - filter supplied positive examples (anchors the prompt)
+            # Fails open on any infrastructure trouble — Level 1 already
+            # cosine-matched, so a flaky nano tier must not drop the match.
+            if self._config is not None and self._config.llm_evaluation_enabled and sub.filter and sub.filter.examples:
+                if self._llm_evaluator is None:
+                    from .llm_evaluator import LLMFilterEvaluator
+
+                    self._llm_evaluator = LLMFilterEvaluator(self._config)
+                passes_llm = await self._llm_evaluator.evaluate(event, sub.filter)
+                if not passes_llm:
+                    continue
 
             matching.append(sub)
 

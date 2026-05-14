@@ -1865,6 +1865,7 @@ class Khora:
             self._hook_dispatcher = HookDispatcher(
                 max_concurrent=max_concurrent,
                 callback_timeout_seconds=callback_timeout,
+                config=hooks_config,
             )
         return self._hook_dispatcher
 
