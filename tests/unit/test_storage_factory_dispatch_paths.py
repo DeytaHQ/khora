@@ -135,8 +135,8 @@ class TestSurrealDBCoordinator:
         # would permanently bind the mock in the module's namespace, leaking
         # mock state into sibling tests (test_from_config_* in
         # TestRelationalAdapterLifecycle) when run under xdist -n auto.
-        import khora.storage.backends.surrealdb.relational  # noqa: F401
         import khora.storage.backends.surrealdb.event_store  # noqa: F401
+        import khora.storage.backends.surrealdb.relational  # noqa: F401
 
         rel_cls = MagicMock(return_value=MagicMock(name="rel"))
         vec_cls = MagicMock(return_value=MagicMock(name="vec"))
