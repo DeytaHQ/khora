@@ -109,6 +109,13 @@ def _collect_chunk_events(storage_mock) -> list[MemoryEvent]:
     return events
 
 
+def _fake_embedder() -> MagicMock:
+    """Build a fake LiteLLMEmbedder that returns deterministic embeddings."""
+    fake = MagicMock()
+    fake.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536 for _ in texts])
+    return fake
+
+
 @pytest.mark.unit
 class TestChunkEntitiesResolved:
     @pytest.mark.asyncio
@@ -131,6 +138,7 @@ class TestChunkEntitiesResolved:
             patch("khora.pipelines.tasks.chunk_document", new=AsyncMock(return_value=[chunk])),
             patch("khora.pipelines.tasks.embed_chunks", new=AsyncMock(return_value=[chunk])),
             patch("khora.pipelines.tasks.extract_entities", new=AsyncMock(return_value=(entities, []))),
+            patch("khora.extraction.embedders.LiteLLMEmbedder", return_value=_fake_embedder()),
         ):
             await process_document(
                 document,
@@ -169,6 +177,7 @@ class TestChunkEntitiesResolved:
             patch("khora.pipelines.tasks.chunk_document", new=AsyncMock(return_value=[chunk])),
             patch("khora.pipelines.tasks.embed_chunks", new=AsyncMock(return_value=[chunk])),
             patch("khora.pipelines.tasks.extract_entities", new=AsyncMock(return_value=(entities, []))),
+            patch("khora.extraction.embedders.LiteLLMEmbedder", return_value=_fake_embedder()),
         ):
             await process_document(
                 document,
@@ -201,6 +210,7 @@ class TestChunkEntitiesResolved:
             patch("khora.pipelines.tasks.chunk_document", new=AsyncMock(return_value=[chunk_a])),
             patch("khora.pipelines.tasks.embed_chunks", new=AsyncMock(return_value=[chunk_a])),
             patch("khora.pipelines.tasks.extract_entities", new=AsyncMock(return_value=(entities_a, []))),
+            patch("khora.extraction.embedders.LiteLLMEmbedder", return_value=_fake_embedder()),
         ):
             await process_document(
                 document_a,
@@ -223,6 +233,7 @@ class TestChunkEntitiesResolved:
             patch("khora.pipelines.tasks.chunk_document", new=AsyncMock(return_value=[chunk_b])),
             patch("khora.pipelines.tasks.embed_chunks", new=AsyncMock(return_value=[chunk_b])),
             patch("khora.pipelines.tasks.extract_entities", new=AsyncMock(return_value=(entities_b, []))),
+            patch("khora.extraction.embedders.LiteLLMEmbedder", return_value=_fake_embedder()),
         ):
             await process_document(
                 document_b,
@@ -251,6 +262,7 @@ class TestChunkEntitiesResolved:
             patch("khora.pipelines.tasks.chunk_document", new=AsyncMock(return_value=[chunk])),
             patch("khora.pipelines.tasks.embed_chunks", new=AsyncMock(return_value=[chunk])),
             patch("khora.pipelines.tasks.extract_entities", new=AsyncMock(return_value=(entities, []))),
+            patch("khora.extraction.embedders.LiteLLMEmbedder", return_value=_fake_embedder()),
         ):
             await process_document(
                 document,
@@ -292,6 +304,7 @@ class TestChunkEntitiesResolved:
             patch("khora.pipelines.tasks.chunk_document", new=AsyncMock(return_value=[chunk_a, chunk_b])),
             patch("khora.pipelines.tasks.embed_chunks", new=AsyncMock(return_value=[chunk_a, chunk_b])),
             patch("khora.pipelines.tasks.extract_entities", new=AsyncMock(return_value=(entities, []))),
+            patch("khora.extraction.embedders.LiteLLMEmbedder", return_value=_fake_embedder()),
         ):
             await process_document(
                 document,
@@ -336,6 +349,7 @@ class TestChunkEntitiesResolved:
             patch("khora.pipelines.tasks.chunk_document", new=AsyncMock(return_value=[chunk])),
             patch("khora.pipelines.tasks.embed_chunks", new=AsyncMock(return_value=[chunk])),
             patch("khora.pipelines.tasks.extract_entities", new=AsyncMock(return_value=(entities, []))),
+            patch("khora.extraction.embedders.LiteLLMEmbedder", return_value=_fake_embedder()),
         ):
             await process_document(
                 document,
