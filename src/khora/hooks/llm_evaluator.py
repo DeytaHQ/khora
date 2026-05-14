@@ -37,12 +37,14 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
 
+from khora.telemetry import bounded_text_hash
 from khora.telemetry.metrics import metric_counter
 
 from .models import SemanticFilter, SemanticHooksConfig
@@ -64,6 +66,14 @@ _TOKEN_COUNTER = metric_counter(
 _THROTTLE_COUNTER = metric_counter(
     "khora.hooks.llm.throttled_total",
     description="Level 2 hook evaluations refused by per-namespace token budget.",
+)
+_CACHE_HIT_COUNTER = metric_counter(
+    "khora.hooks.llm.cache_hits_total",
+    description="Level 2 hook evaluations short-circuited by the (event_summary, filter) cache.",
+)
+_CACHE_MISS_COUNTER = metric_counter(
+    "khora.hooks.llm.cache_misses_total",
+    description="Level 2 hook evaluations not found in the (event_summary, filter) cache.",
 )
 
 
@@ -103,6 +113,20 @@ class _PendingEvaluation:
     future: asyncio.Future[bool]
 
 
+def _event_summary_hash(event: MemoryEvent) -> str:
+    """Bounded-cardinality hash of the LLM-relevant event surface.
+
+    Matches the fields the user message includes (name + type + description).
+    Different event shapes that produce the same prompt body share a cache
+    entry; events that differ in any of those fields don't collide.
+    """
+    data = event.data
+    name = str(data.get("name", ""))[:100]
+    etype = str(data.get("entity_type", data.get("relationship_type", "")))[:50]
+    descr = str(data.get("description", ""))[:200]
+    return bounded_text_hash(f"{etype}|{name}|{descr}")
+
+
 class LLMFilterEvaluator:
     """Level 2 micro-batched LLM evaluator. See module docstring."""
 
@@ -117,9 +141,14 @@ class LLMFilterEvaluator:
         self._batch_size = batch_size if batch_size is not None else config.llm_batch_size
         self._batch_flush_ms = batch_flush_ms if batch_flush_ms is not None else config.llm_batch_flush_ms
         self._budgets: dict[UUID | None, _NamespaceBudget] = {}
+        # Per-subscription (filter) budget; same window as the namespace cap.
+        self._subscription_budgets: dict[UUID, _NamespaceBudget] = {}
         self._queue: list[_PendingEvaluation] = []
         self._queue_lock = asyncio.Lock()
         self._flush_task: asyncio.Task[None] | None = None
+        # (filter_id, event_summary_hash) → (decision, expires_at_monotonic).
+        # OrderedDict gives us LRU semantics via move_to_end on hit.
+        self._cache: OrderedDict[tuple[UUID, str], tuple[bool, float]] = OrderedDict()
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -137,6 +166,14 @@ class LLMFilterEvaluator:
         error, LLM exception). Level 1 already passed; we will not drop a
         cosine-similar match because the LLM tier is flaky.
         """
+        # Cache short-circuit: identical (filter, event_summary) pairs in the
+        # recent past skip the LLM entirely. Issue #601.
+        cached = self._cache_lookup(filter.id, event)
+        if cached is not None:
+            _CACHE_HIT_COUNTER.add(1, attributes={"category": "match" if cached else "no_match"})
+            return cached
+        _CACHE_MISS_COUNTER.add(1)
+
         loop = asyncio.get_event_loop()
         future: asyncio.Future[bool] = loop.create_future()
 
@@ -206,7 +243,12 @@ class LLMFilterEvaluator:
         prompt_estimate = self._estimate_input_tokens(filt, items)
         output_estimate = 25 * len(items)  # ~25 tokens per JSON result object
 
-        if not self._charge_budget(namespace_id, prompt_estimate, output_estimate):
+        if not self._charge_budget(
+            namespace_id,
+            prompt_estimate,
+            output_estimate,
+            subscription_id=filt.id,
+        ):
             _EVAL_COUNTER.add(len(items), attributes={"category": "budget_exceeded"})
             _THROTTLE_COUNTER.add(1)
             for p in items:
@@ -246,6 +288,9 @@ class LLMFilterEvaluator:
             if not p.future.done():
                 p.future.set_result(decision)
             _EVAL_COUNTER.add(1, attributes={"category": "match" if decision else "no_match"})
+            # Cache so future events with the same (filter, event_summary)
+            # short-circuit. Issue #601.
+            self._cache_store(p.filter.id, p.event, decision)
 
     # ------------------------------------------------------------------
     # LLM call + parsing
@@ -352,27 +397,67 @@ class LLMFilterEvaluator:
         namespace_id: UUID | None,
         input_tokens: int,
         output_tokens: int,
+        *,
+        subscription_id: UUID | None = None,
     ) -> bool:
-        """Charge the namespace bucket. Returns False if budget exceeded."""
-        cap = self._config.llm_max_tokens_per_namespace_per_hour
-        if cap <= 0:
-            return True
+        """Charge the namespace bucket (and the per-subscription bucket if
+        configured). Returns False if either cap would be exceeded.
 
+        Per-subscription budget (Issue #601) is enforced in addition to the
+        namespace cap so one noisy filter cannot drain the namespace's hourly
+        allowance. The namespace cap remains the global backstop.
+        """
+        total_charge = input_tokens + output_tokens
+        ns_cap = self._config.llm_max_tokens_per_namespace_per_hour
+        sub_cap = self._config.llm_max_tokens_per_subscription_per_hour
+
+        # Per-subscription check first (cheaper to evict a single noisy filter).
+        if sub_cap > 0 and subscription_id is not None:
+            if not self._charge_bucket(
+                self._subscription_budgets,
+                subscription_id,
+                total_charge,
+                sub_cap,
+                label="subscription",
+            ):
+                return False
+
+        if ns_cap <= 0:
+            return True
+        return self._charge_bucket(
+            self._budgets,
+            namespace_id,
+            total_charge,
+            ns_cap,
+            label="namespace",
+        )
+
+    @staticmethod
+    def _charge_bucket(
+        store: dict,
+        key,
+        charge: int,
+        cap: int,
+        *,
+        label: str,
+    ) -> bool:
+        """Apply a charge to one rolling-hour bucket. Returns False on breach."""
         now = time.monotonic()
-        bucket = self._budgets.get(namespace_id)
+        bucket = store.get(key)
         if bucket is None or (now - bucket.window_started_at) >= _BUDGET_WINDOW_SECONDS:
             bucket = _NamespaceBudget(window_started_at=now)
-            self._budgets[namespace_id] = bucket
+            store[key] = bucket
 
-        projected = bucket.tokens_used + input_tokens + output_tokens
+        projected = bucket.tokens_used + charge
         if projected > cap:
             if not bucket.warned_in_window:
                 logger.warning(
-                    "Level 2 hook LLM budget exceeded for namespace {} "
-                    "({} + {} would exceed cap {}). Failing open until window resets.",
-                    namespace_id,
+                    "Level 2 hook LLM budget exceeded for {} {} ({} + {} would exceed cap {}). "
+                    "Failing open until window resets.",
+                    label,
+                    key,
                     bucket.tokens_used,
-                    input_tokens + output_tokens,
+                    charge,
                     cap,
                 )
                 bucket.warned_in_window = True
@@ -380,6 +465,39 @@ class LLMFilterEvaluator:
 
         bucket.tokens_used = projected
         return True
+
+    # ------------------------------------------------------------------
+    # Cache (Issue #601)
+    # ------------------------------------------------------------------
+
+    def _cache_lookup(self, filter_id: UUID, event: MemoryEvent) -> bool | None:
+        """Return the cached decision for (filter_id, event_summary) if any."""
+        if self._config.llm_cache_size <= 0:
+            return None
+        key = (filter_id, _event_summary_hash(event))
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+        decision, expires_at = entry
+        ttl = self._config.llm_cache_ttl_seconds
+        if ttl > 0 and time.monotonic() >= expires_at:
+            # Lazy eviction — don't keep stale entries around.
+            self._cache.pop(key, None)
+            return None
+        self._cache.move_to_end(key)  # LRU bump
+        return decision
+
+    def _cache_store(self, filter_id: UUID, event: MemoryEvent, decision: bool) -> None:
+        size = self._config.llm_cache_size
+        if size <= 0:
+            return
+        ttl = self._config.llm_cache_ttl_seconds
+        expires_at = time.monotonic() + ttl if ttl > 0 else float("inf")
+        key = (filter_id, _event_summary_hash(event))
+        self._cache[key] = (decision, expires_at)
+        self._cache.move_to_end(key)
+        while len(self._cache) > size:
+            self._cache.popitem(last=False)
 
     def _estimate_input_tokens(
         self,

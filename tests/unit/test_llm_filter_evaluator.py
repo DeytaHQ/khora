@@ -369,3 +369,175 @@ class TestDispatcherLLMIntegration:
         assert count == 1
         cb.assert_awaited_once()
         mock_call.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Cache (Issue #601)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLLMFilterEvaluatorCache:
+    async def test_repeat_event_hits_cache_no_llm_call(self) -> None:
+        """Same (filter, event_summary) twice → one LLM call, not two."""
+        cfg = SemanticHooksConfig(llm_evaluation_enabled=True, llm_cache_size=128)
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10.0)
+        event = _make_event()
+        filt = _make_filter()
+
+        mock_call = AsyncMock(return_value=_llm_response(match=False, confidence=0.1))
+        with patch("khora.config.llm.acompletion", new=mock_call):
+            first = await evaluator.evaluate(event, filt)
+            # Second identical evaluation (same name+type+description) — must be cached.
+            second = await evaluator.evaluate(event, filt)
+
+        assert first is False
+        assert second is False
+        mock_call.assert_awaited_once()
+
+    async def test_cache_separates_by_filter_id(self) -> None:
+        """Same event, different filters → separate cache entries."""
+        cfg = SemanticHooksConfig(llm_evaluation_enabled=True, llm_cache_size=128)
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10.0)
+        event = _make_event()
+        f1 = _make_filter()
+        f2 = _make_filter()  # different id even with same description
+
+        mock_call = AsyncMock(return_value=_llm_response(match=True))
+        with patch("khora.config.llm.acompletion", new=mock_call):
+            await evaluator.evaluate(event, f1)
+            await evaluator.evaluate(event, f2)
+
+        # Two distinct (filter_id, hash) keys → two LLM calls.
+        assert mock_call.await_count == 2
+
+    async def test_cache_disabled_when_size_is_zero(self) -> None:
+        cfg = SemanticHooksConfig(llm_evaluation_enabled=True, llm_cache_size=0)
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10.0)
+        event = _make_event()
+        filt = _make_filter()
+
+        mock_call = AsyncMock(return_value=_llm_response(match=False, confidence=0.1))
+        with patch("khora.config.llm.acompletion", new=mock_call):
+            await evaluator.evaluate(event, filt)
+            await evaluator.evaluate(event, filt)
+
+        # Cache disabled — every call hits the LLM.
+        assert mock_call.await_count == 2
+
+    async def test_cache_lru_evicts_oldest(self) -> None:
+        """When size=1, a second distinct key evicts the first."""
+        cfg = SemanticHooksConfig(llm_evaluation_enabled=True, llm_cache_size=1)
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10.0)
+        e1 = _make_event(name="Acme Corp")
+        e2 = _make_event(name="Globex Inc")
+        filt = _make_filter()
+
+        mock_call = AsyncMock(return_value=_llm_response(match=False, confidence=0.1))
+        with patch("khora.config.llm.acompletion", new=mock_call):
+            await evaluator.evaluate(e1, filt)  # populates cache
+            await evaluator.evaluate(e2, filt)  # evicts e1
+            await evaluator.evaluate(e1, filt)  # cache miss → LLM call again
+
+        assert mock_call.await_count == 3
+
+    async def test_fifty_events_one_filter_drops_to_one_call(self) -> None:
+        """Acceptance bar from #601: 50 events × 1 subscription → ≤2 LLM calls
+        when the events share the same (name, type, description). The first
+        batch (batch_size=10) flushes one call; cache hits short-circuit the rest.
+        """
+        cfg = SemanticHooksConfig(llm_evaluation_enabled=True, llm_cache_size=128)
+        evaluator = LLMFilterEvaluator(cfg, batch_size=10, batch_flush_ms=10.0)
+        filt = _make_filter()
+        ns = uuid4()
+        events = [
+            MemoryEvent.entity_created(
+                namespace_id=ns,
+                entity_id=uuid4(),
+                data={"name": "Acme Corp", "entity_type": "ORGANIZATION", "description": "x"},
+            )
+            for _ in range(50)
+        ]
+
+        mock_call = AsyncMock(return_value=_llm_response(match=True, confidence=0.9))
+        with patch("khora.config.llm.acompletion", new=mock_call):
+            # Run sequentially so the first batch completes (and populates cache)
+            # before subsequent events arrive — matches the realistic stream pattern.
+            results = []
+            for ev in events:
+                results.append(await evaluator.evaluate(ev, filt))
+
+        assert all(results)
+        # The acceptance bar is ≤2 LLM calls. In the sequential path we expect 1.
+        assert mock_call.await_count <= 2
+
+
+# ---------------------------------------------------------------------------
+# Per-subscription budget (Issue #601)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLLMFilterEvaluatorSubscriptionBudget:
+    async def test_subscription_budget_fails_open_when_exceeded(self) -> None:
+        cfg = SemanticHooksConfig(
+            llm_evaluation_enabled=True,
+            llm_cache_size=0,  # exercise the budget directly
+            llm_max_tokens_per_subscription_per_hour=1,  # any nonzero estimate exceeds
+        )
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10.0)
+        event = _make_event()
+        filt = _make_filter()
+
+        mock_call = AsyncMock(return_value=_llm_response(match=False))
+        with patch("khora.config.llm.acompletion", new=mock_call):
+            result = await evaluator.evaluate(event, filt)
+
+        assert result is True  # fail open
+        mock_call.assert_not_awaited()
+
+    async def test_subscription_budget_disabled_when_zero(self) -> None:
+        cfg = SemanticHooksConfig(
+            llm_evaluation_enabled=True,
+            llm_cache_size=0,
+            llm_max_tokens_per_subscription_per_hour=0,
+        )
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10.0)
+        event = _make_event()
+        filt = _make_filter()
+
+        mock_call = AsyncMock(return_value=_llm_response(match=True, confidence=0.9))
+        with patch("khora.config.llm.acompletion", new=mock_call):
+            result = await evaluator.evaluate(event, filt)
+
+        assert result is True
+        mock_call.assert_awaited_once()
+
+    async def test_noisy_filter_does_not_starve_quiet_filter(self) -> None:
+        """Per-subscription cap kicks in on the noisy filter; quiet filter unaffected.
+
+        Cap is sized to fit one call per filter (~150 tokens estimated). The
+        noisy filter consumes its bucket on call 1 and is throttled on call 2;
+        the quiet filter's independent bucket is still full so it goes through.
+        """
+        cfg = SemanticHooksConfig(
+            llm_evaluation_enabled=True,
+            llm_cache_size=0,
+            llm_max_tokens_per_namespace_per_hour=10_000,
+            llm_max_tokens_per_subscription_per_hour=200,  # ~1 call per filter
+        )
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10.0)
+        noisy = _make_filter()
+        quiet = _make_filter()
+
+        with patch(
+            "khora.config.llm.acompletion",
+            new=AsyncMock(return_value=_llm_response(match=False)),
+        ):
+            first_noisy = await evaluator.evaluate(_make_event(name="N1"), noisy)
+            second_noisy = await evaluator.evaluate(_make_event(name="N2"), noisy)
+            quiet_result = await evaluator.evaluate(_make_event(name="Q1"), quiet)
+
+        assert first_noisy is False
+        assert second_noisy is True  # fail open from budget breach
+        assert quiet_result is False

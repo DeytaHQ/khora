@@ -75,6 +75,36 @@ class SemanticHooksConfig(BaseSettings):
             "When breached, evaluations fail open and a throttle counter fires."
         ),
     )
+    # Per-subscription split of the namespace cap. Prevents one noisy filter
+    # from draining the whole namespace's hourly budget — the namespace cap
+    # remains the global backstop. Default 0 = no per-subscription split.
+    # Issue #601.
+    llm_max_tokens_per_subscription_per_hour: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Per-subscription hourly token budget for Level 2 (Issue #601). "
+            "0 disables. When set, charged in addition to the namespace cap. "
+            "Recommended: namespace_cap / expected_subscription_count."
+        ),
+    )
+    # Cache for repeated (event_summary, filter) evaluations. The event
+    # summary is hashed (no raw text retained) so repeated bulk-upsert events
+    # that share entity name/type/description short-circuit to the cached
+    # decision instead of paying for an LLM call. Issue #601.
+    llm_cache_size: int = Field(
+        default=2048,
+        ge=0,
+        description=("Max cached (event_summary, filter) → decision entries. 0 disables the cache."),
+    )
+    llm_cache_ttl_seconds: float = Field(
+        default=3600.0,
+        ge=0.0,
+        description=(
+            "Cache entry TTL. Stale entries are evicted lazily on lookup. "
+            "0 disables expiry — entries live until LRU eviction."
+        ),
+    )
 
     # Callback settings
     max_concurrent_callbacks: int = Field(
