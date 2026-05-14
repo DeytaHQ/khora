@@ -58,7 +58,7 @@ jobs:
   # ============================================================================
   verify-ci-green:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     permissions:
       contents: read
       actions: read   # required by `gh api .../actions/workflows/.../runs`
@@ -68,24 +68,55 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
+          # 10-minute poll window — long enough for the typical ~9 min main-CI
+          # run that may not have started yet when a tag is pushed seconds
+          # after the bump-PR merge (see #554). Tunable via repo variable.
+          POLL_TIMEOUT_SECONDS: ${{ vars.VERIFY_CI_GREEN_TIMEOUT_SECONDS || '600' }}
+          POLL_INTERVAL_SECONDS: '20'
         run: |
           set -euo pipefail
-          echo "Checking for successful ci.yml run on SHA $SHA..."
-          # GitHub's `?status=success` URL filter has a stale-index window of
-          # ~30-60s after a run finishes — observed on v0.10.2, where CI was
-          # green but the filter returned zero. Fetching unfiltered and
-          # selecting on `.conclusion == "success"` reads the per-run record
-          # directly and is consistent immediately on completion.
-          runs=$(gh api \
-            "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=10" \
-            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
-          if [ "$runs" -eq 0 ]; then
-            echo "::error::No successful ci.yml run found for SHA ${SHA}."
-            echo "::error::Tag pushes assume CI has already validated the commit on main."
-            echo "::error::Push the commit to main, wait for CI to go green, then tag."
-            exit 1
-          fi
-          echo "Found ${runs} successful ci.yml run(s) for ${SHA} — proceeding with release."
+          echo "Polling for ci.yml result on SHA $SHA (timeout: ${POLL_TIMEOUT_SECONDS}s)..."
+          deadline=$(( $(date +%s) + POLL_TIMEOUT_SECONDS ))
+          while :; do
+            # Fetch unfiltered (the `?status=success` URL filter has a stale-
+            # index window of ~30-60s) and classify the most-recent run:
+            #   - success: at least one run for this SHA concluded `success`
+            #   - failed:  a run is `completed` but none concluded `success`
+            #   - running: no run yet, or the latest run is still in_progress
+            result=$(gh api \
+              "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=10" \
+              --jq '
+                [.workflow_runs[]] as $runs
+                | if ($runs | length) == 0 then "running"
+                  elif ([$runs[] | select(.conclusion == "success")] | length) > 0 then "success"
+                  elif (all($runs[]; .status == "completed")) then "failed"
+                  else "running"
+                  end
+              ')
+
+            case "$result" in
+              success)
+                echo "ci.yml succeeded on ${SHA} — proceeding with release."
+                exit 0
+                ;;
+              failed)
+                echo "::error::ci.yml failed on ${SHA}."
+                echo "::error::Fix the failure on main and re-tag — the release pipeline will not publish a broken commit."
+                exit 1
+                ;;
+              running)
+                now=$(date +%s)
+                if [ "$now" -ge "$deadline" ]; then
+                  echo "::error::Timed out after ${POLL_TIMEOUT_SECONDS}s waiting for ci.yml to complete on ${SHA}."
+                  echo "::error::Re-run this workflow via workflow_dispatch once CI is green, or bump VERIFY_CI_GREEN_TIMEOUT_SECONDS."
+                  exit 1
+                fi
+                remaining=$(( deadline - now ))
+                echo "ci.yml still running on ${SHA} — sleeping ${POLL_INTERVAL_SECONDS}s (${remaining}s remaining)..."
+                sleep "$POLL_INTERVAL_SECONDS"
+                ;;
+            esac
+          done
 
   # ============================================================================
   # Publish khora-accel — source distribution (sdist) to PyPI via Trusted
