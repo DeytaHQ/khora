@@ -1474,6 +1474,66 @@ async def process_document(
         for _evt in pending_entity_events:
             await storage.dispatch_hook(_evt)
 
+        # CHUNK_ENTITIES_RESOLVED — one chunk-level event per chunk after
+        # its per-entity events all dispatched. Lets subscribers express
+        # co-occurrence filters (entity X AND entity Y in the same chunk)
+        # which single-entity events cannot. (Issue #579 Phase 2 Item B.)
+        #
+        # Per-chunk grouping uses ``entity.source_chunk_ids`` populated by
+        # the extractor for this run. The upsert may append historical
+        # chunk IDs from prior documents, so we intersect with this run's
+        # chunk IDs before grouping. Entities with a chunk ID in
+        # ``source_chunk_ids`` that appears in this document's ``chunks``
+        # are credited to that chunk; an entity mentioned in N chunks
+        # appears in N separate events (one per chunk), matching the
+        # semantics "chunk's entity set fully resolved".
+        try:
+            _MAX_PER_EVENT = 50
+            _this_run_chunk_ids = {c.id for c in chunks}
+            # Build chunk_id -> [Entity] from stored (post-upsert) entities.
+            _chunk_to_entities: dict[UUID, list[Entity]] = {cid: [] for cid in _this_run_chunk_ids}
+            for _entity, _ in store_results:
+                for _cid in _entity.source_chunk_ids:
+                    if _cid in _this_run_chunk_ids:
+                        _chunk_to_entities[_cid].append(_entity)
+
+            for _chunk in chunks:
+                _chunk_entities = _chunk_to_entities.get(_chunk.id, [])
+                # Deterministic ordering by entity.id so truncation is
+                # stable across runs and the test fixtures can rely on it.
+                _chunk_entities_sorted = sorted(_chunk_entities, key=lambda e: e.id)
+                _total = len(_chunk_entities_sorted)
+                _truncated = _total > _MAX_PER_EVENT
+                _capped = _chunk_entities_sorted[:_MAX_PER_EVENT]
+
+                _by_type: dict[str, list[str]] = {}
+                for _e in _capped:
+                    _by_type.setdefault(_e.entity_type, []).append(_e.name)
+
+                _data: dict[str, Any] = {
+                    "chunk_id": str(_chunk.id),
+                    "document_id": str(document.id),
+                    "entity_ids": [str(_e.id) for _e in _capped],
+                    "entity_names_by_type": _by_type,
+                    "entity_count": _total,
+                    "occurred_at": (_chunk.occurred_at.isoformat() if getattr(_chunk, "occurred_at", None) else None),
+                }
+                if _truncated:
+                    _data["truncated"] = True
+
+                await storage.dispatch_hook(
+                    MemoryEvent(
+                        namespace_id=document.namespace_id,
+                        event_type=EventType.CHUNK_ENTITIES_RESOLVED,
+                        resource_type="chunk",
+                        resource_id=_chunk.id,
+                        data=_data,
+                    )
+                )
+        except Exception as _hook_exc:
+            # Hook dispatch must NEVER break ingest.
+            logger.warning(f"Document {document.id}: CHUNK_ENTITIES_RESOLVED dispatch failed: {_hook_exc}")
+
         # Mark as completed
         document.mark_completed(len(chunks), len(entities), stored_count)
         await storage.update_document(document)
