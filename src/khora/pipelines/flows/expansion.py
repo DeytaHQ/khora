@@ -305,7 +305,7 @@ async def unify_entities(
     from khora.extraction.expansion import CrossToolUnifier
 
     unifier = CrossToolUnifier(expertise=resolved_expertise)
-    result = unifier.unify(entities, relationships)
+    result = await unifier.unify(entities, relationships, storage=storage)
 
     logger.info(f"Unification complete: {len(result.unified_entities)} entities ({result.entities_merged} merged)")
 
