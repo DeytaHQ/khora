@@ -491,9 +491,13 @@ class TestFindRelatedEntitiesGraphOnlyBackend:
 
         result = await engine.find_related_entities(seed_id, ns_id, max_depth=2, limit=10)
 
-        # Seed must be stripped; both neighbors returned with flat score.
+        # Seed must be stripped; both neighbors returned. With no relationships
+        # in the neighborhood payload, BFS can't recover per-hop depth so the
+        # engine falls back to distance=1 → score=0.5 (Issue #581 depth scoring,
+        # which superseded the flat-1.0 behaviour the original Issue #533 test
+        # asserted).
         assert {e.id for e, _ in result} == {neighbor_a.id, neighbor_b.id}
-        assert all(score == 1.0 for _, score in result)
+        assert all(score == 0.5 for _, score in result)
         graph.get_neighborhood.assert_awaited_once_with(seed_id, depth=2, limit=10)
 
     async def test_fallback_returns_empty_when_graph_backend_missing(self) -> None:
