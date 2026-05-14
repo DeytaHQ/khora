@@ -988,9 +988,18 @@ class StorageCoordinator:
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
-        """List entities in a namespace."""
+        """List entities in a namespace.
+
+        Prefers the graph backend when configured; otherwise falls back to
+        the vector backend, which owns the entities table on PostgreSQL-only
+        stacks (e.g. chronicle engine without Neo4j).
+        """
         if self.graph:
             return await self.graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
+        if self.vector and hasattr(self.vector, "list_entities"):
+            return await self.vector.list_entities(  # type: ignore[unresolved-attribute]
+                namespace_id, entity_type=entity_type, limit=limit, offset=offset
+            )
         return []
 
     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
@@ -1168,9 +1177,19 @@ class StorageCoordinator:
         limit: int = 1000,
         offset: int = 0,
     ) -> list[Relationship]:
-        """List all relationships in a namespace."""
+        """List all relationships in a namespace.
+
+        Prefers the graph backend when configured; otherwise falls back to
+        the vector backend so graph-less stacks no longer raise — they will
+        receive an empty list (chronicle on PG-only does not currently write
+        the relationships table).
+        """
         if self.graph:
             return await self.graph.list_relationships(
+                namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
+            )
+        if self.vector and hasattr(self.vector, "list_relationships"):
+            return await self.vector.list_relationships(  # type: ignore[unresolved-attribute]
                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
             )
         return []

@@ -27,22 +27,8 @@ async def load_entities(
     *,
     limit: int = 1000,
 ) -> list[Entity]:
-    """Load entities from storage for expansion.
-
-    Args:
-        namespace_id: Namespace to load from
-        storage: Storage coordinator
-        limit: Maximum entities to load
-
-    Returns:
-        List of entities
-    """
-    # Use graph backend if available, otherwise relational
-    if storage.graph:
-        return await storage.graph.get_entities_by_namespace(namespace_id, limit=limit)  # type: ignore[unresolved-attribute]
-    elif storage.relational:
-        return await storage.relational.get_entities_by_namespace(namespace_id, limit=limit)  # type: ignore[unresolved-attribute]
-    return []
+    """Load entities from storage for expansion."""
+    return await storage.list_entities(namespace_id, limit=limit)
 
 
 async def load_relationships(
@@ -51,21 +37,8 @@ async def load_relationships(
     *,
     limit: int = 5000,
 ) -> list[Relationship]:
-    """Load relationships from storage for expansion.
-
-    Args:
-        namespace_id: Namespace to load from
-        storage: Storage coordinator
-        limit: Maximum relationships to load
-
-    Returns:
-        List of relationships
-    """
-    if storage.graph:
-        return await storage.graph.get_relationships_by_namespace(namespace_id, limit=limit)  # type: ignore[unresolved-attribute]
-    elif storage.relational:
-        return await storage.relational.get_relationships_by_namespace(namespace_id, limit=limit)  # type: ignore[unresolved-attribute]
-    return []
+    """Load relationships from storage for expansion."""
+    return await storage.list_relationships(namespace_id, limit=limit)
 
 
 async def run_expansion(
