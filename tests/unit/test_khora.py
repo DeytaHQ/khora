@@ -3551,4 +3551,3 @@ class TestIsUndefinedTableError:
         from khora.khora import _is_undefined_table_error
 
         assert _is_undefined_table_error(RuntimeError("not a db error")) is False
-        assert not kb._connected
