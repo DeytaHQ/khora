@@ -204,3 +204,151 @@ class TestRerankEntities:
         """Empty entities returns empty."""
         result = await rerank_entities("query", [])
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# D5: cross-encoder date-prefix experiment (#594)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossEncoderDatePrefix:
+    """Issue #594 — when ``include_date_prefix=True``, the cross-encoder receives
+    each candidate's content prefixed with the source timestamp so off-the-shelf
+    models can use date tokens as a recency signal."""
+
+    @pytest.mark.asyncio
+    async def test_default_off_does_not_inject_date(self) -> None:
+        reranker = CrossEncoderReranker()  # default include_date_prefix=False
+        captured: list = []
+
+        def fake_predict(pairs, batch_size=32):
+            captured.extend(pairs)
+            return [0.5] * len(pairs)
+
+        reranker._model = MagicMock()
+        reranker._model.predict.side_effect = fake_predict
+
+        candidate = RerankCandidate(
+            item="x",
+            original_score=0.5,
+            content="meeting notes",
+            metadata={"custom": {"occurred_at": "2026-05-14T10:00:00Z"}},
+        )
+        await reranker.rerank("query", [candidate], top_k=1)
+        assert captured[0][1] == "meeting notes"
+
+    @pytest.mark.asyncio
+    async def test_flag_on_prepends_occurred_at_iso_date(self) -> None:
+        reranker = CrossEncoderReranker(include_date_prefix=True)
+        captured: list = []
+
+        def fake_predict(pairs, batch_size=32):
+            captured.extend(pairs)
+            return [0.5] * len(pairs)
+
+        reranker._model = MagicMock()
+        reranker._model.predict.side_effect = fake_predict
+
+        candidate = RerankCandidate(
+            item="x",
+            original_score=0.5,
+            content="meeting notes",
+            metadata={"custom": {"occurred_at": "2026-05-14T10:00:00Z"}},
+        )
+        await reranker.rerank("query", [candidate], top_k=1)
+        # ISO timestamp truncated to YYYY-MM-DD.
+        assert captured[0][1].startswith("[2026-05-14] ")
+        assert captured[0][1].endswith("meeting notes")
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_sent_at_then_created_at(self) -> None:
+        reranker = CrossEncoderReranker(include_date_prefix=True)
+        captured: list = []
+
+        def fake_predict(pairs, batch_size=32):
+            captured.extend(pairs)
+            return [0.5] * len(pairs)
+
+        reranker._model = MagicMock()
+        reranker._model.predict.side_effect = fake_predict
+
+        # No occurred_at, but sent_at present.
+        sent_only = RerankCandidate(
+            item="a",
+            original_score=0.5,
+            content="email body",
+            metadata={"custom": {"sent_at": "2026-04-01"}},
+        )
+        # No occurred_at or sent_at, fall back to metadata.created_at.
+        from datetime import UTC, datetime
+
+        created_only_meta = MagicMock()
+        created_only_meta.custom = {}
+        created_only_meta.created_at = datetime(2026, 3, 15, tzinfo=UTC)
+        created_only = RerankCandidate(
+            item="b",
+            original_score=0.5,
+            content="legacy doc",
+            metadata=created_only_meta,
+        )
+        await reranker.rerank("query", [sent_only, created_only], top_k=2)
+        assert captured[0][1].startswith("[2026-04-01] ")
+        assert captured[1][1].startswith("[2026-03-15] ")
+
+    @pytest.mark.asyncio
+    async def test_no_timestamp_no_prefix_no_crash(self) -> None:
+        reranker = CrossEncoderReranker(include_date_prefix=True)
+        captured: list = []
+
+        def fake_predict(pairs, batch_size=32):
+            captured.extend(pairs)
+            return [0.5] * len(pairs)
+
+        reranker._model = MagicMock()
+        reranker._model.predict.side_effect = fake_predict
+
+        # Empty metadata — fall through silently to un-prefixed content.
+        candidate = RerankCandidate(
+            item="x",
+            original_score=0.5,
+            content="no metadata",
+            metadata={},
+        )
+        await reranker.rerank("query", [candidate], top_k=1)
+        assert captured[0][1] == "no metadata"
+
+    @pytest.mark.asyncio
+    async def test_date_prefix_with_title_keeps_both(self) -> None:
+        """Title and date prefix coexist — date wraps the title."""
+        reranker = CrossEncoderReranker(include_date_prefix=True)
+        captured: list = []
+
+        def fake_predict(pairs, batch_size=32):
+            captured.extend(pairs)
+            return [0.5] * len(pairs)
+
+        reranker._model = MagicMock()
+        reranker._model.predict.side_effect = fake_predict
+
+        candidate = RerankCandidate(
+            item="x",
+            original_score=0.5,
+            content="body text",
+            metadata={"custom": {"occurred_at": "2026-05-14", "title": "Q2 review"}},
+        )
+        await reranker.rerank("query", [candidate], top_k=1)
+        assert "[2026-05-14]" in captured[0][1]
+        assert "[Q2 review]" in captured[0][1]
+        assert "body text" in captured[0][1]
+
+    def test_create_reranker_separates_cache_by_flag(self) -> None:
+        """create_reranker() with and without the flag must yield distinct
+        instances so they can coexist in the cache."""
+        from khora.query.reranking import _reranker_cache, create_reranker
+
+        _reranker_cache.clear()
+        plain = create_reranker(method="cross_encoder")
+        prefixed = create_reranker(method="cross_encoder", include_date_prefix=True)
+        assert plain is not prefixed
+        assert plain._include_date_prefix is False
+        assert prefixed._include_date_prefix is True
