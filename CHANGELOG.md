@@ -4,6 +4,74 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.11.1] — Semantic hooks Phase 1: bugfixes + opt-in Level 2 LLM evaluator
+
+Patch release covering [#576](https://github.com/DeytaHQ/khora/issues/576)
+(PR #577). Closes the trust gap between docs and code in
+`khora.hooks`. Every claim in `docs/hooks/semantic-hooks.md` is now
+true; no public API removals.
+
+### Fixed
+
+- **Level 1 (embedding similarity) was structurally unreachable.**
+  `HookDispatcher.dispatch()` reads `event.data["embedding"]` but the
+  ingest pipeline never populated it because entity events fired
+  *before* the parallel `_embed_entities` branch completed. Operators
+  who set `SemanticFilter(description=..., similarity_threshold=0.7)`
+  per the docs were silently getting Level 0 (type filter) only. Now
+  ingest defers entity-event dispatch until both gather phases
+  complete, backfilling the freshly-computed embedding into each
+  pending event's payload.
+- **`callback_timeout_seconds` config field was never honored.** The
+  field existed on `SemanticHooksConfig` but `_safe_invoke` had no
+  `asyncio.wait_for`. A misbehaving callback could hang ingest
+  indefinitely. Now timed-out callbacks log a warning and release the
+  concurrency semaphore.
+- **`SemanticFilter.description` was never auto-embedded on
+  subscribe.** Filters registered with a description but no
+  precomputed embedding are now queued and drained by
+  `Khora.connect()` via the engine's embedder. Closes the silent
+  degradation where operators following the docs (no manual embed
+  step) got Level 0 only.
+- **`EventType.ENTITY_MERGED` was defined but never dispatched.** The
+  cross-tool unifier merged entities silently. Now emits
+  `entity.merged` with `{merged_from, surviving_id, source_tools,
+  strategy, namespace_id}` — the dedup signal corporate-data
+  customers care most about.
+
+### Added
+
+- **`RECALL_REQUESTED` / `RECALL_RESULTS_READY` / `RECALL_COMPLETED`
+  events** fired from `Khora.recall()`. Shared `recall_id` (UUID)
+  across the three events so subscribers can correlate. Payload caps
+  (top 20 entity/chunk IDs) bound event size. Hook dispatch wrapped
+  in try/except — failures never break `recall()`.
+- **Optional Level 2 LLM filter evaluator** (`khora.hooks.llm_evaluator.LLMFilterEvaluator`).
+  Default OFF (`KHORA_HOOKS_LLM_EVALUATION_ENABLED=false`).
+  Micro-batched (10 pairs / 100 ms window), JSON-schema output via
+  `khora.config.llm.acompletion` with `_telemetry_op="hooks.filter_eval"`,
+  per-namespace token-budget cap (default 10k tokens/hour ≈ 100
+  evaluations — deliberately conservative; operator tunes up).
+  Fail-open on LLM errors / budget breach. Only runs for filters
+  that set `examples=[...]`.
+- **New telemetry contract entries**: `khora.hooks.llm.evaluations_total`
+  (counter, labels `category={match,no_match,timeout,budget_exceeded}`),
+  `khora.hooks.llm.tokens_total` (labels `direction={input,output}`),
+  `khora.hooks.llm.throttled_total`.
+
+### Changed
+
+- **`KhoraConfig.hooks: Any = None` → `SemanticHooksConfig`** (typed).
+  The `Any` placeholder dated to a circular-import worry; lazy
+  module-level import resolves it cleanly. Operators can now read
+  `cfg.hooks.enabled`, `cfg.hooks.callback_timeout_seconds`, etc.
+  Type-narrowing, not breaking — anyone reading `cfg.hooks` and
+  getting `None` today now gets a populated config.
+- **`CrossToolUnifier.unify()` is now async.** Required to dispatch
+  the new `ENTITY_MERGED` event. Both production call sites
+  (`SemanticExpander.expand`, `pipelines/flows/expansion.unify_entities`)
+  updated; the 5 existing unifier tests converted to async.
+
 ## [0.11.0] — Temporal retrieval overhaul: scoring fixes + ingestion contract + entity-anchored fast path
 
 Three-phase rework of khora's temporal retrieval, addressing the production
