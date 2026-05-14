@@ -234,14 +234,35 @@ class LLMFilterEvaluator:
             await self._evaluate_bucket(items)
 
     async def _evaluate_bucket(self, items: list[_PendingEvaluation]) -> None:
-        """Evaluate one (namespace, filter) bucket via one LLM call."""
+        """Evaluate one (namespace, filter) bucket via one LLM call.
+
+        Within the bucket we coalesce by ``event_summary_hash`` so a batch
+        of N duplicate (name, type, description) tuples spends one prompt
+        slot, not N (#608). The LLM decision for the representative item
+        is fanned out to every future sharing the same hash and cached
+        once. When events differ this is a no-op — every event is its
+        own representative.
+        """
         filt = items[0].filter
         namespace_id = items[0].event.namespace_id
 
-        # Estimate tokens before charging. Char/4 is the standard rule
-        # of thumb for English; an over-estimate fails closed (good).
-        prompt_estimate = self._estimate_input_tokens(filt, items)
-        output_estimate = 25 * len(items)  # ~25 tokens per JSON result object
+        # Coalesce by event_summary_hash. ``representatives`` preserves
+        # arrival order (one item per unique hash, first-seen wins). Each
+        # representative's hash maps to the full list of futures awaiting
+        # that decision.
+        representatives: list[_PendingEvaluation] = []
+        dup_groups: dict[str, list[_PendingEvaluation]] = {}
+        for p in items:
+            h = _event_summary_hash(p.event)
+            if h not in dup_groups:
+                dup_groups[h] = []
+                representatives.append(p)
+            dup_groups[h].append(p)
+
+        # Estimate tokens against the deduplicated prompt — the LLM only
+        # sees representatives, so the budget should reflect that.
+        prompt_estimate = self._estimate_input_tokens(filt, representatives)
+        output_estimate = 25 * len(representatives)  # ~25 tokens per JSON result object
 
         if not self._charge_budget(
             namespace_id,
@@ -257,7 +278,7 @@ class LLMFilterEvaluator:
             return
 
         try:
-            results = await self._call_llm(filt, items)
+            results = await self._call_llm(filt, representatives)
         except TimeoutError:
             logger.warning("Level 2 LLM evaluation timed out for filter {}", filt.name)
             _EVAL_COUNTER.add(len(items), attributes={"category": "timeout"})
@@ -274,23 +295,30 @@ class LLMFilterEvaluator:
             return
 
         threshold = filt.llm_confidence_threshold
-        for idx, p in enumerate(items):
+        for idx, rep in enumerate(representatives):
             entry = results.get(idx)
+            duplicates = dup_groups[_event_summary_hash(rep.event)]
             if entry is None:
                 # Missing index → fail open, but count as timeout (parser issue).
-                if not p.future.done():
-                    p.future.set_result(True)
-                _EVAL_COUNTER.add(1, attributes={"category": "timeout"})
+                for p in duplicates:
+                    if not p.future.done():
+                        p.future.set_result(True)
+                _EVAL_COUNTER.add(len(duplicates), attributes={"category": "timeout"})
                 continue
             match_flag = bool(entry.get("match", False))
             confidence = float(entry.get("confidence", 0.0) or 0.0)
             decision = match_flag and confidence >= threshold
-            if not p.future.done():
-                p.future.set_result(decision)
-            _EVAL_COUNTER.add(1, attributes={"category": "match" if decision else "no_match"})
-            # Cache so future events with the same (filter, event_summary)
-            # short-circuit. Issue #601.
-            self._cache_store(p.filter.id, p.event, decision)
+            for p in duplicates:
+                if not p.future.done():
+                    p.future.set_result(decision)
+            _EVAL_COUNTER.add(
+                len(duplicates),
+                attributes={"category": "match" if decision else "no_match"},
+            )
+            # Cache once per representative so future batches with the same
+            # (filter, event_summary) short-circuit at the queue entrance.
+            # Issue #601 / #608.
+            self._cache_store(rep.filter.id, rep.event, decision)
 
     # ------------------------------------------------------------------
     # LLM call + parsing
