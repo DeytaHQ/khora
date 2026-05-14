@@ -25,6 +25,7 @@ from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
 
+
 def _is_undefined_table_error(exc: BaseException) -> bool:
     """Return True if *exc* is (or wraps) a Postgres "undefined table" error.
 
