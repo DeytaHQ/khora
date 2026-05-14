@@ -784,6 +784,24 @@ class QuerySettings(BaseSettings):
     hyde_num_hypotheticals: int = Field(
         default=1, ge=1, le=5, description="Number of hypothetical documents to generate"
     )
+    # HyDE-Cypher (Issue #595, Phase D2). Default OFF — flip after a positive
+    # A/B on a hand-curated structured-query set. When ON, the engine asks an
+    # LLM to pick a parameterized Cypher template for the query and executes
+    # it as an additional retrieval channel; on selection "none" or any
+    # validation error, falls back to text HyDE.
+    enable_hyde_cypher: bool = Field(
+        default=False,
+        description=(
+            "Enable HyDE-Cypher templated graph queries as an additional retrieval "
+            "channel for structured queries. See khora#595."
+        ),
+    )
+    hyde_cypher_limit: int = Field(
+        default=20,
+        ge=1,
+        le=200,
+        description="Max entities returned by a HyDE-Cypher template execution.",
+    )
 
     @field_validator("enable_hyde", mode="before")
     @classmethod
