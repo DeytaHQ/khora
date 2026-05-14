@@ -348,10 +348,11 @@ jobs:
             LATEST_FLAG="--latest"
           fi
           # Idempotent: if a release for this tag already exists (manual
-          # backfill or workflow re-run), update it in place instead of failing.
+          # backfill via the UI, or workflow re-run), leave it untouched —
+          # it may have been hand-edited for a reason — and just print it.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; refreshing generated notes."
-            gh release edit "$TAG" --generate-notes $LATEST_FLAG
+            echo "Release $TAG already exists; leaving it untouched."
+            gh release view "$TAG"
           else
             gh release create "$TAG" --title "$TAG" --generate-notes $LATEST_FLAG
           fi
