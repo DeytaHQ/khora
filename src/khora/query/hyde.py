@@ -7,6 +7,7 @@ for queries that use different vocabulary than stored documents.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -15,6 +16,58 @@ from loguru import logger
 if TYPE_CHECKING:
     from khora.config.llm import LiteLLMConfig
     from khora.extraction.embedders import Embedder
+    from khora.query.temporal_detection import TemporalCategory
+
+
+# Temporal-anchored prompt is selected for these categories. The hypothetical
+# is written as if authored "today" so its surface tokens — ISO dates,
+# weekdays, relative markers — dominate cosine similarity to chunks that
+# carry the same tokens (Slack/email headers, calendar invites). See #592.
+_TEMPORAL_HYDE_CATEGORIES = {"recency", "state_query", "change"}
+
+
+def _detect_category(query: str) -> TemporalCategory | None:
+    """Best-effort temporal-category detection for a HyDE query.
+
+    Wraps ``khora.query.temporal_detection.detect_temporal_category`` so
+    the import is local (avoids a hard dependency at module import time)
+    and any unexpected failure degrades to ``None`` (generic prompt) —
+    HyDE should never crash a query because of a detector error.
+    """
+    try:
+        from khora._accel import detect_temporal_category
+        from khora.query.temporal_detection import CATEGORY_MAP
+
+        cat_id = detect_temporal_category(query)
+        return CATEGORY_MAP.get(cat_id)
+    except Exception:  # noqa: BLE001 — degrade to generic prompt on any failure
+        return None
+
+
+def _select_system_prompt(category: str | None, today: str) -> str:
+    """Pick the HyDE system prompt for a temporal category.
+
+    ``category`` is the string value of a :class:`TemporalCategory`. When
+    ``None`` (no detector available) or one of NONE/EXPLICIT/ORDINAL/
+    AGGREGATE, returns the generic time-blind prompt. For RECENCY,
+    STATE_QUERY, and CHANGE, returns a prompt that anchors the
+    hypothetical to ``today``.
+    """
+    if category in _TEMPORAL_HYDE_CATEGORIES:
+        return (
+            "You are a knowledgeable assistant. Given a question that asks about "
+            "recent, current, or recently-changed information, write a short, "
+            "factual passage (2-3 sentences) that directly answers it as if it "
+            f"were authored today, {today}. Use specific dates, weekdays, or "
+            "relative time markers (e.g. 'yesterday', 'this week', 'on "
+            f"{today}'). Do not include any preamble or meta-commentary, just "
+            "the answer content."
+        )
+    return (
+        "You are a knowledgeable assistant. Given a question, write a short, "
+        "factual passage (2-3 sentences) that directly answers it. "
+        "Do not include any preamble or meta-commentary, just the answer content."
+    )
 
 
 class HyDEExpander:
@@ -31,15 +84,26 @@ class HyDEExpander:
         self._llm_config = llm_config
         self._num_hypotheticals = num_hypotheticals
 
-    async def generate_hypothetical(self, query: str) -> str:
-        """Generate a hypothetical document that answers the query."""
+    async def generate_hypothetical(
+        self,
+        query: str,
+        *,
+        temporal_category: TemporalCategory | None = None,
+        today: str | None = None,
+    ) -> str:
+        """Generate a hypothetical document that answers the query.
+
+        When ``temporal_category`` is RECENCY / STATE_QUERY / CHANGE, the
+        prompt is anchored to ``today`` (defaults to the current UTC date)
+        so the hypothetical's surface tokens align with recency-tagged
+        chunks. Other categories use the time-blind prompt.
+        """
         from khora.config.llm import acompletion
 
-        system_prompt = (
-            "You are a knowledgeable assistant. Given a question, write a short, "
-            "factual passage (2-3 sentences) that directly answers it. "
-            "Do not include any preamble or meta-commentary, just the answer content."
-        )
+        if today is None:
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
+        category_value = temporal_category.value if temporal_category is not None else None
+        system_prompt = _select_system_prompt(category_value, today)
 
         return await acompletion(
             query,
@@ -54,18 +118,29 @@ class HyDEExpander:
         self,
         query: str,
         query_embedding: list[float],
+        *,
+        temporal_category: TemporalCategory | None = None,
     ) -> list[float]:
         """Expand a query embedding by averaging with hypothetical doc embeddings.
+
+        When ``temporal_category`` is set, it is forwarded to the prompt
+        selector so RECENCY / STATE_QUERY / CHANGE queries get a
+        time-anchored hypothetical (#592). When ``None``, the category is
+        derived internally from the query via the Rust Aho-Corasick
+        ``detect_temporal_category`` (sub-millisecond, no LLM cost).
 
         On any failure, returns the original embedding unchanged.
         """
         from khora.telemetry.instrument import pipeline_stage
 
+        if temporal_category is None:
+            temporal_category = _detect_category(query)
+
         try:
             async with pipeline_stage("query", "hyde", extra_metadata={"num_hypotheticals": self._num_hypotheticals}):
                 hypotheticals: list[str] = []
                 for _ in range(self._num_hypotheticals):
-                    doc = await self.generate_hypothetical(query)
+                    doc = await self.generate_hypothetical(query, temporal_category=temporal_category)
                     hypotheticals.append(doc)
 
                 # Embed hypothetical documents
