@@ -1097,6 +1097,74 @@ class PgVectorBackend(AsyncSessionMixin):
             rows = result.scalars().all()
             return [self._chunk_model_to_domain(row) for row in rows]
 
+    async def list_entities(
+        self,
+        namespace_id: UUID,
+        *,
+        entity_type: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list:
+        """List entities in a namespace.
+
+        Coordinator fallback for graph-less stacks (e.g. chronicle on
+        PostgreSQL-only).  Entities live in the ``entities`` table that
+        pgvector owns, so we can serve listings directly even when no
+        graph backend is wired up.
+        """
+        async with self._get_session() as session:
+            stmt = select(EntityModel).where(EntityModel.namespace_id == namespace_id)
+            if entity_type:
+                stmt = stmt.where(EntityModel.entity_type == entity_type)
+            stmt = stmt.order_by(EntityModel.name).limit(limit).offset(offset)
+            result = await session.execute(stmt)
+            return [self._entity_model_to_domain(model) for model in result.scalars()]
+
+    async def list_relationships(
+        self,
+        namespace_id: UUID,
+        *,
+        relationship_type: str | None = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list:
+        """List relationships in a namespace.
+
+        Coordinator fallback for graph-less stacks.  In chronicle+PG-only
+        deployments the ``relationships`` table is not actively written to
+        (relationships live in Neo4j when configured), so this will return
+        an empty list — but it no longer crashes the caller.
+        """
+        from khora.core.models import Relationship
+
+        async with self._get_session() as session:
+            stmt = select(RelationshipModel).where(RelationshipModel.namespace_id == namespace_id)
+            if relationship_type:
+                stmt = stmt.where(RelationshipModel.relationship_type == relationship_type)
+            stmt = stmt.order_by(RelationshipModel.created_at.desc()).limit(limit).offset(offset)
+            result = await session.execute(stmt)
+            return [
+                Relationship(
+                    id=m.id,
+                    namespace_id=m.namespace_id,
+                    source_entity_id=m.source_entity_id,
+                    target_entity_id=m.target_entity_id,
+                    relationship_type=m.relationship_type,
+                    description=m.description,
+                    properties=m.properties or {},
+                    source_document_ids=m.source_document_ids or [],
+                    source_chunk_ids=m.source_chunk_ids or [],
+                    valid_from=m.valid_from,
+                    valid_until=m.valid_until,
+                    confidence=m.confidence,
+                    weight=m.weight,
+                    metadata=m.metadata_ or {},
+                    created_at=m.created_at,
+                    updated_at=m.updated_at,
+                )
+                for m in result.scalars()
+            ]
+
     # =========================================================================
     # Chronicle engine: events + facts (migration 024)
     #
