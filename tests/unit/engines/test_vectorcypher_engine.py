@@ -1339,6 +1339,7 @@ class TestVectorCypherEngineForget:
         engine = VectorCypherEngine(config)
         engine._connected = True
         engine._storage = AsyncMock()
+        engine._storage.graph.fetch_document_extraction_state = AsyncMock(return_value=([], []))
         engine._temporal_store = AsyncMock()
         engine._dual_nodes = AsyncMock()
         engine._neo4j_driver = AsyncMock()
