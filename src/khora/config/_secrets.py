@@ -1,4 +1,4 @@
-"""Secret-redaction helpers and ADR-084 annotation types for log / exception output."""
+"""Secret-redaction helpers and secret-field annotation types for log / exception output."""
 
 from __future__ import annotations
 
@@ -15,13 +15,13 @@ _DSN_USERINFO_RE = re.compile(r"://[^:@]*:[^@]+@")
 
 @dataclass(frozen=True)
 class AllowSecretTyping:
-    """Annotation marker for deliberate ADR-084 exceptions.
+    """Annotation marker for fields that intentionally remain plain ``str``.
 
     Use as ``Annotated[str, AllowSecretTyping(reason="...")]`` on a
     secret-named field that intentionally stays as plain ``str`` (e.g.,
     env-var name pointers or legacy factory intermediaries that hold
     post-boundary unwrapped values). The semgrep rule excludes fields
-    bearing this annotation from the ADR-084 findings.
+    bearing this annotation from the secret-typing lint rule.
     """
 
     reason: str

@@ -218,7 +218,7 @@ class TestRedactDsn:
                 "postgresql://a%2Bb:hunter2@db:5432/app",
                 "postgresql://[REDACTED]@db:5432/app",
             ),
-            # Empty username (e.g. Redis ``://:password@host``) — ADR-084 §contract
+            # Empty username (e.g. Redis ``://:password@host``)
             (
                 "redis://:secretpass@cache.example.com:6379/0",
                 "redis://[REDACTED]@cache.example.com:6379/0",
