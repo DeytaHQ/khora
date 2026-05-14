@@ -595,6 +595,30 @@ src/khora/storage/backends/surrealdb/
 └── _helpers.py       # Shared utilities (UUID conversion, etc.)
 ```
 
+### SurrealDB transactions and batching
+
+SurrealDB supports SurrealQL-level transactions (`BEGIN` / `COMMIT` / `CANCEL`) on the WebSocket connection. The Python client surfaces these as ordinary queries in remote mode. Embedded (`surrealkv://`) and memory (`memory://`) modes raise `UnsupportedFeatureError` on `BEGIN`, so khora preserves the per-statement-atomicity contract there and exposes a batched alternative.
+
+`SurrealDBConnection` (v0.12.0) ships three primitives:
+
+| Method / property | Remote (`ws://`) | Embedded / memory |
+|---|---|---|
+| `supports_transactions` (property) | `True` | `False` |
+| `async with conn.transaction():` | Wraps body in `BEGIN TRANSACTION` / `COMMIT TRANSACTION`. On exception, issues `CANCEL TRANSACTION` and re-raises. If `CANCEL` itself fails the original exception is preserved. | No-op context manager — body runs as ordinary per-statement-atomic writes. |
+| `await conn.execute_batch([(sql, bindings), ...])` | Same semantics as embedded — concatenates with `;` and runs as one round-trip; for true atomicity prefer `transaction()`. | Multiple statements in one round-trip. Parameter-name collisions across statements raise rather than silently overwrite. |
+
+Example:
+
+```python
+async with conn.transaction():
+    await conn.execute("CREATE entity SET name = $n", {"n": "Acme"})
+    await conn.execute("RELATE $a->relates_to->$b", {"a": acme_id, "b": deal_id})
+# Remote: COMMIT issued automatically on clean exit.
+# Embedded/memory: each statement runs as its own surrealkv tx (existing contract preserved).
+```
+
+The coordinator's `StorageCoordinator.transaction()` remains session-shaped (SQLAlchemy `AsyncSession`) and does not yet route to SurrealDB transactions — that integration is a follow-up. For atomic SurrealDB-only multi-statement operations on remote stacks today, use the `conn.transaction()` primitive directly.
+
 ### When to Use SurrealDB
 
 | Scenario | Recommendation |

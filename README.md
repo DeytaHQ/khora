@@ -42,7 +42,7 @@ from khora import Khora
 
 async def main() -> None:
     async with Khora() as kb:  # reads KHORA_DATABASE_URL / KHORA_NEO4J_URL
-        ns = await kb.create_namespace("demo")
+        ns = await kb.create_namespace()  # keyword-only kwargs; no positional name
         await kb.remember(
             "Marie Curie won the Nobel Prize in Physics in 1903.",
             namespace=ns.namespace_id,
@@ -75,9 +75,9 @@ async with Khora() as kb:
 Khora ships two zero-infrastructure paths. Both are marked **experimental** — fine for demos, evaluation, tests, and small single-user CLIs; not yet stamped as a deployment story.
 
 - **SQLite + LanceDB** (`pip install khora[sqlite-lance]`, set `KHORA_STORAGE_BACKEND=sqlite_lance`) — recommended embedded stack. Covers VectorCypher, Skeleton, and Chronicle via dialect-aware Alembic migrations and LanceDB-backed vector search. Documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. Known gaps: no point-in-time queries, partial atomicity in `coordinator.transaction()`, FTS on chunks only. See [configuration.md](docs/configuration.md#embedded-backends-experimental).
-- **SurrealDB** (`pip install khora[surrealdb]`) — unified relational + vector + graph in one store. Python SDK is on the alpha track (`>=2.0.0a1`), and KNN (`<|K|>`) is unreliable in embedded mode (uses brute-force cosine + HNSW fallback). Suitable for experimentation; not recommended for production.
+- **SurrealDB** (`pip install khora[surrealdb]`) — unified relational + vector + graph in one store. Python SDK is on the alpha track (`>=2.0.0a1`), and KNN (`<|K|>`) is unreliable in embedded mode (uses brute-force cosine + HNSW fallback). Remote (WebSocket) mode supports atomic multi-statement transactions via `conn.transaction()` (v0.12.0); embedded / memory modes still operate per-statement-atomic. Suitable for experimentation; not recommended for production.
 
-> **Quickstart caveat.** A literal `Khora("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector — there is no `memory://` URL scheme parsed by khora itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` (or `surrealdb`) and the corresponding `db_path` / connection settings. Routing a true `memory://` URI to the SQLite+LanceDB stack is tracked for v0.10.
+> **Quickstart caveat.** A literal `Khora("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector — there is no `memory://` URL scheme parsed by khora itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` (or `surrealdb`) and the corresponding `db_path` / connection settings.
 
 ## Observability
 

@@ -64,6 +64,14 @@ On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrati
 
 Removed — it bypassed Alembic and left the version table in an inconsistent state. If you find old docs or sample code referencing `create_tables()`, replace it with `run_migrations()` or `Khora(run_migrations=True)`.
 
+## Dialect-conditional migrations
+
+A few migrations execute only on PostgreSQL — they use Postgres-specific features that have no SQLite analogue. The migration scripts gate on `op.get_bind().dialect.name == "postgresql"` and skip silently on `sqlite_lance` so the embedded test stack runs the same chain without errors.
+
+Current dialect-gated migrations:
+
+- **`029_chunks_created_at_brin` (v0.12.0)** — BRIN index on `chunks.created_at` (`pages_per_range = 32`), built with `CREATE INDEX CONCURRENTLY` inside an Alembic autocommit block so online traffic is not blocked. BRIN indexes are tiny (KB-sized) and well-suited to time-correlated columns like `created_at`; they don't compete with HNSW vector indexes or the existing B-trees on chunks. The index helps long-range archive / export queries (months of data) that today sequential-scan the table. No effect on point queries or HNSW similarity search. SQLite-backed embedded stacks skip this migration entirely — see Issue #593 for the rationale.
+
 ## SurrealDB
 
 SurrealDB doesn't use Alembic. The schema is defined with idempotent `DEFINE … IF NOT EXISTS` statements that execute on `SurrealDBBackend.connect()`. There's no migration flag; the schema is always current. See [architecture/storage-backends.md](architecture/storage-backends.md#surrealdb) for the schema layout.

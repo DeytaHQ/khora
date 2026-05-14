@@ -185,7 +185,9 @@ The SurrealDB backend is feature-complete (relational + vector + graph + KV in a
 - Concurrent upserts require the `_SurrealDBEntityKeyGate` to serialise on `(namespace_id, name, entity_type)` keys.
 - BSL-1.1 license — review for downstream packaging concerns before adopting.
 
-Connection schemes: `memory://` (in-process), `surrealkv://...` (embedded file), `ws://...` (remote). Note: `Khora("memory://")` does **not** route to SurrealDB today — the positional argument is treated as the PostgreSQL `database_url`. Set `KHORA_STORAGE_BACKEND=surrealdb` and the relevant `KHORA_STORAGE_SURREALDB_*` settings explicitly. Routing a `memory://` URI directly to the embedded stack is tracked for v0.10.
+Connection schemes: `memory://` (in-process), `surrealkv://...` (embedded file), `ws://...` (remote). Note: `Khora("memory://")` does **not** route to SurrealDB today — the positional argument is treated as the PostgreSQL `database_url`. Set `KHORA_STORAGE_BACKEND=surrealdb` and the relevant `KHORA_STORAGE_SURREALDB_*` settings explicitly.
+
+Remote (`ws://`) mode supports atomic multi-statement transactions via `conn.transaction()` since v0.12.0. Embedded (`surrealkv://`) and memory (`memory://`) modes are per-statement atomic only — `transaction()` is a no-op there, and multi-statement atomicity is approximated by `execute_batch()` (joins statements with `;`). See [architecture/storage-backends.md](architecture/storage-backends.md#surrealdb) for the capability matrix.
 
 ## LLM
 
@@ -238,7 +240,10 @@ Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retr
 | `KHORA_QUERY_KEYWORD_WEIGHT` | `0.2` | Fusion weight. |
 | `KHORA_QUERY_APPLY_RECENCY_BIAS` | `false` | Bias scoring towards newer documents. |
 | `KHORA_QUERY_RECENCY_WEIGHT` | `0.2` | How strong the recency bias is. |
-| `KHORA_QUERY_ENABLE_HYDE` | `auto` | HyDE query expansion: `auto`, `always`, `never`. |
+| `KHORA_QUERY_ENABLE_HYDE` | `auto` | HyDE query expansion: `auto` / `always` / `never` (legacy booleans normalize to `always` / `never`). RECENCY / STATE_QUERY / CHANGE queries automatically get a time-anchored prompt — see [temporal-queries.md](query-engine/temporal-queries.md#temporal-anchored-hyde). |
+| `KHORA_QUERY_HYDE_NUM_HYPOTHETICALS` | `1` | Number of hypothetical documents to generate (1–5). |
+| `KHORA_QUERY_ENABLE_HYDE_CYPHER` | `false` | **v0.12.0, opt-in.** Run LLM-picked parameterized Cypher templates as an extra retrieval channel for structured RECENCY queries. See [retrieval-tuning.md](query-engine/retrieval-tuning.md). |
+| `KHORA_QUERY_HYDE_CYPHER_LIMIT` | `20` | Max entities returned per HyDE-Cypher template execution. |
 | `KHORA_QUERY_ENABLE_RERANKING` | `true` | Cross-encoder reranking of top candidates. |
 | `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN` | `true` | Push relative-date filters into SQL WHERE clauses. |
 
