@@ -80,6 +80,47 @@ def _ensure_tags(value: Any) -> list[str]:
 _MAX_COOCCURRENCE_PER_CHUNK = 15
 
 
+def _bfs_distances_from(seed: UUID, relationships: list[Any]) -> dict[UUID, int]:
+    """BFS hop distance from ``seed`` over an undirected adjacency built from
+    ``relationships``.
+
+    Used by ``find_related_entities`` on graph-only backends where the
+    backend's ``get_neighborhood`` returns entities + edges but no per-entity
+    distance. Edges are treated as undirected (both incoming and outgoing
+    expansions are considered, matching the recursive walk in the underlying
+    backends).
+    """
+    if not relationships:
+        return {}
+    adj: dict[UUID, list[UUID]] = {}
+    for rel in relationships:
+        # Tolerate both Relationship dataclasses and dict-shaped rows that
+        # some backends (e.g. surrealdb) may return.
+        src = getattr(rel, "source_entity_id", None)
+        tgt = getattr(rel, "target_entity_id", None)
+        if src is None and isinstance(rel, dict):
+            src = rel.get("source_entity_id") or rel.get("in") or rel.get("from")
+            tgt = rel.get("target_entity_id") or rel.get("out") or rel.get("to")
+        if src is None or tgt is None:
+            continue
+        adj.setdefault(src, []).append(tgt)
+        adj.setdefault(tgt, []).append(src)
+
+    distances: dict[UUID, int] = {seed: 0}
+    frontier = [seed]
+    depth = 0
+    while frontier:
+        depth += 1
+        next_frontier: list[UUID] = []
+        for node in frontier:
+            for neighbor in adj.get(node, ()):
+                if neighbor not in distances:
+                    distances[neighbor] = depth
+                    next_frontier.append(neighbor)
+        frontier = next_frontier
+    return distances
+
+
 def _build_cooccurrence_relationships(
     entities: list[Entity],
     namespace_id: UUID,
@@ -2906,8 +2947,9 @@ class VectorCypherEngine:
             # Graph-only backends (sqlite_lance, surrealdb): no chunk-entity
             # dual graph, so traversal goes through the GraphBackendProtocol
             # directly. ``get_neighborhood`` returns the seed plus connected
-            # entities up to ``depth``; strip the seed and apply a flat score
-            # (per-hop distance is not exposed cheaply by all backends).
+            # entities and relationships up to ``depth``; we BFS the returned
+            # relationships to recover per-entity distance from the seed,
+            # mirroring the Neo4j Path A scoring ``1 / (1 + distance)``.
             storage = self._get_storage()
             if storage.graph is None:
                 return []
@@ -2917,7 +2959,16 @@ class VectorCypherEngine:
                 limit=limit,
             )
             entities = neighborhood.get("entities", [])
-            return [(e, 1.0) for e in entities if e.id != entity_id][:limit]
+            relationships = neighborhood.get("relationships", [])
+            distances = _bfs_distances_from(entity_id, relationships)
+            results: list[tuple[Entity, float]] = []
+            for e in entities:
+                if e.id == entity_id:
+                    continue
+                d = distances.get(e.id, 1)
+                results.append((e, 1.0 / (1 + d)))
+            results.sort(key=lambda pair: pair[1], reverse=True)
+            return results[:limit]
 
         neighborhoods = await dual_nodes.get_entity_neighborhoods(
             entity_ids=[entity_id],
