@@ -24,6 +24,26 @@ env:
 
 jobs:
   # ============================================================================
+  # Secret typing — detect str-typed secret fields in Pydantic models and
+  # dataclasses. Severity WARNING: CI reports findings but does not block
+  # while existing findings are remediated. Flip to ERROR in .semgrep.yml
+  # once the backlog is clear.
+  # ============================================================================
+  secret-typing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Secret typing check (warn-mode)
+        run: uvx semgrep --config .semgrep.yml src/
+
+  # ============================================================================
   # Guard — refuse to track AGENTS.md (mirrors local pre-commit hook)
   # ============================================================================
   no-agents-md:

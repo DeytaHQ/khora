@@ -18,6 +18,13 @@ repos:
 
   - repo: local
     hooks:
+      - id: secret-typing
+        name: secret typing (warn-mode)
+        entry: uvx semgrep --config .semgrep.yml src/
+        language: system
+        pass_filenames: false
+        types: [python]
+
       - id: ty
         name: ty
         entry: uv run ty check src/

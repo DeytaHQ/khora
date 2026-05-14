@@ -1,0 +1,73 @@
+# Detect str-typed secret-pattern fields in Pydantic models and dataclasses.
+# Severity WARNING: CI reports findings without blocking while existing fields
+# are remediated. Flip both rules to ERROR once the backlog is clear.
+rules:
+  - id: secret-str-pydantic
+    message: >
+      Secret-named field '$FIELD' is typed as plain str in a Pydantic model.
+      Use pydantic.SecretStr, or annotate with AllowSecretTyping(reason="...")
+      for deliberate exceptions.
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              class $CLS(BaseModel, ...):
+                ...
+          - pattern-inside: |
+              class $CLS(BaseSettings, ...):
+                ...
+      - pattern-either:
+          - pattern: "$FIELD: str"
+          - pattern: "$FIELD: str | None"
+          - pattern: "$FIELD: Optional[str]"
+          - pattern: "$FIELD: Annotated[str, ...]"
+          - pattern: "$FIELD: str = $DEFAULT"
+          - pattern: "$FIELD: str | None = $DEFAULT"
+          - pattern: "$FIELD: Optional[str] = $DEFAULT"
+          - pattern: "$FIELD: Annotated[str, ...] = $DEFAULT"
+      - metavariable-regex:
+          metavariable: $FIELD
+          regex: "(?i)^(.*_)?(password|secret|token|api_key|apikey|encryption_key|auth_key|client_secret|webhook_secret|bearer|access_key|private_key|credential|dsn|database_url|connection_string)(_.*)?$|^.*_url$"
+      - pattern-not: "$FIELD: Annotated[str, ..., AllowSecretTyping(...), ...]"
+      - pattern-not: "$FIELD: Annotated[str, ..., AllowSecretTyping(...), ...] = $DEFAULT"
+
+  - id: secret-str-dataclass
+    message: >
+      Secret-named field '$FIELD' is typed as plain str in a dataclass.
+      Use a wrapper type or Annotated[str, AllowSecretTyping(reason="...")] for
+      deliberate exceptions.
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              @dataclass
+              class $CLS:
+                ...
+          - pattern-inside: |
+              @dataclass
+              class $CLS(...):
+                ...
+          - pattern-inside: |
+              @dataclass(...)
+              class $CLS:
+                ...
+          - pattern-inside: |
+              @dataclass(...)
+              class $CLS(...):
+                ...
+      - pattern-either:
+          - pattern: "$FIELD: str"
+          - pattern: "$FIELD: str | None"
+          - pattern: "$FIELD: Optional[str]"
+          - pattern: "$FIELD: Annotated[str, ...]"
+          - pattern: "$FIELD: str = $DEFAULT"
+          - pattern: "$FIELD: str | None = $DEFAULT"
+          - pattern: "$FIELD: Optional[str] = $DEFAULT"
+          - pattern: "$FIELD: Annotated[str, ...] = $DEFAULT"
+      - metavariable-regex:
+          metavariable: $FIELD
+          regex: "(?i)^(.*_)?(password|secret|token|api_key|apikey|encryption_key|auth_key|client_secret|webhook_secret|bearer|access_key|private_key|credential|dsn|database_url|connection_string)(_.*)?$|^.*_url$"
+      - pattern-not: "$FIELD: Annotated[str, ..., AllowSecretTyping(...), ...]"
+      - pattern-not: "$FIELD: Annotated[str, ..., AllowSecretTyping(...), ...] = $DEFAULT"
