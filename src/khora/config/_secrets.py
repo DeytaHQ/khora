@@ -7,7 +7,10 @@ from dataclasses import dataclass
 
 # Matches the userinfo segment of a URI: ``://user:password@``. Captures
 # nothing — substitution replaces the whole match with ``://[REDACTED]@``.
-_DSN_USERINFO_RE = re.compile(r"://[^:@/]+:[^@/]+@")
+# Username class ``[^:@]*`` allows empty usernames (e.g. ``redis://:pw@host``).
+# Password class ``[^@]+`` allows ``/`` so passwords like ``pass/word`` are
+# fully redacted rather than truncated at the first slash.
+_DSN_USERINFO_RE = re.compile(r"://[^:@]*:[^@]+@")
 
 
 @dataclass(frozen=True)
