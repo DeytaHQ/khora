@@ -74,7 +74,7 @@ class CrossToolUnifier:
         self._fuzzy_threshold = fuzzy_threshold
         self._rule_engine = RuleEngine(expertise)
 
-    def unify(
+    async def unify(
         self,
         entities: list[Entity],
         relationships: list[Relationship],
@@ -82,6 +82,7 @@ class CrossToolUnifier:
         use_embeddings: bool = True,
         use_fuzzy: bool = True,
         entity_index: EntityIndex | None = None,
+        storage: Any = None,
     ) -> UnificationResult:
         """Unify entities and update relationships.
 
@@ -90,6 +91,9 @@ class CrossToolUnifier:
             relationships: Relationships between entities
             use_embeddings: Whether to use embedding similarity
             use_fuzzy: Whether to use fuzzy string matching
+            storage: Optional storage coordinator with ``dispatch_hook``; when
+                provided, an ``EventType.ENTITY_MERGED`` event is emitted for
+                each surviving entity that absorbed one or more others.
 
         Returns:
             UnificationResult with unified entities and updated relationships
@@ -102,8 +106,19 @@ class CrossToolUnifier:
         # Build evaluation context
         context = RuleEvaluationContext.from_data(entities, relationships)
 
+        # Track which strategy contributed each merge pair, so the
+        # ENTITY_MERGED event can report a meaningful "strategy" tag.
+        strategy_by_pair: dict[tuple[UUID, UUID], str] = {}
+
         # Find entity groups that should be merged
-        merge_groups = self._find_merge_groups(entities, context, use_embeddings, use_fuzzy, entity_index=entity_index)
+        merge_groups = self._find_merge_groups(
+            entities,
+            context,
+            use_embeddings,
+            use_fuzzy,
+            entity_index=entity_index,
+            strategy_by_pair=strategy_by_pair,
+        )
 
         if not merge_groups:
             # No merging needed
@@ -115,13 +130,18 @@ class CrossToolUnifier:
         entity_mapping: dict[UUID, UUID] = {}
         unified_entities: list[Entity] = []
         processed_ids: set[UUID] = set()
+        # Track per-group metadata for event emission, keyed by surviving
+        # entity id (canonical id after merge).
+        group_meta: list[tuple[Entity, list[Entity]]] = []
 
         for group in merge_groups:
             if len(group) < 2:
                 continue
 
             # Merge all entities in the group
-            merged_entity = self._merge_entity_group([e for e in entities if e.id in group])
+            group_entities = [e for e in entities if e.id in group]
+            pre_merge_snapshot = list(group_entities)
+            merged_entity = self._merge_entity_group(group_entities)
             unified_entities.append(merged_entity)
 
             # Map all original IDs to the merged entity's ID
@@ -131,6 +151,7 @@ class CrossToolUnifier:
 
             result.entities_merged += len(group) - 1
             result.merge_groups.append(list(group))
+            group_meta.append((merged_entity, pre_merge_snapshot))
 
         # Add entities that weren't merged
         for entity in entities:
@@ -152,7 +173,73 @@ class CrossToolUnifier:
             f"({result.entities_merged} merged in {len(merge_groups)} groups)"
         )
 
+        # Emit ENTITY_MERGED hook events — one per surviving entity that
+        # absorbed >=1 others. Hook failures must never break the unifier.
+        if storage is not None and group_meta:
+            await self._dispatch_merge_events(storage, group_meta, strategy_by_pair)
+
         return result
+
+    async def _dispatch_merge_events(
+        self,
+        storage: Any,
+        group_meta: list[tuple[Entity, list[Entity]]],
+        strategy_by_pair: dict[tuple[UUID, UUID], str],
+    ) -> None:
+        """Dispatch ENTITY_MERGED events to storage hook subscribers.
+
+        Wraps each ``dispatch_hook`` call in try/except so a misbehaving
+        callback can never break the unification pipeline.
+        """
+        from khora.core.models.event import EventType, MemoryEvent
+
+        for surviving, pre_merge_entities in group_meta:
+            # Include every pre-merge entity id (both absorbed and surviving):
+            # consumers need the full pre-merge set to reconcile prior IDs.
+            merged_from = [str(e.id) for e in pre_merge_entities]
+            source_tools: list[str] = []
+            seen: set[str] = set()
+            for e in pre_merge_entities:
+                tool = e.attributes.get("source_tool") if e.attributes else None
+                if tool and tool not in seen:
+                    seen.add(tool)
+                    source_tools.append(tool)
+            strategy = self._strategy_for_group(pre_merge_entities, strategy_by_pair)
+            event = MemoryEvent(
+                namespace_id=surviving.namespace_id,
+                event_type=EventType.ENTITY_MERGED,
+                resource_type="entity",
+                resource_id=surviving.id,
+                data={
+                    "merged_from": merged_from,
+                    "surviving_id": str(surviving.id),
+                    "source_tools": source_tools,
+                    "strategy": strategy,
+                    "namespace_id": str(surviving.namespace_id),
+                },
+            )
+            try:
+                await storage.dispatch_hook(event)
+            except Exception as exc:
+                logger.warning(f"ENTITY_MERGED hook dispatch failed for {surviving.id}: {exc}")
+
+    @staticmethod
+    def _strategy_for_group(
+        group_entities: list[Entity],
+        strategy_by_pair: dict[tuple[UUID, UUID], str],
+    ) -> str:
+        """Pick the strategy label for a merge group.
+
+        If any pair within the group was matched by a specific strategy, use
+        that label. Falls back to ``"name_match"`` (the default exact-name
+        match path) when no pair label was recorded.
+        """
+        for i, e1 in enumerate(group_entities):
+            for e2 in group_entities[i + 1 :]:
+                key = (min(e1.id, e2.id), max(e1.id, e2.id))
+                if key in strategy_by_pair:
+                    return strategy_by_pair[key]
+        return "name_match"
 
     def _find_merge_groups(
         self,
@@ -162,8 +249,15 @@ class CrossToolUnifier:
         use_fuzzy: bool,
         *,
         entity_index: EntityIndex | None = None,
+        strategy_by_pair: dict[tuple[UUID, UUID], str] | None = None,
     ) -> list[set[UUID]]:
-        """Find groups of entities that should be merged."""
+        """Find groups of entities that should be merged.
+
+        When ``strategy_by_pair`` is provided, the first strategy that
+        contributed each (min_id, max_id) pair is recorded for later
+        attribution in ENTITY_MERGED events. Later strategies do not
+        overwrite earlier ones.
+        """
         # Use Union-Find to track merge groups
         parent: dict[UUID, UUID] = {e.id: e.id for e in entities}
 
@@ -177,6 +271,12 @@ class CrossToolUnifier:
             if px != py:
                 parent[px] = py
 
+        def _record(strategy: str, a: UUID, b: UUID) -> None:
+            if strategy_by_pair is None or a == b:
+                return
+            key = (min(a, b), max(a, b))
+            strategy_by_pair.setdefault(key, strategy)
+
         # Apply correlation rules
         if self._expertise and self._expertise.correlation_rules:
             for rule in self._expertise.correlation_rules:
@@ -184,21 +284,24 @@ class CrossToolUnifier:
                     matches = self._find_field_match_pairs(entities, rule.match_fields, rule.entity_types)
                     for e1_id, e2_id in matches:
                         union(e1_id, e2_id)
+                        _record(f"correlation:{rule.name}", e1_id, e2_id)
 
         # Exact name matching within same type
-        self._find_exact_name_matches(entities, union)
+        self._find_exact_name_matches(entities, union, strategy_by_pair=strategy_by_pair)
 
         # Optional: Embedding similarity matching
         if use_embeddings:
             embedding_matches = self._find_embedding_matches(entities, entity_index=entity_index)
             for e1_id, e2_id in embedding_matches:
                 union(e1_id, e2_id)
+                _record("embedding", e1_id, e2_id)
 
         # Optional: Fuzzy string matching
         if use_fuzzy:
             fuzzy_matches = self._find_fuzzy_matches(entities, entity_index=entity_index)
             for e1_id, e2_id in fuzzy_matches:
                 union(e1_id, e2_id)
+                _record("fuzzy", e1_id, e2_id)
 
         # Build groups from union-find
         groups: dict[UUID, set[UUID]] = {}
@@ -252,6 +355,8 @@ class CrossToolUnifier:
         self,
         entities: list[Entity],
         union: Any,
+        *,
+        strategy_by_pair: dict[tuple[UUID, UUID], str] | None = None,
     ) -> None:
         """Find entities with exact name matches (same type)."""
         # Group by (normalized_name, type)
@@ -271,6 +376,9 @@ class CrossToolUnifier:
                 first = group[0]
                 for entity in group[1:]:
                     union(first.id, entity.id)
+                    if strategy_by_pair is not None and first.id != entity.id:
+                        pair = (min(first.id, entity.id), max(first.id, entity.id))
+                        strategy_by_pair.setdefault(pair, "name_match")
 
     def _find_embedding_matches(
         self,

@@ -454,6 +454,18 @@ class Khora:
             except (AttributeError, TypeError):
                 pass  # Mock or non-standard engine — hooks won't fire
 
+        # Drain any hook filters that were registered with a description
+        # but no precomputed embedding (Issue #576 Phase 1, Item 2). After
+        # this, operators who wrote SemanticFilter(description="...") per
+        # the docs actually get Level 1 (cosine similarity) gating.
+        if hasattr(self, "_hook_dispatcher"):
+            embedder = getattr(self._engine, "_embedder", None)
+            if embedder is not None:
+                try:
+                    await self._hook_dispatcher.embed_pending_filters(embedder)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("Failed to drain pending hook-filter embeddings: {}", exc)
+
         self._connected = True
         logger.info("Khora connected")
 
@@ -1407,6 +1419,7 @@ class Khora:
         """
         import time as _time
 
+        from khora.core.models.event import EventType, MemoryEvent
         from khora.telemetry.aggregate_metrics import record_recall_duration
         from khora.telemetry.context import (
             clear_trace_id,
@@ -1419,6 +1432,7 @@ class Khora:
         start_usage_collection()
         _t0 = _time.perf_counter()
         _status = "success"
+        _recall_id = uuid4()
         try:
             if start_time is not None or end_time is not None:
                 if start_time is not None and end_time is not None:
@@ -1436,6 +1450,26 @@ class Khora:
             else:
                 temporal_filter = None
             namespace_id = await self._resolve_namespace(namespace)
+
+            # Emit RECALL_REQUESTED before any embedding/retrieval work.
+            try:
+                await self._dispatch_hook(
+                    MemoryEvent(
+                        namespace_id=namespace_id,
+                        event_type=EventType.RECALL_REQUESTED,
+                        resource_type="recall",
+                        resource_id=_recall_id,
+                        data={
+                            "query": query,
+                            "k": limit,
+                            "mode": getattr(mode, "value", str(mode)) if mode is not None else "default",
+                            "namespace_id": str(namespace_id),
+                        },
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Hook dispatch failed for {}: {}", EventType.RECALL_REQUESTED.value, exc)
+
             with trace_span(
                 "khora.recall",
                 namespace_id=str(namespace_id),
@@ -1454,7 +1488,65 @@ class Khora:
                 )
                 if include_sources:
                     await self._populate_sources(result.chunks, result.entities, result.relationships)
-                return replace(result, llm_usage=collect_usage())
+
+                # Emit RECALL_RESULTS_READY after engine returns, before packaging.
+                try:
+                    if result.chunks:
+                        first_chunk = result.chunks[0]
+                        _top_score = (
+                            first_chunk[1] if isinstance(first_chunk, tuple) else getattr(first_chunk, "score", None)
+                        )
+                    else:
+                        _top_score = None
+                    _entity_ids = [
+                        str(e[0].id if isinstance(e, tuple) else e.id)
+                        for e in (result.entities[:20] if result.entities else [])
+                    ]
+                    _chunk_ids = [
+                        str(c[0].id if isinstance(c, tuple) else c.id)
+                        for c in (result.chunks[:20] if result.chunks else [])
+                    ]
+                    await self._dispatch_hook(
+                        MemoryEvent(
+                            namespace_id=namespace_id,
+                            event_type=EventType.RECALL_RESULTS_READY,
+                            resource_type="recall",
+                            resource_id=_recall_id,
+                            data={
+                                "query": query,
+                                "result_count": len(result.chunks),
+                                "top_score": _top_score,
+                                "entity_ids": _entity_ids,
+                                "chunk_ids": _chunk_ids,
+                                "abstention_signals": (result.metadata or {}).get("abstention_signals"),
+                            },
+                        )
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("Hook dispatch failed for {}: {}", EventType.RECALL_RESULTS_READY.value, exc)
+
+                packaged = replace(result, llm_usage=collect_usage())
+
+                # Emit RECALL_COMPLETED with end-to-end timing.
+                try:
+                    await self._dispatch_hook(
+                        MemoryEvent(
+                            namespace_id=namespace_id,
+                            event_type=EventType.RECALL_COMPLETED,
+                            resource_type="recall",
+                            resource_id=_recall_id,
+                            data={
+                                "query": query,
+                                "latency_ms": (_time.perf_counter() - _t0) * 1000.0,
+                                "result_count": len(packaged.chunks) if packaged.chunks else 0,
+                                "llm_usage": (packaged.metadata or {}).get("llm_usage"),
+                            },
+                        )
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("Hook dispatch failed for {}: {}", EventType.RECALL_COMPLETED.value, exc)
+
+                return packaged
         except Exception:
             _status = "error"
             raise
@@ -1766,9 +1858,15 @@ class Khora:
 
             hooks_config = getattr(self._config, "hooks", None)
             max_concurrent = 10
+            callback_timeout = 30.0
             if hooks_config:
                 max_concurrent = getattr(hooks_config, "max_concurrent_callbacks", 10)
-            self._hook_dispatcher = HookDispatcher(max_concurrent=max_concurrent)
+                callback_timeout = getattr(hooks_config, "callback_timeout_seconds", 30.0)
+            self._hook_dispatcher = HookDispatcher(
+                max_concurrent=max_concurrent,
+                callback_timeout_seconds=callback_timeout,
+                config=hooks_config,
+            )
         return self._hook_dispatcher
 
     @property

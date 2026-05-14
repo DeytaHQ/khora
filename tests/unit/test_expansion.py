@@ -265,7 +265,7 @@ class TestRuleEngine:
 class TestCrossToolUnifier:
     """Tests for CrossToolUnifier."""
 
-    def test_unifier_without_expertise(self) -> None:
+    async def test_unifier_without_expertise(self) -> None:
         """Test unifier works without expertise."""
         unifier = CrossToolUnifier()
         namespace_id = uuid4()
@@ -279,12 +279,12 @@ class TestCrossToolUnifier:
             ),
         ]
 
-        result = unifier.unify(entities, [], use_embeddings=False, use_fuzzy=False)
+        result = await unifier.unify(entities, [], use_embeddings=False, use_fuzzy=False)
 
         assert len(result.unified_entities) == 1
         assert result.entities_merged == 0
 
-    def test_unify_by_email(self) -> None:
+    async def test_unify_by_email(self) -> None:
         """Test unifying entities by email with correlation rule."""
         # Expertise with email matching rule
         expertise = ExpertiseConfig(
@@ -322,14 +322,14 @@ class TestCrossToolUnifier:
             attributes={"email": "jane@example.com"},
         )
 
-        result = unifier.unify([e1, e2, e3], [], use_embeddings=False, use_fuzzy=False)
+        result = await unifier.unify([e1, e2, e3], [], use_embeddings=False, use_fuzzy=False)
 
         # e1 and e2 should be merged, e3 separate
         assert len(result.unified_entities) == 2
         assert result.entities_merged == 1
         assert len(result.entity_mapping) == 3
 
-    def test_unify_by_domain(self) -> None:
+    async def test_unify_by_domain(self) -> None:
         """Test unifying entities by domain with correlation rule."""
         # Expertise with domain matching rule
         expertise = ExpertiseConfig(
@@ -360,12 +360,12 @@ class TestCrossToolUnifier:
             attributes={"domain": "acme.com"},
         )
 
-        result = unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=False)
+        result = await unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=False)
 
         assert len(result.unified_entities) == 1
         assert result.entities_merged == 1
 
-    def test_unify_updates_relationships(self) -> None:
+    async def test_unify_updates_relationships(self) -> None:
         """Test that unification updates relationship entity IDs."""
         # Expertise with email matching rule
         expertise = ExpertiseConfig(
@@ -411,7 +411,7 @@ class TestCrossToolUnifier:
             namespace_id=namespace_id,
         )
 
-        result = unifier.unify([e1, e2, e3], [rel], use_embeddings=False, use_fuzzy=False)
+        result = await unifier.unify([e1, e2, e3], [rel], use_embeddings=False, use_fuzzy=False)
 
         # e1 and e2 merged, relationship should be updated
         assert len(result.unified_entities) == 2
@@ -422,7 +422,7 @@ class TestCrossToolUnifier:
         canonical_id = result.entity_mapping[e2.id]
         assert updated_rel.source_entity_id == canonical_id
 
-    def test_unify_with_fuzzy_matching(self) -> None:
+    async def test_unify_with_fuzzy_matching(self) -> None:
         """Test unifying with fuzzy string matching."""
         unifier = CrossToolUnifier(fuzzy_threshold=0.8)
         namespace_id = uuid4()
@@ -440,11 +440,115 @@ class TestCrossToolUnifier:
             namespace_id=namespace_id,
         )
 
-        result = unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=True)
+        result = await unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=True)
 
         # Names are similar enough to merge
         assert len(result.unified_entities) == 1
         assert result.entities_merged == 1
+
+
+class TestCrossToolUnifierMergeEvents:
+    """Tests for ENTITY_MERGED hook event emission (Issue #576, Phase 1, Item 5)."""
+
+    async def test_merge_dispatches_single_entity_merged_event(self) -> None:
+        """A merge of 2 entities dispatches exactly one entity.merged event with merged_from length 2."""
+        from unittest.mock import AsyncMock
+
+        from khora.core.models.event import EventType
+
+        unifier = CrossToolUnifier()
+        namespace_id = uuid4()
+
+        e1 = Entity(
+            id=uuid4(),
+            name="John Smith",
+            entity_type="PERSON",
+            namespace_id=namespace_id,
+            attributes={"source_tool": "slack"},
+        )
+        e2 = Entity(
+            id=uuid4(),
+            name="John Smith",  # Exact name + type match
+            entity_type="PERSON",
+            namespace_id=namespace_id,
+            attributes={"source_tool": "salesforce"},
+        )
+
+        storage = AsyncMock()
+
+        result = await unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=False, storage=storage)
+
+        assert result.entities_merged == 1
+        assert storage.dispatch_hook.await_count == 1
+
+        event = storage.dispatch_hook.await_args.args[0]
+        assert event.event_type == EventType.ENTITY_MERGED
+        assert event.resource_type == "entity"
+        assert len(event.data["merged_from"]) == 2
+        assert set(event.data["merged_from"]) == {str(e1.id), str(e2.id)}
+        assert set(event.data["source_tools"]) == {"slack", "salesforce"}
+        assert event.data["strategy"] == "name_match"
+        assert event.data["namespace_id"] == str(namespace_id)
+
+    async def test_merge_event_surviving_id_matches_canonical_entity(self) -> None:
+        """The event's surviving_id matches the canonical (post-merge) entity id."""
+        from unittest.mock import AsyncMock
+
+        unifier = CrossToolUnifier()
+        namespace_id = uuid4()
+
+        e1 = Entity(
+            id=uuid4(),
+            name="Acme Corp",
+            entity_type="ORGANIZATION",
+            namespace_id=namespace_id,
+            confidence=0.7,
+        )
+        e2 = Entity(
+            id=uuid4(),
+            name="Acme Corp",
+            entity_type="ORGANIZATION",
+            namespace_id=namespace_id,
+            confidence=0.9,  # Higher confidence -> becomes base
+        )
+
+        storage = AsyncMock()
+
+        result = await unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=False, storage=storage)
+
+        assert storage.dispatch_hook.await_count == 1
+        event = storage.dispatch_hook.await_args.args[0]
+        # The surviving entity is the one in the unified list
+        canonical = result.unified_entities[0]
+        assert event.resource_id == canonical.id
+        assert event.data["surviving_id"] == str(canonical.id)
+
+    async def test_no_merge_does_not_dispatch_event(self) -> None:
+        """When no merge happens, no entity.merged event is dispatched."""
+        from unittest.mock import AsyncMock
+
+        unifier = CrossToolUnifier()
+        namespace_id = uuid4()
+
+        e1 = Entity(
+            id=uuid4(),
+            name="John Smith",
+            entity_type="PERSON",
+            namespace_id=namespace_id,
+        )
+        e2 = Entity(
+            id=uuid4(),
+            name="Jane Doe",  # Distinct name -> no merge
+            entity_type="PERSON",
+            namespace_id=namespace_id,
+        )
+
+        storage = AsyncMock()
+
+        result = await unifier.unify([e1, e2], [], use_embeddings=False, use_fuzzy=False, storage=storage)
+
+        assert result.entities_merged == 0
+        storage.dispatch_hook.assert_not_awaited()
 
 
 class TestRelationshipInferrer:

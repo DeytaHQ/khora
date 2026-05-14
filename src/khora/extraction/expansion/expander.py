@@ -7,7 +7,7 @@ to enrich extracted knowledge graphs.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
@@ -135,6 +135,7 @@ class SemanticExpander:
         *,
         namespace_id: UUID | None = None,
         entity_index: EntityIndex | None = None,
+        storage: Any = None,
     ) -> ExpansionResult:
         """Expand the knowledge graph.
 
@@ -174,12 +175,13 @@ class SemanticExpander:
             from khora.telemetry import get_collector
 
             _t0 = _time.perf_counter()
-            unification_result = self._unifier.unify(
+            unification_result = await self._unifier.unify(
                 current_entities,
                 current_relationships,
                 use_embeddings=True,
                 use_fuzzy=True,
                 entity_index=entity_index,
+                storage=storage,
             )
             get_collector().record_pipeline_stage(
                 pipeline="expansion",

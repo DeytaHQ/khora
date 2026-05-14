@@ -832,6 +832,37 @@
         {"name": "source_type", "values": ["slack", "email", "calendar", "salesforce", "jira", "linear", "manual", "unknown"], "_comment": "Bounded enum drawn from SourceSystem; off-enum values bucket to 'unknown'."}
       ],
       "_comment": "Issue #568 Phase B. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.hooks.llm.evaluations_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Level 2 (nano-LLM yes/no) hook filter evaluations, bucketed by outcome.",
+      "labels": [
+        {"name": "category", "values": ["match", "no_match", "timeout", "budget_exceeded"], "_comment": "match/no_match = LLM decided; timeout = LLM raised or response unparseable; budget_exceeded = per-namespace cap hit, evaluator failed open."}
+      ],
+      "_comment": "Issue #576 Phase 1, Item 7. NO namespace_id label — cardinality rule. Default-off feature; counter only fires when KHORA_HOOKS_LLM_EVALUATION_ENABLED=true."
+    },
+    {
+      "name": "khora.hooks.llm.tokens_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "tokens",
+      "description": "Approximate token spend for Level 2 hook evaluations, by direction. Char/4 estimate — the canonical token count lives on khora.llm.tokens via the central LLMUsage path.",
+      "labels": [
+        {"name": "direction", "values": ["input", "output"]}
+      ],
+      "_comment": "Issue #576 Phase 1, Item 7. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.hooks.llm.throttled_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Number of Level 2 hook evaluations refused by the per-namespace hourly token budget. Each throttle event corresponds to a fail-open outcome on the affected batch.",
+      "labels": [],
+      "_comment": "Issue #576 Phase 1, Item 7. NO namespace_id label — cardinality rule."
     }
   ]
 }

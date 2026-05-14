@@ -54,6 +54,28 @@ class SemanticHooksConfig(BaseSettings):
         description="Max milliseconds to wait before flushing an incomplete batch",
     )
 
+    # Level 2 (nano-LLM) evaluation — default OFF. When false, the dispatcher
+    # only runs Level 0 + Level 1 even for filters that supplied examples.
+    # Issue #576 Phase 1, Item 7.
+    llm_evaluation_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable Level 2 (LLM yes/no) evaluation for filters with examples. "
+            "Default OFF — opt in via KHORA_HOOKS_LLM_EVALUATION_ENABLED=true."
+        ),
+    )
+    # Hard cap on Level 2 tokens (input + output) per namespace per rolling hour.
+    # When breached, the evaluator fails open (returns True so the Level 1 match
+    # is preserved) and emits ``khora.hooks.llm.throttled_total``.
+    llm_max_tokens_per_namespace_per_hour: int = Field(
+        default=10_000,
+        ge=0,
+        description=(
+            "Per-namespace hourly token budget for Level 2. 0 disables the cap. "
+            "When breached, evaluations fail open and a throttle counter fires."
+        ),
+    )
+
     # Callback settings
     max_concurrent_callbacks: int = Field(
         default=10,

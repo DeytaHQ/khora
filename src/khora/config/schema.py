@@ -11,6 +11,15 @@ import yaml
 from pydantic import BaseModel, Discriminator, Field, SecretStr, Tag, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Lazy module-level import of SemanticHooksConfig avoids the circular-import
+# chain (config → hooks → telemetry → config) that previously forced
+# ``KhoraConfig.hooks: Any = None``. Imported here at module load — by the
+# time KhoraConfig is instantiated all chains are resolved. See
+# Issue #576 Phase 1 Item 4.
+from khora.hooks.models import SemanticHooksConfig as _SemanticHooksConfig
+
+SemanticHooksConfig = _SemanticHooksConfig  # public re-export
+
 
 def _secret_value(value: SecretStr | str | None, default: str = "") -> str:
     """Return the plain-text value of a ``SecretStr`` (or pass-through ``str``).
@@ -1021,8 +1030,14 @@ class KhoraConfig(BaseSettings):
     # Query pipeline configuration
     query: QuerySettings = Field(default_factory=QuerySettings)
 
-    # Semantic hooks configuration
-    hooks: Any = Field(default=None, description="Semantic hooks configuration (SemanticHooksConfig)")
+    # Semantic hooks configuration. Was ``Any = None`` historically due to
+    # a circular-import worry; lazy import below resolves it without
+    # introducing a forward ref in the type position. Issue #576 Phase 1
+    # Item 4 — replaces the unused-field placeholder with the real config.
+    hooks: SemanticHooksConfig = Field(
+        default_factory=lambda: _SemanticHooksConfig(),
+        description="Semantic hooks configuration",
+    )
 
     # Telemetry
     telemetry_database_url: SecretStr | None = Field(
