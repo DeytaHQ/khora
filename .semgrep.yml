@@ -1,14 +1,12 @@
-# ADR-084: Typed Secret Handling — standalone semgrep rule, warn-mode (DYT-3993).
-# Adapted from deyta-core/src/deyta_core/lint/secret-typing.yml.
-# Severity is WARNING during the D3-R migration window (8 existing findings in
-# config/llm.py, config/schema.py, storage/factory.py). Flip to ERROR in D3-C
-# once all str-typed secrets are re-typed. No deyta-core dependency required.
+# Detect str-typed secret-pattern fields in Pydantic models and dataclasses.
+# Severity WARNING: CI reports findings without blocking while existing fields
+# are remediated. Flip both rules to ERROR once the backlog is clear.
 rules:
-  - id: deyta-secret-str-pydantic
+  - id: secret-str-pydantic
     message: >
       Secret-named field '$FIELD' is typed as plain str in a Pydantic model.
       Use pydantic.SecretStr, or annotate with AllowSecretTyping(reason="...")
-      for deliberate exceptions. See ADR-084: Typed Secret Handling.
+      for deliberate exceptions.
     severity: WARNING
     languages: [python]
     patterns:
@@ -34,11 +32,11 @@ rules:
       - pattern-not: "$FIELD: Annotated[str, ..., AllowSecretTyping(...), ...]"
       - pattern-not: "$FIELD: Annotated[str, ..., AllowSecretTyping(...), ...] = $DEFAULT"
 
-  - id: deyta-secret-str-dataclass
+  - id: secret-str-dataclass
     message: >
       Secret-named field '$FIELD' is typed as plain str in a dataclass.
       Use a wrapper type or Annotated[str, AllowSecretTyping(reason="...")] for
-      deliberate exceptions. See ADR-084: Typed Secret Handling.
+      deliberate exceptions.
     severity: WARNING
     languages: [python]
     patterns:

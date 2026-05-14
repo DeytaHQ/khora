@@ -24,10 +24,10 @@ env:
 
 jobs:
   # ============================================================================
-  # ADR-084: Secret typing check — standalone semgrep, warn-mode (DYT-3993).
-  # Khora is open-source; cannot reference private deyta-core reusable workflows.
-  # Rule lives in .semgrep.yml; severity WARNING keeps CI green during D3-R.
-  # Flip severity to ERROR in D3-C once all str-typed secrets are re-typed.
+  # Secret typing — detect str-typed secret fields in Pydantic models and
+  # dataclasses. Severity WARNING: CI reports findings but does not block
+  # while existing findings are remediated. Flip to ERROR in .semgrep.yml
+  # once the backlog is clear.
   # ============================================================================
   secret-typing:
     runs-on: ubuntu-latest
@@ -35,7 +35,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Secret typing check (ADR-084 warn-mode)
+      - name: Secret typing check (warn-mode)
         run: uvx semgrep --config .semgrep.yml src/
 
   # ============================================================================

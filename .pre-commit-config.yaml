@@ -19,7 +19,7 @@ repos:
   - repo: local
     hooks:
       - id: secret-typing
-        name: ADR-084 secret typing (warn-mode, DYT-3993)
+        name: secret typing (warn-mode)
         entry: uvx semgrep --config .semgrep.yml src/
         language: system
         pass_filenames: false
