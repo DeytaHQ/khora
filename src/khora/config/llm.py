@@ -93,9 +93,11 @@ class LiteLLMConfig(BaseModel):
         default="text-embedding-3-small",
         description="Model to use for embeddings",
     )
-    embedding_api_key_env: Annotated[str, AllowSecretTyping(reason="env-var name pointer, not a credential")] | None = Field(
-        default=None,
-        description="Environment variable for embedding API key (defaults to api_key_env)",
+    embedding_api_key_env: Annotated[str, AllowSecretTyping(reason="env-var name pointer, not a credential")] | None = (
+        Field(
+            default=None,
+            description="Environment variable for embedding API key (defaults to api_key_env)",
+        )
     )
     embedding_dimension: int = Field(
         default=1536,

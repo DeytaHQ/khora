@@ -78,21 +78,50 @@ class StorageConfig:
     """
 
     # PostgreSQL configuration
-    postgresql_url: Annotated[str, AllowSecretTyping(reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_postgresql_url()")] | None = None
+    postgresql_url: (
+        Annotated[
+            str,
+            AllowSecretTyping(
+                reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_postgresql_url()"
+            ),
+        ]
+        | None
+    ) = None
     postgresql_echo: bool = False
     postgresql_pool_size: int = 10
     postgresql_max_overflow: int = 20
     postgresql_pool_pre_ping: bool = False
 
     # pgvector configuration (can share PostgreSQL URL) — legacy
-    pgvector_url: Annotated[str, AllowSecretTyping(reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_postgresql_url()")] | None = None
+    pgvector_url: (
+        Annotated[
+            str,
+            AllowSecretTyping(
+                reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_postgresql_url()"
+            ),
+        ]
+        | None
+    ) = None
     pgvector_embedding_dimension: int = 1536
     pgvector_use_halfvec: bool = True
 
     # Neo4j configuration — legacy
-    neo4j_url: Annotated[str, AllowSecretTyping(reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_neo4j_url()")] | None = None
+    neo4j_url: (
+        Annotated[
+            str,
+            AllowSecretTyping(
+                reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_neo4j_url()"
+            ),
+        ]
+        | None
+    ) = None
     neo4j_user: str = "neo4j"
-    neo4j_password: Annotated[str, AllowSecretTyping(reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_neo4j_password()")] = ""
+    neo4j_password: Annotated[
+        str,
+        AllowSecretTyping(
+            reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_neo4j_password()"
+        ),
+    ] = ""
     neo4j_database: str = "neo4j"
 
     # New-style backend configs (Pydantic models from config/schema.py)
@@ -105,7 +134,15 @@ class StorageConfig:
     sqlite_lance_config: Any = None  # SQLiteLanceConfig from config/schema.py
 
     # Event store configuration (uses PostgreSQL by default)
-    event_store_url: Annotated[str, AllowSecretTyping(reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_postgresql_url()")] | None = None
+    event_store_url: (
+        Annotated[
+            str,
+            AllowSecretTyping(
+                reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_postgresql_url()"
+            ),
+        ]
+        | None
+    ) = None
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> StorageConfig:

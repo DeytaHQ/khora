@@ -461,7 +461,9 @@ class LLMSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KHORA_LLM_", case_sensitive=False)
 
     model: str = Field(default="gpt-4o-mini", description="Primary LLM model")
-    api_key_env: Annotated[str, AllowSecretTyping(reason="env-var name pointer, not a credential")] = Field(default="OPENAI_API_KEY", description="Environment variable for API key")
+    api_key_env: Annotated[str, AllowSecretTyping(reason="env-var name pointer, not a credential")] = Field(
+        default="OPENAI_API_KEY", description="Environment variable for API key"
+    )
     temperature: float = Field(default=0.7, description="Sampling temperature")
     max_tokens: int = Field(default=12288, description="Maximum tokens for LLM extraction output")
     timeout: int = Field(default=30, description="Request timeout in seconds")
