@@ -1,5 +1,5 @@
 # Detect str-typed secret-pattern fields in Pydantic models and dataclasses.
-# ADR-084 migration window closed (DYT-4001): all v1-scope fields retyped.
+# Migration window closed: all v1-scope fields retyped.
 # Severity ERROR: any new str-typed secret field blocks CI.
 rules:
   - id: secret-str-pydantic
