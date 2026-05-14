@@ -541,3 +541,140 @@ class TestLLMFilterEvaluatorSubscriptionBudget:
         assert first_noisy is False
         assert second_noisy is True  # fail open from budget breach
         assert quiet_result is False
+
+
+# ---------------------------------------------------------------------------
+# Intra-batch coalescing (Issue #608)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLLMFilterEvaluatorIntraBatchCoalescing:
+    async def test_ten_identical_events_in_one_batch_get_one_prompt_slot(self) -> None:
+        """A full batch of identical (name, type, description) tuples should
+        spend one LLM prompt slot, not ten — the decision is fanned out."""
+        cfg = SemanticHooksConfig(
+            llm_evaluation_enabled=True,
+            llm_cache_size=0,  # disable cross-batch cache to isolate this path
+        )
+        evaluator = LLMFilterEvaluator(cfg, batch_size=10, batch_flush_ms=10.0)
+        filt = _make_filter()
+        ns = uuid4()
+
+        captured_prompts: list[str] = []
+
+        async def fake_acompletion(prompt, config, **kwargs):  # noqa: ANN001
+            captured_prompts.append(prompt)
+            return _llm_response(match=True, confidence=0.9)
+
+        with patch("khora.config.llm.acompletion", new=fake_acompletion):
+            # Fire 10 evaluate() coroutines concurrently so they land in one batch.
+            futures = [
+                evaluator.evaluate(
+                    MemoryEvent.entity_created(
+                        namespace_id=ns,
+                        entity_id=uuid4(),
+                        data={"name": "Acme", "entity_type": "ORGANIZATION", "description": "x"},
+                    ),
+                    filt,
+                )
+                for _ in range(10)
+            ]
+            results = await asyncio.gather(*futures)
+
+        # All 10 futures resolve to the same fanned-out decision.
+        assert all(results)
+        # One LLM call total.
+        assert len(captured_prompts) == 1
+        # The prompt body contains exactly one ``[0] name=...`` slot — the rest
+        # were coalesced.
+        prompt = captured_prompts[0]
+        assert prompt.count("[0] name=") == 1
+        assert "[1] name=" not in prompt
+
+    async def test_distinct_events_in_one_batch_remain_separate(self) -> None:
+        """Sanity: when events differ, every one gets its own prompt slot."""
+        cfg = SemanticHooksConfig(llm_evaluation_enabled=True, llm_cache_size=0)
+        evaluator = LLMFilterEvaluator(cfg, batch_size=3, batch_flush_ms=10.0)
+        filt = _make_filter()
+        ns = uuid4()
+
+        captured_prompts: list[str] = []
+
+        async def fake_acompletion(prompt, config, **kwargs):  # noqa: ANN001
+            captured_prompts.append(prompt)
+            # Return one result per item (we'll send 3 distinct events).
+            return json.dumps(
+                {
+                    "results": [
+                        {"i": 0, "match": True, "confidence": 0.9},
+                        {"i": 1, "match": False, "confidence": 0.1},
+                        {"i": 2, "match": True, "confidence": 0.8},
+                    ]
+                }
+            )
+
+        with patch("khora.config.llm.acompletion", new=fake_acompletion):
+            futures = [
+                evaluator.evaluate(
+                    MemoryEvent.entity_created(
+                        namespace_id=ns,
+                        entity_id=uuid4(),
+                        data={"name": name, "entity_type": "ORGANIZATION", "description": ""},
+                    ),
+                    filt,
+                )
+                for name in ("A", "B", "C")
+            ]
+            results = await asyncio.gather(*futures)
+
+        assert results == [True, False, True]
+        # One LLM call with all three distinct slots present.
+        assert len(captured_prompts) == 1
+        for idx in range(3):
+            assert f"[{idx}] name=" in captured_prompts[0]
+
+    async def test_mixed_batch_dedupes_only_the_duplicates(self) -> None:
+        """5 events: A, A, B, A, C → 3 unique slots, 5 fanned-out decisions."""
+        cfg = SemanticHooksConfig(llm_evaluation_enabled=True, llm_cache_size=0)
+        evaluator = LLMFilterEvaluator(cfg, batch_size=5, batch_flush_ms=10.0)
+        filt = _make_filter()
+        ns = uuid4()
+
+        captured_prompts: list[str] = []
+
+        async def fake_acompletion(prompt, config, **kwargs):  # noqa: ANN001
+            captured_prompts.append(prompt)
+            # 3 unique → 3 result slots. A is index 0 (first seen), B is 1, C is 2.
+            return json.dumps(
+                {
+                    "results": [
+                        {"i": 0, "match": True, "confidence": 0.9},  # A
+                        {"i": 1, "match": False, "confidence": 0.1},  # B
+                        {"i": 2, "match": True, "confidence": 0.7},  # C
+                    ]
+                }
+            )
+
+        names = ["A", "A", "B", "A", "C"]
+        with patch("khora.config.llm.acompletion", new=fake_acompletion):
+            futures = [
+                evaluator.evaluate(
+                    MemoryEvent.entity_created(
+                        namespace_id=ns,
+                        entity_id=uuid4(),
+                        data={"name": name, "entity_type": "ORGANIZATION", "description": ""},
+                    ),
+                    filt,
+                )
+                for name in names
+            ]
+            results = await asyncio.gather(*futures)
+
+        # The three A's share one decision; B and C have their own.
+        assert results == [True, True, False, True, True]
+        # Exactly one LLM call with 3 deduped slots.
+        assert len(captured_prompts) == 1
+        prompt = captured_prompts[0]
+        assert "[0] name=" in prompt and "[1] name=" in prompt and "[2] name=" in prompt
+        assert "[3]" not in prompt
