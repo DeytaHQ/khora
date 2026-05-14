@@ -129,6 +129,15 @@ class TestSurrealDBCoordinator:
 
         Use ``patch`` on the *concrete classes* the factory imports.
         """
+        # Pre-import modules with top-level SurrealDBConnection bindings so
+        # those bindings are already set to the real class before the patch
+        # context below activates. A lazy first-import inside the patch window
+        # would permanently bind the mock in the module's namespace, leaking
+        # mock state into sibling tests (test_from_config_* in
+        # TestRelationalAdapterLifecycle) when run under xdist -n auto.
+        import khora.storage.backends.surrealdb.event_store  # noqa: F401
+        import khora.storage.backends.surrealdb.relational  # noqa: F401
+
         rel_cls = MagicMock(return_value=MagicMock(name="rel"))
         vec_cls = MagicMock(return_value=MagicMock(name="vec"))
         graph_cls = MagicMock(return_value=MagicMock(name="graph"))
