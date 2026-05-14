@@ -1,13 +1,13 @@
 # Detect str-typed secret-pattern fields in Pydantic models and dataclasses.
-# Severity WARNING: CI reports findings without blocking while existing fields
-# are remediated. Flip both rules to ERROR once the backlog is clear.
+# ADR-084 migration window closed (DYT-4001): all v1-scope fields retyped.
+# Severity ERROR: any new str-typed secret field blocks CI.
 rules:
   - id: secret-str-pydantic
     message: >
       Secret-named field '$FIELD' is typed as plain str in a Pydantic model.
       Use pydantic.SecretStr, or annotate with AllowSecretTyping(reason="...")
       for deliberate exceptions.
-    severity: WARNING
+    severity: ERROR
     languages: [python]
     patterns:
       - pattern-either:
@@ -37,7 +37,7 @@ rules:
       Secret-named field '$FIELD' is typed as plain str in a dataclass.
       Use a wrapper type or Annotated[str, AllowSecretTyping(reason="...")] for
       deliberate exceptions.
-    severity: WARNING
+    severity: ERROR
     languages: [python]
     patterns:
       - pattern-either:
