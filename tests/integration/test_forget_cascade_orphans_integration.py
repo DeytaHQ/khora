@@ -1,14 +1,4 @@
-"""Integration test reproducing IGR-202: ``forget()`` leaks orphan entities
-and relationships into ``entity_search`` / ``entity_explore``.
-
-Before the DYT-4164 cascade, ``khora.forget(document_id, namespace)`` deleted
-the document row and its chunks but never touched the entities or
-relationships extracted from that document. Both pgvector and Neo4j retained
-the orphan, so:
-
-* ``search_entities`` (pgvector) still surfaced the orphan entity.
-* ``find_related_entities`` (Neo4j graph traversal) still walked to the
-  orphan via leftover edges.
+"""Integration test for the ``forget()`` orphan-cleanup cascade.
 
 This test exercises the public ``Khora.remember()`` / ``Khora.forget()`` API
 against a real Postgres + Neo4j stack and asserts:
@@ -109,7 +99,7 @@ async def _run_cypher(driver: Any, query: str, **params: Any) -> list[dict[str, 
     reason="set NEO4J_INTEGRATION_TEST=1 to run against real backends (requires make dev)",
 )
 class TestForgetCascadeOrphansIntegration:
-    """End-to-end IGR-202 reproduction against real Postgres + Neo4j."""
+    """End-to-end forget()-cascade behaviour against real Postgres + Neo4j."""
 
     @pytest.fixture(autouse=True)
     def _stub_extractor_and_embedder(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,8 +171,8 @@ class TestForgetCascadeOrphansIntegration:
 
     @pytest.mark.asyncio
     async def test_forget_removes_orphan_entity_from_search_and_explore(self, kb: Khora, namespace_id: UUID) -> None:
-        """IGR-202 core reproduction: orphan entity disappears from entity_search
-        and find_related_entities after forget().
+        """Orphan entity disappears from entity_search and find_related_entities
+        after forget().
 
         Setup: 2 docs, each mentioning a unique entity.
         - doc_a: (alice, mallory, KNOWS) — alice will survive via doc_b
@@ -257,8 +247,7 @@ class TestForgetCascadeOrphansIntegration:
         results_after = await kb.search_entities(namespace_id=namespace_id, query="anyone", limit=50)
         names_after = {e.name for e in results_after}
         assert mallory not in names_after, (
-            f"IGR-202 regression: orphan entity {mallory!r} still surfaced "
-            f"by entity_search after forget(doc_a). Got names: {names_after}"
+            f"orphan entity {mallory!r} still surfaced by entity_search after forget(doc_a). Got names: {names_after}"
         )
         # Survivors still visible.
         assert alice in names_after
@@ -272,8 +261,7 @@ class TestForgetCascadeOrphansIntegration:
             name=mallory,
         )
         assert mallory_rows == [], (
-            f"IGR-202 regression: orphan entity {mallory!r} still in Neo4j after "
-            f"forget(doc_a). Found rows: {mallory_rows}"
+            f"orphan entity {mallory!r} still in Neo4j after forget(doc_a). Found rows: {mallory_rows}"
         )
 
         # 3. mallory's pgvector row also gone.
@@ -327,8 +315,7 @@ class TestForgetCascadeOrphansIntegration:
             f"after forget(doc_a); related={related_names}"
         )
         assert mallory not in related_names, (
-            f"IGR-202 regression: find_related_entities still walks to orphan "
-            f"{mallory!r} after forget(doc_a); related={related_names}"
+            f"find_related_entities still walks to orphan {mallory!r} after forget(doc_a); related={related_names}"
         )
 
         # Keep doc_b around long enough for later debugging — explicit cleanup:
