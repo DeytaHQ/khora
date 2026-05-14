@@ -11,6 +11,11 @@
         rust-build rust-dev rust-test rust-bench rust-clean \
         docker-run docker-down docker-clean
 
+# Load local environment overrides (.env is git-ignored; silently skipped in CI)
+-include .env
+export KHORA_DATABASE_URL
+export KHORA_NEO4J_URL
+
 # Default target
 help:
 	@echo "Khora Development Commands"
