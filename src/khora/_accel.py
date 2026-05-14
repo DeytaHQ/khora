@@ -373,8 +373,15 @@ def pagerank(
     damping: float = 0.85,
     max_iter: int = 100,
     tol: float = 1e-6,
+    personalization: list[float] | None = None,
 ) -> list[float]:
     """Compute PageRank scores on a weighted directed graph.
+
+    When ``personalization`` is provided, computes Personalized PageRank
+    (PPR) — the teleport distribution becomes the supplied vector rather
+    than uniform. Negatives are clipped to 0; if the result sums to 0
+    (or the length doesn't match ``n``), falls back to uniform — never
+    raises, so a query-time caller never crashes on a malformed seed.
 
     Args:
         n: Number of nodes (IDs are 0..n-1).
@@ -382,16 +389,32 @@ def pagerank(
         damping: Damping factor (typically 0.85).
         max_iter: Maximum iterations.
         tol: Convergence threshold.
+        personalization: Optional seed distribution of length ``n``.
+            None / mismatched length / all-zero → uniform (standard PageRank).
 
     Returns:
         List of length n with PageRank scores indexed by node ID.
     """
     if _HAS_RUST:
-        return _rust_pagerank(n, edges, damping, max_iter, tol)
+        # Only forward the personalization arg when set so an older
+        # khora-accel wheel that still has the 5-arg signature keeps
+        # working until it's rebuilt. New wheels accept either path.
+        if personalization is None:
+            return _rust_pagerank(n, edges, damping, max_iter, tol)
+        return _rust_pagerank(n, edges, damping, max_iter, tol, personalization)
 
     # Pure-Python fallback
     if n == 0:
         return []
+
+    # Resolve teleport distribution `p` (mirrors the Rust validation).
+    uniform = 1.0 / n
+    if personalization is not None and len(personalization) == n:
+        clipped = [x if x > 0.0 else 0.0 for x in personalization]
+        total = sum(clipped)
+        p = [x / total for x in clipped] if total > 0.0 else [uniform] * n
+    else:
+        p = [uniform] * n
 
     incoming: list[list[tuple[int, float]]] = [[] for _ in range(n)]
     out_degree: list[float] = [0.0] * n
@@ -401,8 +424,7 @@ def pagerank(
             incoming[dst].append((src, weight))
             out_degree[src] += weight
 
-    base = (1.0 - damping) / n
-    scores = [1.0 / n] * n
+    scores = list(p)  # init from p so the first iteration is already seeded
 
     for _ in range(max_iter):
         new_scores = [0.0] * n
@@ -413,7 +435,7 @@ def pagerank(
             for src, weight in incoming[node]:
                 if out_degree[src] > 0:
                     contrib += scores[src] * weight / out_degree[src]
-            new_score = base + damping * contrib
+            new_score = (1.0 - damping) * p[node] + damping * contrib
             diff += abs(new_score - scores[node])
             new_scores[node] = new_score
 
