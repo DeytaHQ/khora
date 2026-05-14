@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from loguru import logger
@@ -193,3 +195,102 @@ class SurrealDBConnection:
     async def execute(self, sql: str, bindings: dict[str, Any] | None = None) -> Any:
         """Execute a SurrealQL statement, returning raw result."""
         return await self._execute_raw(sql, bindings)
+
+    # ------------------------------------------------------------------
+    # Transactions (Issue #541)
+    #
+    # SurrealDB supports SurrealQL-level transactions via the
+    # BEGIN / COMMIT / CANCEL statements. The Python client surfaces
+    # these as plain queries on the WebSocket connection in remote mode.
+    # surrealkv (embedded / memory) raises ``UnsupportedFeatureError`` on
+    # BEGIN, so on those modes ``transaction()`` is a no-op and the
+    # caller's writes proceed as ordinary statements — preserving the
+    # "partial atomicity on embedded" contract documented in CLAUDE.md.
+    # ------------------------------------------------------------------
+
+    @property
+    def supports_transactions(self) -> bool:
+        """Return True when the active mode supports atomic multi-statement
+        transactions (remote WebSocket only)."""
+        return self._mode == "remote"
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncGenerator[SurrealDBConnection]:
+        """Async context manager for atomic multi-statement SurrealDB ops.
+
+        Remote mode wraps the body in ``BEGIN TRANSACTION`` /
+        ``COMMIT TRANSACTION``; on exception, issues ``CANCEL TRANSACTION``
+        and re-raises. Embedded / memory modes yield without issuing
+        BEGIN — surrealkv doesn't support it and would raise
+        ``UnsupportedFeatureError``. Callers needing per-statement
+        atomicity on embedded mode should use semicolon-batched
+        SurrealQL via :meth:`execute_batch`.
+
+        Usage::
+
+            async with conn.transaction():
+                await conn.execute("CREATE entity SET name = $n", {"n": "Acme"})
+                await conn.execute("RELATE $a->relates_to->$b", {...})
+
+        On embedded / memory the writes still go through atomically per
+        statement (each `execute` is its own surrealkv tx) but not
+        across statements — matching the existing CLAUDE.md contract.
+        """
+        if not self._connected:
+            raise RuntimeError("SurrealDB not connected")
+
+        if not self.supports_transactions:
+            # No-op for embedded / memory — surrealkv raises on BEGIN.
+            yield self
+            return
+
+        await self._execute_raw("BEGIN TRANSACTION;")
+        try:
+            yield self
+        except Exception:
+            try:
+                await self._execute_raw("CANCEL TRANSACTION;")
+            except Exception as cancel_exc:  # noqa: BLE001
+                logger.warning("SurrealDB CANCEL TRANSACTION failed: {}", cancel_exc)
+            raise
+        else:
+            await self._execute_raw("COMMIT TRANSACTION;")
+
+    async def execute_batch(
+        self,
+        statements: list[tuple[str, dict[str, Any] | None]],
+    ) -> list[Any]:
+        """Execute multiple SurrealQL statements in a single round-trip.
+
+        On embedded / memory modes this is the closest analogue to a
+        transaction: surrealkv applies all statements as one batch and
+        the engine's snapshot isolation means partial visibility is
+        bounded to the batch. On remote mode, prefer :meth:`transaction`
+        — it gives true atomicity across statements.
+
+        The Python client doesn't natively expose batch execution, so we
+        concatenate statements with ``;`` and rely on SurrealQL's
+        statement-separator semantics. Each statement may carry its own
+        parameter dict; we merge them keyed by parameter name, raising on
+        collision so callers can rename rather than silently overwrite.
+        """
+        if not self._connected:
+            raise RuntimeError("SurrealDB not connected")
+        if not statements:
+            return []
+
+        joined_sql_parts: list[str] = []
+        merged_bindings: dict[str, Any] = {}
+        for sql, bindings in statements:
+            joined_sql_parts.append(sql.strip().rstrip(";"))
+            if bindings:
+                for k, v in bindings.items():
+                    if k in merged_bindings and merged_bindings[k] != v:
+                        raise ValueError(
+                            f"execute_batch: parameter {k!r} conflicts between statements; rename one of them"
+                        )
+                    merged_bindings[k] = v
+        joined_sql = ";\n".join(joined_sql_parts) + ";"
+        result = await self._execute_raw(joined_sql, merged_bindings)
+        # SurrealDB returns a list of per-statement results.
+        return result if isinstance(result, list) else [result]
