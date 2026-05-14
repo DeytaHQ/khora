@@ -42,6 +42,45 @@ class RerankResult(Generic[T]):
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _date_prefix_for(metadata: Any, custom: Any) -> str:
+    """Return an ``YYYY-MM-DD`` date prefix for the reranker or ``""``.
+
+    Source priority (matches the canonical ConnectorMetadata mapping from
+    #568): ``custom.occurred_at`` → ``custom.sent_at`` → ``metadata.created_at``.
+    Accepts datetimes, date objects, or ISO-8601 strings; anything else
+    returns ``""`` so the reranker falls back to the un-prefixed content.
+
+    Used by :class:`CrossEncoderReranker` when
+    ``include_date_prefix=True`` (Issue #594, Phase D5).
+    """
+    from datetime import date, datetime
+
+    def _stringify(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, str):
+            # ``YYYY-MM-DD`` prefix of ``YYYY-MM-DDTHH:MM:SS...`` is correct
+            # for any ISO-8601 timestamp without parsing overhead.
+            return value[:10] if len(value) >= 10 and value[4] == "-" and value[7] == "-" else ""
+        return ""
+
+    if isinstance(custom, dict):
+        for key in ("occurred_at", "sent_at"):
+            text = _stringify(custom.get(key))
+            if text:
+                return text
+    created_at = None
+    if hasattr(metadata, "created_at"):
+        created_at = metadata.created_at
+    elif isinstance(metadata, dict):
+        created_at = metadata.get("created_at")
+    return _stringify(created_at)
+
+
 class Reranker(ABC):
     """Abstract base class for rerankers."""
 
@@ -80,6 +119,7 @@ class CrossEncoderReranker(Reranker):
         model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
         device: str | None = None,
         batch_size: int = 32,
+        include_date_prefix: bool = False,
     ) -> None:
         """Initialize the cross-encoder reranker.
 
@@ -87,10 +127,19 @@ class CrossEncoderReranker(Reranker):
             model_name: Cross-encoder model name from sentence-transformers
             device: Device to use (cuda, cpu, or None for auto)
             batch_size: Batch size for scoring
+            include_date_prefix: When True, prepend ``[YYYY-MM-DD] `` to each
+                candidate's content using the source timestamp from
+                ``metadata.custom`` (priority: ``occurred_at`` →
+                ``sent_at`` → ``created_at``). Off-the-shelf cross-encoders
+                tokenize ISO dates fine — the dozen extra tokens per
+                candidate cost is negligible relative to the model's
+                forward pass. Default OFF; flip after a positive A/B on
+                the corporate-shape benchmark. Issue #594 (Phase D5).
         """
         self._model_name = model_name
         self._device = device
         self._batch_size = batch_size
+        self._include_date_prefix = include_date_prefix
         self._model = None
 
     def _get_model(self):
@@ -137,6 +186,10 @@ class CrossEncoderReranker(Reranker):
                 if isinstance(custom, dict):
                     doc_title = custom.get("title", "")
                 content_with_meta = f"[{doc_title}] {c.content}" if doc_title else c.content
+                if self._include_date_prefix:
+                    date_prefix = _date_prefix_for(c.metadata, custom)
+                    if date_prefix:
+                        content_with_meta = f"[{date_prefix}] {content_with_meta}"
                 pairs.append((query, content_with_meta))
 
             # Score in batches
@@ -379,26 +432,34 @@ def create_reranker(
     method: str = "cross_encoder",
     model: str | None = None,
     llm_config: LiteLLMConfig | None = None,
+    *,
+    include_date_prefix: bool = False,
 ) -> Reranker:
     """Create or return a cached reranker based on method.
 
-    Cross-encoder rerankers are cached by model name to avoid reloading
-    the model on every query (~500ms per load).  LLM rerankers are
-    lightweight and created fresh each time.
+    Cross-encoder rerankers are cached by ``(model, include_date_prefix)`` so
+    the two variants coexist without a model reload (~500ms per load). LLM
+    rerankers are lightweight and created fresh each time.
 
     Args:
         method: Reranking method (cross_encoder, llm)
         model: Model name/path
         llm_config: LLM configuration for LLM reranker
+        include_date_prefix: When True (cross-encoder only), prepend an
+            ``[YYYY-MM-DD]`` token to each candidate's content. Default
+            OFF; see :class:`CrossEncoderReranker` and Issue #594.
 
     Returns:
         Reranker instance
     """
     if method == "cross_encoder":
         model_name = model or "cross-encoder/ms-marco-MiniLM-L-6-v2"
-        cache_key = f"cross_encoder:{model_name}"
+        cache_key = f"cross_encoder:{model_name}:date_prefix={include_date_prefix}"
         if cache_key not in _reranker_cache:
-            _reranker_cache[cache_key] = CrossEncoderReranker(model_name=model_name)
+            _reranker_cache[cache_key] = CrossEncoderReranker(
+                model_name=model_name,
+                include_date_prefix=include_date_prefix,
+            )
         return _reranker_cache[cache_key]
     elif method == "llm":
         return LLMReranker(llm_config=llm_config, model=model)
