@@ -1,12 +1,27 @@
-"""Secret-redaction helpers for log / exception output."""
+"""Secret-redaction helpers and ADR-084 annotation types for log / exception output."""
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 # Matches the userinfo segment of a URI: ``://user:password@``. Captures
 # nothing — substitution replaces the whole match with ``://[REDACTED]@``.
 _DSN_USERINFO_RE = re.compile(r"://[^:@/]+:[^@/]+@")
+
+
+@dataclass(frozen=True)
+class AllowSecretTyping:
+    """Annotation marker for deliberate ADR-084 exceptions.
+
+    Use as ``Annotated[str, AllowSecretTyping(reason="...")]`` on a
+    secret-named field that intentionally stays as plain ``str`` (e.g.,
+    env-var name pointers or legacy factory intermediaries that hold
+    post-boundary unwrapped values). The semgrep rule excludes fields
+    bearing this annotation from the ADR-084 findings.
+    """
+
+    reason: str
 
 
 def redact_dsn(text: str) -> str:
@@ -26,4 +41,4 @@ def redact_dsn(text: str) -> str:
     return _DSN_USERINFO_RE.sub("://[REDACTED]@", text)
 
 
-__all__ = ["redact_dsn"]
+__all__ = ["AllowSecretTyping", "redact_dsn"]

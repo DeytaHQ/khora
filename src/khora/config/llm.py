@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
 from loguru import logger
 from pydantic import BaseModel, Field
+
+from khora.config._secrets import AllowSecretTyping
 
 
 class LiteLLMConfig(BaseModel):
@@ -34,7 +36,7 @@ class LiteLLMConfig(BaseModel):
         default="gpt-4o-mini",
         description="Primary model to use (e.g., gpt-4o-mini, claude-sonnet-4-20250514, gemini-2.0-flash)",
     )
-    api_key_env: str = Field(
+    api_key_env: Annotated[str, AllowSecretTyping(reason="env-var name pointer, not a credential")] = Field(
         default="OPENAI_API_KEY",
         description="Environment variable name for API key",
     )
@@ -91,7 +93,7 @@ class LiteLLMConfig(BaseModel):
         default="text-embedding-3-small",
         description="Model to use for embeddings",
     )
-    embedding_api_key_env: str | None = Field(
+    embedding_api_key_env: Annotated[str, AllowSecretTyping(reason="env-var name pointer, not a credential")] | None = Field(
         default=None,
         description="Environment variable for embedding API key (defaults to api_key_env)",
     )

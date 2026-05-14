@@ -16,6 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ``KhoraConfig.hooks: Any = None``. Imported here at module load — by the
 # time KhoraConfig is instantiated all chains are resolved. See
 # Issue #576 Phase 1 Item 4.
+from khora.config._secrets import AllowSecretTyping
 from khora.hooks.models import SemanticHooksConfig as _SemanticHooksConfig
 
 SemanticHooksConfig = _SemanticHooksConfig  # public re-export
@@ -460,7 +461,7 @@ class LLMSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KHORA_LLM_", case_sensitive=False)
 
     model: str = Field(default="gpt-4o-mini", description="Primary LLM model")
-    api_key_env: str = Field(default="OPENAI_API_KEY", description="Environment variable for API key")
+    api_key_env: Annotated[str, AllowSecretTyping(reason="env-var name pointer, not a credential")] = Field(default="OPENAI_API_KEY", description="Environment variable for API key")
     temperature: float = Field(default=0.7, description="Sampling temperature")
     max_tokens: int = Field(default=12288, description="Maximum tokens for LLM extraction output")
     timeout: int = Field(default=30, description="Request timeout in seconds")
