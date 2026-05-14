@@ -120,6 +120,17 @@ Each temporal category maps to specific retrieval parameters:
 | `RECENCY` | 0.5 | 7 days | Strong recency, sharp 7-day decay |
 | `CHANGE` | 0.3 | — | Moderate recency for evolution tracking |
 
+### Temporal-anchored HyDE
+
+When HyDE is enabled (`enable_hyde` set to `auto` or `always`) and the query's `TemporalCategory` is **RECENCY**, **STATE_QUERY**, or **CHANGE**, `HyDEExpander` selects a **time-anchored** system prompt that produces a hypothetical written as if authored today, mentioning specific dates, weekdays, or relative-time markers (`"yesterday"`, `"this week"`, `"on 2026-05-14"`). The hypothetical's surface tokens then dominate cosine similarity to chunks that carry the same tokens — Slack/email headers, calendar invites, anything with a wall-clock stamp.
+
+| Category | HyDE prompt |
+|----------|-------------|
+| `RECENCY`, `STATE_QUERY`, `CHANGE` | Time-anchored: injects today's ISO date, asks for specific dates / weekdays / relative markers |
+| `NONE`, `EXPLICIT`, `ORDINAL`, `AGGREGATE` | Generic: time-blind, factual passage |
+
+Cost: zero additional LLM calls — only the system prompt changes. Category detection is sub-millisecond (Rust Aho-Corasick), so the auto-detection path adds no measurable overhead. Available since v0.12.0 (Issue #592, Phase D1).
+
 ### Manual Recency Bias
 
 You can also set recency bias explicitly via the API:

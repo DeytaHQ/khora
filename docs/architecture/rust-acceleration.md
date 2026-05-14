@@ -215,14 +215,13 @@ A complete BM25 ranking index as a `#[pyclass]`, mirroring the Python
 
 ---
 
-### `pagerank.rs` — Graph PageRank (2 functions)
+### `pagerank.rs` — Graph PageRank + Personalized PageRank (2 functions)
 
-Weighted PageRank for skeleton indexing, where ~10% of chunks are
-identified as "core" for LLM extraction.
+Weighted PageRank for skeleton indexing (where ~10% of chunks are identified as "core" for LLM extraction) and **Personalized PageRank (PPR)** for query-time graph scoring.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `pagerank` | `(py, n: usize, edges: Vec<(usize, usize, f64)>, damping: f64, max_iter: usize, tol: f64) -> Vec<f64>` | Compute PageRank on a weighted directed graph. Uniform init (`1/n`), weighted contributions (`score[src] * weight / out_degree[src]`), converges when total absolute diff < `tol`. |
+| `pagerank` | `(py, n: usize, edges: Vec<(usize, usize, f64)>, damping: f64, max_iter: usize, tol: f64, personalization: Option<Vec<f64>>) -> Vec<f64>` | Compute PageRank on a weighted directed graph. When `personalization` is `None` or L1-normalizes to uniform, this is standard PageRank. When set, this is PPR: `r = (1 - d) * p + d * Mᵀ r`. The vector is validated: negatives clipped to 0, length-mismatch falls back to uniform, all-zero falls back to uniform — never raises. |
 | `build_chunk_edges` | `(py, n_chunks: usize, keyword_chunk_ids: Vec<Vec<usize>>, idf_scores: Vec<f64>) -> Vec<(usize, usize, f64)>` | Build chunk-to-chunk co-occurrence graph. For each keyword, creates bidirectional edges among all chunks sharing that keyword, weighted by IDF score. |
 
 **Rust techniques:**
@@ -231,8 +230,10 @@ identified as "core" for LLM extraction.
 - **Convergence check** — Absolute diff sum checked each iteration for early termination.
 
 **Python consumers:**
-- `khora._accel.pagerank` — called by the skeleton engine's `_calculate_pagerank` (via the `_accel.py` facade)
+- `khora._accel.pagerank` — called by the skeleton engine's `_calculate_pagerank` (uniform init, document-time)
 - `khora._accel.build_chunk_edges` — called by the skeleton engine's `_build_chunk_edges`
+
+The `personalization` parameter (added in v0.12.0, Issue #597) is the enabler for the HippoRAG-2 query-time graph scoring tracked in Issue #542 — seeding PPR from query entities can produce sharper passage scores than BFS + RRF on dense graphs. The actual VectorCypher swap from BFS+RRF → PPR remains gated on the graph-density audit (`scripts/audit_graph_density.py`, Issue #598) and is not enabled by default; until the audit confirms the lift, callers passing `personalization=None` (every existing call site) get identical behaviour to pre-v0.12.0.
 
 ---
 

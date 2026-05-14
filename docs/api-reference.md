@@ -13,6 +13,8 @@ from khora import (
     RememberResult,
     RecallResult,
     BatchResult,
+    BatchHandle,        # submit_batch() return value — has .wait() and .id
+    DocumentResult,     # per-document callback payload from submit_batch
     Stats,
     LLMUsage,
     DocumentSource,
@@ -69,10 +71,12 @@ finally:
 ### Namespaces
 
 ```python
-ns = await kb.create_namespace(namespace_name)                     # returns MemoryNamespace
+ns = await kb.create_namespace(*, config_overrides=None)           # returns MemoryNamespace
 ns = await kb.get_namespace(namespace_id: UUID)                    # returns MemoryNamespace | None
 ns = await kb.get_namespace_by_stable_id(namespace_id: str | UUID) # stable-ID lookup
 ```
+
+`create_namespace` is keyword-only; there is no positional name argument. The optional `config_overrides` dict layers per-namespace settings on top of the global `KhoraConfig`.
 
 Namespaces are the sole tenancy boundary. Use `ns.namespace_id` (the stable public ID) everywhere below — not the row-level `ns.id`. See [architecture/multi-tenancy.md](architecture/multi-tenancy.md).
 
@@ -187,6 +191,30 @@ All result types are frozen slotted dataclasses.
 | `metadata` | `dict[str, Any]` |
 | `llm_usage` | `list[LLMUsage]` |
 
+### `BatchHandle`
+
+Returned by `kb.submit_batch(...)` (the async-staging path that returns immediately and processes via a background worker). Use `await handle.wait()` to block until all documents finish.
+
+| Field / method | Type | Description |
+|---|---|---|
+| `id` | `UUID` | Batch identifier (also surfaced in per-document `DocumentResult`). |
+| `total` | `int` | Number of documents staged. |
+| `await handle.wait()` | `coroutine` | Resolves when the worker has called `on_result` for every document. |
+
+### `DocumentResult`
+
+Delivered to the `on_result` callback per document as `submit_batch` work completes.
+
+| Field | Type | Description |
+|---|---|---|
+| `document_id` | `UUID` | Row-level id of the staged document. |
+| `namespace_id` | `UUID` | Namespace the document was ingested into. |
+| `success` | `bool` | `False` indicates a processing failure; `error` holds the message. |
+| `error` | `str \| None` | Populated when `success=False`. |
+| `chunks_created` / `entities_extracted` / `relationships_created` | `int` | Per-document counts. |
+| `llm_usage` | `list[LLMUsage]` | Costs incurred for this document. |
+| `skipped` | `bool` | `True` when the document was in `COMPLETED` / `PROCESSING` / `ARCHIVED` state and `reprocess_archived=False`. |
+
 ### `RecallResult`
 
 | Field | Type |
@@ -231,9 +259,9 @@ Engines are discovered through the `khora.engines` registry. The default is `vec
 ```python
 from khora import create_engine, list_engines, register_engine
 
-list_engines()                              # ['skeleton', 'vectorcypher', 'chronicle']
-engine = create_engine("chronicle", ...)    # low-level — prefer Khora(engine="chronicle")
-register_engine("my_engine", MyEngineClass) # must implement MemoryEngineProtocol
+list_engines()                                              # ['skeleton', 'vectorcypher', 'chronicle']
+engine = create_engine("chronicle", ...)                    # low-level — prefer Khora(engine="chronicle")
+register_engine("my_engine", "my.module", "MyEngineClass")  # lazy: module path + class name
 ```
 
 A custom engine **must** implement the full `MemoryEngineProtocol` from `src/khora/engines/protocol.py`. See [engines/engine-comparison.md](engines/engine-comparison.md) for selection guidance.
@@ -269,7 +297,19 @@ See [extraction/expertise-system.md](extraction/expertise-system.md). The machin
 from khora import SemanticFilter, EventType
 ```
 
-Subscribe to extraction events. See [hooks/semantic-hooks.md](hooks/semantic-hooks.md).
+Subscribe to extraction and recall events. The full Phase 2 surface (EventBridge-style `match` DSL, `CHUNK_ENTITIES_RESOLVED` for co-occurrence filtering, Level 2 LLM evaluator with cache + per-subscription budget) is documented in [hooks/semantic-hooks.md](hooks/semantic-hooks.md).
+
+## Advanced (opt-in, v0.12.0)
+
+These surfaces are documented for completeness but are **default-OFF** behind config flags pending A/B validation.
+
+```python
+from khora.query import hyde_cypher                     # parameterized graph queries
+from khora.diagnostics import compute_graph_stats, GraphStats  # PPR decision-gate reporter
+```
+
+- `khora.query.hyde_cypher` — `select_template()`, `generate_cypher()`, `validate_selection()`, `TEMPLATES`, `HyDECypherTemplate`, `HyDECypherSelection`, `HyDECypherValidationError`. Default OFF; enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`. See [query-engine/retrieval-tuning.md](query-engine/retrieval-tuning.md).
+- `khora.diagnostics.graph_density` — one-shot reporter for the PPR audit (Issue #598). Operator script: `scripts/audit_graph_density.py`. This module is intentionally **not stable public API** — it may be renamed or removed without a major-version bump.
 
 ## Errors
 
