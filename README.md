@@ -79,6 +79,20 @@ Khora ships two zero-infrastructure paths. Both are marked **experimental** — 
 
 > **Quickstart caveat.** A literal `Khora("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector — there is no `memory://` URL scheme parsed by khora itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` (or `surrealdb`) and the corresponding `db_path` / connection settings.
 
+## Integrations
+
+khora ships ready-made adapters for the major agentic frameworks. Each adapter is an opt-in optional extra — install only what you use, and the framework itself is imported lazily so importing `khora` never pulls in a framework you don't need.
+
+| Framework | Install | Khora surface |
+|---|---|---|
+| [CrewAI](docs/integrations/crewai.md) | `pip install khora[crewai]` | `KhoraMemory` — drop-in storage backend for CrewAI's unified `Memory`. |
+| [LangGraph](docs/integrations/langgraph.md) | `pip install khora[langgraph]` | `KhoraStore` — `BaseStore` implementation for `StateGraph` semantic long-term memory. |
+| [Google ADK](docs/integrations/google_adk.md) | `pip install khora[google-adk]` | `KhoraMemoryService` — `BaseMemoryService` drop-in for ADK `Runner`. |
+| [OpenAI Agents SDK](docs/integrations/openai_agents.md) | `pip install khora[openai-agents]` | `KhoraSession` (`SessionABC`), `khora_recall_tool`, `KhoraMemoryHooks` — compose for session memory, recall-as-tool, and auto-persist. |
+| [LlamaIndex](docs/integrations/llamaindex.md) | `pip install khora[llamaindex]` | `KhoraRetriever` (async `BaseRetriever`), `KhoraMemoryBlock`, and the deprecated `KhoraChatStore`. |
+
+See [docs/integrations/](docs/integrations/index.md) for the full per-adapter docs and the "write your own" Protocol surface.
+
 ## Observability
 
 khora emits OpenTelemetry spans and metrics through the OTel API.
