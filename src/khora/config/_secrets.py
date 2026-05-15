@@ -9,11 +9,15 @@ from dataclasses import dataclass
 # replaces the whole match with ``://[REDACTED]@``.
 # Two alternatives cover both credential forms:
 #   1. ``[^:@]*:[^@]+`` — user:password (empty user allowed, e.g. redis://:pw@)
-#   2. ``[^:@]+``        — user only (no password — token/SASL DSNs where the
-#                          username itself is the credential, e.g. scheme://svc@host)
+#   2. ``[^:@/?#]+``     — user only (no password — token/SASL DSNs where the
+#                          username itself is the credential, e.g. scheme://svc@host).
+#                          Excludes ``/``, ``?``, ``#`` so the alternative can only
+#                          match the URI authority's userinfo segment and will not
+#                          consume host/path text to reach a later ``@`` in a path
+#                          or query (e.g. ``https://example.com/@alice``).
 # Password class ``[^@]+`` allows ``/`` so passwords like ``pass/word`` are
 # fully redacted rather than truncated at the first slash.
-_DSN_USERINFO_RE = re.compile(r"://(?:[^:@]*:[^@]+|[^:@]+)@")
+_DSN_USERINFO_RE = re.compile(r"://(?:[^:@]*:[^@]+|[^:@/?#]+)@")
 
 
 @dataclass(frozen=True)
