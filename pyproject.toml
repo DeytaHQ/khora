@@ -51,6 +51,7 @@ dependencies = [
 crewai = "khora.integrations.crewai:KhoraMemory"
 langgraph = "khora.integrations.langgraph:KhoraStore"
 google_adk = "khora.integrations.google_adk:KhoraMemoryService"
+openai_agents = "khora.integrations.openai_agents:KhoraSession"
 
 [project.urls]
 Homepage = "https://github.com/DeytaHQ/khora"
@@ -162,6 +163,11 @@ langgraph = ["langgraph>=1.0,<2.0"]
 # Bump to <3.0 after the 2.x line GAs and adapter smoke passes against it.
 # See docs/integrations/google_adk.md.
 google-adk = ["google-adk>=1.32,<2.0"]
+# OpenAI Agents SDK adapter (KhoraSession + khora_recall_tool + KhoraMemoryHooks).
+# Pinned tight (single upstream minor): the SDK is pre-1.0 with 17 releases in
+# 7 months as of v0.17. Bump in a deliberate PR per upstream minor — see
+# docs/integrations/openai_agents.md.
+openai-agents = ["openai-agents>=0.17,<0.18"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "hatch-fancy-pypi-readme"]

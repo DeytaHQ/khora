@@ -1,0 +1,11 @@
+[project]
+name = "khora-openai-agents-example"
+version = "0.0.0"
+description = "Runnable smoke example for khora's OpenAI Agents SDK adapter."
+requires-python = ">=3.13"
+dependencies = [
+    "khora[openai-agents,sqlite-lance]",
+]
+
+[tool.uv.sources]
+khora = { path = "../../..", editable = true }

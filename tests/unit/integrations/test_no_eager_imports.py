@@ -30,7 +30,16 @@ import pytest
 # Adapter PRs (CrewAI, LangGraph, ...) add their framework name here when
 # they merge. Each entry is the submodule name; the test poisons it in
 # sys.modules and asserts khora.integrations.<name> still imports.
-ADAPTERS: list[str] = ["crewai", "langgraph", "google_adk"]
+ADAPTERS: list[str] = ["crewai", "langgraph", "google_adk", "openai_agents"]
+
+# Extra frameworks whose import name differs from the adapter dir name.
+# openai-agents (PyPI) installs as the Python module ``agents`` — the AST
+# lint won't catch ``import agents`` (it keys off the dir name), so we
+# explicitly poison ``agents`` in sys.modules and prove the adapter still
+# loads. Each tuple is (adapter_dir_name, framework_module_name).
+EXTRA_FRAMEWORK_NAMES: list[tuple[str, str]] = [
+    ("openai_agents", "agents"),
+]
 
 
 @pytest.mark.parametrize("name", ADAPTERS)
@@ -45,6 +54,33 @@ def test_adapter_imports_without_framework(name: str) -> None:
         # Poison: any real import of {name} raises ImportError.
         sys.modules[{name!r}] = None
         import khora.integrations.{name}  # must still succeed
+        """
+    )
+    subprocess.run(  # noqa: S603 — test harness, sys.executable is trusted
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.parametrize(("adapter_name", "framework_module"), EXTRA_FRAMEWORK_NAMES)
+def test_adapter_imports_when_renamed_framework_poisoned(adapter_name: str, framework_module: str) -> None:
+    """Adapters whose framework module name differs from the dir name.
+
+    The AST lint (``tools/check_optional_imports.py``) only catches
+    ``import <dir_name>`` at module top level. For adapters whose framework
+    publishes under a different name (e.g. ``openai-agents`` → ``agents``)
+    that's not enough — we additionally poison the real framework name in
+    ``sys.modules`` and prove the adapter still imports cleanly.
+    """
+    script = textwrap.dedent(
+        f"""
+        import sys
+        # Poison: any real import of {framework_module} raises ImportError.
+        sys.modules[{framework_module!r}] = None
+        import khora.integrations.{adapter_name}  # must still succeed
         """
     )
     subprocess.run(  # noqa: S603 — test harness, sys.executable is trusted
