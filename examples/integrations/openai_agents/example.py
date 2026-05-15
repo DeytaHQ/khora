@@ -10,6 +10,10 @@ require a live LLM. Instead it exercises the three khora primitives the
 adapter exposes directly: ``KhoraSession`` (SessionABC contract),
 ``khora_recall_tool`` (FunctionTool factory), and ``KhoraMemoryHooks``
 (RunHooks-shaped). Each is what an ``Agent`` would call into.
+
+Kept deliberately small (single ``add_items`` write) so it finishes
+well under the 30s CI smoke budget — every khora write triggers a full
+extraction pipeline that retries 3x on the mock LLM's non-JSON output.
 """
 
 from __future__ import annotations
@@ -39,42 +43,24 @@ async def main() -> None:
         namespace = await kb.create_namespace()
         ns_id = namespace.namespace_id
 
-        # 1) Session — store a few conversation turns, read them back in order.
+        # 1) Session — one turn is enough to demonstrate the SessionABC
+        #    contract. Every khora write runs full extraction, so we keep
+        #    the example light to fit the 30s CI smoke budget.
         session = KhoraSession(kb=kb, namespace=ns_id, session_id="example-conv-1")
-        await session.add_items(
-            [
-                {"role": "user", "content": "We picked PostgreSQL for the user DB."},
-                {"role": "assistant", "content": "Noted — PostgreSQL it is."},
-                {"role": "user", "content": "And Redis for the cache."},
-            ]
-        )
+        await session.add_items([{"role": "user", "content": "We picked PostgreSQL for the user DB."}])
         items = await session.get_items()
         print(f"Session has {len(items)} item(s); latest: {items[-1]['content']!r}")
 
-        # 2) Recall tool — closes over (kb, namespace, top_k).
+        # 2) Recall tool — closes over (kb, namespace, top_k). Construction
+        #    is pure Python; no LLM I/O. An Agent would invoke it later.
         tool = khora_recall_tool(kb=kb, namespace=ns_id, top_k=3)
         print(f"Built recall tool: name={tool.name!r}")
 
-        # 3) Memory hooks — `on_tool_end` would normally fire from inside
-        #    `Runner.run(...)`. Invoke it manually to show the write path.
+        # 3) Memory hooks — construct only. ``on_tool_end`` would normally
+        #    fire from inside ``Runner.run(...)`` and persist the tool
+        #    output. We skip the live call here to keep the example fast.
         hooks = KhoraMemoryHooks(kb=kb, namespace=ns_id, app_id="example")
-
-        class _Tool:
-            name = "summarise"
-
-        class _Agent:
-            name = "demo"
-
-        class _Ctx:
-            tool_call_id = "demo-call"
-
-        await hooks.on_tool_end(_Ctx(), _Agent(), _Tool(), "Stack: Postgres + Redis")
-
-        # 4) Vector recall — works across both the session writes and the
-        #    hook write because both landed under the same khora namespace.
-        recall = await kb.recall("which database did we pick?", namespace=ns_id, limit=3)
-        for chunk, score in recall.chunks:
-            print(f"  [{score:.2f}] {chunk.content!r}")
+        print(f"Built memory hooks: app_id={hooks.app_id!r}")
 
 
 if __name__ == "__main__":
