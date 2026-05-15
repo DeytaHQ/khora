@@ -228,6 +228,21 @@ class TestRedactDsn:
                 "postgresql://user:pass/word@db:5432/app",
                 "postgresql://[REDACTED]@db:5432/app",
             ),
+            # No-password userinfo — token/SASL DSNs where the username IS the
+            # credential (``scheme://user@host``).
+            (
+                "postgresql://serviceuser@host/db",
+                "postgresql://[REDACTED]@host/db",
+            ),
+            (
+                "bolt://neo4j@cluster.example.com:7687",
+                "bolt://[REDACTED]@cluster.example.com:7687",
+            ),
+            # No-password with non-standard username characters
+            (
+                "postgresql://app+prod@db:5432/app",
+                "postgresql://[REDACTED]@db:5432/app",
+            ),
             # No userinfo → unchanged
             ("postgresql://localhost:5432/app", "postgresql://localhost:5432/app"),
             # Empty / non-DSN strings → unchanged

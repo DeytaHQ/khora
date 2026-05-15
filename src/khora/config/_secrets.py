@@ -5,12 +5,15 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# Matches the userinfo segment of a URI: ``://user:password@``. Captures
-# nothing — substitution replaces the whole match with ``://[REDACTED]@``.
-# Username class ``[^:@]*`` allows empty usernames (e.g. ``redis://:pw@host``).
+# Matches the userinfo segment of a URI. Captures nothing — substitution
+# replaces the whole match with ``://[REDACTED]@``.
+# Two alternatives cover both credential forms:
+#   1. ``[^:@]*:[^@]+`` — user:password (empty user allowed, e.g. redis://:pw@)
+#   2. ``[^:@]+``        — user only (no password — token/SASL DSNs where the
+#                          username itself is the credential, e.g. scheme://svc@host)
 # Password class ``[^@]+`` allows ``/`` so passwords like ``pass/word`` are
 # fully redacted rather than truncated at the first slash.
-_DSN_USERINFO_RE = re.compile(r"://[^:@]*:[^@]+@")
+_DSN_USERINFO_RE = re.compile(r"://(?:[^:@]*:[^@]+|[^:@]+)@")
 
 
 @dataclass(frozen=True)
@@ -30,12 +33,14 @@ class AllowSecretTyping:
 def redact_dsn(text: str) -> str:
     """Return ``text`` with any DSN userinfo replaced by ``[REDACTED]``.
 
-    The pattern matches ``scheme://user:password@`` segments and replaces the
-    ``user:password`` part. Strings without an embedded DSN are returned
-    unchanged.
+    Handles both ``scheme://user:password@`` and password-less
+    ``scheme://user@`` forms (token/SASL DSNs where the username is the
+    credential). Strings without an embedded DSN are returned unchanged.
 
     >>> redact_dsn("postgresql://alice:hunter2@db:5432/app")
     'postgresql://[REDACTED]@db:5432/app'
+    >>> redact_dsn("postgresql://serviceuser@host/db")
+    'postgresql://[REDACTED]@host/db'
     >>> redact_dsn("no secret here")
     'no secret here'
     """
