@@ -82,31 +82,24 @@ def run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
         The coroutine's return value.
 
     Raises:
-        RuntimeError: If called from inside a running asyncio event loop.
-            Spawning a thread to dispatch the coroutine and blocking the
-            caller would deadlock on a single-loop application, so we
-            refuse — the caller must restructure to ``await`` directly
-            or hop to a worker thread first.
+        TypeError: If the argument is not a coroutine.
         Exception: Anything the coroutine itself raises is re-raised
             from this call (after the bridge releases its frame).
+
+    Note:
+        The coroutine always runs on a dedicated daemon-thread loop,
+        never on the calling thread's loop. This means it is safe to
+        call from inside a running event loop **provided** the
+        coroutine does not need to wait on work that has to make
+        progress on the calling thread's loop. For khora's own ops
+        (``kb.remember``, ``kb.recall``, ``kb.forget``) that's always
+        true — they only need their own internal loop. Framework
+        adapters that invoke khora from a sync entry point inside a
+        framework-owned event loop (CrewAI flow listeners, LangGraph
+        sync abstracts) rely on this guarantee.
     """
     if not asyncio.iscoroutine(coro):
         raise TypeError(f"run_sync expects a coroutine, got {type(coro).__name__}")
-
-    # Reentrancy check: if a loop is already running on THIS thread, we
-    # can't block here without deadlocking.
-    try:
-        running = asyncio.get_running_loop()
-    except RuntimeError:
-        running = None
-    if running is not None:
-        # Close the coroutine to avoid the "coroutine was never awaited"
-        # warning the user would otherwise get on top of the exception.
-        coro.close()
-        raise RuntimeError(
-            "run_sync() cannot be called from inside a running event loop. "
-            "Await the coroutine directly, or hop to a worker thread first."
-        )
 
     loop = _ensure_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)

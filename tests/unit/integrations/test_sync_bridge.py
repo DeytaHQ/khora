@@ -38,17 +38,19 @@ def test_run_sync_rejects_non_coroutine(shutdown_sync_bridge):
         run_sync("not a coroutine")  # type: ignore[arg-type]
 
 
-def test_run_sync_reentrancy_raises_inside_running_loop(shutdown_sync_bridge):
-    # Re-entering from inside an asyncio.run() loop is the deadlock
-    # surface. run_sync must refuse rather than silently spawn.
+def test_run_sync_works_from_inside_running_loop(shutdown_sync_bridge):
+    # CrewAI's flow runtime calls our sync StorageBackend from inside
+    # its own asyncio loop. run_sync dispatches to a separate
+    # daemon-thread loop via run_coroutine_threadsafe — the canonical
+    # cross-thread pattern. Not a deadlock as long as the coroutine
+    # itself doesn't have to make progress on the caller's loop.
     async def coro_inner() -> int:
         return 1
 
-    async def driver() -> None:
-        with pytest.raises(RuntimeError, match="running event loop"):
-            run_sync(coro_inner())
+    async def driver() -> int:
+        return run_sync(coro_inner())
 
-    asyncio.run(driver())
+    assert asyncio.run(driver()) == 1
 
 
 def test_run_sync_reuses_loop_across_calls(shutdown_sync_bridge):
