@@ -534,12 +534,18 @@ class KhoraStorageBackend:
         """
         return {"scope": scope, "count": self.count(scope_prefix=scope)}
 
-    def list_categories(self, scope_prefix: str | None = None) -> list[str]:
-        """Return distinct category names across stored records."""
+    def list_categories(self, scope_prefix: str | None = None) -> dict[str, int]:
+        """Return a ``{category_name: count}`` mapping for stored records.
+
+        CrewAI's encoding flow calls ``.keys()`` on the return value
+        (see ``crewai/memory/encoding_flow.py:282``), so the shape must
+        be dict-like. The count is a useful side-channel for downstream
+        UIs that show category histograms.
+        """
         return run_sync(self._list_categories_async(scope_prefix=scope_prefix))
 
-    async def _list_categories_async(self, *, scope_prefix: str | None) -> list[str]:
-        seen: set[str] = set()
+    async def _list_categories_async(self, *, scope_prefix: str | None) -> dict[str, int]:
+        counts: dict[str, int] = {}
         storage = self.kb.storage
         cursor = 0
         page_size = 200
@@ -555,11 +561,13 @@ class KhoraStorageBackend:
                         continue
                 cats = custom.get("crewai_categories") or []
                 if isinstance(cats, (list, tuple)):
-                    seen.update(str(c) for c in cats)
+                    for c in cats:
+                        name = str(c)
+                        counts[name] = counts.get(name, 0) + 1
             if len(page) < page_size:
                 break
             cursor += page_size
-        return sorted(seen)
+        return counts
 
     def count(self, scope_prefix: str | None = None) -> int:
         """Return the count of records whose scope starts with ``scope_prefix``."""

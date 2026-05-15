@@ -1,9 +1,11 @@
-"""Verify the sync bridge raises (rather than deadlocks) on reentrancy.
+"""Verify the sync bridge dispatches correctly when called from a running loop.
 
-Per #619, ``khora.integrations._sync.run_sync`` refuses to be called
-from inside a running asyncio loop. The CrewAI adapter inherits that
-contract: invoking any ``KhoraStorageBackend`` method from inside an
-``async def`` must raise ``RuntimeError``, not block.
+Originally this asserted ``run_sync`` raised on reentrancy. CrewAI's
+flow runtime calls our sync ``StorageBackend`` methods from inside its
+own asyncio loop, so refusing was the wrong default — the bridge now
+dispatches to a separate daemon-thread loop in all cases (see
+``khora.integrations._sync``). These tests pin the new contract: sync
+methods invoked from inside an async context complete normally.
 """
 
 from __future__ import annotations
@@ -13,8 +15,6 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
-
-import pytest
 
 from khora.integrations.crewai.storage import KhoraStorageBackend
 from khora.khora import Khora
@@ -37,7 +37,19 @@ class _FakeRecord:
 
 def _make_backend() -> KhoraStorageBackend:
     kb = AsyncMock(spec=Khora)
-    kb.storage = MagicMock()
+    # Provide a remember stub that returns a result with a document_id.
+    remember_result = MagicMock()
+    remember_result.document_id = uuid4()
+    kb.remember = AsyncMock(return_value=remember_result)
+    kb.recall = AsyncMock(return_value=MagicMock(chunks=[]))
+    kb.forget = AsyncMock(return_value=True)
+    # ``storage`` needs to be a regular MagicMock with AsyncMock attributes
+    # for the methods the adapter awaits.
+    storage = MagicMock()
+    storage.get_chunks_by_document = AsyncMock(return_value=[])
+    storage.list_documents = AsyncMock(return_value=[])
+    storage.get_document_by_external_id = AsyncMock(return_value=None)
+    kb.storage = storage
     return KhoraStorageBackend(
         kb=kb,
         namespace_id=uuid4(),
@@ -47,33 +59,40 @@ def _make_backend() -> KhoraStorageBackend:
     )
 
 
-def test_save_raises_rather_than_deadlocks_inside_running_loop() -> None:
-    """Calling ``backend.save`` from inside ``asyncio.run`` must raise."""
+def test_save_works_from_inside_running_loop() -> None:
+    """Calling ``backend.save`` from inside ``asyncio.run`` must complete.
+
+    CrewAI's flow listeners are sync functions executed from within an
+    async runtime — the sync bridge must dispatch to its daemon-thread
+    loop and block the calling thread until the coroutine finishes.
+    """
     backend = _make_backend()
     record = _FakeRecord(id="r-1", content="x")
 
     async def driver() -> None:
-        with pytest.raises(RuntimeError, match="running event loop"):
-            backend.save([record])
+        backend.save([record])
 
     asyncio.run(driver())
+    # remember was awaited on the daemon thread's loop
+    assert backend.kb.remember.await_count == 1
 
 
-def test_search_raises_rather_than_deadlocks_inside_running_loop() -> None:
+def test_search_works_from_inside_running_loop() -> None:
     backend = _make_backend()
 
-    async def driver() -> None:
-        with pytest.raises(RuntimeError, match="running event loop"):
-            backend.search([0.0])
+    async def driver() -> list:
+        return backend.search([0.0])
 
-    asyncio.run(driver())
+    out = asyncio.run(driver())
+    assert out == []
+    assert backend.kb.recall.await_count == 1
 
 
-def test_get_record_raises_rather_than_deadlocks_inside_running_loop() -> None:
+def test_get_record_works_from_inside_running_loop() -> None:
     backend = _make_backend()
 
-    async def driver() -> None:
-        with pytest.raises(RuntimeError, match="running event loop"):
-            backend.get_record("anything")
+    async def driver() -> Any:
+        return backend.get_record("anything")
 
-    asyncio.run(driver())
+    # get_record returns None for unknown ids — no exception.
+    assert asyncio.run(driver()) is None
