@@ -358,3 +358,19 @@ class TestStorageConfigRepr:
         config = self._make_config()
         assert config.postgresql_url == "postgresql+asyncpg://user:secret@host/db"
         assert config.neo4j_password == "hunter2"
+
+    def test_new_style_config_fields_absent_from_repr(self):
+        from khora.config.schema import SurrealDBConfig
+
+        sdb_cfg = SurrealDBConfig(
+            mode="remote",
+            url="ws://user:topsecret@host:8000/rpc",
+            password="topsecret",
+        )
+        config = StorageConfig(backend="surrealdb", surrealdb_config=sdb_cfg)
+        r = repr(config)
+        assert "surrealdb_config" not in r
+        assert "graph_config" not in r
+        assert "vector_config" not in r
+        assert "sqlite_lance_config" not in r
+        assert "topsecret" not in r

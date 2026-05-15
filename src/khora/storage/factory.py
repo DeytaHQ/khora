@@ -125,13 +125,13 @@ class StorageConfig:
     neo4j_database: str = "neo4j"
 
     # New-style backend configs (Pydantic models from config/schema.py)
-    graph_config: Any = None  # GraphConfig union type
-    vector_config: Any = None  # VectorConfig union type
+    graph_config: Any = field(default=None, repr=False)  # GraphConfig union type
+    vector_config: Any = field(default=None, repr=False)  # VectorConfig union type
 
     # Unified backend selector
     backend: str = "postgres"  # "postgres" (traditional), "surrealdb", or "sqlite_lance"
-    surrealdb_config: Any = None  # SurrealDBConfig from config/schema.py
-    sqlite_lance_config: Any = None  # SQLiteLanceConfig from config/schema.py
+    surrealdb_config: Any = field(default=None, repr=False)  # SurrealDBConfig from config/schema.py
+    sqlite_lance_config: Any = field(default=None, repr=False)  # SQLiteLanceConfig from config/schema.py
 
     # Event store configuration (uses PostgreSQL by default)
     event_store_url: (
