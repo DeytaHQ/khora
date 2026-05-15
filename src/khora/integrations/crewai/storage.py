@@ -1,12 +1,15 @@
 """``KhoraStorageBackend`` — sync ``crewai.memory.storage.backend.StorageBackend`` shim.
 
 CrewAI's unified memory orchestrator calls into a sync ``StorageBackend``
-Protocol with six methods on the MemoryRecord-level CRUD surface:
-``save``, ``search``, ``delete``, ``update``, ``get_record``,
-``list_records``. The Protocol carries five more methods for scope and
-category helpers plus async variants; the adapter's ticket scopes us to
-the six MemoryRecord-level methods, which are sufficient for an
-``Agent(memory=Memory(storage=KhoraStorageBackend(...)))`` to function.
+Protocol with eleven sync methods + three async siblings. The
+MemoryRecord-level CRUD surface (``save``, ``search``, ``delete``,
+``update``, ``get_record``, ``list_records``) is the value-carrying
+part; the scope / category / count / reset helpers and the async
+siblings (``asave`` / ``asearch`` / ``adelete``) are exercised by
+CrewAI's own ``encoding_flow`` and ``Memory`` orchestrator at runtime.
+This adapter implements the full surface so an
+``Agent(memory=Memory(storage=KhoraStorageBackend(...)))`` works
+through every code path CrewAI hits.
 
 This module is loaded lazily by ``khora.integrations.crewai.KhoraMemory``
 (itself only invoked when the user installs ``khora[crewai]``). It must
@@ -413,6 +416,180 @@ class KhoraStorageBackend:
                 break
             cursor += page_size
         return out
+
+    # ------------------------------------------------------------------
+    # async siblings — CrewAI's unified Memory occasionally invokes the
+    # async surface (e.g. from inside its own async flows). The bridge
+    # is the other direction: delegate directly to the awaitables.
+    # ------------------------------------------------------------------
+
+    async def asave(self, records: list[Any]) -> None:
+        """Async sibling of :meth:`save` — bypasses the sync bridge."""
+        for record in records:
+            kwargs = record_to_remember_kwargs(
+                record,
+                user_id=self.user_id,
+                app_id=self.app_id,
+            )
+            result = await self.kb.remember(namespace=self.namespace_id, **kwargs)
+            self._record_to_document[str(record.id)] = result.document_id
+
+    async def asearch(
+        self,
+        query_embedding: list[float] | Any,
+        scope_prefix: str | None = None,
+        categories: list[str] | None = None,
+        metadata_filter: dict[str, Any] | None = None,
+        limit: int = 10,
+        min_score: float = 0.0,
+    ) -> list[tuple[Any, float]]:
+        """Async sibling of :meth:`search` — bypasses the sync bridge."""
+        del query_embedding  # see :meth:`search` for rationale
+        query_text = _peek_query_text() or ""
+        recall_result = await self.kb.recall(
+            query_text,
+            namespace=self.namespace_id,
+            limit=max(limit, 1),
+            min_similarity=min_score,
+        )
+        out: list[tuple[Any, float]] = []
+        for chunk, score in recall_result.chunks:
+            record = chunk_to_record(chunk, self._memory_record_cls)
+            if not _matches_filters(
+                record,
+                scope_prefix=scope_prefix,
+                categories=categories,
+                metadata_filter=metadata_filter,
+            ):
+                continue
+            out.append((record, float(score)))
+            if len(out) >= limit:
+                break
+        return out
+
+    async def adelete(
+        self,
+        *,
+        scope_prefix: str | None = None,
+        categories: list[str] | None = None,
+        record_ids: list[str] | None = None,
+        older_than: datetime | None = None,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> int:
+        """Async sibling of :meth:`delete` — bypasses the sync bridge."""
+        if record_ids:
+            deleted = 0
+            for rid in record_ids:
+                doc_id = self._record_to_document.get(rid)
+                if doc_id is None:
+                    continue
+                if await self.kb.forget(doc_id, namespace=self.namespace_id):
+                    deleted += 1
+            return deleted
+        return await self._delete_by_filter(
+            scope_prefix=scope_prefix,
+            categories=categories,
+            older_than=older_than,
+            metadata_filter=metadata_filter,
+        )
+
+    # ------------------------------------------------------------------
+    # scope / category / count / reset — admin surface CrewAI's encoding
+    # flow exercises during ``save``. khora does not natively model
+    # "scope" as a first-class entity; the adapter derives scopes from
+    # ``chunk.metadata.custom["crewai_scope"]`` and treats them as
+    # filesystem-style paths.
+    # ------------------------------------------------------------------
+
+    def list_scopes(self, parent: str = "/") -> list[str]:
+        """Return distinct scopes that have stored records under ``parent``."""
+        return run_sync(self._list_scopes_async(parent=parent))
+
+    async def _list_scopes_async(self, *, parent: str) -> list[str]:
+        seen: set[str] = set()
+        storage = self.kb.storage
+        cursor = 0
+        page_size = 200
+        while True:
+            page = await storage.list_documents(self.namespace_id, limit=page_size, offset=cursor)
+            if not page:
+                break
+            for doc in page:
+                custom = doc.metadata.custom if doc.metadata else {}
+                scope = str(custom.get("crewai_scope", "/"))
+                if scope.startswith(parent):
+                    seen.add(scope)
+            if len(page) < page_size:
+                break
+            cursor += page_size
+        return sorted(seen)
+
+    def get_scope_info(self, scope: str) -> dict[str, Any]:
+        """Return a minimal info dict for ``scope``.
+
+        khora doesn't model scope metadata separately from documents,
+        so we surface just the path and the on-the-fly record count.
+        Duck-typed to whatever CrewAI's ``ScopeInfo`` consumer reads —
+        upstream callers tolerate dict-shaped returns.
+        """
+        return {"scope": scope, "count": self.count(scope_prefix=scope)}
+
+    def list_categories(self, scope_prefix: str | None = None) -> list[str]:
+        """Return distinct category names across stored records."""
+        return run_sync(self._list_categories_async(scope_prefix=scope_prefix))
+
+    async def _list_categories_async(self, *, scope_prefix: str | None) -> list[str]:
+        seen: set[str] = set()
+        storage = self.kb.storage
+        cursor = 0
+        page_size = 200
+        while True:
+            page = await storage.list_documents(self.namespace_id, limit=page_size, offset=cursor)
+            if not page:
+                break
+            for doc in page:
+                custom = doc.metadata.custom if doc.metadata else {}
+                if scope_prefix is not None:
+                    doc_scope = str(custom.get("crewai_scope", "/"))
+                    if not doc_scope.startswith(scope_prefix):
+                        continue
+                cats = custom.get("crewai_categories") or []
+                if isinstance(cats, (list, tuple)):
+                    seen.update(str(c) for c in cats)
+            if len(page) < page_size:
+                break
+            cursor += page_size
+        return sorted(seen)
+
+    def count(self, scope_prefix: str | None = None) -> int:
+        """Return the count of records whose scope starts with ``scope_prefix``."""
+        return run_sync(self._count_async(scope_prefix=scope_prefix))
+
+    async def _count_async(self, *, scope_prefix: str | None) -> int:
+        storage = self.kb.storage
+        if scope_prefix is None:
+            stats = await self.kb.stats(namespace=self.namespace_id)
+            return int(stats.documents)
+        total = 0
+        cursor = 0
+        page_size = 200
+        while True:
+            page = await storage.list_documents(self.namespace_id, limit=page_size, offset=cursor)
+            if not page:
+                break
+            for doc in page:
+                custom = doc.metadata.custom if doc.metadata else {}
+                doc_scope = str(custom.get("crewai_scope", "/"))
+                if doc_scope.startswith(scope_prefix):
+                    total += 1
+            if len(page) < page_size:
+                break
+            cursor += page_size
+        return total
+
+    def reset(self, scope_prefix: str | None = None) -> None:
+        """Delete every record matching ``scope_prefix`` (None = all)."""
+        self.delete(scope_prefix=scope_prefix)
 
 
 def _matches_filters(

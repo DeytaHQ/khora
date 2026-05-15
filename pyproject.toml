@@ -299,7 +299,7 @@ exclude-newer = "7 days"
 # staging window so a same-week CVE fix isn't held back. Use sparingly —
 # every entry here is an explicit "we trust this package enough to skip
 # the staging window".
-exclude-newer-package = { urllib3 = "0 days" }  # CVE-2026-44431 / CVE-2026-44432
+exclude-newer-package = { urllib3 = "0 days", litellm = "0 days" }  # urllib3: CVE-2026-44431/44432; litellm: CVE-2026-42208/42271/40217 (1.83.10+)
 constraint-dependencies = [
     # Security: CVE-2026-25645 fixed in 2.33.0
     "requests>=2.33.0",

@@ -291,7 +291,12 @@ jobs:
               (cd "$ex" && uv sync) || { echo "[examples-smoke] $name: uv sync failed"; fail=1; continue; }
             fi
             echo "[examples-smoke] $name: running example.py (30s budget)"
-            if ! timeout 30s uv run --directory "$ex" python example.py; then
+            # PYTHONPATH points at the repo root so the example can
+            # ``from examples._helpers import …``. uv inherits the env
+            # but uv run's --directory only changes cwd, not the import
+            # path — without this, the helper package is unreachable
+            # because there's no ``examples/__init__.py`` at the root.
+            if ! PYTHONPATH="${GITHUB_WORKSPACE}" timeout 30s uv run --directory "$ex" python example.py; then
               echo "[examples-smoke] $name: FAILED"
               fail=1
             fi
