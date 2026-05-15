@@ -1,0 +1,13 @@
+[project]
+name = "khora-example-langgraph"
+version = "0.0.0"
+description = "Runnable LangGraph + khora example (no API keys required)"
+requires-python = ">=3.13"
+dependencies = [
+    "khora[langgraph,sqlite-lance]",
+]
+
+# Resolve `khora` to the in-tree source tree so the example always runs
+# against the local code (not the published PyPI version).
+[tool.uv.sources]
+khora = { path = "../../..", editable = true }

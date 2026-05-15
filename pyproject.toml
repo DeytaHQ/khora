@@ -46,6 +46,7 @@ dependencies = [
 # distributions that register under the same group — same import path.
 # Empty until #619's adapter tickets land.
 [project.entry-points."khora.integrations"]
+langgraph = "khora.integrations.langgraph:KhoraStore"
 
 [project.urls]
 Homepage = "https://github.com/DeytaHQ/khora"
@@ -147,6 +148,9 @@ sqlite = ["aiosqlite>=0.20.0"]
 lancedb = ["lancedb>=0.25", "pyarrow>=18.0.0"]
 # SQLite + LanceDB embedded backend (relational via aiosqlite + vector via LanceDB)
 sqlite-lance = ["lancedb>=0.25", "aiosqlite>=0.20.0", "pyarrow>=18.0.0"]
+# Agentic framework adapter — LangGraph BaseStore (semantic long-term memory).
+# See docs/integrations/langgraph.md and src/khora/integrations/langgraph/.
+langgraph = ["langgraph>=1.0,<2.0"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "hatch-fancy-pypi-readme"]
