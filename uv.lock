@@ -1684,6 +1684,15 @@ wheels = [
 ]
 
 [[package]]
+name = "griffelib"
+version = "2.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9d/82/74f4a3310cdabfbb10da554c3a672847f1ed33c6f61dd472681ce7f1fe67/griffelib-2.0.2.tar.gz", hash = "sha256:3cf20b3bc470e83763ffbf236e0076b1211bac1bc67de13daf494640f2de707e", size = 166461, upload-time = "2026-03-27T11:34:51.091Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/8c/c9138d881c79aa0ea9ed83cbd58d5ca75624378b38cee225dcf5c42cc91f/griffelib-2.0.2-py3-none-any.whl", hash = "sha256:925c857658fb1ba40c0772c37acbc2ab650bd794d9c1b9726922e36ea4117ea1", size = 142357, upload-time = "2026-03-27T11:34:46.275Z" },
+]
+
+[[package]]
 name = "grpc-google-iam-v1"
 version = "0.14.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2228,6 +2237,9 @@ neptune-iam = [
 nlp = [
     { name = "spacy" },
 ]
+openai-agents = [
+    { name = "openai-agents" },
+]
 otel = [
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.34.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk' or extra != 'extra-5-khora-crewai'" },
@@ -2327,6 +2339,7 @@ requires-dist = [
     { name = "neo4j", marker = "extra == 'neo4j'", specifier = ">=6.1.0" },
     { name = "neo4j", marker = "extra == 'neptune'", specifier = ">=6.1.0" },
     { name = "neo4j", marker = "extra == 'neptune-iam'", specifier = ">=6.1.0" },
+    { name = "openai-agents", marker = "extra == 'openai-agents'", specifier = ">=0.17,<0.18" },
     { name = "openpyxl", marker = "extra == 'binary-readers'", specifier = ">=3.1.0" },
     { name = "opentelemetry-api", specifier = ">=1.27.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'otel-grpc'", specifier = ">=1.27.0" },
@@ -2366,7 +2379,7 @@ requires-dist = [
     { name = "weaviate-client", marker = "extra == 'all-backends'", specifier = ">=4.20.1" },
     { name = "weaviate-client", marker = "extra == 'weaviate'", specifier = ">=4.20.1" },
 ]
-provides-extras = ["accel", "age", "all-backends", "binary-readers", "crewai", "dev", "embedded", "google-adk", "graph-all", "kuzu", "lancedb", "langgraph", "logfire", "memgraph", "neo4j", "neptune", "neptune-iam", "nlp", "otel", "otel-grpc", "parquet", "postgres", "reranking", "rust", "sqlite", "sqlite-lance", "surrealdb", "weaviate"]
+provides-extras = ["accel", "age", "all-backends", "binary-readers", "crewai", "dev", "embedded", "google-adk", "graph-all", "kuzu", "lancedb", "langgraph", "logfire", "memgraph", "neo4j", "neptune", "neptune-iam", "nlp", "openai-agents", "otel", "otel-grpc", "parquet", "postgres", "reranking", "rust", "sqlite", "sqlite-lance", "surrealdb", "weaviate"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2833,15 +2846,15 @@ dependencies = [
     { name = "jsonschema" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
-    { name = "pyjwt", extra = ["crypto"], marker = "extra == 'extra-5-khora-crewai' or extra == 'extra-5-khora-google-adk'" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "python-multipart" },
-    { name = "pywin32", marker = "sys_platform == 'win32'" },
+    { name = "pywin32", marker = "sys_platform == 'win32' or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
     { name = "sse-starlette" },
     { name = "starlette", version = "0.52.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "starlette", version = "1.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
+    { name = "starlette", version = "1.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
     { name = "typing-extensions" },
     { name = "typing-inspection" },
-    { name = "uvicorn", marker = "sys_platform != 'emscripten'" },
+    { name = "uvicorn", marker = "sys_platform != 'emscripten' or (extra == 'extra-5-khora-crewai' and extra == 'extra-5-khora-google-adk')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/fc/6d/62e76bbb8144d6ed86e202b5edd8a4cb631e7c8130f3f4893c3f90262b10/mcp-1.26.0.tar.gz", hash = "sha256:db6e2ef491eecc1a0d93711a76f28dec2e05999f93afd48795da1c1137142c66", size = 608005, upload-time = "2026-01-24T19:40:32.468Z" }
 wheels = [
@@ -3350,6 +3363,26 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f4/a1/4d5e84cf51720fc1526cc49e10ac1961abcccb55b0efb3d970db1e9a2728/openai-2.36.0.tar.gz", hash = "sha256:139dea0edd2f1b30c33d46ae1a6929e03906254140318e4608e98fe8c566f2e7", size = 753003, upload-time = "2026-05-07T17:33:17.075Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9d/1c/5d43735b2553baae2a5e899dcbcd0670a86930d993184d72ca909bf11c9b/openai-2.36.0-py3-none-any.whl", hash = "sha256:143f6194b548dbc2c921af1f1b03b9f14c85fed8a75b5b516f5bcc11a2a50c63", size = 1302361, upload-time = "2026-05-07T17:33:15.063Z" },
+]
+
+[[package]]
+name = "openai-agents"
+version = "0.17.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "griffelib" },
+    { name = "mcp" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "requests" },
+    { name = "types-requests" },
+    { name = "typing-extensions" },
+    { name = "websockets", version = "15.0.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
+    { name = "websockets", version = "16.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bf/e7/5824fb73ec81c4e0aa8d1d3156619d7becaf771f6eb1b8a33cec3f5c1b48/openai_agents-0.17.0.tar.gz", hash = "sha256:547030857e207a2a02d35ac75c41f38e8cd1640e99c4e89eb323ecd0167511ae", size = 5354199, upload-time = "2026-05-08T08:10:20.538Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/80/1a271be40c5d219825c2362d3fb4663199706485bf79c511d448665681f8/openai_agents-0.17.0-py3-none-any.whl", hash = "sha256:58bde1ee2859889db11f87a3ae64a0f61e9d070567e3a17341c1566d40d051c8", size = 827010, upload-time = "2026-05-08T08:10:18.394Z" },
 ]
 
 [[package]]
@@ -5312,7 +5345,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "starlette", version = "0.52.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk'" },
-    { name = "starlette", version = "1.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
+    { name = "starlette", version = "1.0.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/38/82/10cdfab4ab663a6b6bd624d33f55b2cfa41af5105be033a6d5d135a92c5f/sse_starlette-3.4.2.tar.gz", hash = "sha256:2f9a7f51ed84395a0427fb9f66cb1ec11f7899d977a72cbc9070b962a2e14489", size = 35236, upload-time = "2026-05-06T19:42:13.727Z" }
 wheels = [
@@ -5344,7 +5377,7 @@ resolution-markers = [
     "python_full_version < '3.14'",
 ]
 dependencies = [
-    { name = "anyio", marker = "extra == 'extra-5-khora-crewai'" },
+    { name = "anyio", marker = "extra == 'extra-5-khora-crewai' or extra != 'extra-5-khora-google-adk'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/81/69/17425771797c36cded50b7fe44e850315d039f28b15901ab44839e70b593/starlette-1.0.0.tar.gz", hash = "sha256:6a4beaf1f81bb472fd19ea9b918b50dc3a77a6f2e190a12954b25e6ed5eea149", size = 2655289, upload-time = "2026-03-22T18:29:46.779Z" }
 wheels = [
@@ -5665,6 +5698,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/fd/07/b822e1b307d40e263e8253d2384cf98c51aa2368cc7ba9a07e523a1d964b/typer-0.23.1.tar.gz", hash = "sha256:2070374e4d31c83e7b61362fd859aa683576432fd5b026b060ad6b4cd3b86134", size = 120047, upload-time = "2026-02-13T10:04:30.984Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d5/91/9b286ab899c008c2cb05e8be99814807e7fbbd33f0c0c960470826e5ac82/typer-0.23.1-py3-none-any.whl", hash = "sha256:3291ad0d3c701cbf522012faccfbb29352ff16ad262db2139e6b01f15781f14e", size = 56813, upload-time = "2026-02-13T10:04:32.008Z" },
+]
+
+[[package]]
+name = "types-requests"
+version = "2.33.0.20260508"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c7/6b/eb226bdd61a982c9a03e02c657fb4ab001733506e6423906ac142331f2e3/types_requests-2.33.0.20260508.tar.gz", hash = "sha256:81b2ae5f0d20967714a6aa5ef9284c05570d7cb06b7de8f2a77b918b63ddd411", size = 23991, upload-time = "2026-05-08T04:50:56.818Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cb/96/080db0afdf2c5cc5fe512b41354e8d114fe8f65e9510c56ff8dfd40216ce/types_requests-2.33.0.20260508-py3-none-any.whl", hash = "sha256:fa01459cca184229713df03709db46a905325906d27e042cd4fd7ea3d15d3400", size = 20722, upload-time = "2026-05-08T04:50:55.548Z" },
 ]
 
 [[package]]
