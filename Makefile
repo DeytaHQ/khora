@@ -33,6 +33,8 @@ help:
 	@echo "=========================="
 	@echo ""
 	@echo "Development:"
+	@echo "  make install          Sync venv with all extras (crewai combo by default)"
+	@echo "  make install-adk      Sync venv with the google-adk extras combo"
 	@echo "  make dev              Start databases (postgres + neo4j)"
 	@echo "  make dev-down         Stop databases"
 	@echo "  make test             Run tests with coverage (unit parallel + integration serial)"
@@ -65,6 +67,18 @@ help:
 # ==============================================================================
 # Development Commands
 # ==============================================================================
+
+# Sync the venv with the dev dependencies + all adapter extras.
+# Bare ``uv sync --all-extras`` is rejected by uv because the ``crewai`` and
+# ``google-adk`` extras have an opentelemetry-api conflict declared in
+# pyproject.toml's ``[tool.uv].conflicts`` (crewai pins <1.35, google-adk
+# pins >=1.36). The default ``install`` target picks the crewai combo, which
+# matches the CI ``test`` job. Use ``install-adk`` for the google-adk combo.
+install:
+	uv sync --all-extras --no-extra google-adk
+
+install-adk:
+	uv sync --all-extras --no-extra crewai
 
 # Start local development databases
 dev:

@@ -27,6 +27,28 @@ documents its namespace-resolution rule (typically a UUID5 derived
 from framework-native identifiers) so two instances pointed at the
 same khora deployment see the same memory without a shared registry.
 
+### `crewai` and `google-adk` cannot be installed together
+
+The `crewai` extra transitively pins `opentelemetry-api<1.35` and the
+`google-adk` extra pins `>=1.36`. They are declared as mutually
+exclusive in `[tool.uv].conflicts`, so `uv sync --all-extras` is
+rejected. Pick one:
+
+```bash
+# Crewai combo (CI default)
+uv sync --all-extras --no-extra google-adk
+# Or via Makefile: make install
+
+# Google ADK combo
+uv sync --all-extras --no-extra crewai
+# Or via Makefile: make install-adk
+```
+
+The other three adapters (`langgraph`, `openai-agents`, `llamaindex`)
+have no transitive conflicts and install cleanly alongside either
+combo. If you need both crewai and google-adk in the same process,
+use two separate virtual environments.
+
 ## Stability
 
 The OpenAI Agents adapter is tagged **experimental** while upstream

@@ -5,12 +5,16 @@ Khora library: knowledge graphs + vector search + PostgreSQL for unified knowled
 ## Commands
 
 ```bash
+make install           # uv sync --all-extras --no-extra google-adk (crewai combo)
+make install-adk       # uv sync --all-extras --no-extra crewai     (google-adk combo)
 make test              # pytest, coverage ≥30%
 make format            # black, isort, ruff
 make lint              # ruff + ty typecheck
 make dev               # Start postgres + neo4j
 uv run alembic upgrade head                       # Run migrations
 ```
+
+**Installing all extras at once doesn't work.** `crewai` and `google-adk` declare mutually-incompatible `opentelemetry-api` ranges (crewai pins `<1.35`, google-adk pins `>=1.36`) and `[tool.uv].conflicts` makes the conflict explicit, so `uv sync --all-extras` is rejected. Pick one combo: `make install` for crewai (matches CI's `test` job), `make install-adk` for google-adk. CI also keeps `UV_NO_SYNC=1` set so subsequent `uv run` calls don't silently re-resolve the venv to the other combo.
 
 CLI tooling (`extract`, `search`) lives in the separate `khora-cli` package (to be released soon). Ontology tooling (construct / validate / preview) lives in `khora-explorer` (to be released soon). khora is a Python library.
 
