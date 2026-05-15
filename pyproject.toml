@@ -52,6 +52,7 @@ crewai = "khora.integrations.crewai:KhoraMemory"
 langgraph = "khora.integrations.langgraph:KhoraStore"
 google_adk = "khora.integrations.google_adk:KhoraMemoryService"
 openai_agents = "khora.integrations.openai_agents:KhoraSession"
+llamaindex = "khora.integrations.llamaindex:KhoraRetriever"
 
 [project.urls]
 Homepage = "https://github.com/DeytaHQ/khora"
@@ -168,6 +169,13 @@ google-adk = ["google-adk>=1.32,<2.0"]
 # 7 months as of v0.17. Bump in a deliberate PR per upstream minor — see
 # docs/integrations/openai_agents.md.
 openai-agents = ["openai-agents>=0.17,<0.18"]
+# LlamaIndex adapter — BaseRetriever, BaseMemoryBlock, and a deprecated
+# BaseChatStore shim. See docs/integrations/llamaindex.md and
+# src/khora/integrations/llamaindex/. The pin is intentionally narrow
+# (one minor) because LlamaIndex has shipped breaking changes on minor
+# bumps before (BaseMemoryBlock 0.11 → 0.12 → 0.14, BaseMemory.put →
+# aput). Quarterly maintenance reserved for the next minor bump.
+llamaindex = ["llama-index-core>=0.14,<0.15"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "hatch-fancy-pypi-readme"]
