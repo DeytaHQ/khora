@@ -90,6 +90,10 @@ Why all four together? The release pipeline does NOT modify `pyproject.toml` at 
 
 Always run `make format && make test` before committing. CI will reject PRs that fail formatting or tests. Docker Compose is always available — never skip tests by claiming infrastructure is unavailable.
 
+### Integration examples
+
+Every adapter ships `examples/integrations/<name>/example.py` that runs without external services (sqlite_lance fixture + mock LLM helpers under `examples/_helpers/`). The `python title="example.py"` block in `docs/integrations/<name>.md` must be byte-identical to that file. The `examples-smoke` CI job gates drift via `tools/check_examples_drift.py` and smoke-runs each example under a 30s timeout.
+
 ### Coding Principles
 
 #### 1. Think Before Coding
