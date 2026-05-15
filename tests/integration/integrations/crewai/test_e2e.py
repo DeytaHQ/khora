@@ -38,13 +38,20 @@ async def test_memory_save_and_search_roundtrip() -> None:
             user_id="user-test-12345678",
         )
 
-        memory.remember("We decided to use PostgreSQL for the user database.")
-        memory.remember("The release window is the third week of every month.")
+        # The mock LLM produces hash-derived embeddings — cosine
+        # similarity is uncorrelated for distinct texts. To verify the
+        # plumbing without depending on semantic recall, we query with
+        # one of the stored sentences verbatim: deterministic hashing
+        # guarantees a perfect match (cosine = 1.0) on at least the
+        # exact-match chunk.
+        memory_one = "We decided to use PostgreSQL for the user database."
+        memory_two = "The release window is the third week of every month."
 
-        matches = memory.recall("database choice", limit=5)
+        memory.remember(memory_one)
+        memory.remember(memory_two)
+
+        matches = memory.recall(memory_one, limit=5)
 
         assert matches, "expected at least one match from the in-memory backend"
         contents = [m.record.content for m in matches]
-        assert any("PostgreSQL" in c or "database" in c for c in contents), (
-            f"recall did not surface either saved record: {contents}"
-        )
+        assert memory_one in contents, f"verbatim recall failed: {contents}"

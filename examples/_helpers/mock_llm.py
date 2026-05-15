@@ -123,7 +123,7 @@ class MockLLM:
         self.completion_calls: list[dict[str, Any]] = []
         self.embedding_calls: list[dict[str, Any]] = []
 
-    async def acompletion(self, *args: Any, **kwargs: Any) -> _StubCompletion:
+    def _build_completion(self, **kwargs: Any) -> _StubCompletion:
         self.completion_calls.append(kwargs)
         text = self._responses[self._call_index % len(self._responses)]
         self._call_index += 1
@@ -133,7 +133,7 @@ class MockLLM:
             model=kwargs.get("model", "mock"),
         )
 
-    async def aembedding(self, *args: Any, **kwargs: Any) -> _StubEmbedding:
+    def _build_embedding(self, **kwargs: Any) -> _StubEmbedding:
         self.embedding_calls.append(kwargs)
         inputs = kwargs.get("input", [])
         if isinstance(inputs, str):
@@ -149,6 +149,20 @@ class MockLLM:
             usage=_StubUsage(prompt_tokens=len(items), completion_tokens=0, total_tokens=len(items)),
             model=kwargs.get("model", "mock-embedding"),
         )
+
+    async def acompletion(self, *args: Any, **kwargs: Any) -> _StubCompletion:
+        return self._build_completion(**kwargs)
+
+    async def aembedding(self, *args: Any, **kwargs: Any) -> _StubEmbedding:
+        return self._build_embedding(**kwargs)
+
+    def completion(self, *args: Any, **kwargs: Any) -> _StubCompletion:
+        """Sync sibling — CrewAI's analyze step calls ``litellm.completion``."""
+        return self._build_completion(**kwargs)
+
+    def embedding(self, *args: Any, **kwargs: Any) -> _StubEmbedding:
+        """Sync sibling — some framework adapters call ``litellm.embedding``."""
+        return self._build_embedding(**kwargs)
 
 
 def install_mock_llm(
@@ -181,17 +195,20 @@ def install_mock_llm(
     if monkeypatch is not None:
         monkeypatch.setattr(litellm, "acompletion", mock.acompletion)
         monkeypatch.setattr(litellm, "aembedding", mock.aembedding)
+        monkeypatch.setattr(litellm, "completion", mock.completion)
+        monkeypatch.setattr(litellm, "embedding", mock.embedding)
     else:
         litellm.acompletion = mock.acompletion  # type: ignore[assignment]
         litellm.aembedding = mock.aembedding  # type: ignore[assignment]
+        litellm.completion = mock.completion  # type: ignore[assignment]
+        litellm.embedding = mock.embedding  # type: ignore[assignment]
         # Some khora call sites import these as module-level symbols; refresh.
         for module_name in list(sys.modules):
             module = sys.modules[module_name]
             if module is None or not module_name.startswith(("khora.", "litellm")):
                 continue
-            if getattr(module, "acompletion", None) is not None and module_name.startswith("litellm"):
-                module.acompletion = mock.acompletion  # type: ignore[attr-defined]
-            if getattr(module, "aembedding", None) is not None and module_name.startswith("litellm"):
-                module.aembedding = mock.aembedding  # type: ignore[attr-defined]
+            for sym in ("acompletion", "aembedding", "completion", "embedding"):
+                if getattr(module, sym, None) is not None and module_name.startswith("litellm"):
+                    setattr(module, sym, getattr(mock, sym))
 
     return mock
