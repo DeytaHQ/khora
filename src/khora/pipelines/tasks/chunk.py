@@ -55,7 +55,11 @@ async def chunk_document(
                 token_count=result.token_count,
                 custom=custom,
             ),
-            created_at=document.created_at,  # Inherit source timestamp from document
+            created_at=document.created_at,  # Inherit doc created_at (which is source_timestamp when known)
+            # Propagate the parsed source_timestamp so date-bounded
+            # recalls don't fall back to chunk.created_at and surface
+            # historical rows for "last week"-style queries (#615).
+            source_timestamp=document.source_timestamp,
         )
         chunks.append(chunk)
 

@@ -73,6 +73,7 @@ def _chunk_document(document: Document, strategy: str = "fixed", chunk_size: int
                 custom=custom,
             ),
             created_at=document.created_at,
+            source_timestamp=document.source_timestamp,
         )
         chunks.append(chunk)
     return chunks
@@ -105,6 +106,48 @@ class TestChunkDocument:
         chunks = _chunk_document(doc, strategy="fixed", chunk_size=500)
         assert len(chunks) >= 1
         assert chunks[0].metadata.custom.get("key") == "value"
+
+    @pytest.mark.asyncio
+    async def test_source_timestamp_propagates_from_document(self) -> None:
+        """Regression for #615: Chunk.source_timestamp must inherit
+        Document.source_timestamp so date-bounded recalls don't fall back
+        to chunk.created_at (which is ingest time, not event time).
+        """
+        from khora.pipelines.tasks.chunk import chunk_document
+
+        when = datetime(2026, 5, 7, 12, 0, tzinfo=UTC)
+        doc = Document(
+            namespace_id=uuid4(),
+            content="PagerDuty triggered for the payments service at 14:00 UTC.",
+            metadata=DocumentMetadata(custom={"occurred_at": when.isoformat()}),
+            created_at=when,
+            source_timestamp=when,  # what the ingest pipeline populates
+        )
+        chunks = await chunk_document(doc, strategy="fixed", chunk_size=500)
+        assert chunks  # at least one chunk
+        for chunk in chunks:
+            assert chunk.source_timestamp == when, (
+                f"Chunk.source_timestamp dropped: got {chunk.source_timestamp!r}, expected {when!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_source_timestamp_stays_none_when_doc_has_none(self) -> None:
+        """When the document has no source_timestamp (manual ingest with no
+        connector metadata), chunks must NOT invent one — they leave the
+        field None so callers fall back to chunk.created_at downstream.
+        """
+        from khora.pipelines.tasks.chunk import chunk_document
+
+        doc = Document(
+            namespace_id=uuid4(),
+            content="A note with no occurred_at metadata.",
+            metadata=DocumentMetadata(),
+            # source_timestamp left at its default (None)
+        )
+        chunks = await chunk_document(doc, strategy="fixed", chunk_size=500)
+        assert chunks
+        for chunk in chunks:
+            assert chunk.source_timestamp is None
 
 
 # ---------------------------------------------------------------------------
