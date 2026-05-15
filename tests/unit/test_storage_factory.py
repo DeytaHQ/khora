@@ -314,3 +314,63 @@ class TestPoolPrePing:
 
         config = KhoraConfig(storage={"postgresql_pool_pre_ping": True})
         assert config.storage.postgresql_pool_pre_ping is True
+
+
+class TestStorageConfigRepr:
+    """repr must not expose credential fields."""
+
+    _CREDENTIAL_FIELDS = [
+        "postgresql_url",
+        "pgvector_url",
+        "neo4j_url",
+        "neo4j_password",
+        "event_store_url",
+    ]
+
+    def _make_config(self) -> StorageConfig:
+        return StorageConfig(
+            postgresql_url="postgresql+asyncpg://user:secret@host/db",
+            pgvector_url="postgresql+asyncpg://user:secret@host/db",
+            neo4j_url="bolt://user:secret@host:7687",
+            neo4j_password="hunter2",
+            event_store_url="postgresql+asyncpg://user:secret@host/events",
+        )
+
+    def test_credential_fields_absent_from_repr(self):
+        config = self._make_config()
+        r = repr(config)
+        for field_name in self._CREDENTIAL_FIELDS:
+            assert field_name not in r, f"repr should not include {field_name!r}"
+
+    def test_secret_values_absent_from_repr(self):
+        config = self._make_config()
+        r = repr(config)
+        assert "secret" not in r
+        assert "hunter2" not in r
+
+    def test_non_credential_fields_present_in_repr(self):
+        config = StorageConfig(postgresql_echo=True, neo4j_database="mydb")
+        r = repr(config)
+        assert "postgresql_echo" in r
+        assert "neo4j_database" in r
+
+    def test_field_values_still_accessible(self):
+        config = self._make_config()
+        assert config.postgresql_url == "postgresql+asyncpg://user:secret@host/db"
+        assert config.neo4j_password == "hunter2"
+
+    def test_new_style_config_fields_absent_from_repr(self):
+        from khora.config.schema import SurrealDBConfig
+
+        sdb_cfg = SurrealDBConfig(
+            mode="remote",
+            url="ws://user:topsecret@host:8000/rpc",
+            password="topsecret",
+        )
+        config = StorageConfig(backend="surrealdb", surrealdb_config=sdb_cfg)
+        r = repr(config)
+        assert "surrealdb_config" not in r
+        assert "graph_config" not in r
+        assert "vector_config" not in r
+        assert "sqlite_lance_config" not in r
+        assert "topsecret" not in r

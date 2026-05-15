@@ -585,11 +585,17 @@ def test_sync_put_get_delete_route_through_run_sync():
 
 
 @pytest.mark.asyncio
-async def test_sync_method_inside_running_loop_raises():
-    """run_sync rejects reentry — sync inside async must raise loudly."""
+async def test_sync_method_works_inside_running_loop():
+    """``run_sync`` dispatches to a separate daemon-thread loop, so it is
+    safe to call from inside an async context. This pins that contract —
+    LangGraph's sync ``BaseStore`` abstracts are exercised by callers
+    that may themselves run inside an asyncio loop (test runners, graph
+    compile-time hooks).
+    """
     from khora.integrations.langgraph import KhoraStore
 
     kb = _mk_kb()
     store = KhoraStore(kb, user_id="alice-1234")
-    with pytest.raises(RuntimeError, match="cannot be called from inside"):
-        store.put(("ns",), "k1", {"text": "hi"})
+    # Should not raise — dispatches to the bridge's daemon loop.
+    store.put(("ns",), "k1", {"text": "hi"})
+    kb.remember.assert_awaited()

@@ -9,8 +9,11 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    # Configuration
-    "pydantic-settings>=2.13.1",
+    # Configuration. Lower bound is the minimum CrewAI (>=1.10) tolerates;
+    # khora itself uses only the stable ``BaseSettings`` / ``SettingsConfigDict``
+    # surface, so a broader range is safe for callers that want to install
+    # ``khora[crewai]`` alongside the base.
+    "pydantic-settings>=2.10.1",
     "pyyaml>=6.0.3",
     "jinja2>=3.1.6",
     # Async support
@@ -44,8 +47,8 @@ dependencies = [
 # First-party adapters (CrewAI, LangGraph, ...) register themselves here
 # when their tickets merge. Third parties publish khora-<framework>
 # distributions that register under the same group — same import path.
-# Empty until #619's adapter tickets land.
 [project.entry-points."khora.integrations"]
+crewai = "khora.integrations.crewai:KhoraMemory"
 langgraph = "khora.integrations.langgraph:KhoraStore"
 
 [project.urls]
@@ -148,7 +151,9 @@ sqlite = ["aiosqlite>=0.20.0"]
 lancedb = ["lancedb>=0.25", "pyarrow>=18.0.0"]
 # SQLite + LanceDB embedded backend (relational via aiosqlite + vector via LanceDB)
 sqlite-lance = ["lancedb>=0.25", "aiosqlite>=0.20.0", "pyarrow>=18.0.0"]
-# Agentic framework adapter — LangGraph BaseStore (semantic long-term memory).
+# CrewAI memory adapter — see docs/integrations/crewai.md
+crewai = ["crewai>=1.10,<2.0"]
+# LangGraph BaseStore adapter (semantic long-term memory).
 # See docs/integrations/langgraph.md and src/khora/integrations/langgraph/.
 langgraph = ["langgraph>=1.0,<2.0"]
 
@@ -298,7 +303,7 @@ exclude-newer = "7 days"
 # staging window so a same-week CVE fix isn't held back. Use sparingly —
 # every entry here is an explicit "we trust this package enough to skip
 # the staging window".
-exclude-newer-package = { urllib3 = "0 days" }  # CVE-2026-44431 / CVE-2026-44432
+exclude-newer-package = { urllib3 = "0 days", litellm = "0 days" }  # urllib3: CVE-2026-44431/44432; litellm: CVE-2026-42208/42271/40217 (1.83.10+)
 constraint-dependencies = [
     # Security: CVE-2026-25645 fixed in 2.33.0
     "requests>=2.33.0",
