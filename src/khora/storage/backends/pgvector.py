@@ -319,6 +319,7 @@ class PgVectorBackend(AsyncSessionMixin):
             embedding_model=chunk.embedding_model,
             created_at=chunk.created_at,
             source_timestamp=getattr(chunk, "source_timestamp", None),
+            session_id=getattr(chunk, "session_id", None),
         )
         session.add(model)
         if commit:
@@ -356,6 +357,7 @@ class PgVectorBackend(AsyncSessionMixin):
                 embedding_model=chunk.embedding_model,
                 created_at=chunk.created_at,
                 source_timestamp=getattr(chunk, "source_timestamp", None),
+                session_id=getattr(chunk, "session_id", None),
             )
             for chunk in chunks
         ]
@@ -650,6 +652,7 @@ class PgVectorBackend(AsyncSessionMixin):
             embedding_model=model.embedding_model,
             created_at=model.created_at,
             source_timestamp=getattr(model, "source_timestamp", None),
+            session_id=getattr(model, "session_id", None),
         )
 
     # =========================================================================

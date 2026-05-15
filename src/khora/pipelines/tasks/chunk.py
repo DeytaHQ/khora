@@ -60,6 +60,9 @@ async def chunk_document(
             # recalls don't fall back to chunk.created_at and surface
             # historical rows for "last week"-style queries (#615).
             source_timestamp=document.source_timestamp,
+            # Inherit session_id so session-scoped recalls can hit the
+            # partial index on (namespace_id, session_id) (#620).
+            session_id=document.session_id,
         )
         chunks.append(chunk)
 

@@ -166,6 +166,11 @@ class DocumentModel(Base):
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Session attribution for agentic-framework adapters (#620).
+    # Nullable — populated when the caller passes ``session_id`` to remember/submit_batch.
+    # Indexed via migration 031 (Postgres-only); see docs/migrations.md.
+    session_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
     # Relationships
     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="documents")
     chunks: Mapped[list[ChunkModel]] = relationship(
@@ -230,6 +235,10 @@ class ChunkModel(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Session attribution for agentic-framework adapters (#620).
+    # Inherited from the parent document at chunking time.
+    session_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     # Relationships
     namespace: Mapped[MemoryNamespaceModel] = relationship("MemoryNamespaceModel", back_populates="chunks")
@@ -458,6 +467,9 @@ class MemoryEventModel(Base):
 
     # Version
     version: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Session attribution for agentic-framework adapters (#620).
+    session_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
 
@@ -802,6 +814,9 @@ class ChronicleEventModel(Base):
     # Embedding for event-channel similarity (pgvector)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
 
+    # Session attribution for agentic-framework adapters (#620).
+    session_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     # Relationships
@@ -855,6 +870,9 @@ class MemoryFactModel(Base):
 
     # Source tracking
     source_chunk_ids: Mapped[list[UUIDType]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
+
+    # Session attribution for agentic-framework adapters (#620).
+    session_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(

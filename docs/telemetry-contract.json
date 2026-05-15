@@ -279,6 +279,16 @@
       "owner": "khora"
     },
     {
+      "name": "khora.forget_session",
+      "stability": "public",
+      "owner": "khora"
+    },
+    {
+      "name": "khora.gc.expire_sessions",
+      "stability": "public",
+      "owner": "khora"
+    },
+    {
       "name": "khora.vectorcypher.retrieve",
       "stability": "public",
       "owner": "vectorcypher"

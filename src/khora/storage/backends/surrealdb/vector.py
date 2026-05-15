@@ -128,7 +128,8 @@ class SurrealDBVectorAdapter:
             "token_count = $token_count, "
             "metadata_ = $metadata_, "
             "created_at = $created_at, "
-            "source_timestamp = $source_timestamp"
+            "source_timestamp = $source_timestamp, "
+            "session_id = $session_id"
         )
         bindings = self._chunk_to_bindings(chunk)
         await self._conn.execute(sql, bindings)
@@ -156,6 +157,7 @@ class SurrealDBVectorAdapter:
                     "metadata_": chunk.metadata.custom or {},
                     "created_at": chunk.created_at,
                     "source_timestamp": chunk.source_timestamp,
+                    "session_id": str(chunk.session_id) if chunk.session_id else None,
                 }
             )
 
@@ -686,6 +688,7 @@ class SurrealDBVectorAdapter:
             "metadata_": chunk.metadata.custom or {},
             "created_at": chunk.created_at,
             "source_timestamp": chunk.source_timestamp,
+            "session_id": str(chunk.session_id) if chunk.session_id else None,
         }
 
     def _row_to_chunk(self, row: dict[str, Any]) -> Chunk:
@@ -724,6 +727,7 @@ class SurrealDBVectorAdapter:
             embedding_model=row.get("embedding_model", ""),
             created_at=_parse_dt(row.get("created_at")) or datetime.now(UTC),
             source_timestamp=_parse_dt(row.get("source_timestamp")),
+            session_id=_parse_uuid(row.get("session_id")) if row.get("session_id") else None,
         )
 
     # _row_to_entity is now a module-level function in _helpers.py;

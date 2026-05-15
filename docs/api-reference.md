@@ -97,10 +97,11 @@ result: RememberResult = await kb.remember(
     extraction_config_hash: str | None = None,
     chunk_strategy: ChunkStrategy | None = None,
     external_id: str | None = None,
+    session_id: UUID | None = None,
 )
 ```
 
-Ingests content through the 3-phase pipeline (stage → enrich → expand). `chunk_strategy` accepts `"fixed"`, `"semantic"`, `"recursive"`, or `"conversation"`. `external_id` must be `None` or a non-blank string (≤ 512 chars); otherwise `ValueError` is raised.
+Ingests content through the 3-phase pipeline (stage → enrich → expand). `chunk_strategy` accepts `"fixed"`, `"semantic"`, `"recursive"`, or `"conversation"`. `external_id` must be `None` or a non-blank string (≤ 512 chars); otherwise `ValueError` is raised. `session_id` is propagated to `Document.session_id` and every chunk's `Chunk.session_id` so session-scoped recall hits the partial composite index (#620).
 
 ### `remember_batch`
 
@@ -155,6 +156,29 @@ result: RecallResult = await kb.recall(
 removed: bool = await kb.forget(document_id: UUID, *, namespace: str | UUID)
 ```
 
+### `forget_session`
+
+```python
+deleted: int = await kb.forget_session(namespace_id: UUID, session_id: UUID)
+```
+
+Delete every document in `namespace_id` tagged with `session_id`. Cascade-deletes chunks (via the FK `ON DELETE CASCADE`) and routes per-document graph cleanup through the engine's `forget()` so Neo4j Chunk nodes and extracted entities/relationships are tidied up. Returns the count of documents deleted. See [migrations.md](migrations.md) for the `session_id` column and indexes (migrations 030 + 031).
+
+### `gc.expire_sessions`
+
+```python
+from khora import gc
+
+expired_count: int = await gc.expire_sessions(
+    *,
+    kb: Khora,
+    before: datetime,
+    namespace_id: UUID | None = None,
+)
+```
+
+Background-coroutine-friendly TTL cleanup. Calls `forget_session()` for each `session_id` whose newest document predates `before` (using `COALESCE(source_timestamp, created_at)` as the comparison time). **Opt-in** — Khora does not run a scheduler. Adapters / downstream services call this from their own background loop. Pass `namespace_id` for tenant-scoped sweeps; omit to scan every active namespace.
+
 ### `list_entities` / `find_related_entities`
 
 Convenience accessors over the underlying engine's graph-view API. Signatures are stable but return types are engine-specific; consult the type hints in `src/khora/khora.py`.
@@ -193,7 +217,7 @@ All result types are frozen slotted dataclasses.
 
 ### `BatchHandle`
 
-Returned by `kb.submit_batch(...)` (the async-staging path that returns immediately and processes via a background worker). Use `await handle.wait()` to block until all documents finish.
+Returned by `kb.submit_batch(...)` (the async-staging path that returns immediately and processes via a background worker). Use `await handle.wait()` to block until all documents finish. `submit_batch` also accepts an optional `session_id: UUID | None = None` kwarg that is stamped onto every staged document (per-document `metadata["session_id"]` wins if both are set) — see #620 and the [`session_id` column](migrations.md) for retention/forget semantics.
 
 | Field / method | Type | Description |
 |---|---|---|

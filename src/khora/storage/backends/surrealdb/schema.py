@@ -68,7 +68,9 @@ DEFINE FIELD IF NOT EXISTS updated_at ON document TYPE datetime DEFAULT time::no
 DEFINE FIELD IF NOT EXISTS processed_at ON document TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS source_timestamp ON document TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS external_id ON document TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS session_id ON document TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS idx_document_namespace ON document FIELDS namespace_id;
+DEFINE INDEX IF NOT EXISTS idx_document_ns_session ON document FIELDS namespace_id, session_id;
 -- Note: SurrealDB does not support partial indexes; full index used for dedup queries
 DEFINE INDEX IF NOT EXISTS idx_document_ns_checksum ON document FIELDS namespace_id, checksum;
 DEFINE INDEX IF NOT EXISTS idx_document_ns_status ON document FIELDS namespace_id, status;
@@ -90,9 +92,11 @@ DEFINE FIELD IF NOT EXISTS embedding_model ON chunk TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS metadata_ ON chunk FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS created_at ON chunk TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS source_timestamp ON chunk TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS session_id ON chunk TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS idx_chunk_namespace ON chunk FIELDS namespace;
 DEFINE INDEX IF NOT EXISTS idx_chunk_document ON chunk FIELDS document;
 DEFINE INDEX IF NOT EXISTS idx_chunk_doc_idx ON chunk FIELDS document, chunk_index;
+DEFINE INDEX IF NOT EXISTS idx_chunk_ns_session ON chunk FIELDS namespace_id, session_id;
 -- HNSW + BM25 indexes deferred to ensure_search_indexes() for bulk load performance
 
 -- Entity (with HNSW vector index and unique constraint)
