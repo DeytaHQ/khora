@@ -103,7 +103,7 @@ all-backends = [
     "pgvector>=0.4.2",
     "httpx>=0.28.1",
     "weaviate-client>=4.20.1",
-    "surrealdb>=2.0.0a1",
+    "surrealdb>=2.0.0,<3.0",
     "aiosqlite>=0.20.0",
     "lancedb>=0.25",
     "pyarrow>=18.0.0",
@@ -146,8 +146,8 @@ rust = [
     "khora-accel==0.12.1",
 ]
 # SurrealDB unified backend (graph + vector + relational in one DB)
-surrealdb = ["surrealdb>=2.0.0a1"]
-embedded = ["surrealdb>=2.0.0a1"]
+surrealdb = ["surrealdb>=2.0.0,<3.0"]
+embedded = ["surrealdb>=2.0.0,<3.0"]
 # SQLite embedded backend (zero-infrastructure relational + vector)
 sqlite = ["aiosqlite>=0.20.0"]
 # LanceDB embedded vector store (Chronicle engine, zero-infrastructure)
