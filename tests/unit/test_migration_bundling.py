@@ -822,15 +822,20 @@ class TestRunAsyncMigrations:
         mock_engine, mock_conn = self._mock_async_engine()
         mock_conn.run_sync.side_effect = dsn_error
 
-        with patch.object(env, "create_async_engine", return_value=mock_engine):
-            with pytest.raises(RuntimeError) as exc_info:
-                await env.run_async_migrations()
+        with patch.object(env, "logger") as mock_logger:
+            with patch.object(env, "create_async_engine", return_value=mock_engine):
+                with pytest.raises(RuntimeError) as exc_info:
+                    await env.run_async_migrations()
 
         raised = exc_info.value
         # __cause__ must be None — DSN must not leak via exception chain
         assert raised.__cause__ is None, "__cause__ must be suppressed (from None)"
         # The redacted message must not contain the plaintext credential
         assert "secret" not in str(raised)
+        # logger.debug must only log the type name, not the exception message or DSN
+        mock_logger.debug.assert_called_once()
+        debug_args = " ".join(str(a) for a in mock_logger.debug.call_args[0])
+        assert "secret" not in debug_args, "logger.debug must not log unredacted DSN"
 
     @pytest.mark.unit
     async def test_dsn_redaction_normal_exception_type_preserved(self):
