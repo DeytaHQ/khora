@@ -324,6 +324,7 @@ class TestStorageConfigRepr:
         "pgvector_url",
         "neo4j_url",
         "neo4j_password",
+        "neo4j_user",
         "event_store_url",
     ]
 
@@ -333,6 +334,7 @@ class TestStorageConfigRepr:
             pgvector_url="postgresql+asyncpg://user:secret@host/db",
             neo4j_url="bolt://user:secret@host:7687",
             neo4j_password="hunter2",
+            neo4j_user="testuser",
             event_store_url="postgresql+asyncpg://user:secret@host/events",
         )
 
