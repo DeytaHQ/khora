@@ -9,8 +9,11 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    # Configuration
-    "pydantic-settings>=2.13.1",
+    # Configuration. Lower bound is the minimum CrewAI (>=1.10) tolerates;
+    # khora itself uses only the stable ``BaseSettings`` / ``SettingsConfigDict``
+    # surface, so a broader range is safe for callers that want to install
+    # ``khora[crewai]`` alongside the base.
+    "pydantic-settings>=2.10.1",
     "pyyaml>=6.0.3",
     "jinja2>=3.1.6",
     # Async support
@@ -44,8 +47,8 @@ dependencies = [
 # First-party adapters (CrewAI, LangGraph, ...) register themselves here
 # when their tickets merge. Third parties publish khora-<framework>
 # distributions that register under the same group — same import path.
-# Empty until #619's adapter tickets land.
 [project.entry-points."khora.integrations"]
+crewai = "khora.integrations.crewai:KhoraMemory"
 
 [project.urls]
 Homepage = "https://github.com/DeytaHQ/khora"
@@ -147,6 +150,8 @@ sqlite = ["aiosqlite>=0.20.0"]
 lancedb = ["lancedb>=0.25", "pyarrow>=18.0.0"]
 # SQLite + LanceDB embedded backend (relational via aiosqlite + vector via LanceDB)
 sqlite-lance = ["lancedb>=0.25", "aiosqlite>=0.20.0", "pyarrow>=18.0.0"]
+# CrewAI memory adapter — see docs/integrations/crewai.md
+crewai = ["crewai>=1.10,<2.0"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "hatch-fancy-pypi-readme"]

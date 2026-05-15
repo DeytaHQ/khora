@@ -1,0 +1,12 @@
+[project]
+name = "khora-crewai-example"
+version = "0.0.0"
+description = "Runnable smoke example for khora's CrewAI adapter."
+requires-python = ">=3.13"
+dependencies = [
+    "khora[crewai,sqlite-lance]",
+    "crewai>=1.10,<2.0",
+]
+
+[tool.uv.sources]
+khora = { path = "../../..", editable = true }
