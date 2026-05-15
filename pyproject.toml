@@ -49,6 +49,7 @@ dependencies = [
 # distributions that register under the same group — same import path.
 [project.entry-points."khora.integrations"]
 crewai = "khora.integrations.crewai:KhoraMemory"
+langgraph = "khora.integrations.langgraph:KhoraStore"
 
 [project.urls]
 Homepage = "https://github.com/DeytaHQ/khora"
@@ -152,6 +153,9 @@ lancedb = ["lancedb>=0.25", "pyarrow>=18.0.0"]
 sqlite-lance = ["lancedb>=0.25", "aiosqlite>=0.20.0", "pyarrow>=18.0.0"]
 # CrewAI memory adapter — see docs/integrations/crewai.md
 crewai = ["crewai>=1.10,<2.0"]
+# LangGraph BaseStore adapter (semantic long-term memory).
+# See docs/integrations/langgraph.md and src/khora/integrations/langgraph/.
+langgraph = ["langgraph>=1.0,<2.0"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "hatch-fancy-pypi-readme"]
