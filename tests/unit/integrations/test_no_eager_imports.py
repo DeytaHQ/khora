@@ -30,7 +30,7 @@ import pytest
 # Adapter PRs (CrewAI, LangGraph, ...) add their framework name here when
 # they merge. Each entry is the submodule name; the test poisons it in
 # sys.modules and asserts khora.integrations.<name> still imports.
-ADAPTERS: list[str] = ["crewai", "langgraph"]
+ADAPTERS: list[str] = ["crewai", "langgraph", "google_adk"]
 
 
 @pytest.mark.parametrize("name", ADAPTERS)
