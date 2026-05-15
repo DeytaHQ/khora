@@ -277,14 +277,18 @@ async def run_async_migrations() -> None:
             # Re-raise with redacted message. Try to preserve the original
             # exception type, but some SQLAlchemy / asyncpg exception types
             # require multiple positional args (e.g. NoSuchModuleError(name))
-            # — passing just the redacted message would raise TypeError and
-            # lose the original traceback. Fall back to RuntimeError chained
-            # via ``from exc`` so the original is still reachable via
-            # ``__cause__``.
+            # — passing just the redacted message would raise TypeError.
+            # Fall back to RuntimeError with ``from None`` so the unredacted
+            # DSN is not retained in __cause__ and captured by observability
+            # tools (Logfire, Sentry, traceback.print_exception).
             try:
                 redacted_exc = type(exc)(redacted)
             except TypeError:
-                raise RuntimeError(redacted) from exc
+                logger.debug(
+                    "Migration error type (original suppressed for DSN redaction): %s",
+                    type(exc).__name__,
+                )
+                raise RuntimeError(redacted) from None
             raise redacted_exc.with_traceback(exc.__traceback__) from None
         raise
 

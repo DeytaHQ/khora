@@ -798,6 +798,58 @@ class TestRunAsyncMigrations:
         mock_conn.run_sync.assert_called_once_with(env.do_run_migrations)
         mock_engine.dispose.assert_awaited_once()
 
+    @pytest.mark.unit
+    async def test_dsn_redaction_suppresses_cause_chain(self):
+        """TypeError fallback raises RuntimeError from None — __cause__ must not leak DSN.
+
+        When exception type reconstruction raises TypeError (e.g. NoSuchModuleError),
+        the fallback RuntimeError must use ``from None`` so the unredacted DSN is not
+        retained in __cause__ and captured by Logfire / Sentry / traceback.print_exception.
+        """
+        env = _load_env_functions()
+        env.config.attributes["database_url"] = "postgresql://user:secret@host/db"
+
+        class _MultiArgError(Exception):
+            """Simulates an exception type that requires >1 positional arg."""
+
+            def __init__(self, name: str, extra: str) -> None:
+                super().__init__(name, extra)
+
+        dsn_error = _MultiArgError(
+            "postgresql://user:secret@host/db",
+            "some extra arg",
+        )
+        mock_engine, mock_conn = self._mock_async_engine()
+        mock_conn.run_sync.side_effect = dsn_error
+
+        with patch.object(env, "create_async_engine", return_value=mock_engine):
+            with pytest.raises(RuntimeError) as exc_info:
+                await env.run_async_migrations()
+
+        raised = exc_info.value
+        # __cause__ must be None — DSN must not leak via exception chain
+        assert raised.__cause__ is None, "__cause__ must be suppressed (from None)"
+        # The redacted message must not contain the plaintext credential
+        assert "secret" not in str(raised)
+
+    @pytest.mark.unit
+    async def test_dsn_redaction_normal_exception_type_preserved(self):
+        """When exception type can be reconstructed, original type is preserved with redacted message."""
+        env = _load_env_functions()
+        env.config.attributes["database_url"] = "postgresql://user:secret@host/db"
+
+        dsn_error = ValueError("postgresql://user:secret@host/db")
+        mock_engine, mock_conn = self._mock_async_engine()
+        mock_conn.run_sync.side_effect = dsn_error
+
+        with patch.object(env, "create_async_engine", return_value=mock_engine):
+            with pytest.raises(ValueError) as exc_info:
+                await env.run_async_migrations()
+
+        raised = exc_info.value
+        assert raised.__cause__ is None
+        assert "secret" not in str(raised)
+
 
 # ---------------------------------------------------------------------------
 # env.py — do_run_migrations ahead-detection
