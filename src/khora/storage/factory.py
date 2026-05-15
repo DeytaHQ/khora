@@ -115,7 +115,7 @@ class StorageConfig:
         ]
         | None
     ) = field(default=None, repr=False)
-    neo4j_user: str = "neo4j"
+    neo4j_user: str = field(default="neo4j", repr=False)
     neo4j_password: Annotated[
         str,
         AllowSecretTyping(
