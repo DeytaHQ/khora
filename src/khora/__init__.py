@@ -45,6 +45,7 @@ Example usage:
         result = await kb.recall("Who did Alice meet?", namespace=ns.namespace_id)
 """
 
+from . import integrations
 from .config import KhoraConfig
 from .core.models.document import DocumentSource
 from .core.models.event import EventType
@@ -90,4 +91,6 @@ __all__ = [
     # Semantic hooks
     "EventType",
     "SemanticFilter",
+    # Integrations (adapter Protocols, registry, types) — see issue #619
+    "integrations",
 ]

@@ -106,6 +106,7 @@ lint:
 	uv run ruff check .
 	uv run ruff format --check .
 	uv run ty check src/
+	uv run python tools/check_optional_imports.py
 
 # Format code
 format:
