@@ -291,6 +291,75 @@ class RecallResult:
     llm_usage: list[LLMUsage] = field(default_factory=list)
 
 
+# Shared-instance machinery for `Khora.shared()` (#619).
+#
+# Cached by config hash so two callers with identical config share one
+# asyncpg pool. The lock serialises concurrent first-callers — without
+# it, two awaits hitting `Khora.shared()` at the same time would race to
+# instantiate and one of the connections would leak.
+_SHARED_LOCK: asyncio.Lock = asyncio.Lock()
+_SHARED_INSTANCES: dict[str, Khora] = {}
+
+
+def _config_hash(config: KhoraConfig) -> str:
+    """Stable identity hash for a KhoraConfig.
+
+    Used to key the `Khora.shared()` cache. Identity != equality: we want
+    "did the caller supply the same config object or the same effective
+    settings" so callers that read the same env vars share one instance.
+
+    Pydantic's `model_dump_json` is deterministic for the field set and
+    handles SecretStr / UUID / Pydantic types out of the box. SHA-1 is
+    fine here — this is not a security boundary.
+    """
+    try:
+        payload = config.model_dump_json()
+    except Exception:
+        # If serialisation fails for any reason, fall back to id() so we
+        # still get a cache key. This means two equal-but-distinct
+        # configs won't share an instance, which is a correctness-safe
+        # degradation (worse cache hit rate, not wrong answers).
+        return f"id:{id(config)}"
+    return hashlib.sha1(payload.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+
+class _SharedAccessor:
+    """Bridge object exposed as `Khora.shared` so callers can write
+    both `await Khora.shared()` and `await Khora.shared.clear()`.
+
+    A bare `@classmethod` can't carry a `.clear` sub-method while also
+    being awaitable, so we use a small descriptor-like instance.
+    """
+
+    __slots__ = ()
+
+    async def __call__(self, config: KhoraConfig | None = None) -> Khora:
+        """Return the process-wide cached :class:`Khora` instance.
+
+        Lazily creates and connects on first call; subsequent calls with
+        the same effective config return the same instance.
+
+        Args:
+            config: Optional :class:`KhoraConfig` override. If absent,
+                :func:`khora.config.load_config` is called once per
+                cache miss.
+
+        Returns:
+            A connected :class:`Khora` ready for `remember` / `recall`
+            calls. Callers MUST NOT call `disconnect()` — the lifetime
+            is process-wide. Use :meth:`clear` in tests.
+        """
+        return await Khora._shared_get(config)
+
+    async def clear(self) -> None:
+        """Disconnect and drop every cached shared instance.
+
+        Test-only — production code never needs this. Call in test
+        teardown / fixture finalisation to keep tests isolated.
+        """
+        await Khora._shared_clear()
+
+
 class Khora:
     """Primary interface for Khora.
 
@@ -784,6 +853,47 @@ class Khora:
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         """Async context manager exit."""
         await self.disconnect()
+
+    # =========================================================================
+    # Process-wide singleton — Khora.shared() (#619)
+    #
+    # Adapters (CrewAI / LangGraph / OpenAI Agents SDK) run in ephemeral
+    # contexts (`Runner.run_sync`, one-shot crew kicks) where allocating a
+    # fresh `Khora()` per call would churn the asyncpg pool. `Khora.shared()`
+    # returns a process-wide instance, lazily connected, cached by config
+    # hash so two callers with the same config share one pool.
+    #
+    # `Khora.shared.clear()` resets the cache — test-only escape hatch.
+    # =========================================================================
+    shared: _SharedAccessor  # set below the class definition
+
+    @classmethod
+    async def _shared_get(cls, config: KhoraConfig | None = None) -> Khora:
+        """Internal: implement the shared() singleton fetch."""
+        async with _SHARED_LOCK:
+            cfg = config if config is not None else load_config()
+            key = _config_hash(cfg)
+            cached = _SHARED_INSTANCES.get(key)
+            if cached is not None and cached._connected:
+                return cached
+            if cached is None:
+                cached = cls(cfg)
+                _SHARED_INSTANCES[key] = cached
+            if not cached._connected:
+                await cached.connect()
+            return cached
+
+    @classmethod
+    async def _shared_clear(cls) -> None:
+        """Internal: disconnect and drop every cached shared instance."""
+        async with _SHARED_LOCK:
+            instances = list(_SHARED_INSTANCES.values())
+            _SHARED_INSTANCES.clear()
+        for inst in instances:
+            try:
+                await inst.disconnect()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Khora.shared.clear: disconnect raised: {}", exc)
 
     def _get_engine(self) -> MemoryEngineProtocol:
         """Get the engine (internal use)."""
@@ -1900,6 +2010,13 @@ class Khora:
             return {"status": "disconnected"}
 
         return await self._engine.health_check()
+
+
+# Attach the singleton accessor onto Khora. Done outside the class body
+# because `_SharedAccessor` exists only after the class definition
+# closes (it references Khora) — see `_SharedAccessor.__call__` /
+# `clear`. Callers write `await Khora.shared()` and `await Khora.shared.clear()`.
+Khora.shared = _SharedAccessor()
 
 
 # Convenience function for one-off usage

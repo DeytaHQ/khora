@@ -161,6 +161,13 @@ jobs:
         env:
           SKIP: ty  # ty already ran above — skip duplicate
 
+      - name: Optional-import discipline (khora.integrations adapters)
+        # Per ADR #619 — adapter submodules under
+        # src/khora/integrations/<framework>/ must NOT import their
+        # framework at module top level. The AST lint enforces this so
+        # `pip install khora` keeps working without the optional extra.
+        run: uv run python tools/check_optional_imports.py
+
   # ============================================================================
   # Test — pytest with coverage (parallel with lint and security)
   # ============================================================================

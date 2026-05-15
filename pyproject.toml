@@ -40,6 +40,13 @@ dependencies = [
     "opentelemetry-api>=1.27.0",
 ]
 
+# Entry-point group used by khora.integrations.registry.discover().
+# First-party adapters (CrewAI, LangGraph, ...) register themselves here
+# when their tickets merge. Third parties publish khora-<framework>
+# distributions that register under the same group — same import path.
+# Empty until #619's adapter tickets land.
+[project.entry-points."khora.integrations"]
+
 [project.urls]
 Homepage = "https://github.com/DeytaHQ/khora"
 Documentation = "https://github.com/DeytaHQ/khora/blob/main/docs/README.md"
