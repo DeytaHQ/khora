@@ -226,3 +226,67 @@ jobs:
           flags: integration
           name: khora-coverage-integration
           fail_ci_if_error: false
+
+  # ============================================================================
+  # Examples smoke — drift gate + runnable smoke for every adapter example
+  # ============================================================================
+  # Foundation state: no examples/integrations/<framework>/ dirs exist yet, so
+  # the smoke loop is a no-op and the drift gate has nothing to compare. The
+  # job still runs to keep the contract visible. When an adapter merges its
+  # example.py + pyproject.toml under examples/integrations/<name>/, this job
+  # picks it up automatically — no workflow change needed.
+  examples-smoke:
+    needs: install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Restore venv cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
+
+      - name: Doc/example drift gate
+        run: uv run python tools/check_examples_drift.py
+
+      - name: Smoke-test adapter examples
+        run: |
+          shopt -s nullglob
+          dirs=(examples/integrations/*/)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            echo "[examples-smoke] No adapters yet — nothing to run."
+            exit 0
+          fi
+          fail=0
+          for ex in "${dirs[@]}"; do
+            name="$(basename "$ex")"
+            if [ ! -f "$ex/example.py" ]; then
+              echo "[examples-smoke] $name: no example.py — skip."
+              continue
+            fi
+            echo "[examples-smoke] $name: syncing extras"
+            if [ -f "$ex/pyproject.toml" ]; then
+              (cd "$ex" && uv sync) || { echo "[examples-smoke] $name: uv sync failed"; fail=1; continue; }
+            fi
+            echo "[examples-smoke] $name: running example.py (30s budget)"
+            if ! timeout 30s uv run --directory "$ex" python example.py; then
+              echo "[examples-smoke] $name: FAILED"
+              fail=1
+            fi
+          done
+          exit $fail
