@@ -30,15 +30,18 @@ import pytest
 # Adapter PRs (CrewAI, LangGraph, ...) add their framework name here when
 # they merge. Each entry is the submodule name; the test poisons it in
 # sys.modules and asserts khora.integrations.<name> still imports.
-ADAPTERS: list[str] = ["crewai", "langgraph", "google_adk", "openai_agents"]
+ADAPTERS: list[str] = ["crewai", "langgraph", "google_adk", "openai_agents", "llamaindex"]
 
 # Extra frameworks whose import name differs from the adapter dir name.
-# openai-agents (PyPI) installs as the Python module ``agents`` — the AST
-# lint won't catch ``import agents`` (it keys off the dir name), so we
-# explicitly poison ``agents`` in sys.modules and prove the adapter still
-# loads. Each tuple is (adapter_dir_name, framework_module_name).
+# The AST lint keys off the dir name, so for adapters whose framework
+# publishes under a different name we additionally poison the real
+# framework module in ``sys.modules`` and prove the adapter still imports.
+# Each tuple is ``(adapter_dir_name, framework_module_name)``.
+#   - openai-agents (PyPI) installs as Python module ``agents``
+#   - llama-index-core installs as Python module ``llama_index``
 EXTRA_FRAMEWORK_NAMES: list[tuple[str, str]] = [
     ("openai_agents", "agents"),
+    ("llamaindex", "llama_index"),
 ]
 
 
@@ -71,7 +74,8 @@ def test_adapter_imports_when_renamed_framework_poisoned(adapter_name: str, fram
 
     The AST lint (``tools/check_optional_imports.py``) only catches
     ``import <dir_name>`` at module top level. For adapters whose framework
-    publishes under a different name (e.g. ``openai-agents`` → ``agents``)
+    publishes under a different name (e.g. ``openai-agents`` → ``agents``,
+    or ``llamaindex`` → ``llama_index``)
     that's not enough — we additionally poison the real framework name in
     ``sys.modules`` and prove the adapter still imports cleanly.
     """
