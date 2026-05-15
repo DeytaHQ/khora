@@ -50,6 +50,7 @@ dependencies = [
 [project.entry-points."khora.integrations"]
 crewai = "khora.integrations.crewai:KhoraMemory"
 langgraph = "khora.integrations.langgraph:KhoraStore"
+google_adk = "khora.integrations.google_adk:KhoraMemoryService"
 
 [project.urls]
 Homepage = "https://github.com/DeytaHQ/khora"
@@ -156,6 +157,11 @@ crewai = ["crewai>=1.10,<2.0"]
 # LangGraph BaseStore adapter (semantic long-term memory).
 # See docs/integrations/langgraph.md and src/khora/integrations/langgraph/.
 langgraph = ["langgraph>=1.0,<2.0"]
+# Google ADK BaseMemoryService adapter.
+# Upper bound excludes the 2.x beta — ADK 2.0 is still in pre-release.
+# Bump to <3.0 after the 2.x line GAs and adapter smoke passes against it.
+# See docs/integrations/google_adk.md.
+google-adk = ["google-adk>=1.32,<2.0"]
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "hatch-fancy-pypi-readme"]
@@ -293,6 +299,15 @@ invalid-await = "warn"                 # 3 errors, surrealdb SDK stubs missing a
 unused-ignore-comment = "warn"         # 1 warning, stale type: ignore comment
 
 [tool.uv]
+# Adapter extras can have transitive deps that conflict (e.g. crewai pins
+# ``opentelemetry-api<1.35`` while google-adk pins ``>=1.36``). Each
+# adapter is independently installable; the conflict only matters if a
+# single environment wants both. Declaring them here lets ``uv lock`` /
+# ``uv sync`` resolve each combination in isolation rather than failing
+# the whole project resolution.
+conflicts = [
+    [{ extra = "crewai" }, { extra = "google-adk" }],
+]
 # Reproducibility: ignore PyPI releases uploaded within the last 7 days.
 # Relative pin (re-evaluated on every ``uv sync`` / ``uv lock``) so a
 # fresh sync cannot silently pull a brand-new upstream release that

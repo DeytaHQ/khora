@@ -16,6 +16,17 @@
 export KHORA_DATABASE_URL
 export KHORA_NEO4J_URL
 
+# Stop ``uv run`` from re-syncing the venv on every invocation. The
+# ``crewai`` and ``google-adk`` extras are declared as conflicts in
+# pyproject.toml (they pin incompatible opentelemetry-api ranges), which
+# splits the uv.lock into two resolution-marker branches. A bare
+# ``uv run`` re-resolves against the lockfile defaults and silently swaps
+# the installed otel-sdk between 1.34 and 1.40, breaking logfire's
+# in-tree imports. ``uv sync --all-extras --no-extra <one>`` pins the
+# combo correctly; UV_NO_SYNC keeps subsequent ``uv run`` calls from
+# undoing it. Mirrored in .github/workflows/ci.yml.
+export UV_NO_SYNC := 1
+
 # Default target
 help:
 	@echo "Khora Development Commands"

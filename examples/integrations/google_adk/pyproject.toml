@@ -1,0 +1,12 @@
+[project]
+name = "khora-google-adk-example"
+version = "0.0.0"
+description = "Runnable smoke example for khora's Google ADK adapter."
+requires-python = ">=3.13"
+dependencies = [
+    "khora[google-adk,sqlite-lance]",
+    "google-adk>=1.32,<2.0",
+]
+
+[tool.uv.sources]
+khora = { path = "../../..", editable = true }
