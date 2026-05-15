@@ -86,7 +86,7 @@ class StorageConfig:
             ),
         ]
         | None
-    ) = None
+    ) = field(default=None, repr=False)
     postgresql_echo: bool = False
     postgresql_pool_size: int = 10
     postgresql_max_overflow: int = 20
@@ -101,7 +101,7 @@ class StorageConfig:
             ),
         ]
         | None
-    ) = None
+    ) = field(default=None, repr=False)
     pgvector_embedding_dimension: int = 1536
     pgvector_use_halfvec: bool = True
 
@@ -114,14 +114,14 @@ class StorageConfig:
             ),
         ]
         | None
-    ) = None
+    ) = field(default=None, repr=False)
     neo4j_user: str = "neo4j"
     neo4j_password: Annotated[
         str,
         AllowSecretTyping(
             reason="legacy factory intermediary; holds post-boundary plain string from KhoraConfig.get_neo4j_password()"
         ),
-    ] = ""
+    ] = field(default="", repr=False)
     neo4j_database: str = "neo4j"
 
     # New-style backend configs (Pydantic models from config/schema.py)
@@ -142,7 +142,7 @@ class StorageConfig:
             ),
         ]
         | None
-    ) = None
+    ) = field(default=None, repr=False)
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> StorageConfig:
