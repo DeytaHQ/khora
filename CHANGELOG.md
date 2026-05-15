@@ -4,6 +4,42 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.13.0] — Agentic framework adapters; session_id first-class; SurrealDB 2.0 stable
+
+Minor release. Five new opt-in adapters for agentic frameworks (CrewAI, LangGraph, Google ADK, OpenAI Agents SDK, LlamaIndex), a new `session_id` first-class column with cascade-delete and TTL helpers, and the SurrealDB 2.0 stable pin. No public API removals.
+
+### Added
+
+- **`khora.integrations` adapter foundation ([#619](https://github.com/DeytaHQ/khora/issues/619) → PR #631).** New subpackage exposing three runtime-checkable Protocols (`MemoryAdapter`, `RetrieverAdapter`, marker `KhoraIntegration`), an entry-point registry (group `khora.integrations`, with `register()` test escape hatch), the `_sync.run_sync` cross-thread bridge, and a config-hash-keyed `Khora.shared()` process-wide singleton. Adapter submodules MUST NOT import their framework at top level — enforced by `tools/check_optional_imports.py` (AST lint).
+- **CrewAI adapter ([#623](https://github.com/DeytaHQ/khora/issues/623) → PR #633).** `khora.integrations.crewai.KhoraMemory` is a drop-in `StorageBackend` for CrewAI's unified `Memory`. Install with `pip install khora[crewai]`. Tz-naive recency math (`_strip_tz`) keeps CrewAI's `datetime.now() - record.created_at` happy against khora's tz-aware UTC timestamps.
+- **LangGraph adapter ([#624](https://github.com/DeytaHQ/khora/issues/624) → PR #634).** `khora.integrations.langgraph.KhoraStore` implements `BaseStore` for semantic long-term memory inside `StateGraph` runners. Install with `pip install khora[langgraph]`.
+- **Google ADK adapter ([#626](https://github.com/DeytaHQ/khora/issues/626) → PR #642).** `khora.integrations.google_adk.KhoraMemoryService` implements `BaseMemoryService` (`add_session_to_memory` + `search_memory`). Namespace is UUID5 of `adk:{app_name}:{user_id}`; `Session.id` round-trips via `session_id`. Memory only — no `KhoraSessionService` in v1 (ADK's `DatabaseSessionService` already covers turn state). Install with `pip install khora[google-adk]`.
+- **OpenAI Agents SDK adapter ([#625](https://github.com/DeytaHQ/khora/issues/625) → PR #643).** `khora.integrations.openai_agents.KhoraSession` implements `agents.memory.session.SessionABC`; `khora_recall_tool()` is a `FunctionTool` factory; `KhoraMemoryHooks` is a `RunHooks`-shaped auto-persist callback. Items round-trip via `Document.metadata.custom["oai_item"]` (verbatim JSON); ordering via `oai_seq`. Pinned tight (`openai-agents>=0.17,<0.18`). Install with `pip install khora[openai-agents]`.
+- **LlamaIndex adapter ([#627](https://github.com/DeytaHQ/khora/issues/627) → PR #644).** `khora.integrations.llamaindex.KhoraRetriever` is an async-only `BaseRetriever`; `KhoraMemoryBlock` is a `BaseMemoryBlock` factory for long-term memory; `KhoraChatStore` is a deprecated `BaseChatStore` shim for legacy `ChatMemoryBuffer` users (emits `DeprecationWarning`). Pin is narrow (`llama-index-core>=0.14,<0.15`). Install with `pip install khora[llamaindex]`.
+- **`session_id` is a first-class column ([#620](https://github.com/DeytaHQ/khora/issues/620) → PR #632).** Migration 030 adds nullable `session_id UUID` to `documents`, `chunks`, `memory_events`, `chronicle_events`, and `memory_facts`. Migration 031 adds Postgres-only partial composite indexes `ix_chunks_ns_session` / `ix_documents_ns_session (namespace_id, session_id) WHERE session_id IS NOT NULL` plus a BRIN `ix_chunks_session_created_brin (session_id, created_at)` for time-bounded session replay. New public API: `Khora.remember(..., session_id=…)`, `Khora.submit_batch(..., session_id=…)`, `Khora.forget_session(ns, sid)` cascade-delete, and the opt-in `khora.gc.expire_sessions(before=…)` TTL helper.
+- **Adapter examples CI infrastructure ([#622](https://github.com/DeytaHQ/khora/issues/622) → PR #630).** Every adapter ships `examples/integrations/<name>/example.py` that runs without external services (sqlite_lance fixture + mock LLM helpers under `examples/_helpers/`). The `python title="example.py"` block in `docs/integrations/<name>.md` must be byte-identical to that file. The `examples-smoke` CI job gates drift via `tools/check_examples_drift.py` and smoke-runs each example under a 30s timeout.
+- **Integrations roll-up docs (PR #645, PR #647).** README "Integrations" section + new `docs/integrations/index.md` landing page covering all five adapters. New `make install` / `make install-adk` Makefile targets pick the correct extras combo (see Changed → CI section).
+- **Contributor Covenant Code of Conduct ([PR #641](https://github.com/DeytaHQ/khora/pull/641)).** Standard `CODE_OF_CONDUCT.md` for the OSS repository.
+
+### Changed
+
+- **SurrealDB SDK pin bumped to GA stable (PR #646).** `surrealdb>=2.0.0a1` → `surrealdb>=2.0.0,<3.0` at all three sites (`khora[surrealdb]`, `khora[embedded]`, `khora[all-backends]`). Drops the alpha caveat from CLAUDE.md.
+- **Direct-dependency floor pins raised (PR #646).** 25 floor pins in `[project] dependencies` and `[project.optional-dependencies]` bumped to match the resolved versions in `uv.lock`, so the declared minimums reflect the actually-tested versions. Notable: `sqlalchemy 2.0.47 → 2.0.49`, `litellm 1.81.15 → 1.84.0`, `neo4j 6.1.0 → 6.2.0` (7 sites), `sentence-transformers 5.2.3 → 5.4.1`, `opentelemetry-{api,sdk,exporters} 1.27.0 → 1.34.1`, `pyarrow 18.0.0 → 24.0.0`, `lancedb 0.25 → 0.30.0`, `pytest-xdist 3.6 → 3.8.0`, `ruff 0.15.2 → 0.15.12`, `ty 0.0.18 → 0.0.34`, `hypothesis 6.140.0 → 6.152.4`, `weaviate-client 4.20.1 → 4.21.0`, `logfire 4.0 → 4.6.0`. For dual-version packages caused by the crewai/google-adk extras conflict (`pydantic-settings`, `opentelemetry-api`, `aiosqlite`, `lancedb`, `logfire`), the lower of the two resolved versions is used as the floor so both combos still satisfy.
+- **`crewai` and `google-adk` declared as mutually-exclusive extras (PR #642).** The two extras pin incompatible `opentelemetry-api` ranges (crewai `<1.35`, google-adk `>=1.36`). Declared in `[tool.uv].conflicts`. `uv sync --all-extras` is rejected with an explicit error; use `--no-extra google-adk` (crewai combo, CI default) or `--no-extra crewai` (google-adk combo). The new `make install` / `make install-adk` targets (PR #647) pick a combo for you.
+- **`UV_NO_SYNC=1` in Makefile + CI (PR #642).** Prevents `uv run` from silently re-resolving the venv to the other extras-combo branch of the lockfile mid-test-run, which otherwise breaks logfire's in-tree imports when otel-sdk version flips.
+- **Dedicated `test-google-adk` CI job (PR #642).** The default `test` job uses the crewai combo (`--no-extra google-adk`); a separate job builds the google-adk combo and runs the adapter's unit tests + the no-eager-imports probe.
+- **`khora-accel` lockstep pin → 0.13.0.** Matches the `rust/khora-accel/Cargo.toml` version in this release.
+
+### Fixed
+
+- **SurrealDB UUID quoting in `get_neighborhood` ([#635](https://github.com/DeytaHQ/khora/issues/635) → PR #636).** `get_neighborhood` was string-interpolating bare UUIDs into Cypher-like SurQL, which failed parsing on UUIDs containing characters that need escaping (notably hyphens treated as subtraction in some surrealdb-rust versions). Routed through parameter binding so RecordIDs are quoted by the SDK.
+- **Exception chain no longer leaks unredacted DSN via `__cause__` ([PR #640](https://github.com/DeytaHQ/khora/pull/640)).** Connection-pool error reraises preserved the original asyncpg exception's `__cause__`, which contained the raw DSN with credentials. The wrapper now scrubs `__cause__` before re-raising, so a `KhoraConnectionError` in operator logs no longer pastes secrets into the trace.
+- **`StorageConfig` `__repr__` no longer exposes plaintext credentials (DYT-4171, DYT-4300).** `neo4j_user` and related fields are now marked `repr=False`. `DSN` fields with no password but a userinfo are also properly redacted (DYT-4122). Affects Pydantic settings dumps and any `print(config)` output in service start-up logs.
+
+### Removed
+
+- Nothing public removed. Existing extras and APIs continue to work; this release is additive.
+
 ## [0.12.1] — Chunk source_timestamp propagation
 
 Patch release. Single bug fix.
