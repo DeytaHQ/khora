@@ -4,6 +4,14 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.12.1] — Chunk source_timestamp propagation
+
+Patch release. Single bug fix.
+
+### Fixed
+
+- **Chunk `source_timestamp` is no longer lost during ingest ([#615](https://github.com/DeytaHQ/khora/issues/615) → PR #616).** `chunk_document()` built `Chunk` objects with only `created_at` set, never `source_timestamp`. The ingest pipeline already parses doc-level `source_timestamp` from connector metadata (`occurred_at` / `sent_at` / etc.) and stamps it on `Document`, but the field never reached the chunks — so every recall on every (engine × backend) cell returned `chunk.source_timestamp=None`. This silently broke date-bounded recalls: the query layer's temporal scoring fell back to `chunk.created_at` (ingest time), so "last week" queries surfaced older historical rows that happened to be ingested recently. Fix is a one-line propagation in `pipelines/tasks/chunk.py` — upstream of every storage adapter, so it lights up all six (engine × backend) cells. Two regression tests cover propagation when the document has a `source_timestamp` and `None`-preservation when it doesn't (no invented timestamps).
+
 ## [0.12.0] — Temporal Phase D: HyDE + reranker + BRIN; hooks LLM cost controls; PPR enabler; SurrealDB remote transactions
 
 Minor release. Substantial additive surface — five new feature-flagged retrieval channels and one new Python subpackage — plus two correctness bug fixes that change scoring/behaviour on graph-only and graph-less stacks. No public API removals; the `enable_hyde` flag accepts a new string shape (`auto`/`always`/`never`) but the legacy boolean form normalizes transparently.
