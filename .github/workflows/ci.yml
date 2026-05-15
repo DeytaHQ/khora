@@ -17,10 +17,21 @@ concurrency:
 # ---------------------------------------------------------------------------
 # Shared cache key for the Python venv.  Every job that needs the installed
 # packages restores the same cache entry, so `uv sync` becomes a no-op (~2s).
+#
+# UV_NO_SYNC stops ``uv run`` from re-syncing the restored venv. The
+# ``install`` job already pinned the right extras combo (crewai, no
+# google-adk) and cached the resulting .venv; without UV_NO_SYNC every
+# downstream ``uv run`` invocation would re-resolve extras against the
+# conflict-marked lockfile and silently swap opentelemetry-sdk 1.34
+# (compatible with logfire 4.6) for 1.40 (incompatible — missing
+# LogData), breaking import of logfire at pytest-collection time.
+# The ``install`` and ``test-google-adk`` jobs call ``uv sync`` directly,
+# which is unaffected by UV_NO_SYNC.
 # ---------------------------------------------------------------------------
 env:
   VENV_CACHE_KEY: venv-${{ github.run_id }}
   UV_CACHE_KEY_PREFIX: uv-Linux-py3.13
+  UV_NO_SYNC: "1"
 
 jobs:
   # ============================================================================
