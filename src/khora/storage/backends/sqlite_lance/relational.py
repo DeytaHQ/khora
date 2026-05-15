@@ -376,6 +376,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             created_at=document.created_at,
             updated_at=document.updated_at,
             processed_at=document.processed_at,
+            session_id=document.session_id,
         )
         session.add(model)
         if commit:
@@ -443,6 +444,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
                 external_id=document.external_id,
                 updated_at=datetime.now(UTC),
                 processed_at=document.processed_at,
+                session_id=document.session_id,
             )
         )
         if commit:
@@ -616,6 +618,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             created_at=model.created_at,
             updated_at=model.updated_at,
             processed_at=model.processed_at,
+            session_id=getattr(model, "session_id", None),
         )
 
     # ------------------------------------------------------------------

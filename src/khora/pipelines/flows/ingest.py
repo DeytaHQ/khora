@@ -571,6 +571,24 @@ def _extract_source_timestamp(metadata: dict[str, Any]) -> datetime | None:
     return None
 
 
+def _coerce_session_id(value: Any) -> UUID | None:
+    """Coerce a session_id value from custom metadata to a UUID.
+
+    Accepts existing ``UUID`` instances and parses string UUIDs. Returns
+    ``None`` for ``None`` / empty / malformed values — adapters that don't
+    track sessions can keep ignoring the field, and a bad UUID in upstream
+    metadata shouldn't crash ingestion (#620).
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def _parse_temporal_date(value: str | None) -> datetime | None:
     """Parse an ISO date string from LLM-extracted temporal info.
 
@@ -635,6 +653,7 @@ async def stage_document(
     # Use source timestamp if available, otherwise use current time
     source_timestamp = _extract_source_timestamp(custom_metadata)
     created_at = source_timestamp or datetime.now(UTC)
+    session_id = _coerce_session_id(custom_metadata.get("session_id"))
 
     document = Document(
         namespace_id=namespace_id,
@@ -643,6 +662,7 @@ async def stage_document(
         created_at=created_at,
         updated_at=created_at,  # Set updated_at to source time too
         source_timestamp=source_timestamp,
+        session_id=session_id,
     )
 
     return await storage.create_document(document)
@@ -712,6 +732,7 @@ async def stage_documents_batch(
 
         source_timestamp = _extract_source_timestamp(custom_metadata)
         created_at = source_timestamp or datetime.now(UTC)
+        session_id = _coerce_session_id(custom_metadata.get("session_id"))
 
         document = Document(
             namespace_id=namespace_id,
@@ -722,6 +743,7 @@ async def stage_documents_batch(
             created_at=created_at,
             updated_at=created_at,
             source_timestamp=source_timestamp,
+            session_id=session_id,
         )
 
         async with stage_sem:
@@ -783,6 +805,7 @@ async def _stage_all_documents(
 
         source_timestamp = _extract_source_timestamp(custom_metadata)
         created_at = source_timestamp or datetime.now(UTC)
+        session_id = _coerce_session_id(custom_metadata.get("session_id"))
 
         document = Document(
             namespace_id=namespace_id,
@@ -793,6 +816,7 @@ async def _stage_all_documents(
             created_at=created_at,
             updated_at=created_at,
             source_timestamp=source_timestamp,
+            session_id=session_id,
         )
 
         async with stage_sem:

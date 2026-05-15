@@ -75,6 +75,31 @@ _ABSTENTION_COMBINED_SCORE_HISTOGRAM = metric_histogram(
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _coerce_session_id_from_metadata(metadata: dict[str, Any] | None) -> UUID | None:
+    """Pull ``session_id`` out of a metadata dict and coerce to UUID (#620).
+
+    Mirrors the vectorcypher helper. Returns ``None`` on missing /
+    malformed values so adapters can pass arbitrary metadata payloads
+    without breaking ingest.
+    """
+    if not metadata:
+        return None
+    value = metadata.get("session_id")
+    if value is None or value == "":
+        return None
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Temporal decay helpers
 # ---------------------------------------------------------------------------
 
@@ -1068,6 +1093,7 @@ class ChronicleEngine:
             metadata=doc_metadata,
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
+            session_id=_coerce_session_id_from_metadata(metadata),
         )
         document = await storage.create_document(document)
         timings["document_create_ms"] = (time.perf_counter() - start) * 1000

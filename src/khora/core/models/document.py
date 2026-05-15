@@ -96,6 +96,10 @@ class Document:
     processed_at: datetime | None = None
     source_timestamp: datetime | None = None
 
+    # Session attribution for agentic-framework adapters (#620).
+    # Stable public API — coordinate changes with khora-cli, khora-explorer.
+    session_id: UUID | None = None
+
     # Maximum length for external_id (matches DB column String(512))
     _EXTERNAL_ID_MAX_LEN: int = field(default=512, init=False, repr=False, compare=False)
 
@@ -173,6 +177,10 @@ class Chunk:
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     source_timestamp: datetime | None = None
+
+    # Session attribution propagated from the parent document (#620).
+    # Stable public API — coordinate changes with khora-cli, khora-explorer.
+    session_id: UUID | None = None
 
     # Populated by Khora when include_sources=True
     source_document: DocumentSource | None = None

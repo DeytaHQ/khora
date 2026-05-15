@@ -26,6 +26,26 @@ from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
 
 
+def _coerce_session_id_from_dict(metadata: dict[str, Any] | None) -> UUID | None:
+    """Pull ``session_id`` out of a metadata dict and coerce to UUID (#620).
+
+    Mirrors the ingest pipeline helper. Returns ``None`` for missing /
+    malformed values rather than raising so bad upstream metadata doesn't
+    crash a batch submit.
+    """
+    if not metadata:
+        return None
+    value = metadata.get("session_id")
+    if value is None or value == "":
+        return None
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def _is_undefined_table_error(exc: BaseException) -> bool:
     """Return True if *exc* is (or wraps) a Postgres "undefined table" error.
 
@@ -873,6 +893,7 @@ class Khora:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         external_id: str | None = None,
+        session_id: UUID | None = None,
     ) -> RememberResult:
         """Store content in Khora.
 
@@ -919,6 +940,12 @@ class Khora:
         _status = "success"
         try:
             namespace_id = await self._resolve_namespace(namespace)
+            # Stamp session_id into the metadata dict so engines that bypass
+            # the ingest pipeline (vectorcypher builds Document directly)
+            # can recover it from ``document.metadata.custom["session_id"]``
+            # without needing a dedicated kwarg on every engine's remember().
+            if session_id is not None:
+                metadata = {**(metadata or {}), "session_id": str(session_id)}
             with trace_span("khora.remember", namespace_id=str(namespace_id), content_length=len(content)):
                 # NOTE: expertise and extraction_config_hash are always forwarded,
                 # even when None. Custom engines registered via register_engine()
@@ -1071,6 +1098,7 @@ class Khora:
         max_chunks_in_flight: int | None = None,
         max_concurrent: int = 20,
         reprocess_archived: bool = False,
+        session_id: UUID | None = None,
     ) -> BatchHandle:
         """Submit documents for deferred background processing.
 
@@ -1125,6 +1153,19 @@ class Khora:
 
         namespace_id = await self._resolve_namespace(namespace)
         storage = self.storage
+
+        # Stamp the batch-level session_id into each doc's metadata so the
+        # ingest pipeline's ``stage_document`` path picks it up as a
+        # first-class ``Document.session_id`` (#620). A per-doc
+        # ``metadata.session_id`` always wins so callers can mix sessions
+        # within a single submit_batch call.
+        if session_id is not None:
+            session_id_str = str(session_id)
+            for doc_data in documents:
+                meta = doc_data.get("metadata") or {}
+                if "session_id" not in meta:
+                    meta = {**meta, "session_id": session_id_str}
+                    doc_data["metadata"] = meta
 
         # Persist all documents as PENDING before returning the handle.
         # This satisfies the durability contract — if the process crashes after
@@ -1245,6 +1286,11 @@ class Khora:
                 existing.extraction_config_hash = extraction_config_hash
                 existing.extraction_params = extraction_params_payload
                 existing.error_message = None
+                # #620: refresh session_id from the new metadata payload so
+                # re-queued docs pick up an updated session tag.
+                new_sid = _coerce_session_id_from_dict(doc_data.get("metadata"))
+                if new_sid is not None:
+                    existing.session_id = new_sid
                 logger.debug(
                     f"submit_batch: re-queuing existing {prior_status.value} document "
                     f"(external_id={external_id!r}, doc_id={existing.id})"
@@ -1275,6 +1321,7 @@ class Khora:
                 extraction_config_hash=extraction_config_hash,
                 extraction_params=extraction_params_payload,
                 external_id=external_id,
+                session_id=_coerce_session_id_from_dict(doc_data.get("metadata")),
             )
             try:
                 doc = await storage.create_document(doc)
@@ -1583,6 +1630,71 @@ class Khora:
             document_id=str(document_id),
         ):
             return await self._get_engine().forget(document_id, namespace_id)
+
+    async def forget_session(
+        self,
+        namespace_id: UUID,
+        session_id: UUID,
+    ) -> int:
+        """Delete every document in *namespace_id* tagged with *session_id*.
+
+        Single transactional ``DELETE FROM documents WHERE namespace_id=?
+        AND session_id=?``. The ``ON DELETE CASCADE`` on
+        ``chunks.document_id`` propagates the deletion to the chunks table.
+        Graph-side cleanup runs afterwards as a best-effort pass over the
+        deleted document ids (Neo4j Chunk nodes via ``forget()``). Returns
+        the number of documents that were deleted.
+
+        Use this for session-scoped retention (#620): an agentic adapter
+        ending a conversation can call ``forget_session(ns, session)`` and
+        not leave orphaned chunks behind.
+
+        Args:
+            namespace_id: Stable namespace UUID (resolved to the active
+                version automatically).
+            session_id: Session UUID stamped on the documents at ingest.
+
+        Returns:
+            Count of documents deleted (0 if none matched).
+        """
+        resolved_ns = await self._resolve_namespace(namespace_id)
+        storage = self.storage
+
+        with trace_span(
+            "khora.forget_session",
+            namespace_id=str(resolved_ns),
+            session_id=str(session_id),
+        ):
+            # Snapshot the document ids first so the graph/vector cleanup
+            # can target them after the SQL DELETE commits. ``list_documents``
+            # has no session_id filter today, so we filter client-side; the
+            # partial index ``ix_documents_ns_session`` will pay off when a
+            # future kwarg lands on the backend (see ticket follow-ups).
+            matching_ids: list[UUID] = []
+            page_size = 500
+            offset = 0
+            while True:
+                page = await storage.list_documents(resolved_ns, limit=page_size, offset=offset)
+                matching_ids.extend(d.id for d in page if d.session_id == session_id)
+                if len(page) < page_size:
+                    break
+                offset += page_size
+
+            if not matching_ids:
+                return 0
+
+            # Route each delete through the engine so chunks / Chunk nodes /
+            # extracted entities all get the same cascade ``forget()`` runs.
+            # This pays the per-doc cost in exchange for matching the
+            # single-document forget contract — graph backends without
+            # batched delete (Neo4j Cypher MERGE/DETACH DELETE) end up paying
+            # the same cost anyway.
+            deleted = 0
+            for doc_id in matching_ids:
+                ok = await self._get_engine().forget(doc_id, resolved_ns)
+                if ok:
+                    deleted += 1
+            return deleted
 
     # =========================================================================
     # Entity Operations

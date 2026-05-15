@@ -297,7 +297,8 @@ class SurrealDBRelationalAdapter:
             "created_at = $created_at, "
             "updated_at = $updated_at, "
             "processed_at = $processed_at, "
-            "source_timestamp = $source_timestamp",
+            "source_timestamp = $source_timestamp, "
+            "session_id = $session_id",
             {
                 "rid": rid,
                 "namespace_id": str(document.namespace_id),
@@ -323,6 +324,7 @@ class SurrealDBRelationalAdapter:
                 "updated_at": document.updated_at,
                 "processed_at": document.processed_at,
                 "source_timestamp": document.source_timestamp,
+                "session_id": str(document.session_id) if document.session_id else None,
             },
         )
         if row is None:
@@ -391,7 +393,8 @@ class SurrealDBRelationalAdapter:
             "external_id = $external_id, "
             "updated_at = $updated_at, "
             "processed_at = $processed_at, "
-            "source_timestamp = $source_timestamp",
+            "source_timestamp = $source_timestamp, "
+            "session_id = $session_id",
             {
                 "rid": rid,
                 "content": document.content,
@@ -415,6 +418,7 @@ class SurrealDBRelationalAdapter:
                 "updated_at": datetime.now(UTC),
                 "processed_at": document.processed_at,
                 "source_timestamp": document.source_timestamp,
+                "session_id": str(document.session_id) if document.session_id else None,
             },
         )
         return document
@@ -594,6 +598,7 @@ class SurrealDBRelationalAdapter:
             processed_at=_parse_dt(row.get("processed_at")),
             source_timestamp=_parse_dt(row.get("source_timestamp")),
             external_id=row.get("external_id"),
+            session_id=_parse_uuid(row.get("session_id")) if row.get("session_id") else None,
         )
 
     # ------------------------------------------------------------------

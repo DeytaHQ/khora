@@ -77,6 +77,28 @@ def _ensure_tags(value: Any) -> list[str]:
     return []
 
 
+def _coerce_session_id_from_metadata(metadata: dict[str, Any] | None) -> UUID | None:
+    """Pull ``session_id`` out of a metadata dict and coerce to UUID (#620).
+
+    ``Khora.remember`` stamps ``session_id`` into ``metadata`` so engines
+    that build :class:`Document` directly (rather than via
+    ``pipelines.flows.ingest.stage_document``) can still surface it as a
+    first-class column. Malformed values fall back to ``None`` rather than
+    crashing ingestion.
+    """
+    if not metadata:
+        return None
+    value = metadata.get("session_id")
+    if value is None or value == "":
+        return None
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 _MAX_COOCCURRENCE_PER_CHUNK = 15
 
 
@@ -744,6 +766,7 @@ class VectorCypherEngine:
             metadata=doc_metadata,
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
+            session_id=_coerce_session_id_from_metadata(metadata),
         )
         try:
             document = await storage.create_document(document)
@@ -1362,6 +1385,7 @@ class VectorCypherEngine:
             created_at=existing.created_at,
             source_timestamp=existing.source_timestamp,
             processed_at=existing.processed_at,
+            session_id=_coerce_session_id_from_metadata(metadata) or existing.session_id,
         )
 
         # 2. Chunk + embed in-memory (no persistence).
@@ -2266,6 +2290,7 @@ class VectorCypherEngine:
                         ),
                         extraction_config_hash=extraction_config_hash,
                         external_id=doc_data.get("external_id"),
+                        session_id=_coerce_session_id_from_metadata(doc_metadata),
                     )
                     document = await storage.create_document(document)
                     state.document = document
