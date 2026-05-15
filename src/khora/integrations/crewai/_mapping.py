@@ -134,6 +134,25 @@ def record_to_remember_kwargs(
     }
 
 
+def _strip_tz(value: datetime | None) -> datetime | None:
+    """Return a naive datetime (drops tzinfo).
+
+    CrewAI's internal scoring (``types.py:371``) computes recency via
+    ``datetime.now() - record.created_at`` using a NAIVE
+    ``datetime.now()``. khora stores timestamps as tz-aware UTC. The
+    subtraction raises ``TypeError: can't subtract offset-naive and
+    offset-aware datetimes`` unless we hand CrewAI naive values. We
+    drop tzinfo on the round-trip to match CrewAI's expectations;
+    on-disk khora chunks keep their UTC tagging unchanged.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    # Convert to UTC then drop tzinfo so timestamps remain comparable.
+    return value.astimezone(UTC).replace(tzinfo=None)
+
+
 def chunk_to_record(
     chunk: Chunk,
     memory_record_cls: type,
@@ -159,6 +178,8 @@ def chunk_to_record(
     user_metadata = {k: v for k, v in custom.items() if not k.startswith("crewai_")}
 
     record_id = custom.get("external_id") or str(chunk.document_id)
+    created_at = _strip_tz(_parse_isoformat(custom.get(_KEY_CREATED_AT)) or chunk.created_at)
+    last_accessed = _strip_tz(_parse_isoformat(custom.get(_KEY_LAST_ACCESSED)) or chunk.created_at)
     return memory_record_cls(
         id=record_id,
         content=chunk.content,
@@ -166,8 +187,8 @@ def chunk_to_record(
         categories=list(custom.get(_KEY_CATEGORIES) or []),
         metadata=user_metadata,
         importance=float(custom.get(_KEY_IMPORTANCE, 0.5)),
-        created_at=_parse_isoformat(custom.get(_KEY_CREATED_AT)) or chunk.created_at,
-        last_accessed=_parse_isoformat(custom.get(_KEY_LAST_ACCESSED)) or chunk.created_at,
+        created_at=created_at,
+        last_accessed=last_accessed,
         source=custom.get(_KEY_SOURCE),
         private=bool(custom.get(_KEY_PRIVATE, False)),
     )
