@@ -172,7 +172,7 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **Transactions:** `async with coordinator.transaction() as txn:` for atomic multi-backend ops
 - **SurrealDB unified:** all four adapters share one `SurrealDBConnection`. Coordinator skips duplicate writes
 - **SurrealDB schema:** declarative (`DEFINE IF NOT EXISTS`), auto-initializes on `connect()`. No Alembic
-- **SurrealDB SDK:** pinned `>=2.0.0a1` for 3.x support. Install: `pip install khora[surrealdb]`
+- **SurrealDB SDK:** pinned `>=2.0.0,<3.0` for 3.x support. Install: `pip install khora[surrealdb]`
 - **SurrealDB KNN broken:** `<|K|>` unreliable in embedded mode. Uses brute-force cosine + HNSW instead
 - **SurrealDB entity gate:** `_SurrealDBEntityKeyGate` serializes concurrent upserts by (ns, name, type) key
 - **SurrealDB transactions (v0.12.0):** `SurrealDBConnection.transaction()` wraps the body in `BEGIN`/`COMMIT`/`CANCEL` on remote (`ws://`) mode and is a no-op on embedded / memory (surrealkv raises on `BEGIN`). `execute_batch([(sql, bindings), ...])` joins statements with `;` for an embedded-mode batched alternative; rejects parameter-name collisions. The coordinator's session-shaped `transaction()` does NOT yet route to SurrealDB — callers needing remote-mode atomicity use the connection-level primitive directly. See `docs/architecture/storage-backends.md#surrealdb-transactions-and-batching`.

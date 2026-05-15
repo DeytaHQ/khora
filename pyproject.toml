@@ -19,28 +19,28 @@ dependencies = [
     # Async support
     "asyncpg>=0.31.0",
     # Database
-    "sqlalchemy[asyncio]>=2.0.47",
+    "sqlalchemy[asyncio]>=2.0.49",
     "alembic>=1.18.4",
     "loguru>=0.7.3",
     # LLM Access (unified interface)
-    "litellm>=1.81.15",
+    "litellm>=1.84.0",
     # Graph database
-    "neo4j>=6.1.0",
+    "neo4j>=6.2.0",
     # Vector database
     "pgvector>=0.4.2",
     # Token counting
     "tiktoken>=0.12.0",
     # Neural reranking
-    "sentence-transformers>=5.2.3",
+    "sentence-transformers>=5.4.1",
     # Retry logic
     "tenacity>=9.1.4",
     # Temporal date parsing
-    "dateparser>=1.2.0",
+    "dateparser>=1.4.0",
     # OpenTelemetry API (small wheel, no SDK). khora emits spans/metrics
     # via this API unconditionally; export only happens when a real
     # TracerProvider/MeterProvider is installed (see khora[otel] /
     # khora[logfire]).
-    "opentelemetry-api>=1.27.0",
+    "opentelemetry-api>=1.34.1",
 ]
 
 # Entry-point group used by khora.integrations.registry.discover().
@@ -65,15 +65,15 @@ Releases = "https://github.com/DeytaHQ/khora/releases"
 [project.optional-dependencies]
 dev = [
     "pytest>=9.0.3",
-    "pytest-cov>=7.0.0",
+    "pytest-cov>=7.1.0",
     "pytest-mock>=3.15.1",
     "pytest-asyncio>=1.3.0",
-    "pytest-xdist>=3.6",
-    "coverage>=7.13.4",
-    "ruff>=0.15.2",
-    "prek>=0.3.3",
-    "ty>=0.0.18",
-    "hypothesis>=6.140.0",
+    "pytest-xdist>=3.8.0",
+    "coverage>=7.13.5",
+    "ruff>=0.15.12",
+    "prek>=0.3.13",
+    "ty>=0.0.34",
+    "hypothesis>=6.152.4",
 ]
 # Data storage backends
 postgres = [
@@ -81,41 +81,41 @@ postgres = [
     "pgvector>=0.4.2",
 ]
 # Graph backends
-neo4j = ["neo4j>=6.1.0"]
+neo4j = ["neo4j>=6.2.0"]
 # DEPRECATED in 0.9.0 — kuzu extra will be removed in 0.10.0.
 # Use the sqlite-lance extra for embedded, or neo4j for production.
 kuzu = ["kuzu>=0.11.3"]
-memgraph = ["neo4j>=6.1.0"]  # Memgraph uses bolt protocol via neo4j driver
-neptune = ["neo4j>=6.1.0"]  # Neptune uses Bolt protocol via neo4j driver
-neptune-iam = ["neo4j>=6.1.0", "boto3>=1.35.0"]  # With IAM auth support
+memgraph = ["neo4j>=6.2.0"]  # Memgraph uses bolt protocol via neo4j driver
+neptune = ["neo4j>=6.2.0"]  # Neptune uses Bolt protocol via neo4j driver
+neptune-iam = ["neo4j>=6.2.0", "boto3>=1.35.0"]  # With IAM auth support
 age = ["asyncpg>=0.31.0"]  # AGE uses PostgreSQL via asyncpg
 # All graph backends
 # DEPRECATED in 0.9.0 — graph-all still pulls in kuzu (deprecated). Transitional;
 # will drop kuzu in 0.10.0. Prefer the explicit per-backend extras.
-graph-all = ["neo4j>=6.1.0", "kuzu>=0.11.3"]
+graph-all = ["neo4j>=6.2.0", "kuzu>=0.11.3"]
 # Weaviate vector database
-weaviate = ["weaviate-client>=4.20.1"]
+weaviate = ["weaviate-client>=4.21.0"]
 # All backends
 all-backends = [
-    "neo4j>=6.1.0",
+    "neo4j>=6.2.0",
     "kuzu>=0.11.3",
     "asyncpg>=0.31.0",
     "pgvector>=0.4.2",
     "httpx>=0.28.1",
-    "weaviate-client>=4.20.1",
-    "surrealdb>=2.0.0a1",
-    "aiosqlite>=0.20.0",
-    "lancedb>=0.25",
-    "pyarrow>=18.0.0",
+    "weaviate-client>=4.21.0",
+    "surrealdb>=2.0.0,<3.0",
+    "aiosqlite>=0.21.0",
+    "lancedb>=0.30.0",
+    "pyarrow>=24.0.0",
 ]
 # Neural reranking
 reranking = [
-    "sentence-transformers>=3.0.0",
+    "sentence-transformers>=5.4.1",
 ]
 # Binary file readers (PDF, Excel, Word text extraction) — used by khora-cli
-binary-readers = ["pymupdf>=1.25.0", "openpyxl>=3.1.0", "python-docx>=1.1.0"]
+binary-readers = ["pymupdf>=1.27.2", "openpyxl>=3.1.0", "python-docx>=1.2.0"]
 # Parquet file support (used by khora-cli)
-parquet = ["pyarrow>=18.0.0"]
+parquet = ["pyarrow>=24.0.0"]
 # Accelerated CPU operations (numpy for cosine sim, rapidfuzz for string matching)
 accel = [
     "rapidfuzz>=3.0.0",
@@ -125,18 +125,18 @@ accel = [
 # when shipping to any OTel-compatible collector or vendor (Tempo,
 # Jaeger, Honeycomb, Datadog, New Relic, Dynatrace, etc.).
 otel = [
-    "opentelemetry-sdk>=1.27.0",
-    "opentelemetry-exporter-otlp-proto-http>=1.27.0",
+    "opentelemetry-sdk>=1.34.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.34.1",
 ]
 # Optional gRPC transport for OTLP. Pulls in grpcio (~30MB native
 # binary); HTTP is the default and sufficient for most setups.
 otel-grpc = [
     "khora[otel]",
-    "opentelemetry-exporter-otlp-proto-grpc>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.34.1",
 ]
 # Logfire (Pydantic) — a managed OTel backend with auto-bootstrap.
 # Installs its own TracerProvider/MeterProvider on logfire.configure().
-logfire = ["logfire>=4.0"]
+logfire = ["logfire>=4.6.0"]
 # NLP tools
 nlp = ["spacy>=3.8.0"]
 # Rust-accelerated operations (requires Rust toolchain to build from source).
@@ -146,14 +146,14 @@ rust = [
     "khora-accel==0.12.1",
 ]
 # SurrealDB unified backend (graph + vector + relational in one DB)
-surrealdb = ["surrealdb>=2.0.0a1"]
-embedded = ["surrealdb>=2.0.0a1"]
+surrealdb = ["surrealdb>=2.0.0,<3.0"]
+embedded = ["surrealdb>=2.0.0,<3.0"]
 # SQLite embedded backend (zero-infrastructure relational + vector)
-sqlite = ["aiosqlite>=0.20.0"]
+sqlite = ["aiosqlite>=0.21.0"]
 # LanceDB embedded vector store (Chronicle engine, zero-infrastructure)
-lancedb = ["lancedb>=0.25", "pyarrow>=18.0.0"]
+lancedb = ["lancedb>=0.30.0", "pyarrow>=24.0.0"]
 # SQLite + LanceDB embedded backend (relational via aiosqlite + vector via LanceDB)
-sqlite-lance = ["lancedb>=0.25", "aiosqlite>=0.20.0", "pyarrow>=18.0.0"]
+sqlite-lance = ["lancedb>=0.30.0", "aiosqlite>=0.21.0", "pyarrow>=24.0.0"]
 # CrewAI memory adapter — see docs/integrations/crewai.md
 crewai = ["crewai>=1.10,<2.0"]
 # LangGraph BaseStore adapter (semantic long-term memory).
@@ -335,7 +335,7 @@ exclude-newer = "7 days"
 exclude-newer-package = { urllib3 = "0 days", litellm = "0 days" }  # urllib3: CVE-2026-44431/44432; litellm: CVE-2026-42208/42271/40217 (1.83.10+)
 constraint-dependencies = [
     # Security: CVE-2026-25645 fixed in 2.33.0
-    "requests>=2.33.0",
+    "requests>=2.33.1",
     # Security: CVE-2026-4539 (no listed fix; pin to latest)
     "pygments>=2.20.0",
     # Security: CVE-2026-44431 / CVE-2026-44432 fixed in 2.7.0
@@ -347,19 +347,19 @@ khora-accel = { path = "rust/khora-accel", editable = true }
 
 [dependency-groups]
 dev = [
-    "prek>=0.3.3",
+    "prek>=0.3.13",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
-    "pytest-cov>=7.0.0",
-    "pytest-xdist>=3.6",
-    "ruff>=0.15.2",
-    "ty>=0.0.18",
+    "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.15.12",
+    "ty>=0.0.34",
     "rapidfuzz>=3.14.3",  # For ty type checking of optional accel module
     "spacy>=3.8.11",
-    "aiosqlite>=0.20.0",  # For SQLite backend tests
-    "pyarrow>=18.0.0",  # For sqlite-lance backend tests
-    "opentelemetry-sdk>=1.27.0",  # For OTel telemetry tests
-    "opentelemetry-exporter-otlp-proto-http>=1.27.0",  # For OTel exporter tests
+    "aiosqlite>=0.21.0",  # For SQLite backend tests
+    "pyarrow>=24.0.0",  # For sqlite-lance backend tests
+    "opentelemetry-sdk>=1.34.1",  # For OTel telemetry tests
+    "opentelemetry-exporter-otlp-proto-http>=1.34.1",  # For OTel exporter tests
     "psutil>=5.9.0",  # RSS sampling for soak harness
-    "hypothesis>=6.140.0",  # property-based tests for retrieval invariants
+    "hypothesis>=6.152.4",  # property-based tests for retrieval invariants
 ]
