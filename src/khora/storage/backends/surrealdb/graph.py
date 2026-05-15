@@ -345,9 +345,11 @@ class SurrealDBGraphAdapter:
     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
         if not entity_ids:
             return {}
-        ids_list = ", ".join(str(_rid("entity", uid)) for uid in entity_ids)
-        sql = f"SELECT * FROM entity WHERE id IN [{ids_list}]"  # noqa: S608
-        rows = await self._conn.query(sql)
+        # Bind RecordIDs as a parameter — bare ``entity:<uuid>`` interpolation
+        # breaks SurrealQL's parser on the UUID hyphens (issue #635).
+        eids = [_rid("entity", uid) for uid in entity_ids]
+        sql = "SELECT * FROM entity WHERE id IN $eids"
+        rows = await self._conn.query(sql, {"eids": eids})
         result: dict[UUID, Entity] = {}
         for row in rows:
             ent = _row_to_entity(row)
@@ -509,8 +511,10 @@ class SurrealDBGraphAdapter:
         src = _rid("entity", relationship.source_entity_id)
         tgt = _rid("entity", relationship.target_entity_id)
 
+        # Bind RecordIDs as parameters — bare ``entity:<uuid>`` interpolation
+        # breaks SurrealQL's parser on the UUID hyphens (issue #635).
         sql = (
-            f"RELATE {src}->relates_to->{tgt} SET "
+            "RELATE $src->relates_to->$tgt SET "
             "rel_id = $rel_id, "
             "namespace_id = $namespace_id, "
             "relationship_type = $relationship_type, "
@@ -526,7 +530,10 @@ class SurrealDBGraphAdapter:
             "created_at = $created_at, "
             "updated_at = $updated_at"
         )
-        await self._conn.execute(sql, _relationship_to_bindings(relationship))
+        bindings = _relationship_to_bindings(relationship)
+        bindings["src"] = src
+        bindings["tgt"] = tgt
+        await self._conn.execute(sql, bindings)
         return relationship
 
     @trace("khora.surrealdb.graph.get_relationship", include={"relationship_id"})
@@ -853,20 +860,24 @@ class SurrealDBGraphAdapter:
         eid = _rid("entity", entity_id)
 
         rel_filter = ""
-        rel_bindings: dict[str, Any] = {}
+        rel_bindings: dict[str, Any] = {"eid": eid}
         if relationship_types:
             rel_filter = "[WHERE relationship_type IN $rel_types]"
             rel_bindings["rel_types"] = list(relationship_types)
 
-        # Combine outgoing + incoming neighbor traversal in a single query
+        # Combine outgoing + incoming neighbor traversal in a single query.
+        # NOTE: the center record is bound as $eid (not interpolated) — a bare
+        # ``entity:<uuid>`` string makes SurrealQL's parser split on the UUID
+        # hyphens and crash with ``Invalid token, found unexpected character``.
+        # See issue #635.
         out_arrow = ("->relates_to" + rel_filter + "->entity") * depth
         in_arrow = ("<-relates_to" + rel_filter + "<-entity") * depth
         combined_sql = (
             f"SELECT {out_arrow} AS out_neighbors, "  # noqa: S608
             f"{in_arrow} AS in_neighbors "
-            f"FROM {eid}"
+            "FROM $eid"
         )
-        rows = await self._conn.query(combined_sql, rel_bindings or None)
+        rows = await self._conn.query(combined_sql, rel_bindings)
 
         # Collect unique entities from both directions
         seen_ids: set[str] = set()
@@ -900,16 +911,21 @@ class SurrealDBGraphAdapter:
                         seen_ids.add(item_id)
                         entities.append(row)
 
-        # Fetch relationships connecting the center to discovered neighbors
+        # Fetch relationships connecting the center to discovered neighbors.
+        # Bind both the center and neighbour RecordIDs — same reason as above
+        # (issue #635): bare interpolation breaks on UUID hyphens.
         if seen_ids:
-            neighbor_rids = ", ".join(str(_rid("entity", UUID(nid))) for nid in seen_ids)
+            neighbor_rids = [_rid("entity", UUID(nid)) for nid in seen_ids]
             rel_sql = (
-                f"SELECT * FROM relates_to WHERE "  # noqa: S608
-                f"(in = {eid} AND out IN [{neighbor_rids}]) OR "
-                f"(out = {eid} AND in IN [{neighbor_rids}]) "
-                f"LIMIT {limit}"
+                "SELECT * FROM relates_to WHERE "
+                "(in = $eid AND out IN $neighbor_rids) OR "
+                "(out = $eid AND in IN $neighbor_rids) "
+                "LIMIT $limit"
             )
-            rel_rows = await self._conn.query(rel_sql)
+            rel_rows = await self._conn.query(
+                rel_sql,
+                {"eid": eid, "neighbor_rids": neighbor_rids, "limit": limit},
+            )
             relationships = rel_rows
 
         return {"entities": entities, "relationships": relationships}
@@ -939,15 +955,17 @@ class SurrealDBGraphAdapter:
         out_arrow = ("->relates_to" + rel_filter + "->entity") * depth
         in_arrow = ("<-relates_to" + rel_filter + "<-entity") * depth
 
-        # Fetch all neighborhoods in a single query using an IN filter
-        ids_list = ", ".join(str(_rid("entity", uid)) for uid in entity_ids)
+        # Fetch all neighborhoods in a single query using an IN filter.
+        # Bind the entity RecordIDs — bare interpolation of ``entity:<uuid>``
+        # makes SurrealQL parse the hyphens as arithmetic (issue #635).
+        rel_bindings["eids"] = [_rid("entity", uid) for uid in entity_ids]
         batch_sql = (
             f"SELECT id, {out_arrow} AS out_neighbors, "  # noqa: S608
             f"{in_arrow} AS in_neighbors "
-            f"FROM entity WHERE id IN [{ids_list}]"
+            "FROM entity WHERE id IN $eids"
         )
         try:
-            rows = await self._conn.query(batch_sql, rel_bindings or None)
+            rows = await self._conn.query(batch_sql, rel_bindings)
         except Exception:
             logger.warning("Batch neighborhood query failed, falling back to individual queries")
             result: dict[UUID, dict[str, Any]] = {}
@@ -1003,24 +1021,32 @@ class SurrealDBGraphAdapter:
 
             result[eid] = {"entities": entities, "relationships": []}
 
-        # Batch-fetch relationships for all entities at once
+        # Batch-fetch relationships for all entities at once.
+        # Bind each center + its neighbour list via parameters — bare
+        # interpolation of ``entity:<uuid>`` breaks SurrealQL's parser on the
+        # UUID hyphens (issue #635).
         if pending_rels:
-            or_conditions = []
-            for eid, (center_rid, neighbor_ids) in pending_rels.items():
-                neighbor_rids = ", ".join(str(_rid("entity", UUID(nid))) for nid in neighbor_ids)
+            or_conditions: list[str] = []
+            rel_query_bindings: dict[str, Any] = {}
+            for idx, (eid, (center_rid, neighbor_ids)) in enumerate(pending_rels.items()):
+                center_key = f"c{idx}"
+                neighbor_key = f"n{idx}"
+                rel_query_bindings[center_key] = center_rid
+                rel_query_bindings[neighbor_key] = [_rid("entity", UUID(nid)) for nid in neighbor_ids]
                 or_conditions.append(
-                    f"((in = {center_rid} AND out IN [{neighbor_rids}]) OR "
-                    f"(out = {center_rid} AND in IN [{neighbor_rids}]))"
+                    f"((in = ${center_key} AND out IN ${neighbor_key}) OR "
+                    f"(out = ${center_key} AND in IN ${neighbor_key}))"
                 )
 
             if or_conditions:
+                rel_query_bindings["rel_limit"] = limit_per_entity * len(pending_rels)
                 batch_sql = (
                     "SELECT * FROM relates_to WHERE "  # noqa: S608
                     + " OR ".join(or_conditions)
-                    + f" LIMIT {limit_per_entity * len(pending_rels)}"
+                    + " LIMIT $rel_limit"
                 )
                 try:
-                    all_rels = await self._conn.query(batch_sql)
+                    all_rels = await self._conn.query(batch_sql, rel_query_bindings)
                     # Distribute relationships back to each entity
                     for rel in all_rels:
                         rel_in = str(_parse_uuid(rel.get("in", "")))
@@ -1117,12 +1143,15 @@ class SurrealDBGraphAdapter:
         if rel_conditions:
             rel_filter = "[WHERE " + " AND ".join(rel_conditions) + "]"
 
-        # Build a single SELECT with one column per depth level (same pattern as find_paths)
+        # Build a single SELECT with one column per depth level (same pattern as find_paths).
+        # Bind ``$eid`` rather than interpolating — bare ``entity:<uuid>`` breaks
+        # SurrealQL's parser on the UUID hyphens (issue #635).
         hop = "->relates_to" + rel_filter + "->entity"
         columns = ", ".join(f"{hop * d} AS d{d}" for d in range(1, effective_max + 1))
-        sql = f"SELECT {columns} FROM {eid}"  # noqa: S608
+        sql = f"SELECT {columns} FROM $eid"  # noqa: S608
+        bindings["eid"] = eid
 
-        rows = await self._conn.query(sql, bindings or None)
+        rows = await self._conn.query(sql, bindings)
         if not rows:
             return all_neighbors
 
@@ -1174,11 +1203,14 @@ class SurrealDBGraphAdapter:
         """
         ns_rid = _rid("memory_namespace", namespace_id)
 
-        # 1. Fetch all chunks with their metadata
+        # 1. Fetch all chunks with their metadata.
+        # Bind the namespace RecordID — bare ``memory_namespace:<uuid>``
+        # interpolation breaks SurrealQL's parser on UUID hyphens (issue #635).
         rows = await self._conn.query(
-            f"SELECT id, metadata_, created_at, source_timestamp FROM chunk "  # noqa: S608
-            f"WHERE namespace = {ns_rid} "
-            f"ORDER BY (source_timestamp ?? created_at) ASC",
+            "SELECT id, metadata_, created_at, source_timestamp FROM chunk "
+            "WHERE namespace = $ns_rid "
+            "ORDER BY (source_timestamp ?? created_at) ASC",
+            {"ns_rid": ns_rid},
         )
         if not rows:
             return 0
