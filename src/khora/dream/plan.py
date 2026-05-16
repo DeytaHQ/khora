@@ -79,3 +79,18 @@ class DreamPlan:
     plan_id: UUID
     namespace_id: UUID
     ops: tuple[DreamOp, ...] = field(default_factory=tuple)
+
+
+@dataclass(slots=True, frozen=True)
+class Checkpoint:
+    """Resume marker for a partially-applied dream run.
+
+    Carries the ``plan_hash`` so a resume can validate the world hasn't
+    changed under the orchestrator between attempts. ``plan_hash`` is
+    ``sha1(canonical_json(plan))`` computed by the orchestrator when the
+    plan is first persisted.
+    """
+
+    run_id: UUID
+    last_committed_op_seq: int
+    plan_hash: str
