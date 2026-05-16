@@ -80,30 +80,40 @@ def _uuid_type() -> sa.types.TypeEngine:
 
 
 def upgrade() -> None:
+    # Postgres path uses raw SQL with IF NOT EXISTS for idempotency
+    # (tests run the chain repeatedly; production rollouts also need to
+    # tolerate partial-state retry after a crash). SQLite path uses
+    # op.add_column which fails loudly if columns exist — acceptable
+    # because the sqlite_lance fixture stack rebuilds per test.
+    if _is_postgres():
+        for table in _TABLES:
+            op.execute(
+                f"ALTER TABLE {table} "
+                "ADD COLUMN IF NOT EXISTS valid_to TIMESTAMP WITH TIME ZONE NULL, "
+                "ADD COLUMN IF NOT EXISTS invalidated_at TIMESTAMP WITH TIME ZONE NULL, "
+                "ADD COLUMN IF NOT EXISTS invalidated_by UUID NULL"
+            )
+
+        with op.get_context().autocommit_block():
+            op.execute(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_relationships_live "
+                "ON relationships (namespace_id, source_entity_id, target_entity_id, relationship_type) "
+                "WHERE invalidated_at IS NULL"
+            )
+            op.execute(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_memory_facts_live "
+                "ON memory_facts (namespace_id, subject) "
+                "WHERE invalidated_at IS NULL"
+            )
+        return
+
+    # SQLite path — no IF NOT EXISTS support on ADD COLUMN; skip partial
+    # indexes per migration 031's pattern.
     uuid_type = _uuid_type()
     for table in _TABLES:
         op.add_column(table, sa.Column("valid_to", sa.DateTime(timezone=True), nullable=True))
         op.add_column(table, sa.Column("invalidated_at", sa.DateTime(timezone=True), nullable=True))
         op.add_column(table, sa.Column("invalidated_by", uuid_type, nullable=True))
-
-    # Partial indexes are Postgres-only — SQLite supports partial indexes
-    # but ``CREATE INDEX CONCURRENTLY`` is Postgres syntax and the
-    # sqlite_lance fixture stack runs the full chain. Match migration 031's
-    # behavior: skip the indexes on SQLite, the columns are still added.
-    if not _is_postgres():
-        return
-
-    with op.get_context().autocommit_block():
-        op.execute(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_relationships_live "
-            "ON relationships (namespace_id, source_entity_id, target_entity_id, relationship_type) "
-            "WHERE invalidated_at IS NULL"
-        )
-        op.execute(
-            "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_memory_facts_live "
-            "ON memory_facts (namespace_id, subject) "
-            "WHERE invalidated_at IS NULL"
-        )
 
 
 def downgrade() -> None:
@@ -111,6 +121,14 @@ def downgrade() -> None:
         with op.get_context().autocommit_block():
             op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_memory_facts_live")
             op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_relationships_live")
+        for table in reversed(_TABLES):
+            op.execute(
+                f"ALTER TABLE {table} "
+                "DROP COLUMN IF EXISTS invalidated_by, "
+                "DROP COLUMN IF EXISTS invalidated_at, "
+                "DROP COLUMN IF EXISTS valid_to"
+            )
+        return
 
     for table in reversed(_TABLES):
         op.drop_column(table, "invalidated_by")

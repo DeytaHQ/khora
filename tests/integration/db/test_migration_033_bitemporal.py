@@ -248,7 +248,11 @@ async def test_migration_033_downgrade_reverses(pg_engine: AsyncEngine) -> None:
     # Sanity: columns and indexes exist after upgrade.
     assert await _column_info(pg_engine, "relationships", "valid_to") is not None
 
-    # Drive a single-step downgrade programmatically (no subprocess).
+    # Drive a single-step downgrade programmatically. Wrap in to_thread
+    # because Alembic's env.py calls asyncio.run() internally, which can't
+    # nest inside the @pytest.mark.asyncio loop we're already running in.
+    import asyncio
+
     from alembic import command
     from alembic.config import Config
 
@@ -259,7 +263,7 @@ async def test_migration_033_downgrade_reverses(pg_engine: AsyncEngine) -> None:
     cfg.set_main_option("sqlalchemy.url", sync_url)
     cfg.set_main_option("version_table", "khora_alembic_version")
     cfg.set_main_option("version_table_schema", "public")
-    command.downgrade(cfg, "-1")
+    await asyncio.to_thread(command.downgrade, cfg, "-1")
 
     # Columns gone from both tables.
     for table in ("relationships", "memory_facts"):
@@ -338,8 +342,8 @@ async def test_existing_queries_still_work(pg_engine: AsyncEngine) -> None:
         await conn.execute(
             text(
                 "INSERT INTO memory_namespaces "
-                "(id, namespace_id, name, description, created_at, updated_at) "
-                "VALUES (:id, :id, 'test', '', NOW(), NOW())"
+                "(id, namespace_id, version, is_active, created_at, updated_at) "
+                "VALUES (:id, :id, 1, TRUE, NOW(), NOW())"
             ),
             {"id": ns_id},
         )

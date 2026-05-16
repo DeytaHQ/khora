@@ -80,7 +80,7 @@ class TestSqliteMigrations:
                     # Version table must point at head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
                     version = result.scalar()
-                    assert version == "032_dream_runs"
+                    assert version == "033_bitemporal_columns"
             finally:
                 await engine.dispose()
 

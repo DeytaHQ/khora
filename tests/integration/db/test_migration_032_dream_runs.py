@@ -220,10 +220,15 @@ class TestMigration032OnPostgres:
         asyncio.run(check())
 
     def test_migration_032_downgrade_reverses(self, pg_url: str) -> None:
-        """upgrade head → downgrade -1 leaves no table and no index behind."""
+        """upgrade head → downgrade to 031 leaves no table and no index behind.
+
+        Targets revision 031 explicitly rather than ``-1`` because head may
+        now be 033 (or later) once subsequent dream-phase migrations land —
+        we need to walk back through 032 to verify its downgrade runs cleanly.
+        """
         cfg = _make_config(pg_url)
         command.upgrade(cfg, "head")
-        command.downgrade(cfg, "-1")
+        command.downgrade(cfg, "031_session_id_indexes")
 
         async def check() -> None:
             engine = create_async_engine(pg_url)
@@ -292,7 +297,7 @@ class TestMigration032OnSqlite:
                 async with engine.connect() as conn:
                     # Chain reached head (sanity).
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "032_dream_runs"
+                    assert result.scalar() == "033_bitemporal_columns"
 
                     # khora_dream_runs MUST NOT exist on SQLite — embedded path
                     # mirrors checkpoint state via a JSONL file sink.
