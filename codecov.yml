@@ -11,7 +11,7 @@ codecov:
 coverage:
   precision: 1
   round: down
-  range: "30...85"
+  range: "65...85"
   status:
     project:
       default:

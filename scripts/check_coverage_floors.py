@@ -8,7 +8,7 @@ meets or exceeds its minimum line-coverage percentage.
 Why this exists
 ---------------
 
-The repo already has a global ``--cov-fail-under=53`` gate in ``pyproject.toml``
+The repo already has a global ``--cov-fail-under=65`` gate in ``pyproject.toml``
 which protects the aggregate. But aggregate coverage can stay flat while
 critical code paths erode — e.g. someone could remove tests for
 ``sqlite_lance/vector.py`` and the global number wouldn't move enough to

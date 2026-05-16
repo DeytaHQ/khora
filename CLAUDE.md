@@ -7,7 +7,7 @@ Khora library: knowledge graphs + vector search + PostgreSQL for unified knowled
 ```bash
 make install           # uv sync --all-extras --no-extra google-adk (crewai combo)
 make install-adk       # uv sync --all-extras --no-extra crewai     (google-adk combo)
-make test              # pytest, coverage ≥30%
+make test              # pytest, coverage ≥65%
 make format            # black, isort, ruff
 make lint              # ruff + ty typecheck
 make dev               # Start postgres + neo4j
@@ -21,7 +21,7 @@ CLI tooling (`extract`, `search`) lives in the separate `khora-cli` package (to 
 ## Test Commands
 
 ```bash
-make test                                          # Full test suite (unit + integration + e2e), coverage ≥30%
+make test                                          # Full test suite (unit + integration + e2e), coverage ≥65%
 uv run pytest -m integration                       # Integration tests only
 uv run pytest -m e2e                               # End-to-end tests only
 ```
