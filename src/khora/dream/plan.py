@@ -33,6 +33,7 @@ class OpKind(StrEnum):
     VECTORCYPHER_SCHEMA_DRIFT_REPORT = "vectorcypher_schema_drift_report"
     VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT = "vectorcypher_source_chunk_ids_audit"
     CHRONICLE_ABSTENTION_DRIFT_REPORT = "chronicle_abstention_drift_report"
+    VECTORCYPHER_ORPHAN_REPORT = "vectorcypher_orphan_report"
 
 
 @dataclass(slots=True, frozen=True)
