@@ -804,6 +804,46 @@ class QuerySettings(BaseSettings):
         description="Max entities returned by a HyDE-Cypher template execution.",
     )
 
+    # Personalized PageRank retrieval (Issue #542 — HippoRAG 2 style).
+    # Default OFF: when ON, the VectorCypher path replaces BFS graph
+    # expansion with query-time Personalized PageRank seeded from the
+    # entry entities discovered via vector search. Falls back to vector-
+    # only when no entry entities are found or the entity graph is empty.
+    enable_ppr_retrieval: bool = Field(
+        default=False,
+        description=(
+            "Enable query-time Personalized PageRank in VectorCypher retrieval "
+            "(HippoRAG 2). Replaces the BFS graph-expansion channel with a "
+            "PPR-weighted entity walk seeded from query entities. Falls back "
+            "to vector-only when the entity graph is empty or no entry "
+            "entities are found. See khora#542."
+        ),
+    )
+    ppr_damping: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description="Damping factor for Personalized PageRank.",
+    )
+    ppr_max_iter: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="Maximum iterations for Personalized PageRank power method.",
+    )
+    ppr_tol: float = Field(
+        default=1e-5,
+        ge=0.0,
+        le=1.0,
+        description="Convergence tolerance for Personalized PageRank.",
+    )
+    ppr_top_entities: int = Field(
+        default=30,
+        ge=1,
+        le=200,
+        description="Number of top PR-scored entities used to score chunks in the PPR retrieval path.",
+    )
+
     @field_validator("enable_hyde", mode="before")
     @classmethod
     def _normalize_enable_hyde(cls, v: Any) -> str:

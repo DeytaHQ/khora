@@ -571,6 +571,13 @@ class VectorCypherEngine:
             temporal_recency_channel_limit=self._config.query.temporal_recency_channel_limit,
             temporal_llm_disambiguation_enabled=self._config.query.temporal_llm_disambiguation_enabled,
             temporal_llm_disambiguation_model=self._config.query.temporal_llm_disambiguation_model,
+            # Issue #542 — Personalized PageRank retrieval (HippoRAG 2).
+            # Default OFF; flag flows through KhoraConfig.query.enable_ppr_retrieval.
+            enable_ppr_retrieval=self._config.query.enable_ppr_retrieval,
+            ppr_damping=self._config.query.ppr_damping,
+            ppr_max_iter=self._config.query.ppr_max_iter,
+            ppr_tol=self._config.query.ppr_tol,
+            ppr_top_entities=self._config.query.ppr_top_entities,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,
