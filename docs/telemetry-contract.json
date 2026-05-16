@@ -652,6 +652,12 @@
       "stability": "internal",
       "owner": "dream",
       "_comment": "Inner span for the chronicle memory_facts tombstone-audit op (#654, Phase 1.2 of #649). Read-only; attributes: namespace_id (span attr only, never a metric label). The op records active/inactive/invalidated counts, tombstone_ratio, and p50/p90/oldest age in days on the DreamOp outputs."
+    },
+    {
+      "name": "khora.dream.chronicle.fact_compaction",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Inner span for the chronicle memory_facts compaction planner (#664, Phase 2.4 of #649). Dry-run only in v0.14 — emits one planned DreamOp per row that would be hard-deleted (the only Phase 2 op that hard-deletes, because the tombstone is itself the soft-delete marker). Apply mode raises NotImplementedError until v0.15 (#669). Attributes: namespace_id (span attr only, never a metric label), retention_days."
     }
   ],
   "pipeline_stages": [

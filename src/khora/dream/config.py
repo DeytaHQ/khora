@@ -154,6 +154,18 @@ class DreamConfig(BaseSettings):
         ),
     )
 
+    # Phase 2.4 — chronicle memory_facts compaction (#664).
+    fact_compaction_retention_days: int = Field(
+        default=365,
+        ge=0,
+        description=(
+            "Age threshold for the chronicle fact-compaction op: facts "
+            "tombstoned (legacy ``is_active=False`` OR bi-temporal "
+            "``invalidated_at``) more than this many days ago are planned "
+            "for hard-delete. Apply mode lands in v0.15 (#669)."
+        ),
+    )
+
     # Vectorcypher orphan-report knobs (#657).
     cooccurrence_edge_weight: float = Field(
         default=0.2,
