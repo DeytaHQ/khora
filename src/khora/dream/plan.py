@@ -35,6 +35,7 @@ class OpKind(StrEnum):
     CHRONICLE_ABSTENTION_DRIFT_REPORT = "chronicle_abstention_drift_report"
     VECTORCYPHER_ORPHAN_REPORT = "vectorcypher_orphan_report"
     CHRONICLE_TOMBSTONE_AUDIT = "chronicle_tombstone_audit"
+    CHRONICLE_FACT_COMPACTION = "chronicle_fact_compaction"
 
 
 @dataclass(slots=True, frozen=True)
