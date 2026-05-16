@@ -153,3 +153,26 @@ class DreamConfig(BaseSettings):
             "samples used by the chronicle abstention-drift report."
         ),
     )
+
+    # Vectorcypher orphan-report knobs (#657).
+    cooccurrence_edge_weight: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Weight applied to ASSOCIATED_WITH co-occurrence edges during "
+            "the vectorcypher PageRank orphan report. Selective extraction "
+            "emits these by default for non-LLM chunks; left at 1.0 they "
+            "would dominate PageRank and mask real orphans."
+        ),
+    )
+    orphan_pr_percentile_threshold: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=100.0,
+        description=(
+            "Bottom-percentile cut-off for orphan-candidate selection. "
+            "Entities with a PageRank score at or below this percentile "
+            "AND mention_count <= 1 are flagged as archive candidates."
+        ),
+    )

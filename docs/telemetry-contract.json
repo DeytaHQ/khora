@@ -640,6 +640,12 @@
       "stability": "internal",
       "owner": "dream",
       "_comment": "Per-op span for the chronicle abstention-threshold drift report (read-only audit). Attributes: namespace_id (span attr only), decision ('recommend'|'insufficient_data'), direction ('lower'|'raise'|'calibrated'; only when decision=='recommend'), sample_count, top_score_p90, combined_score_p90, rationale_hash (bounded_text_hash). Issue #652 part of #649."
+    },
+    {
+      "name": "khora.dream.vectorcypher.orphan_report",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "PageRank-based orphan-entity report (#657, Phase 1.4). Attributes: run_id, op_id, namespace_id (span attr only — never a metric label per cardinality rule), phase, total_entities, candidate_count, p5_combined_score, weighting_used. Read-only audit; zero mutations, zero LLM calls."
     }
   ],
   "pipeline_stages": [
