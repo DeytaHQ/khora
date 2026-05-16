@@ -222,3 +222,25 @@ class DreamConfig(BaseSettings):
             "without planning an embedding."
         ),
     )
+
+    # Phase 2.1 — vectorcypher cross-batch entity-resolution dedupe (#658).
+    dedupe_entities_default_threshold: float = Field(
+        default=0.90,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Default cosine-similarity merge threshold used by the "
+            "vectorcypher cross-batch dedupe op for any entity_type "
+            "not overridden in dedupe_entities_per_type_thresholds. "
+            "Deliberately tighter than the online resolver's "
+            "DEFAULT_THRESHOLD (0.85)."
+        ),
+    )
+    dedupe_entities_per_type_thresholds: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Per-entity-type cosine-similarity merge threshold overrides "
+            "(e.g. {'PERSON': 0.95}). Missing types fall back to "
+            "dedupe_entities_default_threshold."
+        ),
+    )
