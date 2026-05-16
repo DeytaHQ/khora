@@ -435,6 +435,12 @@
       "owner": "vectorcypher"
     },
     {
+      "name": "khora.vectorcypher.ppr_retrieve",
+      "stability": "internal",
+      "owner": "vectorcypher",
+      "_comment": "Wraps the query-time Personalized PageRank retrieval path (Issue #542 — HippoRAG 2). Attributes: namespace_id (str), entry_count (int), entity_count (int, only set when graph non-empty), edge_count (int), chunk_count (int), fallback_reason (one of 'no_entry_entities'|'empty_entity_graph'|'no_seed_overlap', set only when the path degrades to vector-only)."
+    },
+    {
       "name": "khora.vectorcypher.embed_batch",
       "stability": "internal",
       "owner": "vectorcypher"

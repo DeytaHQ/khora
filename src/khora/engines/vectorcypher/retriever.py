@@ -232,6 +232,18 @@ class RetrieverConfig:
     # single global search.  Improves session_crossing_recall.
     enable_session_aware_search: bool = True
 
+    # Personalized PageRank retrieval path (Issue #542 — HippoRAG 2).
+    # Default OFF — when ON, _vectorcypher_retrieve replaces the BFS+RRF
+    # graph expansion with query-time PPR seeded from entry entities and
+    # scores chunks via PR-weighted sum over their mentioned entities.
+    # When the entity graph is empty or no entry entities are found the
+    # path falls back to vector-only (degrades, never crashes).
+    enable_ppr_retrieval: bool = False
+    ppr_damping: float = 0.85
+    ppr_max_iter: int = 50
+    ppr_tol: float = 1e-5
+    ppr_top_entities: int = 30
+
     # Limits
     max_chunks: int = 50
     max_entities: int = 30
@@ -1116,8 +1128,37 @@ class VectorCypherRetriever:
         # Step 5: Fetch chunks from all entities
         # Skip when graph is unavailable — _fetch_chunks_from_entities uses
         # Neo4j via DualNodeManager and would fail with the same error.
+        #
+        # Issue #542 — when the PPR retrieval flag is on AND a storage
+        # coordinator is wired, replace the BFS-driven chunk fetch with
+        # query-time Personalized PageRank.  Falls back to vector-only
+        # (graph_chunks=[]) when entities or seed overlap are empty.
+        # The vector channel is preserved either way and fusion still
+        # runs — so a degenerate PPR result never silently kills recall.
+        ppr_path_used = False
+        ppr_entity_scores: dict[UUID, float] = {}
         if graph_fallback:
             graph_chunks: list[tuple[UUID, float, Chunk]] = []
+        elif self._config.enable_ppr_retrieval and self._storage is not None:
+            from khora.engines.vectorcypher.ppr_retrieval import ppr_retrieve_chunks
+
+            ppr_chunks, ppr_entity_scores = await ppr_retrieve_chunks(
+                storage=self._storage,
+                namespace_id=namespace_id,
+                entry_entities=entry_entities,
+                damping=self._config.ppr_damping,
+                max_iter=self._config.ppr_max_iter,
+                tol=self._config.ppr_tol,
+                top_entities=self._config.ppr_top_entities,
+                limit=limit * 2,
+            )
+            graph_chunks = ppr_chunks
+            ppr_path_used = bool(ppr_chunks)
+            logger.debug(
+                "PPR retrieval path: {} chunks scored over {} entities",
+                len(graph_chunks),
+                len(ppr_entity_scores),
+            )
         else:
             graph_chunks = await self._fetch_chunks_from_entities(
                 entity_ids=all_entity_ids,
@@ -1593,6 +1634,11 @@ class VectorCypherRetriever:
                 "search_methods": search_methods,
                 "graph_fallback": graph_fallback,
                 **({"graph_error": graph_error_msg} if graph_error_msg else {}),
+                # Issue #542 — PPR retrieval (HippoRAG 2). Surfaced for
+                # benchmark scoring and operator dashboards. False when
+                # the flag is off or when the path fell back to vector-only.
+                "ppr_path_used": ppr_path_used,
+                "ppr_entity_count": len(ppr_entity_scores),
             },
         )
 
