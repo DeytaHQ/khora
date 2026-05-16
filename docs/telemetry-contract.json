@@ -676,6 +676,12 @@
       "stability": "internal",
       "owner": "dream",
       "_comment": "Inner span for the vectorcypher cross-batch entity-resolution dedupe op (OpKind.VECTORCYPHER_DEDUPE_ENTITIES, #658 Phase 2.1 of #649). Dry-run-only in v0.14; apply mode raises NotImplementedError. Attributes: run_id, op_id, namespace_id (span attr only — never a metric label per cardinality rule), phase, total_entities, total_buckets, planned_count, skip_collision_count, default_threshold. Pure planning op — zero writes, zero LLM calls."
+    },
+    {
+      "name": "khora.dream.chronicle.event_clustering",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Inner span for the chronicle_events near-duplicate clustering op (#665, Phase 2.5 of #649). Dry-run only in v0.14; apply lands in v0.15 (#669). Attributes: namespace_id (span attr only, never a metric label), threshold (float, cosine cutoff), window_days (int, referenced_date window half-width), event_count (int, total rows considered). Plan never proposes mutating chronicle_events.chunk_id — that FK powers the temporal recall channel back-pointer."
     }
   ],
   "pipeline_stages": [
