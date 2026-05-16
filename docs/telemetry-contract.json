@@ -670,6 +670,12 @@
       "stability": "internal",
       "owner": "dream",
       "_comment": "Inner span for the vectorcypher centroid-recompute op (OpKind.VECTORCYPHER_CENTROID_RECOMPUTE, #660, Phase 2.2 of #649). Plans the post-merge canonical embedding for each merge cluster — no writes in v0.14 (apply mode raises NotImplementedError). Attributes: op_id, namespace_id (span attr only, never a metric label per the bounded-cardinality rule), phase, cluster_size, min_pairwise_cosine, max_pairwise_lev, decision ('centroid'|'re_embed'|'skip_multimodal'|'skip_singleton')."
+    },
+    {
+      "name": "khora.dream.vectorcypher.dedupe_entities",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Inner span for the vectorcypher cross-batch entity-resolution dedupe op (OpKind.VECTORCYPHER_DEDUPE_ENTITIES, #658 Phase 2.1 of #649). Dry-run-only in v0.14; apply mode raises NotImplementedError. Attributes: run_id, op_id, namespace_id (span attr only — never a metric label per cardinality rule), phase, total_entities, total_buckets, planned_count, skip_collision_count, default_threshold. Pure planning op — zero writes, zero LLM calls."
     }
   ],
   "pipeline_stages": [
