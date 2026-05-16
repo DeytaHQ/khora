@@ -32,6 +32,7 @@ class OpKind(StrEnum):
     RECOMPUTE_CENTROIDS = "recompute_centroids"
     VECTORCYPHER_SCHEMA_DRIFT_REPORT = "vectorcypher_schema_drift_report"
     VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT = "vectorcypher_source_chunk_ids_audit"
+    VECTORCYPHER_SOURCE_CHUNK_IDS_GC = "vectorcypher_source_chunk_ids_gc"
     CHRONICLE_ABSTENTION_DRIFT_REPORT = "chronicle_abstention_drift_report"
     VECTORCYPHER_ORPHAN_REPORT = "vectorcypher_orphan_report"
     CHRONICLE_TOMBSTONE_AUDIT = "chronicle_tombstone_audit"

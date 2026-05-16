@@ -188,3 +188,14 @@ class DreamConfig(BaseSettings):
             "AND mention_count <= 1 are flagged as archive candidates."
         ),
     )
+
+    # Vectorcypher source_chunk_ids GC knob (#662).
+    source_chunk_ids_gc_min_dead: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Minimum dead-UUID count below which an entity is not emitted "
+            "as a GC candidate by the source_chunk_ids GC op. Default 1 "
+            "(every entity with at least one dead reference is planned)."
+        ),
+    )

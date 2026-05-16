@@ -15,9 +15,13 @@ from khora.dream.engines.vectorcypher.schema_drift import (
 from khora.dream.engines.vectorcypher.source_chunk_ids_audit import (
     plan_vectorcypher_source_chunk_ids_audit,
 )
+from khora.dream.engines.vectorcypher.source_chunk_ids_gc import (
+    plan_vectorcypher_source_chunk_ids_gc,
+)
 
 __all__ = [
     "plan_vectorcypher_orphan_report",
     "plan_vectorcypher_schema_drift",
     "plan_vectorcypher_source_chunk_ids_audit",
+    "plan_vectorcypher_source_chunk_ids_gc",
 ]

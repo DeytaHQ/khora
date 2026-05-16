@@ -658,6 +658,12 @@
       "stability": "internal",
       "owner": "dream",
       "_comment": "Inner span for the chronicle memory_facts compaction planner (#664, Phase 2.4 of #649). Dry-run only in v0.14 — emits one planned DreamOp per row that would be hard-deleted (the only Phase 2 op that hard-deletes, because the tombstone is itself the soft-delete marker). Apply mode raises NotImplementedError until v0.15 (#669). Attributes: namespace_id (span attr only, never a metric label), retention_days."
+    },
+    {
+      "name": "khora.dream.vectorcypher.source_chunk_ids_gc",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Inner span for the vectorcypher source_chunk_ids GC op (OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_GC, #662, Phase 2.3 of #649). Dry-run only in v0.14 — apply lands v0.15 via reset_entity_source_chunk_ids_batch. Plans per-entity rewrites that drop dead chunk UUIDs from Entity.source_chunk_ids. Attributes: namespace_id (span attr only, never a metric label per cardinality rule), candidate_count, min_dead, mode. Read-only at the SQL boundary; zero LLM calls."
     }
   ],
   "pipeline_stages": [
