@@ -95,33 +95,38 @@ See [docs/integrations/](docs/integrations/index.md) for the full per-adapter do
 
 ## Maintenance: dream phase
 
-khora ships an **offline maintenance pass** ("dream phase") that audits an accumulated namespace and surfaces drift, stale data, schema mismatches, and graph health issues — without mutating anything. Run it on a schedule (cron, Temporal, k8s CronJob) and consume the structured reports through three independently-togglable sinks: file, semantic-event, or telemetry collector.
+khora ships an **offline maintenance pass** ("dream phase") that audits an accumulated namespace and plans consolidation work — entity dedupe, fact compaction, event clustering. Run it on a schedule (cron, Temporal, k8s CronJob) and consume the structured reports through three independently-togglable sinks: file, semantic-event, or telemetry collector.
 
 ```python
 from khora import Khora, KhoraConfig, DreamConfig
 
 kb = Khora(config=KhoraConfig(dream=DreamConfig(enabled=True)))
 
-# Dry-run — pure observation, zero LLM calls, zero writes.
+# Dry-run — pure observation/planning, zero writes.
 result = await kb.dream(namespace_id, mode="dry-run")
 
-for op in result.plan.ops:
+for op in result.ops:
     print(op.op_type, op.decision, op.outputs)
 ```
 
-Five audit operations ship in v0.14.0, covering both engines:
+Ten operations ship in v0.15.0 across both engines:
 
-| Engine | Operation | Surfaces |
-|---|---|---|
-| chronicle | abstention-threshold drift | Configured `abstention_min_top_score` / `combined_threshold` vs observed p50/p90/p99 |
-| chronicle | tombstone audit | Active / inactive / invalidated fact ratios + age distribution |
-| vectorcypher | schema drift | New / unused / frequency-changed entity & relationship types vs `ExpertiseConfig` |
-| vectorcypher | orphan PageRank | Bottom-5% PR entities flagged as `archive_candidate` |
-| vectorcypher | source_chunk_ids audit | Dead UUID counts + array-length p50/p90/p99 + top-K offenders |
+| Phase | Engine | Operation | Surfaces |
+|---|---|---|---|
+| 1 audit | chronicle | abstention-threshold drift | Configured thresholds vs observed p50/p90/p99 |
+| 1 audit | chronicle | tombstone audit | Active / inactive / invalidated fact ratios + age distribution |
+| 1 audit | vectorcypher | schema drift | New / unused / frequency-changed types vs `ExpertiseConfig` |
+| 1 audit | vectorcypher | orphan PageRank | Bottom-5% PR entities flagged as `archive_candidate` |
+| 1 audit | vectorcypher | source_chunk_ids audit | Dead UUID counts + array-length distribution |
+| 2 planner | vectorcypher | cross-batch entity dedupe | Pairs above the per-type cosine threshold, planned merges |
+| 2 planner | vectorcypher | centroid recompute | Per-cluster `centroid` / `re_embed` / `skip_multimodal` decisions |
+| 2 planner | vectorcypher | source_chunk_ids GC | Per-entity rewrites dropping dead chunk UUIDs |
+| 2 planner | chronicle | memory_facts compaction | Tombstoned rows past `retention_days` |
+| 2 planner | chronicle | event clustering | Near-duplicate `chronicle_events` within a sliding window |
 
-Default is `DreamConfig(enabled=False)` — the master switch is opt-in. Mutation operations are deliberately deferred to a follow-up release; v0.14.0 is audit-only by design.
+Default is `DreamConfig(enabled=False)` — the master switch is opt-in. **No op in v0.15.0 mutates state**: Phase 1 audits are pure SELECT; Phase 2 planners emit a plan and raise `NotImplementedError` if you ask them to apply it. Apply mode lands in v0.16.
 
-See [docs/dream-phase.md](docs/dream-phase.md) for the full operator guide: configuration surface, sink wiring, telemetry contract, storage substrate, and stability tags.
+See [docs/dream-phase.md](docs/dream-phase.md) for the full operator guide: research lineage, configuration surface, sink wiring, telemetry contract, storage substrate, and stability tags.
 
 ## Observability
 
