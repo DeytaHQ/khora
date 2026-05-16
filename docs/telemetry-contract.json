@@ -664,6 +664,12 @@
       "stability": "internal",
       "owner": "dream",
       "_comment": "Inner span for the vectorcypher source_chunk_ids GC op (OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_GC, #662, Phase 2.3 of #649). Dry-run only in v0.14 — apply lands v0.15 via reset_entity_source_chunk_ids_batch. Plans per-entity rewrites that drop dead chunk UUIDs from Entity.source_chunk_ids. Attributes: namespace_id (span attr only, never a metric label per cardinality rule), candidate_count, min_dead, mode. Read-only at the SQL boundary; zero LLM calls."
+    },
+    {
+      "name": "khora.dream.vectorcypher.centroid_recompute",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Inner span for the vectorcypher centroid-recompute op (OpKind.VECTORCYPHER_CENTROID_RECOMPUTE, #660, Phase 2.2 of #649). Plans the post-merge canonical embedding for each merge cluster — no writes in v0.14 (apply mode raises NotImplementedError). Attributes: op_id, namespace_id (span attr only, never a metric label per the bounded-cardinality rule), phase, cluster_size, min_pairwise_cosine, max_pairwise_lev, decision ('centroid'|'re_embed'|'skip_multimodal'|'skip_singleton')."
     }
   ],
   "pipeline_stages": [
