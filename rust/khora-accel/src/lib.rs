@@ -43,6 +43,7 @@ fn configure_thread_pool(num_threads: usize, mode: &str) -> PyResult<()> {
     }
 }
 
+mod blocking;
 mod bm25;
 mod community;
 mod cosine;
@@ -73,6 +74,10 @@ fn khora_accel(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(cosine::batch_dot_product, m)?)?;
+
+    // Pairwise similarity with name-token-prefix blocking (dream-phase
+    // cross-batch entity resolution, see issue #663).
+    m.add_function(wrap_pyfunction!(blocking::block_and_score_pairs, m)?)?;
 
     // String similarity
     m.add_function(wrap_pyfunction!(string_sim::levenshtein_similarity, m)?)?;

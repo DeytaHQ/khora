@@ -4,6 +4,16 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.14.0] — Dream-phase pairwise blocking kernel
+
+### Added
+
+- **`khora._accel.block_and_score_pairs` ([#663](https://github.com/DeytaHQ/khora/issues/663)).** New Rust kernel in `khora-accel` for pairwise cosine similarity over pre-normalised embeddings with optional token-prefix name blocking. Powers the dream-phase cross-batch entity resolution op ([Phase 2.1](https://github.com/DeytaHQ/khora/issues/658)) at namespace scale: at N≈100k entities, the naive `pairwise_cosine_above_threshold` is ~30s wall, while name-token-prefix blocking cuts the candidate set ~100x on a realistic name distribution. Falls back to a pure-numpy / pure-Python implementation when the Rust extra isn't installed. Part of the [Dream Phase umbrella (#649)](https://github.com/DeytaHQ/khora/issues/649).
+
+### Changed
+
+- **`khora-accel` version bumped from 0.13.0 to 0.14.0 (lockstep with khora itself per the version-bump contract).** Root `pyproject.toml`'s `rust` extra pin updated to `khora-accel==0.14.0`; `rust/Cargo.lock` regenerated.
+
 ## [0.13.0] — Agentic framework adapters; session_id first-class; SurrealDB 2.0 stable
 
 Minor release. Five new opt-in adapters for agentic frameworks (CrewAI, LangGraph, Google ADK, OpenAI Agents SDK, LlamaIndex), a new `session_id` first-class column with cascade-delete and TTL helpers, and the SurrealDB 2.0 stable pin. No public API removals.

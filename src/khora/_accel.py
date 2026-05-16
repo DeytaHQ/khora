@@ -43,6 +43,7 @@ try:
     from khora_accel import batch_score_stats as _rust_batch_score_stats
     from khora_accel import batch_sequence_match as _rust_batch_sequence_match
     from khora_accel import batch_temporal_filter as _rust_batch_temporal_filter
+    from khora_accel import block_and_score_pairs as _rust_block_and_score_pairs
     from khora_accel import build_chunk_edges as _rust_build_chunk_edges
     from khora_accel import configure_thread_pool as _rust_configure_thread_pool
     from khora_accel import cosine_similarity as _rust_cosine
@@ -245,6 +246,137 @@ def pairwise_cosine_above_threshold(
     for i in range(n):
         for j in range(i + 1, n):
             sim = cosine_similarity(embeddings[i], embeddings[j])
+            if sim >= threshold:
+                results.append((i, j, sim))
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Pairwise similarity with name-token-prefix blocking
+# (dream-phase cross-batch entity resolution, see issue #663)
+# ---------------------------------------------------------------------------
+
+_TOKEN_PREFIX_LEN = 3
+
+
+def _name_prefix_keys(name: str) -> set[str]:
+    """Token-prefix blocking keys for an entity name.
+
+    Lowercase, split on every non-alphanumeric character, drop tokens of
+    length < 2, then take the first three characters of each surviving
+    token. Mirrors the Rust implementation byte-for-byte.
+    """
+    keys: set[str] = set()
+    current: list[str] = []
+    for ch in name:
+        if ch.isalnum():
+            current.append(ch.lower())
+        elif current:
+            if len(current) >= 2:
+                keys.add("".join(current[:_TOKEN_PREFIX_LEN]))
+            current.clear()
+    if current and len(current) >= 2:
+        keys.add("".join(current[:_TOKEN_PREFIX_LEN]))
+    return keys
+
+
+def block_and_score_pairs(
+    embeddings,  # numpy ndarray or 2D sequence
+    names: list[str],
+    threshold: float,
+    *,
+    name_token_blocking: bool = True,
+) -> list[tuple[int, int, float]]:
+    """Pairwise cosine similarity with optional name-token-prefix blocking.
+
+    For cross-batch entity resolution: returns every `(i, j, similarity)`
+    triple (with `i < j`) where the cosine similarity between
+    `embeddings[i]` and `embeddings[j]` is at least `threshold`, optionally
+    filtered to pairs whose entity names share at least one blocking key.
+
+    A blocking key is the first three characters of a token, where tokens
+    are lowercase, alphanumeric, length >= 2 substrings of a name. With
+    `name_token_blocking=True`, this cuts the candidate set from
+    O(N^2) to roughly O(N * average_block_size), ~10-100x on a realistic
+    name distribution.
+
+    Args:
+        embeddings: `(N, D)` pre-normalised float32 matrix. Pre-normalised
+            means cosine == dot product — the kernel does not re-normalise.
+        names: length-N list of entity names, one per row. Names are not
+            re-normalised — case and punctuation are tokenised raw.
+        threshold: cosine similarity threshold in [-1.0, 1.0]. Only pairs
+            with similarity >= threshold are returned.
+        name_token_blocking: when True (default), apply token-prefix
+            blocking. When False, the output is identical to
+            `pairwise_cosine_above_threshold(embeddings, threshold)` over
+            pre-normalised embeddings.
+
+    Returns:
+        `[(i, j, similarity), ...]` with `i < j`. No deterministic global
+        sort — callers that need one should sort the result.
+
+    Raises:
+        ValueError: if `embeddings.ndim != 2` or `len(names) != N`.
+
+    Uses Rust (rayon parallel) > numpy > pure Python.
+    """
+    if _HAS_RUST and _HAS_NUMPY:
+        mat = np.asarray(embeddings, dtype=np.float32)
+        if mat.ndim != 2:
+            raise ValueError(f"embeddings must be 2-D, got ndim={mat.ndim}")
+        if len(names) != mat.shape[0]:
+            raise ValueError(f"names length ({len(names)}) does not match embeddings rows ({mat.shape[0]})")
+        return _rust_block_and_score_pairs(mat, names, float(threshold), bool(name_token_blocking))
+
+    # Numpy / pure-Python fallback
+    if _HAS_NUMPY:
+        mat = np.asarray(embeddings, dtype=np.float32)
+        if mat.ndim != 2:
+            raise ValueError(f"embeddings must be 2-D, got ndim={mat.ndim}")
+        n = mat.shape[0]
+    else:
+        mat = embeddings  # treat as list-of-lists
+        n = len(mat)
+    if len(names) != n:
+        raise ValueError(f"names length ({len(names)}) does not match embeddings rows ({n})")
+    if n < 2:
+        return []
+
+    if name_token_blocking:
+        row_keys = [_name_prefix_keys(name) for name in names]
+        inverted: dict[str, list[int]] = {}
+        for i, keys in enumerate(row_keys):
+            for k in keys:
+                inverted.setdefault(k, []).append(i)
+        results: list[tuple[int, int, float]] = []
+        for i in range(n):
+            keys = row_keys[i]
+            if not keys:
+                continue
+            candidates: set[int] = set()
+            for k in keys:
+                for j in inverted.get(k, ()):
+                    if j > i:
+                        candidates.add(j)
+            for j in sorted(candidates):
+                if _HAS_NUMPY:
+                    sim = float(np.dot(mat[i], mat[j]))
+                else:
+                    sim = sum(a * b for a, b in zip(mat[i], mat[j]))
+                if sim >= threshold:
+                    results.append((i, j, sim))
+        return results
+
+    # Unblocked path: parity with pairwise_cosine_above_threshold over
+    # pre-normalised embeddings (dot == cosine).
+    results = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _HAS_NUMPY:
+                sim = float(np.dot(mat[i], mat[j]))
+            else:
+                sim = sum(a * b for a, b in zip(mat[i], mat[j]))
             if sim >= threshold:
                 results.append((i, j, sim))
     return results

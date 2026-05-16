@@ -1,6 +1,6 @@
 [package]
 name = "khora-accel"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Rust-accelerated operations for Khora"
@@ -43,4 +43,8 @@ harness = false
 
 [[bench]]
 name = "pagerank_bench"
+harness = false
+
+[[bench]]
+name = "block_and_score_pairs"
 harness = false
