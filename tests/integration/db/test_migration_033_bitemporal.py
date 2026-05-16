@@ -13,11 +13,10 @@ Validates that ``033_bitemporal_columns``:
 * leaves the existing ``is_active=True`` filter behavior on
   ``memory_facts`` unchanged.
 
-The migration depends on #651 / migration 032 landing first. While 032
-is in flight, ``down_revision`` is a placeholder, and the full alembic
-chain cannot resolve. These tests detect that condition and skip with a
-clear reason — they will run normally once the rebase against the real
-032 revision id is in place.
+The migration depends on migration 032 (``032_dream_runs``, PR #676)
+being on the same branch. If 032 isn't present (e.g. branch was not
+rebased), the alembic chain cannot resolve and these tests skip with
+a clear reason.
 
 Run locally::
 

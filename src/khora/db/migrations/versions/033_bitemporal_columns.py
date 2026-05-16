@@ -1,7 +1,7 @@
 """Add bi-temporal soft-delete columns to relationships and memory_facts.
 
 Revision ID: 033_bitemporal_columns
-Revises: 032_DREAM_RUNS_PLACEHOLDER
+Revises: 032_dream_runs
 Create Date: 2026-05-16
 
 Issue #653 — Phase 0.3 of the dream-phase rollout (umbrella #649). v0.14
@@ -44,12 +44,8 @@ migration 032 itself, which does not declare ``namespace_id`` as a FK
 to ``memory_namespaces.id``. The constraint can be added in a later
 migration if operational experience demands it.
 
-Dependency on #651 / migration 032: the ``down_revision`` below
-references the planned revision id for migration 032
-(``032_DREAM_RUNS_PLACEHOLDER``) as a placeholder. Before this PR
-merges, it MUST be rebased so ``down_revision`` matches 032's actual
-committed revision id (currently expected to be ``032_dream_runs``
-per #651's draft).
+Depends on migration 032 (``032_dream_runs``, PR #676). Must merge
+after #676 lands on main.
 """
 
 from collections.abc import Sequence
@@ -59,9 +55,7 @@ from alembic import op
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 revision: str = "033_bitemporal_columns"
-# NOTE: placeholder — rebase against #651 / migration 032's real revision id
-# before merge. See module docstring "Dependency on #651".
-down_revision: str | Sequence[str] | None = "032_DREAM_RUNS_PLACEHOLDER"
+down_revision: str | Sequence[str] | None = "032_dream_runs"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
