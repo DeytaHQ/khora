@@ -28,8 +28,10 @@ import time
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from rapidfuzz.distance import Levenshtein
-
+# Note: `from rapidfuzz.distance import Levenshtein` is deferred into
+# `_max_pairwise_lev_distance` below. rapidfuzz ships with the `[accel]`
+# optional extra, and importing it at module top would break the
+# examples-smoke CI job (which installs per-adapter extras only).
 from khora import _accel
 from khora.dream.plan import DreamOp, OpKind
 from khora.telemetry import trace_span
@@ -264,6 +266,8 @@ def _max_pairwise_lev_distance(names: list[str]) -> int:
     """Largest Levenshtein distance among any two names in the cluster."""
     if len(names) < 2:
         return 0
+    from rapidfuzz.distance import Levenshtein
+
     worst = 0
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
