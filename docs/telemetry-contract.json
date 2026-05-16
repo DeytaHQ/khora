@@ -628,6 +628,12 @@
       "stability": "internal",
       "owner": "dream",
       "_comment": "Inner span for the community-summary op kind (Phase 5+). Issue #666."
+    },
+    {
+      "name": "khora.dream.vectorcypher.schema_drift",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Inner span for the vectorcypher schema-drift audit op (OpKind.VECTORCYPHER_SCHEMA_DRIFT_REPORT). Attributes: run_id, namespace_id (span attr only — never a metric label), entity_total (int), relationship_total (int), new_entity_types_count (int), unused_entity_types_count (int), entity_frequency_delta_count (int), new_relationship_types_count (int), unused_relationship_types_count (int), relationship_frequency_delta_count (int). Raw type-name strings never become metric labels per the bounded-cardinality rule. Issue #655 part of #649."
     }
   ],
   "pipeline_stages": [

@@ -30,6 +30,7 @@ class OpKind(StrEnum):
     COMPACT_FACTS = "compact_facts"
     CLUSTER_EVENTS = "cluster_events"
     RECOMPUTE_CENTROIDS = "recompute_centroids"
+    VECTORCYPHER_SCHEMA_DRIFT_REPORT = "vectorcypher_schema_drift_report"
 
 
 @dataclass(slots=True, frozen=True)
