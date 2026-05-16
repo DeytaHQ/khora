@@ -35,6 +35,11 @@ from khora.dream.events import (
     DreamRunStarted,
     UndoHandle,
 )
+from khora.dream.exceptions import (
+    DreamDisabledError,
+    DreamForbiddenOpError,
+    DreamRunStuckError,
+)
 from khora.dream.locks import DreamLockUnavailable, acquire_namespace_dream_lock
 from khora.dream.orchestrator import DreamOrchestrator
 from khora.dream.plan import Checkpoint, DreamOp, DreamPlan, DreamScope, OpKind
@@ -57,10 +62,13 @@ from khora.dream.result import (
 
 __all__ = [
     "DreamConfig",
+    "DreamDisabledError",
+    "DreamForbiddenOpError",
     "DreamLockUnavailable",
     "DreamMode",
     "DreamResult",
     "DreamRunInfo",
+    "DreamRunStuckError",
     "DreamScope",
     "OpKind",
     "acquire_namespace_dream_lock",
