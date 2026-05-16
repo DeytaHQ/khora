@@ -38,11 +38,21 @@ kb = Khora(
 
 result = await kb.dream(namespace_id, mode="dry-run")
 
-for op in result.ops:
-    print(op.op_type, op.decision, op.outputs)
+# `result.ops` is the aggregate counter — one OpSummary per op kind.
+for summary in result.ops:
+    print(
+        f"{summary.op_type}: planned={summary.planned} "
+        f"skipped={summary.skipped} failed={summary.failed}"
+    )
+
+# Per-op detail (decision strings, outputs dicts, rationale) lives in
+# the file sink's events.jsonl, or in `result.metadata["plan_payload"]`
+# in dry-run mode.
 ```
 
-Configuration knobs and env var bindings live in [configuration.md](configuration.md); all settings are reachable via the `KHORA_DREAM_*` prefix.
+Configuration knobs and env-var bindings live in [configuration.md](configuration.md); all settings reachable via `KHORA_DREAM_*`.
+
+**Default file-sink location.** With `report_file_sink_enabled=True`, the default base directory is `<system temp dir>/khora-dream-reports`. On Linux that's `/tmp/...`, which is wiped on reboot — **set a persistent base directory** if you want audit history to survive restarts. The overridable hook lands in v0.15.x (#697 follow-up); until then operators on persistent workloads should run a sweep that copies reports out of the temp dir, or call `DreamFileSink` directly with `base_dir=` in a custom sink list.
 
 ## Operations
 
@@ -129,7 +139,7 @@ Plans hard deletes of tombstoned `memory_facts` rows older than `fact_compaction
 
 Clusters near-duplicate `chronicle_events` within a `(namespace_id, subject)` bucket and a sliding `referenced_date` window. SVO-summary cosine ≥ `event_clustering_cosine_threshold` (default 0.95) within `event_clustering_window_days` (default 7) defines a cluster. Each cluster gets a canonical representative; the rest are tagged for soft-tombstoning when apply lands.
 
-**Invariant the planner enforces:** `chronicle_events.chunk_id` is never proposed for mutation. That FK powers the temporal recall channel back-pointer; touching it breaks recall. The planner refuses outputs that key on the bare column name `chunk_id`.
+**Architectural promise:** `chronicle_events.chunk_id` is never proposed for mutation. That FK powers the temporal recall channel back-pointer; touching it breaks recall. The planner code is structured so its output payloads can't carry the bare key `chunk_id` (the field name is namespaced as `merged_source_chunk_ids_count` etc.), but this is **not a runtime assertion** — a future contributor who adds a literal `"chunk_id"` key won't trip a test. The test suite covers the negative-existence check (`test_invariant_no_chunk_id_mutation`); keep it green.
 
 ## Output channels (sinks)
 
@@ -199,6 +209,10 @@ async def dream_history(namespace: str | UUID, *, limit: int = 20) -> list[Dream
 ```
 
 Functional equivalents live at `khora.dream.api.{dream, dream_status, dream_history, dream_cancel}`. `dream_cancel(run_id)` flips an in-process cancel flag, checked between ops. `Khora.dream()` raises `DreamDisabledError` when `DreamConfig.enabled` is False and `ValueError` for bad `mode` / non-UUID `namespace`.
+
+**Embedded-backend caveat.** `dream_status(run_id)` returns `{}` and `dream_history(namespace, ...)` returns `[]` on every non-Postgres backend (sqlite_lance, SurrealDB embedded) — the `khora_dream_runs` checkpoint table is Postgres-only. On embedded, read the file-sink artifacts directly (`<base_dir>/<namespace_id>/<date>/<run_id>.{summary.md,events.jsonl,manifest.json}`) instead of querying the API.
+
+**`mode="apply"` today.** Through `Khora.dream()`, apply is a pass-through for both Phase 1 audit ops (correct — audits have no destructive side effect) and Phase 2 planner ops (their actual mutation logic lands in v0.16 via #669). The per-op `NotImplementedError` guards in `plan_chronicle_fact_compaction(apply=True)` etc. fire only when the planner functions are called *directly*, not via `Khora.dream(mode="apply")`. Treat apply mode as "validated pass" until v0.16.
 
 ### Configuration
 
@@ -323,7 +337,7 @@ Postgres-only checkpoint table for crash-resume semantics.
 | `trigger` | VARCHAR(32) | `"manual" \| "resume" \| ...` |
 | `mode` | VARCHAR(16) | `"dry-run" \| "apply"` |
 | `state` | VARCHAR(32) | `init \| planning \| applying \| completed \| cancelled \| crashed` |
-| `plan_hash` | VARCHAR(64) | canonical-JSON SHA1; detect plan drift on resume |
+| `plan_hash` | VARCHAR(64) | first 16 hex chars of canonical-JSON SHA1; detect plan drift on resume |
 | `started_at`, `heartbeat_at`, `finished_at` | TIMESTAMPTZ | |
 | `last_committed_op_seq` | INTEGER | resume cursor |
 | `total_ops`, `total_decisions` | INTEGER | |
@@ -345,6 +359,45 @@ Adds three NULLable columns to both `relationships` and `memory_facts`:
 Plus Postgres-only partial composite indexes `ix_relationships_live` and `ix_memory_facts_live` over `WHERE invalidated_at IS NULL`. Existing query paths filtering on the legacy `memory_facts.is_active` flag keep working unchanged; the two coexist until a future major version.
 
 These columns are unused by Phase 1 audit and Phase 2 planner ops. They're already in place because apply mode (v0.16) needs them, and migrations land best ahead of the code that depends on them.
+
+## Scheduling
+
+A minimal cron recipe — same shape works under Temporal, k8s CronJob, GitHub Actions schedules, etc.
+
+```python
+# scripts/dream_nightly.py
+import asyncio
+from uuid import UUID
+from khora import Khora, KhoraConfig, DreamConfig
+from khora.dream.exceptions import DreamLockUnavailable, DreamRunStuckError
+
+NAMESPACE_ID = UUID("...")  # stable namespace_id, not the row-level id
+
+async def main() -> None:
+    kb = Khora(config=KhoraConfig(dream=DreamConfig(
+        enabled=True,
+        report_file_sink_enabled=True,
+        report_collector_sink_enabled=True,
+    )))
+    try:
+        async with kb:
+            result = await kb.dream(NAMESPACE_ID, mode="dry-run")
+        # Wire result.ops + your alerting here. Failing counters are the
+        # interesting signal; planned/skipped just describe the namespace.
+        print(result.ops)
+    except DreamLockUnavailable as e:
+        # Another run is in flight against this namespace. Exit non-zero so
+        # cron alerts on overlapping schedules but don't bash an in-flight run.
+        raise SystemExit(75) from e
+    except DreamRunStuckError as e:
+        # Prior run crashed mid-apply. Surface to oncall; do NOT auto-resume.
+        # Operator decides whether to `kb.dream(..., resume_from=e.run_id)`.
+        raise SystemExit(2) from e
+
+asyncio.run(main())
+```
+
+Backing out a rollout: unset `KHORA_DREAM_ENABLED` (or set `dream.enabled=False` in config). `Khora.dream()` then raises `DreamDisabledError` cleanly without touching the DB. The `khora_dream_runs` table and bi-temporal columns from migrations 032/033 remain in the schema (zero-cost when unused).
 
 ## Concurrency
 
@@ -380,7 +433,7 @@ These systems define the *write* side of agent memory well; dream phase targets 
 
 | System | Citation | What it does well | Gap dream phase addresses |
 |---|---|---|---|
-| MemGPT | Packer et al., [arXiv:2310.08560](https://arxiv.org/abs/2310.08560) (2024) | OS-style paged memory, recall vs. archival tiers | No structural audit of archival tier over time |
+| MemGPT | Packer et al., [arXiv:2310.08560](https://arxiv.org/abs/2310.08560) (2023, rev. 2024) | OS-style paged memory, recall vs. archival tiers | No structural audit of archival tier over time |
 | GraphRAG | Edge et al., [arXiv:2404.16130](https://arxiv.org/abs/2404.16130) (2024) | Community-summary index built at ingest | Re-indexing is full-rebuild; no incremental drift detection |
 | Self-RAG | Asai et al., [arXiv:2310.11511](https://arxiv.org/abs/2310.11511) (2023) | Retrieval-on-demand with reflection tokens | Online only; no offline corpus hygiene |
 | Letta / Mem0 | Letta docs; Mem0 OSS | Structured user-facing memory blocks | No scheduled compaction or entity dedupe pass |
@@ -403,6 +456,14 @@ The cleanest framing: dream phase is to memory what OLAP is to OLTP. Same store,
 
 Dream phase does not solve memory drift. It provides the substrate to **detect** drift (audit mode, live in v0.14) and **plan** corrective ops (planner mode, live in v0.15). The `apply` mode that would actually execute dedupe / compaction / clustering raises `NotImplementedError` as of v0.15. Treat the current release as instrumentation; the mutation ops land in v0.16 once the planning signals have been validated against real namespaces.
 
+### LLM usage
+
+**Dream phase makes zero LLM calls in v0.15.0.** Every op is pure SQL + pure-Python — entity dedupe uses pairwise embedding cosine (`_accel.batch_dot_product`), centroid recompute uses Levenshtein over name strings (`rapidfuzz`), event clustering uses SVO-summary cosine on pre-normalized embeddings, schema drift is multiset-diff against `ExpertiseConfig`, abstention drift reads OTel histograms. No prompts exist; no `litellm.acompletion` is called from any planner or audit op.
+
+The plumbing for LLM-using ops is in place: `DreamConfig.llm_max_tokens_per_run` (default 200k) and `llm_max_tokens_per_namespace_per_day` (default 1M) are reserved budgets; `khora.dream.llm_call` span and `khora.dream.llm.tokens` metric are declared in the telemetry contract. These remain inert until Phase 5 (#670–#673) lands ops that genuinely need an LLM — community-summary generation (GraphRAG-style summaries over PageRank communities), contradiction detection across `memory_facts`, and operator-supplied schema-drift normalization. Those will be opt-in per op via `DreamConfig.ops.*` flags, with the budgets enforced before each call.
+
+If you see token cost attributed to khora in v0.15, it is **not** from dream phase. The cost paths are recall-time HyDE expansion, ingest-time extraction, and the optional Level-2 hook evaluator — all documented separately under [observability.md](observability.md).
+
 ## Stability
 
 | Symbol | Tag | Notes |
@@ -410,7 +471,7 @@ Dream phase does not solve memory drift. It provides the substrate to **detect**
 | `Khora.dream()`, `dream_status()`, `dream_history()` | **public** | Coordinated release with `khora-cli` / `khora-explorer` |
 | `DreamConfig`, `DreamResult`, `DreamRunInfo`, `DreamMode`, `DreamScope`, `OpKind` | **public** | Re-exported from top-level `khora` |
 | Dream-specific exceptions (`DreamDisabledError`, `DreamForbiddenOpError`, `DreamRunStuckError`, `DreamLockUnavailable`) | **public** | Pattern-match from job runners |
-| `DreamOp`, `DreamPlan`, `DreamReport`, `DreamProgress`, `DreamCapable` | **internal** | Importable but may evolve |
+| `DreamOp`, `DreamPlan`, `DreamReportEvent`, `DreamProgress`, `DreamCapable` | **internal** | Importable but may evolve |
 | `OpKind` enum *values* | **internal** | New values land per ticket; names may be renamed |
 | Top-level OTel spans + aggregate metrics | **public** | Pin dashboards safely |
 | Per-op OTel spans | **internal** | Names may evolve |

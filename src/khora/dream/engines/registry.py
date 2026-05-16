@@ -25,12 +25,17 @@ from uuid import UUID, uuid4
 
 from khora.dream.engines.chronicle import (
     plan_chronicle_abstention_drift,
+    plan_chronicle_event_clustering,
+    plan_chronicle_fact_compaction,
     plan_chronicle_tombstone_audit,
 )
 from khora.dream.engines.vectorcypher import (
+    plan_vectorcypher_centroid_recompute,
+    plan_vectorcypher_dedupe_entities,
     plan_vectorcypher_orphan_report,
     plan_vectorcypher_schema_drift,
     plan_vectorcypher_source_chunk_ids_audit,
+    plan_vectorcypher_source_chunk_ids_gc,
 )
 from khora.dream.exceptions import DreamForbiddenOpError
 from khora.dream.plan import Checkpoint, DreamOp, DreamPlan, DreamScope, OpKind
@@ -132,6 +137,8 @@ class _ChroniclePlugin:
             {
                 OpKind.CHRONICLE_ABSTENTION_DRIFT_REPORT,
                 OpKind.CHRONICLE_TOMBSTONE_AUDIT,
+                OpKind.CHRONICLE_FACT_COMPACTION,
+                OpKind.CHRONICLE_EVENT_CLUSTERING,
             }
         )
 
@@ -147,6 +154,7 @@ class _ChroniclePlugin:
         del expertise  # chronicle audits don't consult expertise in Phase 1
         ops: list[DreamOp] = []
         wanted = _resolved_scope(scope, self.dream_capabilities)
+        coordinator = kb.storage
 
         if OpKind.CHRONICLE_ABSTENTION_DRIFT_REPORT in wanted:
             engine = kb._get_engine()
@@ -160,10 +168,19 @@ class _ChroniclePlugin:
             ops.append(op)
 
         if OpKind.CHRONICLE_TOMBSTONE_AUDIT in wanted:
-            coordinator = kb.storage
             async with coordinator.transaction() as txn:
                 op = await plan_chronicle_tombstone_audit(namespace_id, session=txn.session, config=config)
             ops.append(op)
+
+        if OpKind.CHRONICLE_FACT_COMPACTION in wanted:
+            async with coordinator.transaction() as txn:
+                phase2_ops = await plan_chronicle_fact_compaction(namespace_id, session=txn.session, config=config)
+            ops.extend(phase2_ops)
+
+        if OpKind.CHRONICLE_EVENT_CLUSTERING in wanted:
+            async with coordinator.transaction() as txn:
+                phase2_ops = await plan_chronicle_event_clustering(namespace_id, session=txn.session, config=config)
+            ops.extend(phase2_ops)
 
         return DreamPlan(
             plan_id=uuid4(),
@@ -193,6 +210,9 @@ class _VectorCypherPlugin:
                 OpKind.VECTORCYPHER_SCHEMA_DRIFT_REPORT,
                 OpKind.VECTORCYPHER_ORPHAN_REPORT,
                 OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT,
+                OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+                OpKind.VECTORCYPHER_CENTROID_RECOMPUTE,
+                OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_GC,
             }
         )
 
@@ -233,6 +253,41 @@ class _VectorCypherPlugin:
         if OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT in wanted:
             op = await plan_vectorcypher_source_chunk_ids_audit(namespace_id, coordinator=coordinator)
             ops.append(op)
+
+        if OpKind.VECTORCYPHER_DEDUPE_ENTITIES in wanted:
+            phase2_ops = await plan_vectorcypher_dedupe_entities(
+                namespace_id,
+                coordinator=coordinator,
+                default_threshold=config.dedupe_entities_default_threshold,
+                per_type_thresholds=config.dedupe_entities_per_type_thresholds,
+                mode="dry-run",
+            )
+            ops.extend(phase2_ops)
+
+        if OpKind.VECTORCYPHER_CENTROID_RECOMPUTE in wanted:
+            # centroid_recompute needs merge_clusters as input. In the
+            # default dispatch we pass [] — operators who want real
+            # centroid plans either invoke the planner function directly
+            # with clusters from a prior dedupe run, or wait for the
+            # auto-chaining off dedupe results that lands in v0.15.x.
+            phase2_ops = await plan_vectorcypher_centroid_recompute(
+                namespace_id,
+                coordinator=coordinator,
+                merge_clusters=[],
+                mode="dry-run",
+                lev_threshold=config.centroid_lev_threshold,
+                min_intra_cluster_cosine=config.centroid_min_intra_cluster_cosine,
+            )
+            ops.extend(phase2_ops)
+
+        if OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_GC in wanted:
+            phase2_ops = await plan_vectorcypher_source_chunk_ids_gc(
+                namespace_id,
+                coordinator=coordinator,
+                min_dead=config.source_chunk_ids_gc_min_dead,
+                mode="dry-run",
+            )
+            ops.extend(phase2_ops)
 
         return DreamPlan(
             plan_id=uuid4(),
