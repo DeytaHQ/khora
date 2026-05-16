@@ -20,6 +20,10 @@ from khora.dream.engines.chronicle.abstention_drift import (
     record_abstention_sample,
     reset_abstention_samples,
 )
+from khora.dream.engines.chronicle.event_clustering import (
+    apply_event_clustering,
+    plan_chronicle_event_clustering,
+)
 from khora.dream.engines.chronicle.fact_compaction import (
     plan_chronicle_fact_compaction,
 )
@@ -28,7 +32,9 @@ from khora.dream.engines.chronicle.tombstone_audit import (
 )
 
 __all__ = [
+    "apply_event_clustering",
     "plan_chronicle_abstention_drift",
+    "plan_chronicle_event_clustering",
     "plan_chronicle_fact_compaction",
     "plan_chronicle_tombstone_audit",
     "record_abstention_sample",

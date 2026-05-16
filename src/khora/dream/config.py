@@ -244,3 +244,26 @@ class DreamConfig(BaseSettings):
             "dedupe_entities_default_threshold."
         ),
     )
+
+    # Phase 2.5 — chronicle event near-duplicate clustering (#665).
+    event_clustering_cosine_threshold: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "SVO-summary cosine threshold above which two chronicle_events "
+            "are considered near-duplicates and clustered. Applied within "
+            "a (namespace_id, subject) bucket and a sliding referenced_date "
+            "window. Pairwise dot product on pre-normalized embeddings."
+        ),
+    )
+    event_clustering_window_days: int = Field(
+        default=7,
+        ge=0,
+        description=(
+            "Half-width of the sliding referenced_date window (in days) "
+            "inside which chronicle_events with cosine >= the threshold "
+            "are clustered. Events outside the window are never merged "
+            "even when their SVO summaries are identical."
+        ),
+    )
