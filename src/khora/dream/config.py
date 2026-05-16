@@ -134,3 +134,22 @@ class DreamConfig(BaseSettings):
             "strips every textual field."
         ),
     )
+
+    # Phase 1.1 — chronicle abstention drift report (#652).
+    abstention_drift_min_samples: int = Field(
+        default=1000,
+        ge=0,
+        description=(
+            "Minimum sample count before the chronicle abstention-drift "
+            "report emits a recommendation. Below this floor the op "
+            "returns decision='insufficient_data'."
+        ),
+    )
+    abstention_drift_sample_cap: int = Field(
+        default=1024,
+        ge=1,
+        description=(
+            "Per-namespace cap on the in-process ring buffer of recall "
+            "samples used by the chronicle abstention-drift report."
+        ),
+    )
