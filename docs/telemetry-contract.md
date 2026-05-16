@@ -66,3 +66,29 @@ related OSS packages are expected to do the same rather than depend on
 a shared telemetry library. Downstream consumers may rely on the names
 tagged `public` in this file remaining stable within a major version
 line.
+
+## Dream-phase free-text rule (Issue #666)
+
+All dream-phase span attributes that carry free text (entity names,
+rationale strings, summary text, raw inputs to a `DreamOperationEvent`)
+MUST go through `khora.telemetry.bounded_text_hash` before becoming a
+span attribute. This applies uniformly across the three sinks in
+`khora.dream.report`:
+
+- File sink — persists verbatim text only when `DreamConfig.redact_text`
+  permits (`none` keeps raw, `summary` keeps the first 200 chars +
+  hash, `all` keeps hash only). The hash representation is always
+  present on the payload via `rationale.rationale_hash` and
+  `text_refs`.
+- Event sink — bridges the `DreamReportEvent` into `MemoryEvent` via
+  `HookDispatcher` and inherits whatever the file-sink payload
+  already serialized; downstream subscribers read the same shape.
+- Collector sink — never reaches into raw text. It reads only
+  pre-hashed surfaces (`rationale_hash`, `text_refs`) for span
+  attributes and bounded-enum scalars (`phase`, `op_type`, `decision`,
+  `mode`, `trigger`, `outcome`, `direction`, `model`) for metric
+  labels.
+
+The cardinality rule still applies: `namespace_id` is a span attribute
+and a log/event field only. None of the dream metrics carry
+`namespace_id` as a label.

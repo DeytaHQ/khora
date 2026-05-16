@@ -580,6 +580,54 @@
       "name": "khora.neo4j.get_neighborhoods_batch.timeout",
       "stability": "internal",
       "owner": "neo4j"
+    },
+    {
+      "name": "khora.dream.run",
+      "stability": "public",
+      "owner": "dream",
+      "_comment": "Top-level dream run span. Attributes: run_id (str), namespace_id (str — span attr ONLY, never a metric label), mode ('dry-run'|'apply'), trigger (str). Issue #666 part of #649."
+    },
+    {
+      "name": "khora.dream.phase",
+      "stability": "public",
+      "owner": "dream",
+      "_comment": "Per-phase span (audit / mutation / ...). Attributes: run_id (str), namespace_id (str — span attr only), phase (str). Issue #666."
+    },
+    {
+      "name": "khora.dream.llm_call",
+      "stability": "public",
+      "owner": "dream",
+      "_comment": "Wraps each LLM call inside a dream phase (borderline-merge verifier, second-opinion auditor). Attributes: model, direction. Free-text prompts go through bounded_text_hash before becoming attributes. Issue #666."
+    },
+    {
+      "name": "khora.dream.undo",
+      "stability": "public",
+      "owner": "dream",
+      "_comment": "Wraps the invocation of an UndoHandle. Attributes: op_type, outcome. Issue #666."
+    },
+    {
+      "name": "khora.dream.op",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Per-op span (DreamOperationEvent). Inner-loop, internal stability. Attributes: run_id, op_id, namespace_id (span attr only), phase, op_type, decision, strategy, rationale_hash (bounded_text_hash). Issue #666."
+    },
+    {
+      "name": "khora.dream.entity_merge",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Inner span for the entity-merge op kind. Issue #666."
+    },
+    {
+      "name": "khora.dream.edge_prune",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Inner span for the edge-prune op kind. Issue #666."
+    },
+    {
+      "name": "khora.dream.community_summary",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Inner span for the community-summary op kind (Phase 5+). Issue #666."
     }
   ],
   "pipeline_stages": [
@@ -893,6 +941,113 @@
       "description": "Level 2 hook evaluations that fell through the cache and required (or queued) an LLM call.",
       "labels": [],
       "_comment": "Issue #601. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.dream.runs_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "description": "Dream runs completed, bucketed by trigger + outcome.",
+      "labels": [
+        {"name": "trigger", "values": ["manual", "scheduled", "api"], "_comment": "Operator-supplied trigger label; bounded enum."},
+        {"name": "outcome", "values": ["completed", "failed"]}
+      ],
+      "_comment": "Issue #666. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.dream.run.duration",
+      "type": "histogram",
+      "stability": "public",
+      "unit": "s",
+      "description": "End-to-end dream run duration in seconds.",
+      "labels": [
+        {"name": "trigger", "values": ["manual", "scheduled", "api"]},
+        {"name": "outcome", "values": ["completed", "failed"]}
+      ],
+      "_comment": "Issue #666. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.dream.phase.duration",
+      "type": "histogram",
+      "stability": "public",
+      "unit": "s",
+      "description": "Per-phase duration inside a dream run.",
+      "labels": [
+        {"name": "phase", "_comment": "Bounded enum of dream phases (audit / mutation / ...)."},
+        {"name": "outcome", "values": ["success", "skipped", "failed"]}
+      ],
+      "_comment": "Issue #666. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.dream.ops_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "description": "Dream ops decided, by phase / op_type / decision.",
+      "labels": [
+        {"name": "phase"},
+        {"name": "op_type", "_comment": "Bounded by OpKind plus future additions."},
+        {"name": "decision", "_comment": "Bounded enum decision string."}
+      ],
+      "_comment": "Issue #666. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.dream.op.duration",
+      "type": "histogram",
+      "stability": "internal",
+      "unit": "s",
+      "description": "Per-op duration. Internal — phase-level histogram is the public surface.",
+      "labels": [
+        {"name": "phase"},
+        {"name": "op_type"}
+      ],
+      "_comment": "Issue #666. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.dream.llm.tokens",
+      "type": "counter",
+      "stability": "public",
+      "unit": "tokens",
+      "description": "LLM tokens spent inside a dream run, by direction + model. Distinct from khora.llm.tokens so dream cost can be sliced separately.",
+      "labels": [
+        {"name": "direction", "values": ["prompt", "completion"]},
+        {"name": "model", "_comment": "LLM model id (e.g. 'gpt-4o-mini')."}
+      ],
+      "_comment": "Issue #666. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.dream.undo_invocations_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "description": "Number of UndoHandle invocations, by op_type + outcome.",
+      "labels": [
+        {"name": "op_type"},
+        {"name": "outcome", "values": ["applied", "skipped", "failed"]}
+      ],
+      "_comment": "Issue #666. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.dream.subscription.overflow_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Dream event-sink outbox drops (queue full, drop_oldest policy).",
+      "labels": [
+        {"name": "subscription_class"}
+      ],
+      "_comment": "Issue #666. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.dream.report.write_failures_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "File-sink writes that failed (open / write / rename / manifest / summary / undo).",
+      "labels": [
+        {"name": "reason", "values": ["open", "io_error", "rename", "manifest", "summary", "undo", "no_open_run"]}
+      ],
+      "_comment": "Issue #666. NO namespace_id label — cardinality rule."
     }
   ]
 }

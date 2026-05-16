@@ -329,6 +329,20 @@ class HookDispatcher:
             if rel_type and rel_type not in filter.relationship_types:
                 return False
 
+        # Dream-phase events: check op_type / decision (Issue #666).
+        # Resource type is "dream" for events emitted via the dream event
+        # sink; matching when either list is set lets subscribers narrow
+        # by op kind or decision without re-implementing pattern logic.
+        if event.resource_type == "dream":
+            if filter.dream_op_types:
+                op_type = data.get("op_type", "")
+                if op_type and op_type not in filter.dream_op_types:
+                    return False
+            if filter.dream_decisions:
+                decision = data.get("decision", "")
+                if decision and decision not in filter.dream_decisions:
+                    return False
+
         # Phase 2 (Item A, Issue #579): structural match DSL.
         if filter.match is not None:
             if not _match_dsl(filter.match, data):
