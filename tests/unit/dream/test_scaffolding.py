@@ -74,20 +74,16 @@ def test_khora_config_nested() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dream_stubs_raise_not_implemented() -> None:
-    """``Khora.dream`` must raise NotImplementedError pointing at the orchestrator ticket."""
+async def test_dream_disabled_raises() -> None:
+    """``Khora.dream`` requires DreamConfig.enabled=True at the API surface."""
+    from khora.dream import DreamDisabledError
+
     kb = Khora.__new__(Khora)
-    # Inject a minimal config so the orchestrator constructor can pull dream out.
-    kb._config = KhoraConfig()
+    kb._config = KhoraConfig()  # default DreamConfig — enabled=False
+    assert kb._config.dream.enabled is False
 
-    with pytest.raises(NotImplementedError, match="Dream orchestrator not yet wired"):
+    with pytest.raises(DreamDisabledError, match="enabled=True"):
         await kb.dream(uuid4())
-
-    with pytest.raises(NotImplementedError, match="Dream orchestrator not yet wired"):
-        await kb.dream_status(uuid4())
-
-    with pytest.raises(NotImplementedError, match="Dream orchestrator not yet wired"):
-        await kb.dream_history(uuid4())
 
 
 def test_internal_symbols_not_in_top_level_all() -> None:
