@@ -17,6 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # time KhoraConfig is instantiated all chains are resolved. See
 # Issue #576 Phase 1 Item 4.
 from khora.config._secrets import AllowSecretTyping
+from khora.dream.config import DreamConfig
 from khora.hooks.models import SemanticHooksConfig as _SemanticHooksConfig
 
 SemanticHooksConfig = _SemanticHooksConfig  # public re-export
@@ -1068,6 +1069,13 @@ class KhoraConfig(BaseSettings):
     telemetry_service_name: str = Field(
         default="khora",
         description="Service name tag for telemetry events",
+    )
+
+    # Dream-phase configuration (#649 / #650). Scaffolding only — orchestrator
+    # bodies are stubbed and raise NotImplementedError until #661 lands.
+    dream: DreamConfig = Field(
+        default_factory=DreamConfig,
+        description="Dream-phase configuration",
     )
 
     @model_validator(mode="after")

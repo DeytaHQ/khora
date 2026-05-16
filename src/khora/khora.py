@@ -1807,6 +1807,57 @@ class Khora:
             return deleted
 
     # =========================================================================
+    # Dream-phase (#649 / #650 scaffolding — orchestrator stubs)
+    # =========================================================================
+
+    async def dream(
+        self,
+        namespace: str | UUID,
+        *,
+        mode: str = "dry-run",
+        scope: Any = None,
+        ops: Any = None,
+        config: Any = None,
+        on_progress: Callable[[Any], None] | None = None,
+        resume_from: UUID | None = None,
+    ) -> Any:
+        """Run a dream-phase pass over ``namespace``.
+
+        Phase 0.1 scaffolding — body raises ``NotImplementedError`` until
+        the orchestrator ships in #661. The signature is settled so
+        callers can wire against it.
+        """
+        from khora.dream.api import dream as _dream
+
+        return await _dream(
+            self,
+            namespace,
+            mode=mode,
+            scope=scope,
+            ops=ops,
+            config=config,
+            on_progress=on_progress,
+            resume_from=resume_from,
+        )
+
+    async def dream_status(self, run_id: UUID) -> dict[str, object]:
+        """Return live or post-mortem status for a dream run."""
+        from khora.dream.api import dream_status as _dream_status
+
+        return await _dream_status(self, run_id)
+
+    async def dream_history(
+        self,
+        namespace: str | UUID,
+        *,
+        limit: int = 20,
+    ) -> list[Any]:
+        """Return recent dream-run results for ``namespace`` (newest first)."""
+        from khora.dream.api import dream_history as _dream_history
+
+        return await _dream_history(self, namespace, limit=limit)
+
+    # =========================================================================
     # Entity Operations
     # =========================================================================
 

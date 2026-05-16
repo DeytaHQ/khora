@@ -49,6 +49,7 @@ from . import integrations
 from .config import KhoraConfig
 from .core.models.document import DocumentSource
 from .core.models.event import EventType
+from .dream import DreamConfig, DreamMode, DreamResult, DreamRunInfo, DreamScope, OpKind
 from .engines import create_engine, list_engines, register_engine
 from .exceptions import KhoraError
 from .extraction.skills import EntityTypeConfig, ExpertiseConfig, RelationshipTypeConfig
@@ -93,4 +94,11 @@ __all__ = [
     "SemanticFilter",
     # Integrations (adapter Protocols, registry, types) — see issue #619
     "integrations",
+    # Dream-phase scaffolding — see issues #649 / #650
+    "DreamConfig",
+    "DreamMode",
+    "DreamScope",
+    "DreamResult",
+    "DreamRunInfo",
+    "OpKind",
 ]
