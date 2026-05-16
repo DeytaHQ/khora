@@ -54,4 +54,5 @@ ignore:
   - "tests/**"
   - "scripts/**"
   - "docs/**"
+  - "examples/**"
   - "src/khora/db/migrations/versions/*.py"
