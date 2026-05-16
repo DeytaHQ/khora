@@ -364,6 +364,12 @@ class RelationshipModel(Base):
     valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     valid_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Bi-temporal soft-delete (migration 033, dream-phase Phase 0.3, #653).
+    # Populated by Phase 4 apply-mode dream runs in v0.15; NULL = still valid.
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidated_by: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
     # Confidence and weight
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
     weight: Mapped[float] = mapped_column(Float, default=1.0)
@@ -873,6 +879,13 @@ class MemoryFactModel(Base):
 
     # Session attribution for agentic-framework adapters (#620).
     session_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+    # Bi-temporal soft-delete (migration 033, dream-phase Phase 0.3, #653).
+    # Coexists with ``is_active`` in v0.14; deprecation of ``is_active`` is a
+    # v0.16+ concern. NULL = still valid.
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidated_by: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
