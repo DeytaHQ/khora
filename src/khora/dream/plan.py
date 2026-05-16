@@ -31,6 +31,7 @@ class OpKind(StrEnum):
     CLUSTER_EVENTS = "cluster_events"
     RECOMPUTE_CENTROIDS = "recompute_centroids"
     VECTORCYPHER_SCHEMA_DRIFT_REPORT = "vectorcypher_schema_drift_report"
+    VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT = "vectorcypher_source_chunk_ids_audit"
 
 
 @dataclass(slots=True, frozen=True)
