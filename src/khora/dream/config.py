@@ -199,3 +199,26 @@ class DreamConfig(BaseSettings):
             "(every entity with at least one dead reference is planned)."
         ),
     )
+
+    # Vectorcypher centroid-recompute knobs (#660).
+    centroid_lev_threshold: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "Maximum Levenshtein distance between any two names in a "
+            "merge cluster for the centroid path. Above this, the names "
+            "are considered lexically distant and the op plans a "
+            "re-embed of the canonical name instead."
+        ),
+    )
+    centroid_min_intra_cluster_cosine: float = Field(
+        default=0.88,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum pairwise cosine within a merge cluster. Below this "
+            "floor the cluster is judged multimodal — the merge itself "
+            "is suspect — and the op emits decision='skip_multimodal' "
+            "without planning an embedding."
+        ),
+    )

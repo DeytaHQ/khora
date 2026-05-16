@@ -37,6 +37,7 @@ class OpKind(StrEnum):
     VECTORCYPHER_ORPHAN_REPORT = "vectorcypher_orphan_report"
     CHRONICLE_TOMBSTONE_AUDIT = "chronicle_tombstone_audit"
     CHRONICLE_FACT_COMPACTION = "chronicle_fact_compaction"
+    VECTORCYPHER_CENTROID_RECOMPUTE = "vectorcypher_centroid_recompute"
 
 
 @dataclass(slots=True, frozen=True)
