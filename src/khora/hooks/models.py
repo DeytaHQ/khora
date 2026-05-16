@@ -154,6 +154,13 @@ class SemanticFilter:
     entity_types: list[str] = field(default_factory=list)
     relationship_types: list[str] = field(default_factory=list)
 
+    # Dream-phase Level 0 pre-filters (Issue #666). When set, only dream
+    # ops whose ``op_type`` / ``decision`` is in the list pass through —
+    # zero-cost list membership checks against the MemoryEvent data
+    # payload populated by the dream event sink.
+    dream_op_types: list[str] = field(default_factory=list)
+    dream_decisions: list[str] = field(default_factory=list)
+
     # EventBridge-style structural filter (Level 0, free). When set, the
     # dispatcher evaluates this pattern against ``event.data`` after the
     # entity_types / relationship_types checks. See ``khora.hooks.match_dsl``

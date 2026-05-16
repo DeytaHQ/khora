@@ -70,6 +70,16 @@ class EventType(str, Enum):
     RECALL_RESULTS_READY = "recall.results_ready"
     RECALL_COMPLETED = "recall.completed"
 
+    # Dream-phase events — emitted by the dream orchestrator's event sink
+    # so operators can subscribe to plan / op / phase transitions through
+    # the same HookDispatcher cascade (Issue #666, part of #649).
+    DREAM_RUN_STARTED = "dream.run.started"
+    DREAM_PHASE_STARTED = "dream.phase.started"
+    DREAM_OP_DECIDED = "dream.op.decided"
+    DREAM_PHASE_COMPLETED = "dream.phase.completed"
+    DREAM_RUN_COMPLETED = "dream.run.completed"
+    DREAM_RUN_FAILED = "dream.run.failed"
+
 
 @dataclass
 class MemoryEvent:
