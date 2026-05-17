@@ -39,9 +39,9 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import text
 
-from khora.dream._undo_record import UndoRecord
 from khora.dream.exceptions import DreamForbiddenOpError
 from khora.dream.plan import DreamOp, OpKind
+from khora.dream.result import UndoRecord
 from khora.telemetry import trace_span
 
 if TYPE_CHECKING:

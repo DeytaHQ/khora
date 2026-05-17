@@ -124,7 +124,7 @@ Ten operations ship in v0.15.0 across both engines:
 | 2 planner | chronicle | memory_facts compaction | Tombstoned rows past `retention_days` |
 | 2 planner | chronicle | event clustering | Near-duplicate `chronicle_events` within a sliding window |
 
-Default is `DreamConfig(enabled=False)` — the master switch is opt-in. **No op in v0.15.0 mutates state**: Phase 1 audits are pure SELECT; Phase 2 planners emit a plan and raise `NotImplementedError` if you ask them to apply it. Apply mode lands in v0.16.
+Default is `DreamConfig(enabled=False)` — the master switch is opt-in. **Both modes are live in v0.15.0**: `mode="dry-run"` emits the plan only; `mode="apply"` runs the matching apply handler under a per-op transaction with the pre-state snapshotted into `undo.json` before each mutation. Five guardrails protect the apply path (7-day hard retention floor, `KHORA_DREAM_DISABLE_APPLY` kill-switch, chunk_id runtime assertion, snapshot-before-delete, advisory-lock-held-through-apply).
 
 See [docs/dream-phase.md](docs/dream-phase.md) for the full operator guide: research lineage, configuration surface, sink wiring, telemetry contract, storage substrate, and stability tags.
 
