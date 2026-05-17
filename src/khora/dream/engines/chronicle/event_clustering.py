@@ -90,12 +90,29 @@ async def plan_chronicle_event_clustering(
 
 
 async def apply_event_clustering(*_args: Any, **_kwargs: Any) -> None:
-    """Apply path is blocked in v0.14.
+    """Apply path is blocked pending a ``chronicle_events`` schema migration.
 
-    Raises ``NotImplementedError`` unconditionally; the v0.15 phase-4
-    rollout (#669) ships the bi-temporal soft-delete apply path.
+    Phase 4 (#669) wires the orchestrator's per-op apply dispatch, but
+    the bi-temporal soft-delete columns required by this op
+    (``invalidated_at``, ``invalidated_by``, ``merged_into_event_id``)
+    are **not** present on the ``chronicle_events`` table as of
+    migration 033 — that migration added bi-temporal columns to
+    ``relationships`` and ``memory_facts`` only. Landing apply mode for
+    this op requires migration 034 (out of scope for #669).
+
+    The chunk_id invariant assertion the runtime handler will carry is
+    documented in the module docstring above ("never propose mutating
+    ``chronicle_events.chunk_id``"). When migration 034 lands, this
+    function will be replaced with an apply handler matching the
+    :func:`apply_chronicle_fact_compaction` shape: snapshot canonical /
+    tail rows before mutation, ``UPDATE`` the soft-delete columns
+    (never ``chunk_id``), return an :class:`UndoRecord`.
     """
-    raise NotImplementedError("apply mode lands in v0.15 — see #649 phase 4 / #669")
+    raise NotImplementedError(
+        "apply_event_clustering requires chronicle_events bi-temporal columns "
+        "(invalidated_at, invalidated_by, merged_into_event_id) — not present "
+        "until migration 034 lands (see #669 follow-up). Plan mode is supported."
+    )
 
 
 # ---------------------------------------------------------------------------

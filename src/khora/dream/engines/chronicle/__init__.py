@@ -7,10 +7,10 @@ records the *intent* of one consolidation action; the orchestrator
 Phase 1.1 (#652) lands the read-only abstention-drift report.
 Phase 1.2 (#654) lands the read-only tombstone audit. Phase 2.4 (#664)
 lands the dry-run-only fact-compaction planner that consumes the
-audit's ``recommended_retention_days`` output; apply mode lands in
-v0.15 (#669).
+audit's ``recommended_retention_days`` output; the matching apply
+handler lands in v0.15 / #669 (:func:`apply_chronicle_fact_compaction`).
 
-Stability: **internal** (Phase 1 / Phase 2).
+Stability: **internal** (Phase 1 / Phase 2 / Phase 4).
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from khora.dream.engines.chronicle.event_clustering import (
     plan_chronicle_event_clustering,
 )
 from khora.dream.engines.chronicle.fact_compaction import (
+    apply_chronicle_fact_compaction,
     plan_chronicle_fact_compaction,
 )
 from khora.dream.engines.chronicle.tombstone_audit import (
@@ -32,6 +33,7 @@ from khora.dream.engines.chronicle.tombstone_audit import (
 )
 
 __all__ = [
+    "apply_chronicle_fact_compaction",
     "apply_event_clustering",
     "plan_chronicle_abstention_drift",
     "plan_chronicle_event_clustering",
