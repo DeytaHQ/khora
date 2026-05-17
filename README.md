@@ -10,22 +10,22 @@
 
 **Khora is a durable knowledge memory library for long-horizon AI agents, with pluggable retrieval engines and storage backends to fit different workloads.** It stores what your agent learns — documents, entities, relationships, events, facts — and retrieves it through hybrid search that combines vector similarity, graph traversal, keyword matching, and temporal context. A scheduled "dream phase" then reorganizes the store offline so quality doesn't decay as it grows.
 
-khora is a **library, not an application**. You embed it in your agent's process; there is no server. Tooling lives in sibling packages (coming soon): khora-cli for extraction and search, khora-explorer for ontology construction.
+Khora is a **library, not an application**. You embed it in your agent's process; there is no server. Tooling lives in sibling packages (coming soon): khora-cli for extraction and search, khora-explorer for ontology construction.
 
 ## Why khora?
 
 Long-horizon agents — copilots, customer-support bots, research assistants, anything that has to remember across sessions — hit four problems that pure vector search doesn't solve:
 
-1. **Ingest is more than chunking.** Useful memory needs entities, relationships, and temporal anchors extracted from the raw text. khora runs a 3-phase ingest pipeline (stage → enrich → expand) with selective LLM extraction (default 70% of chunks, configurable) and cross-batch entity resolution.
-2. **Recall is more than cosine.** Real questions mix semantic similarity, multi-hop entity reasoning, freshness, and keyword precision. khora's engines combine all four — vector + Cypher graph traversal + BM25 + RRF fusion + temporal-anchored reranking — and route per query.
-3. **Memory drifts.** Thresholds calibrated on day one stop working at week ten. Duplicates accumulate from independent ingest batches. Soft-deleted facts pile up. khora's [dream phase](docs/dream-phase.md) audits the store, plans consolidation work (entity dedupe, centroid recompute, fact compaction, event clustering), and applies it under per-op transactions with snapshotted undo records.
+1. **Ingest is more than chunking.** Useful memory needs entities, relationships, and temporal anchors extracted from the raw text. Khora runs a 3-phase ingest pipeline (stage → enrich → expand) with selective LLM extraction (default 70% of chunks, configurable) and cross-batch entity resolution.
+2. **Recall is more than cosine.** Real questions mix semantic similarity, multi-hop entity reasoning, freshness, and keyword precision. Khora's engines combine all four — vector + Cypher graph traversal + BM25 + RRF fusion + temporal-anchored reranking — and route per query.
+3. **Memory drifts.** Thresholds calibrated on day one stop working at week ten. Duplicates accumulate from independent ingest batches. Soft-deleted facts pile up. Khora's [dream phase](docs/dream-phase.md) audits the store, plans consolidation work (entity dedupe, centroid recompute, fact compaction, event clustering), and applies it under per-op transactions with snapshotted undo records.
 4. **Production needs observability.** Every recall emits OpenTelemetry spans and metrics through a stable, contract-tested surface; credential fields are `SecretStr`; free-text never leaks into span attributes. See [docs/observability.md](docs/observability.md).
 
-khora's bet: instead of one opinionated memory model, ship **pluggable engines** for different access patterns, share the same storage substrate underneath them, and own the offline-maintenance gap that vector-store wrappers leave to operators.
+Khora's bet: instead of one opinionated memory model, ship **pluggable engines** for different access patterns, share the same storage substrate underneath them, and own the offline-maintenance gap that vector-store wrappers leave to operators.
 
 ## Engines
 
-khora ships **two production engines** and one experimental one. They share the storage substrate (PostgreSQL + pgvector, optionally Neo4j) and the ingest pipeline — pick by access pattern.
+Khora ships **two production engines** and one experimental one. They share the storage substrate (PostgreSQL + pgvector, optionally Neo4j) and the ingest pipeline — pick by access pattern.
 
 ### VectorCypher (default) — hybrid graph + vector recall
 
@@ -121,7 +121,7 @@ Khora ships two zero-infrastructure paths. Both are marked **experimental** — 
 
 ## Integrations
 
-khora ships ready-made adapters for the major agentic frameworks. Each adapter is an opt-in optional extra — install only what you use, and the framework itself is imported lazily so importing `khora` never pulls in a framework you don't need.
+Khora ships ready-made adapters for the major agentic frameworks. Each adapter is an opt-in optional extra — install only what you use, and the framework itself is imported lazily so importing `khora` never pulls in a framework you don't need.
 
 | Framework | Install | Khora surface |
 |---|---|---|
@@ -135,7 +135,7 @@ See [docs/integrations/](docs/integrations/index.md) for the full per-adapter do
 
 ## Maintenance: dream phase
 
-khora ships an **offline maintenance pass** ("dream phase") that audits an accumulated namespace and plans consolidation work — entity dedupe, fact compaction, event clustering. Run it on a schedule (cron, Temporal, k8s CronJob) and consume the structured reports through three independently-togglable sinks: file, semantic-event, or telemetry collector.
+Khora ships an **offline maintenance pass** ("dream phase") that audits an accumulated namespace and plans consolidation work — entity dedupe, fact compaction, event clustering. Run it on a schedule (cron, Temporal, k8s CronJob) and consume the structured reports through three independently-togglable sinks: file, semantic-event, or telemetry collector.
 
 ```python
 from khora import Khora, KhoraConfig, DreamConfig
