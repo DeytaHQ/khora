@@ -14,8 +14,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Hard floor on fact-compaction retention. Operators cannot configure
+# the dream phase to hard-delete tombstoned facts younger than this many
+# days — anything tighter is treated as a misconfiguration. The floor
+# protects against accidental data loss during rollout (#667).
+_FACT_COMPACTION_RETENTION_FLOOR_DAYS = 7
 
 
 class DreamOpsConfig(BaseModel):
@@ -244,6 +250,54 @@ class DreamConfig(BaseSettings):
             "dedupe_entities_default_threshold."
         ),
     )
+
+    # ------------------------------------------------------------------
+    # Apply-mode guardrails (#667)
+    # ------------------------------------------------------------------
+
+    @field_validator("fact_compaction_retention_days")
+    @classmethod
+    def _enforce_fact_compaction_retention_floor(cls, value: int) -> int:
+        """Reject retention windows tighter than the hard floor.
+
+        The dream-phase fact compactor hard-deletes tombstoned rows older
+        than ``fact_compaction_retention_days``. Operators cannot drop
+        the value below the floor — a value smaller than the floor is
+        always a misconfiguration (a Phase 4 rollout disabling the floor
+        would land as a separate field).
+        """
+        if value < _FACT_COMPACTION_RETENTION_FLOOR_DAYS:
+            raise ValueError(
+                f"fact_compaction_retention_days must be >= "
+                f"{_FACT_COMPACTION_RETENTION_FLOOR_DAYS} (got {value}). "
+                "The hard floor exists to prevent accidental data loss "
+                "during dream-phase apply rollout."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _enforce_apply_mode_retention_floor(self) -> DreamConfig:
+        """Re-assert the retention floor when apply mode is the default.
+
+        Even though :meth:`_enforce_fact_compaction_retention_floor`
+        always runs, this model-level pass makes the constraint explicit
+        for the (enabled, default_mode='apply') configuration — if the
+        Pydantic field-validator ever moved or is bypassed via a future
+        configurable-floor flag, this last gate still catches an
+        apply-mode dream run pointed at a too-tight retention window.
+        """
+        if (
+            self.enabled
+            and self.default_mode == "apply"
+            and self.fact_compaction_retention_days < _FACT_COMPACTION_RETENTION_FLOOR_DAYS
+        ):
+            raise ValueError(
+                "DreamConfig(enabled=True, default_mode='apply') "
+                f"requires fact_compaction_retention_days >= "
+                f"{_FACT_COMPACTION_RETENTION_FLOOR_DAYS} "
+                f"(got {self.fact_compaction_retention_days})."
+            )
+        return self
 
     # Phase 2.5 — chronicle event near-duplicate clustering (#665).
     event_clustering_cosine_threshold: float = Field(

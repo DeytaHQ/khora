@@ -1,14 +1,15 @@
-"""Engine-plugin registry for dream-phase orchestration (#661).
+"""Engine-plugin registry for dream-phase orchestration (#661, #667).
 
 Each registered engine plugin implements :class:`DreamCapable` and
 encapsulates the per-op ``plan_*`` calls under one ``plan_dream`` entry
 point. The orchestrator runtime-checks every plugin against the
 Protocol before dispatching.
 
-Phase 1 only ships read-only audit ops, so ``apply_dream`` is a
-pass-through that re-stamps the op records and returns a
-:class:`DreamResult`. Phase 2+ tickets land destructive apply handlers
-on top of the same scaffolding.
+Phase 4 (#667) introduces real per-op apply handlers. The orchestrator
+walks each :class:`DreamOp` in the plan, looks up the handler via
+:func:`get_apply_handler`, and invokes it inside its own
+coordinator transaction. Handlers return an :class:`UndoRecord`; ops
+without a handler (Phase 1 audit ops) return ``None`` and are skipped.
 
 Stability: **internal** (Phase 1.0). The Protocol itself
 (:class:`DreamCapable`) is internal until the dream surface stabilizes.
@@ -34,13 +35,20 @@ from khora.dream.engines.vectorcypher import (
 )
 from khora.dream.exceptions import DreamForbiddenOpError
 from khora.dream.plan import Checkpoint, DreamOp, DreamPlan, DreamScope, OpKind
-from khora.dream.result import DreamDiff, DreamProgress, DreamResult, DreamRunInfo, OpSummary
+from khora.dream.result import DreamDiff, DreamProgress, DreamResult, DreamRunInfo, OpSummary, UndoRecord
 from khora.exceptions import KhoraError
 
 if TYPE_CHECKING:
     from khora.dream.config import DreamConfig
     from khora.extraction.skills.base import ExpertiseConfig
     from khora.khora import Khora
+
+
+# Per-op apply-handler signature. Handlers run inside an orchestrator-owned
+# coordinator transaction; they take the op + the open session and return
+# an :class:`UndoRecord`. Returning ``None`` is reserved for ops that have
+# no apply handler (Phase 1 audit ops).
+ApplyHandler = Callable[..., Awaitable["UndoRecord"]]
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +115,93 @@ _FORBIDDEN_OP_KINDS: frozenset[str] = frozenset(
         "documents_delete",
     }
 )
+
+
+# ---------------------------------------------------------------------------
+# Apply-handler dispatch (#667)
+# ---------------------------------------------------------------------------
+#
+# Each OpKind that has an apply path maps to the name of a function the
+# corresponding engine submodule exports. Lookup is lazy via importlib so
+# this module can stay decoupled from individual handler modules — the
+# parallel agents writing the handlers only need to export the name listed
+# below. Phase 1 audit ops (e.g. CHRONICLE_TOMBSTONE_AUDIT) are absent
+# from the map; the orchestrator treats that as a no-op pass-through.
+
+_APPLY_HANDLER_NAMES: dict[OpKind, tuple[str, str]] = {
+    # (module-path, attribute-name)
+    OpKind.VECTORCYPHER_DEDUPE_ENTITIES: (
+        "khora.dream.engines.vectorcypher.dedupe_entities",
+        "apply_vectorcypher_dedupe_entities",
+    ),
+    OpKind.VECTORCYPHER_CENTROID_RECOMPUTE: (
+        "khora.dream.engines.vectorcypher.centroid_recompute",
+        "apply_vectorcypher_centroid_recompute",
+    ),
+    OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_GC: (
+        "khora.dream.engines.vectorcypher.source_chunk_ids_gc",
+        "apply_vectorcypher_source_chunk_ids_gc",
+    ),
+    OpKind.CHRONICLE_FACT_COMPACTION: (
+        "khora.dream.engines.chronicle.fact_compaction",
+        "apply_chronicle_fact_compaction",
+    ),
+    OpKind.CHRONICLE_EVENT_CLUSTERING: (
+        "khora.dream.engines.chronicle.event_clustering",
+        "apply_event_clustering",
+    ),
+}
+
+
+def get_apply_handler(op_type: OpKind | str) -> ApplyHandler | None:
+    """Resolve the apply handler for ``op_type``.
+
+    Returns ``None`` for Phase 1 audit ops that don't carry an apply
+    handler. The orchestrator treats ``None`` as "skip — no mutation
+    needed".
+
+    Looking up via importlib means the engine submodule does not need
+    to import its handler from the registry, and the registry does not
+    need to import the handler at module load. The parallel handler
+    implementations land in their respective engine submodules.
+
+    Raises:
+        DreamForbiddenOpError: ``op_type`` lives in
+            :data:`_FORBIDDEN_OP_KINDS`. Defense in depth — the safety
+            floor check should have rejected the plan first, but this
+            re-check makes the apply path safe against a buggy
+            ``_validate_no_forbidden_ops`` call site.
+    """
+    op_type_str = str(op_type)
+    if op_type_str in _FORBIDDEN_OP_KINDS:
+        raise DreamForbiddenOpError(
+            f"Apply-handler lookup for forbidden op_type={op_type_str!r}; "
+            "_validate_no_forbidden_ops should have aborted the run earlier."
+        )
+
+    try:
+        op_kind = OpKind(op_type_str)
+    except ValueError:
+        # Unknown op_type — treat as no-handler so the orchestrator's
+        # pass-through path runs.
+        return None
+
+    entry = _APPLY_HANDLER_NAMES.get(op_kind)
+    if entry is None:
+        return None
+
+    import importlib
+
+    module_path, attr = entry
+    module = importlib.import_module(module_path)
+    handler = getattr(module, attr, None)
+    if handler is None:
+        # Handler module exists but the symbol is missing — a parallel
+        # agent has not landed yet. Treat as no-handler so the
+        # orchestrator continues (and the missing handler surfaces as a
+        # test failure in the handler's own ticket, not this one).
+        return None
+    return handler
 
 
 def _validate_no_forbidden_ops(plan: DreamPlan) -> None:
@@ -324,7 +419,9 @@ def get_engine_plugin(engine_name: str) -> object:
 
 
 __all__ = [
+    "ApplyHandler",
     "canonical_plan_payload",
+    "get_apply_handler",
     "get_engine_plugin",
     "plan_hash",
 ]

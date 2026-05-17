@@ -55,7 +55,20 @@ class DreamRunStuckError(KhoraError):
         )
 
 
+class DreamApplyDisabled(KhoraError):
+    """Raised when ``mode='apply'`` is requested but the kill-switch is set.
+
+    The ``KHORA_DREAM_DISABLE_APPLY`` environment variable is the global
+    five-second escape hatch operators flip to halt all destructive dream
+    runs without restarting the process. It is read at orchestrator
+    construction; a truthy value (anything other than ``""``, ``"0"``,
+    ``"false"``) makes :meth:`DreamOrchestrator._apply_phase` raise this
+    error before touching any database row.
+    """
+
+
 __all__ = [
+    "DreamApplyDisabled",
     "DreamDisabledError",
     "DreamForbiddenOpError",
     "DreamRunStuckError",

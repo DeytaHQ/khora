@@ -22,11 +22,13 @@ wire their own GC loop — same shape as :func:`khora.gc.expire_sessions`.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import IO, Any, Literal
+from typing import IO, TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from loguru import logger
@@ -43,14 +45,54 @@ from khora.dream.events import (
     UndoHandle,
 )
 from khora.dream.report.base import DreamReportSchemaMismatchError, ReportSink
+from khora.telemetry import trace_span
 from khora.telemetry.metrics import metric_counter
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from khora.dream.result import UndoRecord
+
 SCHEMA_VERSION = "dream-report/1"
+UNDO_SCHEMA_VERSION = "dream-undo/1"
 
 _WRITE_FAILURE_COUNTER = metric_counter(
     "khora.dream.report.write_failures_total",
     description="File-sink writes that failed (open / write / rename).",
 )
+
+
+def _atomic_write_with_fsync(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` atomically with an fsync.
+
+    Writes to ``{path}.tmp``, fsyncs the file descriptor, then renames
+    over ``path``. The rename is atomic on POSIX so a mid-write crash
+    leaves either the old file or the new file — never a half-written
+    one. The fsync flushes to the platter so a power loss after the
+    rename does not lose the contents.
+    """
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
+    os.replace(str(tmp_path), str(path))
+
+
+def _undo_record_to_dict(record: UndoRecord) -> dict[str, Any]:
+    """Serialize an :class:`UndoRecord` to the ``dream-undo/1`` op shape."""
+    return {
+        "op_id": str(record.op_id),
+        "op_type": record.op_type,
+        "before": record.before,
+        "applied_at": record.applied_at.isoformat(),
+    }
 
 
 def _serialize(event: DreamReportEvent) -> dict[str, Any]:
@@ -146,6 +188,67 @@ class DreamFileSink(ReportSink):
     async def flush(self) -> None:
         if self._jsonl_handle is not None:
             self._jsonl_handle.flush()
+
+    # ------------------------------------------------------------------
+    # Apply-phase incremental undo writes (#667)
+    # ------------------------------------------------------------------
+
+    def write_undo_incremental(
+        self,
+        records: Sequence[UndoRecord],
+        *,
+        run_id: UUID | None = None,
+        namespace_id: UUID | None = None,
+        started_at: datetime | None = None,
+    ) -> None:
+        """Write ``{run_id}.undo.json`` (``dream-undo/1``) with fsync.
+
+        Called by the orchestrator after every committed op so a
+        mid-apply process crash leaves a recoverable undo file on
+        disk. The full record list is re-serialized each call — for
+        the bounded op counts a dream run produces (typically < 1000)
+        the overhead is negligible, and the simpler write path avoids
+        partial-write hazards.
+
+        Args:
+            records: All undo records collected so far. Order matches
+                op execution order; consumers replay in reverse to roll
+                back.
+            run_id: Override for the run id (defaults to the in-flight
+                run captured on :meth:`emit`).
+            namespace_id: Override for the namespace id.
+            started_at: Override for ``started_at`` stamped on the
+                document.
+        """
+        target_run_id = run_id if run_id is not None else self._run_id
+        target_namespace = namespace_id if namespace_id is not None else self._namespace_id
+        target_run_dir = self._run_dir
+        if target_run_dir is None:
+            _WRITE_FAILURE_COUNTER.add(1, attributes={"reason": "undo_before_run_started"})
+            return
+        if target_run_id is None:
+            _WRITE_FAILURE_COUNTER.add(1, attributes={"reason": "undo_missing_run_id"})
+            return
+
+        with trace_span(
+            "khora.dream.undo.write",
+            run_id=str(target_run_id),
+            namespace_id=str(target_namespace) if target_namespace is not None else "",
+            record_count=str(len(records)),
+        ):
+            payload = {
+                "schema_version": UNDO_SCHEMA_VERSION,
+                "run_id": str(target_run_id),
+                "namespace_id": str(target_namespace) if target_namespace is not None else None,
+                "started_at": (started_at or datetime.now(UTC)).isoformat(),
+                "ops": [_undo_record_to_dict(r) for r in records],
+            }
+            path = target_run_dir / f"{target_run_id}.undo.json"
+            try:
+                _atomic_write_with_fsync(path, json.dumps(payload, indent=2, default=str))
+            except OSError as exc:
+                _WRITE_FAILURE_COUNTER.add(1, attributes={"reason": "undo_incremental"})
+                logger.warning("DreamFileSink incremental undo write failed: {}", exc)
 
     async def close(self) -> None:
         """Finalize the run directory.
@@ -379,6 +482,7 @@ async def expire_dream_reports(
 __all__ = [
     "DreamFileSink",
     "SCHEMA_VERSION",
-    "load_manifest",
+    "UNDO_SCHEMA_VERSION",
     "expire_dream_reports",
+    "load_manifest",
 ]
