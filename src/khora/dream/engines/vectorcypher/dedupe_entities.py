@@ -29,11 +29,16 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
 
+from sqlalchemy import text
+
 from khora import _accel
 from khora.dream.plan import DreamOp, OpKind
+from khora.dream.result import UndoRecord
 from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from khora.core.models.entity import Entity
     from khora.storage.coordinator import StorageCoordinator
 
@@ -310,3 +315,160 @@ def _build_skip_collision_op(
         started_at=started_at,
         namespace_id=namespace_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Apply handler (#668)
+# ---------------------------------------------------------------------------
+
+
+async def apply_vectorcypher_dedupe_entities(
+    op: DreamOp,
+    *,
+    coordinator: StorageCoordinator,
+    session: AsyncSession,
+) -> UndoRecord:
+    """Apply one planned dedupe op — caller owns the transaction.
+
+    For each merge listed in ``op.outputs[0]["merges"]``:
+
+      1. Snapshot every ``relationships`` row that points at the
+         absorbed entity (either as source or target).
+      2. Rewrite each such row's matching endpoint(s) to the canonical
+         entity_id.
+      3. Detect self-loops created by the rewrite (canonical -> canonical)
+         and bi-temporally invalidate them via ``invalidated_at=NOW()`` /
+         ``invalidated_by=op_id``.
+      4. Soft-delete the absorbed entity row by stamping
+         ``valid_until=NOW()`` — never hard-delete.
+
+    Idempotent on replay: if the absorbed entity has no remaining live
+    edges, no rewrites fire (the soft-delete UPDATE is itself a noop on
+    an already-soft-deleted row). The handler does not touch
+    ``documents`` or ``chunks``.
+
+    Args:
+        op: The planned op. ``outputs[0]["merges"]`` is a list of
+            ``{"canonical_id": str, "absorbed_id": str}`` dicts.
+        coordinator: Storage coordinator (unused — session owns writes).
+        session: Orchestrator-owned async session.
+
+    Returns:
+        :class:`UndoRecord` with ``before["merges"]`` carrying, per
+        merge, the absorbed_id, canonical_id, the list of previous
+        ``relationships`` rows, and the ids of relationships that were
+        invalidated as post-rewrite self-loops. Top-level key is
+        ``"merges"``, never ``"chunk_id"``.
+    """
+    del coordinator  # unused — session is the only write surface
+    outputs = op.outputs[0] if op.outputs else {}
+    merges_input = list(outputs.get("merges") or [])
+    if not merges_input:
+        return UndoRecord(
+            op_id=op.op_id,
+            op_type=str(op.op_type),
+            before={"merges": []},
+            applied_at=datetime.now(UTC),
+        )
+
+    merges_undo: list[dict[str, Any]] = []
+    now = datetime.now(UTC)
+
+    for entry in merges_input:
+        canonical_id = UUID(str(entry["canonical_id"]))
+        absorbed_id = UUID(str(entry["absorbed_id"]))
+
+        # 1. Snapshot rows that reference the absorbed entity.
+        prev_rows = await _select_relationships_touching(session, absorbed_id)
+        previous_serialized: list[dict[str, Any]] = []
+        self_loops: list[UUID] = []
+
+        for row in prev_rows:
+            rel_id = _coerce_uuid(getattr(row, "id", None))
+            src_id = _coerce_uuid(getattr(row, "source_entity_id", None))
+            tgt_id = _coerce_uuid(getattr(row, "target_entity_id", None))
+            rel_type = getattr(row, "relationship_type", None)
+            if rel_id is None or src_id is None or tgt_id is None:
+                continue
+
+            previous_serialized.append(
+                {
+                    "id": str(rel_id),
+                    "source_entity_id": str(src_id),
+                    "target_entity_id": str(tgt_id),
+                    "relationship_type": str(rel_type) if rel_type is not None else None,
+                }
+            )
+
+            new_src = canonical_id if src_id == absorbed_id else src_id
+            new_tgt = canonical_id if tgt_id == absorbed_id else tgt_id
+            if new_src == new_tgt:
+                # Post-rewrite self-loop — invalidate, don't rewrite.
+                await session.execute(
+                    text("UPDATE relationships SET invalidated_at = :ts, invalidated_by = :opid WHERE id = :rid"),
+                    {"ts": now, "opid": op.op_id, "rid": rel_id},
+                )
+                self_loops.append(rel_id)
+            else:
+                # 2. Rewrite the absorbed endpoint(s) to the canonical id.
+                await session.execute(
+                    text(
+                        "UPDATE relationships "
+                        "SET source_entity_id = :src, target_entity_id = :tgt, "
+                        "    updated_at = :ts "
+                        "WHERE id = :rid"
+                    ),
+                    {
+                        "src": new_src,
+                        "tgt": new_tgt,
+                        "ts": now,
+                        "rid": rel_id,
+                    },
+                )
+
+        # 3. Soft-delete the absorbed entity row (never hard-delete).
+        await session.execute(
+            text("UPDATE entities SET valid_until = :ts, updated_at = :ts WHERE id = :aid AND valid_until IS NULL"),
+            {"ts": now, "aid": absorbed_id},
+        )
+
+        merges_undo.append(
+            {
+                "canonical_id": str(canonical_id),
+                "absorbed_id": str(absorbed_id),
+                "previous_relationships": previous_serialized,
+                "self_loops_invalidated": [str(rid) for rid in self_loops],
+            }
+        )
+
+    return UndoRecord(
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before={"merges": merges_undo},
+        applied_at=now,
+    )
+
+
+async def _select_relationships_touching(session: AsyncSession, absorbed_id: UUID) -> list[Any]:
+    """Return every row whose source or target is ``absorbed_id`` and which is still live."""
+    result = await session.execute(
+        text(
+            "SELECT id, source_entity_id, target_entity_id, relationship_type "
+            "FROM relationships "
+            "WHERE (source_entity_id = :aid OR target_entity_id = :aid) "
+            "  AND invalidated_at IS NULL"
+        ),
+        {"aid": absorbed_id},
+    )
+    return list(result)
+
+
+def _coerce_uuid(value: Any) -> UUID | None:
+    if value is None:
+        return None
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        return None
