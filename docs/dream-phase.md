@@ -1,11 +1,11 @@
 # Dream phase
 
-`khora.dream` is an **offline maintenance pass** for accumulated agentic memory. It runs against a single namespace on a schedule — cron, Temporal, k8s CronJob — auditing the graph and (in v0.15+) planning consolidation work. Audit ops are read-only and ship today. Planner ops emit a dry-run plan today and raise `NotImplementedError` if you try to apply it; apply mode lands in v0.16.
+`khora.dream` is an **offline maintenance pass** for accumulated agentic memory. It runs against a single namespace on a schedule — cron, Temporal, k8s CronJob — auditing the graph, planning consolidation work, and (when called with `mode="apply"`) executing the plan with bi-temporal soft-delete + per-op snapshots written to `undo.json`.
 
 The naming follows the complementary learning systems framework from neuroscience: ingestion is the fast, episodic path (`Khora.remember`), dream phase is the slow, reorganizing path. Same store, different access regime, different objective function. See [Research & Prior Art](#research--prior-art) for the lineage.
 
 > **v0.15.0 status — read this once before scheduling anything in prod.**
-> Five Phase-1 audit ops are live and safe. Five Phase-2 planner ops are live in dry-run mode; their `apply` paths raise `NotImplementedError`. Nothing in v0.15 mutates your graph. The kill-criterion gate is whether operators actually call `kb.dream()` in production — `khora.dream.runs_total` is the telemetry to watch.
+> Ten ops are live: five Phase-1 audits (read-only, no side effects) and five Phase-2 planners (planning + apply). Apply mode mutates your graph through bi-temporal soft-delete and one hard-delete path (`fact_compaction` on already-tombstoned rows past retention). Five guardrails protect the apply path: hard 7-day retention floor, `KHORA_DREAM_DISABLE_APPLY` env-var kill-switch, advisory-lock-held-through-apply, `chunk_id` runtime assertion, snapshot-before-mutate undo records. Default config is `enabled=False`; nothing happens until you opt in.
 
 ## When to use it
 
@@ -16,7 +16,7 @@ The naming follows the complementary learning systems framework from neuroscienc
 - An `ExpertiseConfig` change landed weeks ago and you don't know whether the data has caught up.
 - Operators want a periodic, human-readable "state of the graph" snapshot they can review before authorizing destructive ops.
 
-If you want to **fix** any of these today, you can't — apply mode raises `NotImplementedError`. Dream phase v0.15 tells you the truth about your graph and produces a plan. The plan-then-apply split is deliberate (see [Research & Prior Art](#offline-rl-replay-buffers)).
+For each, you can `kb.dream(namespace_id, mode="dry-run")` to see the proposed plan first, then `mode="apply"` once you trust it. The plan-then-apply split is deliberate (see [Research & Prior Art](#offline-rl-replay-buffers)). Run dry-run on the same namespace at least a few times before flipping to apply — both to validate the planner's output and to give yourself an audit trail through the file sink.
 
 ## Quickstart
 
@@ -38,11 +38,21 @@ kb = Khora(
 
 result = await kb.dream(namespace_id, mode="dry-run")
 
-for op in result.ops:
-    print(op.op_type, op.decision, op.outputs)
+# `result.ops` is the aggregate counter — one OpSummary per op kind.
+for summary in result.ops:
+    print(
+        f"{summary.op_type}: planned={summary.planned} "
+        f"skipped={summary.skipped} failed={summary.failed}"
+    )
+
+# Per-op detail (decision strings, outputs dicts, rationale) lives in
+# the file sink's events.jsonl, or in `result.metadata["plan_payload"]`
+# in dry-run mode.
 ```
 
-Configuration knobs and env var bindings live in [configuration.md](configuration.md); all settings are reachable via the `KHORA_DREAM_*` prefix.
+Configuration knobs and env-var bindings live in [configuration.md](configuration.md); all settings reachable via `KHORA_DREAM_*`.
+
+**Default file-sink location.** With `report_file_sink_enabled=True`, reports land under `<system temp dir>/khora-dream-reports`. On Linux that's `/tmp/...`, which is wiped on reboot — **set a persistent base directory** if you want audit history to survive restarts. Operators on persistent workloads should copy reports out of the temp dir on a sweep, or wire a `DreamFileSink(base_dir=...)` directly in a custom sink list.
 
 ## Operations
 
@@ -94,7 +104,7 @@ Joins entities × chunks (Postgres `unnest`; SQLite Python-side) and reports tot
 
 ### Planner operations (Phase 2)
 
-Plan-only in v0.15. Each op emits one `DreamOp` per work item with `decision` describing what it would do; `apply` mode raises `NotImplementedError` (tracked under #669). The plan is checkpointed to `khora_dream_runs` so the apply phase, when it lands, can resume from the same plan.
+Each op emits one `DreamOp` per work item with `decision` describing what it would do. **Both modes are live in v0.15**: `mode="dry-run"` emits the plan only; `mode="apply"` runs the matching `apply_<op>` handler under per-op transactions, with the pre-state snapshotted into `undo.json` before each mutation. The plan is checkpointed to `khora_dream_runs` so a crashed run can resume via `resume_from=<run_id>`.
 
 #### VectorCypher: cross-batch entity dedupe
 
@@ -123,7 +133,7 @@ Plans per-entity rewrites that drop dead chunk UUIDs from `Entity.source_chunk_i
 
 #### Chronicle: `memory_facts` compaction
 
-Plans hard deletes of tombstoned `memory_facts` rows older than `fact_compaction_retention_days` (default 365). The only Phase 2 op that hard-deletes — because the tombstone is itself the soft-delete marker; compaction is the second of the two phases. Output rows describe per-fact what would be deleted; apply mode raises `NotImplementedError`. See [Database compaction and tombstone GC](#database-compaction-and-tombstone-gc) for the prior art.
+Plans hard deletes of tombstoned `memory_facts` rows older than `fact_compaction_retention_days` (default 365; **hard floor: 7 days**, config rejected below that). The only Phase 2 op that hard-deletes — because the tombstone is itself the soft-delete marker; compaction is the second of the two phases. Apply mode (`apply_chronicle_fact_compaction`) snapshots the full content of every row into `UndoRecord.before["rows"]` **before** issuing the DELETE; the snapshot SELECT/DELETE ordering is TDD-pinned by `test_snapshot_captured_before_delete_executes`. See [Database compaction and tombstone GC](#database-compaction-and-tombstone-gc) for the prior art.
 
 #### Chronicle: event clustering
 
@@ -236,44 +246,60 @@ Functional equivalents live at `khora.dream.api.{dream, dream_status, dream_hist
 | `VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT` | `vectorcypher_source_chunk_ids_audit` | 1 (audit) | pass-through |
 | `CHRONICLE_ABSTENTION_DRIFT_REPORT` | `chronicle_abstention_drift_report` | 1 (audit) | pass-through |
 | `CHRONICLE_TOMBSTONE_AUDIT` | `chronicle_tombstone_audit` | 1 (audit) | pass-through |
-| `VECTORCYPHER_DEDUPE_ENTITIES` | `vectorcypher_dedupe_entities` | 2 (planner) | raises `NotImplementedError` until v0.16 (#669) |
-| `VECTORCYPHER_CENTROID_RECOMPUTE` | `vectorcypher_centroid_recompute` | 2 (planner) | raises `NotImplementedError` until v0.16 |
-| `VECTORCYPHER_SOURCE_CHUNK_IDS_GC` | `vectorcypher_source_chunk_ids_gc` | 2 (planner) | raises `NotImplementedError` until v0.16 |
-| `CHRONICLE_FACT_COMPACTION` | `chronicle_fact_compaction` | 2 (planner) | raises `NotImplementedError` until v0.16 |
-| `CHRONICLE_EVENT_CLUSTERING` | `chronicle_event_clustering` | 2 (planner) | `apply_event_clustering` raises `NotImplementedError` until v0.16 |
+| `VECTORCYPHER_DEDUPE_ENTITIES` | `vectorcypher_dedupe_entities` | 2 (planner) | `apply_vectorcypher_dedupe_entities` — bi-temporal soft-delete + relationship rewrite. Postgres-only. |
+| `VECTORCYPHER_CENTROID_RECOMPUTE` | `vectorcypher_centroid_recompute` | 2 (planner) | `apply_vectorcypher_centroid_recompute` — overwrites canonical entity embedding. Postgres-only in v0.15; SQLite-LanceDB path lands v0.16. |
+| `VECTORCYPHER_SOURCE_CHUNK_IDS_GC` | `vectorcypher_source_chunk_ids_gc` | 2 (planner) | `apply_vectorcypher_source_chunk_ids_gc` — array filter. Dialect-aware. Idempotent. |
+| `CHRONICLE_FACT_COMPACTION` | `chronicle_fact_compaction` | 2 (planner) | `apply_chronicle_fact_compaction` — **only hard-delete op**. Snapshots full rows into undo.json before DELETE. 7-day retention floor. |
+| `CHRONICLE_EVENT_CLUSTERING` | `chronicle_event_clustering` | 2 (planner) | `apply_chronicle_event_clustering` — bi-temporal soft-merge via `merged_into_event_id` (migration 034). |
 
 ### Plan / scope / result dataclasses
 
 All in `khora.dream.plan` / `khora.dream.result`. Frozen slotted dataclasses.
 
 - `DreamScope(op_kinds, since, until, entity_ids, document_ids)` — **public**. `None` fields = no restriction.
-- `DreamResult(run, diff, ops, llm_usage, metadata)` — **public**. `metadata` carries `plan_hash` + `plan_payload`.
+- `DreamResult(run, diff, ops, llm_usage, metadata)` — **public**. `metadata` carries `plan_hash` + `plan_payload` on dry-run.
 - `DreamRunInfo(run_id, namespace_id, mode, started_at, finished_at, duration_ms, resume_of)` — **public**.
 - `DreamMode = Literal["dry-run", "apply"]` — **public**.
-- `DreamOp`, `DreamPlan`, `Checkpoint`, `DreamDiff`, `DreamProgress`, `OpSummary` — **internal**.
+- `UndoRecord(op_id, op_type, before, applied_at)` — **public**. Returned by every apply handler; persisted into `undo.json` (schema `dream-undo/1`).
+- `OpSummary(op_type, planned, applied, skipped, failed)` — **public**. The shape of items in `DreamResult.ops`.
+- `DreamOp`, `DreamPlan`, `Checkpoint`, `DreamDiff`, `DreamProgress` — **internal**.
 
 ### Planner functions
 
-Coroutines returning `DreamOp` (or `tuple[DreamOp, ...]`). **Internal** stability — call via the orchestrator unless writing tests.
+Coroutines returning `DreamOp` (or `tuple[DreamOp, ...]`). **Internal** stability — call via the orchestrator unless writing tests. The orchestrator never invokes a planner with `mode="apply"`; that path is reserved for direct testing.
 
 ```python
 # Chronicle (khora.dream.engines.chronicle)
 plan_chronicle_abstention_drift(namespace_id, *, engine, config, sample_rate=None)
 plan_chronicle_tombstone_audit(namespace_id, *, session, config, recommended_retention_days=365)
-plan_chronicle_fact_compaction(namespace_id, *, session, config, apply=False)  # apply=True → NotImplementedError
+plan_chronicle_fact_compaction(namespace_id, *, session, config)
 plan_chronicle_event_clustering(namespace_id, *, session, config)
-apply_event_clustering(*args, **kwargs)                                         # raises NotImplementedError
 
 # Vectorcypher (khora.dream.engines.vectorcypher)
 plan_vectorcypher_schema_drift(namespace_id, *, coordinator, expertise, previous_run_id=None, ...)
 plan_vectorcypher_orphan_report(namespace_id, *, coordinator, expertise=None, pr_percentile_threshold=5.0, ...)
 plan_vectorcypher_source_chunk_ids_audit(namespace_id, *, coordinator, top_k_offenders=20)
-plan_vectorcypher_source_chunk_ids_gc(namespace_id, *, coordinator, min_dead=1, mode="dry-run")
-plan_vectorcypher_centroid_recompute(namespace_id, *, coordinator, merge_clusters, mode="dry-run", ...)
-plan_vectorcypher_dedupe_entities(namespace_id, *, coordinator, default_threshold=0.90, mode="dry-run", ...)
+plan_vectorcypher_source_chunk_ids_gc(namespace_id, *, coordinator, min_dead=1)
+plan_vectorcypher_centroid_recompute(namespace_id, *, coordinator, merge_clusters, ...)
+plan_vectorcypher_dedupe_entities(namespace_id, *, coordinator, default_threshold=0.90, ...)
 ```
 
-For Phase 2 functions, `mode="apply"` raises `NotImplementedError`.
+### Apply functions
+
+Coroutines returning `UndoRecord`. **Internal** stability. Invoked by the orchestrator's `_apply_phase` via `khora.dream.engines.registry.get_apply_handler(op_kind)`; direct callers own their own transaction.
+
+```python
+# Chronicle
+apply_chronicle_fact_compaction(op, *, coordinator, session) -> UndoRecord
+apply_chronicle_event_clustering(op, *, coordinator, session) -> UndoRecord
+
+# Vectorcypher
+apply_vectorcypher_source_chunk_ids_gc(op, *, coordinator, session) -> UndoRecord
+apply_vectorcypher_centroid_recompute(op, *, coordinator, session, embedder=None) -> UndoRecord
+apply_vectorcypher_dedupe_entities(op, *, coordinator, session) -> UndoRecord
+```
+
+Every handler honors: caller-owned transaction (no commit/log/telemetry), idempotent on replay, JSON-serialisable `UndoRecord.before`, no top-level `"chunk_id"` key (orchestrator runtime-asserts this via `safety._assert_no_chunk_id_mutation`).
 
 ### Reporting sinks
 
@@ -293,8 +319,9 @@ Also exported: `SCHEMA_VERSION = "dream-report/1"`, `load_manifest(path)`, `expi
 All inherit from `khora.exceptions.KhoraError`. **Public** — pattern-match these from job runners.
 
 - `DreamDisabledError` — `DreamConfig.enabled` is False
-- `DreamForbiddenOpError` — plan contains a forbidden op (document delete, UNIQUE-collision write, read-only namespace)
-- `DreamRunStuckError(run_id, heartbeat_age_seconds)` — prior run is `applying` with a stale heartbeat; resolve via `resume_from=run_id`
+- `DreamApplyDisabled` — `KHORA_DREAM_DISABLE_APPLY` env-var kill-switch tripped; `mode="apply"` refused without touching the DB
+- `DreamForbiddenOpError` — plan contains a forbidden op (document delete, `chunk_id` mutation, UNIQUE-collision write, read-only namespace, sub-floor retention)
+- `DreamRunStuckError(run_id, heartbeat_age_seconds)` — prior run is `applying` with a stale heartbeat; resolve via `resume_from=run_id` after manual review
 - `DreamLockUnavailable(namespace_id, timeout_seconds)` — advisory lock contention
 
 ### Protocol
@@ -380,7 +407,7 @@ These systems define the *write* side of agent memory well; dream phase targets 
 
 | System | Citation | What it does well | Gap dream phase addresses |
 |---|---|---|---|
-| MemGPT | Packer et al., [arXiv:2310.08560](https://arxiv.org/abs/2310.08560) (2024) | OS-style paged memory, recall vs. archival tiers | No structural audit of archival tier over time |
+| MemGPT | Packer et al., [arXiv:2310.08560](https://arxiv.org/abs/2310.08560) (2023, rev. 2024) | OS-style paged memory, recall vs. archival tiers | No structural audit of archival tier over time |
 | GraphRAG | Edge et al., [arXiv:2404.16130](https://arxiv.org/abs/2404.16130) (2024) | Community-summary index built at ingest | Re-indexing is full-rebuild; no incremental drift detection |
 | Self-RAG | Asai et al., [arXiv:2310.11511](https://arxiv.org/abs/2310.11511) (2023) | Retrieval-on-demand with reflection tokens | Online only; no offline corpus hygiene |
 | Letta / Mem0 | Letta docs; Mem0 OSS | Structured user-facing memory blocks | No scheduled compaction or entity dedupe pass |
@@ -401,7 +428,12 @@ The cleanest framing: dream phase is to memory what OLAP is to OLTP. Same store,
 
 ### Honest limits
 
-Dream phase does not solve memory drift. It provides the substrate to **detect** drift (audit mode, live in v0.14) and **plan** corrective ops (planner mode, live in v0.15). The `apply` mode that would actually execute dedupe / compaction / clustering raises `NotImplementedError` as of v0.15. Treat the current release as instrumentation; the mutation ops land in v0.16 once the planning signals have been validated against real namespaces.
+Dream phase does not solve memory drift. It provides the substrate to detect drift (audit mode, since v0.14), plan corrective ops (planner mode, since v0.15), and execute them with bi-temporal soft-delete + per-op undo snapshots (apply mode, since v0.15). What it does **not** do:
+
+- Decide *when* to run. That's operator policy — cron / Temporal / k8s CronJob.
+- Validate that a planned op makes business sense. The planner uses heuristics (cosine, Levenshtein, age thresholds); operators are expected to dry-run several times and review the file-sink reports before flipping to apply.
+- Reverse an applied op automatically. Undo records are persisted to `undo.json` (schema `dream-undo/1`) but there is no `kb.undo(run_id)` API. Restoring from the snapshot is a hand-rolled operation in v0.15; an automated undo player lands in v0.16.
+- Replace good ingest-time decisions. If dedupe finds 10,000 candidate merges in a fresh namespace, the bug is upstream — in the extraction pipeline, the embedding model choice, or the per-type thresholds — not in dream phase.
 
 ## Stability
 
@@ -409,8 +441,9 @@ Dream phase does not solve memory drift. It provides the substrate to **detect**
 |---|---|---|
 | `Khora.dream()`, `dream_status()`, `dream_history()` | **public** | Coordinated release with `khora-cli` / `khora-explorer` |
 | `DreamConfig`, `DreamResult`, `DreamRunInfo`, `DreamMode`, `DreamScope`, `OpKind` | **public** | Re-exported from top-level `khora` |
-| Dream-specific exceptions (`DreamDisabledError`, `DreamForbiddenOpError`, `DreamRunStuckError`, `DreamLockUnavailable`) | **public** | Pattern-match from job runners |
-| `DreamOp`, `DreamPlan`, `DreamReport`, `DreamProgress`, `DreamCapable` | **internal** | Importable but may evolve |
+| Dream-specific exceptions (`DreamDisabledError`, `DreamApplyDisabled`, `DreamForbiddenOpError`, `DreamRunStuckError`, `DreamLockUnavailable`) | **public** | Pattern-match from job runners |
+| `UndoRecord` | **public** | Returned by apply handlers; persisted into `undo.json` |
+| `DreamOp`, `DreamPlan`, `DreamReportEvent`, `DreamProgress`, `DreamCapable` | **internal** | Importable but may evolve |
 | `OpKind` enum *values* | **internal** | New values land per ticket; names may be renamed |
 | Top-level OTel spans + aggregate metrics | **public** | Pin dashboards safely |
 | Per-op OTel spans | **internal** | Names may evolve |
@@ -420,7 +453,10 @@ Dream phase does not solve memory drift. It provides the substrate to **detect**
 
 Tracked under the umbrella [#649](https://github.com/DeytaHQ/khora/issues/649).
 
-- **Phase 4 — apply mode** (#667, #668, #669). Flips the five Phase 2 planners from `NotImplementedError` to real mutation. The bi-temporal columns from migration 033 carry the audit trail.
-- **Phase 5 — advanced operations** (#670, #671, #672, #673). Community detection + summaries (LLM-heavy, opt-in), edge pruning by weight × recency, contradiction detection, schema-drift normalization with an operator-supplied mapping.
+- **Phase 5 — advanced operations** (#670, #671, #672, #673). Community detection + LLM-generated summaries (GraphRAG-style; the first dream-phase ops to actually call an LLM, gated by the existing `llm_max_tokens_per_run` budget), edge pruning by weight × recency, contradiction detection across `memory_facts`, schema-drift normalization with an operator-supplied mapping.
+- **`apply_vectorcypher_centroid_recompute` on SQLite-LanceDB.** The handler is Postgres-only in v0.15 because the embedded vector backend's `update_entity_embedding` commits out-of-band, violating the caller-owned-transaction contract. SQLite path needs a session-aware vector-backend write API first.
+- **`apply_vectorcypher_dedupe_entities` Neo4j re-target.** v0.15 ships the Postgres `relationships` rewrite. The Neo4j edge re-target + archived-node path needs a different transactional shape (no shared session with PG) and is deferred.
+- **Auto-chaining of dedupe → centroid_recompute.** Today `centroid_recompute` in the default plan dispatch receives `merge_clusters=[]` and emits no DreamOps. Real centroid plans require direct invocation with clusters from a prior dedupe run, or manual operator stitching via `resume_from`.
+- **Planner `mode="apply"` cleanup.** Two of the Phase 2 planners (`plan_vectorcypher_dedupe_entities`, `plan_vectorcypher_source_chunk_ids_gc`, `plan_vectorcypher_centroid_recompute`) still accept a `mode="apply"` kwarg that raises `NotImplementedError`. The orchestrator never sets this kwarg — the dedicated `apply_<op>` functions are the real apply entry point. The raise path is dead code reachable only from direct callers; removing the kwarg is a follow-up cleanup.
 
-The deliberate gate: do operators actually call `kb.dream()` against production namespaces? `khora.dream.runs_total` is the telemetry to watch. If yes, Phase 4 follows in v0.16. If no, the mutation track is deprecated and the planner ops stay as audit-grade signals.
+Phase 4 has shipped. The kill-criterion telemetry remains `khora.dream.runs_total` — it now distinguishes `mode="dry-run"` vs `mode="apply"` via the `outcome` label and informs whether to invest in Phase 5.
