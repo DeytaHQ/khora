@@ -823,6 +823,24 @@ class ChronicleEventModel(Base):
     # Session attribution for agentic-framework adapters (#620).
     session_id: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
+    # Bi-temporal soft-delete (migration 034, dream-phase Phase 4, #669).
+    # Populated by Phase 4 apply-mode dream runs that soft-merge near-duplicate
+    # events. NULL = still live. ``merged_into_event_id`` is a self-FK to the
+    # canonical event the row was merged into; ``ON DELETE SET NULL`` so a hard
+    # delete of a canonical row detaches its tails rather than cascading.
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    invalidated_by: Mapped[UUIDType | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    merged_into_event_id: Mapped[UUIDType | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "chronicle_events.id",
+            name="fk_chronicle_events_merged_into_event_id",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     # Relationships

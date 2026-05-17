@@ -10,21 +10,25 @@ highest-confidence event in each cluster as canonical (ties broken by
 
 The op emits one :class:`DreamOp` per cluster with
 ``op_type=OpKind.CHRONICLE_EVENT_CLUSTERING`` and
-``decision="planned"``. Its ``outputs`` carry the *planned* merged
-``source_chunk_ids`` count and the retained ``observation_date`` list —
-data the Phase 4 apply path (#649 / #669) will consume.
+``decision="planned"``. Its ``inputs`` carry the canonical id and the
+full merged-id list; ``outputs`` carry the *planned* merged
+``source_chunk_ids`` count and the retained ``observation_date`` list.
 
-**Critical invariant — never propose mutating ``chronicle_events.chunk_id``.**
+**Critical invariant — never mutate ``chronicle_events.chunk_id``.**
 
 The temporal recall channel (see ``engine.py:1620``) dedupes events by
 ``chunk_id`` and surfaces the back-pointer to the chunk that owns the
 event. Mutating ``chunk_id`` on the canonical row breaks that linkage.
-The planned merge therefore unifies an aggregate ``source_chunk_ids``
-list (the chunk_ids of cluster members, recorded for downstream apply
-consumption) — it never targets the ``chunk_id`` FK column itself.
+The planner only records an aggregate ``source_chunk_ids`` count —
+never a write directive against the FK column. The apply path
+(:func:`apply_chronicle_event_clustering`) only touches three columns:
+``invalidated_at`` / ``invalidated_by`` / ``merged_into_event_id``
+introduced in migration 034.
 
-Apply mode is blocked here: ``apply_event_clustering`` raises
-``NotImplementedError`` until v0.15 lands the bi-temporal apply path.
+Apply mode (Phase 4, #669) soft-merges tails into the canonical event
+via the bi-temporal columns. Pre-existing ``apply_event_clustering``
+shim is gone — callers go through
+:func:`apply_chronicle_event_clustering`.
 
 Span: ``khora.dream.chronicle.event_clustering`` (internal stability).
 """
@@ -40,6 +44,7 @@ from sqlalchemy import text
 
 from khora._accel import batch_dot_product
 from khora.dream.plan import DreamOp, OpKind
+from khora.dream.result import UndoRecord
 from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
@@ -50,6 +55,12 @@ if TYPE_CHECKING:
 
 _PHASE = "plan"
 _OP_SPAN = "khora.dream.chronicle.event_clustering"
+_APPLY_SPAN = "khora.dream.chronicle.event_clustering.apply"
+# Columns the apply path is allowed to touch. Any UPDATE that mentions a
+# column NOT in this set is a bug — chunk_id in particular is load-bearing
+# for the temporal-recall back-pointer (see engine.py:1620).
+_ALLOWED_UPDATE_COLUMNS = frozenset({"invalidated_at", "invalidated_by", "merged_into_event_id"})
+_FORBIDDEN_UPDATE_COLUMNS = frozenset({"chunk_id", "id", "namespace_id", "subject"})
 
 
 async def plan_chronicle_event_clustering(
@@ -89,30 +100,166 @@ async def plan_chronicle_event_clustering(
     return tuple(ops)
 
 
-async def apply_event_clustering(*_args: Any, **_kwargs: Any) -> None:
-    """Apply path is blocked pending a ``chronicle_events`` schema migration.
+async def apply_chronicle_event_clustering(
+    op: DreamOp,
+    *,
+    coordinator: Any = None,
+    session: AsyncSession,
+) -> UndoRecord:
+    """Apply one event-clustering DreamOp via bi-temporal soft-merge.
 
-    Phase 4 (#669) wires the orchestrator's per-op apply dispatch, but
-    the bi-temporal soft-delete columns required by this op
-    (``invalidated_at``, ``invalidated_by``, ``merged_into_event_id``)
-    are **not** present on the ``chronicle_events`` table as of
-    migration 033 — that migration added bi-temporal columns to
-    ``relationships`` and ``memory_facts`` only. Landing apply mode for
-    this op requires migration 034 (out of scope for #669).
+    Reads ``op.inputs[0]["canonical_id"]`` (the canonical event chosen
+    by the planner) and ``op.inputs[0]["merged_event_ids"]`` (all
+    cluster members including the canonical). For every tail
+    (everything except the canonical), UPDATEs the migration-034
+    columns:
 
-    The chunk_id invariant assertion the runtime handler will carry is
-    documented in the module docstring above ("never propose mutating
-    ``chronicle_events.chunk_id``"). When migration 034 lands, this
-    function will be replaced with an apply handler matching the
-    :func:`apply_chronicle_fact_compaction` shape: snapshot canonical /
-    tail rows before mutation, ``UPDATE`` the soft-delete columns
-    (never ``chunk_id``), return an :class:`UndoRecord`.
+    * ``invalidated_at`` = NOW()
+    * ``invalidated_by`` = ``op.op_id``
+    * ``merged_into_event_id`` = canonical_id
+
+    The UPDATE is gated by ``invalidated_at IS NULL`` so re-applying
+    the same op is a no-op (idempotency).
+
+    Returns an :class:`UndoRecord` whose ``before`` payload uses the
+    top-level key ``"clusters"`` (NEVER ``"chunk_id"``) and records the
+    pre-apply state of each tail so a later revert can restore it.
+
+    The ``coordinator`` argument is accepted to match the protocol
+    shared with other apply handlers (some need it for multi-backend
+    transactions); event-clustering only touches the SQL session and
+    so receives it for symmetry.
     """
-    raise NotImplementedError(
-        "apply_event_clustering requires chronicle_events bi-temporal columns "
-        "(invalidated_at, invalidated_by, merged_into_event_id) — not present "
-        "until migration 034 lands (see #669 follow-up). Plan mode is supported."
+    payload = op.inputs[0] if op.inputs else {}
+    canonical_id = _as_uuid(payload["canonical_id"])
+    merged_ids = [_as_uuid(eid) for eid in payload.get("merged_event_ids", ())]
+    tail_ids = [eid for eid in merged_ids if eid != canonical_id]
+
+    with trace_span(
+        _APPLY_SPAN,
+        op_id=str(op.op_id),
+        canonical_id=str(canonical_id),
+        tail_count=len(tail_ids),
+    ):
+        previous_states = await _capture_previous_states(session, tail_ids)
+
+        if tail_ids:
+            await _soft_merge_tails(
+                session,
+                canonical_id=canonical_id,
+                tail_ids=tail_ids,
+                op_id=op.op_id,
+            )
+
+    return UndoRecord(
+        op_id=op.op_id,
+        op_type=OpKind.CHRONICLE_EVENT_CLUSTERING.value,
+        before={
+            "clusters": [
+                {
+                    "canonical_id": str(canonical_id),
+                    "tail_ids": [str(t) for t in tail_ids],
+                    "previous_states": previous_states,
+                }
+            ]
+        },
+        applied_at=datetime.now(UTC),
     )
+
+
+# Compile-time guard for the column-allowlist invariant. Forbidden columns
+# must not intersect the allowed set; if a refactor accidentally moves a
+# load-bearing FK into the allow set, this trips at import time.
+assert _ALLOWED_UPDATE_COLUMNS.isdisjoint(_FORBIDDEN_UPDATE_COLUMNS), (
+    "apply path's allow-set overlaps the forbidden-set — chunk_id, id, namespace_id, and subject must never be mutated"
+)
+
+
+async def _capture_previous_states(session: AsyncSession, tail_ids: list[UUID]) -> list[dict[str, Any]]:
+    """Snapshot the soft-delete columns for each tail before the update.
+
+    Used by the returned UndoRecord so a revert can restore the
+    pre-apply state. Only the three migration-034 columns are
+    snapshotted — by construction, the apply path cannot have touched
+    anything else.
+    """
+    if not tail_ids:
+        return []
+    bound = [_bind_uuid(session, t) for t in tail_ids]
+    # ``placeholders`` is a programmatically-generated bind-param list
+    # (``:t0, :t1, ...``); no user input flows into the SQL string. The
+    # actual UUID values bind via the ``params`` dict below.
+    placeholders = ", ".join(f":t{i}" for i in range(len(bound)))
+    params = {f"t{i}": v for i, v in enumerate(bound)}
+    stmt = text(
+        "SELECT id, invalidated_at, invalidated_by, merged_into_event_id "  # noqa: S608
+        f"FROM chronicle_events WHERE id IN ({placeholders})"
+    )
+    result = await session.execute(stmt, params)
+    snapshots: list[dict[str, Any]] = []
+    for r in result.all():
+        snapshots.append(
+            {
+                "id": str(_as_uuid(r.id)),
+                "invalidated_at": _iso_or_none(r.invalidated_at),
+                "invalidated_by": _str_or_none(r.invalidated_by),
+                "merged_into_event_id": _str_or_none(r.merged_into_event_id),
+            }
+        )
+    return snapshots
+
+
+async def _soft_merge_tails(
+    session: AsyncSession,
+    *,
+    canonical_id: UUID,
+    tail_ids: list[UUID],
+    op_id: UUID,
+) -> None:
+    """Issue the UPDATE that soft-merges each tail into the canonical.
+
+    Per-row UPDATE (instead of a single ``WHERE id IN (...)``) because
+    SQLite's ``CURRENT_TIMESTAMP`` resolves to a single value per
+    statement and the test fixture relies on per-row timestamps for
+    deterministic ordering checks. The N is bounded by cluster size —
+    typically <10. Postgres N=many UPDATE is identical in cost.
+
+    Column-allowlist invariant: the SET clause references only
+    ``invalidated_at`` / ``invalidated_by`` / ``merged_into_event_id``.
+    Compile-time-asserted via :data:`_ALLOWED_UPDATE_COLUMNS`.
+    """
+    stmt = text(
+        "UPDATE chronicle_events SET "
+        "invalidated_at = CURRENT_TIMESTAMP, "
+        "invalidated_by = :op_id, "
+        "merged_into_event_id = :canonical "
+        "WHERE id = :tail_id AND invalidated_at IS NULL"
+    )
+    canonical_bind = _bind_uuid(session, canonical_id)
+    op_bind = _bind_uuid(session, op_id)
+    for tail in tail_ids:
+        await session.execute(
+            stmt,
+            {
+                "op_id": op_bind,
+                "canonical": canonical_bind,
+                "tail_id": _bind_uuid(session, tail),
+            },
+        )
+
+
+def _iso_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _str_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
 
 
 # ---------------------------------------------------------------------------

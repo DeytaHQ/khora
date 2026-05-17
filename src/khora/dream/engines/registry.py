@@ -148,7 +148,7 @@ _APPLY_HANDLER_NAMES: dict[OpKind, tuple[str, str]] = {
     ),
     OpKind.CHRONICLE_EVENT_CLUSTERING: (
         "khora.dream.engines.chronicle.event_clustering",
-        "apply_event_clustering",
+        "apply_chronicle_event_clustering",
     ),
 }
 
