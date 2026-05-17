@@ -278,10 +278,18 @@ async def test_dream_op_round_trips_json(session: AsyncSession) -> None:
 
 
 async def test_apply_raises_not_implemented() -> None:
-    """Apply path is blocked in v0.14 — see #649 phase 4 / #669."""
+    """Apply path is blocked on the ``chronicle_events`` bi-temporal migration.
+
+    The Phase 4 / #669 rollout discovered that the bi-temporal soft-delete
+    columns the apply handler needs (``invalidated_at``,
+    ``invalidated_by``, ``merged_into_event_id``) live on
+    ``relationships`` and ``memory_facts`` after migration 033 but were
+    **not** added to ``chronicle_events``. Migration 034 will land them;
+    until then the stub raises with a message pointing the next step.
+    """
     with pytest.raises(NotImplementedError) as excinfo:
         await apply_event_clustering()
-    assert "v0.15" in str(excinfo.value)
+    assert "migration 034" in str(excinfo.value) or "merged_into_event_id" in str(excinfo.value)
 
 
 async def test_threshold_and_window_are_configurable(session: AsyncSession) -> None:
