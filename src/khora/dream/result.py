@@ -3,8 +3,9 @@
 Stability:
 
 - :class:`DreamResult`, :class:`DreamMode`, :class:`DreamRunInfo` — public.
-- :class:`DreamDiff`, :class:`DreamProgress`, :class:`OpSummary` —
-  internal stability (may evolve through Phase 0).
+- :class:`DreamDiff`, :class:`DreamProgress`, :class:`OpSummary`,
+  :class:`UndoRecord` — internal stability (may evolve through Phase 0
+  / Phase 4).
 """
 
 from __future__ import annotations

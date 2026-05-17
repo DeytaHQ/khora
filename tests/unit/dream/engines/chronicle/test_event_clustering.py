@@ -13,7 +13,7 @@ The tests cover:
 - the planner never proposes a write that touches ``chronicle_events.chunk_id``
 - the planner emits zero writes (row-count invariant)
 - ``DreamOp`` round-trips JSON cleanly
-- apply path raises ``NotImplementedError``
+- apply path is wired (real handler in ``test_event_clustering_apply.py``)
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ from sqlalchemy.ext.asyncio import (
 
 from khora.dream.config import DreamConfig
 from khora.dream.engines.chronicle import (
-    apply_event_clustering,
     plan_chronicle_event_clustering,
 )
 from khora.dream.plan import OpKind
@@ -275,21 +274,6 @@ async def test_dream_op_round_trips_json(session: AsyncSession) -> None:
     restored = json.loads(blob)
     assert restored["op_type"] == "chronicle_event_clustering"
     assert restored["decision"] == "planned"
-
-
-async def test_apply_raises_not_implemented() -> None:
-    """Apply path is blocked on the ``chronicle_events`` bi-temporal migration.
-
-    The Phase 4 / #669 rollout discovered that the bi-temporal soft-delete
-    columns the apply handler needs (``invalidated_at``,
-    ``invalidated_by``, ``merged_into_event_id``) live on
-    ``relationships`` and ``memory_facts`` after migration 033 but were
-    **not** added to ``chronicle_events``. Migration 034 will land them;
-    until then the stub raises with a message pointing the next step.
-    """
-    with pytest.raises(NotImplementedError) as excinfo:
-        await apply_event_clustering()
-    assert "migration 034" in str(excinfo.value) or "merged_into_event_id" in str(excinfo.value)
 
 
 async def test_threshold_and_window_are_configurable(session: AsyncSession) -> None:
