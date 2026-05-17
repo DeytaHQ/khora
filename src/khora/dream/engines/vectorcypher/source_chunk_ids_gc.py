@@ -1,7 +1,10 @@
-"""Plan rewrites of ``Entity.source_chunk_ids`` to drop dead UUIDs (#662).
+"""Plan + apply rewrites of ``Entity.source_chunk_ids`` to drop dead UUIDs (#662, #668).
 
-Phase 2.3 mutation op, **dry-run only in v0.14** — apply mode raises
-``NotImplementedError`` and is tracked in #649 phase 4 / #668.
+Phase 2.3 mutation op. The dry-run planner emits one :class:`DreamOp`
+per entity that has at least ``min_dead`` chunk UUIDs not resolving to a
+live ``chunks`` row. The apply handler (:func:`apply_vectorcypher_source_chunk_ids_gc`,
+#668) consumes those ops and rewrites the column in-place — Postgres uses
+a native ``uuid[]`` UPDATE, SQLite writes JSON-text.
 
 For every entity whose ``source_chunk_ids`` array contains UUIDs that no
 longer resolve to a live ``chunks`` row (the online ``forget`` /
@@ -39,8 +42,11 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 
 from khora.dream.plan import DreamOp, OpKind
+from khora.dream.result import UndoRecord
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from khora.storage.coordinator import StorageCoordinator
 
 
@@ -256,6 +262,133 @@ async def _collect_sqlite(session: Any, resolved_namespace_id: UUID) -> list[dic
 def _sqlite_namespace_param(resolved_namespace_id: UUID) -> str:
     """SQLite stores UUIDs as 32-char hex without dashes — match that."""
     return resolved_namespace_id.hex
+
+
+# ---------------------------------------------------------------------------
+# Apply handler (#668)
+# ---------------------------------------------------------------------------
+
+
+async def apply_vectorcypher_source_chunk_ids_gc(
+    op: DreamOp,
+    *,
+    coordinator: StorageCoordinator,
+    session: AsyncSession,
+) -> UndoRecord:
+    """Apply one planned source_chunk_ids GC op — caller owns the transaction.
+
+    Rewrites the entity's ``source_chunk_ids`` column to drop the dead
+    UUIDs listed in ``op.inputs[0]["dead_uuids"]``. The session is the
+    orchestrator-owned :class:`AsyncSession`; this handler issues SQL
+    only — never commits, never opens its own transaction, never logs.
+
+    Idempotent: if the current array already equals the planned
+    ``after_array``, no UPDATE is issued and the returned
+    :class:`UndoRecord` carries ``before={"noop": True}``.
+
+    Args:
+        op: The planned op. ``inputs[0]`` carries ``entity_id``,
+            ``before_length``, and ``dead_uuids``; ``outputs[0]`` carries
+            ``after_array``.
+        coordinator: Storage coordinator (unused by this handler — the
+            session is the only write surface; kept for signature
+            uniformity with other apply handlers).
+        session: Orchestrator-owned async session.
+
+    Returns:
+        :class:`UndoRecord` with ``before["entities"]`` carrying the
+        pre-apply ``previous_source_chunk_ids`` per entity, sufficient to
+        reverse the UPDATE. The top-level key is intentionally
+        ``"entities"`` — never ``"chunk_id"``, which the orchestrator's
+        safety floor treats as a forbidden mutation.
+
+    Raises:
+        Nothing on the happy path; SQL errors propagate up to the
+        orchestrator, which rolls back the transaction.
+    """
+    del coordinator  # unused — session is the only write surface
+    inputs = op.inputs[0]
+    outputs = op.outputs[0]
+    entity_id = UUID(str(inputs["entity_id"]))
+    planned_after = [UUID(str(u)) for u in outputs["after_array"]]
+    dialect = session.bind.dialect.name if session.bind is not None else ""
+
+    if dialect == "postgresql":
+        previous = await _read_current_pg(session, entity_id)
+    else:
+        previous = await _read_current_sqlite(session, entity_id)
+
+    if previous == planned_after:
+        # Replay-safe: someone (or this handler on a previous resume)
+        # already collapsed the array to the planned state.
+        return UndoRecord(
+            op_id=op.op_id,
+            op_type=str(op.op_type),
+            before={"noop": True},
+            applied_at=datetime.now(UTC),
+        )
+
+    if dialect == "postgresql":
+        await session.execute(
+            text("UPDATE entities SET source_chunk_ids = :new_array WHERE id = :eid"),
+            {"new_array": planned_after, "eid": entity_id},
+        )
+    else:
+        await session.execute(
+            text("UPDATE entities SET source_chunk_ids = :new_array WHERE id = :eid"),
+            {
+                "new_array": json.dumps([str(u) for u in planned_after]),
+                "eid": _sqlite_namespace_param(entity_id),
+            },
+        )
+
+    return UndoRecord(
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before={
+            "entities": [
+                {
+                    "entity_id": str(entity_id),
+                    "previous_source_chunk_ids": [str(u) for u in previous],
+                }
+            ]
+        },
+        applied_at=datetime.now(UTC),
+    )
+
+
+async def _read_current_pg(session: AsyncSession, entity_id: UUID) -> list[UUID]:
+    """Read the current ``source_chunk_ids`` value via the Postgres array path."""
+    result = await session.execute(
+        text("SELECT source_chunk_ids FROM entities WHERE id = :eid"),
+        {"eid": entity_id},
+    )
+    row = result.first()
+    if row is None:
+        return []
+    raw = row.source_chunk_ids if hasattr(row, "source_chunk_ids") else row[0]
+    if raw is None:
+        return []
+    out: list[UUID] = []
+    for item in raw:
+        try:
+            out.append(UUID(str(item)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def _read_current_sqlite(session: AsyncSession, entity_id: UUID) -> list[UUID]:
+    """Read the current JSON-text ``source_chunk_ids`` value via the SQLite path."""
+    result = await session.execute(
+        text("SELECT source_chunk_ids FROM entities WHERE id = :eid"),
+        {"eid": _sqlite_namespace_param(entity_id)},
+    )
+    row = result.first()
+    if row is None:
+        return []
+    raw = row.source_chunk_ids if hasattr(row, "source_chunk_ids") else row[0]
+    return _parse_sqlite_uuid_list(raw)
 
 
 def _parse_sqlite_uuid_list(value: Any) -> list[UUID]:

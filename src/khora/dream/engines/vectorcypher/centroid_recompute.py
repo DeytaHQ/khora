@@ -1,4 +1,4 @@
-"""Vectorcypher centroid embedding recompute (#660, Phase 2.2 of #649).
+"""Vectorcypher centroid embedding recompute (#660, Phase 2.2 of #649; apply #668).
 
 For each cluster of entities proposed for merge (see the Phase 2.1 dedupe
 op), this planner picks how the post-merge canonical embedding should be
@@ -25,20 +25,34 @@ The op is dry-run only in v0.14 — ``mode="apply"`` raises
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+from sqlalchemy import text
 
 # Note: `from rapidfuzz.distance import Levenshtein` is deferred into
 # `_max_pairwise_lev_distance` below. rapidfuzz ships with the `[accel]`
 # optional extra, and importing it at module top would break the
 # examples-smoke CI job (which installs per-adapter extras only).
 from khora import _accel
+from khora.dream.exceptions import DreamForbiddenOpError
 from khora.dream.plan import DreamOp, OpKind
+from khora.dream.result import UndoRecord
 from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from khora.core.models.entity import Entity
     from khora.storage.coordinator import StorageCoordinator
+
+
+# Embedder injection: (text) -> Awaitable[list[float]]. Apply-mode
+# re_embed branch calls this; without it, the handler raises rather than
+# silently falling back to dry-run.
+EmbedderFn = Callable[[str], Awaitable[list[float]]]
 
 
 _PHASE = "mutation_plan"
@@ -303,3 +317,126 @@ def _utcnow():
     from datetime import UTC, datetime
 
     return datetime.now(UTC)
+
+
+# ---------------------------------------------------------------------------
+# Apply handler (#668)
+# ---------------------------------------------------------------------------
+
+
+async def apply_vectorcypher_centroid_recompute(
+    op: DreamOp,
+    *,
+    coordinator: StorageCoordinator,
+    session: AsyncSession,
+    embedder: EmbedderFn | None = None,
+) -> UndoRecord:
+    """Apply one planned centroid-recompute op — caller owns the transaction.
+
+    Three branches, dispatched on ``op.decision``:
+
+      * ``skip_singleton`` / ``skip_multimodal`` — no DB activity, returns
+        ``UndoRecord(before={"noop": True})``.
+      * ``centroid`` — writes ``op.outputs[0]["new_embedding_vector"]``
+        into the canonical entity's ``embedding`` column.
+      * ``re_embed`` — calls the injected ``embedder`` on the canonical
+        name, L2-renormalizes, writes the result. Without an embedder,
+        raises :class:`DreamForbiddenOpError` rather than silently
+        downgrading.
+
+    Postgres-only in v0.15. On SQLite, vectors live in LanceDB off-row
+    and the per-backend ``update_entity_embedding`` commits out-of-band,
+    violating the orchestrator's caller-owned-transaction contract.
+    SQLite raises :class:`DreamForbiddenOpError`; the session-aware
+    SQLite path lands in v0.16.
+
+    Args:
+        op: The planned op.
+        coordinator: Storage coordinator (unused — session owns writes).
+        session: Orchestrator-owned async session.
+        embedder: Optional async callable for the ``re_embed`` branch.
+
+    Returns:
+        :class:`UndoRecord` whose ``before["clusters"]`` carries the
+        canonical entity's previous embedding per cluster (skipped
+        branches return ``before={"noop": True}``).
+    """
+    del coordinator  # unused — session is the only write surface
+    decision = op.decision
+    if decision in ("skip_singleton", "skip_multimodal"):
+        return UndoRecord(
+            op_id=op.op_id,
+            op_type=str(op.op_type),
+            before={"noop": True},
+            applied_at=datetime.now(UTC),
+        )
+
+    dialect = session.bind.dialect.name if session.bind is not None else ""
+    if dialect and dialect != "postgresql":
+        raise DreamForbiddenOpError(
+            "centroid_recompute apply is Postgres-only in v0.15; v0.16 adds session-aware SQLite path. See #668."
+        )
+
+    inputs = op.inputs[0]
+    outputs = op.outputs[0] if op.outputs else {}
+    canonical_id = UUID(str(inputs["canonical_entity_id"]))
+
+    if decision == "centroid":
+        new_vec = list(outputs.get("new_embedding_vector") or [])
+        if not new_vec:
+            raise DreamForbiddenOpError(f"centroid op {op.op_id} missing new_embedding_vector in outputs")
+    elif decision == "re_embed":
+        if embedder is None:
+            raise DreamForbiddenOpError("centroid_recompute re_embed path requires embedder injection")
+        name = str(outputs.get("new_embedding_text") or "")
+        raw = await embedder(name)
+        new_vec = _accel.normalize_embeddings_batch([list(raw)])[0]
+    else:
+        raise DreamForbiddenOpError(f"centroid_recompute apply: unknown decision={decision!r}")
+
+    previous = await _read_current_embedding(session, canonical_id)
+    if previous is not None and list(previous) == list(new_vec):
+        return UndoRecord(
+            op_id=op.op_id,
+            op_type=str(op.op_type),
+            before={"noop": True},
+            applied_at=datetime.now(UTC),
+        )
+
+    await session.execute(
+        text("UPDATE entities SET embedding = :embedding, updated_at = :ts WHERE id = :eid"),
+        {
+            "embedding": new_vec,
+            "ts": datetime.now(UTC),
+            "eid": canonical_id,
+        },
+    )
+
+    return UndoRecord(
+        op_id=op.op_id,
+        op_type=str(op.op_type),
+        before={
+            "clusters": [
+                {
+                    "entity_id": str(canonical_id),
+                    "previous_embedding": list(previous) if previous is not None else None,
+                }
+            ]
+        },
+        applied_at=datetime.now(UTC),
+    )
+
+
+async def _read_current_embedding(session: AsyncSession, entity_id: UUID) -> list[float] | None:
+    """Read the canonical entity's current ``embedding`` column."""
+    result = await session.execute(
+        text("SELECT embedding FROM entities WHERE id = :eid"),
+        {"eid": entity_id},
+    )
+    row = result.first()
+    if row is None:
+        return None
+    raw = row.embedding if hasattr(row, "embedding") else row[0]
+    if raw is None:
+        return None
+    return [float(x) for x in raw]
