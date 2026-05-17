@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -43,6 +44,7 @@ from sqlalchemy import text
 from khora.dream.config import DreamConfig
 from khora.dream.engines.registry import (
     canonical_plan_payload,
+    get_apply_handler,
     get_engine_plugin,
     plan_hash,
 )
@@ -56,7 +58,7 @@ from khora.dream.events import (
     DreamRunFailed,
     DreamRunStarted,
 )
-from khora.dream.exceptions import DreamForbiddenOpError
+from khora.dream.exceptions import DreamApplyDisabled, DreamForbiddenOpError
 from khora.dream.locks import acquire_namespace_dream_lock
 from khora.dream.plan import DreamOp, DreamPlan, DreamScope, OpKind
 from khora.dream.report import DreamCollectorSink, DreamEventSink, DreamFileSink, ReportSink
@@ -66,7 +68,9 @@ from khora.dream.result import (
     DreamResult,
     DreamRunInfo,
     OpSummary,
+    UndoRecord,
 )
+from khora.dream.safety import _assert_no_chunk_id_mutation
 from khora.telemetry import bounded_text_hash
 
 if TYPE_CHECKING:
@@ -80,6 +84,29 @@ if TYPE_CHECKING:
 # orchestrator checks the flag between ops only.
 _CANCEL_FLAGS: dict[UUID, asyncio.Event] = {}
 _CANCEL_FLAGS_LOCK = asyncio.Lock()
+
+
+# Kill-switch env var (#667): when set to anything non-empty / non-falsey,
+# DreamOrchestrator._apply_phase raises DreamApplyDisabled before touching
+# the DB. Read at orchestrator construction so an operator setting it via
+# ``export KHORA_DREAM_DISABLE_APPLY=1`` halts the next run without needing
+# a restart on a long-lived process — but already-constructed
+# orchestrators carry the value they were built with.
+_APPLY_DISABLED_ENV_VAR = "KHORA_DREAM_DISABLE_APPLY"
+_APPLY_DISABLED_FALSEY: frozenset[str] = frozenset({"", "0", "false", "False", "FALSE", "no", "No", "NO"})
+
+
+def _is_apply_disabled_via_env() -> bool:
+    """Read :data:`_APPLY_DISABLED_ENV_VAR` and decide if apply is gated.
+
+    The truthiness rule is intentionally lax — anything other than the
+    short list of falsey strings counts as on. Operators flipping the
+    kill-switch under stress should not have to remember a magic value.
+    """
+    raw = os.environ.get(_APPLY_DISABLED_ENV_VAR)
+    if raw is None:
+        return False
+    return raw not in _APPLY_DISABLED_FALSEY
 
 
 async def _register_cancel_flag(run_id: UUID) -> asyncio.Event:
@@ -117,6 +144,11 @@ class DreamOrchestrator:
         self._kb = kb
         self._config = config
         self._sinks: list[ReportSink] = list(sinks) if sinks is not None else self._default_sinks()
+        # Captured at construction so an operator can flip the kill-switch
+        # and rebuild an orchestrator without restarting the process.
+        # Long-lived orchestrators carry their original value — see the
+        # module-level helper docstring.
+        self._apply_disabled = _is_apply_disabled_via_env()
 
     # ------------------------------------------------------------------
     # Public methods
@@ -378,18 +410,39 @@ class DreamOrchestrator:
         cancel_flag: asyncio.Event,
         on_progress: Callable[[DreamProgress], None] | None,
     ) -> DreamResult:
-        """Apply path: hand each op to the engine plugin in sequence.
+        """Apply path: per-op handler dispatch + per-op transaction (#667).
 
-        Cancellation is checked *between* ops. The engine plugin's
-        ``apply_dream`` is called per-op so the orchestrator owns the
-        cursor and can persist ``last_committed_op_seq`` after each
-        commit.
+        Loop invariant: each op runs inside its own
+        ``coordinator.transaction()`` block. The orchestrator looks up
+        the apply handler via :func:`get_apply_handler`, calls it with
+        the open session, validates the returned
+        :class:`UndoRecord`, persists ``last_committed_op_seq`` inside
+        the same transaction, and lets the transaction-context exit
+        commit (or roll back). Undo records are written incrementally to
+        the file sink after every successful commit so a mid-apply crash
+        leaves a recoverable file on disk.
 
-        Resume semantics: when ``checkpoint.last_committed_op_seq >= 0``
-        the orchestrator skips ops up to that seq before dispatching.
-        Phase 1 ops are read-only so apply is a pass-through that
-        re-publishes the per-op event.
+        Cancellation is checked *between* ops. Resume skips ops up to
+        the persisted ``last_committed_op_seq``.
+
+        Guardrails (#667):
+            - Kill-switch (:envvar:`KHORA_DREAM_DISABLE_APPLY`) raises
+              :class:`DreamApplyDisabled` before any DB activity.
+            - The chunk_id mutation assertion fires immediately after
+              each handler returns; a violation rolls back the txn and
+              aborts the run with :class:`DreamForbiddenOpError`.
+            - Ops without an apply handler (Phase 1 audits) are
+              pass-through — they advance the checkpoint and emit the
+              op event but skip the handler / undo write.
         """
+        if self._apply_disabled:
+            raise DreamApplyDisabled(
+                "Dream apply mode is disabled via "
+                f"{_APPLY_DISABLED_ENV_VAR}={os.environ.get(_APPLY_DISABLED_ENV_VAR)!r}. "
+                "Unset the env var (or set it to '0' / 'false') and rebuild "
+                "the DreamOrchestrator to re-enable apply."
+            )
+
         started = datetime.now(UTC)
         await self._emit_all(
             DreamPhaseStarted(
@@ -401,16 +454,45 @@ class DreamOrchestrator:
         )
 
         last_committed = await self._read_last_committed(run_id)
+        undo_records: list[UndoRecord] = []
+        file_sink = self._file_sink()
+
         for seq, op in enumerate(plan.ops):
             if cancel_flag.is_set():
                 break
             if seq <= last_committed:
                 continue
-            # TODO(phase-2): per-op checkpoint + UNIQUE-violation pre-check
-            # + namespace.is_read_only guard land with the first
-            # mutation-capable op (#664+).
+
+            handler = get_apply_handler(op.op_type)
+            if handler is None:
+                # Phase 1 audit op — no mutation, no undo, but still
+                # advance the checkpoint so a resume doesn't re-run
+                # the audit and re-publish its event.
+                await self._record_committed(run_id, seq)
+                await self._emit_op_event(run_id, op)
+                self._fire_progress(on_progress, run_id, plan, seq, op, "apply")
+                continue
+
+            # Mutation op — run inside its own coordinator transaction so
+            # the apply handler's writes commit/rollback together with
+            # the checkpoint update.
+            undo = await self._apply_one_op(run_id=run_id, seq=seq, op=op, handler=handler)
+            _assert_no_chunk_id_mutation(undo)
+            undo_records.append(undo)
+
+            # Persist the undo file before announcing the op — readers
+            # of `undo.json` will see this op's snapshot even if the
+            # next step crashes the process between emit and the next
+            # write.
+            if file_sink is not None:
+                file_sink.write_undo_incremental(
+                    undo_records,
+                    run_id=run_id,
+                    namespace_id=plan.namespace_id,
+                    started_at=started,
+                )
+
             await self._emit_op_event(run_id, op)
-            await self._record_committed(run_id, seq)
             self._fire_progress(on_progress, run_id, plan, seq, op, "apply")
 
         await self._emit_all(
@@ -425,6 +507,39 @@ class DreamOrchestrator:
         )
 
         return _build_result(run_id=run_id, namespace_id=plan.namespace_id, plan=plan, mode="apply")
+
+    async def _apply_one_op(
+        self,
+        *,
+        run_id: UUID,
+        seq: int,
+        op: DreamOp,
+        handler: Any,
+    ) -> UndoRecord:
+        """Run one apply handler inside a coordinator transaction.
+
+        The checkpoint update lives inside the same transaction so a
+        committed op always has a matching ``last_committed_op_seq``
+        and a rolled-back op never advances the cursor. On embedded
+        backends without a SQL transaction the orchestrator falls back
+        to invoking the handler with ``session=None`` — handlers that
+        need a session must guard against this themselves.
+        """
+        coordinator = self._kb.storage
+        try:
+            async with coordinator.transaction() as txn:
+                session = txn.session
+                undo = await handler(op, coordinator=coordinator, session=session)
+                await self._record_committed_in_session(session, run_id, seq)
+                return undo
+        except RuntimeError as exc:
+            if "No SQL backend" not in str(exc):
+                raise
+            # Embedded fallback: call handler without a session and
+            # advance the in-memory checkpoint best-effort.
+            undo = await handler(op, coordinator=coordinator, session=None)
+            await self._record_committed(run_id, seq)
+            return undo
 
     # ------------------------------------------------------------------
     # Lock acquisition
@@ -525,19 +640,24 @@ class DreamOrchestrator:
         coordinator = self._kb.storage
         try:
             async with coordinator.transaction() as txn:
-                session = txn.session
-                if not _is_postgres(session):
-                    return
-                await session.execute(
-                    text(
-                        "UPDATE khora_dream_runs "
-                        "SET last_committed_op_seq = :seq, heartbeat_at = :ts "
-                        "WHERE run_id = :rid"
-                    ),
-                    {"seq": seq, "ts": datetime.now(UTC), "rid": run_id},
-                )
+                await self._record_committed_in_session(txn.session, run_id, seq)
         except RuntimeError:
             return
+
+    async def _record_committed_in_session(self, session: Any, run_id: UUID, seq: int) -> None:
+        """Persist ``last_committed_op_seq`` using an existing session.
+
+        Phase 4 apply runs the checkpoint update inside the same
+        transaction as the apply handler so a rollback unwinds both.
+        On non-postgres backends the call is a no-op (mirrors the
+        :meth:`_record_committed` shape).
+        """
+        if not _is_postgres(session):
+            return
+        await session.execute(
+            text("UPDATE khora_dream_runs SET last_committed_op_seq = :seq, heartbeat_at = :ts WHERE run_id = :rid"),
+            {"seq": seq, "ts": datetime.now(UTC), "rid": run_id},
+        )
 
     async def _finalize_run_row(
         self,
@@ -619,6 +739,18 @@ class DreamOrchestrator:
             with contextlib.suppress(Exception):
                 await sink.flush()
                 await sink.close()
+
+    def _file_sink(self) -> DreamFileSink | None:
+        """Return the first :class:`DreamFileSink` in the sink list (or None).
+
+        The orchestrator calls into the file sink directly to write
+        incremental undo files — sinks otherwise receive events through
+        the :meth:`_emit_all` fan-out.
+        """
+        for sink in self._sinks:
+            if isinstance(sink, DreamFileSink):
+                return sink
+        return None
 
     async def _emit_op_event(self, run_id: UUID, op: DreamOp) -> None:
         await self._emit_all(

@@ -66,6 +66,27 @@ class DreamProgress:
 
 
 @dataclass(slots=True, frozen=True)
+class UndoRecord:
+    """Per-op snapshot recorded by the apply-phase before each commit.
+
+    The orchestrator collects an ``UndoRecord`` from every apply handler
+    and persists the run's full list to ``{run_id}.undo.json`` (schema
+    ``dream-undo/1``). The ``before`` payload is a JSON-serializable
+    snapshot of whatever the apply handler needs to reverse the op (row
+    contents, edge tuples, fact rows, etc.). A handler that performs no
+    mutation returns an :class:`UndoRecord` with an empty ``before``.
+
+    Stability: internal — the on-disk schema is versioned via
+    ``dream-undo/<n>``; this in-memory dataclass may evolve freely.
+    """
+
+    op_id: UUID
+    op_type: str
+    before: dict[str, Any]
+    applied_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
 class DreamRunInfo:
     """Run-level metadata recorded alongside the plan / diff."""
 
