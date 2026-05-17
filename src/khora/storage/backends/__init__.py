@@ -15,11 +15,6 @@ from .postgresql import PostgreSQLBackend
 
 # Lazy imports for optional backends
 try:
-    from .kuzu import KuzuBackend
-except ImportError:
-    KuzuBackend = None  # type: ignore[assignment,misc]
-
-try:
     from .memgraph import MemgraphBackend
 except ImportError:
     MemgraphBackend = None  # type: ignore[assignment,misc]
@@ -53,7 +48,6 @@ __all__ = [
     "PostgreSQLBackend",
     "PgVectorBackend",
     "Neo4jBackend",
-    "KuzuBackend",
     "MemgraphBackend",
     "NeptuneBackend",
     "AGEBackend",

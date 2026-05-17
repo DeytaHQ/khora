@@ -14,12 +14,6 @@ try:
 except ImportError:
     HAS_NEO4J = False
 
-HAS_KUZU = True
-try:
-    from khora.storage.backends.kuzu import KuzuBackend
-except ImportError:
-    HAS_KUZU = False
-
 HAS_MEMGRAPH = True
 try:
     from khora.storage.backends.memgraph import MemgraphBackend
@@ -46,12 +40,6 @@ class TestProtocolConformance:
     @pytest.mark.skipif(not HAS_NEO4J, reason="neo4j package not installed")
     def test_neo4j_implements_protocol(self):
         backend = Neo4jBackend("bolt://localhost:7687")
-        self._assert_graph_protocol(backend)
-
-    @pytest.mark.skipif(not HAS_KUZU, reason="kuzu package not installed")
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-    def test_kuzu_implements_protocol(self, tmp_path):
-        backend = KuzuBackend(str(tmp_path / "kuzu_db"))
         self._assert_graph_protocol(backend)
 
     @pytest.mark.skipif(not HAS_MEMGRAPH, reason="neo4j package not installed")
@@ -117,17 +105,6 @@ class TestFromConfig:
         assert backend._user == "admin"
         assert backend._password == "secret"
         assert backend._database == "testdb"
-
-    @pytest.mark.skipif(not HAS_KUZU, reason="kuzu package not installed")
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-    def test_kuzu_from_config(self, tmp_path):
-        from khora.config.schema import KuzuConfig
-
-        db_path = str(tmp_path / "kuzu_test")
-        config = KuzuConfig(database_path=db_path, read_only=True)
-        backend = KuzuBackend.from_config(config)
-        assert backend._database_path == db_path
-        assert backend._read_only is True
 
     @pytest.mark.skipif(not HAS_MEMGRAPH, reason="neo4j package not installed")
     def test_memgraph_from_config(self):

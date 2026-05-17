@@ -6,7 +6,6 @@ from pydantic import ValidationError
 from khora.config.schema import (
     AGEConfig,
     KhoraConfig,
-    KuzuConfig,
     MemgraphConfig,
     Neo4jConfig,
     ParsedNeo4jUrl,
@@ -46,10 +45,10 @@ class TestStorageSettingsBackwardsCompat:
     def test_new_style_graph_config_takes_precedence(self):
         settings = StorageSettings(
             neo4j_url="bolt://old:7687",
-            graph=KuzuConfig(database_path="/tmp/kuzu"),
+            graph=MemgraphConfig(url="bolt://new:7687"),
         )
-        assert isinstance(settings.graph, KuzuConfig)
-        assert settings.graph.database_path == "/tmp/kuzu"
+        assert isinstance(settings.graph, MemgraphConfig)
+        assert settings.graph.url.get_secret_value() == "bolt://new:7687"
 
     def test_defaults(self):
         settings = StorageSettings()
@@ -62,15 +61,6 @@ class TestStorageSettingsBackwardsCompat:
 @pytest.mark.unit
 class TestDiscriminatedUnionParsing:
     """Discriminated union configs parsed from dict/YAML."""
-
-    def test_kuzu_config_from_dict(self):
-        settings = StorageSettings.model_validate(
-            {
-                "graph": {"backend": "kuzu", "database_path": "/data/kuzu"},
-            }
-        )
-        assert isinstance(settings.graph, KuzuConfig)
-        assert settings.graph.database_path == "/data/kuzu"
 
     def test_memgraph_config_from_dict(self):
         settings = StorageSettings.model_validate(
@@ -188,16 +178,6 @@ class TestKhoraConfigGraphHelpers:
         assert graph.user == "neo4j"
         # password is SecretStr — unwrap to compare plaintext.
         assert graph.password.get_secret_value() == "pass"
-
-    def test_get_graph_config_kuzu(self):
-        config = KhoraConfig(
-            storage=StorageSettings(
-                graph=KuzuConfig(database_path="/tmp/kuzu_test"),
-            ),
-        )
-        graph = config.get_graph_config()
-        assert isinstance(graph, KuzuConfig)
-        assert graph.database_path == "/tmp/kuzu_test"
 
     def test_get_vector_config_defaults_to_postgresql_url(self):
         config = KhoraConfig(

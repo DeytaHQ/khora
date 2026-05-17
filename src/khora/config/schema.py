@@ -162,20 +162,6 @@ class Neo4jConfig(BaseModel):
     )
 
 
-class KuzuConfig(BaseModel):
-    """Kùzu embedded graph backend configuration.
-
-    .. deprecated::
-        KuzuDB backend is deprecated. Kuzu was acquired by Apple in October 2025
-        and the repository is archived. Consider using :class:`Neo4jConfig` or
-        :class:`SurrealDBConfig` instead.
-    """
-
-    backend: Literal["kuzu"] = "kuzu"  # DEPRECATED in 0.9.0 — removal in 0.10.0
-    database_path: str = Field(default="./kuzu_db", description="Path to Kùzu database directory")
-    read_only: bool = Field(default=False, description="Open database in read-only mode")
-
-
 class MemgraphConfig(BaseModel):
     """Memgraph graph backend configuration."""
 
@@ -282,7 +268,6 @@ def _graph_discriminator(v: Any) -> str:
 
 GraphConfig = Annotated[
     Annotated[Neo4jConfig, Tag("neo4j")]
-    | Annotated[KuzuConfig, Tag("kuzu")]  # DEPRECATED in 0.9.0
     | Annotated[MemgraphConfig, Tag("memgraph")]
     | Annotated[NeptuneConfig, Tag("neptune")]
     | Annotated[SurrealDBConfig, Tag("surrealdb")]
@@ -1260,7 +1245,7 @@ class KhoraConfig(BaseSettings):
         # If it's already set from new-style config with a URL, return as-is
         if isinstance(graph, Neo4jConfig) and graph.url:
             return graph
-        # If it's a non-Neo4j backend (Kuzu, Memgraph, etc.), return as-is
+        # If it's a non-Neo4j backend (Memgraph, Neptune, SurrealDB, AGE, etc.), return as-is
         if graph is not None and not isinstance(graph, Neo4jConfig):
             return graph
         # Check legacy neo4j_url (covers both graph=None and Neo4jConfig without URL)

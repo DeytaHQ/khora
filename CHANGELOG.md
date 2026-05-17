@@ -4,6 +4,14 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.15.0] — Dream-phase Phase 2 + Phase 4, kuzu removed
+
+Minor release. See merged PRs for the full surface.
+
+### Removed
+
+- **kuzu backend.** Deprecated in v0.9.0, the upstream repository has been archived since the October 2025 acquisition. The `kuzu` and `graph-all` extras (`pip install khora[kuzu]`, `pip install khora[graph-all]`) no longer pull in the kuzu wheel; the `KuzuBackend` / `KuzuConfig` symbols are gone from `khora.storage.backends` and `khora.config.schema`. Embedded users should switch to `khora[sqlite-lance]`; production graph users should switch to `khora[neo4j]`.
+
 ## [0.14.0] — Dream-phase audit foundation
 
 Minor release. Lands Phase 0 (foundation), Phase 1 (read-only audit operations), and Phase 3 (Rust acceleration) of the [Dream Phase umbrella (#649)](https://github.com/DeytaHQ/khora/issues/649). `Khora.dream(namespace, mode="dry-run")` is live end-to-end: operators can plan a consolidation pass over their graph, see exactly what every audit op would surface (drift thresholds, tombstone ratios, schema mismatches, orphan candidates, dead chunk references), and have those decisions emitted through three independently-togglable sinks (file, semantic-event, telemetry collector). No mutation operations ship in v0.14.0 — Phase 2 (mutation-planning ops, dry-run only) and Phase 4 (apply mode) land in a follow-up release. Audit-only is the deliberate "validate demand before committing engineering" gate.

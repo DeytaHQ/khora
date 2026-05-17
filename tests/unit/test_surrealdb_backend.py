@@ -3520,32 +3520,6 @@ class TestSurrealDBVectorUpsertBatch:
 
 
 # ---------------------------------------------------------------------------
-# Kuzu deprecation
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestKuzuDeprecation:
-    """Tests for Kuzu backend deprecation warning."""
-
-    def test_kuzu_import_warns(self) -> None:
-        """Importing kuzu backend emits DeprecationWarning."""
-        import importlib
-        import warnings
-
-        import khora.storage.backends.kuzu as kuzu_mod
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            importlib.reload(kuzu_mod)
-
-        deprecation_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-        assert len(deprecation_warnings) >= 1, (
-            f"Expected DeprecationWarning from kuzu import, got: {[w.category.__name__ for w in caught]}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # Create tables
 # ---------------------------------------------------------------------------
 
