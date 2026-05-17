@@ -82,23 +82,18 @@ postgres = [
 ]
 # Graph backends
 neo4j = ["neo4j>=6.2.0"]
-# DEPRECATED in 0.9.0 — kuzu extra will be removed in 0.10.0.
-# Use the sqlite-lance extra for embedded, or neo4j for production.
-kuzu = ["kuzu>=0.11.3"]
 memgraph = ["neo4j>=6.2.0"]  # Memgraph uses bolt protocol via neo4j driver
 neptune = ["neo4j>=6.2.0"]  # Neptune uses Bolt protocol via neo4j driver
 neptune-iam = ["neo4j>=6.2.0", "boto3>=1.35.0"]  # With IAM auth support
 age = ["asyncpg>=0.31.0"]  # AGE uses PostgreSQL via asyncpg
-# All graph backends
-# DEPRECATED in 0.9.0 — graph-all still pulls in kuzu (deprecated). Transitional;
-# will drop kuzu in 0.10.0. Prefer the explicit per-backend extras.
-graph-all = ["neo4j>=6.2.0", "kuzu>=0.11.3"]
+# All graph backends (currently just neo4j; legacy graph-all transitional pin
+# kept for installers that referenced it).
+graph-all = ["neo4j>=6.2.0"]
 # Weaviate vector database
 weaviate = ["weaviate-client>=4.21.0"]
 # All backends
 all-backends = [
     "neo4j>=6.2.0",
-    "kuzu>=0.11.3",
     "asyncpg>=0.31.0",
     "pgvector>=0.4.2",
     "httpx>=0.28.1",
@@ -306,7 +301,7 @@ unknown-argument = "ignore"            # 3 errors, third-party keyword args
 deprecated = "ignore"                  # 6 warnings, third-party deprecations
 unresolved-attribute = "warn"          # 6 errors, protocol/model attribute gaps
 unresolved-reference = "warn"          # 2 errors, forward references
-unresolved-import = "warn"             # 1 error, optional dependency (kuzu)
+unresolved-import = "warn"             # optional dependencies (e.g. weaviate, surrealdb)
 invalid-assignment = "warn"            # 2 errors, third-party stub mismatches
 invalid-return-type = "warn"           # 2 errors, implicit None returns
 not-iterable = "warn"                  # 1 error, exception unpacking pattern

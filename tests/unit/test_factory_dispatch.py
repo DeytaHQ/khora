@@ -4,7 +4,6 @@ import pytest
 
 from khora.config.schema import (
     AGEConfig,
-    KuzuConfig,
     MemgraphConfig,
     Neo4jConfig,
     NeptuneConfig,
@@ -19,7 +18,6 @@ class TestRegistryContents:
 
     def test_graph_registry_has_all_backends(self):
         assert "neo4j" in _GRAPH_REGISTRY
-        assert "kuzu" in _GRAPH_REGISTRY
         assert "memgraph" in _GRAPH_REGISTRY
         assert "neptune" in _GRAPH_REGISTRY
         assert "age" in _GRAPH_REGISTRY
@@ -68,17 +66,6 @@ class TestFactoryLegacyPath:
 @pytest.mark.unit
 class TestFactoryNewStyleDispatch:
     """New-style config dispatch creates correct backend types."""
-
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-    def test_kuzu_config_dispatch(self):
-        config = StorageConfig(
-            graph_config=KuzuConfig(database_path="/tmp/test_kuzu"),
-        )
-        factory = StorageFactory(config=config)
-        backend = factory.create_graph_backend()
-        # Will be None if kuzu package not installed, which is OK
-        if backend is not None:
-            assert type(backend).__name__ == "KuzuBackend"
 
     def test_neo4j_config_dispatch(self):
         config = StorageConfig(
