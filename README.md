@@ -8,17 +8,63 @@
 
 > *"Khora is the receptacle, the space, the matrix in which all things come to be."* — Plato, *Timaeus*
 
-Khora is a knowledge memory library for long-horizon AI agents, with pluggable retrieval engines and storage backends to fit different workloads. It stores knowledge as documents, embeddings, and graph relationships, and retrieves it through hybrid search (vector + graph + keyword), reranking, and temporal context.
+**khora is durable memory for long-horizon AI agents.** It stores what your agent learns — documents, entities, relationships, events, facts — and retrieves it through hybrid search that combines vector similarity, graph traversal, keyword matching, and temporal context. A scheduled "dream phase" then reorganizes the store offline so quality doesn't decay as it grows.
 
-Khora is a **library, not an application**. Tooling lives in sibling packages (coming soon...):
+khora is a **library, not an application**. You embed it in your agent's process; there is no server. Tooling lives in sibling packages (coming soon): khora-cli for extraction and search, khora-explorer for ontology construction.
 
-- khora-cli (to be released soon) — CLI tooling for extraction and search.
-- khora-explorer (to be released soon) — tooling for ontology construction and exploration.
+## Why khora?
+
+Long-horizon agents — copilots, customer-support bots, research assistants, anything that has to remember across sessions — hit four problems that pure vector search doesn't solve:
+
+1. **Ingest is more than chunking.** Useful memory needs entities, relationships, and temporal anchors extracted from the raw text. khora runs a 3-phase ingest pipeline (stage → enrich → expand) with selective LLM extraction (default 70% of chunks, configurable) and cross-batch entity resolution.
+2. **Recall is more than cosine.** Real questions mix semantic similarity, multi-hop entity reasoning, freshness, and keyword precision. khora's engines combine all four — vector + Cypher graph traversal + BM25 + RRF fusion + temporal-anchored reranking — and route per query.
+3. **Memory drifts.** Thresholds calibrated on day one stop working at week ten. Duplicates accumulate from independent ingest batches. Soft-deleted facts pile up. khora's [dream phase](docs/dream-phase.md) audits the store, plans consolidation work (entity dedupe, centroid recompute, fact compaction, event clustering), and applies it under per-op transactions with snapshotted undo records.
+4. **Production needs observability.** Every recall emits OpenTelemetry spans and metrics through a stable, contract-tested surface; credential fields are `SecretStr`; free-text never leaks into span attributes. See [docs/observability.md](docs/observability.md).
+
+khora's bet: instead of one opinionated memory model, ship **pluggable engines** for different access patterns, share the same storage substrate underneath them, and own the offline-maintenance gap that vector-store wrappers leave to operators.
+
+## Engines
+
+khora ships **two production engines** and one experimental one. They share the storage substrate (PostgreSQL + pgvector, optionally Neo4j) and the ingest pipeline — pick by access pattern.
+
+### VectorCypher (default) — hybrid graph + vector recall
+
+The right choice for **knowledge-graph-shaped data**: documents that reference entities, entities that reference each other, queries that need multi-hop reasoning ("which engineers worked on projects that shipped with Acme?").
+
+- **Storage:** PostgreSQL + pgvector + Neo4j (or Memgraph / Neptune / AGE).
+- **Retrieval:** Vector similarity + Cypher graph traversal + BM25 keyword + RRF fusion + optional PPR (Personalized PageRank) + optional cross-encoder reranking.
+- **Extraction:** Selective per-chunk (KET-RAG style; default 70% of chunks get full LLM extraction, the rest get co-occurrence edges).
+- **Best for:** Multi-hop reasoning, entity-rich corpora, knowledge bases, "who knows whom"-style queries, anything where graph structure adds signal that flat embeddings miss.
+- **Status:** Production-ready on PostgreSQL + Neo4j. Experimental on embedded backends.
+
+### Chronicle — temporal-first, no graph DB
+
+The right choice for **chat-shaped or event-stream data**: conversational memory, support tickets, meeting transcripts, anything where "when" is as important as "what".
+
+- **Storage:** PostgreSQL + pgvector. **No graph database required.**
+- **Retrieval:** 4-channel parallel — semantic vector + BM25 keyword + temporal + entity — fused with abstention signals that flag low-confidence answers before they reach your LLM.
+- **Extraction:** SVO events (subject-verb-object), entities, and facts via the same shared ingest pipeline.
+- **Time model:** Triple timestamps (`valid_from` / `valid_to` / `recorded_at`) + Ebbinghaus forgetting-curve decay applied to relevance scores.
+- **Best for:** Long conversations across sessions, recency-sensitive recall ("what did Alice say last week?"), benchmark-optimized retrieval (LongMemEval, LoCoMo, BEAM), deployments without a graph DB.
+- **Status:** Production-ready on PostgreSQL + pgvector. Experimental on embedded backends.
+
+### Skeleton (experimental) — minimal-LLM ingestion
+
+Lazy-extraction engine that runs LLM-based entity extraction only on ~10% of chunks ("skeleton core" by PageRank) and expands on demand. **Experimental** — feature-complete enough for cost-sensitive prototypes and evaluation, but not production-stamped. New work should start with VectorCypher or Chronicle; revisit Skeleton if LLM cost dominates and your queries are mostly time-windowed hybrid search rather than multi-hop entity reasoning.
+
+| Engine | Multi-hop entity recall | Temporal recall | Graph DB needed | LLM cost (1k docs) | Status |
+|---|---|---|---|---|---|
+| **VectorCypher** | ✓ Native via Cypher | ✓ Temporal detection + reranking | ✓ Required | ~$0.10–0.20 | Production |
+| **Chronicle** | Limited (entity channel only) | ✓ Native bi-temporal + Ebbinghaus decay | — Not required | ~$0.15–0.30 | Production |
+| **Skeleton** | Limited (lazy expansion) | ✓ Bi-temporal | — Not required | ~$0.02–0.05 | Experimental |
+
+See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md) for the detailed comparison: full feature matrix, cost analysis per workload, hybrid-engine patterns, and migration recipes.
 
 ## Install
 
 ```bash
 pip install khora                 # core (PostgreSQL + pgvector)
+pip install khora[neo4j]          # + Neo4j for VectorCypher
 pip install khora[sqlite-lance]   # [experimental] embedded SQLite + LanceDB
 pip install khora[surrealdb]      # [experimental] unified SurrealDB (single store)
 pip install khora[all-backends]   # everything: Neo4j, SurrealDB, SQLite+LanceDB, Weaviate, AGE
@@ -28,13 +74,7 @@ See [docs/configuration.md](docs/configuration.md) for the full extras list.
 
 ## Production stack
 
-The production stack is **PostgreSQL + pgvector + Neo4j**:
-
-- **VectorCypher** (default engine) — runs on PostgreSQL + pgvector + Neo4j.
-- **Chronicle** — runs on PostgreSQL + pgvector (no graph DB required).
-- **Skeleton** — available; PostgreSQL + pgvector (no graph DB required).
-
-Set `KHORA_DATABASE_URL` and `KHORA_NEO4J_URL`, run `uv run alembic upgrade head`, then instantiate `Khora()` with no arguments:
+The recommended production stack is **PostgreSQL + pgvector + Neo4j** — runs VectorCypher (default) and Chronicle from the same database. Set `KHORA_DATABASE_URL` and `KHORA_NEO4J_URL`, run `uv run alembic upgrade head`, then instantiate `Khora()` with no arguments:
 
 ```python
 import asyncio
