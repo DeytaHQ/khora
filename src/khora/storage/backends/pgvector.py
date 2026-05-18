@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, literal_column, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
@@ -909,7 +909,13 @@ class PgVectorBackend(AsyncSessionMixin):
         deadlocks when multiple documents share entities.  Upserts for
         different namespaces proceed in parallel without contention.
 
-        Returns list of (entity, is_new) tuples (is_new is approximate).
+        Returns list of ``(entity, is_new)`` tuples. ``is_new`` is derived
+        from Postgres's ``xmax`` system column on the RETURNING row: an
+        ``INSERT ... ON CONFLICT DO UPDATE`` leaves ``xmax = 0`` on freshly
+        inserted rows and a non-zero locking-tx id on rows that took the
+        UPDATE branch, so ``(xmax = 0)`` reliably distinguishes "new" from
+        "matched + updated" without a second round-trip. Matches the Neo4j
+        adapter's MERGE semantics (#719).
         """
         if not entities:
             return []
@@ -920,6 +926,11 @@ class PgVectorBackend(AsyncSessionMixin):
             # Sort by (namespace_id, name, entity_type) to ensure consistent lock ordering
             sorted_entities = sorted(entities, key=lambda e: (str(e.namespace_id), e.name, str(e.entity_type)))
             key1, key2 = _namespace_lock_keys(namespace_id)
+
+            # (name, entity_type) → is_new. Within a single namespace batch
+            # the uq_entities_namespace_name_type constraint reduces to this
+            # pair, so it uniquely identifies each affected row.
+            is_new_by_key: dict[tuple[str, str], bool] = {}
 
             async with self._get_session() as session:
                 # Acquire namespace-scoped advisory lock for the duration of this
@@ -971,12 +982,25 @@ class PgVectorBackend(AsyncSessionMixin):
                             "updated_at": stmt.excluded.updated_at,
                         },
                     )
-                    await session.execute(stmt)
+                    # xmax = 0 on freshly inserted rows; non-zero on rows
+                    # touched by the ON CONFLICT DO UPDATE branch. Canonical
+                    # PG idiom for distinguishing INSERT vs UPDATE outcomes
+                    # within a single upsert statement.
+                    stmt = stmt.returning(
+                        EntityModel.name,
+                        EntityModel.entity_type,
+                        literal_column("(xmax = 0)").label("is_new"),
+                    )
+                    result = await session.execute(stmt)
+                    for row in result:
+                        is_new_by_key[(row.name, row.entity_type)] = bool(row.is_new)
 
                 # Single commit for all sub-batches under the advisory lock
                 await session.commit()
 
-            return [(entity, True) for entity in sorted_entities]
+            # Default to True for any input whose key didn't come back in
+            # RETURNING (defensive — shouldn't happen in practice).
+            return [(entity, is_new_by_key.get((entity.name, entity.entity_type), True)) for entity in sorted_entities]
 
         return await _retry_on_deadlock(_do_upsert)
 
