@@ -2950,9 +2950,9 @@ class VectorCypherEngine:
     # Entity Operations
     # =========================================================================
 
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
-        """Get an entity by ID."""
-        return await self._get_storage().get_entity(entity_id)
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
+        """Get an entity by ID, scoped to ``namespace_id``."""
+        return await self._get_storage().get_entity(entity_id, namespace_id=namespace_id)
 
     async def list_entities(
         self,
@@ -3013,7 +3013,7 @@ class VectorCypherEngine:
         entity_infos = neighborhoods.get(str(entity_id), [])
 
         for info in entity_infos[:limit]:
-            entity = await self._get_storage().get_entity(UUID(info["id"]))
+            entity = await self._get_storage().get_entity(UUID(info["id"]), namespace_id=namespace_id)
             if entity:
                 score = 1.0 / (1 + info.get("distance", 1))
                 results.append((entity, score))
