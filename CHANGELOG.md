@@ -12,7 +12,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Removed
 
-- `RetrieverConfig.query_cache_ttl_seconds` and `RetrieverConfig.query_cache_max_size` (also removed from `VectorCypherEngineConfig`). Callers that set these can drop them — they no longer have any effect.
+- `RetrieverConfig.query_cache_ttl_seconds` and `RetrieverConfig.query_cache_max_size` (also removed from `VectorCypherEngineConfig`). **Breaking:** passing these kwargs now raises `TypeError`. Drop them from your config.
 
 ## [0.15.1] — Security patch release
 
