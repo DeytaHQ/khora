@@ -180,10 +180,15 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         """Store a single temporal chunk."""
         chunk_id = chunk.id or uuid4()
 
+        # Bind the RecordIDs via $params so they carry UUID-typed inner ids
+        # \u2014 matching what ``create_chunks_batch`` writes via ``_rid()``.  The
+        # literal ``temporal_chunk:\u27e8{uuid}\u27e9`` syntax produces *string*-typed
+        # ids that don't compare equal to SDK-written rows (see issue #716
+        # and the ``_build_filter_clauses`` docstring).
         sql = (
-            "CREATE temporal_chunk:\u27e8$id\u27e9 SET "
-            "namespace = memory_namespace:\u27e8$ns\u27e9, "
-            "document = document:\u27e8$doc\u27e9, "
+            "CREATE $chunk_rid SET "
+            "namespace = $ns_rid, "
+            "document = $doc_rid, "
             "content = $content, "
             "embedding = $embedding, "
             "occurred_at = $occurred_at, "
@@ -196,6 +201,9 @@ class SurrealDBTemporalStore(TemporalVectorStore):
             "metadata_ = $metadata_"
         )
         bindings = self._chunk_to_bindings(chunk, chunk_id)
+        bindings["chunk_rid"] = _rid("temporal_chunk", chunk_id)
+        bindings["ns_rid"] = _rid("memory_namespace", chunk.namespace_id)
+        bindings["doc_rid"] = _rid("document", chunk.document_id)
         await self._conn.execute(sql, bindings)
 
         chunk.id = chunk_id
@@ -234,50 +242,52 @@ class SurrealDBTemporalStore(TemporalVectorStore):
 
     async def get_chunk(self, chunk_id: UUID, namespace_id: UUID) -> TemporalChunk | None:
         """Fetch a temporal chunk by ID, scoped to namespace."""
-        sql = "SELECT * FROM temporal_chunk:\u27e8$id\u27e9 WHERE namespace = memory_namespace:\u27e8$ns\u27e9"
-        row = await self._conn.query_one(sql, {"id": str(chunk_id), "ns": str(namespace_id)})
+        # Bind RecordIDs via $params (see _build_filter_clauses docstring re #716
+        # for why literal ``:\u27e8{uuid}\u27e9`` interpolation does not match SDK-written rows).
+        sql = "SELECT * FROM $chunk_rid WHERE namespace = $ns_rid"
+        row = await self._conn.query_one(
+            sql,
+            {
+                "chunk_rid": _rid("temporal_chunk", chunk_id),
+                "ns_rid": _rid("memory_namespace", namespace_id),
+            },
+        )
         if not row:
             return None
         return self._row_to_chunk(row)
 
     async def delete_chunk(self, chunk_id: UUID, namespace_id: UUID) -> bool:
         """Delete a temporal chunk by ID, scoped to namespace."""
+        bindings = {
+            "chunk_rid": _rid("temporal_chunk", chunk_id),
+            "ns_rid": _rid("memory_namespace", namespace_id),
+        }
         # Count first to determine if the record exists
-        check_sql = (
-            "SELECT count() AS cnt FROM temporal_chunk "
-            "WHERE id = temporal_chunk:\u27e8$id\u27e9 "
-            "AND namespace = memory_namespace:\u27e8$ns\u27e9 GROUP ALL"
-        )
-        count_row = await self._conn.query_one(check_sql, {"id": str(chunk_id), "ns": str(namespace_id)})
+        check_sql = "SELECT count() AS cnt FROM temporal_chunk WHERE id = $chunk_rid AND namespace = $ns_rid GROUP ALL"
+        count_row = await self._conn.query_one(check_sql, bindings)
         exists = int(count_row.get("cnt", 0)) > 0 if count_row else False
 
         if exists:
-            del_sql = (
-                "DELETE FROM temporal_chunk "
-                "WHERE id = temporal_chunk:\u27e8$id\u27e9 "
-                "AND namespace = memory_namespace:\u27e8$ns\u27e9"
-            )
-            await self._conn.execute(del_sql, {"id": str(chunk_id), "ns": str(namespace_id)})
+            del_sql = "DELETE FROM temporal_chunk WHERE id = $chunk_rid AND namespace = $ns_rid"
+            await self._conn.execute(del_sql, bindings)
 
         return exists
 
     async def delete_chunks_by_document(self, document_id: UUID, namespace_id: UUID) -> int:
         """Delete all temporal chunks for a document within a namespace."""
+        bindings = {
+            "doc_rid": _rid("document", document_id),
+            "ns_rid": _rid("memory_namespace", namespace_id),
+        }
         count_sql = (
-            "SELECT count() AS cnt FROM temporal_chunk "
-            "WHERE document = document:\u27e8$doc\u27e9 "
-            "AND namespace = memory_namespace:\u27e8$ns\u27e9 GROUP ALL"
+            "SELECT count() AS cnt FROM temporal_chunk WHERE document = $doc_rid AND namespace = $ns_rid GROUP ALL"
         )
-        count_row = await self._conn.query_one(count_sql, {"doc": str(document_id), "ns": str(namespace_id)})
+        count_row = await self._conn.query_one(count_sql, bindings)
         count = int(count_row.get("cnt", 0)) if count_row else 0
 
         if count > 0:
-            del_sql = (
-                "DELETE FROM temporal_chunk "
-                "WHERE document = document:\u27e8$doc\u27e9 "
-                "AND namespace = memory_namespace:\u27e8$ns\u27e9"
-            )
-            await self._conn.execute(del_sql, {"doc": str(document_id), "ns": str(namespace_id)})
+            del_sql = "DELETE FROM temporal_chunk WHERE document = $doc_rid AND namespace = $ns_rid"
+            await self._conn.execute(del_sql, bindings)
 
         return count
 
@@ -527,11 +537,8 @@ class SurrealDBTemporalStore(TemporalVectorStore):
 
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Return the total number of temporal chunks in a namespace."""
-        sql = (
-            "SELECT count() AS cnt FROM temporal_chunk "  # noqa: S608
-            f"WHERE namespace = memory_namespace:\u27e8{namespace_id}\u27e9 GROUP ALL"
-        )
-        row = await self._conn.query_one(sql)
+        sql = "SELECT count() AS cnt FROM temporal_chunk WHERE namespace = $ns_rid GROUP ALL"
+        row = await self._conn.query_one(sql, {"ns_rid": _rid("memory_namespace", namespace_id)})
         return int(row.get("cnt", 0)) if row else 0
 
     # ------------------------------------------------------------------
@@ -603,10 +610,23 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         ``namespace_id`` — we match both so the filter works regardless of
         which ID the caller passes (recall resolves to row-level, but chunks
         store the stable namespace_id as record reference).
+
+        The namespace RecordID is bound via parameter (``$ns_rid``)
+        rather than interpolated as a SurrealQL literal.  The SDK's
+        ``RecordID(table, uuid)`` constructor produces a *UUID-typed*
+        record id (``memory_namespace:u'<uuid>'`` on the wire), whereas
+        the literal ``memory_namespace:\u27e8{uuid-str}\u27e9`` is parsed
+        as a *string-typed* record id.  SurrealDB's equality is
+        type-strict, so the literal form never matches rows the writer
+        inserted via the SDK \u2014 see issue #716.
         """
-        ns_ref = f"memory_namespace:\u27e8{namespace_id}\u27e9"
-        clauses = [f"(namespace = {ns_ref} OR namespace.namespace_id = '{namespace_id}')"]
-        bindings: dict[str, Any] = {}
+        clauses = [
+            "(namespace = $ns_rid OR namespace.namespace_id = $ns_str)",
+        ]
+        bindings: dict[str, Any] = {
+            "ns_rid": _rid("memory_namespace", namespace_id),
+            "ns_str": str(namespace_id),
+        }
 
         if not temporal_filter:
             return clauses, bindings
