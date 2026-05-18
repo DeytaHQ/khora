@@ -42,16 +42,27 @@ except ImportError:
 
 _DEADLOCK_MAX_RETRIES = 3
 
-# Advisory lock key-space for entity upserts (avoids collision with other lock users).
-_ENTITY_UPSERT_LOCK_KEY1 = 0x4B484F52  # "KHOR" in hex
 
+def _namespace_lock_keys(namespace_id: UUID) -> tuple[int, int]:
+    """Derive a stable ``(int4, int4)`` advisory-lock pair from a namespace UUID.
 
-def _namespace_lock_key(namespace_id: UUID) -> int:
-    """Derive a stable 32-bit advisory lock key from a namespace UUID."""
-    b = namespace_id.bytes
-    chunks = struct.unpack(">IIII", b)
-    folded = chunks[0] ^ chunks[1] ^ chunks[2] ^ chunks[3]
-    return struct.unpack(">i", struct.pack(">I", folded))[0]
+    Postgres's two-int form ``pg_advisory_xact_lock(int4, int4)`` treats the
+    pair as a single 64-bit lock id internally, so using two halves of the
+    UUID gives ~2^64 lock-id entropy — birthday-safe at billions of
+    namespaces. The previous implementation folded all 128 bits down to a
+    single 32-bit key, which birthday-collided at ~65K namespaces (#738).
+    """
+    hi64, lo64 = struct.unpack(">QQ", namespace_id.bytes)
+    # XOR each 64-bit half down to 32 bits so all 128 bits of the UUID feed
+    # both slots. For random UUIDs (v4 / v5) every output bit depends on
+    # multiple input bits.
+    fold_hi = (hi64 ^ (hi64 >> 32)) & 0xFFFFFFFF
+    fold_lo = (lo64 ^ (lo64 >> 32)) & 0xFFFFFFFF
+    # pg int4 is signed [-2^31, 2^31 - 1]; convert via signed-overflow.
+    return (
+        struct.unpack(">i", struct.pack(">I", fold_hi))[0],
+        struct.unpack(">i", struct.pack(">I", fold_lo))[0],
+    )
 
 
 async def _retry_on_deadlock(coro_fn, *args, **kwargs):
@@ -760,10 +771,10 @@ class PgVectorBackend(AsyncSessionMixin):
 
         async with self._get_session() as session:
             # Advisory lock prevents deadlocks with concurrent upserts
-            lock_key2 = _namespace_lock_key(entity.namespace_id)
+            key1, key2 = _namespace_lock_keys(entity.namespace_id)
             await session.execute(
                 text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
-                {"key1": _ENTITY_UPSERT_LOCK_KEY1, "key2": lock_key2},
+                {"key1": key1, "key2": key2},
             )
 
             stmt = insert(EntityModel).values(
@@ -908,14 +919,14 @@ class PgVectorBackend(AsyncSessionMixin):
 
             # Sort by (namespace_id, name, entity_type) to ensure consistent lock ordering
             sorted_entities = sorted(entities, key=lambda e: (str(e.namespace_id), e.name, str(e.entity_type)))
-            lock_key2 = _namespace_lock_key(namespace_id)
+            key1, key2 = _namespace_lock_keys(namespace_id)
 
             async with self._get_session() as session:
                 # Acquire namespace-scoped advisory lock for the duration of this
                 # transaction.  pg_advisory_xact_lock auto-releases on commit/rollback.
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
-                    {"key1": _ENTITY_UPSERT_LOCK_KEY1, "key2": lock_key2},
+                    {"key1": key1, "key2": key2},
                 )
 
                 for start in range(0, len(sorted_entities), batch_size):

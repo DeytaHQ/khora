@@ -9,6 +9,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 ### Fixed
 
 - Stale results from `Khora.recall()` after `remember`/`forget`. The in-process query result cache in the vectorcypher retriever held results for up to 5 minutes without invalidation on writes.
+- **Entity-upsert advisory lock collided at ~65K namespaces** ([#738](https://github.com/DeytaHQ/khora/issues/738)). `_namespace_lock_key` folded the 128-bit `namespace_id` UUID down to a single signed `int4` via 4-way XOR, used as `key2` in `pg_advisory_xact_lock(KHOR, key2)`. Deployments with more than ~65K distinct namespaces (per-user / per-agent patterns under `khora.integrations.openai_agents`, `google_adk`, `crewai`, `langgraph`) hit birthday-paradox collisions — empirically observed at 120K in the issue's repro. Two namespaces sharing a folded key would serialize their entity upserts behind each other, producing tail-latency spikes on a random subset of namespaces. No data loss — the lock auto-released on commit and `_retry_on_deadlock` covered the contention. Replaced with `_namespace_lock_keys(...)` which fills both 32-bit slots of Postgres's two-int advisory-lock form from the full 128 bits of the UUID, giving ~2^64 effective lock-id entropy (birthday-safe at billions of namespaces). **Operators:** the legacy `0x4B484F52` ("KHOR") `classid` is no longer set on these locks — update any `pg_locks` dashboards that filter on it.
 
 ### Removed
 
