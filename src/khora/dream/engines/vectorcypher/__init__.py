@@ -12,6 +12,9 @@ from khora.dream.engines.vectorcypher.centroid_recompute import (
 from khora.dream.engines.vectorcypher.community_summary import (
     plan_vectorcypher_community_summary,
 )
+from khora.dream.engines.vectorcypher.contradiction_detect import (
+    plan_vectorcypher_contradiction_detect,
+)
 from khora.dream.engines.vectorcypher.dedupe_entities import (
     plan_vectorcypher_dedupe_entities,
 )
@@ -36,6 +39,7 @@ __all__ = [
     "apply_vectorcypher_prune_edges",
     "plan_vectorcypher_centroid_recompute",
     "plan_vectorcypher_community_summary",
+    "plan_vectorcypher_contradiction_detect",
     "plan_vectorcypher_dedupe_entities",
     "plan_vectorcypher_orphan_report",
     "plan_vectorcypher_prune_edges",

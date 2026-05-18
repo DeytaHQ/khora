@@ -30,6 +30,7 @@ from khora.dream.engines.chronicle import (
 )
 from khora.dream.engines.vectorcypher import (
     plan_vectorcypher_community_summary,
+    plan_vectorcypher_contradiction_detect,
     plan_vectorcypher_orphan_report,
     plan_vectorcypher_prune_edges,
     plan_vectorcypher_schema_drift,
@@ -159,6 +160,10 @@ _APPLY_HANDLER_NAMES: dict[OpKind, tuple[str, str]] = {
     OpKind.VECTORCYPHER_COMMUNITY_SUMMARY: (
         "khora.dream.engines.vectorcypher.community_summary",
         "apply_vectorcypher_community_summary",
+    ),
+    OpKind.VECTORCYPHER_CONTRADICTION_DETECT: (
+        "khora.dream.engines.vectorcypher.contradiction_detect",
+        "apply_vectorcypher_contradiction_detect",
     ),
 }
 
@@ -300,6 +305,7 @@ class _VectorCypherPlugin:
                 OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT,
                 OpKind.VECTORCYPHER_COMMUNITY_SUMMARY,
                 OpKind.VECTORCYPHER_PRUNE_EDGES,
+                OpKind.VECTORCYPHER_CONTRADICTION_DETECT,
             }
         )
 
@@ -359,6 +365,14 @@ class _VectorCypherPlugin:
                 confidence_threshold=config.prune_edges_confidence_threshold,
             )
             ops.extend(prune_ops)
+
+        if OpKind.VECTORCYPHER_CONTRADICTION_DETECT in wanted and config.contradiction_detect_enabled:
+            op = await plan_vectorcypher_contradiction_detect(
+                namespace_id,
+                coordinator=coordinator,
+                similarity_threshold=config.contradiction_detect_similarity_threshold,
+            )
+            ops.append(op)
 
         return DreamPlan(
             plan_id=uuid4(),
