@@ -331,6 +331,30 @@ class DreamConfig(BaseSettings):
         ),
     )
 
+    # Phase 5.3 — vectorcypher contradiction detection (log only, #672).
+    contradiction_detect_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the vectorcypher contradiction-detection "
+            "op (OpKind.VECTORCYPHER_CONTRADICTION_DETECT, #672). Report "
+            "only — never mutates ``relationships``; findings feed a "
+            "human triage queue and become the natural source of mapping "
+            "recommendations for Phase 5.4 (#673)."
+        ),
+    )
+    contradiction_detect_similarity_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Textual-similarity threshold for the contradiction detector. "
+            "Pairs of live relationships in the same (source, target, type) "
+            "bucket scoring below this value are flagged as potential "
+            "contradictions. Property contradictions are flagged "
+            "independently of this threshold."
+        ),
+    )
+
     # Phase 2.5 — chronicle event near-duplicate clustering (#665).
     event_clustering_cosine_threshold: float = Field(
         default=0.95,
