@@ -504,25 +504,32 @@ class Khora:
         logger.info("Connecting Khora...")
 
         if self._run_migrations:
-            from khora.db.session import run_migrations as _run_migrations
-
-            # For the sqlite_lance embedded backend, derive a sqlite+aiosqlite URL
-            # from the configured db_path so Alembic migrations target the same
-            # file the adapters use. The migrations are dialect-aware.
-            db_url: str | None
-            if (
-                getattr(self._config.storage, "backend", "postgres") == "sqlite_lance"
-                and self._config.storage.sqlite_lance is not None
-            ):
-                db_path = self._config.storage.sqlite_lance.db_path
-                db_url = f"sqlite+aiosqlite:///{db_path}"
+            # SurrealDB initialises its schema declaratively (DEFINE IF NOT
+            # EXISTS on connect), so there is no Alembic chain to run. Treat
+            # run_migrations=True as a no-op rather than reaching for a
+            # Postgres DSN that doesn't exist — see #713.
+            backend = getattr(self._config.storage, "backend", "postgres")
+            if backend == "surrealdb":
+                logger.info("Skipping Alembic migrations: backend=surrealdb uses declarative schema")
             else:
-                # database_url is a SecretStr; unwrap for the Alembic runner
-                # (it forwards into SQLAlchemy create_async_engine).
-                db_url = self._config.database_url.get_secret_value() if self._config.database_url is not None else None
-            result = await _run_migrations(db_url)
-            if not result.success:
-                raise RuntimeError(f"Database migration failed: {result.error}")
+                from khora.db.session import run_migrations as _run_migrations
+
+                # For the sqlite_lance embedded backend, derive a sqlite+aiosqlite URL
+                # from the configured db_path so Alembic migrations target the same
+                # file the adapters use. The migrations are dialect-aware.
+                db_url: str | None
+                if backend == "sqlite_lance" and self._config.storage.sqlite_lance is not None:
+                    db_path = self._config.storage.sqlite_lance.db_path
+                    db_url = f"sqlite+aiosqlite:///{db_path}"
+                else:
+                    # database_url is a SecretStr; unwrap for the Alembic runner
+                    # (it forwards into SQLAlchemy create_async_engine).
+                    db_url = (
+                        self._config.database_url.get_secret_value() if self._config.database_url is not None else None
+                    )
+                result = await _run_migrations(db_url)
+                if not result.success:
+                    raise RuntimeError(f"Database migration failed: {result.error}")
 
         from khora.engines import create_engine
 
