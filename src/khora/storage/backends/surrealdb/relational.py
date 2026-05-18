@@ -638,9 +638,285 @@ class SurrealDBRelationalAdapter:
         )
 
     # ------------------------------------------------------------------
+    # Chronicle engine: events + facts (issue #712)
+    #
+    # Mirrors the chronicle methods on the pgvector / sqlite_lance
+    # relational adapters. ``StorageCoordinator._chronicle_backend``
+    # picks self.vector first, then self.relational — the SurrealDB
+    # vector adapter does not carry chronicle methods, so dispatch
+    # falls through here.
+    #
+    # Tables ``chronicle_event`` / ``memory_fact`` are defined in
+    # schema.py; they are SurrealDB-side mirrors of the pgvector
+    # ChronicleEventModel / MemoryFactModel rows. Returned rows are
+    # lightweight namespace objects shaped to MemoryFact / ChronicleEvent
+    # attribute access (``id``, ``subject``, ``is_active``, etc.) so the
+    # chronicle engine's reconciliation path works without changes.
+    # ------------------------------------------------------------------
+
+    async def write_events(
+        self,
+        events: list[Any],
+        *,
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Insert chronicle_event rows; returns inserted IDs in input order."""
+        if not events:
+            return []
+        now = datetime.now(UTC)
+        ns_str = str(namespace_id)
+        ids: list[UUID] = []
+        for ev in events:
+            ev_id: UUID = getattr(ev, "id", None) or uuid4()
+            ids.append(ev_id)
+            await self._conn.execute(
+                "CREATE $rid SET "
+                "namespace_id = $ns, "
+                "chunk_id = $chunk_id, "
+                "subject = $subject, "
+                "verb = $verb, "
+                "object = $object, "
+                "observation_date = $observation_date, "
+                "referenced_date = $referenced_date, "
+                "relative_offset = $relative_offset, "
+                "confidence = $confidence, "
+                "source_text = $source_text, "
+                "embedding = $embedding, "
+                "created_at = $created_at",
+                {
+                    "rid": _record_id("chronicle_event", ev_id),
+                    "ns": ns_str,
+                    "chunk_id": str(ev.chunk_id) if getattr(ev, "chunk_id", None) else None,
+                    "subject": ev.subject,
+                    "verb": ev.verb,
+                    "object": ev.object or None,
+                    "observation_date": ev.observation_date or now,
+                    "referenced_date": ev.referenced_date,
+                    "relative_offset": ev.relative_offset or None,
+                    "confidence": float(ev.confidence),
+                    "source_text": ev.source_text or "",
+                    "embedding": list(ev.embedding) if getattr(ev, "embedding", None) is not None else None,
+                    "created_at": now,
+                },
+            )
+        return ids
+
+    async def write_facts(
+        self,
+        facts: list[Any],
+        *,
+        namespace_id: UUID,
+    ) -> list[UUID]:
+        """Insert memory_fact rows; returns inserted IDs in input order."""
+        if not facts:
+            return []
+        now = datetime.now(UTC)
+        ns_str = str(namespace_id)
+        ids: list[UUID] = []
+        for f in facts:
+            fact_id: UUID = getattr(f, "id", None) or uuid4()
+            ids.append(fact_id)
+            chunk_ids = [str(cid) for cid in (getattr(f, "source_chunk_ids", None) or [])]
+            superseded_by = getattr(f, "superseded_by", None)
+            await self._conn.execute(
+                "CREATE $rid SET "
+                "namespace_id = $ns, "
+                "subject = $subject, "
+                "predicate = $predicate, "
+                "object = $object, "
+                "fact_text = $fact_text, "
+                "confidence = $confidence, "
+                "is_active = $is_active, "
+                "superseded_by = $superseded_by, "
+                "source_chunk_ids = $source_chunk_ids, "
+                "created_at = $created_at, "
+                "updated_at = $updated_at",
+                {
+                    "rid": _record_id("memory_fact", fact_id),
+                    "ns": ns_str,
+                    "subject": f.subject or "",
+                    "predicate": f.predicate or "",
+                    "object": f.object_ or "",
+                    "fact_text": f.fact_text or "",
+                    "confidence": float(f.confidence),
+                    "is_active": bool(getattr(f, "is_active", True)),
+                    "superseded_by": str(superseded_by) if superseded_by else None,
+                    "source_chunk_ids": chunk_ids,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+        return ids
+
+    async def query_events(
+        self,
+        namespace_id: UUID,
+        *,
+        subject: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Any]:
+        """Query chronicle_event filtered by subject and referenced_date range."""
+        ns_str = str(namespace_id)
+        conditions = ["namespace_id = $ns"]
+        params: dict[str, Any] = {"ns": ns_str, "lim": limit}
+        if subject is not None:
+            conditions.append("subject = $subject")
+            params["subject"] = subject
+        if since is not None:
+            conditions.append("referenced_date >= $since")
+            params["since"] = since
+        if until is not None:
+            conditions.append("referenced_date <= $until")
+            params["until"] = until
+        where = " AND ".join(conditions)
+        rows = await self._conn.query(
+            f"SELECT * FROM chronicle_event WHERE {where} ORDER BY referenced_date DESC LIMIT $lim",  # noqa: S608
+            params,
+        )
+        return [_row_to_chronicle_event(r) for r in rows]
+
+    async def query_active_facts_for_subject(
+        self,
+        namespace_id: UUID,
+        subject: str,
+    ) -> list[Any]:
+        """Return all active (not superseded) memory facts for a subject."""
+        ns_str = str(namespace_id)
+        rows = await self._conn.query(
+            "SELECT * FROM memory_fact "
+            "WHERE namespace_id = $ns AND subject = $subject AND is_active = true "
+            "ORDER BY created_at DESC",
+            {"ns": ns_str, "subject": subject},
+        )
+        return [_row_to_memory_fact(r) for r in rows]
+
+    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID) -> None:
+        """Mark a fact inactive and link it to its replacement."""
+        await self._conn.execute(
+            "UPDATE $rid SET is_active = false, superseded_by = $superseded_by, updated_at = $updated_at",
+            {
+                "rid": _record_id("memory_fact", fact_id),
+                "superseded_by": str(superseded_by),
+                "updated_at": datetime.now(UTC),
+            },
+        )
+
+    # ------------------------------------------------------------------
     # SQLAlchemy compatibility shim
     # ------------------------------------------------------------------
 
     def _get_session(self) -> None:
         """No-op — SurrealDB does not use SQLAlchemy sessions."""
         return None
+
+
+# ---------------------------------------------------------------------------
+# Row → dataclass helpers for chronicle methods (issue #712)
+#
+# Returned objects only need to support attribute access (``row.id``,
+# ``row.subject``, ``row.is_active`` etc.) — the chronicle engine consumes
+# the rows via ``getattr``. A lightweight type with the same surface as
+# ``ChronicleEvent`` / ``MemoryFact`` keeps us from importing
+# litellm-heavy modules just to construct the dataclasses.
+# ---------------------------------------------------------------------------
+
+
+class _ChronicleEventRow:
+    """Minimal attribute container shaped like ``ChronicleEvent``."""
+
+    __slots__ = (
+        "id",
+        "namespace_id",
+        "chunk_id",
+        "subject",
+        "verb",
+        "object",
+        "observation_date",
+        "referenced_date",
+        "relative_offset",
+        "confidence",
+        "source_text",
+    )
+
+    def __init__(self, **kwargs: Any) -> None:
+        for key in self.__slots__:
+            setattr(self, key, kwargs.get(key))
+
+
+class _MemoryFactRow:
+    """Minimal attribute container shaped like ``MemoryFact``."""
+
+    __slots__ = (
+        "id",
+        "namespace_id",
+        "subject",
+        "predicate",
+        "object_",
+        "fact_text",
+        "confidence",
+        "is_active",
+        "superseded_by",
+        "source_chunk_ids",
+        "created_at",
+        "updated_at",
+    )
+
+    def __init__(self, **kwargs: Any) -> None:
+        for key in self.__slots__:
+            setattr(self, key, kwargs.get(key))
+
+
+def _row_to_chronicle_event(row: dict[str, Any]) -> _ChronicleEventRow:
+    chunk_raw = row.get("chunk_id")
+    chunk_id: UUID | None = None
+    if chunk_raw:
+        try:
+            chunk_id = UUID(str(chunk_raw))
+        except (ValueError, TypeError):
+            chunk_id = None
+    return _ChronicleEventRow(
+        id=_parse_uuid(row.get("id", "")),
+        namespace_id=_parse_uuid(row.get("namespace_id", "")) if row.get("namespace_id") else None,
+        chunk_id=chunk_id,
+        subject=row.get("subject") or "",
+        verb=row.get("verb") or "",
+        object=row.get("object") or "",
+        observation_date=_parse_dt(row.get("observation_date")),
+        referenced_date=_parse_dt(row.get("referenced_date")),
+        relative_offset=row.get("relative_offset") or "",
+        confidence=float(row.get("confidence", 1.0)),
+        source_text=row.get("source_text") or "",
+    )
+
+
+def _row_to_memory_fact(row: dict[str, Any]) -> _MemoryFactRow:
+    raw_chunks = row.get("source_chunk_ids") or []
+    chunk_ids: list[UUID] = []
+    for cid in raw_chunks:
+        try:
+            chunk_ids.append(UUID(str(cid)))
+        except (ValueError, TypeError):
+            continue
+    superseded_raw = row.get("superseded_by")
+    superseded_by: UUID | None = None
+    if superseded_raw:
+        try:
+            superseded_by = UUID(str(superseded_raw))
+        except (ValueError, TypeError):
+            superseded_by = None
+    return _MemoryFactRow(
+        id=_parse_uuid(row.get("id", "")),
+        namespace_id=_parse_uuid(row.get("namespace_id", "")) if row.get("namespace_id") else None,
+        subject=row.get("subject") or "",
+        predicate=row.get("predicate") or "",
+        object_=row.get("object") or "",
+        fact_text=row.get("fact_text") or "",
+        confidence=float(row.get("confidence", 1.0)),
+        is_active=bool(row.get("is_active", True)),
+        superseded_by=superseded_by,
+        source_chunk_ids=chunk_ids,
+        created_at=_parse_dt(row.get("created_at")),
+        updated_at=_parse_dt(row.get("updated_at")),
+    )
