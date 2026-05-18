@@ -227,7 +227,6 @@ def synth_retriever() -> VectorCypherRetriever:
 
     cfg = RetrieverConfig(
         temporal_recency_floor_enabled=True,
-        query_cache_ttl_seconds=0,
     )
     retriever = VectorCypherRetriever(
         vector_store=vector_store,
@@ -323,7 +322,6 @@ class TestSyntheticRecencyFilter:
 
         cfg = RetrieverConfig(
             temporal_recency_floor_enabled=False,
-            query_cache_ttl_seconds=0,
         )
         retriever = VectorCypherRetriever(
             vector_store=vector_store,

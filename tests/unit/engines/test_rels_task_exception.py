@@ -71,7 +71,6 @@ def _make_retriever(
     storage.get_entities_batch = AsyncMock(return_value={entity_id_1: entity_1, entity_id_2: entity_2})
 
     config = RetrieverConfig(
-        query_cache_ttl_seconds=0,
         coherence_weight=0.0,
     )
 

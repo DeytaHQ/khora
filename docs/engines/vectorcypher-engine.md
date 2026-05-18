@@ -175,11 +175,6 @@ class RetrieverConfig:
     # Entity expansion
     lazy_entity_expansion: bool = False  # Defer entity expansion until needed
 
-    # Query cache
-    query_cache_enabled: bool = True
-    query_cache_ttl: int = 300  # seconds
-    query_cache_max_size: int = 1000
-
     # Limits
     max_chunks: int = 50
     max_entities: int = 30

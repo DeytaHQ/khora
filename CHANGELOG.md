@@ -4,6 +4,16 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [Unreleased]
+
+### Fixed
+
+- Stale results from `Khora.recall()` after `remember`/`forget`. The in-process query result cache in the vectorcypher retriever held results for up to 5 minutes without invalidation on writes.
+
+### Removed
+
+- `RetrieverConfig.query_cache_ttl_seconds` and `RetrieverConfig.query_cache_max_size` (also removed from `VectorCypherEngineConfig`). **Breaking:** passing these kwargs now raises `TypeError`. Drop them from your config.
+
 ## [0.15.1] — Security patch release
 
 ### Security

@@ -390,21 +390,6 @@ These higher limits are safe because Rust acceleration reduces per-operation CPU
 
 ## Phase 8: VectorCypher Query Optimizations (v0.3.5)
 
-### Query Result Caching
-
-The VectorCypher engine now caches query results with LRU eviction:
-
-```python
-from khora.engines.vectorcypher import VectorCypherConfig
-
-config = VectorCypherConfig(
-    query_cache_ttl_seconds=300,   # 5-minute TTL (default)
-    query_cache_max_size=100,      # Max cached entries (default)
-)
-```
-
-Cache key is `sha256(query + namespace_id + mode)`. The cache is checked at the start of the retriever pipeline and populated on completion. Any `remember()` or `forget()` call invalidates the cache for the affected namespace.
-
 ### Coherence Scoring
 
 A lightweight bigram coherence analysis is applied after RRF fusion to penalize word-shuffled confounders:

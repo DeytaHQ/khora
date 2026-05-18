@@ -11,7 +11,6 @@ These improvements are focused on making Khora faster and more reliable for prod
 | Item | Why It Matters |
 |------|----------------|
 | **HNSW Index Support** | Done. Migration 005 rebuilds the vector index as HNSW with `ef_construction=128`. See [Performance Optimization](architecture/performance-optimization.md). |
-| **Query Result Caching** | Done. LRU cache with TTL (`max_size=100`, `ttl_seconds=300`) keyed on `sha256(query + namespace_id + mode)`. See [Performance Optimization](architecture/performance-optimization.md). |
 | **Coherence Scoring** | Done (v0.3.5). Bigram coherence scoring for confounder rejection in VectorCypher's RRF fusion (`coherence_weight=0.1`). |
 | **Streaming Pipeline** | Done (v0.3.2). `streaming_pipeline=True` default in `VectorCypherConfig`. |
 | **Incremental Index Updates** | Currently, adding new vectors requires rebuilding indexes. Incremental updates would make real-time ingestion practical. |
