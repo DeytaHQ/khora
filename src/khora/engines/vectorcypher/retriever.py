@@ -15,10 +15,8 @@ Performance optimizations:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import math
 import os
-import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
@@ -191,10 +189,6 @@ class RetrieverConfig:
     # Search thresholds
     min_entity_similarity: float = 0.3
     hybrid_alpha: float = 0.7
-
-    # Query caching
-    query_cache_ttl_seconds: int = 0  # 0 = disabled
-    query_cache_max_size: int = 100
 
     # Lazy entity expansion
     lazy_entity_expansion: bool = False
@@ -379,11 +373,6 @@ class VectorCypherRetriever:
             else None
         )
 
-        # Query result cache (LRU + TTL)
-        self._cache: dict[str, tuple[float, VectorCypherResult]] = {}
-        self._cache_ttl = self._config.query_cache_ttl_seconds
-        self._cache_max_size = self._config.query_cache_max_size
-
         # Lazy entity expansion cache: chunk_id -> expansion_score (0 = no match)
         self._expansion_cache: dict[UUID, float] = {}
 
@@ -535,23 +524,6 @@ class VectorCypherRetriever:
                     vetoed=anti_recency_veto,
                 )
 
-            # Cache check
-            cache_key = ""
-            if self._cache_ttl > 0:
-                cache_key = hashlib.md5(
-                    f"{query}:{namespace_id}:{temporal_filter}:{graph_depth}:{limit}".encode(),
-                    usedforsecurity=False,
-                ).hexdigest()
-
-                if cache_key in self._cache:
-                    cached_time, cached_result = self._cache[cache_key]
-                    if time.monotonic() - cached_time < self._cache_ttl:
-                        cached_result.metadata["cache_hit"] = True
-                        span.set_attribute("cache_hit", True)
-                        return cached_result
-                    else:
-                        del self._cache[cache_key]
-
             # Step 1: Route query to determine strategy
             with trace_span("khora.vectorcypher.route") as route_span:
                 routing = await self._router.route(query, temporal_signal=temporal_signal)
@@ -632,13 +604,6 @@ class VectorCypherRetriever:
                         recency_floor=params.recency_floor,
                         temporal_signal=temporal_signal,
                     )
-
-            # Store in cache
-            if self._cache_ttl > 0 and cache_key:
-                if len(self._cache) >= self._cache_max_size:
-                    oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
-                    del self._cache[oldest_key]
-                self._cache[cache_key] = (time.monotonic(), result)
 
             span.set_attribute("chunk_count", len(result.chunks))
             span.set_attribute("entity_count", len(result.entities))

@@ -39,8 +39,6 @@ class TestVectorCypherConfig:
         assert config.temporal_recency_weight == 0.2
         assert config.temporal_recency_decay_days == 30
         assert config.recency_decay_type == "exponential"
-        assert config.query_cache_ttl_seconds == 300
-        assert config.query_cache_max_size == 100
         assert config.streaming_pipeline is True
         assert config.enable_smart_resolution is True
         assert config.lazy_entity_expansion is True
@@ -56,14 +54,12 @@ class TestVectorCypherConfig:
             graph_default_depth=3,
             fusion_vector_weight=0.7,
             fusion_graph_weight=0.3,
-            query_cache_ttl_seconds=300,
         )
         assert config.routing_enabled is False
         assert config.skeleton_core_ratio == 0.5
         assert config.graph_default_depth == 3
         assert config.fusion_vector_weight == 0.7
         assert config.fusion_graph_weight == 0.3
-        assert config.query_cache_ttl_seconds == 300
 
 
 class TestExtractionQualityMetrics:

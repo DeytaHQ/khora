@@ -249,10 +249,6 @@ class VectorCypherConfig:
     temporal_recency_decay_days: int = 30
     recency_decay_type: str = "exponential"  # "linear" or "exponential"
 
-    # Query caching
-    query_cache_ttl_seconds: int = 300  # 5 min TTL
-    query_cache_max_size: int = 100
-
     # Extraction concurrency (aligned with ingest pipeline's default of 20)
     max_concurrent_extractions: int = 20
 
@@ -544,8 +540,6 @@ class VectorCypherEngine:
             recency_decay_type=self._vc_config.recency_decay_type,
             min_entity_similarity=self._vc_config.retriever_min_entity_similarity,
             hybrid_alpha=self._vc_config.fusion_hybrid_alpha,
-            query_cache_ttl_seconds=self._vc_config.query_cache_ttl_seconds,
-            query_cache_max_size=self._vc_config.query_cache_max_size,
             lazy_entity_expansion=self._vc_config.lazy_entity_expansion,
             skeleton_core_ratio=self._vc_config.skeleton_core_ratio,
             enable_session_aware_search=self._vc_config.enable_session_aware_search,

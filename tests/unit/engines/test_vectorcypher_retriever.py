@@ -40,8 +40,6 @@ class TestRetrieverConfig:
         assert config.recency_decay_type == "exponential"
         assert config.min_entity_similarity == 0.3
         assert config.hybrid_alpha == 0.7
-        assert config.query_cache_ttl_seconds == 0
-        assert config.query_cache_max_size == 100
         assert config.lazy_entity_expansion is False
         assert config.enable_session_aware_search is True
         assert config.max_chunks == 50
@@ -56,7 +54,6 @@ class TestRetrieverConfig:
             vector_weight=0.7,
             graph_weight=0.3,
             recency_weight=0.0,
-            query_cache_ttl_seconds=300,
         )
         assert config.default_depth == 3
         assert config.max_depth == 5
@@ -64,7 +61,6 @@ class TestRetrieverConfig:
         assert config.vector_weight == 0.7
         assert config.graph_weight == 0.3
         assert config.recency_weight == 0.0
-        assert config.query_cache_ttl_seconds == 300
 
     def test_session_aware_search_enabled(self) -> None:
         """Test enabling session-aware search."""
@@ -129,7 +125,6 @@ class TestRetrieverInit:
         )
 
         assert retriever._config.default_depth == 2
-        assert retriever._cache == {}
 
     def test_init_custom_config(self) -> None:
         """Test retriever initialization with custom config."""
@@ -222,7 +217,7 @@ class TestRetrieverSimpleRetrieve:
         mock_result.similarity = 0.85
         vector_store.search = AsyncMock(return_value=[mock_result])
 
-        config = RetrieverConfig(query_cache_ttl_seconds=0)
+        config = RetrieverConfig()
 
         retriever = VectorCypherRetriever(
             vector_store=vector_store,
@@ -428,24 +423,6 @@ class TestRetrieverRecencyScores:
 
 
 @pytest.mark.unit
-class TestRetrieverCaching:
-    """Tests for query result caching."""
-
-    @pytest.mark.asyncio
-    async def test_cache_disabled_by_default(self) -> None:
-        """Test that caching is disabled when ttl is 0."""
-        retriever = VectorCypherRetriever(
-            vector_store=AsyncMock(),
-            neo4j_driver=AsyncMock(),
-            embedder=AsyncMock(),
-            config=RetrieverConfig(query_cache_ttl_seconds=0),
-        )
-
-        assert retriever._cache_ttl == 0
-        assert retriever._cache == {}
-
-
-@pytest.mark.unit
 class TestSimpleRetrieveScoreNormalization:
     """Regression tests for: simple path score normalization.
 
@@ -541,7 +518,7 @@ class TestSimpleRetrieveScoreNormalization:
 
         vector_store.search = AsyncMock(return_value=mock_results)
 
-        config = RetrieverConfig(query_cache_ttl_seconds=0)
+        config = RetrieverConfig()
         retriever = VectorCypherRetriever(
             vector_store=vector_store,
             neo4j_driver=neo4j_driver,
@@ -601,7 +578,7 @@ class TestSimpleRetrieveScoreNormalization:
 
         vector_store.search = AsyncMock(return_value=[mock_result])
 
-        config = RetrieverConfig(query_cache_ttl_seconds=0)
+        config = RetrieverConfig()
         retriever = VectorCypherRetriever(
             vector_store=vector_store,
             neo4j_driver=AsyncMock(),
@@ -666,7 +643,7 @@ class TestGracefulDegradation:
         storage.search_similar_entities = AsyncMock(return_value=[(entry_entity_id, 0.9)])
         storage.get_entities_batch = AsyncMock(return_value={})
 
-        config = RetrieverConfig(query_cache_ttl_seconds=0)
+        config = RetrieverConfig()
 
         retriever = VectorCypherRetriever(
             vector_store=vector_store,
@@ -1080,7 +1057,6 @@ class TestExplicitTemporalSignalSkipsFallback:
         # path — that path issues additional _vector_search_chunks calls and
         # would muddy the call-count assertion.
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             enable_session_aware_search=False,
         )
         retriever = VectorCypherRetriever(

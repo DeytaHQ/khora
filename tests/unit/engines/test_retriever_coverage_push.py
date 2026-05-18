@@ -84,7 +84,7 @@ def _make_retriever(
         vector_store=vector_store if vector_store is not None else AsyncMock(),
         neo4j_driver=neo4j_driver if neo4j_driver is not None else AsyncMock(),
         embedder=AsyncMock(),
-        config=config or RetrieverConfig(query_cache_ttl_seconds=0),
+        config=config or RetrieverConfig(),
         storage=storage,
     )
 
@@ -327,7 +327,6 @@ class TestRecencyChannelChunks:
         c1 = _make_vector_store_chunk(embedding=emb)
         vstore.search_recent_chunks = AsyncMock(return_value=[(c1, None)])
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             temporal_query_relevance_floor=0.5,
         )
         retriever = _make_retriever(config=config, vector_store=vstore)
@@ -385,7 +384,6 @@ class TestApplyReranking:
         fused = [FusedResult(item=c, item_id=c.id, rrf_score=1.0 - 0.1 * i) for i, c in enumerate(chunks)]
 
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             reranking_top_n=3,
             reranking_blend_weight=0.7,
         )
@@ -540,7 +538,6 @@ class TestApplyLLMReranking:
         chunks = [_make_chunk(f"c{i}") for i in range(6)]
         fused = [FusedResult(item=c, item_id=c.id, rrf_score=1.0 - 0.1 * i) for i, c in enumerate(chunks)]
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             llm_reranking_top_n=3,
         )
         retriever = _make_retriever(config=config)
@@ -636,7 +633,6 @@ class TestApplyLLMReranking:
 class TestShouldSkipLlmRerank:
     def test_gap_gate_fires(self) -> None:
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             llm_reranking_confidence_threshold=0.1,
         )
         retriever = _make_retriever(config=config)
@@ -645,7 +641,6 @@ class TestShouldSkipLlmRerank:
 
     def test_decisive_winner_gate_fires(self) -> None:
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             llm_reranking_confidence_threshold=0.5,  # gap won't trigger
             llm_reranking_min_top_score=0.7,
             llm_reranking_decisive_gap=0.1,
@@ -656,7 +651,6 @@ class TestShouldSkipLlmRerank:
 
     def test_neither_gate_fires(self) -> None:
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             llm_reranking_confidence_threshold=0.5,
             llm_reranking_min_top_score=0.7,
             llm_reranking_decisive_gap=0.1,
@@ -1004,7 +998,6 @@ class TestCalculateRecencyScoresPerSource:
         """slack source → 3-day decay (fast), salesforce → 180 (slow); when same age
         the slack chunk decays faster."""
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             temporal_per_source_decay=True,
             temporal_reference_wall_clock=True,
             recency_decay_type="exponential",
@@ -1026,7 +1019,6 @@ class TestCalculateRecencyScoresPerSource:
     def test_per_source_decay_falls_back_to_default(self) -> None:
         """Unknown source_system → use the dict's ``_default`` key."""
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             temporal_per_source_decay=True,
             temporal_reference_wall_clock=True,
             recency_decay_type="exponential",
@@ -1044,7 +1036,6 @@ class TestCalculateRecencyScoresPerSource:
     def test_per_source_decay_default_missing_falls_back_to_config(self) -> None:
         """If ``_default`` key is absent → use config.recency_decay_days."""
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             temporal_per_source_decay=True,
             temporal_reference_wall_clock=True,
             recency_decay_type="exponential",
@@ -1063,7 +1054,6 @@ class TestCalculateRecencyScoresPerSource:
     def test_pathological_zero_decay_falls_back(self) -> None:
         """Decay=0 would div-by-zero → falls back to config.recency_decay_days."""
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             temporal_per_source_decay=True,
             temporal_reference_wall_clock=True,
             recency_decay_type="exponential",
@@ -1081,7 +1071,6 @@ class TestCalculateRecencyScoresPerSource:
     def test_linear_decay_path(self) -> None:
         """The ``linear`` decay branch is independent from per-source."""
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             temporal_reference_wall_clock=True,
             recency_decay_type="linear",
             recency_decay_days=10,
@@ -1104,7 +1093,6 @@ class TestCalculateRecencyScoresPerSource:
     def test_reference_mode_override(self) -> None:
         """explicit reference_mode kwarg wins over config."""
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             temporal_reference_wall_clock=False,
         )
         retriever = _make_retriever(config=config)
@@ -1134,7 +1122,7 @@ class TestRetrieveBackendGate:
             vector_store=AsyncMock(),
             neo4j_driver=None,
             embedder=AsyncMock(),
-            config=RetrieverConfig(query_cache_ttl_seconds=0),
+            config=RetrieverConfig(),
             backend="sqlite_lance",
         )
         from khora.engines.skeleton.backends import TemporalFilter
@@ -1152,7 +1140,6 @@ class TestPprRetrievalPath:
         calls ppr_retrieve_chunks instead of _fetch_chunks_from_entities."""
         ns = uuid4()
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             enable_ppr_retrieval=True,
             ppr_damping=0.85,
             ppr_max_iter=10,
@@ -1335,7 +1322,7 @@ class TestCypherExpand:
             vector_store=AsyncMock(),
             neo4j_driver=None,  # no dual_nodes
             embedder=AsyncMock(),
-            config=RetrieverConfig(query_cache_ttl_seconds=0),
+            config=RetrieverConfig(),
             storage=storage,
         )
         scores, info = await retriever._cypher_expand(entry_entity_ids=[seed], namespace_id=uuid4(), depth=2)
@@ -1361,7 +1348,7 @@ class TestCypherExpand:
 
     @pytest.mark.asyncio
     async def test_depth_is_clamped_to_max(self) -> None:
-        retriever = _make_retriever(config=RetrieverConfig(query_cache_ttl_seconds=0, max_depth=3))
+        retriever = _make_retriever(config=RetrieverConfig(max_depth=3))
         retriever._dual_nodes = MagicMock()
         retriever._dual_nodes.get_entity_neighborhoods = AsyncMock(return_value={})
         await retriever._cypher_expand(
@@ -1417,7 +1404,7 @@ class TestFetchChunksFromEntities:
             vector_store=AsyncMock(),
             neo4j_driver=None,
             embedder=AsyncMock(),
-            config=RetrieverConfig(query_cache_ttl_seconds=0),
+            config=RetrieverConfig(),
             storage=None,
         )
         result = await retriever._fetch_chunks_from_entities(
@@ -1436,7 +1423,7 @@ class TestFetchChunksFromEntities:
             vector_store=AsyncMock(),
             neo4j_driver=None,
             embedder=AsyncMock(),
-            config=RetrieverConfig(query_cache_ttl_seconds=0),
+            config=RetrieverConfig(),
             storage=storage,
         )
         result = await retriever._fetch_chunks_from_entities(
@@ -1564,7 +1551,7 @@ class TestSimpleRetrievePaths:
                 ("new content", newer, None),
             ]
         )
-        config = RetrieverConfig(query_cache_ttl_seconds=0)
+        config = RetrieverConfig()
         retriever = VectorCypherRetriever(
             vector_store=vstore,
             neo4j_driver=AsyncMock(),
@@ -1600,7 +1587,7 @@ class TestSimpleRetrievePaths:
             vector_store=vstore,
             neo4j_driver=AsyncMock(),
             embedder=AsyncMock(),
-            config=RetrieverConfig(query_cache_ttl_seconds=0),
+            config=RetrieverConfig(),
         )
         routing = RoutingDecision(
             complexity=QueryComplexity.SIMPLE,
@@ -1631,7 +1618,6 @@ class TestSimpleRetrievePaths:
         storage.search_fulltext_chunks = AsyncMock(return_value=[(bm25_chunk, 0.9)])
 
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             enable_bm25_channel=True,
             bm25_top_k=10,
         )
@@ -1668,7 +1654,6 @@ class TestSimpleRetrievePaths:
         storage.search_fulltext_chunks = AsyncMock(side_effect=RuntimeError("ft down"))
 
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             enable_bm25_channel=True,
         )
         retriever = VectorCypherRetriever(
@@ -1712,7 +1697,7 @@ class TestSimpleRetrievePaths:
             vector_store=vstore,
             neo4j_driver=AsyncMock(),
             embedder=AsyncMock(),
-            config=RetrieverConfig(query_cache_ttl_seconds=0),
+            config=RetrieverConfig(),
         )
         routing = RoutingDecision(
             complexity=QueryComplexity.SIMPLE,
@@ -1748,7 +1733,6 @@ class TestRetrieveAntiRecencyVeto:
         """When the floor flag is on and the query contains "ever" / "all time",
         synthesis is vetoed and the resulting metadata reflects the veto."""
         config = RetrieverConfig(
-            query_cache_ttl_seconds=0,
             temporal_recency_floor_enabled=True,
         )
         vector_store = AsyncMock()
