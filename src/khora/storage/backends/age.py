@@ -180,15 +180,30 @@ class AGEBackend(GraphBackendBase):
     ) -> list[dict[str, Any]]:
         """Execute a Cypher query via AGE's ``cypher()`` SQL function.
 
-        Wraps the Cypher in::
-
-            SELECT * FROM cypher('graph', $$ <cypher> $$) AS (<columns>)
+        Wraps the Cypher in a *uniquely-tagged* PostgreSQL dollar-quoted
+        string (``$khora_age$ ... $khora_age$``). The unique tag defangs a
+        ``$$``-breakout escalation path: a Cypher payload containing the
+        bare token ``$$`` no longer closes the surrounding SQL string. A
+        payload containing the literal tag ``$khora_age$`` would still
+        escape, so we reject that defensively before the round-trip.
 
         Parses agtype results into Python dicts.
         """
+        if "$khora_age$" in cypher_query:
+            # Defense in depth — the per-string-literal escape in
+            # _serialize_dict_literal / _escape already handles single
+            # quotes + backslashes, but the Cypher-level escape can't reach
+            # the SQL-level dollar-quote. Refusing here is preferable to
+            # silently mangling the tag.
+            raise ValueError(
+                "Cypher query contains the reserved dollar-quote tag '$khora_age$'. "
+                "Run caller-derived input through AGEBackend._escape or "
+                "AGEBackend._serialize_dict_literal before interpolation."
+            )
+
         cols = columns or ["v agtype"]
         col_clause = ", ".join(cols)
-        sql = f"SELECT * FROM cypher('{self._graph_name}', $$ {cypher_query} $$) AS ({col_clause})"  # noqa: S608
+        sql = f"SELECT * FROM cypher('{self._graph_name}', $khora_age$ {cypher_query} $khora_age$) AS ({col_clause})"  # noqa: S608
 
         result = await session.execute(text(sql))
         rows = result.fetchall()
@@ -247,6 +262,31 @@ class AGEBackend(GraphBackendBase):
         # Strip null bytes and escape other control characters
         escaped = escaped.replace("\x00", "").replace("\r", "\\r").replace("\n", "\\n")
         return escaped
+
+    @staticmethod
+    def _serialize_dict_literal(value: dict[str, Any] | None) -> str:
+        """Serialize a dict for safe interpolation inside a Cypher string literal.
+
+        Caller-controlled keys / values may contain single quotes, backslashes,
+        or other Cypher metacharacters that would otherwise close the
+        surrounding ``'...'`` literal early and let the rest of the JSON be
+        parsed as Cypher. This helper JSON-serialises the value and then
+        runs the result through :meth:`_escape` so the embedded payload
+        round-trips into the graph store verbatim.
+
+        Covers every site that interpolates a dict into Cypher:
+        ``Entity.attributes``, ``Entity.metadata``, ``Relationship.properties``,
+        ``Relationship.metadata``, ``Episode.metadata`` — anything that
+        flows through the LLM extractor and ends up inside a Cypher map.
+
+        Returns ``"{}"`` for empty / None inputs so callers can drop the
+        ``or "{}"`` fallback they previously used.
+        """
+        # serialize_dict({}) returns the literal string "{}"; serialize_dict(None)
+        # is a TypeError. Treat None / falsy the same.
+        if not value:
+            return "{}"
+        return AGEBackend._escape(serialize_dict(value))
 
     @staticmethod
     def _sanitize_label(label: str) -> str:
@@ -376,14 +416,14 @@ class AGEBackend(GraphBackendBase):
                 name: '{self._escape(entity.name)}',
                 entity_type: '{self._escape(entity.entity_type)}',
                 description: '{self._escape(entity.description or "")}',
-                attributes: '{serialize_dict(entity.attributes) or "{}"}',
+                attributes: '{self._serialize_dict_literal(entity.attributes)}',
                 source_document_ids: {src_doc_ids},
                 source_chunk_ids: {src_chunk_ids},
                 mention_count: {entity.mention_count},
                 valid_from: {f"'{entity.valid_from.isoformat()}'" if entity.valid_from else "null"},
                 valid_until: {f"'{entity.valid_until.isoformat()}'" if entity.valid_until else "null"},
                 confidence: {entity.confidence},
-                metadata: '{serialize_dict(entity.metadata) or "{}"}',
+                metadata: '{self._serialize_dict_literal(entity.metadata)}',
                 created_at: '{now}',
                 updated_at: '{now}'
             }})
@@ -443,14 +483,14 @@ class AGEBackend(GraphBackendBase):
             MATCH (e:Entity {{id: '{entity.id}'}})
             SET e.name = '{self._escape(entity.name)}',
                 e.description = '{self._escape(entity.description or "")}',
-                e.attributes = '{serialize_dict(entity.attributes) or "{}"}',
+                e.attributes = '{self._serialize_dict_literal(entity.attributes)}',
                 e.source_document_ids = {src_doc_ids},
                 e.source_chunk_ids = {src_chunk_ids},
                 e.mention_count = {entity.mention_count},
                 e.valid_from = {f"'{entity.valid_from.isoformat()}'" if entity.valid_from else "null"},
                 e.valid_until = {f"'{entity.valid_until.isoformat()}'" if entity.valid_until else "null"},
                 e.confidence = {entity.confidence},
-                e.metadata = '{serialize_dict(entity.metadata) or "{}"}',
+                e.metadata = '{self._serialize_dict_literal(entity.metadata)}',
                 e.updated_at = '{now}'
             RETURN e
         """
@@ -543,14 +583,14 @@ class AGEBackend(GraphBackendBase):
                 id: '{relationship.id}',
                 namespace_id: '{relationship.namespace_id}',
                 description: '{self._escape(relationship.description or "")}',
-                properties: '{serialize_dict(relationship.properties) or "{}"}',
+                properties: '{self._serialize_dict_literal(relationship.properties)}',
                 source_document_ids: {src_doc_ids},
                 source_chunk_ids: {src_chunk_ids},
                 valid_from: {f"'{relationship.valid_from.isoformat()}'" if relationship.valid_from else "null"},
                 valid_until: {f"'{relationship.valid_until.isoformat()}'" if relationship.valid_until else "null"},
                 confidence: {relationship.confidence},
                 weight: {relationship.weight},
-                metadata: '{serialize_dict(relationship.metadata) or "{}"}',
+                metadata: '{self._serialize_dict_literal(relationship.metadata)}',
                 created_at: '{now}',
                 updated_at: '{now}'
             }}]->(target)
@@ -728,7 +768,7 @@ class AGEBackend(GraphBackendBase):
                 entity_ids: {entity_id_list},
                 source_document_ids: {src_doc_ids},
                 source_chunk_ids: {src_chunk_ids},
-                metadata: '{serialize_dict(episode.metadata) or "{}"}',
+                metadata: '{self._serialize_dict_literal(episode.metadata)}',
                 created_at: '{now}',
                 updated_at: '{now}'
             }})

@@ -48,6 +48,95 @@ class TestEscape:
 
 
 # ---------------------------------------------------------------------------
+# _serialize_dict_literal() — Cypher injection regression coverage
+# ---------------------------------------------------------------------------
+
+
+import re  # noqa: E402 — kept local to the regression suite for readability
+
+
+def _count_unescaped_quotes(s: str) -> int:
+    """Count single quotes NOT preceded by a backslash (literal delimiters)."""
+    return len(re.findall(r"(?<!\\)'", s))
+
+
+@pytest.mark.unit
+class TestSerializeDictLiteral:
+    """``_serialize_dict_literal`` is the defense against caller-controlled
+    Cypher injection via ``Entity.attributes``, ``Entity.metadata``,
+    ``Relationship.properties / metadata``, and ``Episode.metadata``. Each
+    of those fields lands inside ``f"...: '{serialize_dict(value)}'"`` in
+    the Cypher template — without this helper, a single quote inside the
+    serialised JSON closes the Cypher literal early and the rest is
+    executed as Cypher.
+    """
+
+    def test_none_returns_empty_object_literal(self):
+        assert AGEBackend._serialize_dict_literal(None) == "{}"
+
+    def test_empty_dict_returns_empty_object_literal(self):
+        assert AGEBackend._serialize_dict_literal({}) == "{}"
+
+    def test_plain_dict_round_trips(self):
+        out = AGEBackend._serialize_dict_literal({"k": "v"})
+        # JSON-shaped output, no escape needed for plain text.
+        assert out == '{"k": "v"}'
+
+    def test_single_quote_in_value_is_escaped(self):
+        # The canonical injection payload from the bug report. Without
+        # escape, the embedded `'` closes the Cypher literal early.
+        payload = {"note": "x'; MATCH (n) DETACH DELETE n; //"}
+        out = AGEBackend._serialize_dict_literal(payload)
+        assert "\\'" in out
+        # Wrapped in the Cypher template, the unescaped-quote count must
+        # be exactly 2 (open + close), not 3 (open + payload-borne + close).
+        fragment = f"attributes: '{out}',"
+        assert _count_unescaped_quotes(fragment) == 2
+
+    def test_backslash_in_value_is_escaped(self):
+        out = AGEBackend._serialize_dict_literal({"path": "C:\\Users"})
+        # JSON encodes the backslash as `\\`; our escape then doubles each
+        # backslash, so the four-character JSON `"\\"` becomes the
+        # eight-character Cypher fragment `"\\\\"`.
+        assert "\\\\\\\\" in out
+
+    def test_dollar_dollar_payload_does_not_break_sql_wrapping(self):
+        # ``$$`` would close the legacy SQL dollar-quote wrapping. The
+        # per-literal escape doesn't have to neutralise it (the value
+        # round-trips into the graph literally) — the SQL-level defense
+        # is the uniquely-tagged ``$khora_age$`` wrap in ``_cypher``.
+        # Here we only assert that the literal stays balanced.
+        payload = {"note": "x'; $$; DROP TABLE chunks; $$;"}
+        out = AGEBackend._serialize_dict_literal(payload)
+        fragment = f"attributes: '{out}',"
+        assert _count_unescaped_quotes(fragment) == 2
+
+    def test_newline_in_value_is_escaped(self):
+        out = AGEBackend._serialize_dict_literal({"k": "a\nb"})
+        # JSON encodes the newline as the two-char sequence `\n`; the
+        # Cypher escape then turns the backslash into `\\`.
+        assert "\\\\n" in out
+
+    def test_assembled_cypher_fragment_is_balanced(self):
+        # End-to-end check on the assembled fragment shape: the exact
+        # template used inside create_entity / update_entity et al.
+        for payload in [
+            {"note": "single ' quote"},
+            {"note": 'double " quote'},
+            {"note": "$$-dollar-quote"},
+            {"key": "x'); DROP TABLE chunks; //"},
+            {"k": "v", "nested": {"inner": "with ' quote"}},
+        ]:
+            out = AGEBackend._serialize_dict_literal(payload)
+            fragment = f"attributes: '{out}',"
+            assert _count_unescaped_quotes(fragment) == 2, (
+                f"payload {payload!r} produced fragment with "
+                f"{_count_unescaped_quotes(fragment)} unescaped quotes "
+                f"(want 2): {fragment!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # _sanitize_label()
 # ---------------------------------------------------------------------------
 
