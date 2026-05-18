@@ -20,7 +20,7 @@ import pytest
 from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, MemoryNamespace
 from khora.core.models.document import DocumentStatus
 from khora.db.session import run_migrations
-from khora.storage.backends.pgvector import PgvectorBackend
+from khora.storage.backends.pgvector import PgVectorBackend
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
@@ -63,7 +63,7 @@ async def _run_migrations_once():
 
 @pytest.fixture
 async def backend(_run_migrations_once):
-    be = PgvectorBackend(DATABASE_URL)
+    be = PgVectorBackend(DATABASE_URL)
     await be.connect()
     yield be
     await be.disconnect()
@@ -103,7 +103,7 @@ def _make_doc(namespace_id) -> Document:
 
 @skip_no_pg
 class TestChunkNamespaceIsolationPg:
-    async def test_cross_namespace_get_chunk_returns_none(self, backend: PgvectorBackend) -> None:
+    async def test_cross_namespace_get_chunk_returns_none(self, backend: PgVectorBackend) -> None:
         ns_a = await backend.create_namespace(MemoryNamespace())
         ns_b = await backend.create_namespace(MemoryNamespace())
 
@@ -118,7 +118,7 @@ class TestChunkNamespaceIsolationPg:
         # Cross-namespace lookup must return None.
         assert (await backend.get_chunk(chunk.id, namespace_id=ns_b.id)) is None
 
-    async def test_cross_namespace_get_chunks_batch_filters(self, backend: PgvectorBackend) -> None:
+    async def test_cross_namespace_get_chunks_batch_filters(self, backend: PgVectorBackend) -> None:
         ns_a = await backend.create_namespace(MemoryNamespace())
         ns_b = await backend.create_namespace(MemoryNamespace())
 
@@ -134,7 +134,7 @@ class TestChunkNamespaceIsolationPg:
         result = await backend.get_chunks_batch([c_a.id, c_b.id], namespace_id=ns_a.id)
         assert set(result.keys()) == {c_a.id}
 
-    async def test_cross_namespace_get_chunks_by_document_returns_empty(self, backend: PgvectorBackend) -> None:
+    async def test_cross_namespace_get_chunks_by_document_returns_empty(self, backend: PgVectorBackend) -> None:
         ns_a = await backend.create_namespace(MemoryNamespace())
         ns_b = await backend.create_namespace(MemoryNamespace())
 
