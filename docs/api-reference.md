@@ -183,6 +183,28 @@ Background-coroutine-friendly TTL cleanup. Calls `forget_session()` for each `se
 
 Convenience accessors over the underlying engine's graph-view API. Signatures are stable but return types are engine-specific; consult the type hints in `src/khora/khora.py`.
 
+### `get_entity`
+
+```python
+entity = await kb.get_entity(entity_id, namespace=ns.namespace_id)
+# Entity | None  — returns None for cross-namespace lookups.
+```
+
+`namespace` is **required** (accepts `str | UUID`, mirrors `list_entities` / `find_related_entities`). The facade fetches the row and verifies its `namespace_id` matches — cross-namespace ids resolve to `None` rather than the foreign entity. Calling without `namespace=` raises `TypeError`.
+
+This shape applies to the whole `kb.storage` getter surface — namespace is the trust boundary, never derivable from the id alone:
+
+| Method | Required keyword |
+|---|---|
+| `kb.storage.get_entity(entity_id, *, namespace_id)` | `namespace_id: UUID` |
+| `kb.storage.get_relationship(relationship_id, *, namespace_id)` | `namespace_id: UUID` |
+| `kb.storage.get_episode(episode_id, *, namespace_id)` | `namespace_id: UUID` |
+| `kb.storage.get_chunk(chunk_id, *, namespace_id)` | `namespace_id: UUID` |
+| `kb.storage.get_chunks_batch(chunk_ids, *, namespace_id)` | `namespace_id: UUID` — cross-namespace ids silently dropped from the returned dict |
+| `kb.storage.get_chunks_by_document(document_id, *, namespace_id)` | `namespace_id: UUID` — returns `[]` if the document doesn't belong to the namespace |
+
+The underlying graph-backend / vector-backend `get_*` methods retain their id-only shape; they sit below the trust boundary. Filtering happens at the facade.
+
 ### `stats`
 
 ```python

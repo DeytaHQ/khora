@@ -101,6 +101,7 @@ Canonical machine-readable contract: `__all__` in `src/khora/extraction/skills/b
 
 - **Additive changes** are permitted in minor and patch releases: new optional dataclass fields with defaults, new optional keyword arguments to existing methods, new helper modules. Adding a field must preserve existing `from_dict` / `to_dict` round-trips for older payloads.
 - **Breaking changes** require a major version bump: renaming or removing a field/method, changing a type, changing a default in a way that alters observable behaviour, removing a class. Breaking changes coordinate with the published consumer packages (khora-cli, khora-explorer).
+- **Security exception.** Breaking changes that close a confidentiality or integrity vulnerability may land in a patch release without a major bump. The patch CHANGELOG entry calls out the affected signatures under `### Changed (breaking)` and the corresponding security finding under `### Security`. Coordinated consumer-package updates still apply; the carve-out only covers the timing of the bump, not the disclosure. Example: v0.15.1 promoted `kb.get_entity` and the `kb.storage` getters (`get_entity` / `get_relationship` / `get_episode` / `get_chunk` / `get_chunks_batch` / `get_chunks_by_document`) to require a `namespace` / `namespace_id` keyword argument, closing cross-namespace IDOR primitives on multi-tenant deployments.
 - `from_dict` for extraction-skill dataclasses preserves backward compatibility with historical YAML/JSON payloads for at least one major version after schema evolution.
 
 ### What's NOT pinned

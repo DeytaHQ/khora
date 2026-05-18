@@ -39,7 +39,7 @@ Vector search was fetching entities one at a time:
 ```python
 # Before: N sequential awaits
 for entity_id, score in entity_ids_scores:
-    entity = await self._storage.get_entity(entity_id)
+    entity = await self._storage.get_entity(entity_id, namespace_id=ns)
 
 # After: single batch query
 entity_ids = [eid for eid, _ in entity_ids_scores]
