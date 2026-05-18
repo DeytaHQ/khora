@@ -110,7 +110,7 @@ test-unit:
 
 # Run integration tests serial; appends to .coverage from test-unit and emits the report.
 test-integration:
-	uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-fail-under=65 -m integration
+	uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-fail-under=72 -m integration
 
 # Run SQLite+LanceDB embedded-stack tests only (no Docker required).
 # Useful for fast feedback on the embedded path without spinning up Postgres/Neo4j.
