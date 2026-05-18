@@ -289,7 +289,10 @@ class EntityIndex:
         Returns:
             List of (candidate, similarity) pairs, highest first.
         """
-        if not entity.embedding:
+        # ``is None`` (not ``not entity.embedding``): SurrealDB returns the
+        # stored embedding as a numpy ndarray, which raises in a boolean
+        # context (#717).
+        if entity.embedding is None:
             return []
 
         type_str = entity.entity_type
@@ -323,7 +326,9 @@ class EntityIndex:
             if len(valid_candidates) >= max_candidates:
                 break
             candidate = self._by_id.get(cid)
-            if candidate is None or not candidate.embedding:
+            # ``embedding is None``: see comment on the query-side guard
+            # above (#717).
+            if candidate is None or candidate.embedding is None:
                 continue
             if candidate.entity_type != type_str:
                 continue

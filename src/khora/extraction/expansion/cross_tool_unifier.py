@@ -394,8 +394,11 @@ class CrossToolUnifier:
         """
         pairs = []
 
-        # Filter to entities with embeddings
-        with_embeddings = [e for e in entities if e.embedding]
+        # Filter to entities with embeddings.
+        # ``is not None`` (not ``e.embedding``): SurrealDB returns the stored
+        # embedding as a numpy ndarray, which raises ``ValueError: truth value
+        # of an array is ambiguous`` in a boolean context (#717).
+        with_embeddings = [e for e in entities if e.embedding is not None]
         if len(with_embeddings) < 2:
             return pairs
 

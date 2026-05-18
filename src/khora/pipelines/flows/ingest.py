@@ -1283,7 +1283,11 @@ async def process_document(
                     stored_id = str(entity.id)
                     name_type_to_stored[key] = stored_id
                     entity_id_mapping[stored_id] = stored_id
-                    needs_embedding = is_new or not entity.embedding
+                    # ``is None`` (not ``not …``): SurrealDB returns the
+                    # stored embedding as a numpy ndarray, and ``not ndarray``
+                    # raises ``ValueError: truth value of an array is
+                    # ambiguous`` on the re-ingest path (#714).
+                    needs_embedding = is_new or entity.embedding is None
                     store_results.append((entity, needs_embedding))
 
                 # Map every original entity ID to its stored counterpart by name+type
@@ -2024,7 +2028,9 @@ async def run_smart_resolution(
     await storage.upsert_entities_batch(namespace_id, resolved_entities, batch_size=batch_size)
 
     # Generate embeddings for entities missing them
-    entities_needing_embeddings = [e for e in resolved_entities if not e.embedding]
+    # ``is None``: see comment on the matching guard in ``_store_entities``
+    # (#714) — SurrealDB returns embeddings as ndarrays.
+    entities_needing_embeddings = [e for e in resolved_entities if e.embedding is None]
     if entities_needing_embeddings:
         from khora.extraction.embedders import LiteLLMEmbedder
 
@@ -2246,7 +2252,8 @@ async def backfill_entity_embeddings(
     # Note: We check the vector backend directly since graph doesn't store embeddings
     entities_needing_embeddings = []
     for entity in entities:
-        if not entity.embedding:
+        # ``is None``: SurrealDB returns embeddings as ndarrays (#714).
+        if entity.embedding is None:
             # Also ensure entity exists in PostgreSQL, create if not
             if storage.vector:
                 exists = await storage.vector.entity_exists(entity.id)
