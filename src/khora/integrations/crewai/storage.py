@@ -351,7 +351,7 @@ class KhoraStorageBackend:
                 return None
             doc_id = doc.id
             self._record_to_document[record_id] = doc_id
-        chunks = await storage.get_chunks_by_document(doc_id)
+        chunks = await storage.get_chunks_by_document(doc_id, namespace_id=self.namespace_id)
         return chunks[0] if chunks else None
 
     # ------------------------------------------------------------------
@@ -406,7 +406,7 @@ class KhoraStorageBackend:
                 if skipped < offset:
                     skipped += 1
                     continue
-                chunks = await storage.get_chunks_by_document(doc.id)
+                chunks = await storage.get_chunks_by_document(doc.id, namespace_id=self.namespace_id)
                 if not chunks:
                     continue
                 out.append(chunk_to_record(chunks[0], self._memory_record_cls))

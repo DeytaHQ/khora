@@ -818,20 +818,25 @@ class SQLiteVectorBackend:
         await self._conn.commit()
         return chunks
 
-    async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-        cursor = await self._conn.execute("SELECT * FROM chunks WHERE id = ?", (str(chunk_id),))
+    async def get_chunk(self, chunk_id: UUID, *, namespace_id: UUID) -> Chunk | None:
+        cursor = await self._conn.execute(
+            "SELECT * FROM chunks WHERE id = ? AND namespace_id = ?",
+            (str(chunk_id), str(namespace_id)),
+        )
         row = await cursor.fetchone()
         if row is None:
             return None
         return self._row_to_chunk(row)
 
-    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
+    async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:
         if not chunk_ids:
             return {}
         placeholders = ",".join("?" for _ in chunk_ids)
+        params = [str(c) for c in chunk_ids]
+        params.append(str(namespace_id))
         cursor = await self._conn.execute(
-            f"SELECT * FROM chunks WHERE id IN ({placeholders})",  # noqa: S608
-            [str(c) for c in chunk_ids],
+            f"SELECT * FROM chunks WHERE id IN ({placeholders}) AND namespace_id = ?",  # noqa: S608
+            params,
         )
         rows = await cursor.fetchall()
         result: dict[UUID, Chunk] = {}
@@ -840,10 +845,10 @@ class SQLiteVectorBackend:
             result[chunk.id] = chunk
         return result
 
-    async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+    async def get_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
         cursor = await self._conn.execute(
-            "SELECT * FROM chunks WHERE document_id = ? ORDER BY chunk_index",
-            (str(document_id),),
+            "SELECT * FROM chunks WHERE document_id = ? AND namespace_id = ? ORDER BY chunk_index",
+            (str(document_id), str(namespace_id)),
         )
         rows = await cursor.fetchall()
         return [self._row_to_chunk(r) for r in rows]

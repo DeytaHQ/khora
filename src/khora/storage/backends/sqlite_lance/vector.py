@@ -241,20 +241,25 @@ class SQLiteLanceVectorAdapter:
 
         return chunks
 
-    async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-        cur = await self._sqlite.execute("SELECT * FROM chunks WHERE id = ?", (uuid_to_text(chunk_id),))
+    async def get_chunk(self, chunk_id: UUID, *, namespace_id: UUID) -> Chunk | None:
+        cur = await self._sqlite.execute(
+            "SELECT * FROM chunks WHERE id = ? AND namespace_id = ?",
+            (uuid_to_text(chunk_id), uuid_to_text(namespace_id)),
+        )
         row = await cur.fetchone()
         if row is None:
             return None
         return self._row_to_chunk(row)
 
-    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
+    async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:
         if not chunk_ids:
             return {}
         placeholders = ",".join("?" for _ in chunk_ids)
+        params = [uuid_to_text(c) for c in chunk_ids]
+        params.append(uuid_to_text(namespace_id))
         cur = await self._sqlite.execute(
-            f"SELECT * FROM chunks WHERE id IN ({placeholders})",  # noqa: S608
-            [uuid_to_text(c) for c in chunk_ids],
+            f"SELECT * FROM chunks WHERE id IN ({placeholders}) AND namespace_id = ?",  # noqa: S608
+            params,
         )
         rows = await cur.fetchall()
         result: dict[UUID, Chunk] = {}
@@ -263,10 +268,10 @@ class SQLiteLanceVectorAdapter:
             result[chunk.id] = chunk
         return result
 
-    async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
+    async def get_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
         cur = await self._sqlite.execute(
-            "SELECT * FROM chunks WHERE document_id = ? ORDER BY chunk_index",
-            (uuid_to_text(document_id),),
+            "SELECT * FROM chunks WHERE document_id = ? AND namespace_id = ? ORDER BY chunk_index",
+            (uuid_to_text(document_id), uuid_to_text(namespace_id)),
         )
         rows = await cur.fetchall()
         return [self._row_to_chunk(r) for r in rows]

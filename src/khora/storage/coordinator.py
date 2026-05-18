@@ -799,32 +799,44 @@ class StorageCoordinator:
             raise RuntimeError("Vector backend not configured")
         return await self.vector.create_chunks_batch(chunks)
 
-    async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-        """Get a chunk by ID."""
+    async def get_chunk(self, chunk_id: UUID, *, namespace_id: UUID) -> Chunk | None:
+        """Get a chunk by ID, filtered to the caller's ``namespace_id``.
+
+        Returns ``None`` when the chunk does not exist or belongs to a
+        different namespace. The ``namespace_id`` keyword is required to
+        prevent cross-tenant chunk access via id (IDOR).
+        """
         if not self.vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.get_chunk(chunk_id)
+        return await self.vector.get_chunk(chunk_id, namespace_id=namespace_id)
 
-    async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-        """Get all chunks for a document."""
+    async def get_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
+        """Get all chunks for a document, filtered to the caller's ``namespace_id``.
+
+        Returns an empty list when the document does not belong to the
+        caller's namespace.
+        """
         if not self.vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.get_chunks_by_document(document_id)
+        return await self.vector.get_chunks_by_document(document_id, namespace_id=namespace_id)
 
-    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
-        """Fetch multiple chunks by ID in a single query.
+    async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:
+        """Fetch multiple chunks by ID in a single query, filtered to ``namespace_id``.
 
         Args:
-            chunk_ids: List of chunk IDs to fetch
+            chunk_ids: List of chunk IDs to fetch.
+            namespace_id: Caller's namespace; chunks belonging to any
+                other namespace are silently dropped from the result.
 
         Returns:
-            Dictionary mapping chunk ID to Chunk (only for existing chunks)
+            Dictionary mapping chunk ID to Chunk (only for existing
+            chunks within ``namespace_id``).
         """
         if not chunk_ids:
             return {}
         if not self.vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.get_chunks_batch(chunk_ids)
+        return await self.vector.get_chunks_batch(chunk_ids, namespace_id=namespace_id)
 
     @_record_storage_op("search_similar_chunks", "pgvector")
     async def search_similar_chunks(

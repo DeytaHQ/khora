@@ -570,7 +570,7 @@ class TestReplaceViaRememberIntegration:
         # via TemporalVectorStore, NOT to the coordinator's ``chunks``
         # table, so this count starts at 0 and must stay at 0 after the
         # aborted replace (PG rollback is the invariant).
-        chunks_before = await kb.storage.get_chunks_by_document(v1.document_id)
+        chunks_before = await kb.storage.get_chunks_by_document(v1.document_id, namespace_id=namespace_id)
 
         vector_backend = kb.storage.vector
         assert vector_backend is not None
@@ -606,7 +606,7 @@ class TestReplaceViaRememberIntegration:
         assert call_count["n"] >= 1, "coordinator txn never invoked vector.create_chunks_batch"
 
         # PG chunks: unchanged by the rolled-back transaction.
-        chunks_after = await kb.storage.get_chunks_by_document(v1.document_id)
+        chunks_after = await kb.storage.get_chunks_by_document(v1.document_id, namespace_id=namespace_id)
         assert len(chunks_after) == len(chunks_before)
 
         # Document status is FAILED (coordinator's error path marks the row

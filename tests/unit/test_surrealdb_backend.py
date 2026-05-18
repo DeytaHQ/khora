@@ -1416,7 +1416,7 @@ class TestVectorAdapterChunkOps:
         conn.query_one = AsyncMock(return_value=row)
         adapter = SurrealDBVectorAdapter(conn)
 
-        result = await adapter.get_chunk(chunk_id)
+        result = await adapter.get_chunk(chunk_id, namespace_id=uuid4())
         assert result is not None
         assert result.id == chunk_id
         assert result.content == "test chunk content"
@@ -1428,7 +1428,7 @@ class TestVectorAdapterChunkOps:
         conn.query_one = AsyncMock(return_value=None)
         adapter = SurrealDBVectorAdapter(conn)
 
-        result = await adapter.get_chunk(uuid4())
+        result = await adapter.get_chunk(uuid4(), namespace_id=uuid4())
         assert result is None
 
     async def test_get_chunks_batch(self) -> None:
@@ -1441,7 +1441,7 @@ class TestVectorAdapterChunkOps:
         conn.query = AsyncMock(return_value=rows)
         adapter = SurrealDBVectorAdapter(conn)
 
-        result = await adapter.get_chunks_batch([c1, c2])
+        result = await adapter.get_chunks_batch([c1, c2], namespace_id=uuid4())
         assert len(result) == 2
         assert c1 in result
         assert c2 in result
@@ -1451,7 +1451,7 @@ class TestVectorAdapterChunkOps:
 
         conn = _make_mock_conn()
         adapter = SurrealDBVectorAdapter(conn)
-        result = await adapter.get_chunks_batch([])
+        result = await adapter.get_chunks_batch([], namespace_id=uuid4())
         assert result == {}
 
     async def test_get_chunks_by_document(self) -> None:
@@ -1464,7 +1464,7 @@ class TestVectorAdapterChunkOps:
         conn.query = AsyncMock(return_value=rows)
         adapter = SurrealDBVectorAdapter(conn)
 
-        result = await adapter.get_chunks_by_document(doc_id)
+        result = await adapter.get_chunks_by_document(doc_id, namespace_id=uuid4())
         assert len(result) == 2
 
     async def test_delete_chunks_by_document(self) -> None:

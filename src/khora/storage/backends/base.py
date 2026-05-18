@@ -285,25 +285,40 @@ class VectorBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-        """Get a chunk by ID."""
-        ...
+    async def get_chunk(self, chunk_id: UUID, *, namespace_id: UUID) -> Chunk | None:
+        """Get a chunk by ID, scoped to ``namespace_id``.
 
-    @abstractmethod
-    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
-        """Get multiple chunks by ID in a single query.
-
-        Args:
-            chunk_ids: List of chunk IDs to fetch
-
-        Returns:
-            Dictionary mapping chunk ID to Chunk (only for existing chunks)
+        Returns ``None`` if the chunk does not exist OR belongs to a
+        different namespace — the caller's namespace is the authority.
+        The ``namespace_id`` filter prevents cross-tenant chunk access
+        by id (IDOR).
         """
         ...
 
     @abstractmethod
-    async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-        """Get all chunks for a document."""
+    async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:
+        """Get multiple chunks by ID in a single query, scoped to ``namespace_id``.
+
+        Args:
+            chunk_ids: List of chunk IDs to fetch.
+            namespace_id: Caller's namespace; chunks belonging to any
+                other namespace are silently dropped from the result
+                to prevent cross-tenant IDOR.
+
+        Returns:
+            Dictionary mapping chunk ID to Chunk (only for existing
+            chunks within ``namespace_id``).
+        """
+        ...
+
+    @abstractmethod
+    async def get_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
+        """Get all chunks for a document, scoped to ``namespace_id``.
+
+        Returns an empty list when the document does not belong to the
+        caller's namespace. The namespace filter prevents cross-tenant
+        chunk access by document id.
+        """
         ...
 
     @abstractmethod

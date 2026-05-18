@@ -282,22 +282,22 @@ class TestVectorGuards:
     @pytest.mark.asyncio
     async def test_get_chunk(self, empty_coord) -> None:
         with pytest.raises(RuntimeError, match="Vector backend not configured"):
-            await empty_coord.get_chunk(uuid4())
+            await empty_coord.get_chunk(uuid4(), namespace_id=uuid4())
 
     @pytest.mark.asyncio
     async def test_get_chunks_by_document(self, empty_coord) -> None:
         with pytest.raises(RuntimeError, match="Vector backend not configured"):
-            await empty_coord.get_chunks_by_document(uuid4())
+            await empty_coord.get_chunks_by_document(uuid4(), namespace_id=uuid4())
 
     @pytest.mark.asyncio
     async def test_get_chunks_batch_empty_returns_empty(self, empty_coord) -> None:
         """Empty list short-circuits before the guard, returning {}."""
-        assert await empty_coord.get_chunks_batch([]) == {}
+        assert await empty_coord.get_chunks_batch([], namespace_id=uuid4()) == {}
 
     @pytest.mark.asyncio
     async def test_get_chunks_batch_raises_when_unconfigured(self, empty_coord) -> None:
         with pytest.raises(RuntimeError, match="Vector backend not configured"):
-            await empty_coord.get_chunks_batch([uuid4()])
+            await empty_coord.get_chunks_batch([uuid4()], namespace_id=uuid4())
 
     @pytest.mark.asyncio
     async def test_search_similar_chunks(self, empty_coord) -> None:

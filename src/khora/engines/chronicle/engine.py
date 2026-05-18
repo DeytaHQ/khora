@@ -1132,7 +1132,7 @@ class ChronicleEngine:
         if run_events or run_facts:
             chunk_ids = result.get("chunk_ids", []) or []
             if chunk_ids:
-                chunks_map = await storage.get_chunks_batch(list(chunk_ids))
+                chunks_map = await storage.get_chunks_batch(list(chunk_ids), namespace_id=namespace_id)
                 chunks = [chunks_map[cid] for cid in chunk_ids if cid in chunks_map]
                 if run_events:
                     start = time.perf_counter()
@@ -1737,7 +1737,7 @@ class ChronicleEngine:
         # Hydrate the top-scoring chunks. We only need ``limit`` of them.
         top_chunk_ids = sorted(per_chunk_score, key=lambda cid: per_chunk_score[cid], reverse=True)[:limit]
         try:
-            chunks_map = await storage.get_chunks_batch(top_chunk_ids)
+            chunks_map = await storage.get_chunks_batch(top_chunk_ids, namespace_id=namespace_id)
         except Exception as exc:
             logger.debug("temporal channel: get_chunks_batch failed ({})", exc)
             return []
@@ -1915,7 +1915,7 @@ class ChronicleEngine:
         # Step 3: Fetch the actual chunks
         chunk_ids = sorted(chunk_scores, key=lambda k: chunk_scores.get(k, 0.0), reverse=True)[:limit]
         try:
-            chunks_map = await storage.get_chunks_batch(chunk_ids)
+            chunks_map = await storage.get_chunks_batch(chunk_ids, namespace_id=namespace_id)
         except Exception as e:
             logger.warning("Entity channel: get_chunks_batch failed for {} IDs: {}", len(chunk_ids), e)
             return []
@@ -2119,7 +2119,7 @@ class ChronicleEngine:
         # Fetch and score expansion chunks
         expansion_chunk_ids = expansion_chunk_ids[:limit]  # Cap expansion size
         try:
-            chunks_map = await storage.get_chunks_batch(expansion_chunk_ids)
+            chunks_map = await storage.get_chunks_batch(expansion_chunk_ids, namespace_id=namespace_id)
         except Exception:
             return chunks_with_scores
 
@@ -2353,7 +2353,7 @@ class ChronicleEngine:
             for per_doc in result.get("per_document_results", []):
                 all_chunk_ids.extend(per_doc.get("chunk_ids", []) or [])
             if all_chunk_ids:
-                chunks_map = await self._get_storage().get_chunks_batch(all_chunk_ids)
+                chunks_map = await self._get_storage().get_chunks_batch(all_chunk_ids, namespace_id=namespace_id)
                 chunks = [chunks_map[cid] for cid in all_chunk_ids if cid in chunks_map]
                 if run_events:
                     start = time.perf_counter()

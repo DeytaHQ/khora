@@ -366,35 +366,53 @@ class PgVectorBackend(AsyncSessionMixin):
             await session.commit()
         return chunks
 
-    async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-        """Get a chunk by ID."""
+    async def get_chunk(self, chunk_id: UUID, *, namespace_id: UUID) -> Chunk | None:
+        """Get a chunk by ID, filtered to the caller's ``namespace_id``."""
         async with self._get_session() as session:
-            result = await session.execute(select(ChunkModel).where(ChunkModel.id == chunk_id))
+            result = await session.execute(
+                select(ChunkModel).where(
+                    ChunkModel.id == chunk_id,
+                    ChunkModel.namespace_id == namespace_id,
+                )
+            )
             model = result.scalar_one_or_none()
             return self._chunk_model_to_domain(model) if model else None
 
-    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
-        """Get multiple chunks by ID in a single query.
+    async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:
+        """Get multiple chunks by ID in a single query, scoped to ``namespace_id``.
 
         Args:
-            chunk_ids: List of chunk IDs to fetch
+            chunk_ids: List of chunk IDs to fetch.
+            namespace_id: Caller's namespace; cross-namespace ids are
+                silently dropped from the result to prevent IDOR.
 
         Returns:
-            Dictionary mapping chunk ID to Chunk (only for existing chunks)
+            Dictionary mapping chunk ID to Chunk (only for existing
+            chunks within ``namespace_id``).
         """
         if not chunk_ids:
             return {}
 
         async with self._get_session() as session:
-            result = await session.execute(select(ChunkModel).where(ChunkModel.id.in_(chunk_ids)))
+            result = await session.execute(
+                select(ChunkModel).where(
+                    ChunkModel.id.in_(chunk_ids),
+                    ChunkModel.namespace_id == namespace_id,
+                )
+            )
             models = result.scalars().all()
             return {m.id: self._chunk_model_to_domain(m) for m in models}
 
-    async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-        """Get all chunks for a document."""
+    async def get_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
+        """Get all chunks for a document, filtered to the caller's ``namespace_id``."""
         async with self._get_session() as session:
             result = await session.execute(
-                select(ChunkModel).where(ChunkModel.document_id == document_id).order_by(ChunkModel.chunk_index)
+                select(ChunkModel)
+                .where(
+                    ChunkModel.document_id == document_id,
+                    ChunkModel.namespace_id == namespace_id,
+                )
+                .order_by(ChunkModel.chunk_index)
             )
             return [self._chunk_model_to_domain(m) for m in result.scalars().all()]
 

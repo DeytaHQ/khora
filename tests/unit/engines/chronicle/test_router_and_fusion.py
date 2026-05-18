@@ -110,7 +110,7 @@ class _RecordingCoordinator:
         self.query_events_calls.append({"kwargs": kwargs})
         return []
 
-    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
+    async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:
         return {}
 
     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Any]:
