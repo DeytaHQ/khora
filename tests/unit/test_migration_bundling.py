@@ -373,6 +373,36 @@ class TestKhoraConnectMigrations:
         mock_mig.assert_not_called()
         assert kb._connected is True
 
+    @pytest.mark.unit
+    async def test_connect_skips_migrations_on_surrealdb_backend(self):
+        """run_migrations=True is a no-op on backend=surrealdb (#713).
+
+        SurrealDB has no Alembic chain (declarative schema via
+        ``DEFINE IF NOT EXISTS``), so the migration runner must not fire
+        on this backend even when the caller passes ``run_migrations=True``.
+        Pre-fix, Khora.connect() unconditionally invoked the Postgres-shaped
+        runner and raised ``RuntimeError: Database migration failed: No
+        database URL.`` (or surfaced a stray ``KHORA_DATABASE_URL`` against
+        a backend the user never configured).
+        """
+        cfg = _mock_config()
+        cfg.database_url = None  # No PG URL — mirrors the reported repro
+        cfg.storage.backend = "surrealdb"
+
+        mock_engine = MagicMock()
+        mock_engine.connect = AsyncMock()
+
+        with (
+            patch("khora.khora.load_config", return_value=cfg),
+            patch("khora.engines.create_engine", return_value=mock_engine),
+            patch("khora.db.session.run_migrations") as mock_mig,
+        ):
+            kb = Khora(run_migrations=True)
+            await kb.connect()
+
+        mock_mig.assert_not_called()
+        assert kb._connected is True
+
 
 # ---------------------------------------------------------------------------
 # db/__init__.py exports
