@@ -43,6 +43,7 @@ class OpKind(StrEnum):
     CHRONICLE_EVENT_CLUSTERING = "chronicle_event_clustering"
     VECTORCYPHER_COMMUNITY_SUMMARY = "vectorcypher_community_summary"
     VECTORCYPHER_CONTRADICTION_DETECT = "vectorcypher_contradiction_detect"
+    VECTORCYPHER_NORMALIZE_SCHEMA = "vectorcypher_normalize_schema"
 
 
 @dataclass(slots=True, frozen=True)

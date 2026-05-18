@@ -251,6 +251,7 @@ Functional equivalents live at `khora.dream.api.{dream, dream_status, dream_hist
 | `VECTORCYPHER_SOURCE_CHUNK_IDS_GC` | `vectorcypher_source_chunk_ids_gc` | 2 (planner) | `apply_vectorcypher_source_chunk_ids_gc` — array filter. Dialect-aware. Idempotent. |
 | `CHRONICLE_FACT_COMPACTION` | `chronicle_fact_compaction` | 2 (planner) | `apply_chronicle_fact_compaction` — **only hard-delete op**. Snapshots full rows into undo.json before DELETE. 7-day retention floor. |
 | `CHRONICLE_EVENT_CLUSTERING` | `chronicle_event_clustering` | 2 (planner) | `apply_chronicle_event_clustering` — bi-temporal soft-merge via `merged_into_event_id` (migration 034). |
+| `VECTORCYPHER_NORMALIZE_SCHEMA` | `vectorcypher_normalize_schema` | 5.4 (planner + apply) | `apply_vectorcypher_normalize_schema` — operator-supplied `old_type -> new_type` mapping; rewrites `entity_type` / `relationship_type` and emits one `ENTITY_UPDATED` / `RELATIONSHIP_UPDATED` event per row. Refuses to run on empty mapping. **Coordinated-release impact:** type names are part of the consumer contract (`khora-cli`, `khora-explorer`). |
 
 ### Plan / scope / result dataclasses
 
@@ -282,6 +283,7 @@ plan_vectorcypher_source_chunk_ids_audit(namespace_id, *, coordinator, top_k_off
 plan_vectorcypher_source_chunk_ids_gc(namespace_id, *, coordinator, min_dead=1)
 plan_vectorcypher_centroid_recompute(namespace_id, *, coordinator, merge_clusters, ...)
 plan_vectorcypher_dedupe_entities(namespace_id, *, coordinator, default_threshold=0.90, ...)
+plan_vectorcypher_normalize_schema(namespace_id, *, coordinator, config) -> list[DreamOp]
 ```
 
 ### Apply functions
@@ -297,6 +299,7 @@ apply_chronicle_event_clustering(op, *, coordinator, session) -> UndoRecord
 apply_vectorcypher_source_chunk_ids_gc(op, *, coordinator, session) -> UndoRecord
 apply_vectorcypher_centroid_recompute(op, *, coordinator, session, embedder=None) -> UndoRecord
 apply_vectorcypher_dedupe_entities(op, *, coordinator, session) -> UndoRecord
+apply_vectorcypher_normalize_schema(op, *, coordinator, session) -> UndoRecord
 ```
 
 Every handler honors: caller-owned transaction (no commit/log/telemetry), idempotent on replay, JSON-serialisable `UndoRecord.before`, no top-level `"chunk_id"` key (orchestrator runtime-asserts this via `safety._assert_no_chunk_id_mutation`).

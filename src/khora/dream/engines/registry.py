@@ -31,6 +31,7 @@ from khora.dream.engines.chronicle import (
 from khora.dream.engines.vectorcypher import (
     plan_vectorcypher_community_summary,
     plan_vectorcypher_contradiction_detect,
+    plan_vectorcypher_normalize_schema,
     plan_vectorcypher_orphan_report,
     plan_vectorcypher_prune_edges,
     plan_vectorcypher_schema_drift,
@@ -164,6 +165,10 @@ _APPLY_HANDLER_NAMES: dict[OpKind, tuple[str, str]] = {
     OpKind.VECTORCYPHER_CONTRADICTION_DETECT: (
         "khora.dream.engines.vectorcypher.contradiction_detect",
         "apply_vectorcypher_contradiction_detect",
+    ),
+    OpKind.VECTORCYPHER_NORMALIZE_SCHEMA: (
+        "khora.dream.engines.vectorcypher.normalize_schema",
+        "apply_vectorcypher_normalize_schema",
     ),
 }
 
@@ -306,6 +311,7 @@ class _VectorCypherPlugin:
                 OpKind.VECTORCYPHER_COMMUNITY_SUMMARY,
                 OpKind.VECTORCYPHER_PRUNE_EDGES,
                 OpKind.VECTORCYPHER_CONTRADICTION_DETECT,
+                OpKind.VECTORCYPHER_NORMALIZE_SCHEMA,
             }
         )
 
@@ -373,6 +379,14 @@ class _VectorCypherPlugin:
                 similarity_threshold=config.contradiction_detect_similarity_threshold,
             )
             ops.append(op)
+
+        if OpKind.VECTORCYPHER_NORMALIZE_SCHEMA in wanted:
+            normalize_ops = await plan_vectorcypher_normalize_schema(
+                namespace_id,
+                coordinator=coordinator,
+                config=config,
+            )
+            ops.extend(normalize_ops)
 
         return DreamPlan(
             plan_id=uuid4(),
