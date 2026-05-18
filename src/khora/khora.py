@@ -878,8 +878,26 @@ class Khora:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
-        """Async context manager exit."""
-        await self.disconnect()
+        """Async context manager exit.
+
+        If the body of the ``async with`` raised, suppress any secondary
+        exception from disconnect() so the original traceback is what reaches
+        the user. Disconnect-time failures are logged at warning level.
+        Without this guard, a teardown error (e.g. a SurrealDB shared
+        connection in a bad state after the body's exception) replaces the
+        real cause — exactly the kind of masking #715 describes for the Rust
+        side.
+        """
+        try:
+            await self.disconnect()
+        except Exception as disc_exc:  # noqa: BLE001
+            if exc_type is None:
+                raise
+            logger.warning(
+                "Khora.disconnect raised during __aexit__; suppressing to preserve original {} traceback: {}",
+                exc_type.__name__,
+                disc_exc,
+            )
 
     # =========================================================================
     # Process-wide singleton — Khora.shared() (#619)

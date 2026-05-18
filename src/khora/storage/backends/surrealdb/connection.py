@@ -50,6 +50,16 @@ class SurrealDBConnection:
         self._client: Any = None
         self._connected = False
         self._schema_initialized = False
+        # Serializes concurrent disconnect() calls. The StorageCoordinator
+        # calls disconnect() on all four SurrealDB adapters in parallel via
+        # asyncio.gather; they all delegate to this shared connection. Without
+        # serialization, four awaits race into `self._client.close()` on the
+        # same client object, which (a) makes the close non-idempotent inside
+        # surrealdb-py and (b) leaves pyo3 tokio worker threads in a state
+        # where they can call back into Python after interpreter finalization
+        # — triggering a SIGABRT/pyo3 panic that masks the user's traceback
+        # (#715).
+        self._close_lock: asyncio.Lock = asyncio.Lock()
 
         # Write semaphore for embedded/memory modes: SurrealDB's surrealkv
         # engine can panic under high concurrent HNSW index mutations.
@@ -120,13 +130,27 @@ class SurrealDBConnection:
                     self._schema_initialized = True
 
     async def disconnect(self) -> None:
-        if self._client and self._connected:
-            try:
-                await self._client.close()
-            except Exception:
-                logger.debug("Error closing SurrealDB client (may already be closed)")
+        # Serialize concurrent disconnects from the four SurrealDB adapters
+        # that share this connection. Flip `_connected` before awaiting close
+        # so any caller blocked on the lock sees the connection as already
+        # closed and skips the second close() entirely. Awaiting close() to
+        # completion (rather than letting it run after the GIL release) is
+        # what prevents the surrealdb-py tokio worker from calling back into
+        # Python after interpreter finalization — the SIGABRT/pyo3 panic
+        # reported in #715.
+        async with self._close_lock:
+            if not (self._client and self._connected):
+                return
+            client = self._client
             self._connected = False
             self._client = None
+            try:
+                await client.close()
+            except Exception as exc:  # noqa: BLE001
+                # Log at warning rather than debug: a close failure that
+                # leaves tokio workers alive is exactly the precondition for
+                # the #715 SIGABRT, so operators need to see it.
+                logger.warning("SurrealDB client close raised during disconnect: {}", exc)
             logger.info("Disconnected from SurrealDB")
 
     async def is_healthy(self) -> bool:

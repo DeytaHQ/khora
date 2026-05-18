@@ -260,6 +260,45 @@ class TestSurrealDBConnection:
         await conn.disconnect()
         assert not conn.connected
 
+    async def test_concurrent_disconnect_calls_close_once(self) -> None:
+        """Four parallel disconnects (one per adapter sharing a connection)
+        must call ``client.close()`` exactly once.
+
+        Regression for #715: previously each adapter raced into close() on the
+        same SurrealDB client, leaving pyo3 tokio workers in a state where
+        they called back into Python after interpreter finalization — SIGABRT.
+        """
+        import asyncio
+
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        client = AsyncMock()
+        client.close = AsyncMock()
+        conn._client = client
+        conn._connected = True
+
+        await asyncio.gather(*(conn.disconnect() for _ in range(4)))
+
+        assert not conn.connected
+        assert conn._client is None
+        client.close.assert_awaited_once()
+
+    async def test_disconnect_swallows_client_close_failure(self) -> None:
+        """A failing client.close() must not propagate — it would mask the
+        user's traceback in __aexit__ (#715)."""
+        from khora.storage.backends.surrealdb.connection import SurrealDBConnection
+
+        conn = SurrealDBConnection()
+        conn._client = AsyncMock()
+        conn._client.close = AsyncMock(side_effect=RuntimeError("kaboom"))
+        conn._connected = True
+
+        # Must not raise
+        await conn.disconnect()
+        assert not conn.connected
+        assert conn._client is None
+
     async def test_is_healthy_when_not_connected(self) -> None:
         from khora.storage.backends.surrealdb.connection import SurrealDBConnection
 
