@@ -577,13 +577,16 @@ class SurrealDBRelationalAdapter:
             content=row.get("content", ""),
             status=DocumentStatus(status_raw) if isinstance(status_raw, str) else status_raw,
             metadata=DocumentMetadata(
-                source=row.get("source", ""),
-                source_type=row.get("source_type", ""),
-                content_type=row.get("content_type", ""),
-                title=row.get("title", ""),
-                author=row.get("author", ""),
-                language=row.get("language", "en"),
-                checksum=row.get("checksum", ""),
+                # ``row.get(..., default)`` returns ``None`` if the key exists with
+                # a None value — coerce with ``or`` so the DTO's str contract holds
+                # after migration 037 made these columns nullable on the SQL backends.
+                source=row.get("source") or "",
+                source_type=row.get("source_type") or "",
+                content_type=row.get("content_type") or "",
+                title=row.get("title") or "",
+                author=row.get("author") or "",
+                language=row.get("language") or "en",
+                checksum=row.get("checksum") or "",
                 size_bytes=row.get("size_bytes", 0),
                 custom=row.get("metadata_") or {},
             ),

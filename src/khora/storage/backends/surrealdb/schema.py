@@ -48,12 +48,20 @@ DEFINE TABLE IF NOT EXISTS document SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS namespace_id ON document TYPE string;
 DEFINE FIELD IF NOT EXISTS title ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS content ON document TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS content_type ON document TYPE string DEFAULT 'text';
+-- ``content_type`` and ``language`` are option<string> here to mirror the
+-- Postgres/SQLite nullability flip in migration 037.
+-- Note: SurrealDB ``DEFINE FIELD IF NOT EXISTS`` is append-only — existing
+-- deployments that initialized this schema before the relaxation keep
+-- their stricter type. Re-typing requires an explicit ``REMOVE FIELD``
+-- + redefine, which is out of scope for v0.16.
+DEFINE FIELD IF NOT EXISTS content_type ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS source ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS source_type ON document TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS source_name ON document TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS source_url ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS status ON document TYPE string DEFAULT 'pending';
 DEFINE FIELD IF NOT EXISTS author ON document TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS language ON document TYPE string DEFAULT 'en';
+DEFINE FIELD IF NOT EXISTS language ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS checksum ON document TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS size_bytes ON document TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS chunk_count ON document TYPE int DEFAULT 0;
@@ -90,6 +98,10 @@ DEFINE FIELD IF NOT EXISTS token_count ON chunk TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS embedding ON chunk TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS embedding_model ON chunk TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS metadata_ ON chunk FLEXIBLE TYPE option<object>;
+-- ``chunker_info`` is non-optional with a default-empty-object — mirrors the
+-- PG side's ``NOT NULL DEFAULT '{}'::jsonb`` from migration 037. Unlike the
+-- other FLEXIBLE fields above, an empty object is always present.
+DEFINE FIELD IF NOT EXISTS chunker_info ON chunk FLEXIBLE TYPE object DEFAULT {};
 DEFINE FIELD IF NOT EXISTS created_at ON chunk TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS source_timestamp ON chunk TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS session_id ON chunk TYPE option<string>;
