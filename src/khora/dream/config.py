@@ -321,3 +321,42 @@ class DreamConfig(BaseSettings):
             "even when their SVO summaries are identical."
         ),
     )
+
+    # Phase 5.1 — vectorcypher community detection + per-community LLM
+    # summary (#670). OFF by default — first LLM-using dream op.
+    community_summary_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master toggle for the community-summary op. Default OFF — "
+            "this is the first LLM-using dream op and operators must "
+            "opt-in to the cost surface (~$15-25 per dream cycle on a "
+            "100k-entity namespace at gpt-4o-mini rates)."
+        ),
+    )
+    community_summary_min_size: int = Field(
+        default=5,
+        ge=2,
+        description=(
+            "Minimum community size to emit a summary op for. "
+            "Communities smaller than this are skipped — the LLM cost is "
+            "not justified."
+        ),
+    )
+    community_summary_model: str = Field(
+        default="gpt-4o-mini",
+        description=(
+            "LLM model used by the community-summary apply handler. "
+            "Configurable so operators can swap to a higher-quality "
+            "model (gpt-4o) at higher cost, or to a self-hosted model "
+            "for air-gapped deployments."
+        ),
+    )
+    community_summary_max_members_per_prompt: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Per-community cap on member ids carried into the LLM "
+            "prompt. Bounds the prompt size so a single community of "
+            "1k entities cannot run an unbounded context."
+        ),
+    )
