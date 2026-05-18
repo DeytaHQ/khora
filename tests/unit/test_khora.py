@@ -194,6 +194,34 @@ class TestConnectDisconnect:
 
         kb.disconnect.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_aexit_preserves_body_exception_when_disconnect_fails(self) -> None:
+        """If the body raises AND disconnect raises, the body's exception
+        must reach the caller — disconnect failures are logged but
+        suppressed. Regression for #715: previously a teardown error could
+        replace the user's traceback."""
+        kb = _make_kb()
+        kb.connect = AsyncMock()
+        kb.disconnect = AsyncMock(side_effect=RuntimeError("disconnect kaboom"))
+
+        with pytest.raises(ValueError, match="body kaboom"):
+            async with kb:
+                raise ValueError("body kaboom")
+
+        kb.disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_aexit_propagates_disconnect_error_on_clean_exit(self) -> None:
+        """When the body exits cleanly, a disconnect failure still propagates
+        — we only suppress to preserve a pre-existing exception."""
+        kb = _make_kb()
+        kb.connect = AsyncMock()
+        kb.disconnect = AsyncMock(side_effect=RuntimeError("disconnect kaboom"))
+
+        with pytest.raises(RuntimeError, match="disconnect kaboom"):
+            async with kb:
+                pass
+
 
 # ---------------------------------------------------------------------------
 # _resolve_namespace
