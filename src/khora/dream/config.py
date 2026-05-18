@@ -251,6 +251,74 @@ class DreamConfig(BaseSettings):
         ),
     )
 
+    # Phase 4.1 — two-LLM judge for borderline dedupe merges (#667).
+    dedupe_verifier_band_low: float = Field(
+        default=0.78,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Lower edge of the borderline-merge band. Candidate pairs with "
+            "cosine similarity in [dedupe_verifier_band_low, "
+            "dedupe_verifier_band_high) are routed through the two-LLM "
+            "judge before applying. Pairs above the band skip the verifier; "
+            "pairs below it are rejected by the planner threshold already."
+        ),
+    )
+    dedupe_verifier_band_high: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Upper edge of the borderline-merge band. Pairs at or above "
+            "this score skip the verifier and apply directly."
+        ),
+    )
+    dedupe_verifier_model: str = Field(
+        default="gpt-4o-mini",
+        description=(
+            "LiteLLM model id for the verifier (first judge) on borderline "
+            "dedupe merges. Configurable per call via DreamConfig."
+        ),
+    )
+    dedupe_auditor_model: str = Field(
+        default="claude-haiku-4.5",
+        description=(
+            "LiteLLM model id for the auditor (second judge, distinct "
+            "model family from dedupe_verifier_model). Both judges must "
+            "agree on 'merge' before a borderline op applies."
+        ),
+    )
+    dedupe_verifier_timeout_seconds: int = Field(
+        default=10,
+        gt=0,
+        description=(
+            "Per-judge LLM timeout in seconds. A timeout / transport error "
+            "degrades the joint verdict to decision='defer' (the merge is "
+            "not applied)."
+        ),
+    )
+    dedupe_verifier_min_confidence: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence floor each judge must report when voting 'merge' "
+            "before the dispatcher returns 'merge'. Below-floor confidence "
+            "degrades to defer."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _enforce_verifier_band_ordering(self) -> DreamConfig:
+        """Reject configurations where the low edge exceeds the high edge."""
+        if self.dedupe_verifier_band_low >= self.dedupe_verifier_band_high:
+            raise ValueError(
+                "dedupe_verifier_band_low must be strictly less than "
+                f"dedupe_verifier_band_high (got low={self.dedupe_verifier_band_low}, "
+                f"high={self.dedupe_verifier_band_high})."
+            )
+        return self
+
     # ------------------------------------------------------------------
     # Apply-mode guardrails (#667)
     # ------------------------------------------------------------------

@@ -313,6 +313,229 @@ async def test_undo_record_carries_no_chunk_id_top_level_key() -> None:
     assert "chunk_id" not in undo.before
 
 
+# ---------------------------------------------------------------------------
+# Phase 4.1 — borderline-merge verifier gate (#667)
+# ---------------------------------------------------------------------------
+
+
+def _op_dedupe_with_score(
+    *,
+    canonical: UUID,
+    absorbed: UUID,
+    similarity_score: float,
+    canonical_name: str = "Canonical",
+    absorbed_name: str = "Variant",
+    entity_type: str = "PERSON",
+) -> DreamOp:
+    """Build an op whose merge entry carries the similarity_score the verifier reads."""
+    return DreamOp(
+        op_id=uuid4(),
+        phase="apply",
+        op_type=OpKind.VECTORCYPHER_DEDUPE_ENTITIES,
+        inputs=(),
+        outputs=(
+            {
+                "merges": [
+                    {
+                        "canonical_id": str(canonical),
+                        "absorbed_id": str(absorbed),
+                        "similarity_score": similarity_score,
+                        "canonical_name": canonical_name,
+                        "absorbed_name": absorbed_name,
+                        "entity_type": entity_type,
+                    }
+                ],
+            },
+        ),
+        decision="planned",
+        rationale="dedupe",
+        started_at=datetime.now(UTC),
+        duration_ms=0.1,
+        namespace_id=uuid4(),
+    )
+
+
+class _RecordingVerifier:
+    """Fake two-LLM judge that records every call and returns canned verdicts."""
+
+    def __init__(self, decision: str, *, rationale: str = "stubbed") -> None:
+        from khora.dream.engines.vectorcypher.verifier import JudgeResult, VerifierVerdict
+
+        self.decision = decision
+        self.rationale = rationale
+        self.calls: list[Any] = []
+        self._JudgeResult = JudgeResult
+        self._VerifierVerdict = VerifierVerdict
+
+    async def __call__(self, pair: Any, *, config: Any) -> Any:
+        self.calls.append(pair)
+        # Both judges agree by construction — the dispatcher would
+        # already have collapsed to the decision passed in.
+        verdict = self._VerifierVerdict(
+            decision=self.decision if self.decision in ("merge", "keep_separate", "defer") else "defer",
+            confidence=0.9,
+            evidence_ids=[],
+            rationale=self.rationale,
+        )
+        return self._JudgeResult(
+            decision=self.decision,  # type: ignore[arg-type]
+            verifier_verdict=verdict,
+            auditor_verdict=verdict,
+            rationale=self.rationale,
+        )
+
+
+@pytest.mark.asyncio
+async def test_verifier_skipped_above_band() -> None:
+    """Pair at similarity >= dedupe_verifier_band_high must not invoke the verifier."""
+    from khora.dream.config import DreamConfig
+
+    canonical = uuid4()
+    absorbed = uuid4()
+    session = _FakeSession(dialect_name="postgresql")
+    session.relationship_rows[absorbed] = []
+    op = _op_dedupe_with_score(canonical=canonical, absorbed=absorbed, similarity_score=0.97)
+    verifier = _RecordingVerifier(decision="defer")  # would block the merge if called
+
+    undo = await apply_vectorcypher_dedupe_entities(
+        op,
+        coordinator=_FakeCoordinator(),
+        session=session,
+        dream_config=DreamConfig(),
+        verifier_fn=verifier,
+    )
+
+    # Verifier never ran.
+    assert verifier.calls == []
+    # Merge applied — soft-delete UPDATE fired.
+    sql_blob = " | ".join(s.upper() for s, _ in session.executed)
+    assert "VALID_UNTIL" in sql_blob
+    # Undo record has applied=True and no verifier payload.
+    merge = undo.before["merges"][0]
+    assert merge["applied"] is True
+    assert "verifier" not in merge
+
+
+@pytest.mark.asyncio
+async def test_verifier_runs_in_band() -> None:
+    """Pair at similarity inside [0.78, 0.95) goes through the verifier."""
+    from khora.dream.config import DreamConfig
+
+    canonical = uuid4()
+    absorbed = uuid4()
+    session = _FakeSession(dialect_name="postgresql")
+    session.relationship_rows[absorbed] = []
+    op = _op_dedupe_with_score(canonical=canonical, absorbed=absorbed, similarity_score=0.85)
+    verifier = _RecordingVerifier(decision="merge")
+
+    undo = await apply_vectorcypher_dedupe_entities(
+        op,
+        coordinator=_FakeCoordinator(),
+        session=session,
+        dream_config=DreamConfig(),
+        verifier_fn=verifier,
+    )
+
+    assert len(verifier.calls) == 1
+    # Merge applied (verifier said merge).
+    sql_blob = " | ".join(s.upper() for s, _ in session.executed)
+    assert "VALID_UNTIL" in sql_blob
+    merge = undo.before["merges"][0]
+    assert merge["applied"] is True
+    assert merge["verifier"]["decision"] == "merge"
+
+
+@pytest.mark.asyncio
+async def test_verifier_defer_blocks_merge() -> None:
+    """Verifier decision != merge prevents the soft-delete UPDATE and edge rewrites."""
+    from khora.dream.config import DreamConfig
+
+    canonical = uuid4()
+    absorbed = uuid4()
+    other = uuid4()
+    session = _FakeSession(dialect_name="postgresql")
+    session.relationship_rows[absorbed] = [
+        _FakeRow(id=uuid4(), source_entity_id=absorbed, target_entity_id=other, relationship_type="KNOWS"),
+    ]
+    op = _op_dedupe_with_score(canonical=canonical, absorbed=absorbed, similarity_score=0.85)
+    verifier = _RecordingVerifier(decision="defer", rationale="judges disagreed")
+
+    undo = await apply_vectorcypher_dedupe_entities(
+        op,
+        coordinator=_FakeCoordinator(),
+        session=session,
+        dream_config=DreamConfig(),
+        verifier_fn=verifier,
+    )
+
+    # No mutation: no UPDATE statements on entities or relationships.
+    update_sqls = [s for s, _ in session.executed if s.lstrip().upper().startswith("UPDATE")]
+    assert update_sqls == []
+    # Undo record records the defer verdict.
+    merge = undo.before["merges"][0]
+    assert merge["applied"] is False
+    assert merge["verifier"]["decision"] == "defer"
+    assert merge["verifier"]["rationale"] == "judges disagreed"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_defers_on_disagreement() -> None:
+    """The real dispatcher returns 'defer' when judges disagree — verified at unit level."""
+    from khora.dream.engines.vectorcypher.verifier import (
+        VerifierVerdict,
+        _combine_verdicts,
+    )
+
+    verifier = VerifierVerdict(decision="merge", confidence=0.9, evidence_ids=[], rationale="yes")
+    auditor = VerifierVerdict(decision="keep_separate", confidence=0.9, evidence_ids=[], rationale="no")
+    decision, rationale = _combine_verdicts(verifier, auditor, min_confidence=0.6)
+    assert decision == "defer"
+    assert "disagree" in rationale
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_defers_on_low_confidence() -> None:
+    """Both judges say merge but with low confidence → defer."""
+    from khora.dream.engines.vectorcypher.verifier import (
+        VerifierVerdict,
+        _combine_verdicts,
+    )
+
+    verifier = VerifierVerdict(decision="merge", confidence=0.4, evidence_ids=[], rationale="weak")
+    auditor = VerifierVerdict(decision="merge", confidence=0.55, evidence_ids=[], rationale="weak")
+    decision, _ = _combine_verdicts(verifier, auditor, min_confidence=0.6)
+    assert decision == "defer"
+
+
+def test_verifier_parses_fenced_json() -> None:
+    """Models that wrap JSON in ``` fences still parse cleanly."""
+    from khora.dream.engines.vectorcypher.verifier import _parse_verdict
+
+    raw = (
+        "```json\n"
+        '{"decision": "merge", "confidence": 0.92, "evidence_ids": [], '
+        '"rationale": "same person, alt spelling"}\n'
+        "```"
+    )
+    verdict = _parse_verdict(raw)
+    assert verdict is not None
+    assert verdict.decision == "merge"
+    assert verdict.confidence == 0.92
+
+
+def test_verifier_returns_none_on_garbage() -> None:
+    from khora.dream.engines.vectorcypher.verifier import _parse_verdict
+
+    assert _parse_verdict("") is None
+    assert _parse_verdict("not json at all") is None
+    # Wrong schema (missing decision)
+    assert _parse_verdict('{"confidence": 0.9}') is None
+    # Out-of-range confidence rejected by Pydantic
+    assert _parse_verdict('{"decision": "merge", "confidence": 1.5}') is None
+    # Invalid decision value
+    assert _parse_verdict('{"decision": "yes", "confidence": 0.9}') is None
+
+
 @pytest.mark.asyncio
 async def test_multi_merge_op_handles_every_pair() -> None:
     """An op whose outputs carry N merges produces N undo entries."""

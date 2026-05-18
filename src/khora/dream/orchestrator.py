@@ -524,12 +524,18 @@ class DreamOrchestrator:
         backends without a SQL transaction the orchestrator falls back
         to invoking the handler with ``session=None`` — handlers that
         need a session must guard against this themselves.
+
+        The orchestrator's :class:`DreamConfig` is forwarded as a
+        ``dream_config`` kwarg for handlers that consume it (the dedupe
+        Phase 4.1 verifier — #667). Handlers that don't accept the
+        kwarg are dispatched without it so the registry stays loosely
+        coupled.
         """
         coordinator = self._kb.storage
         try:
             async with coordinator.transaction() as txn:
                 session = txn.session
-                undo = await handler(op, coordinator=coordinator, session=session)
+                undo = await self._invoke_handler(handler, op, coordinator=coordinator, session=session)
                 await self._record_committed_in_session(session, run_id, seq)
                 return undo
         except RuntimeError as exc:
@@ -537,9 +543,37 @@ class DreamOrchestrator:
                 raise
             # Embedded fallback: call handler without a session and
             # advance the in-memory checkpoint best-effort.
-            undo = await handler(op, coordinator=coordinator, session=None)
+            undo = await self._invoke_handler(handler, op, coordinator=coordinator, session=None)
             await self._record_committed(run_id, seq)
             return undo
+
+    async def _invoke_handler(
+        self,
+        handler: Any,
+        op: DreamOp,
+        *,
+        coordinator: Any,
+        session: Any,
+    ) -> UndoRecord:
+        """Call ``handler`` with ``dream_config`` when its signature accepts it.
+
+        We inspect the handler's parameter list once (cheap — handlers
+        are function objects, not classes) and forward
+        ``self._config`` only when the handler declares a ``dream_config``
+        keyword. This keeps the verifier gate fully orchestrated without
+        forcing the (currently four) parallel apply handlers to take a
+        ``dream_config`` kwarg they don't need.
+        """
+        import inspect
+
+        kwargs: dict[str, Any] = {"coordinator": coordinator, "session": session}
+        try:
+            sig = inspect.signature(handler)
+        except (TypeError, ValueError):
+            sig = None
+        if sig is not None and "dream_config" in sig.parameters:
+            kwargs["dream_config"] = self._config
+        return await handler(op, **kwargs)
 
     # ------------------------------------------------------------------
     # Lock acquisition

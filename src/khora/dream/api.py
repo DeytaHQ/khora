@@ -7,7 +7,9 @@ They validate inputs, resolve namespace IDs, construct a fresh
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from khora.dream.config import DreamConfig
@@ -120,9 +122,118 @@ def _coerce_namespace(namespace: str | UUID) -> UUID:
         raise ValueError(f"namespace must be a UUID or UUID-shaped string, got {namespace!r}") from exc
 
 
+# ---------------------------------------------------------------------------
+# Dream undo (#667 — Phase 4.1)
+# ---------------------------------------------------------------------------
+
+
+async def dream_undo(
+    kb: Khora,
+    op_id: UUID,
+    *,
+    base_dir: str | Path | None = None,
+) -> bool:
+    """Reverse a previously-applied dream op by ``op_id``.
+
+    Reads the ``{run_id}.undo.json`` (schema ``dream-undo/1``) under
+    ``base_dir`` (defaulting to the orchestrator's default file-sink
+    location — ``<tmp>/khora-dream-reports``), locates the op record
+    with ``op_id`` equal to the argument, and dispatches to the
+    op-type-specific reverse handler inside one
+    ``coordinator.transaction()`` block.
+
+    Idempotent: re-calling on an already-undone op returns ``False``
+    without touching any rows.
+
+    Currently supported op types:
+
+      * :data:`khora.dream.plan.OpKind.VECTORCYPHER_DEDUPE_ENTITIES` —
+        restores the absorbed entity tombstone, re-points each
+        previously-rewritten relationship at the absorbed side, and
+        clears the bi-temporal invalidation on any post-rewrite
+        self-loops the apply created.
+
+    Other op types fall through with a ``False`` return — they don't
+    have a reverse implementation yet (separate tickets).
+
+    Args:
+        op_id: The op_id captured on the :class:`DreamOp` at apply time
+            (visible on the ``khora.dream.op`` span and in the ``ops[]``
+            array of the run's ``undo.json``).
+        base_dir: Override for the file-sink root. Defaults to the same
+            path :class:`khora.dream.orchestrator.DreamOrchestrator`
+            uses when no operator-supplied sink directory exists.
+
+    Returns:
+        ``True`` when at least one DB row was restored. ``False`` for an
+        unknown op_id, an op whose op_type lacks a reverse handler, or
+        an already-undone op (idempotent re-undo).
+    """
+    found = _locate_undo_op(op_id, base_dir=base_dir)
+    if found is None:
+        return False
+
+    op_entry = found
+    op_type = str(op_entry.get("op_type") or "")
+    coordinator = kb.storage
+
+    if op_type == str(OpKind.VECTORCYPHER_DEDUPE_ENTITIES):
+        from khora.dream.engines.vectorcypher.dedupe_entities import (
+            reverse_vectorcypher_dedupe_entities,
+        )
+
+        try:
+            async with coordinator.transaction() as txn:
+                return await reverse_vectorcypher_dedupe_entities(op_entry, session=txn.session)
+        except RuntimeError as exc:
+            # No SQL backend — embedded paths don't carry the
+            # bi-temporal rows the reverse handler needs.
+            if "No SQL backend" in str(exc):
+                return False
+            raise
+
+    # Unknown op type — Phase 5+ apply handlers can wire their own
+    # reverse paths here as they land.
+    return False
+
+
+def _default_file_sink_dir() -> Path:
+    """Mirror :func:`khora.dream.orchestrator._default_file_sink_dir`."""
+    import tempfile
+
+    return Path(tempfile.gettempdir()) / "khora-dream-reports"
+
+
+def _locate_undo_op(op_id: UUID, *, base_dir: str | Path | None) -> dict[str, Any] | None:
+    """Walk the file-sink tree until we find the op with ``op_id``.
+
+    The dream file sink lays out runs as
+    ``{base_dir}/{namespace_id}/{date}/{run_id}.undo.json``. We scan
+    every undo file (small N: one per dream run) and return the first
+    op record whose ``op_id`` matches. Returns ``None`` when no match
+    exists — including when the base_dir doesn't exist at all.
+    """
+    root = Path(base_dir) if base_dir is not None else _default_file_sink_dir()
+    if not root.exists() or not root.is_dir():
+        return None
+    target = str(op_id)
+    for path in root.rglob("*.undo.json"):
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("schema_version") != "dream-undo/1":
+            continue
+        for op_entry in payload.get("ops") or []:
+            if str(op_entry.get("op_id") or "") == target:
+                return op_entry
+    return None
+
+
 __all__ = [
     "dream",
     "dream_cancel",
     "dream_history",
     "dream_status",
+    "dream_undo",
 ]
