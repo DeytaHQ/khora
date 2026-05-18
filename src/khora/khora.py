@@ -104,6 +104,8 @@ class _GlobalChunkSemaphore:
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from khora.core.models import Relationship
     from khora.engines.protocol import MemoryEngineProtocol
     from khora.extraction.chunkers import ChunkStrategy
@@ -1856,6 +1858,26 @@ class Khora:
         from khora.dream.api import dream_history as _dream_history
 
         return await _dream_history(self, namespace, limit=limit)
+
+    async def dream_undo(
+        self,
+        op_id: UUID,
+        *,
+        base_dir: str | Path | None = None,
+    ) -> bool:
+        """Reverse a previously-applied dream op by ``op_id``.
+
+        Reads the run's ``undo.json`` (schema ``dream-undo/1`` written by
+        :class:`khora.dream.report.DreamFileSink`), locates the op, and
+        dispatches to the op-type-specific reverse handler inside one
+        coordinator transaction. Returns ``True`` when at least one row
+        was restored and ``False`` for unknown / already-undone ops.
+
+        See :func:`khora.dream.api.dream_undo` for the full contract.
+        """
+        from khora.dream.api import dream_undo as _dream_undo
+
+        return await _dream_undo(self, op_id, base_dir=base_dir)
 
     # =========================================================================
     # Entity Operations

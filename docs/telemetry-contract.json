@@ -694,6 +694,12 @@
       "stability": "internal",
       "owner": "dream",
       "_comment": "Wraps each fsync'd write of {run_id}.undo.json by DreamFileSink.write_undo_incremental (#667, Phase 4 of #649). Attributes: run_id (str), namespace_id (str — span attr only, never a metric label per cardinality rule), record_count (str). The orchestrator's apply-phase loop fires this after every committed op so a mid-run crash leaves a recoverable undo file on disk."
+    },
+    {
+      "name": "khora.dream.vectorcypher.dedupe.verifier",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Wraps each LLM judge call inside the borderline-merge two-LLM verifier on the vectorcypher dedupe apply path (#667, Phase 4.1 of #649). Attributes: direction ('verifier'|'auditor', bounded), model (str), similarity_score (str), prompt_hash (bounded_text_hash — never raw prompt text), outcome ('parsed'|'parse_error'|'timeout'|'error'), decision ('merge'|'keep_separate'|'defer'; only on 'parsed'), confidence (str; only on 'parsed'), error_type (str; only on 'timeout' / 'error'). Free-text rationale lives in the undo record JSON, never on a span. Verifier-deferred merges record decision='defer' in {run_id}.undo.json and do NOT mutate any DB row — kb.dream_undo on a deferred op is a no-op."
     }
   ],
   "pipeline_stages": [

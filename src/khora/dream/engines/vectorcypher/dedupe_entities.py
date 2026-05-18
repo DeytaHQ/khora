@@ -327,19 +327,25 @@ async def apply_vectorcypher_dedupe_entities(
     *,
     coordinator: StorageCoordinator,
     session: AsyncSession,
+    dream_config: Any = None,
+    verifier_fn: Any = None,
 ) -> UndoRecord:
     """Apply one planned dedupe op — caller owns the transaction.
 
     For each merge listed in ``op.outputs[0]["merges"]``:
 
-      1. Snapshot every ``relationships`` row that points at the
+      1. (Optional) Run the borderline-merge two-LLM judge when the
+         entry carries a ``similarity_score`` inside the configured
+         verifier band. ``decision="defer"`` skips the merge but still
+         records the verdict in the undo for operator review.
+      2. Snapshot every ``relationships`` row that points at the
          absorbed entity (either as source or target).
-      2. Rewrite each such row's matching endpoint(s) to the canonical
+      3. Rewrite each such row's matching endpoint(s) to the canonical
          entity_id.
-      3. Detect self-loops created by the rewrite (canonical -> canonical)
+      4. Detect self-loops created by the rewrite (canonical -> canonical)
          and bi-temporally invalidate them via ``invalidated_at=NOW()`` /
          ``invalidated_by=op_id``.
-      4. Soft-delete the absorbed entity row by stamping
+      5. Soft-delete the absorbed entity row by stamping
          ``valid_until=NOW()`` — never hard-delete.
 
     Idempotent on replay: if the absorbed entity has no remaining live
@@ -349,15 +355,25 @@ async def apply_vectorcypher_dedupe_entities(
 
     Args:
         op: The planned op. ``outputs[0]["merges"]`` is a list of
-            ``{"canonical_id": str, "absorbed_id": str}`` dicts.
+            ``{"canonical_id": str, "absorbed_id": str,
+            "similarity_score"?: float, "canonical_name"?: str,
+            "absorbed_name"?: str, "entity_type"?: str}`` dicts.
         coordinator: Storage coordinator (unused — session owns writes).
         session: Orchestrator-owned async session.
+        dream_config: Optional :class:`DreamConfig` providing verifier /
+            auditor model names and the borderline band edges. When None
+            the default ``DreamConfig()`` is used so the verifier still
+            runs with the spec'd defaults.
+        verifier_fn: Optional async callable
+            ``(CandidatePair, *, config) -> JudgeResult`` for tests. When
+            None the real two-LLM judge is used.
 
     Returns:
         :class:`UndoRecord` with ``before["merges"]`` carrying, per
         merge, the absorbed_id, canonical_id, the list of previous
-        ``relationships`` rows, and the ids of relationships that were
-        invalidated as post-rewrite self-loops. Top-level key is
+        ``relationships`` rows, the ids of relationships invalidated as
+        post-rewrite self-loops, and (when the verifier ran) the joint
+        ``decision`` plus per-judge verdicts. Top-level key is
         ``"merges"``, never ``"chunk_id"``.
     """
     del coordinator  # unused — session is the only write surface
@@ -378,7 +394,32 @@ async def apply_vectorcypher_dedupe_entities(
         canonical_id = UUID(str(entry["canonical_id"]))
         absorbed_id = UUID(str(entry["absorbed_id"]))
 
-        # 1. Snapshot rows that reference the absorbed entity.
+        # 1. Borderline-merge verifier gate (#667).
+        verifier_record = await _maybe_run_verifier(
+            entry,
+            canonical_id=canonical_id,
+            absorbed_id=absorbed_id,
+            dream_config=dream_config,
+            verifier_fn=verifier_fn,
+        )
+        if verifier_record is not None and verifier_record["decision"] != "merge":
+            # The verifier did not authorize the merge. Record the
+            # verdict for the undo file so an operator can see *why* no
+            # rows were touched, and continue to the next merge entry
+            # without any writes.
+            merges_undo.append(
+                {
+                    "canonical_id": str(canonical_id),
+                    "absorbed_id": str(absorbed_id),
+                    "previous_relationships": [],
+                    "self_loops_invalidated": [],
+                    "verifier": verifier_record,
+                    "applied": False,
+                }
+            )
+            continue
+
+        # 2. Snapshot rows that reference the absorbed entity.
         prev_rows = await _select_relationships_touching(session, absorbed_id)
         previous_serialized: list[dict[str, Any]] = []
         self_loops: list[UUID] = []
@@ -432,14 +473,16 @@ async def apply_vectorcypher_dedupe_entities(
             {"ts": now, "aid": absorbed_id},
         )
 
-        merges_undo.append(
-            {
-                "canonical_id": str(canonical_id),
-                "absorbed_id": str(absorbed_id),
-                "previous_relationships": previous_serialized,
-                "self_loops_invalidated": [str(rid) for rid in self_loops],
-            }
-        )
+        merge_record: dict[str, Any] = {
+            "canonical_id": str(canonical_id),
+            "absorbed_id": str(absorbed_id),
+            "previous_relationships": previous_serialized,
+            "self_loops_invalidated": [str(rid) for rid in self_loops],
+            "applied": True,
+        }
+        if verifier_record is not None:
+            merge_record["verifier"] = verifier_record
+        merges_undo.append(merge_record)
 
     return UndoRecord(
         op_id=op.op_id,
@@ -472,3 +515,195 @@ def _coerce_uuid(value: Any) -> UUID | None:
         return UUID(str(value))
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 4.1 — two-LLM judge gate (#667)
+# ---------------------------------------------------------------------------
+
+
+async def _maybe_run_verifier(
+    entry: dict[str, Any],
+    *,
+    canonical_id: UUID,
+    absorbed_id: UUID,
+    dream_config: Any,
+    verifier_fn: Any,
+) -> dict[str, Any] | None:
+    """Run the borderline-merge two-LLM judge when the pair falls in band.
+
+    Returns a serialised verdict dict (``decision`` + per-judge verdicts)
+    when the verifier ran, or ``None`` when the entry was outside the
+    band and the verifier was skipped. The caller treats a returned
+    ``decision != "merge"`` as "do not apply this merge entry".
+    """
+    score_raw = entry.get("similarity_score")
+    if score_raw is None:
+        # No similarity score on the entry — skip the verifier path
+        # entirely (back-compat with the v0.15.x apply contract that
+        # only carried canonical_id / absorbed_id).
+        return None
+    try:
+        similarity = float(score_raw)
+    except (TypeError, ValueError):
+        return None
+
+    from khora.dream.config import DreamConfig
+
+    cfg = dream_config if dream_config is not None else DreamConfig()
+    low = float(cfg.dedupe_verifier_band_low)
+    high = float(cfg.dedupe_verifier_band_high)
+    if similarity < low or similarity >= high:
+        # Above the band → planner / threshold already authorised it.
+        # Below the band → the planner threshold would have rejected it.
+        return None
+
+    from khora.dream.engines.vectorcypher.verifier import (
+        CandidatePair,
+        run_two_llm_judge,
+    )
+
+    pair = CandidatePair(
+        canonical_id=str(canonical_id),
+        canonical_name=str(entry.get("canonical_name") or entry.get("surviving_name") or ""),
+        canonical_entity_type=str(entry.get("entity_type") or entry.get("canonical_entity_type") or ""),
+        absorbed_id=str(absorbed_id),
+        absorbed_name=str(entry.get("absorbed_name") or ""),
+        absorbed_entity_type=str(entry.get("absorbed_entity_type") or entry.get("entity_type") or ""),
+        similarity_score=similarity,
+    )
+
+    judge = verifier_fn if verifier_fn is not None else run_two_llm_judge
+    result = await judge(pair, config=cfg)
+
+    verifier_payload: dict[str, Any] = {
+        "decision": result.decision,
+        "rationale": result.rationale,
+        "similarity_score": similarity,
+    }
+    if result.verifier_verdict is not None:
+        verifier_payload["verifier_verdict"] = result.verifier_verdict.model_dump()
+    if result.auditor_verdict is not None:
+        verifier_payload["auditor_verdict"] = result.auditor_verdict.model_dump()
+    return verifier_payload
+
+
+# ---------------------------------------------------------------------------
+# Undo / reverse path (#667 — kb.dream_undo)
+# ---------------------------------------------------------------------------
+
+
+async def reverse_vectorcypher_dedupe_entities(
+    undo_op: dict[str, Any],
+    *,
+    session: AsyncSession,
+) -> bool:
+    """Reverse a previously-applied dedupe op from its ``undo.json`` entry.
+
+    The :class:`UndoRecord` for one applied dedupe op records, per merge:
+
+      * the previous ``relationships`` rows (so we can re-point them at
+        the absorbed entity),
+      * the self-loops that were invalidated (so we can clear
+        ``invalidated_at`` / ``invalidated_by``),
+      * the canonical / absorbed entity ids (so we can clear the
+        ``valid_until`` tombstone on the absorbed row).
+
+    This function unwinds those three sides in reverse order. It is
+    **idempotent**: replaying it on an already-undone op finds nothing
+    to restore and returns ``False`` (no rows touched).
+
+    Merges with ``"applied": False`` (verifier deferred them) are
+    skipped — there's nothing to roll back.
+
+    Args:
+        undo_op: One element of the ``ops`` array in ``undo.json``.
+            Must have the schema produced by
+            :func:`apply_vectorcypher_dedupe_entities` —
+            ``before.merges[*]`` carries the per-merge snapshot.
+        session: Caller-owned async session. The caller wraps this in
+            the same coordinator transaction shape as the apply path.
+
+    Returns:
+        ``True`` when at least one row was restored (entity tombstone
+        cleared, relationship rewritten back, or self-loop reactivated).
+        ``False`` when there was nothing to undo (idempotent re-undo).
+    """
+    before = undo_op.get("before") or {}
+    merges = list(before.get("merges") or [])
+    if not merges:
+        return False
+
+    op_id_value = undo_op.get("op_id")
+    op_uuid = _coerce_uuid(op_id_value) if op_id_value is not None else None
+
+    any_change = False
+    for merge in merges:
+        if not merge.get("applied", True):
+            # Verifier-deferred merge — nothing was written, nothing to undo.
+            continue
+
+        absorbed_id = _coerce_uuid(merge.get("absorbed_id"))
+        canonical_id = _coerce_uuid(merge.get("canonical_id"))
+        if absorbed_id is None or canonical_id is None:
+            continue
+
+        # 1. Clear the absorbed entity's tombstone iff it still points
+        #    at the apply timestamp. If a downstream write has already
+        #    re-soft-deleted the row, leave it alone — never resurrect
+        #    something the live system has tombstoned for unrelated
+        #    reasons.
+        revive = await session.execute(
+            text("UPDATE entities SET valid_until = NULL WHERE id = :aid AND valid_until IS NOT NULL"),
+            {"aid": absorbed_id},
+        )
+        if getattr(revive, "rowcount", 0):
+            any_change = True
+
+        # 2. Restore each previously-rewritten relationship to its
+        #    pre-apply endpoints. Use the snapshot's id so a row that
+        #    has since been deleted is simply not updated (idempotent).
+        for prev in list(merge.get("previous_relationships") or []):
+            rid = _coerce_uuid(prev.get("id"))
+            src = _coerce_uuid(prev.get("source_entity_id"))
+            tgt = _coerce_uuid(prev.get("target_entity_id"))
+            if rid is None or src is None or tgt is None:
+                continue
+            rewrite = await session.execute(
+                text(
+                    "UPDATE relationships "
+                    "SET source_entity_id = :src, target_entity_id = :tgt, "
+                    "    updated_at = :ts "
+                    "WHERE id = :rid"
+                ),
+                {"src": src, "tgt": tgt, "ts": datetime.now(UTC), "rid": rid},
+            )
+            if getattr(rewrite, "rowcount", 0):
+                any_change = True
+
+        # 3. Clear the bi-temporal invalidation on any self-loop the
+        #    apply created. Match by id and by the invalidated_by op_id
+        #    so we only clear what *this* op invalidated, never a
+        #    self-loop the live system invalidated for other reasons.
+        for self_loop_value in list(merge.get("self_loops_invalidated") or []):
+            sl_id = _coerce_uuid(self_loop_value)
+            if sl_id is None:
+                continue
+            if op_uuid is not None:
+                clear = await session.execute(
+                    text(
+                        "UPDATE relationships "
+                        "SET invalidated_at = NULL, invalidated_by = NULL "
+                        "WHERE id = :rid AND invalidated_by = :opid"
+                    ),
+                    {"rid": sl_id, "opid": op_uuid},
+                )
+            else:
+                clear = await session.execute(
+                    text("UPDATE relationships SET invalidated_at = NULL, invalidated_by = NULL WHERE id = :rid"),
+                    {"rid": sl_id},
+                )
+            if getattr(clear, "rowcount", 0):
+                any_change = True
+
+    return any_change
