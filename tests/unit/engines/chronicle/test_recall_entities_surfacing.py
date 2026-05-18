@@ -119,7 +119,7 @@ class _FakeCoordinator:
             out.append(ev)
         return out[:limit]
 
-    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
+    async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:
         return {cid: self._chunks_by_id[cid] for cid in chunk_ids if cid in self._chunks_by_id}
 
     async def search_similar_chunks(self, *args: Any, **kwargs: Any) -> list[tuple[Chunk, float]]:

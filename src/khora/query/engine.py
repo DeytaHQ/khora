@@ -1816,7 +1816,7 @@ class HybridQueryEngine:
             if chunk_ids_to_fetch:
                 from khora._accel import batch_dot_product
 
-                chunks_map = await self._storage.get_chunks_batch(chunk_ids_to_fetch)
+                chunks_map = await self._storage.get_chunks_batch(chunk_ids_to_fetch, namespace_id=namespace_id)
 
                 _min_graph_sim = 0.3
 

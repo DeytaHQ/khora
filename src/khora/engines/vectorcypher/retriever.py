@@ -2502,7 +2502,7 @@ class VectorCypherRetriever:
                     for entity in entities_map.values():
                         all_chunk_ids.extend(entity.source_chunk_ids[:5])
                     if all_chunk_ids:
-                        chunks_map = await self._storage.get_chunks_batch(all_chunk_ids)
+                        chunks_map = await self._storage.get_chunks_batch(all_chunk_ids, namespace_id=namespace_id)
                         for cid, chunk in chunks_map.items():
                             chunk_records.append(
                                 {

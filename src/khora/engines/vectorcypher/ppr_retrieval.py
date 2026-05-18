@@ -229,7 +229,7 @@ async def ppr_retrieve_chunks(
         if not chunk_ids:
             return [], entity_score_map
 
-        chunks_map = await storage.get_chunks_batch(chunk_ids)
+        chunks_map = await storage.get_chunks_batch(chunk_ids, namespace_id=namespace_id)
         score_map = dict(ranked_chunks)
         results: list[tuple[UUID, float, Chunk]] = []
         for cid in chunk_ids:

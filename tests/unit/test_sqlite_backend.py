@@ -430,7 +430,7 @@ class TestChunkOperations:
         created = await vector.create_chunk(chunk)
         assert created.id == chunk.id
 
-        fetched = await vector.get_chunk(chunk.id)
+        fetched = await vector.get_chunk(chunk.id, namespace_id=ns_id)
         assert fetched is not None
         assert fetched.content == "Test chunk content"
         assert fetched.embedding is not None
@@ -449,7 +449,7 @@ class TestChunkOperations:
         chunks = [_make_chunk(ns_id, doc_id) for _ in range(3)]
         await vector.create_chunks_batch(chunks)
 
-        batch = await vector.get_chunks_batch([c.id for c in chunks])
+        batch = await vector.get_chunks_batch([c.id for c in chunks], namespace_id=ns_id)
         assert len(batch) == 3
 
     async def test_get_chunks_by_document(self, vector: SQLiteVectorBackend):
@@ -460,7 +460,7 @@ class TestChunkOperations:
         ]
         await vector.create_chunks_batch(chunks)
 
-        result = await vector.get_chunks_by_document(doc_id)
+        result = await vector.get_chunks_by_document(doc_id, namespace_id=ns_id)
         assert len(result) == 3
         # Should be ordered by chunk_index
         assert [c.metadata.chunk_index for c in result] == [0, 1, 2]
@@ -474,7 +474,7 @@ class TestChunkOperations:
         deleted = await vector.delete_chunks_by_document(doc_id)
         assert deleted == 3
 
-        result = await vector.get_chunks_by_document(doc_id)
+        result = await vector.get_chunks_by_document(doc_id, namespace_id=ns_id)
         assert len(result) == 0
 
     async def test_count_chunks(self, vector: SQLiteVectorBackend):

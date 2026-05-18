@@ -174,7 +174,7 @@ class TestReplaceDocumentExtractionIntegration:
         assert persisted.status == DocumentStatus.COMPLETED
 
         # Chunk count matches the new chunks
-        chunks = await coord.get_chunks_by_document(new_doc.id)
+        chunks = await coord.get_chunks_by_document(new_doc.id, namespace_id=namespace_id)
         assert len(chunks) == 3
 
         # Graph state: alice's source_document_ids has new_doc.id (swap happened),

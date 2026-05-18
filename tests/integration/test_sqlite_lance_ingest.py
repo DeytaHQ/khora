@@ -88,7 +88,7 @@ class TestSQLiteLanceIngest:
             assert fetched is not None
             assert fetched.external_id == "doc-42"
 
-            chunk_fetched = await coord.vector.get_chunk(sample_chunk.id)  # type: ignore[union-attr]
+            chunk_fetched = await coord.vector.get_chunk(sample_chunk.id, namespace_id=ns.id)  # type: ignore[union-attr]
             assert chunk_fetched is not None
             assert chunk_fetched.content == sample_chunk.content
         finally:

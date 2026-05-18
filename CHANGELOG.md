@@ -16,11 +16,14 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 - **Cross-namespace IDOR on `StorageCoordinator.get_entity` / `get_relationship` / `get_episode`.** The public storage-facade getters took only an ID and returned whatever the graph backend held under that ID. A caller scoped to namespace B that knew an entity ID from namespace A received the namespace-A entity verbatim, violating the per-tenant isolation invariant. `Khora.get_entity()` (top-level), the engine `get_entity` methods (`vectorcypher`, `chronicle`, `skeleton`), and the `MemoryEngineProtocol.get_entity` had the same shape. The facade now requires a `namespace_id` keyword argument and returns `None` whenever the persisted row's `namespace_id` does not match the caller's. The underlying graph-backend `get_entity` / `get_relationship` / `get_episode` methods retain their ID-only shape (they sit below the trust boundary); filtering happens at the facade.
 
+- **Cross-namespace chunk access via `kb.storage.get_chunk` / `get_chunks_batch` / `get_chunks_by_document`.** The three chunk-getter facade methods (and their underlying vector-backend implementations in pgvector, sqlite, sqlite+lance, and surrealdb) previously accepted only an id and did not filter by namespace, allowing a caller scoped to namespace B to retrieve chunks belonging to namespace A by id (an IDOR primitive on multi-tenant deployments). The methods now require a `namespace_id` keyword argument and apply a namespace predicate at SQL level; cross-namespace ids are silently dropped from the result. All in-tree callers have been updated.
+
 ### Changed (breaking)
 
 - **`khora.Khora.get_entity(entity_id)` now requires `namespace=...`.** Resolution mirrors `list_entities` / `find_related_entities` — accepts `str | UUID`. Calling without it raises `TypeError`. Downstream consumers (`khora-cli`, `khora-explorer`) must be updated in lockstep.
 - **`StorageCoordinator.get_entity(entity_id)` / `get_relationship(relationship_id)` / `get_episode(episode_id)` now require keyword-only `namespace_id: UUID`.** Calls without it raise `TypeError`.
 - **`MemoryEngineProtocol.get_entity` and its three implementations (`VectorCypherEngine`, `ChronicleEngine`, `SkeletonEngine`) gained a required `namespace_id` kwarg.**
+- **`StorageCoordinator.get_chunk(chunk_id)` / `get_chunks_batch(chunk_ids)` / `get_chunks_by_document(document_id)` now require keyword-only `namespace_id: UUID`.** Same shape on the four vector-backend implementations (pgvector, sqlite, sqlite+lance, surrealdb). Calls without it raise `TypeError`; cross-namespace ids in `get_chunks_batch` are silently dropped from the returned dict; `get_chunks_by_document` returns `[]` if the document doesn't belong to the namespace.
 
 ## [0.15.0] — Dream-phase Phase 2 + Phase 4, PPR retrieval, kuzu removed
 

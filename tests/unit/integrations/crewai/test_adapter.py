@@ -378,7 +378,7 @@ def test_list_records_walks_documents_and_returns_first_chunk_each() -> None:
     c2 = _make_chunk(content="two", document_id=d2_id)
     kb.storage.list_documents = AsyncMock(side_effect=[docs, []])
 
-    async def _chunks_for(doc_id: UUID) -> list[Any]:
+    async def _chunks_for(doc_id: UUID, *, namespace_id: UUID) -> list[Any]:
         return [c1] if doc_id == d1_id else [c2]
 
     kb.storage.get_chunks_by_document = AsyncMock(side_effect=_chunks_for)

@@ -165,32 +165,58 @@ class SurrealDBVectorAdapter:
         await self._conn.execute(sql, {"records": records})
         return chunks
 
-    async def get_chunk(self, chunk_id: UUID) -> Chunk | None:
-        """Fetch a single chunk by primary key."""
-        sql = "SELECT * FROM chunk:\u27e8$id\u27e9"
-        row = await self._conn.query_one(sql, {"id": str(chunk_id)})
+    async def get_chunk(self, chunk_id: UUID, *, namespace_id: UUID) -> Chunk | None:
+        """Fetch a single chunk by primary key, filtered to ``namespace_id``."""
+        sql = "SELECT * FROM chunk:\u27e8$id\u27e9 WHERE (namespace = $ns_rid OR namespace.namespace_id = $ns_str)"
+        row = await self._conn.query_one(
+            sql,
+            {
+                "id": str(chunk_id),
+                "ns_rid": _rid("memory_namespace", namespace_id),
+                "ns_str": str(namespace_id),
+            },
+        )
         if not row:
             return None
         return self._row_to_chunk(row)
 
-    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
-        """Fetch multiple chunks in one round-trip."""
+    async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:
+        """Fetch multiple chunks in one round-trip, filtered to ``namespace_id``."""
         if not chunk_ids:
             return {}
 
         chunk_rids = [_rid("chunk", uid) for uid in chunk_ids]
-        sql = "SELECT * FROM chunk WHERE id IN $ids"
-        rows = await self._conn.query(sql, {"ids": chunk_rids})
+        sql = "SELECT * FROM chunk WHERE id IN $ids AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str)"
+        rows = await self._conn.query(
+            sql,
+            {
+                "ids": chunk_rids,
+                "ns_rid": _rid("memory_namespace", namespace_id),
+                "ns_str": str(namespace_id),
+            },
+        )
         result: dict[UUID, Chunk] = {}
         for row in rows:
             chunk = self._row_to_chunk(row)
             result[chunk.id] = chunk
         return result
 
-    async def get_chunks_by_document(self, document_id: UUID) -> list[Chunk]:
-        """Return all chunks belonging to a document, ordered by index."""
-        sql = "SELECT * FROM chunk WHERE document = document:\u27e8$doc\u27e9 ORDER BY chunk_index ASC"
-        rows = await self._conn.query(sql, {"doc": str(document_id)})
+    async def get_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
+        """Return all chunks belonging to a document, filtered to ``namespace_id``."""
+        sql = (
+            "SELECT * FROM chunk "
+            "WHERE document = document:\u27e8$doc\u27e9 "
+            "AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) "
+            "ORDER BY chunk_index ASC"
+        )
+        rows = await self._conn.query(
+            sql,
+            {
+                "doc": str(document_id),
+                "ns_rid": _rid("memory_namespace", namespace_id),
+                "ns_str": str(namespace_id),
+            },
+        )
         return [self._row_to_chunk(r) for r in rows]
 
     async def delete_chunks_by_document(self, document_id: UUID) -> int:

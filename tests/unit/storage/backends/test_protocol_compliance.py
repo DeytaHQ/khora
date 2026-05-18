@@ -818,7 +818,7 @@ class TestVectorProtocol:
         created = await vector_backend.create_chunk(c)
         assert created.id == c.id
 
-        fetched = await vector_backend.get_chunk(c.id)
+        fetched = await vector_backend.get_chunk(c.id, namespace_id=ns)
         assert fetched is not None
         # Backends where metadata and embedding live in separate stores
         # (e.g. sqlite_lance — SQLite for metadata, LanceDB for vectors)
@@ -826,7 +826,7 @@ class TestVectorProtocol:
         # up through similarity search.
         assert fetched.embedding in (None, c.embedding)
 
-        assert await vector_backend.get_chunk(uuid4()) is None
+        assert await vector_backend.get_chunk(uuid4(), namespace_id=ns) is None
 
     async def test_create_chunks_batch(self, vector_backend):
         ns, doc = uuid4(), uuid4()
@@ -843,7 +843,7 @@ class TestVectorProtocol:
         chunks = [_make_chunk(ns, doc, embedding=_unit(8, i), index=i) for i in range(3)]
         await vector_backend.create_chunks_batch(chunks)
 
-        fetched = await vector_backend.get_chunks_by_document(doc)
+        fetched = await vector_backend.get_chunks_by_document(doc, namespace_id=ns)
         assert len(fetched) == 3
         # Contract: ordered by chunk_index ascending.
         assert [c.metadata.chunk_index for c in fetched] == [0, 1, 2]

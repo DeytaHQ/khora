@@ -171,7 +171,7 @@ class TestChunkCRUD:
         created = await adapter.create_chunk(c)
         assert created.id == c.id
 
-        fetched = await adapter.get_chunk(c.id)
+        fetched = await adapter.get_chunk(c.id, namespace_id=ns)
         assert fetched is not None
         assert fetched.id == c.id
         assert fetched.content == c.content
@@ -185,7 +185,7 @@ class TestChunkCRUD:
         await adapter.create_chunk(c)
 
         # SQLite row should exist; LanceDB table should still be empty.
-        fetched = await adapter.get_chunk(c.id)
+        fetched = await adapter.get_chunk(c.id, namespace_id=ns)
         assert fetched is not None
 
         tbl = await adapter._chunks_table()  # type: ignore[reportPrivateUsage]
@@ -206,18 +206,18 @@ class TestChunkCRUD:
         chunks = [_make_chunk(ns, doc, embedding=_unit(8, i)) for i in range(3)]
         await adapter.create_chunks_batch(chunks)
 
-        fetched = await adapter.get_chunks_batch([c.id for c in chunks])
+        fetched = await adapter.get_chunks_batch([c.id for c in chunks], namespace_id=ns)
         assert set(fetched.keys()) == {c.id for c in chunks}
 
     async def test_get_chunks_batch_empty(self, adapter: SQLiteLanceVectorAdapter):
-        assert await adapter.get_chunks_batch([]) == {}
+        assert await adapter.get_chunks_batch([], namespace_id=uuid4()) == {}
 
     async def test_get_chunks_by_document(self, adapter: SQLiteLanceVectorAdapter):
         ns, doc = uuid4(), uuid4()
         chunks = [_make_chunk(ns, doc, embedding=_unit(8, i), index=i) for i in range(3)]
         await adapter.create_chunks_batch(chunks)
 
-        fetched = await adapter.get_chunks_by_document(doc)
+        fetched = await adapter.get_chunks_by_document(doc, namespace_id=ns)
         assert len(fetched) == 3
         # Ordered by chunk_index
         assert [c.metadata.chunk_index for c in fetched] == [0, 1, 2]

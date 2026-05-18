@@ -86,7 +86,7 @@ async def test_lance_add_failure_leaves_sqlite_consistent(tmp_path: Path, monkey
             await coord.create_chunks_batch([chunk])
 
         # SQLite must have the chunk row even though LanceDB is empty.
-        sqlite_chunk = await coord.vector.get_chunk(chunk.id)  # type: ignore[union-attr]
+        sqlite_chunk = await coord.vector.get_chunk(chunk.id, namespace_id=ns.id)  # type: ignore[union-attr]
         assert sqlite_chunk is not None, (
             "Partial-atomicity contract violated: SQLite chunk row was rolled back "
             "after LanceDB failure. The documented behaviour is SQLite stays consistent."

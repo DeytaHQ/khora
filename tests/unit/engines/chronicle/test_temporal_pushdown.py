@@ -106,7 +106,7 @@ class _PushdownCoordinator:
     async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
         return {eid: self._entities[eid] for eid in entity_ids if eid in self._entities}
 
-    async def get_chunks_batch(self, chunk_ids: list[UUID]) -> dict[UUID, Chunk]:
+    async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:
         return {cid: self._chunks[cid] for cid in chunk_ids if cid in self._chunks}
 
     async def get_entities_by_names_batch(self, namespace_id: UUID, names: list[str]) -> dict[str, Any]:
