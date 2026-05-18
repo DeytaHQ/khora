@@ -8,7 +8,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Fixed
 
-- Stale results from `Khora.recall()` after `remember`/`forget` (IGR-114). The in-process query result cache in the vectorcypher retriever held results for up to 5 minutes without invalidation on writes.
+- Stale results from `Khora.recall()` after `remember`/`forget`. The in-process query result cache in the vectorcypher retriever held results for up to 5 minutes without invalidation on writes.
 
 ### Removed
 
