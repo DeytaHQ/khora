@@ -31,6 +31,7 @@ from khora.dream.engines.chronicle import (
 from khora.dream.engines.vectorcypher import (
     plan_vectorcypher_community_summary,
     plan_vectorcypher_orphan_report,
+    plan_vectorcypher_prune_edges,
     plan_vectorcypher_schema_drift,
     plan_vectorcypher_source_chunk_ids_audit,
 )
@@ -142,6 +143,10 @@ _APPLY_HANDLER_NAMES: dict[OpKind, tuple[str, str]] = {
     OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_GC: (
         "khora.dream.engines.vectorcypher.source_chunk_ids_gc",
         "apply_vectorcypher_source_chunk_ids_gc",
+    ),
+    OpKind.VECTORCYPHER_PRUNE_EDGES: (
+        "khora.dream.engines.vectorcypher.prune_edges",
+        "apply_vectorcypher_prune_edges",
     ),
     OpKind.CHRONICLE_FACT_COMPACTION: (
         "khora.dream.engines.chronicle.fact_compaction",
@@ -294,6 +299,7 @@ class _VectorCypherPlugin:
                 OpKind.VECTORCYPHER_ORPHAN_REPORT,
                 OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT,
                 OpKind.VECTORCYPHER_COMMUNITY_SUMMARY,
+                OpKind.VECTORCYPHER_PRUNE_EDGES,
             }
         )
 
@@ -344,6 +350,15 @@ class _VectorCypherPlugin:
                 max_members_per_prompt=config.community_summary_max_members_per_prompt,
             )
             ops.extend(community_ops)
+
+        if OpKind.VECTORCYPHER_PRUNE_EDGES in wanted and config.prune_edges_enabled:
+            prune_ops = await plan_vectorcypher_prune_edges(
+                namespace_id,
+                coordinator=coordinator,
+                target_predicates=tuple(config.prune_edges_target_predicates),
+                confidence_threshold=config.prune_edges_confidence_threshold,
+            )
+            ops.extend(prune_ops)
 
         return DreamPlan(
             plan_id=uuid4(),

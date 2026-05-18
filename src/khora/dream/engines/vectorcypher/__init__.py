@@ -18,6 +18,10 @@ from khora.dream.engines.vectorcypher.dedupe_entities import (
 from khora.dream.engines.vectorcypher.orphan_report import (
     plan_vectorcypher_orphan_report,
 )
+from khora.dream.engines.vectorcypher.prune_edges import (
+    apply_vectorcypher_prune_edges,
+    plan_vectorcypher_prune_edges,
+)
 from khora.dream.engines.vectorcypher.schema_drift import (
     plan_vectorcypher_schema_drift,
 )
@@ -29,10 +33,12 @@ from khora.dream.engines.vectorcypher.source_chunk_ids_gc import (
 )
 
 __all__ = [
+    "apply_vectorcypher_prune_edges",
     "plan_vectorcypher_centroid_recompute",
     "plan_vectorcypher_community_summary",
     "plan_vectorcypher_dedupe_entities",
     "plan_vectorcypher_orphan_report",
+    "plan_vectorcypher_prune_edges",
     "plan_vectorcypher_schema_drift",
     "plan_vectorcypher_source_chunk_ids_audit",
     "plan_vectorcypher_source_chunk_ids_gc",

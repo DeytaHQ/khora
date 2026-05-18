@@ -299,6 +299,38 @@ class DreamConfig(BaseSettings):
             )
         return self
 
+    # Phase 5.2 — vectorcypher edge pruning by weight x recency (#671).
+    prune_edges_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the vectorcypher edge-pruning op "
+            "(OpKind.VECTORCYPHER_PRUNE_EDGES). When False (default), the "
+            "op is skipped even if requested by scope.op_kinds."
+        ),
+    )
+    prune_edges_target_predicates: list[str] = Field(
+        default_factory=lambda: ["ASSOCIATED_WITH"],
+        description=(
+            "Whitelist of relationship_type values eligible for edge "
+            "pruning. Default targets only ASSOCIATED_WITH co-occurrence "
+            "edges (the soup that dominates the edge set after months of "
+            "ingest). Operators must opt in to broader pruning by adding "
+            "more types — narrower than ASSOCIATED_WITH is fine; wider "
+            "is a deliberate decision."
+        ),
+    )
+    prune_edges_confidence_threshold: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Edges with confidence < threshold satisfy the first conjunct "
+            "of the prune predicate. The other two conjuncts are "
+            "valid_to IS NULL and 'all source chunks deleted'. Default "
+            "0.4 matches the issue spec."
+        ),
+    )
+
     # Phase 2.5 — chronicle event near-duplicate clustering (#665).
     event_clustering_cosine_threshold: float = Field(
         default=0.95,
