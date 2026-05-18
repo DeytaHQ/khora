@@ -255,6 +255,42 @@ DEFINE FIELD IF NOT EXISTS namespace_id ON next_session TYPE string;
 DEFINE FIELD IF NOT EXISTS metadata_ ON next_session FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS created_at ON next_session TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_next_session_namespace ON next_session FIELDS namespace_id;
+
+-- Chronicle event (SVO + temporal triple, mirrors chronicle_events table on PG/SQLite).
+-- See issue #712 / PR #528 (sqlite_lance equivalent).
+DEFINE TABLE IF NOT EXISTS chronicle_event SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS namespace_id ON chronicle_event TYPE string;
+DEFINE FIELD IF NOT EXISTS chunk_id ON chronicle_event TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS subject ON chronicle_event TYPE string;
+DEFINE FIELD IF NOT EXISTS verb ON chronicle_event TYPE string;
+DEFINE FIELD IF NOT EXISTS object ON chronicle_event TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS observation_date ON chronicle_event TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS referenced_date ON chronicle_event TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS relative_offset ON chronicle_event TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS confidence ON chronicle_event TYPE float DEFAULT 1.0;
+DEFINE FIELD IF NOT EXISTS source_text ON chronicle_event TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS embedding ON chronicle_event TYPE option<array<float>>;
+DEFINE FIELD IF NOT EXISTS created_at ON chronicle_event TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_chronicle_event_namespace ON chronicle_event FIELDS namespace_id;
+DEFINE INDEX IF NOT EXISTS idx_chronicle_event_ns_subject ON chronicle_event FIELDS namespace_id, subject;
+DEFINE INDEX IF NOT EXISTS idx_chronicle_event_ns_referenced ON chronicle_event FIELDS namespace_id, referenced_date;
+
+-- Memory fact (atomic SVO claim with supersession tracking).
+-- Mirrors memory_facts table on PG/SQLite; see compression.MemoryFact dataclass.
+DEFINE TABLE IF NOT EXISTS memory_fact SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS namespace_id ON memory_fact TYPE string;
+DEFINE FIELD IF NOT EXISTS subject ON memory_fact TYPE string;
+DEFINE FIELD IF NOT EXISTS predicate ON memory_fact TYPE string;
+DEFINE FIELD IF NOT EXISTS object ON memory_fact TYPE string;
+DEFINE FIELD IF NOT EXISTS fact_text ON memory_fact TYPE string;
+DEFINE FIELD IF NOT EXISTS confidence ON memory_fact TYPE float DEFAULT 1.0;
+DEFINE FIELD IF NOT EXISTS is_active ON memory_fact TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS superseded_by ON memory_fact TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS source_chunk_ids ON memory_fact TYPE option<array>;
+DEFINE FIELD IF NOT EXISTS created_at ON memory_fact TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated_at ON memory_fact TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS idx_memory_fact_namespace ON memory_fact FIELDS namespace_id;
+DEFINE INDEX IF NOT EXISTS idx_memory_fact_ns_subject_active ON memory_fact FIELDS namespace_id, subject, is_active;
 """
 
 
