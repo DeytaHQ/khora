@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Literal
 
 from loguru import logger
 
+from .._loop_lock import get_loop_lock
 from .schema import ensure_lance_tables
 
 if TYPE_CHECKING:
@@ -22,11 +23,12 @@ if TYPE_CHECKING:
     from lancedb.db import AsyncConnection as LanceAsyncConnection
 
 
-# Module-level lock to serialize schema initialization across adapters
-# sharing the same embedded DB. The StorageFactory may instantiate
-# multiple adapters concurrently; LanceDB's create_table is idempotent
-# but we serialize to avoid interleaved writes to the Lance catalog.
-_schema_init_lock = asyncio.Lock()
+# Cross-instance schema-init lock keyed on the running event loop.
+# Multiple adapters share an embedded DB and may initialize concurrently
+# via ``StorageCoordinator``; the lock serializes Lance catalog writes.
+# A plain module-level ``asyncio.Lock()`` would bind to the first loop
+# that touched it, which breaks pytest-asyncio's function-scoped loops.
+_SCHEMA_INIT_LOCK_NAME = "sqlite_lance_schema_init"
 
 
 # SQLite pragmas tuned for concurrent reads with occasional writes.
@@ -159,7 +161,7 @@ class EmbeddedStorageHandle:
             self._connected = True
 
             if not self._schema_initialized:
-                async with _schema_init_lock:
+                async with get_loop_lock(_SCHEMA_INIT_LOCK_NAME):
                     if not self._schema_initialized:
                         await ensure_lance_tables(
                             self._lance,

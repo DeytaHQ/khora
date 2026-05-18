@@ -11,11 +11,15 @@ from typing import Any
 from loguru import logger
 
 from ..._log_safe import _safe_url_for_log
+from .._loop_lock import get_loop_lock
 
-# Module-level lock prevents concurrent schema initialization from
-# multiple SurrealDBConnection instances (the StorageCoordinator
-# connects 4 backends in parallel, all sharing the same embedded DB).
-_schema_init_lock = asyncio.Lock()
+# Cross-instance schema-init lock keyed on the running event loop.
+# The StorageCoordinator connects four SurrealDB-backed adapters in
+# parallel against the same embedded DB; the lock serializes their
+# DEFINE statements to avoid embedded-mode transaction conflicts.
+# A plain module-level ``asyncio.Lock()`` would bind to the first loop
+# that touched it, which breaks pytest-asyncio's function-scoped loops.
+_SCHEMA_INIT_LOCK_NAME = "surrealdb_schema_init"
 
 
 class SurrealDBConnection:
@@ -122,7 +126,7 @@ class SurrealDBConnection:
         # statements in parallel, which causes SurrealDB transaction
         # conflicts on embedded mode.
         if not self._schema_initialized:
-            async with _schema_init_lock:
+            async with get_loop_lock(_SCHEMA_INIT_LOCK_NAME):
                 if not self._schema_initialized:
                     from .schema import initialize_schema
 
