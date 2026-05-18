@@ -876,7 +876,7 @@ class EntityResolver:
                 )
 
                 for entity_id, score in results:
-                    entity = await self._storage.get_entity(entity_id)
+                    entity = await self._storage.get_entity(entity_id, namespace_id=namespace_id)
                     if entity and entity.entity_type == entity_type:
                         # Skip if already matched
                         if entity in [c.entity for c in candidates]:

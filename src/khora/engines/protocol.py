@@ -209,14 +209,16 @@ class MemoryEngineProtocol(Protocol):
     # Entity Operations (optional - return empty/None if not supported)
     # =========================================================================
 
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
-        """Get an entity by ID.
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
+        """Get an entity by ID, scoped to a namespace.
 
         Args:
             entity_id: Entity UUID
+            namespace_id: Required — returns None when the entity belongs to a
+                different namespace (prevents cross-tenant IDOR)
 
         Returns:
-            Entity or None if not found
+            Entity or None if not found / cross-namespace
         """
         ...
 

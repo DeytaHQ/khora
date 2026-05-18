@@ -943,10 +943,18 @@ class StorageCoordinator:
             await self.vector.create_entity(entity)
         return entity
 
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
-        """Get an entity by ID."""
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
+        """Get an entity by ID, scoped to ``namespace_id``.
+
+        Returns ``None`` when the entity belongs to a different namespace.
+        ``namespace_id`` is required to prevent cross-tenant IDOR — the graph
+        backend's underlying ``get_entity`` only filters by ID.
+        """
         if self.graph:
-            return await self.graph.get_entity(entity_id)
+            entity = await self.graph.get_entity(entity_id)
+            if entity is None or entity.namespace_id != namespace_id:
+                return None
+            return entity
         return None
 
     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
@@ -1142,10 +1150,17 @@ class StorageCoordinator:
             raise RuntimeError("Graph backend not configured")
         return await self.graph.create_relationship(relationship)
 
-    async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-        """Get a relationship by ID."""
+    async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
+        """Get a relationship by ID, scoped to ``namespace_id``.
+
+        Returns ``None`` when the relationship belongs to a different
+        namespace. ``namespace_id`` is required to prevent cross-tenant IDOR.
+        """
         if self.graph:
-            return await self.graph.get_relationship(relationship_id)
+            rel = await self.graph.get_relationship(relationship_id)
+            if rel is None or rel.namespace_id != namespace_id:
+                return None
+            return rel
         return None
 
     async def delete_relationship(self, relationship_id: UUID) -> bool:
@@ -1204,10 +1219,17 @@ class StorageCoordinator:
             raise RuntimeError("Graph backend not configured")
         return await self.graph.create_episode(episode)
 
-    async def get_episode(self, episode_id: UUID) -> Episode | None:
-        """Get an episode by ID."""
+    async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
+        """Get an episode by ID, scoped to ``namespace_id``.
+
+        Returns ``None`` when the episode belongs to a different namespace.
+        ``namespace_id`` is required to prevent cross-tenant IDOR.
+        """
         if self.graph:
-            return await self.graph.get_episode(episode_id)
+            ep = await self.graph.get_episode(episode_id)
+            if ep is None or ep.namespace_id != namespace_id:
+                return None
+            return ep
         return None
 
     async def list_episodes(

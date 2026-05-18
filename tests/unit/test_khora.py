@@ -740,16 +740,19 @@ class TestEntityOperations:
 
     @pytest.mark.asyncio
     async def test_get_entity(self) -> None:
-        """get_entity delegates to engine."""
+        """get_entity delegates to engine with resolved namespace_id."""
         kb = _make_kb(connected=True)
         entity_id = uuid4()
+        ns_id = uuid4()
+        row_id = uuid4()
         mock_entity = MagicMock()
 
+        kb._engine._storage.resolve_namespace = AsyncMock(return_value=row_id)
         kb._engine.get_entity = AsyncMock(return_value=mock_entity)
 
-        result = await kb.get_entity(entity_id)
+        result = await kb.get_entity(entity_id, namespace=ns_id)
         assert result is mock_entity
-        kb._engine.get_entity.assert_awaited_once_with(entity_id)
+        kb._engine.get_entity.assert_awaited_once_with(entity_id, namespace_id=row_id)
 
     @pytest.mark.asyncio
     async def test_list_entities(self) -> None:
@@ -1464,11 +1467,12 @@ class TestIncludeSources:
             source_document_ids=[doc_id],
         )
         kb._engine.get_entity = AsyncMock(return_value=entity)
+        kb._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
 
         src = DocumentSource(id=doc_id, title="Source Doc")
         kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id: src})
 
-        result = await kb.get_entity(entity.id, include_sources=True)
+        result = await kb.get_entity(entity.id, namespace=ns_id, include_sources=True)
 
         assert result is not None
         assert result.source_documents == {doc_id: src}
@@ -1488,9 +1492,10 @@ class TestIncludeSources:
             entity_type="PERSON",
         )
         kb._engine.get_entity = AsyncMock(return_value=entity)
+        kb._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
         kb._engine._storage.get_document_sources_batch = AsyncMock()
 
-        result = await kb.get_entity(entity.id)
+        result = await kb.get_entity(entity.id, namespace=ns_id)
 
         assert result is not None
         kb._engine._storage.get_document_sources_batch.assert_not_awaited()
@@ -1499,10 +1504,12 @@ class TestIncludeSources:
     async def test_get_entity_include_sources_not_found(self) -> None:
         """get_entity returns None when entity not found, even with include_sources=True."""
         kb = _make_kb(connected=True)
+        ns_id = uuid4()
         kb._engine.get_entity = AsyncMock(return_value=None)
+        kb._engine._storage.resolve_namespace = AsyncMock(return_value=ns_id)
         kb._engine._storage.get_document_sources_batch = AsyncMock()
 
-        result = await kb.get_entity(uuid4(), include_sources=True)
+        result = await kb.get_entity(uuid4(), namespace=ns_id, include_sources=True)
 
         assert result is None
         kb._engine._storage.get_document_sources_batch.assert_not_awaited()

@@ -179,12 +179,12 @@ class TestReplaceDocumentExtractionIntegration:
 
         # Graph state: alice's source_document_ids has new_doc.id (swap happened),
         # bob is retired (valid_until set), carol is net-new.
-        alice_fetched = await coord.get_entity(alice.id)
+        alice_fetched = await coord.get_entity(alice.id, namespace_id=namespace_id)
         assert alice_fetched is not None
         assert new_doc.id in alice_fetched.source_document_ids
         assert old_doc.id not in alice_fetched.source_document_ids
 
-        bob_fetched = await coord.get_entity(bob.id)
+        bob_fetched = await coord.get_entity(bob.id, namespace_id=namespace_id)
         assert bob_fetched is not None
         assert bob_fetched.valid_until is not None  # retired
 

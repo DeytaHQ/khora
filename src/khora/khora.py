@@ -1865,19 +1865,24 @@ class Khora:
         self,
         entity_id: UUID,
         *,
+        namespace: str | UUID,
         include_sources: bool = False,
     ) -> Entity | None:
-        """Get an entity by ID.
+        """Get an entity by ID, scoped to a namespace.
 
         Args:
             entity_id: Entity UUID to retrieve
+            namespace: Namespace UUID (as UUID or string). Required —
+                returns ``None`` when the entity belongs to a different
+                namespace (prevents cross-tenant IDOR).
             include_sources: If True, populate source document metadata on
                 the returned entity (default: False)
 
         Returns:
-            Entity if found, else None
+            Entity if found in the namespace, else None
         """
-        entity = await self._get_engine().get_entity(entity_id)
+        namespace_id = await self._resolve_namespace(namespace)
+        entity = await self._get_engine().get_entity(entity_id, namespace_id=namespace_id)
         if entity is not None and include_sources:
             await self._populate_sources([], [entity], [])
         return entity

@@ -381,7 +381,7 @@ class EntityLinker:
 
             # Fetch full entities
             for entity_id, score in results:
-                entity = await self._storage.get_entity(entity_id)
+                entity = await self._storage.get_entity(entity_id, namespace_id=namespace_id)
                 if entity:
                     # Only include entities of compatible types
                     if self._types_compatible(mention.entity_type, entity.entity_type):
