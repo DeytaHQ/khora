@@ -4,6 +4,16 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [Unreleased]
+
+### Security
+
+- **Cypher / SQL injection via `Entity.attributes` / `Entity.metadata` (and the equivalent `Relationship` and `Episode` fields) on the AGE graph backend.** A document submitted through `Khora.remember` whose extracted entity attributes or metadata contained a single quote was JSON-serialised unescaped into the AGE Cypher template, letting the payload close the Cypher string literal and execute Cypher of the attacker's choice. Because AGE wrapped Cypher inside a PostgreSQL `$$ … $$` dollar-quoted string, a payload containing `$$` further escalated to SQL injection on the host. Fixed by:
+  1. New `AGEBackend._serialize_dict_literal()` helper that JSON-encodes and then runs the result through the existing `_escape` (single quotes, backslashes, control characters). Applied at every Cypher-template site that interpolates a dict (entity create / update, relationship create, episode create — 7 call sites total).
+  2. `AGEBackend._cypher()` now wraps the inner Cypher in a uniquely-tagged dollar-quote `$khora_age$ … $khora_age$`, defanging the `$$`-breakout escalation. Inputs containing the literal tag are refused with a `ValueError` as defense in depth.
+
+  Reachable from any caller that can submit a document to `remember()` in a deployment where `backend=age` is configured; the attacker-controlled value reaches the AGE template through the LLM extractor's `attributes` / `metadata` output.
+
 ## [0.15.0] — Dream-phase Phase 2 + Phase 4, PPR retrieval, kuzu removed
 
 Minor release. Lands Phase 2 (planner ops) and Phase 4 (apply mode) of the [Dream Phase umbrella (#649)](https://github.com/DeytaHQ/khora/issues/649) — `Khora.dream(namespace, mode="apply")` is now end-to-end functional with bi-temporal soft-delete, per-op transactions, and snapshotted undo records. Also: Personalized PageRank retrieval for VectorCypher (#542), the kuzu backend is removed, and the README + dream-phase docs are rewritten.
