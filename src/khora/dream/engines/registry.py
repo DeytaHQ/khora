@@ -29,6 +29,7 @@ from khora.dream.engines.chronicle import (
     plan_chronicle_tombstone_audit,
 )
 from khora.dream.engines.vectorcypher import (
+    plan_vectorcypher_community_summary,
     plan_vectorcypher_orphan_report,
     plan_vectorcypher_schema_drift,
     plan_vectorcypher_source_chunk_ids_audit,
@@ -149,6 +150,10 @@ _APPLY_HANDLER_NAMES: dict[OpKind, tuple[str, str]] = {
     OpKind.CHRONICLE_EVENT_CLUSTERING: (
         "khora.dream.engines.chronicle.event_clustering",
         "apply_chronicle_event_clustering",
+    ),
+    OpKind.VECTORCYPHER_COMMUNITY_SUMMARY: (
+        "khora.dream.engines.vectorcypher.community_summary",
+        "apply_vectorcypher_community_summary",
     ),
 }
 
@@ -288,6 +293,7 @@ class _VectorCypherPlugin:
                 OpKind.VECTORCYPHER_SCHEMA_DRIFT_REPORT,
                 OpKind.VECTORCYPHER_ORPHAN_REPORT,
                 OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT,
+                OpKind.VECTORCYPHER_COMMUNITY_SUMMARY,
             }
         )
 
@@ -328,6 +334,16 @@ class _VectorCypherPlugin:
         if OpKind.VECTORCYPHER_SOURCE_CHUNK_IDS_AUDIT in wanted:
             op = await plan_vectorcypher_source_chunk_ids_audit(namespace_id, coordinator=coordinator)
             ops.append(op)
+
+        if OpKind.VECTORCYPHER_COMMUNITY_SUMMARY in wanted and config.community_summary_enabled:
+            community_ops = await plan_vectorcypher_community_summary(
+                namespace_id,
+                coordinator=coordinator,
+                min_size=config.community_summary_min_size,
+                cooccurrence_edge_weight=config.cooccurrence_edge_weight,
+                max_members_per_prompt=config.community_summary_max_members_per_prompt,
+            )
+            ops.extend(community_ops)
 
         return DreamPlan(
             plan_id=uuid4(),

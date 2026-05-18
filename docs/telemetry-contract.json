@@ -690,6 +690,12 @@
       "_comment": "Inner span for the chronicle_events near-duplicate clustering op (#665, Phase 2.5 of #649). Dry-run only in v0.14; apply lands in v0.15 (#669). Attributes: namespace_id (span attr only, never a metric label), threshold (float, cosine cutoff), window_days (int, referenced_date window half-width), event_count (int, total rows considered). Plan never proposes mutating chronicle_events.chunk_id — that FK powers the temporal recall channel back-pointer."
     },
     {
+      "name": "khora.dream.vectorcypher.community_summary",
+      "stability": "internal",
+      "owner": "dream",
+      "_comment": "Inner span for the vectorcypher community-detection + LLM summary op (OpKind.VECTORCYPHER_COMMUNITY_SUMMARY, #670, Phase 5.1 of #649). First LLM-using dream op. Planner attributes: op_id, namespace_id (span attr only, never a metric label), phase=audit, total_entities, weighting_used (float, ASSOCIATED_WITH down-weight), community_count, duration_ms. Apply attributes: op_id, namespace_id (span attr only), phase=mutation, community_size, community_id_hash (bounded_text_hash), prompt_hash (bounded_text_hash), kept_claims, dropped_claims, decision ('persisted'|'noop_replay'|'no_grounded_claims'). LLM cost is recorded via khora.dream.llm.tokens through the acompletion wrapper (_telemetry_op='dream_community_summary'). The op is default-OFF behind DreamConfig.community_summary_enabled."
+    },
+    {
       "name": "khora.dream.undo.write",
       "stability": "internal",
       "owner": "dream",

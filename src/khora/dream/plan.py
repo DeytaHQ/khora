@@ -40,6 +40,7 @@ class OpKind(StrEnum):
     VECTORCYPHER_CENTROID_RECOMPUTE = "vectorcypher_centroid_recompute"
     VECTORCYPHER_DEDUPE_ENTITIES = "vectorcypher_dedupe_entities"
     CHRONICLE_EVENT_CLUSTERING = "chronicle_event_clustering"
+    VECTORCYPHER_COMMUNITY_SUMMARY = "vectorcypher_community_summary"
 
 
 @dataclass(slots=True, frozen=True)
