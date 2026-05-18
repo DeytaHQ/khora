@@ -416,3 +416,23 @@ class DreamConfig(BaseSettings):
             "1k entities cannot run an unbounded context."
         ),
     )
+
+    # Phase 5.4 — vectorcypher schema-drift normalization (#673).
+    normalize_schema_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master toggle for the vectorcypher schema-drift normalization "
+            "op. Default OFF — type renames touch the consumer contract "
+            "(khora-cli, khora-explorer) and require coordinated release."
+        ),
+    )
+    normalize_schema_mapping: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Operator-supplied old_type -> new_type rename mapping for "
+            "the vectorcypher schema-drift normalization op. Applies to "
+            "both entity_type and relationship_type columns. Never "
+            "auto-derived — when empty, the op emits a single DreamOp "
+            "with decision='insufficient_input' and refuses to run."
+        ),
+    )
