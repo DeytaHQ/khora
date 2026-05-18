@@ -10,7 +10,7 @@
 
 **Khora is a durable knowledge memory library for long-horizon AI agents, with pluggable retrieval engines and storage backends to fit different workloads.** It stores what your agent learns — documents, entities, relationships, events, facts — and retrieves it through hybrid search that combines vector similarity, graph traversal, keyword matching, and temporal context. A scheduled "dream phase" then reorganizes the store offline so quality doesn't decay as it grows.
 
-Khora is a **library, not an application**. You embed it in your agent's process; there is no server. Tooling lives in sibling packages (coming soon): khora-cli for extraction and search, khora-explorer for ontology construction.
+Khora is a **library, not an application**. You embed it in your agent's process; there is no server. Tooling lives in sibling packages (coming soon - CLI, API/MCP, ontology construction SDK).
 
 ## Why khora?
 
