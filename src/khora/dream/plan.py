@@ -39,6 +39,7 @@ class OpKind(StrEnum):
     CHRONICLE_FACT_COMPACTION = "chronicle_fact_compaction"
     VECTORCYPHER_CENTROID_RECOMPUTE = "vectorcypher_centroid_recompute"
     VECTORCYPHER_DEDUPE_ENTITIES = "vectorcypher_dedupe_entities"
+    VECTORCYPHER_PRUNE_EDGES = "vectorcypher_prune_edges"
     CHRONICLE_EVENT_CLUSTERING = "chronicle_event_clustering"
     VECTORCYPHER_COMMUNITY_SUMMARY = "vectorcypher_community_summary"
 
