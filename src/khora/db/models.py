@@ -135,13 +135,15 @@ class DocumentModel(Base):
     )
 
     # Metadata
-    source: Mapped[str] = mapped_column(String(1024), default="")
-    source_type: Mapped[str] = mapped_column(String(64), default="")
-    content_type: Mapped[str] = mapped_column(String(128), default="")
-    title: Mapped[str] = mapped_column(String(512), default="")
-    author: Mapped[str] = mapped_column(String(255), default="")
-    language: Mapped[str] = mapped_column(String(10), default="en")
-    checksum: Mapped[str] = mapped_column(String(64), default="", index=True)
+    source: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    source_type: Mapped[str] = mapped_column(String(64), nullable=False, default="library")
+    source_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    author: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    language: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    checksum: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
     external_id: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
@@ -220,6 +222,17 @@ class ChunkModel(Base):
     end_char: Mapped[int] = mapped_column(Integer, default=0)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    chunker_info: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        # Portable JSON literal — JSONB on Postgres accepts plain '{}' without the
+        # explicit ``::jsonb`` cast (implicit cast on column type), and SQLite's
+        # JSON alias accepts the same literal. Keeps any code path that calls
+        # ``Base.metadata.create_all()`` (deprecated but still callable) emitting
+        # valid DDL on the sqlite_lance fixture.
+        server_default=text("'{}'"),
+        default=dict,
+    )
 
     # Embedding (pgvector)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)

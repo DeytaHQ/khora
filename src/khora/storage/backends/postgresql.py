@@ -632,13 +632,16 @@ class PostgreSQLBackend(AsyncSessionMixin):
             content=model.content,
             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
             metadata=DocumentMetadata(
-                source=model.source,
+                # Nullable columns (migration 037) coerce to "" at the DTO boundary —
+                # DocumentMetadata's str-typed fields are part of the stable public
+                # API. The DTO surface widens in a follow-up.
+                source=model.source or "",
                 source_type=model.source_type,
-                content_type=model.content_type,
-                title=model.title,
-                author=model.author,
-                language=model.language,
-                checksum=model.checksum,
+                content_type=model.content_type or "",
+                title=model.title or "",
+                author=model.author or "",
+                language=model.language or "",
+                checksum=model.checksum or "",
                 size_bytes=model.size_bytes,
                 custom=model.metadata_,
             ),

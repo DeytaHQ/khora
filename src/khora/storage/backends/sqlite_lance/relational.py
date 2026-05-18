@@ -598,13 +598,16 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             content=model.content,
             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
             metadata=DocumentMetadata(
-                source=model.source,
+                # See postgresql.py — migration 037 makes these columns nullable;
+                # coerce to "" so DocumentMetadata's str contract holds. DTO widening
+                # lands in a follow-up.
+                source=model.source or "",
                 source_type=model.source_type,
-                content_type=model.content_type,
-                title=model.title,
-                author=model.author,
-                language=model.language,
-                checksum=model.checksum,
+                content_type=model.content_type or "",
+                title=model.title or "",
+                author=model.author or "",
+                language=model.language or "",
+                checksum=model.checksum or "",
                 size_bytes=model.size_bytes,
                 custom=model.metadata_ or {},
             ),
