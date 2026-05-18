@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, literal_column, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
@@ -898,7 +898,10 @@ class PgVectorBackend(AsyncSessionMixin):
         deadlocks when multiple documents share entities.  Upserts for
         different namespaces proceed in parallel without contention.
 
-        Returns list of (entity, is_new) tuples (is_new is approximate).
+        Returns list of (entity, is_new) tuples. `is_new` is computed via
+        ``RETURNING (xmax = 0)``: ``xmax = 0`` indicates a true insert, while
+        a non-zero ``xmax`` means the ``ON CONFLICT DO UPDATE`` path acquired
+        a row lock on the existing row.
         """
         if not entities:
             return []
@@ -909,6 +912,7 @@ class PgVectorBackend(AsyncSessionMixin):
             # Sort by (namespace_id, name, entity_type) to ensure consistent lock ordering
             sorted_entities = sorted(entities, key=lambda e: (str(e.namespace_id), e.name, str(e.entity_type)))
             lock_key2 = _namespace_lock_key(namespace_id)
+            is_new_map: dict[tuple[str, str], bool] = {}
 
             async with self._get_session() as session:
                 # Acquire namespace-scoped advisory lock for the duration of this
@@ -959,13 +963,44 @@ class PgVectorBackend(AsyncSessionMixin):
                             "metadata": stmt.excluded.metadata,
                             "updated_at": stmt.excluded.updated_at,
                         },
+                    ).returning(
+                        EntityModel.name,
+                        EntityModel.entity_type,
+                        literal_column("(xmax = 0)").label("is_new"),
                     )
-                    await session.execute(stmt)
+                    result = await session.execute(stmt)
+                    for row in result:
+                        key = (row.name, row.entity_type)
+                        if key in is_new_map:
+                            logger.warning(
+                                "upsert_entities_batch: duplicate (name, entity_type) "
+                                "in input batch; is_new for first occurrence may be inaccurate "
+                                "(name={name!r}, entity_type={entity_type!r}, namespace_id={namespace_id})",
+                                name=row.name,
+                                entity_type=row.entity_type,
+                                namespace_id=namespace_id,
+                            )
+                        is_new_map[key] = bool(row.is_new)
 
                 # Single commit for all sub-batches under the advisory lock
                 await session.commit()
 
-            return [(entity, True) for entity in sorted_entities]
+            results: list[tuple] = []
+            for entity in sorted_entities:
+                key = (entity.name, entity.entity_type)
+                if key in is_new_map:
+                    results.append((entity, is_new_map[key]))
+                else:
+                    logger.warning(
+                        "upsert_entities_batch: entity missing from RETURNING; "
+                        "falling back to is_new=True "
+                        "(name={name!r}, entity_type={entity_type!r}, namespace_id={namespace_id})",
+                        name=entity.name,
+                        entity_type=entity.entity_type,
+                        namespace_id=namespace_id,
+                    )
+                    results.append((entity, True))
+            return results
 
         return await _retry_on_deadlock(_do_upsert)
 
