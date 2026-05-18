@@ -336,13 +336,18 @@ jobs:
             if [ -f "$ex/pyproject.toml" ]; then
               (cd "$ex" && uv sync) || { echo "[examples-smoke] $name: uv sync failed"; fail=1; continue; }
             fi
-            echo "[examples-smoke] $name: running example.py (30s budget)"
+            echo "[examples-smoke] $name: running example.py (60s budget)"
             # PYTHONPATH points at the repo root so the example can
             # ``from examples._helpers import …``. uv inherits the env
             # but uv run's --directory only changes cwd, not the import
             # path — without this, the helper package is unreachable
             # because there's no ``examples/__init__.py`` at the root.
-            if ! PYTHONPATH="${GITHUB_WORKSPACE}" timeout 30s uv run --directory "$ex" python example.py; then
+            #
+            # 60s budget (was 30s): the crewai example runs through the
+            # full ingest pipeline + LLM stub retries and observed times
+            # around 25-34s on GitHub-hosted runners. 30s was too tight
+            # and produced intermittent flakes (#741 / v0.15.1 release).
+            if ! PYTHONPATH="${GITHUB_WORKSPACE}" timeout 60s uv run --directory "$ex" python example.py; then
               echo "[examples-smoke] $name: FAILED"
               fail=1
             fi
