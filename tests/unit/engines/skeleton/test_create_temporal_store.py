@@ -112,7 +112,19 @@ class TestSurrealDBDispatch:
     def test_passes_surrealdb_config(self, mock_config: MagicMock, stub_surrealdb_store: MagicMock) -> None:
         surreal_cfg = MagicMock()
         create_temporal_store("surrealdb", mock_config, surrealdb_config=surreal_cfg)
-        stub_surrealdb_store.assert_called_once_with(mock_config, surrealdb_config=surreal_cfg)
+        stub_surrealdb_store.assert_called_once_with(mock_config, surrealdb_config=surreal_cfg, connection=None)
+
+    def test_passes_shared_connection(self, mock_config: MagicMock, stub_surrealdb_store: MagicMock) -> None:
+        """Skeleton must forward the coordinator's SurrealDBConnection (issue #718)."""
+        surreal_cfg = MagicMock()
+        shared_conn = MagicMock(name="shared-SurrealDBConnection")
+        create_temporal_store(
+            "surrealdb",
+            mock_config,
+            surrealdb_config=surreal_cfg,
+            surrealdb_connection=shared_conn,
+        )
+        stub_surrealdb_store.assert_called_once_with(mock_config, surrealdb_config=surreal_cfg, connection=shared_conn)
 
 
 class TestSQLiteLanceDispatch:

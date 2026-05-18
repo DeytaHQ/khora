@@ -127,11 +127,22 @@ class SkeletonConstructionEngine:
             if sqlite_lance_handle is None:
                 raise RuntimeError("sqlite_lance vector adapter is missing its EmbeddedStorageHandle")
 
+        # For the SurrealDB unified backend, reuse the coordinator's
+        # shared SurrealDBConnection. surrealkv (embedded mode) allows
+        # only one open handle per on-disk directory — opening a second
+        # connection raises ``InternalError: Invalid revision 0 for type
+        # Value`` on the first write (issue #718). Mirrors vectorcypher.
+        surrealdb_connection = None
+        if self._backend_type == "surrealdb":
+            if self._storage.relational is not None:
+                surrealdb_connection = getattr(self._storage.relational, "_conn", None)
+
         self._temporal_store = create_temporal_store(
             self._backend_type,
             self._config,
             weaviate_url=self._weaviate_url,
             surrealdb_config=self._config.storage.surrealdb if self._backend_type == "surrealdb" else None,
+            surrealdb_connection=surrealdb_connection,
             engine=shared_pg_engine,
             sqlite_lance_handle=sqlite_lance_handle,
         )

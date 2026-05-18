@@ -155,6 +155,7 @@ def create_temporal_store(
     *,
     weaviate_url: str | None = None,
     surrealdb_config: Any | None = None,
+    surrealdb_connection: Any | None = None,
     engine: Any | None = None,
     sqlite_lance_handle: Any | None = None,
 ) -> TemporalVectorStore:
@@ -165,6 +166,13 @@ def create_temporal_store(
         config: Khora configuration
         weaviate_url: Weaviate URL (required for weaviate backend)
         surrealdb_config: SurrealDBConfig instance (optional, falls back to config.storage.surrealdb)
+        surrealdb_connection: Shared ``SurrealDBConnection`` (surrealdb backend only).
+            When provided, the temporal store reuses this connection instead
+            of opening its own. Required on ``surrealkv://`` (embedded) mode
+            because surrealkv allows only one open handle per directory —
+            opening a second handle raises
+            ``InternalError: Invalid revision 0 for type Value`` on the
+            first write (see issue #718). Mirrors the vectorcypher wiring.
         engine: Optional shared SQLAlchemy AsyncEngine (pgvector backend only).
             When provided, the temporal store reuses this engine instead of
             creating a private connection pool.
@@ -189,7 +197,11 @@ def create_temporal_store(
     elif backend == "surrealdb":
         from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore
 
-        return SurrealDBTemporalStore(config, surrealdb_config=surrealdb_config)
+        return SurrealDBTemporalStore(
+            config,
+            surrealdb_config=surrealdb_config,
+            connection=surrealdb_connection,
+        )
     elif backend == "sqlite_lance":
         if sqlite_lance_handle is None:
             raise ValueError(
