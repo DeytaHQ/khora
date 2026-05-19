@@ -305,12 +305,12 @@ def _apply_version_scoring(
             except (TypeError, ValueError):
                 version = None
 
-        # Group key: first entity_ref, or title, or document_id
+        # Group key: first entity_ref, or document_id
         entity_refs = custom.get("entity_refs")
         if entity_refs and isinstance(entity_refs, list) and len(entity_refs) > 0:
             group_key = str(entity_refs[0])
         else:
-            group_key = custom.get("title", str(chunk.document_id))
+            group_key = str(chunk.document_id)
 
         chunk_meta.append((group_key, version))
 
