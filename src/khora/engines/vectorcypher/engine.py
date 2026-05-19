@@ -435,8 +435,10 @@ class VectorCypherEngine:
 
             neo4j_cfg = self._config.get_graph_config()
             neo4j_database = self._config.get_neo4j_database() or "neo4j"
-            if self._storage.graph is not None:
-                self._storage.graph = Neo4jBackend.from_driver(
+            if self._storage._graph is not None:
+                # Route through the public attr so __setattr__ rewraps the
+                # proxy alongside the private ref (IGR-224).
+                self._storage.graph = Neo4jBackend.from_driver(  # type: ignore[assignment]
                     self._neo4j_driver,
                     database=neo4j_database,
                     entity_write_concurrency=getattr(neo4j_cfg, "entity_write_concurrency", 12),
@@ -450,7 +452,7 @@ class VectorCypherEngine:
         if is_surrealdb:
             # Share the coordinator's SurrealDB connection to avoid isolated
             # embedded views (each embedded connection has its own write buffer)
-            shared_conn = getattr(self._storage.relational, "_conn", None)
+            shared_conn = getattr(self._storage._relational, "_conn", None)
             from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore
 
             self._temporal_store = SurrealDBTemporalStore(
@@ -462,9 +464,9 @@ class VectorCypherEngine:
             # aiosqlite + LanceDB pair across all adapters). The vector
             # adapter holds the canonical reference. Mirrors the Skeleton
             # engine wiring landed in #481.
-            if self._storage.vector is None:
+            if self._storage._vector is None:
                 raise RuntimeError("sqlite_lance coordinator did not provide a vector backend")
-            sqlite_lance_handle = getattr(self._storage.vector, "_handle", None)
+            sqlite_lance_handle = getattr(self._storage._vector, "_handle", None)
             if sqlite_lance_handle is None:
                 raise RuntimeError("sqlite_lance vector adapter is missing its EmbeddedStorageHandle")
             self._temporal_store = create_temporal_store(
@@ -476,10 +478,10 @@ class VectorCypherEngine:
             # Share the coordinator's SQLAlchemy engine so the temporal store
             # does not create a second connection pool against the same PG.
             shared_pg_engine = None
-            if self._storage.vector is not None:
-                shared_pg_engine = getattr(self._storage.vector, "_engine", None)
-            if shared_pg_engine is None and self._storage.relational is not None:
-                shared_pg_engine = getattr(self._storage.relational, "_engine", None)
+            if self._storage._vector is not None:
+                shared_pg_engine = getattr(self._storage._vector, "_engine", None)
+            if shared_pg_engine is None and self._storage._relational is not None:
+                shared_pg_engine = getattr(self._storage._relational, "_engine", None)
             self._temporal_store = create_temporal_store("pgvector", self._config, engine=shared_pg_engine)
         await self._temporal_store.connect()
 
@@ -508,7 +510,7 @@ class VectorCypherEngine:
         # Route session acquisition through Neo4jBackend._session so pool
         # metrics (timeout counter + acquire_duration) observe these paths.
         if not skip_neo4j:
-            neo4j_backend = self._storage.graph if self._storage is not None else None
+            neo4j_backend = self._storage._graph if self._storage is not None else None
             self._dual_nodes = DualNodeManager(
                 self._neo4j_driver,
                 neo4j_database,

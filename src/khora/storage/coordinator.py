@@ -200,6 +200,11 @@ class StorageCoordinator:
     graph: GraphBackendProtocol | None = None
     event_store: EventStoreProtocol | None = None
 
+    _relational: RelationalBackendProtocol | None = field(default=None, init=False, repr=False)
+    _vector: VectorBackendProtocol | None = field(default=None, init=False, repr=False)
+    _graph: GraphBackendProtocol | None = field(default=None, init=False, repr=False)
+    _event_store: EventStoreProtocol | None = field(default=None, init=False, repr=False)
+
     _connected: bool = field(default=False, init=False)
     _is_unified_backend: bool = field(default=False, init=False)
     _hook_dispatcher: Any = field(default=None, init=False)
@@ -213,15 +218,41 @@ class StorageCoordinator:
         if self._hook_dispatcher is not None and self._hook_dispatcher.subscription_count > 0:
             await self._hook_dispatcher.dispatch(event)
 
+    # IGR-224: tuple of public attr names that proxy through __setattr__.
+    # Listed at class level so __setattr__ doesn't pay dict-lookup per call.
+    _PROXIED_ROLES: tuple[str, ...] = ("relational", "vector", "graph", "event_store")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Wrap public backend attrs in ``NamespaceRequiredProxy`` on assign.
+
+        Routes assignment to ``relational`` / ``vector`` / ``graph`` /
+        ``event_store`` (either via dataclass-generated ``__init__`` or
+        post-construction) through the proxy so external callers always see
+        a deprecation-warning + namespace-enforcing wrapper. Internal
+        coordinator code uses ``self._{role}`` directly to bypass the proxy.
+        """
+        if name in StorageCoordinator._PROXIED_ROLES:
+            from khora.storage._namespace_proxy import NamespaceRequiredProxy
+
+            object.__setattr__(self, f"_{name}", value)
+            proxy = NamespaceRequiredProxy(value, name) if value is not None else None
+            object.__setattr__(self, name, proxy)
+            return
+        object.__setattr__(self, name, value)
+
     def __post_init__(self) -> None:
+        # Public-attr assignment in dataclass-generated __init__ already routed
+        # through __setattr__ above, so self._{role} is populated and self.{role}
+        # holds the proxy. Nothing to wrap here.
+
         # Detect if graph and vector share a SurrealDB connection (unified backend).
         # Some adapters (e.g. SQLiteLance) expose ``_conn`` as a property that
         # raises when the underlying connection isn't open yet — treat any
         # error as "not unified" since the probe is advisory.
-        if self.graph is not None and self.vector is not None:
+        if self._graph is not None and self._vector is not None:
             try:
-                graph_conn = getattr(self.graph, "_conn", None)
-                vector_conn = getattr(self.vector, "_conn", None)
+                graph_conn = getattr(self._graph, "_conn", None)
+                vector_conn = getattr(self._vector, "_conn", None)
             except Exception:
                 graph_conn = None
                 vector_conn = None
@@ -242,14 +273,14 @@ class StorageCoordinator:
 
         # Build list of connection tasks to run in parallel
         tasks = []
-        if self.relational:
-            tasks.append(self.relational.connect())
-        if self.vector:
-            tasks.append(self.vector.connect())
-        if self.graph:
-            tasks.append(self.graph.connect())
-        if self.event_store:
-            tasks.append(self.event_store.connect())
+        if self._relational:
+            tasks.append(self._relational.connect())
+        if self._vector:
+            tasks.append(self._vector.connect())
+        if self._graph:
+            tasks.append(self._graph.connect())
+        if self._event_store:
+            tasks.append(self._event_store.connect())
 
         # Connect all backends concurrently
         if tasks:
@@ -270,14 +301,14 @@ class StorageCoordinator:
 
         # Build list of disconnection tasks to run in parallel
         tasks = []
-        if self.event_store:
-            tasks.append(self.event_store.disconnect())
-        if self.graph:
-            tasks.append(self.graph.disconnect())
-        if self.vector:
-            tasks.append(self.vector.disconnect())
-        if self.relational:
-            tasks.append(self.relational.disconnect())
+        if self._event_store:
+            tasks.append(self._event_store.disconnect())
+        if self._graph:
+            tasks.append(self._graph.disconnect())
+        if self._vector:
+            tasks.append(self._vector.disconnect())
+        if self._relational:
+            tasks.append(self._relational.disconnect())
 
         # Disconnect all backends concurrently
         if tasks:
@@ -292,14 +323,14 @@ class StorageCoordinator:
 
         # Build list of health check coroutines to run in parallel
         checks: list[tuple[str, Any]] = []
-        if self.relational:
-            checks.append(("relational", self.relational.is_healthy()))
-        if self.vector:
-            checks.append(("vector", self.vector.is_healthy()))
-        if self.graph:
-            checks.append(("graph", self.graph.is_healthy()))
-        if self.event_store:
-            checks.append(("event_store", self.event_store.is_healthy()))
+        if self._relational:
+            checks.append(("relational", self._relational.is_healthy()))
+        if self._vector:
+            checks.append(("vector", self._vector.is_healthy()))
+        if self._graph:
+            checks.append(("graph", self._graph.is_healthy()))
+        if self._event_store:
+            checks.append(("event_store", self._event_store.is_healthy()))
 
         if checks:
             results = await asyncio.gather(*[coro for _, coro in checks], return_exceptions=True)
@@ -329,7 +360,7 @@ class StorageCoordinator:
         """
         # Resolve a session factory from the first available SQL backend
         factory = None
-        for backend in (self.relational, self.vector, self.event_store):
+        for backend in (self._relational, self._vector, self._event_store):
             sf = getattr(backend, "_session_factory", None)
             if sf is not None:
                 factory = sf
@@ -364,35 +395,35 @@ class StorageCoordinator:
         Raises:
             ValueError: If no active version exists for the given namespace_id
         """
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.resolve_namespace(namespace_id)
+        return await self._relational.resolve_namespace(namespace_id)
 
     async def create_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Create a new memory namespace."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.create_namespace(namespace)
+        return await self._relational.create_namespace(namespace)
 
     async def get_namespace(self, namespace_id: UUID) -> MemoryNamespace | None:
         """Get a namespace by ID."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_namespace(namespace_id)
+        return await self._relational.get_namespace(namespace_id)
 
     async def list_namespaces(
         self, *, active_only: bool = True, limit: int = 100, offset: int = 0
     ) -> PaginatedResult[MemoryNamespace]:
         """List namespaces with pagination."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.list_namespaces(active_only=active_only, limit=limit, offset=offset)
+        return await self._relational.list_namespaces(active_only=active_only, limit=limit, offset=offset)
 
     async def update_namespace(self, namespace: MemoryNamespace) -> MemoryNamespace:
         """Update a namespace."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.update_namespace(namespace)
+        return await self._relational.update_namespace(namespace)
 
     async def create_namespace_version(
         self,
@@ -407,9 +438,9 @@ class StorageCoordinator:
         Returns:
             New namespace version
         """
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.create_namespace_version(previous_version=previous_version)
+        return await self._relational.create_namespace_version(previous_version=previous_version)
 
     async def deactivate_namespace(self, namespace_id: UUID) -> None:
         """Mark a namespace version as inactive.
@@ -417,9 +448,9 @@ class StorageCoordinator:
         Args:
             namespace_id: ID of the namespace to deactivate
         """
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        await self.relational.deactivate_namespace(namespace_id)
+        await self._relational.deactivate_namespace(namespace_id)
 
     # =========================================================================
     # Document operations (delegated to relational)
@@ -428,9 +459,9 @@ class StorageCoordinator:
     @_record_storage_op("create_document", "postgresql")
     async def create_document(self, document: Document) -> Document:
         """Create a new document."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.create_document(document)
+        return await self._relational.create_document(document)
 
     async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
         """Get a document by ID, scoped to ``namespace_id``.
@@ -440,9 +471,9 @@ class StorageCoordinator:
         backend's SQL layer to prevent cross-tenant document access by id
         (IDOR — IGR-221).
         """
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_document(document_id, namespace_id=namespace_id)
+        return await self._relational.get_document(document_id, namespace_id=namespace_id)
 
     async def list_documents(
         self,
@@ -454,28 +485,28 @@ class StorageCoordinator:
         offset: int = 0,
     ) -> list[Document]:
         """List documents in a namespace."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.list_documents(
+        return await self._relational.list_documents(
             namespace_id, status=status, updated_before=updated_before, limit=limit, offset=offset
         )
 
     async def update_document(self, document: Document) -> Document:
         """Update a document."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.update_document(document)
+        return await self._relational.update_document(document)
 
     async def delete_document(self, document_id: UUID) -> bool:
         """Delete a document and its chunks."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
 
         # Delete chunks first
-        if self.vector:
-            await self.vector.delete_chunks_by_document(document_id)
+        if self._vector:
+            await self._vector.delete_chunks_by_document(document_id)
 
-        return await self.relational.delete_document(document_id)
+        return await self._relational.delete_document(document_id)
 
     @_record_storage_op("replace_document_extraction", "coordinator")
     async def replace_document_extraction(
@@ -522,18 +553,18 @@ class StorageCoordinator:
         Returns:
             A ``ReplaceResult`` with the write-footprint counts.
         """
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        if not self.graph:
+        if not self._graph:
             raise RuntimeError("Graph backend not configured")
 
         try:
             # 1. Prefetch old graph state and compute retire / survive sets
             #    BEFORE mutating anything.  Doing this up front keeps the
             #    Python-side filter aligned with the Cypher.
-            fetch = getattr(self.graph, "fetch_document_extraction_state", None)
+            fetch = getattr(self._graph, "fetch_document_extraction_state", None)
             if fetch is None:
                 old_entity_records: list[dict[str, Any]] = []
                 old_relationship_records: list[dict[str, Any]] = []
@@ -623,9 +654,9 @@ class StorageCoordinator:
             #    Embedding (OpenAI roundtrip) happened before this block — the
             #    transaction deliberately wraps only DB work (ADR §Performance).
             async with self.transaction() as txn:
-                await self.relational.update_document(new_document, session=txn.session)  # type: ignore[unresolved-attribute]
-                chunks_deleted = await self.vector.delete_chunks_by_document(old_document_id, session=txn.session)
-                await self.vector.create_chunks_batch(new_chunks, session=txn.session)  # type: ignore[unresolved-attribute]
+                await self._relational.update_document(new_document, session=txn.session)  # type: ignore[unresolved-attribute]
+                chunks_deleted = await self._vector.delete_chunks_by_document(old_document_id, session=txn.session)
+                await self._vector.create_chunks_batch(new_chunks, session=txn.session)  # type: ignore[unresolved-attribute]
 
             # 3. Graph-side retirement / remap (after PG commits).  Order:
             #    retire -> remap -> upsert.  Retirement snapshots the current
@@ -635,18 +666,18 @@ class StorageCoordinator:
             #    are those with keys absent from the old extraction.
             entities_retired = 0
             if entity_retirement_rows:
-                entities_retired = await self.graph.retire_orphaned_entities_batch(  # type: ignore[unresolved-attribute]
+                entities_retired = await self._graph.retire_orphaned_entities_batch(  # type: ignore[unresolved-attribute]
                     entity_retirement_rows
                 )
 
             relationships_retired = 0
             if relationship_retirement_rows:
-                relationships_retired = await self.graph.retire_orphaned_relationships_batch(  # type: ignore[unresolved-attribute]
+                relationships_retired = await self._graph.retire_orphaned_relationships_batch(  # type: ignore[unresolved-attribute]
                     relationship_retirement_rows
                 )
 
             if entity_survivor_remap_rows or relationship_survivor_remap_rows:
-                await self.graph.remap_source_document_ids_batch(  # type: ignore[unresolved-attribute]
+                await self._graph.remap_source_document_ids_batch(  # type: ignore[unresolved-attribute]
                     entity_survivors=entity_survivor_remap_rows,
                     relationship_survivors=relationship_survivor_remap_rows,
                 )
@@ -680,7 +711,7 @@ class StorageCoordinator:
             # their id is preserved from the old graph state.
 
             new_document.mark_completed(len(new_chunks), len(new_entities), relationships_created)
-            await self.relational.update_document(new_document)
+            await self._relational.update_document(new_document)
 
             return ReplaceResult(
                 document_id=new_document.id,
@@ -700,7 +731,7 @@ class StorageCoordinator:
             # replace can self-heal the row (ADR §Decision #8).
             new_document.mark_failed(str(e))
             try:
-                await self.relational.update_document(new_document)
+                await self._relational.update_document(new_document)
             except Exception as persist_error:
                 logger.error(
                     f"Failed to persist FAILED status after replace_document_extraction error: {persist_error}"
@@ -719,9 +750,9 @@ class StorageCoordinator:
         Raises:
             RuntimeError: If relational backend is not configured
         """
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.count_documents(namespace_id)
+        return await self._relational.count_documents(namespace_id)
 
     async def get_last_activity_at(self, namespace_id: UUID) -> datetime | None:
         """Get the most recent document creation timestamp in a namespace.
@@ -736,21 +767,21 @@ class StorageCoordinator:
         Raises:
             RuntimeError: If relational backend is not configured
         """
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_last_activity_at(namespace_id)
+        return await self._relational.get_last_activity_at(namespace_id)
 
     async def get_document_stats(self, namespace_id: UUID) -> tuple[int, datetime | None]:
         """Get document count and last activity timestamp in a single query."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_document_stats(namespace_id)
+        return await self._relational.get_document_stats(namespace_id)
 
     async def get_document_by_checksum(self, namespace_id: UUID, checksum: str) -> Document | None:
         """Get a document by its content checksum."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_document_by_checksum(namespace_id, checksum)
+        return await self._relational.get_document_by_checksum(namespace_id, checksum)
 
     async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
         """Get a document by (namespace_id, external_id).
@@ -759,9 +790,9 @@ class StorageCoordinator:
         any status (including ``FAILED`` and ``PROCESSING``) so callers can
         self-heal on the next successful replace.
         """
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_document_by_external_id(namespace_id, external_id)
+        return await self._relational.get_document_by_external_id(namespace_id, external_id)
 
     async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
         """Batch variant of :meth:`get_document_by_external_id`.
@@ -769,9 +800,9 @@ class StorageCoordinator:
         Collapses N serial lookups into one query for ``remember_batch`` replace
         dispatch. Status-agnostic like the single lookup.
         """
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_documents_by_external_ids(namespace_id, external_ids)
+        return await self._relational.get_documents_by_external_ids(namespace_id, external_ids)
 
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
@@ -785,9 +816,9 @@ class StorageCoordinator:
         Returns:
             Dictionary mapping checksum to Document (only for existing documents)
         """
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_documents_by_checksums(namespace_id, checksums)  # type: ignore[unresolved-attribute]
+        return await self._relational.get_documents_by_checksums(namespace_id, checksums)  # type: ignore[unresolved-attribute]
 
     # =========================================================================
     # Chunk operations (delegated to vector)
@@ -795,16 +826,16 @@ class StorageCoordinator:
 
     async def create_chunk(self, chunk: Chunk) -> Chunk:
         """Create a new chunk with embedding."""
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.create_chunk(chunk)
+        return await self._vector.create_chunk(chunk)
 
     @_record_storage_op("create_chunks_batch", "pgvector")
     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[Chunk]:
         """Create multiple chunks in a batch."""
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.create_chunks_batch(chunks)
+        return await self._vector.create_chunks_batch(chunks)
 
     async def get_chunk(self, chunk_id: UUID, *, namespace_id: UUID) -> Chunk | None:
         """Get a chunk by ID, filtered to the caller's ``namespace_id``.
@@ -813,9 +844,9 @@ class StorageCoordinator:
         different namespace. The ``namespace_id`` keyword is required to
         prevent cross-tenant chunk access via id (IDOR).
         """
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.get_chunk(chunk_id, namespace_id=namespace_id)
+        return await self._vector.get_chunk(chunk_id, namespace_id=namespace_id)
 
     async def get_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
         """Get all chunks for a document, filtered to the caller's ``namespace_id``.
@@ -823,9 +854,9 @@ class StorageCoordinator:
         Returns an empty list when the document does not belong to the
         caller's namespace.
         """
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.get_chunks_by_document(document_id, namespace_id=namespace_id)
+        return await self._vector.get_chunks_by_document(document_id, namespace_id=namespace_id)
 
     async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:
         """Fetch multiple chunks by ID in a single query, filtered to ``namespace_id``.
@@ -841,9 +872,9 @@ class StorageCoordinator:
         """
         if not chunk_ids:
             return {}
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.get_chunks_batch(chunk_ids, namespace_id=namespace_id)
+        return await self._vector.get_chunks_batch(chunk_ids, namespace_id=namespace_id)
 
     @_record_storage_op("search_similar_chunks", "pgvector")
     async def search_similar_chunks(
@@ -858,9 +889,9 @@ class StorageCoordinator:
         created_before: datetime | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Search for similar chunks."""
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.search_similar(
+        return await self._vector.search_similar(
             namespace_id,
             query_embedding,
             limit=limit,
@@ -882,9 +913,9 @@ class StorageCoordinator:
         created_before: datetime | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Search chunks using PostgreSQL full-text search."""
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.search_fulltext(
+        return await self._vector.search_fulltext(
             namespace_id,
             query_text,
             limit=limit,
@@ -895,9 +926,9 @@ class StorageCoordinator:
 
     async def count_chunks(self, namespace_id: UUID) -> int:
         """Count chunks in a namespace."""
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.count_chunks(namespace_id)
+        return await self._vector.count_chunks(namespace_id)
 
     async def list_chunks(
         self,
@@ -916,22 +947,22 @@ class StorageCoordinator:
         Returns:
             List of chunks
         """
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.list_chunks(namespace_id, limit=limit, offset=offset)
+        return await self._vector.list_chunks(namespace_id, limit=limit, offset=offset)
 
     async def count_entities(self, namespace_id: UUID) -> int:
         """Count entities in a namespace. Best-effort during active ingestion (non-atomic dual-write)."""
-        if self.vector:
-            return await self.vector.count_entities(namespace_id)
-        if self.graph:
-            return await self.graph.count_entities(namespace_id)
+        if self._vector:
+            return await self._vector.count_entities(namespace_id)
+        if self._graph:
+            return await self._graph.count_entities(namespace_id)
         return 0
 
     async def count_relationships(self, namespace_id: UUID) -> int:
         """Count relationships in a namespace (graph-only)."""
-        if self.graph:
-            return await self.graph.count_relationships(namespace_id)
+        if self._graph:
+            return await self._graph.count_relationships(namespace_id)
         return 0
 
     # =========================================================================
@@ -946,20 +977,20 @@ class StorageCoordinator:
         connection, e.g. SurrealDB), the vector write is skipped to avoid
         duplicate records in the same database.
         """
-        if self.graph and self.vector:
+        if self._graph and self._vector:
             if self._is_unified_backend:
                 # Single DB — graph adapter write is sufficient
-                entity = await self.graph.create_entity(entity)
+                entity = await self._graph.create_entity(entity)
             else:
                 graph_result, _ = await asyncio.gather(
-                    self.graph.create_entity(entity),
-                    self.vector.create_entity(entity),
+                    self._graph.create_entity(entity),
+                    self._vector.create_entity(entity),
                 )
                 entity = graph_result
-        elif self.graph:
-            entity = await self.graph.create_entity(entity)
-        elif self.vector:
-            await self.vector.create_entity(entity)
+        elif self._graph:
+            entity = await self._graph.create_entity(entity)
+        elif self._vector:
+            await self._vector.create_entity(entity)
         return entity
 
     async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
@@ -969,11 +1000,11 @@ class StorageCoordinator:
         ``namespace_id`` is required to prevent cross-tenant IDOR — the graph
         backend's underlying ``get_entity`` only filters by ID.
         """
-        if self.graph:
+        if self._graph:
             # Backend now filters at the Cypher/SQL layer (IGR-223). Keep the
             # post-fetch check as defense-in-depth in case a backend's filter
             # ever regresses.
-            entity = await self.graph.get_entity(entity_id, namespace_id=namespace_id)
+            entity = await self._graph.get_entity(entity_id, namespace_id=namespace_id)
             if entity is None or entity.namespace_id != namespace_id:
                 return None
             return entity
@@ -981,8 +1012,8 @@ class StorageCoordinator:
 
     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
         """Get an entity by name and type."""
-        if self.graph:
-            return await self.graph.get_entity_by_name(namespace_id, name, entity_type)
+        if self._graph:
+            return await self._graph.get_entity_by_name(namespace_id, name, entity_type)
         return None
 
     async def update_entity(self, entity: Entity) -> Entity:
@@ -990,24 +1021,24 @@ class StorageCoordinator:
 
         When a unified backend is detected, the vector write is skipped.
         """
-        if self.graph and self.vector:
+        if self._graph and self._vector:
             if self._is_unified_backend:
-                return await self.graph.update_entity(entity)
+                return await self._graph.update_entity(entity)
             graph_result, _ = await asyncio.gather(
-                self.graph.update_entity(entity),
-                self.vector.update_entity(entity),
+                self._graph.update_entity(entity),
+                self._vector.update_entity(entity),
             )
             return graph_result
-        if self.graph:
-            return await self.graph.update_entity(entity)
-        if self.vector:
-            await self.vector.update_entity(entity)
+        if self._graph:
+            return await self._graph.update_entity(entity)
+        if self._vector:
+            await self._vector.update_entity(entity)
         return entity
 
     async def delete_entity(self, entity_id: UUID) -> bool:
         """Delete an entity."""
-        if self.graph:
-            return await self.graph.delete_entity(entity_id)
+        if self._graph:
+            return await self._graph.delete_entity(entity_id)
         return False
 
     async def list_entities(
@@ -1024,27 +1055,27 @@ class StorageCoordinator:
         the vector backend, which owns the entities table on PostgreSQL-only
         stacks (e.g. chronicle engine without Neo4j).
         """
-        if self.graph:
-            return await self.graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
-        if self.vector and hasattr(self.vector, "list_entities"):
-            return await self.vector.list_entities(  # type: ignore[unresolved-attribute]
+        if self._graph:
+            return await self._graph.list_entities(namespace_id, entity_type=entity_type, limit=limit, offset=offset)
+        if self._vector and hasattr(self._vector, "list_entities"):
+            return await self._vector.list_entities(  # type: ignore[unresolved-attribute]
                 namespace_id, entity_type=entity_type, limit=limit, offset=offset
             )
         return []
 
     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
         """Update the embedding for an entity."""
-        if self.vector:
-            await self.vector.update_entity_embedding(entity_id, embedding, model)
+        if self._vector:
+            await self._vector.update_entity_embedding(entity_id, embedding, model)
 
     async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
         """Update embeddings for multiple entities in a single transaction."""
-        if self.vector and hasattr(self.vector, "update_entity_embeddings_batch"):
-            return await self.vector.update_entity_embeddings_batch(updates)
+        if self._vector and hasattr(self._vector, "update_entity_embeddings_batch"):
+            return await self._vector.update_entity_embeddings_batch(updates)
         # Fallback to individual updates (sequential)
-        if self.vector:
+        if self._vector:
             for entity_id, embedding, model in updates:
-                await self.vector.update_entity_embedding(entity_id, embedding, model)
+                await self._vector.update_entity_embedding(entity_id, embedding, model)
             return len(updates)
         return 0
 
@@ -1058,9 +1089,9 @@ class StorageCoordinator:
         min_similarity: float = 0.0,
     ) -> list[tuple[UUID, float]]:
         """Search for similar entities."""
-        if not self.vector:
+        if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self.vector.search_similar_entities(
+        return await self._vector.search_similar_entities(
             namespace_id,
             query_embedding,
             limit=limit,
@@ -1094,16 +1125,16 @@ class StorageCoordinator:
         results: list[tuple[Entity, bool]] = []
 
         # Upsert in graph and vector backends in parallel
-        has_graph = self.graph and hasattr(self.graph, "upsert_entities_batch")
-        has_vector = self.vector and hasattr(self.vector, "upsert_entities_batch")
+        has_graph = self._graph and hasattr(self._graph, "upsert_entities_batch")
+        has_vector = self._vector and hasattr(self._vector, "upsert_entities_batch")
         logger.debug(f"upsert_entities_batch: {len(entities)} entities, has_graph={has_graph}, has_vector={has_vector}")
 
         if has_graph and has_vector:
-            assert self.graph is not None  # narrowed by has_graph
-            assert self.vector is not None  # narrowed by has_vector
+            assert self._graph is not None  # narrowed by has_graph
+            assert self._vector is not None  # narrowed by has_vector
             if self._is_unified_backend:
                 # Single DB — graph adapter upsert is sufficient
-                results = await self.graph.upsert_entities_batch(
+                results = await self._graph.upsert_entities_batch(
                     namespace_id,
                     entities,
                     batch_size=batch_size,
@@ -1111,25 +1142,25 @@ class StorageCoordinator:
                 )
             else:
                 graph_results, _ = await asyncio.gather(
-                    self.graph.upsert_entities_batch(
+                    self._graph.upsert_entities_batch(
                         namespace_id,
                         entities,
                         batch_size=batch_size,
                         bulk_mode=bulk_mode,
                     ),
-                    self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),  # type: ignore[unresolved-attribute]
+                    self._vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),  # type: ignore[unresolved-attribute]
                 )
                 results = graph_results
         elif has_graph:
-            assert self.graph is not None
-            results = await self.graph.upsert_entities_batch(
+            assert self._graph is not None
+            results = await self._graph.upsert_entities_batch(
                 namespace_id,
                 entities,
                 batch_size=batch_size,
                 bulk_mode=bulk_mode,
             )
         elif has_vector:
-            results = await self.vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)  # type: ignore[unresolved-attribute]
+            results = await self._vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)  # type: ignore[unresolved-attribute]
 
         # Fallback: if no backend returned results, create synthetic results
         # to ensure callers always get one result per input entity
@@ -1156,8 +1187,8 @@ class StorageCoordinator:
             return 0
 
         count = 0
-        if self.graph and hasattr(self.graph, "create_relationships_batch"):
-            count = await self.graph.create_relationships_batch(relationships, batch_size=batch_size)
+        if self._graph and hasattr(self._graph, "create_relationships_batch"):
+            count = await self._graph.create_relationships_batch(relationships, batch_size=batch_size)
 
         return count
 
@@ -1168,9 +1199,9 @@ class StorageCoordinator:
     @_record_storage_op("create_relationship", "graph")
     async def create_relationship(self, relationship: Relationship) -> Relationship:
         """Create a relationship between entities."""
-        if not self.graph:
+        if not self._graph:
             raise RuntimeError("Graph backend not configured")
-        return await self.graph.create_relationship(relationship)
+        return await self._graph.create_relationship(relationship)
 
     async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
         """Get a relationship by ID, scoped to ``namespace_id``.
@@ -1178,8 +1209,8 @@ class StorageCoordinator:
         Returns ``None`` when the relationship belongs to a different
         namespace. ``namespace_id`` is required to prevent cross-tenant IDOR.
         """
-        if self.graph:
-            rel = await self.graph.get_relationship(relationship_id, namespace_id=namespace_id)
+        if self._graph:
+            rel = await self._graph.get_relationship(relationship_id, namespace_id=namespace_id)
             if rel is None or rel.namespace_id != namespace_id:
                 return None
             return rel
@@ -1187,8 +1218,8 @@ class StorageCoordinator:
 
     async def delete_relationship(self, relationship_id: UUID) -> bool:
         """Delete a relationship."""
-        if self.graph:
-            return await self.graph.delete_relationship(relationship_id)
+        if self._graph:
+            return await self._graph.delete_relationship(relationship_id)
         return False
 
     async def get_entity_relationships(
@@ -1206,8 +1237,8 @@ class StorageCoordinator:
         namespace. Edges that cross into other namespaces are excluded
         (IGR-223).
         """
-        if self.graph:
-            return await self.graph.get_entity_relationships(
+        if self._graph:
+            return await self._graph.get_entity_relationships(
                 entity_id,
                 namespace_id=namespace_id,
                 direction=direction,
@@ -1231,12 +1262,12 @@ class StorageCoordinator:
         receive an empty list (chronicle on PG-only does not currently write
         the relationships table).
         """
-        if self.graph:
-            return await self.graph.list_relationships(
+        if self._graph:
+            return await self._graph.list_relationships(
                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
             )
-        if self.vector and hasattr(self.vector, "list_relationships"):
-            return await self.vector.list_relationships(  # type: ignore[unresolved-attribute]
+        if self._vector and hasattr(self._vector, "list_relationships"):
+            return await self._vector.list_relationships(  # type: ignore[unresolved-attribute]
                 namespace_id, relationship_type=relationship_type, limit=limit, offset=offset
             )
         return []
@@ -1247,9 +1278,9 @@ class StorageCoordinator:
 
     async def create_episode(self, episode: Episode) -> Episode:
         """Create an episode."""
-        if not self.graph:
+        if not self._graph:
             raise RuntimeError("Graph backend not configured")
-        return await self.graph.create_episode(episode)
+        return await self._graph.create_episode(episode)
 
     async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
         """Get an episode by ID, scoped to ``namespace_id``.
@@ -1257,8 +1288,8 @@ class StorageCoordinator:
         Returns ``None`` when the episode belongs to a different namespace.
         ``namespace_id`` is required to prevent cross-tenant IDOR.
         """
-        if self.graph:
-            ep = await self.graph.get_episode(episode_id, namespace_id=namespace_id)
+        if self._graph:
+            ep = await self._graph.get_episode(episode_id, namespace_id=namespace_id)
             if ep is None or ep.namespace_id != namespace_id:
                 return None
             return ep
@@ -1273,8 +1304,8 @@ class StorageCoordinator:
         limit: int = 100,
     ) -> list[Episode]:
         """List episodes in a time range."""
-        if self.graph:
-            return await self.graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
+        if self._graph:
+            return await self._graph.list_episodes(namespace_id, start_time=start_time, end_time=end_time, limit=limit)
         return []
 
     # =========================================================================
@@ -1291,8 +1322,8 @@ class StorageCoordinator:
         relationship_types: list[str] | None = None,
     ) -> list[list[dict[str, Any]]]:
         """Find paths between two entities."""
-        if self.graph:
-            return await self.graph.find_paths(
+        if self._graph:
+            return await self._graph.find_paths(
                 namespace_id,
                 source_entity_id,
                 target_entity_id,
@@ -1316,8 +1347,8 @@ class StorageCoordinator:
         belongs to a different namespace. Traversal never crosses namespace
         boundaries (IGR-223).
         """
-        if self.graph:
-            return await self.graph.get_neighborhood(
+        if self._graph:
+            return await self._graph.get_neighborhood(
                 entity_id,
                 namespace_id=namespace_id,
                 depth=depth,
@@ -1345,11 +1376,11 @@ class StorageCoordinator:
         """
         if not entity_ids:
             return {}
-        if self.graph:
-            return await self.graph.get_entities_batch(entity_ids, namespace_id=namespace_id)
+        if self._graph:
+            return await self._graph.get_entities_batch(entity_ids, namespace_id=namespace_id)
         # Fallback to pgvector for engines without graph backend (e.g., Chronicle)
-        if self.vector and hasattr(self.vector, "get_entities_batch"):
-            return await self.vector.get_entities_batch(  # type: ignore[unresolved-attribute]
+        if self._vector and hasattr(self._vector, "get_entities_batch"):
+            return await self._vector.get_entities_batch(  # type: ignore[unresolved-attribute]
                 entity_ids, namespace_id=namespace_id
             )
         return {}
@@ -1363,8 +1394,8 @@ class StorageCoordinator:
         """
         if not names:
             return {}
-        if self.vector and hasattr(self.vector, "get_entities_by_names_batch"):
-            return await self.vector.get_entities_by_names_batch(namespace_id, names)
+        if self._vector and hasattr(self._vector, "get_entities_by_names_batch"):
+            return await self._vector.get_entities_by_names_batch(namespace_id, names)
         return {}
 
     async def get_documents_batch(self, document_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Document]:
@@ -1382,8 +1413,8 @@ class StorageCoordinator:
         """
         if not document_ids:
             return {}
-        if self.relational:
-            return await self.relational.get_documents_batch(document_ids, namespace_id=namespace_id)
+        if self._relational:
+            return await self._relational.get_documents_batch(document_ids, namespace_id=namespace_id)
         return {}
 
     async def get_document_sources_batch(
@@ -1404,8 +1435,8 @@ class StorageCoordinator:
         """
         if not document_ids:
             return {}
-        if self.relational:
-            return await self.relational.get_document_sources_batch(document_ids, namespace_id=namespace_id)
+        if self._relational:
+            return await self._relational.get_document_sources_batch(document_ids, namespace_id=namespace_id)
         return {}
 
     async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
@@ -1419,8 +1450,8 @@ class StorageCoordinator:
         """
         if not document_ids:
             return {}
-        if self.relational:
-            return await self.relational.get_document_projections_batch(document_ids)
+        if self._relational:
+            return await self._relational.get_document_projections_batch(document_ids)
         return {}
 
     @_record_storage_op("get_neighborhoods_batch", "graph")
@@ -1451,7 +1482,7 @@ class StorageCoordinator:
         """
         if not entity_ids:
             return {}
-        if self.graph:
+        if self._graph:
             kwargs: dict[str, Any] = {
                 "namespace_id": namespace_id,
                 "depth": depth,
@@ -1462,11 +1493,11 @@ class StorageCoordinator:
             # signatures don't accept the kwarg keep working.
             if prefer_current:
                 try:
-                    return await self.graph.get_neighborhoods_batch(entity_ids, **kwargs, prefer_current=True)
+                    return await self._graph.get_neighborhoods_batch(entity_ids, **kwargs, prefer_current=True)
                 except TypeError:
                     # Backend doesn't accept prefer_current — fall through.
                     pass
-            return await self.graph.get_neighborhoods_batch(entity_ids, **kwargs)
+            return await self._graph.get_neighborhoods_batch(entity_ids, **kwargs)
         return {}
 
     # =========================================================================
@@ -1475,15 +1506,15 @@ class StorageCoordinator:
 
     async def append_event(self, event: MemoryEvent) -> MemoryEvent:
         """Append an event to the log."""
-        if not self.event_store:
+        if not self._event_store:
             raise RuntimeError("Event store not configured")
-        return await self.event_store.append_event(event)
+        return await self._event_store.append_event(event)
 
     async def append_events_batch(self, events: list[MemoryEvent]) -> list[MemoryEvent]:
         """Append multiple events in a batch."""
-        if not self.event_store:
+        if not self._event_store:
             raise RuntimeError("Event store not configured")
-        return await self.event_store.append_events_batch(events)
+        return await self._event_store.append_events_batch(events)
 
     async def get_events(
         self,
@@ -1498,9 +1529,9 @@ class StorageCoordinator:
         offset: int = 0,
     ) -> list[MemoryEvent]:
         """Query events from the log."""
-        if not self.event_store:
+        if not self._event_store:
             raise RuntimeError("Event store not configured")
-        return await self.event_store.get_events(
+        return await self._event_store.get_events(
             namespace_id,
             event_types=event_types,
             resource_type=resource_type,
@@ -1528,10 +1559,10 @@ class StorageCoordinator:
         relational adapter (vector = LanceDB, which has no SQL session).
         Prefer vector for back-compat, fall back to relational.
         """
-        if self.vector is not None and hasattr(self.vector, method_name):
-            return self.vector
-        if self.relational is not None and hasattr(self.relational, method_name):
-            return self.relational
+        if self._vector is not None and hasattr(self._vector, method_name):
+            return self._vector
+        if self._relational is not None and hasattr(self._relational, method_name):
+            return self._relational
         raise RuntimeError(f"No backend supports chronicle method {method_name!r}")
 
     async def write_events(
@@ -1600,12 +1631,12 @@ class StorageCoordinator:
 
     async def get_sync_checkpoint(self, namespace_id: UUID, source: str) -> str | None:
         """Get the last sync checkpoint for a source."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_sync_checkpoint(namespace_id, source)
+        return await self._relational.get_sync_checkpoint(namespace_id, source)
 
     async def set_sync_checkpoint(self, namespace_id: UUID, source: str, checkpoint: str) -> None:
         """Set the sync checkpoint for a source."""
-        if not self.relational:
+        if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        await self.relational.set_sync_checkpoint(namespace_id, source, checkpoint)
+        await self._relational.set_sync_checkpoint(namespace_id, source, checkpoint)

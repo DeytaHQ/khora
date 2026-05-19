@@ -387,7 +387,7 @@ async def test_vc_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
     # The sqlite_lance backend stores UUIDs as 32-char hex (no dashes),
     # so we must match that form when filtering on ``document_id``.
     coord = kb._engine._storage  # type: ignore[union-attr]
-    handle = coord.vector._handle  # type: ignore[union-attr]
+    handle = coord._vector._handle  # type: ignore[union-attr]
     backdated_iso = (now - timedelta(days=400)).isoformat()
     await handle.sqlite.execute(
         "UPDATE chunks SET source_timestamp = ? WHERE document_id = ?",

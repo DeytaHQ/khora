@@ -75,7 +75,7 @@ async def test_lance_add_failure_leaves_sqlite_consistent(tmp_path: Path, monkey
         # Open the LanceDB chunks table once and replace its `add` method with
         # a raiser. The vector adapter caches the table handle, so subsequent
         # calls reuse this poisoned table.
-        tbl = await coord.vector._chunks_table()  # type: ignore[union-attr]
+        tbl = await coord._vector._chunks_table()  # type: ignore[union-attr]
         original_add = tbl.add
 
         async def _poisoned_add(*args, **kwargs):

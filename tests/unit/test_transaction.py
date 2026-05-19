@@ -48,7 +48,7 @@ class TestCoordinatorTransaction:
     async def test_transaction_commits_on_success(self):
         """Session is committed when context exits normally."""
         coord = self._make_coordinator()
-        mock_session = coord.relational._session_factory.return_value
+        mock_session = coord._relational._session_factory.return_value
 
         async with coord.transaction() as txn:
             assert isinstance(txn, TransactionContext)
@@ -62,7 +62,7 @@ class TestCoordinatorTransaction:
     async def test_transaction_rollback_on_exception(self):
         """Session is rolled back when exception is raised."""
         coord = self._make_coordinator()
-        mock_session = coord.relational._session_factory.return_value
+        mock_session = coord._relational._session_factory.return_value
 
         with pytest.raises(ValueError, match="boom"):
             async with coord.transaction():

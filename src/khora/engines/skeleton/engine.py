@@ -109,10 +109,10 @@ class SkeletonConstructionEngine:
         # Share the coordinator's PG engine so we don't double the pool.
         shared_pg_engine = None
         if self._backend_type == "pgvector":
-            if self._storage.vector is not None:
-                shared_pg_engine = getattr(self._storage.vector, "_engine", None)
-            if shared_pg_engine is None and self._storage.relational is not None:
-                shared_pg_engine = getattr(self._storage.relational, "_engine", None)
+            if self._storage._vector is not None:
+                shared_pg_engine = getattr(self._storage._vector, "_engine", None)
+            if shared_pg_engine is None and self._storage._relational is not None:
+                shared_pg_engine = getattr(self._storage._relational, "_engine", None)
 
         # For the sqlite_lance unified backend the temporal store reuses
         # the coordinator's shared EmbeddedStorageHandle (single aiosqlite
@@ -120,9 +120,9 @@ class SkeletonConstructionEngine:
         # the canonical reference.
         sqlite_lance_handle = None
         if self._backend_type == "sqlite_lance":
-            if self._storage.vector is None:
+            if self._storage._vector is None:
                 raise RuntimeError("sqlite_lance backend requires a vector adapter on the coordinator")
-            sqlite_lance_handle = getattr(self._storage.vector, "_handle", None)
+            sqlite_lance_handle = getattr(self._storage._vector, "_handle", None)
             if sqlite_lance_handle is None:
                 raise RuntimeError("sqlite_lance vector adapter is missing its EmbeddedStorageHandle")
 
@@ -133,8 +133,8 @@ class SkeletonConstructionEngine:
         # Value`` on the first write (issue #718). Mirrors vectorcypher.
         surrealdb_connection = None
         if self._backend_type == "surrealdb":
-            if self._storage.relational is not None:
-                surrealdb_connection = getattr(self._storage.relational, "_conn", None)
+            if self._storage._relational is not None:
+                surrealdb_connection = getattr(self._storage._relational, "_conn", None)
 
         self._temporal_store = create_temporal_store(
             self._backend_type,
