@@ -65,16 +65,16 @@ class _SessionCtx:
 
 
 def _make_storage_with_session(session: Any) -> Any:
-    """Build a fake storage coordinator whose ``relational._get_session()``
+    """Build a fake storage coordinator whose ``_relational._get_session()``
     returns an object whose ``__aenter__`` resolves to ``session``."""
     storage = MagicMock()
-    storage.relational._get_session = MagicMock(return_value=_SessionCtx(session))
+    storage._relational._get_session = MagicMock(return_value=_SessionCtx(session))
     return storage
 
 
 def _make_storage_without_relational() -> Any:
     storage = MagicMock()
-    storage.relational = None
+    storage._relational = None
     return storage
 
 

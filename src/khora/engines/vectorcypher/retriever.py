@@ -1459,12 +1459,12 @@ class VectorCypherRetriever:
         else:
             # SurrealDB: no dual node manager, fetch via storage coordinator
             async def _fetch_rels_from_storage() -> list:
-                if not self._storage or not self._storage.graph:
+                if not self._storage or not self._storage._graph:
                     return []
                 rels = []
                 for eid in entity_ids_to_fetch[:10]:
                     try:
-                        entity_rels = await self._storage.graph.get_entity_relationships(
+                        entity_rels = await self._storage._graph.get_entity_relationships(
                             eid, namespace_id=namespace_id, limit=20
                         )
                         for r in entity_rels:
@@ -2175,7 +2175,7 @@ class VectorCypherRetriever:
                     limit_per_entity=20,
                     prefer_current=prefer_current,
                 )
-            elif self._storage and self._storage.graph:
+            elif self._storage and self._storage._graph:
                 raw_neighborhoods = await self._storage.get_neighborhoods_batch(
                     entry_entity_ids,
                     depth=depth,

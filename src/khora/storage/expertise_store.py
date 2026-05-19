@@ -67,10 +67,10 @@ class ExpertiseStore:
         """
         from khora.db.models import ExpertiseDefinitionModel
 
-        if not self._storage.relational:
+        if not self._storage._relational:
             raise RuntimeError("Relational storage not configured")
 
-        session: AsyncSession = await self._storage.relational._get_session().__aenter__()
+        session: AsyncSession = await self._storage._relational._get_session().__aenter__()
         try:
             # Check if expertise with this name already exists
             result = await session.execute(
@@ -126,10 +126,10 @@ class ExpertiseStore:
         from khora.db.models import ExpertiseDefinitionModel
         from khora.extraction.skills import ExpertiseConfig
 
-        if not self._storage.relational:
+        if not self._storage._relational:
             return None
 
-        session: AsyncSession = await self._storage.relational._get_session().__aenter__()
+        session: AsyncSession = await self._storage._relational._get_session().__aenter__()
         try:
             result = await session.execute(
                 select(ExpertiseDefinitionModel).where(
@@ -158,10 +158,10 @@ class ExpertiseStore:
         from khora.db.models import ExpertiseDefinitionModel
         from khora.extraction.skills import ExpertiseConfig
 
-        if not self._storage.relational:
+        if not self._storage._relational:
             return None
 
-        session: AsyncSession = await self._storage.relational._get_session().__aenter__()
+        session: AsyncSession = await self._storage._relational._get_session().__aenter__()
         try:
             result = await session.execute(
                 select(ExpertiseDefinitionModel).where(
@@ -189,10 +189,10 @@ class ExpertiseStore:
         from khora.db.models import ExpertiseDefinitionModel
         from khora.extraction.skills import ExpertiseConfig
 
-        if not self._storage.relational:
+        if not self._storage._relational:
             return None
 
-        session: AsyncSession = await self._storage.relational._get_session().__aenter__()
+        session: AsyncSession = await self._storage._relational._get_session().__aenter__()
         try:
             result = await session.execute(
                 select(ExpertiseDefinitionModel).where(
@@ -237,10 +237,10 @@ class ExpertiseStore:
         """
         from khora.db.models import ExpertiseDefinitionModel
 
-        if not self._storage.relational:
+        if not self._storage._relational:
             return []
 
-        session: AsyncSession = await self._storage.relational._get_session().__aenter__()
+        session: AsyncSession = await self._storage._relational._get_session().__aenter__()
         try:
             query = select(ExpertiseDefinitionModel).where(
                 ExpertiseDefinitionModel.namespace_id == str(namespace_id),
@@ -281,10 +281,10 @@ class ExpertiseStore:
         """
         from khora.db.models import ExpertiseDefinitionModel
 
-        if not self._storage.relational:
+        if not self._storage._relational:
             return False
 
-        session: AsyncSession = await self._storage.relational._get_session().__aenter__()
+        session: AsyncSession = await self._storage._relational._get_session().__aenter__()
         try:
             # Deactivate all
             await session.execute(
@@ -321,10 +321,10 @@ class ExpertiseStore:
         """
         from khora.db.models import ExpertiseDefinitionModel
 
-        if not self._storage.relational:
+        if not self._storage._relational:
             return False
 
-        session: AsyncSession = await self._storage.relational._get_session().__aenter__()
+        session: AsyncSession = await self._storage._relational._get_session().__aenter__()
         try:
             result = await session.execute(
                 select(ExpertiseDefinitionModel).where(

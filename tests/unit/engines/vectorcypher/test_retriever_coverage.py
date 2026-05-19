@@ -920,8 +920,8 @@ class TestVectorCypherRetrieveFlow:
             description="d",
             namespace_id=ns,
         )
-        storage.graph = MagicMock()
-        storage.graph.get_entity_relationships = AsyncMock(return_value=[rel])
+        storage._graph = MagicMock()
+        storage._graph.get_entity_relationships = AsyncMock(return_value=[rel])
         # neighborhoods batch fetch needed by storage path
         storage.get_neighborhoods_batch = AsyncMock(return_value={})
 
