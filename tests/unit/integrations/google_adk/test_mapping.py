@@ -237,16 +237,15 @@ def _mk_chunk(*, content: str, custom: dict[str, Any]) -> Chunk:
 
 
 def test_chunk_to_memory_entry_text_only():
-    chunk = _mk_chunk(
-        content="hello world",
-        custom={
-            KEY_AUTHOR: "user",
-            KEY_EVENT_ID: "ev-1",
-            KEY_TIMESTAMP: "2026-05-15T00:00:00+00:00",
-        },
-    )
+    custom = {
+        KEY_AUTHOR: "user",
+        KEY_EVENT_ID: "ev-1",
+        KEY_TIMESTAMP: "2026-05-15T00:00:00+00:00",
+    }
+    chunk = _mk_chunk(content="hello world", custom=custom)
     entry = chunk_to_memory_entry(
         chunk,
+        custom_metadata=custom,
         memory_entry_cls=MemoryEntry,
         content_cls=genai_types.Content,
         part_cls=genai_types.Part,
@@ -266,6 +265,7 @@ def test_chunk_to_memory_entry_with_function_call_part():
     chunk = _mk_chunk(content="tool call: lookup", custom=custom)
     entry = chunk_to_memory_entry(
         chunk,
+        custom_metadata=custom,
         memory_entry_cls=MemoryEntry,
         content_cls=genai_types.Content,
         part_cls=genai_types.Part,
