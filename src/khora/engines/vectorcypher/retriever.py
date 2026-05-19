@@ -2617,7 +2617,7 @@ class VectorCypherRetriever:
             for idx, sim in sim_pairs:
                 chunk, _emb = chunks_with_embedding[idx]
                 # Re-shape into ``(chunk_id, score, Chunk)`` matching
-                # ``_vector_search_chunks``. The Chunk's metadata.custom
+                # ``_vector_search_chunks``. The Chunk's metadata dict
                 # carries ``occurred_at`` for the downstream recency
                 # boost (RRF only uses rank position, so the score is
                 # informational).
