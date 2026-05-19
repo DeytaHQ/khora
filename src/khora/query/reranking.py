@@ -29,6 +29,7 @@ class RerankCandidate(Generic[T]):
     original_score: float
     content: str  # Text content for reranking
     metadata: dict[str, Any] = field(default_factory=dict)
+    doc_title: str = ""
 
 
 @dataclass

@@ -1702,6 +1702,7 @@ class VectorCypherRetriever:
                     original_score=(r.rrf_score - score_min) / score_range if score_range > 1e-9 else 0.5,
                     content=chunk_content,
                     metadata=r.item.metadata if hasattr(r.item, "metadata") else {},
+                    doc_title="",
                 )
             )
 
@@ -1819,6 +1820,7 @@ class VectorCypherRetriever:
                     original_score=(r.rrf_score - score_min) / score_range if score_range > 1e-9 else 0.5,
                     content=chunk_content,
                     metadata=r.item.metadata if hasattr(r.item, "metadata") else {},
+                    doc_title="",
                 )
             )
 

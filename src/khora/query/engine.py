@@ -1336,6 +1336,7 @@ class HybridQueryEngine:
                             original_score=score,
                             content=chunk.content,
                             metadata=chunk.metadata,
+                            doc_title="",
                         )
                         for chunk, score in fused_chunks[: cfg.reranking_top_n]
                     ]
@@ -2909,6 +2910,7 @@ class HybridQueryEngine:
                         original_score=score,
                         content=chunk.content,
                         metadata=chunk.metadata,
+                        doc_title="",
                     )
                     for chunk, score in candidates_to_rerank
                 ]
