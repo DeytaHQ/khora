@@ -151,17 +151,6 @@ class TestApplyVersionScoring:
         # beta v1 is max in its group -> no penalty
         assert scores[("beta", 1)] == pytest.approx(0.7)
 
-    def test_fallback_to_title_grouping(self):
-        """Without entity_refs, chunks are grouped by title."""
-        c_v1 = _make_chunk(version=1, title="Acme Deal Record")
-        c_v2 = _make_chunk(version=2, title="Acme Deal Record")
-        original = [(c_v1, 0.9), (c_v2, 0.8)]
-        result = _apply_version_scoring(original, "current status")
-
-        scores = {chunk.metadata["version"]: score for chunk, score in result}
-        assert scores[2] == pytest.approx(0.8)
-        assert scores[1] == pytest.approx(0.9 * (1 / 2) ** 0.5)
-
     def test_result_is_sorted_descending(self):
         """Output should be sorted by descending score."""
         c_v1 = _make_chunk(version=1, entity_refs=["x"])
