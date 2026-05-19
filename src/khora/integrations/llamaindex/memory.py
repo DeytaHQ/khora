@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from khora.core.recall_context import context_text
 from khora.integrations.llamaindex._mapping import message_to_text, stamp_event_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -139,7 +140,7 @@ def KhoraMemoryBlock(  # noqa: N802 — factory matches class-like usage
                 namespace=self._namespace_id,
                 limit=self._top_k,
             )
-            return _format_recall(result)
+            return _format_recall(result, max_chunks=self._top_k)
 
         async def _aput(  # type: ignore[override]
             self,
@@ -231,15 +232,15 @@ def _pick_query(messages: list[ChatMessage] | None) -> str:
     return ""
 
 
-def _format_recall(result: Any) -> str:
+def _format_recall(result: Any, *, max_chunks: int) -> str:
     """Render a ``RecallResult`` as a bounded text block.
 
-    Joins the chunk contents into a single block. The output is wrapped
-    in a ``<khora_memory>`` envelope so a downstream prompt template can
-    spot it.
+    Delegates to the public ``khora.context_text`` helper and wraps its
+    output in a ``<khora_memory>`` envelope. ``max_chunks`` is passed
+    through so the rendered context respects the caller's
+    ``similarity_top_k`` instead of the helper's smaller default.
     """
-    parts = [chunk.content for chunk in result.chunks]
-    context = "\n".join(p for p in parts if p).strip()
+    context = context_text(result, max_chunks=max_chunks).strip()
     if not context:
         return ""
     return f"{_RECALL_HEADER}\n{context}\n{_RECALL_FOOTER}"

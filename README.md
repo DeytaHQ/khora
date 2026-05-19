@@ -78,7 +78,7 @@ The recommended production stack is **PostgreSQL + pgvector + Neo4j** — runs V
 
 ```python
 import asyncio
-from khora import Khora
+from khora import Khora, context_text
 
 async def main() -> None:
     async with Khora() as kb:  # reads KHORA_DATABASE_URL / KHORA_NEO4J_URL
@@ -88,7 +88,7 @@ async def main() -> None:
             namespace=ns.namespace_id,
         )
         result = await kb.recall("What did Curie win?", namespace=ns.namespace_id)
-        print(result.context_text)
+        print(context_text(result))
 
 asyncio.run(main())
 ```

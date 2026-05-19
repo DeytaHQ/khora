@@ -49,6 +49,7 @@ from . import integrations
 from .config import KhoraConfig
 from .core.models.document import DocumentSource
 from .core.models.event import EventType
+from .core.recall_context import context_text
 from .dream import DreamConfig, DreamMode, DreamResult, DreamRunInfo, DreamScope, OpKind
 from .engines import create_engine, list_engines, register_engine
 from .exceptions import KhoraError
@@ -82,6 +83,7 @@ __all__ = [
     "RecallChunk",
     "RecallEntity",
     "RecallRelationship",
+    "context_text",
     "BatchResult",
     "BatchHandle",
     "DocumentResult",

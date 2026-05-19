@@ -132,6 +132,8 @@ def _mk_kb(**recall_attrs: Any) -> Any:
     recall_result = MagicMock(
         chunks=recall_attrs.get("chunks", []),
         entities=recall_attrs.get("entities", []),
+        relationships=recall_attrs.get("relationships", []),
+        documents=recall_attrs.get("documents", []),
         metadata=recall_attrs.get("metadata", {}),
     )
     kb.recall = AsyncMock(return_value=recall_result)
@@ -208,20 +210,19 @@ async def test_memory_aget_returns_empty_when_recall_returns_no_chunks() -> None
     assert out == ""
 
 
-async def test_memory_aget_chunk_join_drops_empty_chunk_text() -> None:
-    """Chunks with empty ``content`` are dropped from the chunk-join."""
+async def test_memory_aget_single_chunk_no_trailing_separator() -> None:
+    """A single chunk renders without the inter-section ``---`` separator."""
     from khora.integrations.llamaindex import KhoraMemoryBlock
 
     chunks = [
-        MagicMock(content="real chunk"),
-        MagicMock(content=""),
+        MagicMock(content="real chunk", document_id=uuid4()),
     ]
     kb = _mk_kb(chunks=chunks)
     block = KhoraMemoryBlock(kb=kb, namespace_id=uuid4())
     out = await block.aget(messages=[ChatMessage(role="user", content="q")])
     assert "real chunk" in out
-    # Empty-content chunk doesn't introduce a blank line.
-    assert "\n\n" not in out.replace("<khora_memory>\n", "").rstrip("\n</khora_memory>")
+    # No spurious separator block for a single section.
+    assert "---" not in out.replace("<khora_memory>", "").replace("</khora_memory>", "")
 
 
 # ---------------------------------------------------------------------------

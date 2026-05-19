@@ -116,9 +116,9 @@ async with Khora("postgresql://...", engine="vectorcypher") as kb:
 - **`entities`** — Entities mentioned in matching chunks
 - **`relationships`** — Connections between entities in the result set
 
-Callers that need a flat context string for an LLM can compose one from
-`chunk.content` plus the `format_entity_section` / `format_relationship_section`
-helpers — no additional queries required.
+Callers that need a flat context string for an LLM can render one with the
+public `khora.context_text(result, max_chunks=...)` helper — no additional
+queries required.
 
 ### Source Document Population
 

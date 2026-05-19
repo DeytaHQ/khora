@@ -20,6 +20,7 @@ from khora import (
     DocumentSource,
     EventType,
     SemanticFilter,
+    context_text,       # render a RecallResult as a flat LLM context string
     # Engines
     create_engine,
     list_engines,
@@ -182,6 +183,21 @@ result: RecallResult = await kb.recall(
 - `agentic=True` — multi-step exploration with follow-up queries.
 - `raw=True` — skips query understanding, reranking, HyDE, and entity linking (useful for benchmarks).
 - `start_time` / `end_time` — explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required.
+
+### `context_text`
+
+```python
+from khora import context_text
+
+text: str = context_text(result: RecallResult, *, max_chunks: int = 5)
+```
+
+Render a `RecallResult` as a flat text context string suitable for an LLM prompt. Groups the first `max_chunks` chunks by document title (`DocumentProjection.title`) joined with `\n\n---\n\n`, then appends an `--- Entities ---` section (deduplicated by entity id) and a `--- Relationships ---` section (deduplicated by `(source_entity_id, target_entity_id, relationship_type)`, with endpoint names resolved from `result.entities` and `str(uuid)` fallback). Returns the empty string when there are no chunks, entities, or relationships to render.
+
+```python
+result = await kb.recall("query", namespace=ns_id)
+print(context_text(result, max_chunks=3))
+```
 
 ### `forget`
 
