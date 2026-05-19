@@ -2456,6 +2456,13 @@ class VectorCypherRetriever:
                             chunk_records.append(
                                 {
                                     "chunk_id": str(cid),
+                                    # document_id is consumed by the result-building
+                                    # loop below (UUID(record["document_id"])).
+                                    # Forgetting to include it here makes the
+                                    # fallback KeyError out and crash any recall
+                                    # query routed through this channel on a
+                                    # SurrealDB-only deployment (#754).
+                                    "document_id": str(chunk.document_id),
                                     "content": chunk.content,
                                     "embedding": chunk.embedding,
                                     "total_mentions": 1,
