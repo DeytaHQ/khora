@@ -80,7 +80,7 @@ async def test_skeleton_engine_shares_coordinator_surrealdb_connection() -> None
             # _conn, NOT its own.
             assert engine._temporal_store is not None
             assert engine._storage is not None
-            coord_conn = getattr(engine._storage.relational, "_conn", None)
+            coord_conn = getattr(engine._storage._relational, "_conn", None)
             assert coord_conn is not None, "coordinator must expose a shared SurrealDB connection"
             assert isinstance(engine._temporal_store, SurrealDBTemporalStore)
             assert engine._temporal_store._conn is coord_conn, (
