@@ -180,10 +180,10 @@ class CrossEncoderReranker(Reranker):
             # Prepare pairs for cross-encoder
             pairs = []
             for c in candidates:
-                meta = c.metadata if isinstance(c.metadata, dict) else {}
-                doc_title = meta.get("title", "") or ""
+                doc_title = c.doc_title or ""
                 content_with_meta = f"[{doc_title}] {c.content}" if doc_title else c.content
                 if self._include_date_prefix:
+                    meta = c.metadata if isinstance(c.metadata, dict) else {}
                     date_prefix = _date_prefix_for(c.metadata, meta)
                     if date_prefix:
                         content_with_meta = f"[{date_prefix}] {content_with_meta}"
@@ -353,8 +353,7 @@ class LLMReranker(Reranker):
             """Score a batch of candidates in a single LLM call."""
             passage_lines = []
             for i, c in enumerate(batch):
-                meta = c.metadata if isinstance(c.metadata, dict) else {}
-                doc_title = meta.get("title", "") or ""
+                doc_title = c.doc_title or ""
                 prefix = f"[{doc_title}] " if doc_title else ""
                 passage_lines.append(f"[{i + 1}] {prefix}{c.content[:500]}")
             passages = "\n".join(passage_lines)
