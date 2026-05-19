@@ -17,9 +17,9 @@ from khora.query.reranking import (
 )
 
 
-def _make_candidate(content: str = "test", score: float = 0.5) -> RerankCandidate:
+def _make_candidate(content: str = "test", score: float = 0.5, doc_title: str = "") -> RerankCandidate:
     """Create a RerankCandidate."""
-    return RerankCandidate(item=content, original_score=score, content=content)
+    return RerankCandidate(item=content, original_score=score, content=content, doc_title=doc_title)
 
 
 class TestRerankCandidate:
@@ -32,6 +32,17 @@ class TestRerankCandidate:
         assert c.original_score == 0.8
         assert c.content == "doc text"
         assert c.metadata == {}
+        assert c.doc_title == ""
+
+    def test_doc_title_defaults_to_empty(self) -> None:
+        """doc_title is an optional typed field defaulting to ''."""
+        c = RerankCandidate(item="x", original_score=0.5, content="body")
+        assert c.doc_title == ""
+
+    def test_doc_title_set_explicitly(self) -> None:
+        """doc_title accepts a string and round-trips on the dataclass."""
+        c = RerankCandidate(item="x", original_score=0.5, content="body", doc_title="Q2 review")
+        assert c.doc_title == "Q2 review"
 
 
 class TestRerankResult:
@@ -233,6 +244,7 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="meeting notes",
             metadata={"occurred_at": "2026-05-14T10:00:00Z"},
+            doc_title="",
         )
         await reranker.rerank("query", [candidate], top_k=1)
         assert captured[0][1] == "meeting notes"
@@ -254,6 +266,7 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="meeting notes",
             metadata={"occurred_at": "2026-05-14T10:00:00Z"},
+            doc_title="",
         )
         await reranker.rerank("query", [candidate], top_k=1)
         # ISO timestamp truncated to YYYY-MM-DD.
@@ -278,6 +291,7 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="email body",
             metadata={"sent_at": "2026-04-01"},
+            doc_title="",
         )
         # No occurred_at or sent_at, fall back to metadata.created_at.
         from datetime import UTC, datetime
@@ -289,6 +303,7 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="legacy doc",
             metadata=created_only_meta,
+            doc_title="",
         )
         await reranker.rerank("query", [sent_only, created_only], top_k=2)
         assert captured[0][1].startswith("[2026-04-01] ")
@@ -312,6 +327,7 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="no metadata",
             metadata={},
+            doc_title="",
         )
         await reranker.rerank("query", [candidate], top_k=1)
         assert captured[0][1] == "no metadata"
@@ -334,6 +350,7 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="body text",
             metadata={"occurred_at": "2026-05-14", "title": "Q2 review"},
+            doc_title="",
         )
         await reranker.rerank("query", [candidate], top_k=1)
         assert "[2026-05-14]" in captured[0][1]
@@ -351,3 +368,74 @@ class TestCrossEncoderDatePrefix:
         assert plain is not prefixed
         assert plain._include_date_prefix is False
         assert prefixed._include_date_prefix is True
+
+
+class TestCrossEncoderRerankerDocTitleTypedField:
+    """Cross-encoder accepts the typed ``doc_title`` field on candidates.
+
+    The field is part of the ``RerankCandidate`` contract; populating it
+    must not crash the reranker call path or alter ranking behaviour today.
+    """
+
+    @pytest.mark.asyncio
+    async def test_typed_doc_title_is_accepted_without_crash(self) -> None:
+        reranker = CrossEncoderReranker()
+        mock_model = MagicMock()
+        mock_model.predict.return_value = [0.9, 0.3]
+        reranker._model = mock_model
+
+        candidates = [
+            RerankCandidate(
+                item="a",
+                original_score=0.5,
+                content="hello",
+                metadata={},
+                doc_title="Doc A",
+            ),
+            RerankCandidate(
+                item="b",
+                original_score=0.5,
+                content="world",
+                metadata={},
+                doc_title="Doc B",
+            ),
+        ]
+        results = await reranker.rerank("query", candidates, top_k=2)
+        assert len(results) == 2
+        assert results[0].rerank_score > results[1].rerank_score
+
+
+class TestLLMRerankerDocTitleTypedField:
+    """LLM reranker accepts the typed ``doc_title`` field on candidates.
+
+    The field is part of the ``RerankCandidate`` contract; populating it
+    must not crash the reranker call path or alter ranking behaviour today.
+    """
+
+    @pytest.mark.asyncio
+    async def test_typed_doc_title_is_accepted_without_crash(self) -> None:
+        reranker = LLMReranker(batch_size=10)
+        candidates = [
+            RerankCandidate(
+                item="a",
+                original_score=0.5,
+                content="hello",
+                metadata={},
+                doc_title="Doc A",
+            ),
+            RerankCandidate(
+                item="b",
+                original_score=0.5,
+                content="world",
+                metadata={},
+                doc_title="Doc B",
+            ),
+        ]
+        with patch(
+            "khora.config.llm.acompletion",
+            new_callable=AsyncMock,
+            return_value='{"scores": [9.0, 2.0]}',
+        ):
+            results = await reranker.rerank("query", candidates, top_k=2)
+        assert len(results) == 2
+        assert results[0].rerank_score > results[1].rerank_score
