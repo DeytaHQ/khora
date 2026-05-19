@@ -221,16 +221,29 @@ class SurrealDBVectorAdapter:
         )
         return [self._row_to_chunk(r) for r in rows]
 
-    async def delete_chunks_by_document(self, document_id: UUID) -> int:
-        """Delete all chunks for a document and return the count deleted."""
+    async def delete_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> int:
+        """Delete all chunks for a document, scoped to ``namespace_id`` (IGR-226).
+
+        Returns the count deleted. Chunks in other namespaces are silently
+        skipped, preventing cross-tenant deletion by document id.
+        """
         # First count so we can report back
-        count_sql = "SELECT count() AS cnt FROM chunk WHERE document = document:\u27e8$doc\u27e9 GROUP ALL"
-        count_row = await self._conn.query_one(count_sql, {"doc": str(document_id)})
+        count_sql = (
+            "SELECT count() AS cnt FROM chunk "
+            "WHERE document = document:\u27e8$doc\u27e9 AND namespace_id = $ns GROUP ALL"
+        )
+        count_row = await self._conn.query_one(
+            count_sql,
+            {"doc": str(document_id), "ns": str(namespace_id)},
+        )
         count = int(count_row.get("cnt", 0)) if count_row else 0
 
         if count > 0:
-            del_sql = "DELETE FROM chunk WHERE document = document:\u27e8$doc\u27e9"
-            await self._conn.execute(del_sql, {"doc": str(document_id)})
+            del_sql = "DELETE FROM chunk WHERE document = document:\u27e8$doc\u27e9 AND namespace_id = $ns"
+            await self._conn.execute(
+                del_sql,
+                {"doc": str(document_id), "ns": str(namespace_id)},
+            )
 
         return count
 
@@ -416,8 +429,16 @@ class SurrealDBVectorAdapter:
         )
         await self._conn.execute(sql, _entity_to_bindings(entity))
 
-    async def update_entity(self, entity: Entity) -> None:
-        """Update an existing entity record."""
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> None:
+        """Update an existing entity record, scoped to ``namespace_id`` (IGR-226).
+
+        The ``namespace_id`` kwarg is defense-in-depth \u2014 asserted equal to
+        ``entity.namespace_id`` before the UPDATE filter is applied.
+        """
+        if entity.namespace_id != namespace_id:
+            raise ValueError(
+                f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
+            )
         sql = (
             "UPDATE entity:\u27e8$id\u27e9 SET "
             "name = $name, "
@@ -434,11 +455,14 @@ class SurrealDBVectorAdapter:
             "valid_until = $valid_until, "
             "confidence = $confidence, "
             "metadata_ = $metadata_, "
-            "updated_at = $updated_at"
+            "updated_at = $updated_at "
+            "WHERE namespace = $ns_rid OR namespace.namespace_id = $ns_str"
         )
         bindings = _entity_to_bindings(entity)
         # No created_at on update
         bindings.pop("created_at", None)
+        bindings["ns_rid"] = _rid("memory_namespace", namespace_id)
+        bindings["ns_str"] = str(namespace_id)
         await self._conn.execute(sql, bindings)
 
     async def entity_exists(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
@@ -463,13 +487,21 @@ class SurrealDBVectorAdapter:
         )
         return int(row.get("cnt", 0)) > 0 if row else False
 
-    async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-        """Set the embedding vector on a single entity."""
+    async def update_entity_embedding(
+        self,
+        entity_id: UUID,
+        embedding: list[float],
+        model: str,
+        *,
+        namespace_id: UUID,
+    ) -> None:
+        """Set the embedding vector on a single entity, scoped to ``namespace_id`` (IGR-226)."""
         sql = (
             "UPDATE entity:\u27e8$id\u27e9 SET "
             "embedding = $embedding, "
             "embedding_model = $embedding_model, "
-            "updated_at = $updated_at"
+            "updated_at = $updated_at "
+            "WHERE namespace = $ns_rid OR namespace.namespace_id = $ns_str"
         )
         await self._conn.execute(
             sql,
@@ -478,14 +510,22 @@ class SurrealDBVectorAdapter:
                 "embedding": list(embedding),
                 "embedding_model": model,
                 "updated_at": datetime.now(UTC),
+                "ns_rid": _rid("memory_namespace", namespace_id),
+                "ns_str": str(namespace_id),
             },
         )
 
-    async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
-        """Batch-update entity embeddings.
+    async def update_entity_embeddings_batch(
+        self,
+        updates: list[tuple[UUID, list[float], str]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Batch-update entity embeddings, scoped to ``namespace_id`` (IGR-226).
 
         Uses a SurrealQL ``FOR`` loop to apply all updates in a single
-        round-trip.
+        round-trip. Ids outside the caller's namespace are silently filtered
+        by the per-row WHERE clause.
         """
         if not updates:
             return 0
@@ -507,9 +547,17 @@ class SurrealDBVectorAdapter:
             "embedding = $upd.embedding, "
             "embedding_model = $upd.embedding_model, "
             "updated_at = $upd.updated_at "
+            "WHERE namespace = $ns_rid OR namespace.namespace_id = $ns_str "
             "}"
         )
-        await self._conn.execute(sql, {"updates": update_dicts})
+        await self._conn.execute(
+            sql,
+            {
+                "updates": update_dicts,
+                "ns_rid": _rid("memory_namespace", namespace_id),
+                "ns_str": str(namespace_id),
+            },
+        )
         return len(updates)
 
     @trace(

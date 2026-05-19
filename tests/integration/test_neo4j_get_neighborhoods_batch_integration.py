@@ -134,15 +134,15 @@ class TestNeo4jGetNeighborhoodsBatchIntegration:
         finally:
             # Best-effort cleanup
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -244,23 +244,23 @@ class TestNeo4jGetNeighborhoodsBatchIntegration:
         finally:
             # Best-effort cleanup
             try:
-                await backend.delete_relationship(rel_bc.id)
+                await backend.delete_relationship(rel_bc.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_relationship(rel_ab.id)
+                await backend.delete_relationship(rel_ab.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_c.id)
+                await backend.delete_entity(entity_c.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -363,27 +363,27 @@ class TestNeo4jGetNeighborhoodsBatchIntegration:
         finally:
             # Best-effort cleanup
             try:
-                await backend.delete_relationship(rel_1.id)
+                await backend.delete_relationship(rel_1.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_relationship(rel_2.id)
+                await backend.delete_relationship(rel_2.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_1.id)
+                await backend.delete_entity(entity_1.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_1_neighbor.id)
+                await backend.delete_entity(entity_1_neighbor.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_2.id)
+                await backend.delete_entity(entity_2.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_2_neighbor.id)
+                await backend.delete_entity(entity_2_neighbor.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()

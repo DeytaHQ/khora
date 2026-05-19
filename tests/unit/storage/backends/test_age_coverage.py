@@ -379,7 +379,7 @@ async def test_update_entity_returns_input() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
     ent = Entity(name="Alice", entity_type="PERSON")
-    out = await b.update_entity(ent)
+    out = await b.update_entity(ent, namespace_id=ent.namespace_id)
     assert out is ent
     assembled = [str(call.args[0]) for call in session.execute.await_args_list]
     assert any("MATCH (e:Entity" in sql and "SET" in sql for sql in assembled)
@@ -389,14 +389,14 @@ async def test_update_entity_returns_input() -> None:
 async def test_delete_entity_false_when_no_rows() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    assert await b.delete_entity(uuid4()) is False
+    assert await b.delete_entity(uuid4(), namespace_id=uuid4()) is False
 
 
 @pytest.mark.unit
 async def test_delete_entity_uses_detach_delete() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    await b.delete_entity(uuid4())
+    await b.delete_entity(uuid4(), namespace_id=uuid4())
     assembled = [str(call.args[0]) for call in session.execute.await_args_list]
     assert any("DETACH DELETE e" in sql for sql in assembled)
 
@@ -460,7 +460,7 @@ async def test_get_relationship_none_when_no_rows() -> None:
 async def test_delete_relationship_false_when_no_rows() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    assert await b.delete_relationship(uuid4()) is False
+    assert await b.delete_relationship(uuid4(), namespace_id=uuid4()) is False
 
 
 @pytest.mark.unit

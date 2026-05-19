@@ -168,7 +168,7 @@ class TestEntityCRUD:
 
         e.description = "updated"
         e.mention_count = 42
-        await adapter.update_entity(e)
+        await adapter.update_entity(e, namespace_id=ns)
 
         fetched = await adapter.get_entity(e.id, namespace_id=ns)
         assert fetched is not None
@@ -180,9 +180,9 @@ class TestEntityCRUD:
         e = _make_entity(ns, name="Dave")
         await adapter.create_entity(e)
 
-        assert await adapter.delete_entity(e.id) is True
+        assert await adapter.delete_entity(e.id, namespace_id=ns) is True
         assert await adapter.get_entity(e.id, namespace_id=ns) is None
-        assert await adapter.delete_entity(e.id) is False
+        assert await adapter.delete_entity(e.id, namespace_id=ns) is False
 
     async def test_delete_entity_removes_relationships(self, adapter: SQLiteLanceGraphAdapter):
         ns = uuid4()
@@ -193,7 +193,7 @@ class TestEntityCRUD:
         r = _make_relationship(ns, a.id, b.id)
         await adapter.create_relationship(r)
 
-        await adapter.delete_entity(a.id)
+        await adapter.delete_entity(a.id, namespace_id=ns)
         assert await adapter.get_relationship(r.id, namespace_id=ns) is None
 
     async def test_entity_exists(self, adapter: SQLiteLanceGraphAdapter):
@@ -317,9 +317,9 @@ class TestRelationships:
         r = _make_relationship(ns, a.id, b.id)
         await adapter.create_relationship(r)
 
-        assert await adapter.delete_relationship(r.id) is True
+        assert await adapter.delete_relationship(r.id, namespace_id=ns) is True
         assert await adapter.get_relationship(r.id, namespace_id=ns) is None
-        assert await adapter.delete_relationship(r.id) is False
+        assert await adapter.delete_relationship(r.id, namespace_id=ns) is False
 
     async def test_get_entity_relationships_directions(self, adapter: SQLiteLanceGraphAdapter):
         ns = uuid4()

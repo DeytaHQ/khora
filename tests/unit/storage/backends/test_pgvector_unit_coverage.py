@@ -468,12 +468,12 @@ class TestEmptyShortCircuits:
     @pytest.mark.asyncio
     async def test_delete_entities_batch_empty_returns_zero(self) -> None:
         b = _backend()
-        assert await b.delete_entities_batch([]) == 0
+        assert await b.delete_entities_batch([], namespace_id=uuid4()) == 0
 
     @pytest.mark.asyncio
     async def test_delete_relationships_batch_empty_returns_zero(self) -> None:
         b = _backend()
-        assert await b.delete_relationships_batch([]) == 0
+        assert await b.delete_relationships_batch([], namespace_id=uuid4()) == 0
 
     @pytest.mark.asyncio
     async def test_remove_document_from_entity_sources_empty(self) -> None:
@@ -503,7 +503,7 @@ class TestEmptyShortCircuits:
     @pytest.mark.asyncio
     async def test_update_entity_embeddings_batch_empty(self) -> None:
         b = _backend()
-        assert await b.update_entity_embeddings_batch([]) == 0
+        assert await b.update_entity_embeddings_batch([], namespace_id=uuid4()) == 0
 
     @pytest.mark.asyncio
     async def test_write_events_empty(self) -> None:
@@ -530,7 +530,7 @@ class TestSessionBackedDeletes:
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
         b = _backend_with_session(session)
-        out = await b.delete_chunks_by_document(uuid4())
+        out = await b.delete_chunks_by_document(uuid4(), namespace_id=uuid4())
         assert out == 4
         session.commit.assert_awaited_once()
 
@@ -541,7 +541,7 @@ class TestSessionBackedDeletes:
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
         b = _backend_with_session(session)
-        out = await b.delete_entities_batch([uuid4(), uuid4()])
+        out = await b.delete_entities_batch([uuid4(), uuid4()], namespace_id=uuid4())
         assert out == 7
 
     @pytest.mark.asyncio
@@ -551,7 +551,7 @@ class TestSessionBackedDeletes:
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
         b = _backend_with_session(session)
-        out = await b.delete_relationships_batch([uuid4()])
+        out = await b.delete_relationships_batch([uuid4()], namespace_id=uuid4())
         assert out == 3
 
     @pytest.mark.asyncio
@@ -642,7 +642,7 @@ class TestUpdateEntityEmbedding:
     async def test_calls_session_with_update(self) -> None:
         session = AsyncMock()
         b = _backend_with_session(session)
-        await b.update_entity_embedding(uuid4(), [0.1, 0.2], "model-x")
+        await b.update_entity_embedding(uuid4(), [0.1, 0.2], "model-x", namespace_id=uuid4())
         session.execute.assert_awaited_once()
         session.commit.assert_awaited_once()
 
@@ -885,6 +885,6 @@ class TestDeleteChunksByDocumentWithExternalSession:
         result.rowcount = 9
         session.execute = AsyncMock(return_value=result)
         b = _backend()
-        out = await b.delete_chunks_by_document(uuid4(), session=session)
+        out = await b.delete_chunks_by_document(uuid4(), namespace_id=uuid4(), session=session)
         assert out == 9
         session.commit.assert_not_called()

@@ -489,8 +489,11 @@ class SQLiteRelationalBackend:
         document.updated_at = datetime.fromisoformat(now)
         return document
 
-    async def delete_document(self, document_id: UUID) -> bool:
-        cursor = await self._conn.execute("DELETE FROM documents WHERE id = ?", (str(document_id),))
+    async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
+        cursor = await self._conn.execute(
+            "DELETE FROM documents WHERE id = ? AND namespace_id = ?",
+            (str(document_id), str(namespace_id)),
+        )
         await self._conn.commit()
         return cursor.rowcount > 0
 
@@ -912,17 +915,20 @@ class SQLiteVectorBackend:
         rows = await cursor.fetchall()
         return [self._row_to_chunk(r) for r in rows]
 
-    async def delete_chunks_by_document(self, document_id: UUID) -> int:
-        # Remove from FTS first
+    async def delete_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> int:
+        # Remove from FTS first — scoped to namespace_id (IGR-226).
         cursor = await self._conn.execute(
-            "SELECT id FROM chunks WHERE document_id = ?",
-            (str(document_id),),
+            "SELECT id FROM chunks WHERE document_id = ? AND namespace_id = ?",
+            (str(document_id), str(namespace_id)),
         )
         fts_rows = await cursor.fetchall()
         for fr in fts_rows:
             await self._fts_delete(fr["id"])
 
-        cursor = await self._conn.execute("DELETE FROM chunks WHERE document_id = ?", (str(document_id),))
+        cursor = await self._conn.execute(
+            "DELETE FROM chunks WHERE document_id = ? AND namespace_id = ?",
+            (str(document_id), str(namespace_id)),
+        )
         await self._conn.commit()
         return cursor.rowcount
 
@@ -1037,7 +1043,11 @@ class SQLiteVectorBackend:
         )
         await self._conn.commit()
 
-    async def update_entity(self, entity: Entity) -> None:
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> None:
+        if entity.namespace_id != namespace_id:
+            raise ValueError(
+                f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
+            )
         now = _now_iso()
         embedding_json = json.dumps(entity.embedding) if entity.embedding else None
         await self._conn.execute(
@@ -1046,7 +1056,7 @@ class SQLiteVectorBackend:
             "source_tool = ?, source_document_ids = ?, source_chunk_ids = ?, "
             "mention_count = ?, embedding = ?, embedding_model = ?, "
             "valid_from = ?, valid_until = ?, confidence = ?, metadata_ = ?, updated_at = ? "
-            "WHERE id = ?",
+            "WHERE id = ? AND namespace_id = ?",
             (
                 entity.name,
                 entity.entity_type,
@@ -1064,6 +1074,7 @@ class SQLiteVectorBackend:
                 _json_dumps(entity.metadata),
                 now,
                 str(entity.id),
+                str(namespace_id),
             ),
         )
         await self._conn.commit()
@@ -1073,23 +1084,38 @@ class SQLiteVectorBackend:
         row = await cursor.fetchone()
         return row is not None
 
-    async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
+    async def update_entity_embedding(
+        self,
+        entity_id: UUID,
+        embedding: list[float],
+        model: str,
+        *,
+        namespace_id: UUID,
+    ) -> None:
         now = _now_iso()
         await self._conn.execute(
-            "UPDATE entities SET embedding = ?, embedding_model = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(embedding), model, now, str(entity_id)),
+            "UPDATE entities SET embedding = ?, embedding_model = ?, updated_at = ? WHERE id = ? AND namespace_id = ?",
+            (json.dumps(embedding), model, now, str(entity_id), str(namespace_id)),
         )
         await self._conn.commit()
 
-    async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
+    async def update_entity_embeddings_batch(
+        self,
+        updates: list[tuple[UUID, list[float], str]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
         now = _now_iso()
         count = 0
+        ns_str = str(namespace_id)
         for entity_id, embedding, model in updates:
-            await self._conn.execute(
-                "UPDATE entities SET embedding = ?, embedding_model = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(embedding), model, now, str(entity_id)),
+            cursor = await self._conn.execute(
+                "UPDATE entities SET embedding = ?, embedding_model = ?, updated_at = ? "
+                "WHERE id = ? AND namespace_id = ?",
+                (json.dumps(embedding), model, now, str(entity_id), ns_str),
             )
-            count += 1
+            if cursor.rowcount > 0:
+                count += 1
         await self._conn.commit()
         return count
 

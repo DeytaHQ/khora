@@ -235,7 +235,7 @@ class TestRelationalGuards:
     @pytest.mark.asyncio
     async def test_delete_document(self, empty_coord) -> None:
         with pytest.raises(RuntimeError, match="Relational backend not configured"):
-            await empty_coord.delete_document(uuid4())
+            await empty_coord.delete_document(uuid4(), namespace_id=uuid4())
 
     @pytest.mark.asyncio
     async def test_get_document_by_checksum(self, empty_coord) -> None:

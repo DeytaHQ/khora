@@ -497,16 +497,16 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self._relational.update_document(document)
 
-    async def delete_document(self, document_id: UUID) -> bool:
-        """Delete a document and its chunks."""
+    async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a document and its chunks, scoped to ``namespace_id`` (IGR-226)."""
         if not self._relational:
             raise RuntimeError("Relational backend not configured")
 
         # Delete chunks first
         if self._vector:
-            await self._vector.delete_chunks_by_document(document_id)
+            await self._vector.delete_chunks_by_document(document_id, namespace_id=namespace_id)
 
-        return await self._relational.delete_document(document_id)
+        return await self._relational.delete_document(document_id, namespace_id=namespace_id)
 
     @_record_storage_op("replace_document_extraction", "coordinator")
     async def replace_document_extraction(
@@ -655,7 +655,9 @@ class StorageCoordinator:
             #    transaction deliberately wraps only DB work (ADR §Performance).
             async with self.transaction() as txn:
                 await self._relational.update_document(new_document, session=txn.session)  # type: ignore[unresolved-attribute]
-                chunks_deleted = await self._vector.delete_chunks_by_document(old_document_id, session=txn.session)
+                chunks_deleted = await self._vector.delete_chunks_by_document(
+                    old_document_id, namespace_id=namespace_id, session=txn.session
+                )
                 await self._vector.create_chunks_batch(new_chunks, session=txn.session)  # type: ignore[unresolved-attribute]
 
             # 3. Graph-side retirement / remap (after PG commits).  Order:
@@ -673,13 +675,14 @@ class StorageCoordinator:
             relationships_retired = 0
             if relationship_retirement_rows:
                 relationships_retired = await self._graph.retire_orphaned_relationships_batch(  # type: ignore[unresolved-attribute]
-                    relationship_retirement_rows
+                    relationship_retirement_rows, namespace_id=namespace_id
                 )
 
             if entity_survivor_remap_rows or relationship_survivor_remap_rows:
                 await self._graph.remap_source_document_ids_batch(  # type: ignore[unresolved-attribute]
                     entity_survivors=entity_survivor_remap_rows,
                     relationship_survivors=relationship_survivor_remap_rows,
+                    namespace_id=namespace_id,
                 )
 
             net_new_entities = [e for e in new_entities if (e.name, e.entity_type) not in entity_survivor_keys]
@@ -1026,29 +1029,30 @@ class StorageCoordinator:
             return await self._graph.get_entity_by_name(namespace_id, name, entity_type)
         return None
 
-    async def update_entity(self, entity: Entity) -> Entity:
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
         """Update an entity in both graph and vector stores (parallel).
 
-        When a unified backend is detected, the vector write is skipped.
+        Scoped to ``namespace_id`` (IGR-226). When a unified backend is
+        detected, the vector write is skipped.
         """
         if self._graph and self._vector:
             if self._is_unified_backend:
-                return await self._graph.update_entity(entity)
+                return await self._graph.update_entity(entity, namespace_id=namespace_id)
             graph_result, _ = await asyncio.gather(
-                self._graph.update_entity(entity),
-                self._vector.update_entity(entity),
+                self._graph.update_entity(entity, namespace_id=namespace_id),
+                self._vector.update_entity(entity, namespace_id=namespace_id),
             )
             return graph_result
         if self._graph:
-            return await self._graph.update_entity(entity)
+            return await self._graph.update_entity(entity, namespace_id=namespace_id)
         if self._vector:
-            await self._vector.update_entity(entity)
+            await self._vector.update_entity(entity, namespace_id=namespace_id)
         return entity
 
-    async def delete_entity(self, entity_id: UUID) -> bool:
-        """Delete an entity."""
+    async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete an entity, scoped to ``namespace_id`` (IGR-226)."""
         if self._graph:
-            return await self._graph.delete_entity(entity_id)
+            return await self._graph.delete_entity(entity_id, namespace_id=namespace_id)
         return False
 
     async def list_entities(
@@ -1073,19 +1077,31 @@ class StorageCoordinator:
             )
         return []
 
-    async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-        """Update the embedding for an entity."""
+    async def update_entity_embedding(
+        self,
+        entity_id: UUID,
+        embedding: list[float],
+        model: str,
+        *,
+        namespace_id: UUID,
+    ) -> None:
+        """Update the embedding for an entity, scoped to ``namespace_id`` (IGR-226)."""
         if self._vector:
-            await self._vector.update_entity_embedding(entity_id, embedding, model)
+            await self._vector.update_entity_embedding(entity_id, embedding, model, namespace_id=namespace_id)
 
-    async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
-        """Update embeddings for multiple entities in a single transaction."""
+    async def update_entity_embeddings_batch(
+        self,
+        updates: list[tuple[UUID, list[float], str]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Update embeddings for multiple entities in a single transaction, scoped to ``namespace_id`` (IGR-226)."""
         if self._vector and hasattr(self._vector, "update_entity_embeddings_batch"):
-            return await self._vector.update_entity_embeddings_batch(updates)
+            return await self._vector.update_entity_embeddings_batch(updates, namespace_id=namespace_id)
         # Fallback to individual updates (sequential)
         if self._vector:
             for entity_id, embedding, model in updates:
-                await self._vector.update_entity_embedding(entity_id, embedding, model)
+                await self._vector.update_entity_embedding(entity_id, embedding, model, namespace_id=namespace_id)
             return len(updates)
         return 0
 
@@ -1226,10 +1242,10 @@ class StorageCoordinator:
             return rel
         return None
 
-    async def delete_relationship(self, relationship_id: UUID) -> bool:
-        """Delete a relationship."""
+    async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
         if self._graph:
-            return await self._graph.delete_relationship(relationship_id)
+            return await self._graph.delete_relationship(relationship_id, namespace_id=namespace_id)
         return False
 
     async def get_entity_relationships(
@@ -1638,9 +1654,11 @@ class StorageCoordinator:
             namespace_id, subject
         )
 
-    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID) -> None:
-        """Mark a fact inactive and record the replacement fact ID."""
-        await self._chronicle_backend("supersede_fact").supersede_fact(fact_id, superseded_by)
+    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID, *, namespace_id: UUID) -> None:
+        """Mark a fact inactive and record the replacement fact ID, scoped to ``namespace_id`` (IGR-226)."""
+        await self._chronicle_backend("supersede_fact").supersede_fact(
+            fact_id, superseded_by, namespace_id=namespace_id
+        )
 
     # =========================================================================
     # Sync checkpoint operations (delegated to relational)

@@ -250,7 +250,7 @@ class TestDocumentCRUD:
         doc = _make_document(ns.id)
         await relational.create_document(doc)
 
-        result = await relational.delete_document(doc.id)
+        result = await relational.delete_document(doc.id, namespace_id=ns.id)
         assert result is True
 
         fetched = await relational.get_document(doc.id)
@@ -467,7 +467,7 @@ class TestChunkOperations:
         chunks = [_make_chunk(ns_id, doc_id) for _ in range(3)]
         await vector.create_chunks_batch(chunks)
 
-        deleted = await vector.delete_chunks_by_document(doc_id)
+        deleted = await vector.delete_chunks_by_document(doc_id, namespace_id=ns_id)
         assert deleted == 3
 
         result = await vector.get_chunks_by_document(doc_id, namespace_id=ns_id)
@@ -574,7 +574,7 @@ class TestEntityOperations:
         await vector.create_entity(entity)
 
         entity.description = "Updated description"
-        await vector.update_entity(entity)
+        await vector.update_entity(entity, namespace_id=entity.namespace_id)
 
         # Verify by checking it still exists (no get_entity on vector protocol)
         assert await vector.entity_exists(entity.id)
@@ -584,16 +584,17 @@ class TestEntityOperations:
         await vector.create_entity(entity)
 
         new_emb = _unit_embedding(8, 3)
-        await vector.update_entity_embedding(entity.id, new_emb, "updated-model")
+        await vector.update_entity_embedding(entity.id, new_emb, "updated-model", namespace_id=entity.namespace_id)
         assert await vector.entity_exists(entity.id)
 
     async def test_update_entity_embeddings_batch(self, vector: SQLiteVectorBackend):
-        entities = [_make_entity(uuid4()) for _ in range(3)]
+        ns_id = uuid4()
+        entities = [_make_entity(ns_id, name=f"Entity {i}") for i in range(3)]
         for e in entities:
             await vector.create_entity(e)
 
         updates = [(e.id, _unit_embedding(8, i), "batch-model") for i, e in enumerate(entities)]
-        count = await vector.update_entity_embeddings_batch(updates)
+        count = await vector.update_entity_embeddings_batch(updates, namespace_id=ns_id)
         assert count == 3
 
     async def test_search_similar_entities(self, vector: SQLiteVectorBackend):

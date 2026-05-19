@@ -708,7 +708,7 @@ async def test_delete_document_returns_false_when_missing() -> None:
     session.delete = AsyncMock()
     session.commit = AsyncMock()
     b = _make_backend_with_session(session)
-    assert await b.delete_document(uuid4()) is False
+    assert await b.delete_document(uuid4(), namespace_id=uuid4()) is False
 
 
 @pytest.mark.unit
@@ -721,7 +721,7 @@ async def test_delete_document_returns_true_when_deleted() -> None:
     session.delete = AsyncMock()
     session.commit = AsyncMock()
     b = _make_backend_with_session(session)
-    assert await b.delete_document(uuid4()) is True
+    assert await b.delete_document(uuid4(), namespace_id=uuid4()) is True
     session.delete.assert_awaited_with(model)
 
 

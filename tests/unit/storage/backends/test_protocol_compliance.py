@@ -450,10 +450,10 @@ class TestRelationalProtocol:
         assert refreshed.title == "After"
         assert refreshed.status == DocumentStatus.COMPLETED
 
-        assert await relational_backend.delete_document(doc.id) is True
+        assert await relational_backend.delete_document(doc.id, namespace_id=ns.id) is True
         assert await relational_backend.get_document(doc.id, namespace_id=ns.id) is None
         # Idempotent — second delete is a no-op returning False.
-        assert await relational_backend.delete_document(doc.id) is False
+        assert await relational_backend.delete_document(doc.id, namespace_id=ns.id) is False
 
     async def test_document_checksum_dedup(self, relational_backend):
         ns = _make_namespace()
@@ -535,7 +535,7 @@ class TestRelationalProtocol:
 
     async def test_edge_case_nonexistent_id(self, relational_backend):
         assert await relational_backend.get_document(uuid4(), namespace_id=uuid4()) is None
-        assert await relational_backend.delete_document(uuid4()) is False
+        assert await relational_backend.delete_document(uuid4(), namespace_id=uuid4()) is False
 
     async def test_unicode_content_roundtrip(self, relational_backend):
         ns = _make_namespace()
@@ -575,14 +575,14 @@ class TestGraphProtocol:
         assert fetched.attributes["role"] == "eng"
 
         e.description = "updated"
-        await graph_backend.update_entity(e)
+        await graph_backend.update_entity(e, namespace_id=ns)
         refreshed = await graph_backend.get_entity(e.id, namespace_id=ns)
         assert refreshed is not None and refreshed.description == "updated"
 
-        assert await graph_backend.delete_entity(e.id) is True
+        assert await graph_backend.delete_entity(e.id, namespace_id=ns) is True
         assert await graph_backend.get_entity(e.id, namespace_id=ns) is None
         # Deleting again is a no-op.
-        assert await graph_backend.delete_entity(e.id) is False
+        assert await graph_backend.delete_entity(e.id, namespace_id=ns) is False
 
     async def test_get_entity_by_name(self, graph_backend):
         ns = uuid4()
@@ -634,9 +634,9 @@ class TestGraphProtocol:
         assert fetched is not None
         assert fetched.relationship_type == "KNOWS"
 
-        assert await graph_backend.delete_relationship(r.id) is True
+        assert await graph_backend.delete_relationship(r.id, namespace_id=ns) is True
         assert await graph_backend.get_relationship(r.id, namespace_id=ns) is None
-        assert await graph_backend.delete_relationship(r.id) is False
+        assert await graph_backend.delete_relationship(r.id, namespace_id=ns) is False
 
     async def test_get_entity_relationships_directions(self, graph_backend):
         ns = uuid4()
@@ -851,12 +851,12 @@ class TestVectorProtocol:
         chunks = [_make_chunk(ns, doc, embedding=_unit(8, i)) for i in range(3)]
         await vector_backend.create_chunks_batch(chunks)
 
-        deleted = await vector_backend.delete_chunks_by_document(doc)
+        deleted = await vector_backend.delete_chunks_by_document(doc, namespace_id=ns)
         assert deleted == 3
         assert await vector_backend.count_chunks(ns) == 0
 
         # Deleting an empty document is a no-op.
-        assert await vector_backend.delete_chunks_by_document(uuid4()) == 0
+        assert await vector_backend.delete_chunks_by_document(uuid4(), namespace_id=ns) == 0
 
     async def test_delete_chunks_by_document_with_session(self, vector_backend):
         """When ``session`` is provided, the caller owns the transaction.
@@ -869,7 +869,7 @@ class TestVectorProtocol:
         await vector_backend.create_chunks_batch([_make_chunk(ns, doc, embedding=_unit(8, i)) for i in range(2)])
 
         sentinel = object()  # Non-SQLAlchemy opaque session.
-        deleted = await vector_backend.delete_chunks_by_document(doc, session=sentinel)  # type: ignore[arg-type]
+        deleted = await vector_backend.delete_chunks_by_document(doc, namespace_id=ns, session=sentinel)  # type: ignore[arg-type]
         assert deleted == 2
 
     async def test_search_similar_top_k(self, vector_backend):
@@ -944,7 +944,7 @@ class TestVectorProtocol:
 
         # Update → search still hits the row.
         e.description = "updated"
-        await vector_backend.update_entity(e)
+        await vector_backend.update_entity(e, namespace_id=ns)
         hits = await vector_backend.search_similar_entities(ns, _unit(8, 0), limit=5)
         assert any(eid == e.id for eid, _ in hits)
 
@@ -953,7 +953,7 @@ class TestVectorProtocol:
         e = _make_entity(ns, name="Alice", embedding=_unit(8, 0))
         await entity_seeder(e)
 
-        await vector_backend.update_entity_embedding(e.id, _unit(8, 3), "new-model")
+        await vector_backend.update_entity_embedding(e.id, _unit(8, 3), "new-model", namespace_id=ns)
         hits = await vector_backend.search_similar_entities(ns, _unit(8, 3), limit=5)
         assert hits
         assert hits[0][0] == e.id

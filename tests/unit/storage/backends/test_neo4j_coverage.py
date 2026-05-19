@@ -627,13 +627,13 @@ class TestEmptyBatchShortCircuits:
     @pytest.mark.asyncio
     async def test_delete_entities_batch_empty_returns_zero(self) -> None:
         b = _backend_with_session_mock(AsyncMock())
-        out = await b.delete_entities_batch([], uuid4())
+        out = await b.delete_entities_batch([], namespace_id=uuid4())
         assert out == 0
 
     @pytest.mark.asyncio
     async def test_delete_relationships_batch_empty_returns_zero(self) -> None:
         b = _backend_with_session_mock(AsyncMock())
-        out = await b.delete_relationships_batch([])
+        out = await b.delete_relationships_batch([], namespace_id=uuid4())
         assert out == 0
 
     @pytest.mark.asyncio
@@ -665,7 +665,7 @@ class TestEmptyBatchShortCircuits:
         """Both survivor lists empty → no session work."""
         session = AsyncMock()
         b = _backend_with_session_mock(session)
-        await b.remap_source_document_ids_batch(entity_survivors=[], relationship_survivors=[])
+        await b.remap_source_document_ids_batch(entity_survivors=[], relationship_survivors=[], namespace_id=uuid4())
         session.execute_write.assert_not_called()
 
     @pytest.mark.asyncio

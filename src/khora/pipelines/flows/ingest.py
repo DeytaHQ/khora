@@ -1357,7 +1357,7 @@ async def process_document(
                 updates = [
                     (entity.id, embedding, embedding_model) for entity, embedding in zip(embeddable, entity_embeddings)
                 ]
-                await storage.update_entity_embeddings_batch(updates)
+                await storage.update_entity_embeddings_batch(updates, namespace_id=document.namespace_id)
                 _ee_ctx["output_count"] = len(embeddable)
 
                 # Backfill ``data["embedding"]`` on any deferred entity
@@ -2021,7 +2021,7 @@ async def run_smart_resolution(
             (entity.id, embedding, embedding_model)
             for entity, embedding in zip(entities_needing_embeddings, entity_embeddings)
         ]
-        await storage.update_entity_embeddings_batch(updates)
+        await storage.update_entity_embeddings_batch(updates, namespace_id=namespace_id)
         logger.debug(f"Smart resolution: generated embeddings for {len(entities_needing_embeddings)} entities")
 
     # Phase 3: Load all relationships and remap merged entity IDs
@@ -2262,7 +2262,7 @@ async def backfill_entity_embeddings(
 
         # Update entities in batch
         updates = [(entity.id, embedding, embedding_model) for entity, embedding in zip(batch, embeddings)]
-        total_updated += await storage.update_entity_embeddings_batch(updates)
+        total_updated += await storage.update_entity_embeddings_batch(updates, namespace_id=namespace_id)
 
         logger.debug(f"Updated {total_updated}/{len(entities_needing_embeddings)} entity embeddings")
 

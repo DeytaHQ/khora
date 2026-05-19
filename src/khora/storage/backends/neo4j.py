@@ -1192,14 +1192,23 @@ class Neo4jBackend(GraphBackendBase):
             records = await result.data()
             return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
 
-    async def update_entity(self, entity: Entity) -> Entity:
-        """Update an entity."""
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
+        """Update an entity, scoped to ``namespace_id`` (IGR-226).
+
+        The ``namespace_id`` kwarg is defense-in-depth — asserted equal to
+        ``entity.namespace_id`` before the MATCH filter is applied.
+        """
+        if entity.namespace_id != namespace_id:
+            raise ValueError(
+                f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
+            )
 
         params = _entity_to_cypher_params(entity)
+        params["namespace_id"] = str(namespace_id)
 
         async def _update(tx: AsyncManagedTransaction) -> None:
             query = """
-            MATCH (e:Entity {id: $id})
+            MATCH (e:Entity {id: $id, namespace_id: $namespace_id})
             SET e.name = $name,
                 e.description = $description,
                 e.attributes = $attributes,
@@ -1219,17 +1228,18 @@ class Neo4jBackend(GraphBackendBase):
 
         return entity
 
-    async def delete_entity(self, entity_id: UUID) -> bool:
-        """Delete an entity and its relationships."""
+    async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete an entity and its relationships, scoped to ``namespace_id`` (IGR-226)."""
 
         async def _delete(tx: AsyncManagedTransaction) -> int:
             result = await tx.run(
                 """
-                MATCH (e:Entity {id: $id})
+                MATCH (e:Entity {id: $id, namespace_id: $namespace_id})
                 DETACH DELETE e
                 RETURN count(e) as deleted
                 """,
                 id=str(entity_id),
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             return record["deleted"] if record else 0
@@ -2100,17 +2110,18 @@ RETURN count(r) AS updated
                 )
             return None
 
-    async def delete_relationship(self, relationship_id: UUID) -> bool:
-        """Delete a relationship."""
+    async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
 
         async def _delete(tx: AsyncManagedTransaction) -> int:
             result = await tx.run(
                 """
-                MATCH ()-[r {id: $id}]->()
+                MATCH ()-[r {id: $id, namespace_id: $namespace_id}]->()
                 DELETE r
                 RETURN count(r) as deleted
                 """,
                 id=str(relationship_id),
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             return record["deleted"] if record else 0
@@ -2133,12 +2144,16 @@ RETURN count(r) AS updated
     async def retire_orphaned_relationships_batch(
         self,
         retirement_rows: list[RetirementRow],
+        *,
+        namespace_id: UUID,
     ) -> int:
         """Soft-retire orphaned relationships by stamping valid_until in-place.
 
-        Only mutates relationships whose sole source was the replaced document
-        (size(source_document_ids) = 1). Multi-sourced relationships are left
-        untouched for separate survivor cleanup.
+        Scoped to ``namespace_id`` (IGR-226): only edges owned by the caller's
+        namespace are touched. Only mutates relationships whose sole source
+        was the replaced document (size(source_document_ids) = 1).
+        Multi-sourced relationships are left untouched for separate survivor
+        cleanup.
 
         Each row must contain:
             relationship_id: UUID — the relationship to retire
@@ -2164,7 +2179,7 @@ RETURN count(r) AS updated
             result = await tx.run(
                 """
                 UNWIND $retirement_rows AS r
-                MATCH ()-[rel {id: r.relationship_id}]-()
+                MATCH ()-[rel {id: r.relationship_id, namespace_id: $namespace_id}]-()
                 WHERE size(rel.source_document_ids) = 1
                   AND r.old_doc_id IN rel.source_document_ids
                 SET rel.valid_until = r.retired_at,
@@ -2172,6 +2187,7 @@ RETURN count(r) AS updated
                 RETURN count(DISTINCT rel) AS retired
                 """,
                 retirement_rows=rows,
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             return record["retired"] if record else 0
@@ -2868,17 +2884,21 @@ RETURN count(r) AS updated
         *,
         entity_survivors: list[dict[str, str]],
         relationship_survivors: list[dict[str, str]],
+        namespace_id: UUID,
     ) -> None:
         """Remap source_document_ids for entities and relationships after dedup.
 
-        Idempotent on repeated application against the same
-        ``(old_doc_id, new_doc_id)`` pair: if ``new_doc_id`` is already
-        present in the array, the append is suppressed so a retry never
-        duplicates it. Self-heal can retry the
+        Scoped to ``namespace_id`` (IGR-226): only nodes/edges owned by the
+        caller's namespace are remapped. Idempotent on repeated application
+        against the same ``(old_doc_id, new_doc_id)`` pair: if
+        ``new_doc_id`` is already present in the array, the append is
+        suppressed so a retry never duplicates it. Self-heal can retry the
         replace lifecycle and the caller's remap payload will re-include
         surviving entity/relationship rows, so this method must be
         safe to run repeatedly.
         """
+
+        ns_str = str(namespace_id)
 
         if entity_survivors:
 
@@ -2891,12 +2911,12 @@ RETURN count(r) AS updated
                 # collapses cleanly to ``[new]`` instead of ``[new, new]``).
                 query = """
                 UNWIND $survivors AS s
-                MATCH (e:Entity {id: s.entity_id})
+                MATCH (e:Entity {id: s.entity_id, namespace_id: $namespace_id})
                 WITH e, s, [x IN coalesce(e.source_document_ids, []) WHERE x <> s.old_doc_id] AS filtered
                 SET e.source_document_ids = filtered +
                     CASE WHEN s.new_doc_id IN filtered THEN [] ELSE [s.new_doc_id] END
                 """
-                await tx.run(query, survivors=entity_survivors)
+                await tx.run(query, survivors=entity_survivors, namespace_id=ns_str)
 
             async with self._session() as session:
                 await session.execute_write(_remap_entities)
@@ -2911,13 +2931,13 @@ RETURN count(r) AS updated
                 # SET twice and duplicate ``new_doc_id``.
                 query = """
                 UNWIND $survivors AS s
-                MATCH ()-[rel {id: s.relationship_id}]-()
+                MATCH ()-[rel {id: s.relationship_id, namespace_id: $namespace_id}]-()
                 WITH DISTINCT rel, s
                 WITH rel, s, [x IN coalesce(rel.source_document_ids, []) WHERE x <> s.old_doc_id] AS filtered
                 SET rel.source_document_ids = filtered +
                     CASE WHEN s.new_doc_id IN filtered THEN [] ELSE [s.new_doc_id] END
                 """
-                await tx.run(query, survivors=relationship_survivors)
+                await tx.run(query, survivors=relationship_survivors, namespace_id=ns_str)
 
             async with self._session() as session:
                 await session.execute_write(_remap_relationships)
@@ -2925,9 +2945,10 @@ RETURN count(r) AS updated
     async def delete_entities_batch(
         self,
         entity_ids: list[UUID],
+        *,
         namespace_id: UUID,
     ) -> int:
-        """Hard-delete entities by id, scoped to a namespace.
+        """Hard-delete entities by id, scoped to ``namespace_id`` (IGR-226).
 
         Used by the forget cascade to remove orphan entities (those whose
         only ``source_document_ids`` value is the document being forgotten).
@@ -2957,8 +2978,8 @@ RETURN count(r) AS updated
         async with self._session() as session:
             return await session.execute_write(_delete)
 
-    async def delete_relationships_batch(self, relationship_ids: list[UUID]) -> int:
-        """Hard-delete relationships by their ``id`` property.
+    async def delete_relationships_batch(self, relationship_ids: list[UUID], *, namespace_id: UUID) -> int:
+        """Hard-delete relationships by their ``id`` property, scoped to ``namespace_id`` (IGR-226).
 
         Sibling to :meth:`delete_entities_batch` for the relationship side
         of the forget cascade. Matches edges across any direction since
@@ -2975,12 +2996,13 @@ RETURN count(r) AS updated
             result = await tx.run(
                 """
                 UNWIND $relationship_ids AS rid
-                MATCH ()-[r {id: rid}]-()
+                MATCH ()-[r {id: rid, namespace_id: $namespace_id}]-()
                 WITH DISTINCT r
                 DELETE r
                 RETURN count(r) AS deleted
                 """,
                 relationship_ids=[str(rid) for rid in relationship_ids],
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             return record["deleted"] if record else 0

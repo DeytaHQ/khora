@@ -162,16 +162,17 @@ class TestDocumentOps:
     async def test_delete_document(self) -> None:
         """delete_document deletes chunks first, then document."""
         doc_id = uuid4()
+        ns_id = uuid4()
         rel = MagicMock()
         rel.delete_document = AsyncMock(return_value=True)
         vec = MagicMock()
         vec.delete_chunks_by_document = AsyncMock()
 
         coord = StorageCoordinator(relational=rel, vector=vec)
-        result = await coord.delete_document(doc_id)
+        result = await coord.delete_document(doc_id, namespace_id=ns_id)
 
-        vec.delete_chunks_by_document.assert_awaited_once_with(doc_id)
-        rel.delete_document.assert_awaited_once_with(doc_id)
+        vec.delete_chunks_by_document.assert_awaited_once_with(doc_id, namespace_id=ns_id)
+        rel.delete_document.assert_awaited_once_with(doc_id, namespace_id=ns_id)
         assert result is True
 
     @pytest.mark.asyncio
@@ -329,14 +330,16 @@ class TestEntityOps:
     @pytest.mark.asyncio
     async def test_update_entity_parallel(self) -> None:
         """update_entity runs graph and vector in parallel."""
+        ns_id = uuid4()
         entity = MagicMock(spec=Entity)
+        entity.namespace_id = ns_id
         graph = MagicMock()
         graph.update_entity = AsyncMock(return_value=entity)
         vec = MagicMock()
         vec.update_entity = AsyncMock()
 
         coord = StorageCoordinator(graph=graph, vector=vec)
-        await coord.update_entity(entity)
+        await coord.update_entity(entity, namespace_id=ns_id)
 
         graph.update_entity.assert_awaited_once()
         vec.update_entity.assert_awaited_once()
@@ -567,9 +570,10 @@ class TestBatchOps:
         vec.update_entity_embedding = AsyncMock()
         coord = StorageCoordinator(vector=vec)
 
+        ns_id = uuid4()
         entity_id = uuid4()
         updates = [(entity_id, [0.1, 0.2], "model")]
-        count = await coord.update_entity_embeddings_batch(updates)
+        count = await coord.update_entity_embeddings_batch(updates, namespace_id=ns_id)
         assert count == 1
         vec.update_entity_embedding.assert_awaited_once()
 
@@ -577,7 +581,7 @@ class TestBatchOps:
     async def test_update_entity_embeddings_batch_no_vector(self) -> None:
         """No vector backend returns 0."""
         coord = StorageCoordinator()
-        count = await coord.update_entity_embeddings_batch([])
+        count = await coord.update_entity_embeddings_batch([], namespace_id=uuid4())
         assert count == 0
 
 
@@ -774,7 +778,9 @@ class TestReplaceDocumentExtraction:
 
         # PG ops were issued against the txn session
         rel_backend.update_document.assert_any_await(new_doc, session=session)
-        vec_backend.delete_chunks_by_document.assert_awaited_with(old_doc_id, session=session)
+        vec_backend.delete_chunks_by_document.assert_awaited_with(
+            old_doc_id, namespace_id=namespace_id, session=session
+        )
         vec_backend.create_chunks_batch.assert_awaited_with(new_chunks, session=session)
 
         # Retirement: orphan entity and orphan relationship only

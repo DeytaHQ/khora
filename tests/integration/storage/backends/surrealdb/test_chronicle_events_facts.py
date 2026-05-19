@@ -144,7 +144,7 @@ async def test_supersede_fact_on_surrealdb(coordinator: StorageCoordinator) -> N
     )
     await coordinator.write_facts([old, new], namespace_id=namespace_id)
 
-    await coordinator.supersede_fact(old.id, new.id)
+    await coordinator.supersede_fact(old.id, new.id, namespace_id=namespace_id)
 
     active = await coordinator.query_active_facts_for_subject(namespace_id, "Pluto")
     active_ids = {getattr(r, "id", None) for r in active}

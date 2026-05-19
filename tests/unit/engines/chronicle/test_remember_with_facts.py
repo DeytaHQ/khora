@@ -98,7 +98,7 @@ class _RecordingCoordinator:
         self._chunks_by_id = {c.id: c for c in chunks}
         self._active_facts = active_facts_by_subject or {}
         self.write_facts_calls: list[tuple[list[MemoryFact], UUID]] = []
-        self.supersede_calls: list[tuple[UUID, UUID]] = []
+        self.supersede_calls: list[tuple[UUID, UUID, UUID]] = []
         self.write_events_calls: list[tuple[list[Any], UUID]] = []
         self.query_active_subjects: list[str] = []
 
@@ -118,8 +118,8 @@ class _RecordingCoordinator:
         self.write_facts_calls.append((list(facts), namespace_id))
         return [f.id for f in facts]
 
-    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID) -> None:
-        self.supersede_calls.append((fact_id, superseded_by))
+    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID, *, namespace_id: UUID) -> None:
+        self.supersede_calls.append((fact_id, superseded_by, namespace_id))
 
     async def write_events(self, events: list[Any], *, namespace_id: UUID) -> list[UUID]:
         self.write_events_calls.append((list(events), namespace_id))
@@ -420,7 +420,7 @@ class TestReconciliation:
         # New fact written, old fact superseded by new fact's id.
         assert len(coord.write_facts_calls) == 1
         assert coord.write_facts_calls[0][0] == [new_fact]
-        assert coord.supersede_calls == [(old_fact.id, new_fact.id)]
+        assert coord.supersede_calls == [(old_fact.id, new_fact.id, ns_id)]
         assert result.metadata["facts_extracted"] == 1
 
     @pytest.mark.asyncio

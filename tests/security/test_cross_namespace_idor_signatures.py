@@ -1,10 +1,11 @@
-"""Signature gate for the cross-namespace IDOR invariant (IGR-225).
+"""Signature gate for the cross-namespace IDOR invariant (IGR-225 / IGR-226).
 
-The IDOR family (IGR-212/213/214 → IGR-221/223/224) keeps recurring
-because no test asserts the invariant directly. This module enforces it
-structurally: for every concrete backend implementation, every read or
-existence method must declare ``namespace_id`` as a parameter (keyword-only
-after IGR-221/IGR-223).
+The IDOR family (IGR-212/213/214 → IGR-221/223/224 → IGR-226) keeps
+recurring because no test asserts the invariant directly. This module
+enforces it structurally: for every concrete backend implementation,
+every read, existence, write or delete method must declare
+``namespace_id`` as a parameter (keyword-only after IGR-221/IGR-223 for
+reads and IGR-226 for writes/deletes).
 
 If a new backend method is added without ``namespace_id``, this test fails
 at collection time with the offending class / method named, so the
@@ -74,11 +75,12 @@ _EVENT_STORE_BACKENDS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Read-method patterns. A method that matches one of these AND takes an
-# identifier-typed positional argument must declare ``namespace_id``.
+# Read- and write-method patterns. A method that matches one of these AND
+# takes an identifier-typed positional argument must declare ``namespace_id``.
 # ---------------------------------------------------------------------------
 
-# Methods that read or test the existence of a row by ID. Includes
+# Methods that read or test the existence of a row by ID (IGR-221/223),
+# plus methods that mutate or delete a row by ID (IGR-226). Includes
 # traversal methods that walk the graph from a seed entity ID.
 _READ_METHOD_PATTERN = re.compile(
     r"^("
@@ -88,6 +90,10 @@ _READ_METHOD_PATTERN = re.compile(
     r"|find_paths"
     r"|get_neighborhood"
     r"|get_neighborhoods_batch"
+    # Write / delete surface (IGR-226):
+    r"|delete_\w+"
+    r"|update_entity(_\w+)?"
+    r"|supersede_\w+"
     r")$"
 )
 
@@ -105,6 +111,10 @@ _EXEMPT_METHODS: frozenset[str] = frozenset(
         "get_namespace_versions",  # namespace registry helpers
         "get_active_namespace_id",
         "get_active_namespace",
+        # Namespace-side maintenance methods that delete namespaces wholesale —
+        # by definition not "scoped to a namespace_id" because they ARE
+        # operating on the namespace row itself.
+        "delete_namespace",
     }
 )
 
@@ -123,15 +133,25 @@ def _is_id_param(name: str, annotation: Any) -> bool:
     return "UUID" in ann or "uuid.UUID" in ann
 
 
-def _enumerate_read_methods(cls: type) -> list[tuple[str, inspect.Signature]]:
-    """Return [(method_name, signature), ...] for ID-based read methods.
+# Names whose mere existence implies a row-mutation (so the gate runs even
+# if their first positional argument isn't UUID-typed — e.g.
+# ``update_entity(entity: Entity, ...)``).
+_FORCE_INCLUDE_NAMES = re.compile(r"^(delete_\w+|update_entity(_\w+)?|supersede_\w+)$")
 
-    A method is considered an ID-based read if it has at least one *required*
-    id-typed parameter (after ``self``). List-style methods like
-    ``get_events(namespace_id, *, resource_id=None)`` where the id-typed
-    parameters are all optional are excluded — those are filtered scans, not
-    targeted lookups, and the namespace gate in the SQL WHERE clause is the
-    primary IDOR control.
+
+def _enumerate_read_methods(cls: type) -> list[tuple[str, inspect.Signature]]:
+    """Return [(method_name, signature), ...] for ID-based read/write methods.
+
+    A method is considered ID-scoped if it has at least one *required*
+    id-typed parameter (after ``self``), OR if its name matches one of the
+    write/delete patterns where the namespace_id requirement is unconditional
+    regardless of the first-arg shape (``update_entity(entity, ...)`` is
+    still namespace-scoped even though ``entity`` is not an ID).
+
+    List-style methods like ``get_events(namespace_id, *, resource_id=None)``
+    where the id-typed parameters are all optional are excluded — those are
+    filtered scans, not targeted lookups, and the namespace gate in the SQL
+    WHERE clause is the primary IDOR control.
     """
     out: list[tuple[str, inspect.Signature]] = []
     for name, member in inspect.getmembers(cls, predicate=inspect.isfunction):
@@ -146,7 +166,10 @@ def _enumerate_read_methods(cls: type) -> list[tuple[str, inspect.Signature]]:
         except (TypeError, ValueError):
             continue
         params = list(sig.parameters.values())
-        if not any(_is_id_param(p.name, p.annotation) and p.default is inspect.Parameter.empty for p in params[1:]):
+        has_id_param = any(
+            _is_id_param(p.name, p.annotation) and p.default is inspect.Parameter.empty for p in params[1:]
+        )
+        if not has_id_param and not _FORCE_INCLUDE_NAMES.match(name):
             continue
         out.append((name, sig))
     return out

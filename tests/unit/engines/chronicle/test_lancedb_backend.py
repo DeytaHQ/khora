@@ -277,7 +277,8 @@ class TestChronicleLanceDBBackend:
                 [
                     (alice.id, fake_embedding("Alice PERSON"), "fake"),
                     (bob.id, fake_embedding("Bob PERSON"), "fake"),
-                ]
+                ],
+                namespace_id=ns.id,
             )
 
             # Vector adapter writes embeddings to LanceDB; entity search should

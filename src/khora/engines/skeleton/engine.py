@@ -666,7 +666,7 @@ class SkeletonConstructionEngine:
         await temporal_store.delete_chunks_by_document(document_id, namespace_id)
 
         # Delete from relational storage
-        return await storage.delete_document(document_id)
+        return await storage.delete_document(document_id, namespace_id=namespace_id)
 
     @trace("khora.skeleton.remember_batch")
     async def remember_batch(

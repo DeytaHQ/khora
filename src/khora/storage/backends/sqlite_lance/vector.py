@@ -277,8 +277,14 @@ class SQLiteLanceVectorAdapter:
         rows = await cur.fetchall()
         return [self._row_to_chunk(r) for r in rows]
 
-    async def delete_chunks_by_document(self, document_id: UUID, *, session: AsyncSession | None = None) -> int:
-        """Delete chunks by document.
+    async def delete_chunks_by_document(
+        self,
+        document_id: UUID,
+        *,
+        namespace_id: UUID,
+        session: AsyncSession | None = None,
+    ) -> int:
+        """Delete chunks by document, scoped to ``namespace_id`` (IGR-226).
 
         The ``session`` parameter is part of the protocol contract but the
         SQLite+LanceDB backend never participates in a SQLAlchemy session —
@@ -288,15 +294,22 @@ class SQLiteLanceVectorAdapter:
         we commit immediately and run the LanceDB delete as compensation.
         """
         doc_text = uuid_to_text(document_id)
+        ns_text = uuid_to_text(namespace_id)
 
         # Enumerate before delete so we know whether LanceDB compensation is
         # needed.  FTS5 is kept in sync by the AFTER-DELETE trigger on
         # ``chunks`` — no manual ``chunks_fts`` delete needed.
-        cur = await self._sqlite.execute("SELECT id FROM chunks WHERE document_id = ?", (doc_text,))
+        cur = await self._sqlite.execute(
+            "SELECT id FROM chunks WHERE document_id = ? AND namespace_id = ?",
+            (doc_text, ns_text),
+        )
         rows = await cur.fetchall()
         count = len(rows)
 
-        cur = await self._sqlite.execute("DELETE FROM chunks WHERE document_id = ?", (doc_text,))
+        cur = await self._sqlite.execute(
+            "DELETE FROM chunks WHERE document_id = ? AND namespace_id = ?",
+            (doc_text, ns_text),
+        )
         rowcount = cur.rowcount
 
         if session is None:
@@ -309,7 +322,7 @@ class SQLiteLanceVectorAdapter:
                 try:
                     tbl = await self._chunks_table()
                     async with self._lance_write_lock:
-                        await tbl.delete(f"document_id = '{doc_text}'")
+                        await tbl.delete(f"document_id = '{doc_text}' AND namespace_id = '{ns_text}'")
                 except Exception:
                     logger.warning(
                         "LanceDB delete for document {} failed — orphaned vectors remain until next compaction",
@@ -393,8 +406,15 @@ class SQLiteLanceVectorAdapter:
         # backend's column-precedence rule (PR #470). Half-open
         # interval ``>= start AND < end`` to match the Chronicle pushdown
         # contract.
-        sql_parts = [f"SELECT * FROM chunks WHERE id IN ({','.join('?' for _ in id_order)})"]  # noqa: S608
-        params: list[Any] = list(id_order)
+        # Defense-in-depth (IGR-226): also enforce namespace_id on the SQLite
+        # side rather than trusting LanceDB's filter alone. If LanceDB's
+        # where-clause regressed, the SQLite filter would still keep cross-
+        # namespace rows out of the result.
+        sql_parts = [
+            f"SELECT * FROM chunks WHERE id IN ({','.join('?' for _ in id_order)}) "  # noqa: S608
+            "AND namespace_id = ?"
+        ]
+        params: list[Any] = [*id_order, uuid_to_text(namespace_id)]
         if created_after is not None:
             sql_parts.append("AND COALESCE(source_timestamp, created_at) >= ?")
             params.append(_dt_to_str(created_after))
@@ -479,12 +499,17 @@ class SQLiteLanceVectorAdapter:
         if entity.embedding:
             await self._upsert_entity_vector(entity.id, entity.namespace_id, entity.embedding)
 
-    async def update_entity(self, entity: Entity) -> None:
-        """Refresh the entity's embedding in LanceDB.
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> None:
+        """Refresh the entity's embedding in LanceDB, scoped to ``namespace_id``.
 
         See :meth:`create_entity` — SQLite entity metadata belongs to
-        the graph adapter.
+        the graph adapter. The ``namespace_id`` kwarg is defense-in-depth
+        (IGR-226) — asserted equal to ``entity.namespace_id``.
         """
+        if entity.namespace_id != namespace_id:
+            raise ValueError(
+                f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
+            )
         if entity.embedding:
             await self._upsert_entity_vector(entity.id, entity.namespace_id, entity.embedding)
 
@@ -502,31 +527,50 @@ class SQLiteLanceVectorAdapter:
         row = await cur.fetchone()
         return row is not None
 
-    async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:  # noqa: ARG002 — model is tracked on the graph row, not in LanceDB
-        # Look up namespace from the authoritative SQLite row (graph-owned).
+    async def update_entity_embedding(  # noqa: ARG002 — model is tracked on the graph row, not in LanceDB
+        self,
+        entity_id: UUID,
+        embedding: list[float],
+        model: str,
+        *,
+        namespace_id: UUID,
+    ) -> None:
+        """Update an entity's embedding in LanceDB, scoped to ``namespace_id``.
+
+        No-op when the entity does not exist in the given namespace
+        (cross-namespace IDOR — IGR-226).
+        """
+        # Verify the entity exists in this namespace before writing LanceDB.
         cur = await self._sqlite.execute(
-            "SELECT namespace_id FROM entities WHERE id = ?",
-            (uuid_to_text(entity_id),),
+            "SELECT 1 FROM entities WHERE id = ? AND namespace_id = ?",
+            (uuid_to_text(entity_id), uuid_to_text(namespace_id)),
         )
         row = await cur.fetchone()
         if row is None:
-            raise ValueError(f"Entity {entity_id} not found")
-        namespace_id = UUID(row["namespace_id"])
+            return
 
         await self._upsert_entity_vector(entity_id, namespace_id, embedding)
 
-    async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
+    async def update_entity_embeddings_batch(
+        self,
+        updates: list[tuple[UUID, list[float], str]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
         if not updates:
             return 0
 
-        # Fetch namespace_ids from SQLite so we can write LanceDB rows.
-        # The ``embedding_model`` is not persisted in LanceDB (it's a SQLite
-        # column on ``entities``, managed by the graph adapter / ORM).
+        # Fetch namespace_ids from SQLite — restricted to ``namespace_id``
+        # so ids outside the caller's namespace are silently dropped
+        # (cross-namespace IDOR — IGR-226). The ``embedding_model`` is not
+        # persisted in LanceDB (it's a SQLite column on ``entities``,
+        # managed by the graph adapter / ORM).
         ids_text = [uuid_to_text(u) for u, _, _ in updates]
         placeholders = ",".join("?" for _ in ids_text)
         cur = await self._sqlite.execute(
-            f"SELECT id, namespace_id FROM entities WHERE id IN ({placeholders})",  # noqa: S608
-            ids_text,
+            f"SELECT id, namespace_id FROM entities WHERE id IN ({placeholders}) "  # noqa: S608
+            "AND namespace_id = ?",
+            [*ids_text, uuid_to_text(namespace_id)],
         )
         rows = await cur.fetchall()
         ns_by_id = {r["id"]: r["namespace_id"] for r in rows}
@@ -561,7 +605,7 @@ class SQLiteLanceVectorAdapter:
                 arrow_tbl = pa.Table.from_pylist(lance_rows, schema=schema)
                 await tbl.add(arrow_tbl)
 
-        return len(updates)
+        return len(lance_rows)
 
     async def search_similar_entities(
         self,

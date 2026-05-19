@@ -69,9 +69,10 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
                     }
                 ],
                 relationship_survivors=[],
+                namespace_id=namespace_id,
             )
 
-            got = await backend.get_entity(entity.id)
+            got = await backend.get_entity(entity.id, namespace_id=namespace_id)
             assert got is not None
             doc_ids = got.source_document_ids
             assert len(doc_ids) == 2
@@ -80,7 +81,7 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             assert doc_a not in doc_ids
         finally:
             try:
-                await backend.delete_entity(entity.id)
+                await backend.delete_entity(entity.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -117,9 +118,10 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
                     }
                 ],
                 relationship_survivors=[],
+                namespace_id=namespace_id,
             )
 
-            got = await backend.get_entity(entity.id)
+            got = await backend.get_entity(entity.id, namespace_id=namespace_id)
             assert got is not None
             doc_ids = got.source_document_ids
             assert len(doc_ids) == 2
@@ -127,7 +129,7 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             assert doc_b in doc_ids
         finally:
             try:
-                await backend.delete_entity(entity.id)
+                await backend.delete_entity(entity.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -164,9 +166,10 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
                     }
                 ],
                 relationship_survivors=[],
+                namespace_id=namespace_id,
             )
 
-            got = await backend.get_entity(entity.id)
+            got = await backend.get_entity(entity.id, namespace_id=namespace_id)
             assert got is not None
             doc_ids = got.source_document_ids
             assert len(doc_ids) == 2
@@ -175,7 +178,7 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             assert doc_a not in doc_ids
         finally:
             try:
-                await backend.delete_entity(entity.id)
+                await backend.delete_entity(entity.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -232,16 +235,17 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
                     },
                 ],
                 relationship_survivors=[],
+                namespace_id=namespace_id,
             )
 
-            got_1 = await backend.get_entity(entity_1.id)
+            got_1 = await backend.get_entity(entity_1.id, namespace_id=namespace_id)
             assert got_1 is not None
             doc_ids_1 = got_1.source_document_ids
             assert len(doc_ids_1) == 2
             assert doc_b in doc_ids_1
             assert doc_e in doc_ids_1
 
-            got_2 = await backend.get_entity(entity_2.id)
+            got_2 = await backend.get_entity(entity_2.id, namespace_id=namespace_id)
             assert got_2 is not None
             doc_ids_2 = got_2.source_document_ids
             assert len(doc_ids_2) == 2
@@ -249,11 +253,11 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             assert doc_f in doc_ids_2
         finally:
             try:
-                await backend.delete_entity(entity_1.id)
+                await backend.delete_entity(entity_1.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_2.id)
+                await backend.delete_entity(entity_2.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -305,9 +309,10 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
                         "new_doc_id": str(doc_c),
                     }
                 ],
+                namespace_id=namespace_id,
             )
 
-            got = await backend.get_relationship(relationship.id)
+            got = await backend.get_relationship(relationship.id, namespace_id=namespace_id)
             assert got is not None
             doc_ids = got.source_document_ids
             assert len(doc_ids) == 2
@@ -316,15 +321,15 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             assert doc_a not in doc_ids
         finally:
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -376,9 +381,10 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
                         "new_doc_id": str(uuid4()),
                     }
                 ],
+                namespace_id=namespace_id,
             )
 
-            got = await backend.get_relationship(relationship.id)
+            got = await backend.get_relationship(relationship.id, namespace_id=namespace_id)
             assert got is not None
             doc_ids = got.source_document_ids
             assert len(doc_ids) == 2
@@ -386,15 +392,15 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             assert doc_b in doc_ids
         finally:
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -431,11 +437,15 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             }
 
             # First application: swap doc_a → doc_c
-            await backend.remap_source_document_ids_batch(entity_survivors=[row], relationship_survivors=[])
+            await backend.remap_source_document_ids_batch(
+                entity_survivors=[row], relationship_survivors=[], namespace_id=namespace_id
+            )
             # Retry the same row — caller payload is unchanged on self-heal
-            await backend.remap_source_document_ids_batch(entity_survivors=[row], relationship_survivors=[])
+            await backend.remap_source_document_ids_batch(
+                entity_survivors=[row], relationship_survivors=[], namespace_id=namespace_id
+            )
 
-            got = await backend.get_entity(entity.id)
+            got = await backend.get_entity(entity.id, namespace_id=namespace_id)
             assert got is not None
             doc_ids = got.source_document_ids
             # No duplicates; old is gone; new appears exactly once
@@ -445,7 +455,7 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             assert doc_a not in doc_ids
         finally:
             try:
-                await backend.delete_entity(entity.id)
+                await backend.delete_entity(entity.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -481,9 +491,10 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
                     }
                 ],
                 relationship_survivors=[],
+                namespace_id=namespace_id,
             )
 
-            got = await backend.get_entity(entity.id)
+            got = await backend.get_entity(entity.id, namespace_id=namespace_id)
             assert got is not None
             doc_ids = got.source_document_ids
             # All occurrences of old removed, new_doc_id stays exactly once
@@ -492,7 +503,7 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             assert doc_a not in doc_ids
         finally:
             try:
-                await backend.delete_entity(entity.id)
+                await backend.delete_entity(entity.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -537,9 +548,10 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
                         "new_doc_id": str(doc_c),
                     }
                 ],
+                namespace_id=namespace_id,
             )
 
-            got = await backend.get_relationship(relationship.id)
+            got = await backend.get_relationship(relationship.id, namespace_id=namespace_id)
             assert got is not None
             doc_ids = got.source_document_ids
             # No duplicate new_doc_id despite self-loop double-match
@@ -549,11 +561,11 @@ class TestNeo4jRemapSourceDocumentIdsIntegration:
             assert doc_a not in doc_ids
         finally:
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity.id)
+                await backend.delete_entity(entity.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()

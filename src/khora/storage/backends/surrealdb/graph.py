@@ -317,7 +317,16 @@ class SurrealDBGraphAdapter:
         return _row_to_entity(row)
 
     @trace("khora.surrealdb.graph.update_entity", include={"entity"})
-    async def update_entity(self, entity: Entity) -> Entity:
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
+        """Update an entity, scoped to ``namespace_id`` (IGR-226).
+
+        The ``namespace_id`` kwarg is defense-in-depth \u2014 asserted equal to
+        ``entity.namespace_id`` before the UPDATE filter is applied.
+        """
+        if entity.namespace_id != namespace_id:
+            raise ValueError(
+                f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
+            )
         sql = (
             "UPDATE entity:\u27e8$id\u27e9 SET "
             "name = $name, "
@@ -334,25 +343,34 @@ class SurrealDBGraphAdapter:
             "valid_until = $valid_until, "
             "confidence = $confidence, "
             "metadata_ = $metadata_, "
-            "updated_at = $updated_at"
+            "updated_at = $updated_at "
+            "WHERE namespace = $ns_rid OR namespace.namespace_id = $ns_str"
         )
         bindings = _entity_to_bindings(entity)
         bindings.pop("created_at", None)
+        bindings["ns_rid"] = _rid("memory_namespace", namespace_id)
+        bindings["ns_str"] = str(namespace_id)
         await self._conn.execute(sql, bindings)
         return entity
 
     @trace("khora.surrealdb.graph.delete_entity", include={"entity_id"})
-    async def delete_entity(self, entity_id: UUID) -> bool:
+    async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete an entity and its relationships, scoped to ``namespace_id`` (IGR-226)."""
         eid = _rid("entity", entity_id)
-        # Delete relationships first, then the entity.
-        # DELETE ... RETURN BEFORE returns deleted rows (empty list if nothing matched).
+        ns_rid = _rid("memory_namespace", namespace_id)
+        ns_str = str(namespace_id)
+        # Delete relationships first, then the entity. Scoped by namespace.
         await self._conn.execute(
-            "DELETE FROM relates_to WHERE in = $eid OR out = $eid",
-            {"eid": eid},
+            "DELETE FROM relates_to "
+            "WHERE (in = $eid OR out = $eid) "
+            "AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str)",
+            {"eid": eid, "ns_rid": ns_rid, "ns_str": ns_str},
         )
         deleted = await self._conn.query(
-            "DELETE FROM entity WHERE id = $eid RETURN BEFORE",
-            {"eid": eid},
+            "DELETE FROM entity "
+            "WHERE id = $eid AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) "
+            "RETURN BEFORE",
+            {"eid": eid, "ns_rid": ns_rid, "ns_str": ns_str},
         )
         return len(deleted) > 0
 
@@ -609,11 +627,12 @@ class SurrealDBGraphAdapter:
         return _row_to_relationship(row)
 
     @trace("khora.surrealdb.graph.delete_relationship", include={"relationship_id"})
-    async def delete_relationship(self, relationship_id: UUID) -> bool:
+    async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
         # DELETE ... RETURN BEFORE returns deleted rows (empty if nothing matched)
         deleted = await self._conn.query(
-            "DELETE FROM relates_to WHERE rel_id = $rel_id RETURN BEFORE",
-            {"rel_id": str(relationship_id)},
+            "DELETE FROM relates_to WHERE rel_id = $rel_id AND namespace_id = $ns RETURN BEFORE",
+            {"rel_id": str(relationship_id), "ns": str(namespace_id)},
         )
         return len(deleted) > 0
 

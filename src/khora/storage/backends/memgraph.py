@@ -306,11 +306,20 @@ class MemgraphBackend(GraphBackendBase):
                 UUID(element_to_dict(r["e"])["id"]): self._record_to_entity(element_to_dict(r["e"])) for r in records
             }
 
-    async def update_entity(self, entity: Entity) -> Entity:
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
+        """Update an entity, scoped to ``namespace_id`` (IGR-226).
+
+        The ``namespace_id`` kwarg is defense-in-depth — asserted equal to
+        ``entity.namespace_id`` before the MATCH filter is applied.
+        """
+        if entity.namespace_id != namespace_id:
+            raise ValueError(
+                f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
+            )
         driver = self._get_driver()
 
         query = """
-        MATCH (e:Entity {id: $id})
+        MATCH (e:Entity {id: $id, namespace_id: $namespace_id})
         SET e.name = $name,
             e.description = $description,
             e.attributes = $attributes,
@@ -328,6 +337,7 @@ class MemgraphBackend(GraphBackendBase):
             await session.run(
                 query,
                 id=str(entity.id),
+                namespace_id=str(namespace_id),
                 name=entity.name,
                 description=entity.description,
                 attributes=serialize_dict(entity.attributes),
@@ -343,17 +353,19 @@ class MemgraphBackend(GraphBackendBase):
 
         return entity
 
-    async def delete_entity(self, entity_id: UUID) -> bool:
+    async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete an entity and its relationships, scoped to ``namespace_id`` (IGR-226)."""
         driver = self._get_driver()
 
         async with driver.session() as session:
             result = await session.run(
                 """
-                MATCH (e:Entity {id: $id})
+                MATCH (e:Entity {id: $id, namespace_id: $namespace_id})
                 DETACH DELETE e
                 RETURN count(e) as deleted
                 """,
                 id=str(entity_id),
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             return (record["deleted"] if record else 0) > 0
@@ -473,17 +485,19 @@ class MemgraphBackend(GraphBackendBase):
                 )
             return None
 
-    async def delete_relationship(self, relationship_id: UUID) -> bool:
+    async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
         driver = self._get_driver()
 
         async with driver.session() as session:
             result = await session.run(
                 """
-                MATCH ()-[r {id: $id}]->()
+                MATCH ()-[r {id: $id, namespace_id: $namespace_id}]->()
                 DELETE r
                 RETURN count(r) as deleted
                 """,
                 id=str(relationship_id),
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             return (record["deleted"] if record else 0) > 0

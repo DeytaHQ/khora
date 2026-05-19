@@ -1356,7 +1356,7 @@ class TestVectorCypherEngineForget:
         assert result is True
         connected_engine._dual_nodes.delete_chunks_by_document.assert_called_once_with(doc_id, namespace_id)
         connected_engine._temporal_store.delete_chunks_by_document.assert_called_once_with(doc_id, namespace_id)
-        connected_engine._storage.delete_document.assert_called_once_with(doc_id)
+        connected_engine._storage.delete_document.assert_called_once_with(doc_id, namespace_id=namespace_id)
 
     @pytest.mark.asyncio
     async def test_forget_namespace_mismatch(self, connected_engine: VectorCypherEngine) -> None:
@@ -1423,8 +1423,12 @@ class TestVectorCypherEngineForget:
 
         await connected_engine.forget(doc_id, namespace_id)
 
-        connected_engine._storage.graph.delete_entities_batch.assert_awaited_once_with([orphan_ent_id], namespace_id)
-        connected_engine._storage.vector.delete_entities_batch.assert_awaited_once_with([orphan_ent_id])
+        connected_engine._storage.graph.delete_entities_batch.assert_awaited_once_with(
+            [orphan_ent_id], namespace_id=namespace_id
+        )
+        connected_engine._storage.vector.delete_entities_batch.assert_awaited_once_with(
+            [orphan_ent_id], namespace_id=namespace_id
+        )
         connected_engine._storage.graph.remove_document_from_entity_sources_batch.assert_not_called()
         connected_engine._storage.vector.remove_document_from_entity_sources.assert_not_called()
 
@@ -1477,8 +1481,12 @@ class TestVectorCypherEngineForget:
 
         await connected_engine.forget(doc_id, namespace_id)
 
-        connected_engine._storage.graph.delete_relationships_batch.assert_awaited_once_with([orphan_rel_id])
-        connected_engine._storage.vector.delete_relationships_batch.assert_awaited_once_with([orphan_rel_id])
+        connected_engine._storage.graph.delete_relationships_batch.assert_awaited_once_with(
+            [orphan_rel_id], namespace_id=namespace_id
+        )
+        connected_engine._storage.vector.delete_relationships_batch.assert_awaited_once_with(
+            [orphan_rel_id], namespace_id=namespace_id
+        )
         connected_engine._storage.graph.remove_document_from_relationship_sources_batch.assert_not_called()
         connected_engine._storage.vector.remove_document_from_relationship_sources.assert_not_called()
 
@@ -1540,7 +1548,7 @@ class TestVectorCypherEngineForget:
         # Existing chunk + document-row deletes are still invoked.
         connected_engine._dual_nodes.delete_chunks_by_document.assert_awaited_once_with(doc_id, namespace_id)
         connected_engine._temporal_store.delete_chunks_by_document.assert_awaited_once_with(doc_id, namespace_id)
-        connected_engine._storage.delete_document.assert_awaited_once_with(doc_id)
+        connected_engine._storage.delete_document.assert_awaited_once_with(doc_id, namespace_id=namespace_id)
 
     @pytest.mark.asyncio
     async def test_forget_cascade_runs_before_chunk_and_doc_deletes(self, connected_engine: VectorCypherEngine) -> None:
