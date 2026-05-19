@@ -1022,6 +1022,9 @@ class Khora:
         namespace: str | UUID,
         title: str = "",
         source: str = "",
+        source_type: str = "library",
+        source_name: str = "",
+        source_url: str = "",
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         entity_types: list[str],
@@ -1045,6 +1048,9 @@ class Khora:
             namespace: Namespace UUID (as UUID or string)
             title: Optional title for the content
             source: Optional source identifier
+            source_type: Provenance category (default "library").
+            source_name: Optional provider-level identifier (e.g. "slack", "linear").
+            source_url: Optional original-source URL.
             metadata: Optional metadata
             skill_name: Extraction skill to use
             entity_types: Required entity types to extract
@@ -1092,6 +1098,9 @@ class Khora:
                     namespace_id,
                     title=title,
                     source=source,
+                    source_type=source_type,
+                    source_name=source_name,
+                    source_url=source_url,
                     metadata=metadata,
                     skill_name=skill_name,
                     entity_types=entity_types,
@@ -1120,6 +1129,9 @@ class Khora:
         *,
         namespace: str | UUID,
         skill_name: str = "general_entities",
+        source_type: str = "library",
+        source_name: str = "",
+        source_url: str = "",
         max_concurrent: int = 10,
         deduplicate: bool = True,
         infer_relationships: bool = True,
@@ -1149,10 +1161,16 @@ class Khora:
                 - content: str (required)
                 - title: str (optional)
                 - source: str (optional)
+                - source_type: str (optional) — overrides top-level kwarg per doc
+                - source_name: str (optional) — overrides top-level kwarg per doc
+                - source_url: str (optional) — overrides top-level kwarg per doc
                 - metadata: dict (optional)
                 - external_id: str (optional) — caller-supplied external identifier
             namespace: Namespace UUID (as UUID or string)
             skill_name: Extraction skill to use
+            source_type: Default provenance category for docs that don't supply one.
+            source_name: Default provider identifier for docs that don't supply one.
+            source_url: Default original-source URL for docs that don't supply one.
             max_concurrent: Maximum concurrent document processing
             deduplicate: Deduplicate entities across documents (default: True)
             infer_relationships: Infer relationships after ingestion (default: True)
@@ -1185,6 +1203,17 @@ class Khora:
         try:
             namespace_id = await self._resolve_namespace(namespace)
             with trace_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
+                # Pre-stamp the top-level provenance kwargs onto each doc dict
+                # so engines (and the ingest pipeline) read a single source of
+                # truth. Per-doc dict values always win — only fill the kwarg
+                # default when the doc didn't supply its own.
+                for doc_data in documents:
+                    if "source_type" not in doc_data:
+                        doc_data["source_type"] = source_type
+                    if "source_name" not in doc_data:
+                        doc_data["source_name"] = source_name
+                    if "source_url" not in doc_data:
+                        doc_data["source_url"] = source_url
                 # NOTE: see remember() comment re: custom engine compatibility
                 batch_kwargs: dict[str, Any] = dict(
                     skill_name=skill_name,
@@ -1197,6 +1226,9 @@ class Khora:
                     expertise=expertise,
                     extraction_config_hash=extraction_config_hash,
                     chunk_strategy=chunk_strategy,
+                    source_type=source_type,
+                    source_name=source_name,
+                    source_url=source_url,
                 )
                 if extraction_batch_size is not None:
                     batch_kwargs["extraction_batch_size"] = extraction_batch_size
@@ -1227,6 +1259,9 @@ class Khora:
         on_result: Callable[[int, int, DocumentResult], None],
         namespace: str | UUID,
         skill_name: str = "general_entities",
+        source_type: str = "library",
+        source_name: str = "",
+        source_url: str = "",
         entity_types: list[str],
         relationship_types: list[str],
         expertise: ExpertiseConfig | None = None,
@@ -1254,11 +1289,16 @@ class Khora:
 
         Args:
             documents: List of document dicts with 'content', 'title', 'source',
-                'metadata', 'external_id' keys.
+                'source_type', 'source_name', 'source_url', 'metadata',
+                'external_id' keys. Per-doc source_type / source_name /
+                source_url override the top-level kwargs for that document.
             on_result: Synchronous callback(completed, total, DocumentResult)
                 invoked per document as processing completes.
             namespace: Namespace UUID (as UUID or string).
             skill_name: Extraction skill to use.
+            source_type: Default provenance category (e.g. "library", "api").
+            source_name: Default provider identifier (e.g. "slack", "linear").
+            source_url: Default original-source URL.
             entity_types: Required entity types to extract.
             relationship_types: Required relationship types to extract.
             expertise: Optional domain-specific extraction config.
@@ -1413,7 +1453,9 @@ class Khora:
                 existing.content = content
                 existing.title = doc_data.get("title") or None
                 existing.source = doc_data.get("source") or None
-                existing.source_type = "api"
+                existing.source_type = doc_data.get("source_type", source_type)
+                existing.source_name = doc_data.get("source_name", source_name) or None
+                existing.source_url = doc_data.get("source_url", source_url) or None
                 existing.checksum = checksum
                 existing.size_bytes = len(content.encode("utf-8"))
                 existing.metadata = doc_data.get("metadata") or {}
@@ -1447,7 +1489,9 @@ class Khora:
                 content=content,
                 title=doc_data.get("title") or None,
                 source=doc_data.get("source") or None,
-                source_type="api",
+                source_type=doc_data.get("source_type", source_type),
+                source_name=doc_data.get("source_name", source_name) or None,
+                source_url=doc_data.get("source_url", source_url) or None,
                 checksum=checksum,
                 size_bytes=len(content.encode("utf-8")),
                 metadata=doc_data.get("metadata") or {},

@@ -3586,3 +3586,299 @@ class TestIsUndefinedTableError:
         from khora.khora import _is_undefined_table_error
 
         assert _is_undefined_table_error(RuntimeError("not a db error")) is False
+
+
+# ---------------------------------------------------------------------------
+# Provenance kwargs: source_type / source_name / source_url
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceKwargsRemember:
+    """Tests that remember() threads source_type/source_name/source_url to the engine."""
+
+    @pytest.mark.asyncio
+    async def test_remember_passes_explicit_provenance(self) -> None:
+        """Explicit source_type/source_name/source_url are forwarded to engine.remember()."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        mock_result = RememberResult(
+            document_id=uuid4(),
+            namespace_id=ns_id,
+            chunks_created=1,
+            entities_extracted=0,
+            relationships_created=0,
+        )
+        kb._engine.remember = AsyncMock(return_value=mock_result)
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember(
+                "content",
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_type="api",
+                source_name="slack",
+                source_url="https://slack.com/messages/1",
+            )
+
+        kwargs = kb._engine.remember.call_args.kwargs
+        assert kwargs["source_type"] == "api"
+        assert kwargs["source_name"] == "slack"
+        assert kwargs["source_url"] == "https://slack.com/messages/1"
+
+    @pytest.mark.asyncio
+    async def test_remember_defaults(self) -> None:
+        """No kwargs → source_type='library', source_name='', source_url=''."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember = AsyncMock(
+            return_value=RememberResult(
+                document_id=uuid4(),
+                namespace_id=ns_id,
+                chunks_created=0,
+                entities_extracted=0,
+                relationships_created=0,
+            )
+        )
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember(
+                "content",
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        kwargs = kb._engine.remember.call_args.kwargs
+        assert kwargs["source_type"] == "library"
+        assert kwargs["source_name"] == ""
+        assert kwargs["source_url"] == ""
+
+
+class TestProvenanceKwargsRememberBatch:
+    """Tests that remember_batch() stamps per-doc dicts with provenance kwargs."""
+
+    @pytest.mark.asyncio
+    async def test_top_level_kwargs_apply_to_all_docs(self) -> None:
+        """Top-level kwargs are stamped onto every doc dict and forwarded to engine."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=2, processed=2, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [{"content": "doc one"}, {"content": "doc two"}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_type="api",
+                source_name="linear",
+                source_url="https://linear.app",
+            )
+
+        # Each doc dict is stamped in-place.
+        for doc in docs:
+            assert doc["source_type"] == "api"
+            assert doc["source_name"] == "linear"
+            assert doc["source_url"] == "https://linear.app"
+
+        # Top-level kwargs are also forwarded to the engine.
+        engine_kwargs = kb._engine.remember_batch.call_args.kwargs
+        assert engine_kwargs["source_type"] == "api"
+        assert engine_kwargs["source_name"] == "linear"
+        assert engine_kwargs["source_url"] == "https://linear.app"
+
+    @pytest.mark.asyncio
+    async def test_per_doc_dict_keys_override_top_level(self) -> None:
+        """Mixed: doc-with-keys keeps its own values; doc-without-keys inherits top-level."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=2, processed=2, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [
+            {
+                "content": "doc with override",
+                "source_type": "file",
+                "source_name": "uploaded.pdf",
+                "source_url": "file:///tmp/uploaded.pdf",
+            },
+            {"content": "doc without override"},
+        ]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_type="api",
+                source_name="default-name",
+                source_url="https://default.example",
+            )
+
+        # Doc 0: per-doc keys win.
+        assert docs[0]["source_type"] == "file"
+        assert docs[0]["source_name"] == "uploaded.pdf"
+        assert docs[0]["source_url"] == "file:///tmp/uploaded.pdf"
+
+        # Doc 1: gets the top-level fallbacks.
+        assert docs[1]["source_type"] == "api"
+        assert docs[1]["source_name"] == "default-name"
+        assert docs[1]["source_url"] == "https://default.example"
+
+    @pytest.mark.asyncio
+    async def test_defaults_when_neither_provided(self) -> None:
+        """No top-level kwarg + no per-doc key → defaults library/''/''."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=1, processed=1, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [{"content": "doc"}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        assert docs[0]["source_type"] == "library"
+        assert docs[0]["source_name"] == ""
+        assert docs[0]["source_url"] == ""
+
+
+class TestProvenanceKwargsSubmitBatch:
+    """Tests that submit_batch() honors source_type/source_name/source_url precedence."""
+
+    @pytest.mark.asyncio
+    async def test_top_level_kwargs_stamp_document(self) -> None:
+        """Top-level kwargs end up on each persisted Document."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        handle = await kb.submit_batch(
+            [{"content": "doc-1"}, {"content": "doc-2"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            source_type="api",
+            source_name="nango",
+            source_url="https://nango.dev",
+        )
+        await handle.wait()
+
+        assert len(captured) == 2
+        for doc in captured:
+            assert doc.source_type == "api"
+            assert doc.source_name == "nango"
+            assert doc.source_url == "https://nango.dev"
+
+    @pytest.mark.asyncio
+    async def test_per_doc_keys_override_top_level(self) -> None:
+        """Mixed batch: per-doc keys win, others inherit top-level kwargs."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        docs = [
+            {
+                "content": "override",
+                "source_type": "file",
+                "source_name": "report.pdf",
+                "source_url": "file:///tmp/report.pdf",
+            },
+            {"content": "inherit"},
+        ]
+
+        handle = await kb.submit_batch(
+            docs,
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            source_type="api",
+            source_name="default-name",
+            source_url="https://default.example",
+        )
+        await handle.wait()
+
+        assert len(captured) == 2
+        assert captured[0].source_type == "file"
+        assert captured[0].source_name == "report.pdf"
+        assert captured[0].source_url == "file:///tmp/report.pdf"
+        assert captured[1].source_type == "api"
+        assert captured[1].source_name == "default-name"
+        assert captured[1].source_url == "https://default.example"
+
+    @pytest.mark.asyncio
+    async def test_defaults_when_neither_provided(self) -> None:
+        """No top-level + no per-doc → defaults library/None/None."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        handle = await kb.submit_batch(
+            [{"content": "doc"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(captured) == 1
+        assert captured[0].source_type == "library"
+        assert captured[0].source_name is None
+        assert captured[0].source_url is None
