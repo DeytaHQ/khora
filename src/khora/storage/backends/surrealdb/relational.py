@@ -614,7 +614,7 @@ class SurrealDBRelationalAdapter:
             "SELECT id, created_at, source_type, title, external_id, source, source_name, "
             "source_url, content_type, source_timestamp, metadata_ FROM document "
             "WHERE id IN $ids AND namespace_id = $ns",
-            {"ids": id_strs, "ns": namespace_id},
+            {"ids": id_strs, "ns": str(namespace_id)},
         )
         result: dict[UUID, DocumentProjection] = {}
         for r in rows:
