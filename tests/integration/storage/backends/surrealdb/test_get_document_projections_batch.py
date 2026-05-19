@@ -69,7 +69,7 @@ async def test_projections_batch_full_field_roundtrip(adapter, namespace) -> Non
     )
     await adapter.create_document(doc)
 
-    projections = await adapter.get_document_projections_batch([doc.id])
+    projections = await adapter.get_document_projections_batch([doc.id], namespace_id=namespace.id)
 
     assert doc.id in projections
     proj = projections[doc.id]
@@ -102,14 +102,14 @@ async def test_projections_batch_null_source_type_defaults_to_library(adapter, n
     )
     await adapter.create_document(doc)
 
-    projections = await adapter.get_document_projections_batch([doc.id])
+    projections = await adapter.get_document_projections_batch([doc.id], namespace_id=namespace.id)
     proj = projections[doc.id]
     assert proj.source_type == "library"
 
 
 async def test_projections_batch_empty_input(adapter) -> None:
     """Empty input short-circuits to ``{}`` without a SurrealDB query."""
-    assert await adapter.get_document_projections_batch([]) == {}
+    assert await adapter.get_document_projections_batch([], namespace_id=uuid4()) == {}
 
 
 async def test_projections_batch_unknown_id_omitted(adapter, namespace) -> None:
@@ -118,5 +118,5 @@ async def test_projections_batch_unknown_id_omitted(adapter, namespace) -> None:
     await adapter.create_document(doc)
     missing = uuid4()
 
-    projections = await adapter.get_document_projections_batch([doc.id, missing])
+    projections = await adapter.get_document_projections_batch([doc.id, missing], namespace_id=namespace.id)
     assert set(projections.keys()) == {doc.id}
