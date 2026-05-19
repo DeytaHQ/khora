@@ -8,6 +8,7 @@ generated tool by invoking its underlying callable directly with mocked
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -20,6 +21,7 @@ from agents.run import RunConfig  # noqa: E402
 from agents.tool import FunctionTool  # noqa: E402
 from agents.tool_context import ToolContext  # noqa: E402
 
+from khora.core.models.recall import RecallChunk  # noqa: E402
 from khora.integrations.openai_agents.tool import khora_recall_tool  # noqa: E402
 from khora.khora import Khora  # noqa: E402
 
@@ -37,18 +39,23 @@ def _make_tool_context() -> ToolContext:
 
 @dataclass
 class _RecallResultStub:
-    chunks: list[tuple[Any, float]]
+    chunks: list[Any]
     query: str = ""
     namespace_id: UUID = field(default_factory=uuid4)
+    documents: list[Any] = field(default_factory=list)
     entities: list[Any] = field(default_factory=list)
-    context_text: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
+    relationships: list[Any] = field(default_factory=list)
+    engine_info: dict[str, Any] = field(default_factory=dict)
 
 
-def _make_chunk(content: str) -> Any:
-    from khora.core.models.document import Chunk
-
-    return Chunk(content=content, document_id=uuid4())
+def _make_chunk(content: str, score: float = 0.87) -> RecallChunk:
+    return RecallChunk(
+        id=uuid4(),
+        document_id=uuid4(),
+        content=content,
+        score=score,
+        created_at=datetime.now(UTC),
+    )
 
 
 def _make_kb() -> Any:
@@ -83,7 +90,7 @@ async def test_tool_invocation_calls_kb_recall_with_bound_namespace() -> None:
     kb = _make_kb()
     namespace = uuid4()
     kb.recall.return_value = _RecallResultStub(
-        chunks=[(_make_chunk("hello"), 0.87), (_make_chunk("world"), 0.65)],
+        chunks=[_make_chunk("hello", score=0.87), _make_chunk("world", score=0.65)],
     )
 
     tool = khora_recall_tool(kb=kb, namespace=namespace, top_k=4, min_similarity=0.1)
