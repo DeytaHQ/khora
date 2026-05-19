@@ -783,7 +783,12 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self._relational.get_document_by_checksum(namespace_id, checksum)
 
-    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+    async def get_document_by_external_id(
+        self,
+        external_id: str | None,
+        *,
+        namespace_id: UUID,
+    ) -> Document | None:
         """Get a document by (namespace_id, external_id).
 
         Unlike ``get_document_by_checksum``, this lookup returns documents in
@@ -792,9 +797,14 @@ class StorageCoordinator:
         """
         if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self._relational.get_document_by_external_id(namespace_id, external_id)
+        return await self._relational.get_document_by_external_id(external_id, namespace_id=namespace_id)
 
-    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+    async def get_documents_by_external_ids(
+        self,
+        external_ids: list[str],
+        *,
+        namespace_id: UUID,
+    ) -> dict[str, Document]:
         """Batch variant of :meth:`get_document_by_external_id`.
 
         Collapses N serial lookups into one query for ``remember_batch`` replace
@@ -802,7 +812,7 @@ class StorageCoordinator:
         """
         if not self._relational:
             raise RuntimeError("Relational backend not configured")
-        return await self._relational.get_documents_by_external_ids(namespace_id, external_ids)
+        return await self._relational.get_documents_by_external_ids(external_ids, namespace_id=namespace_id)
 
     async def get_documents_by_checksums(self, namespace_id: UUID, checksums: list[str]) -> dict[str, Document]:
         """Fetch documents by content checksums in a single query.
@@ -1314,19 +1324,19 @@ class StorageCoordinator:
 
     async def find_paths(
         self,
-        namespace_id: UUID,
         source_entity_id: UUID,
         target_entity_id: UUID,
         *,
+        namespace_id: UUID,
         max_depth: int = 3,
         relationship_types: list[str] | None = None,
     ) -> list[list[dict[str, Any]]]:
         """Find paths between two entities."""
         if self._graph:
             return await self._graph.find_paths(
-                namespace_id,
                 source_entity_id,
                 target_entity_id,
+                namespace_id=namespace_id,
                 max_depth=max_depth,
                 relationship_types=relationship_types,
             )
@@ -1439,11 +1449,18 @@ class StorageCoordinator:
             return await self._relational.get_document_sources_batch(document_ids, namespace_id=namespace_id)
         return {}
 
-    async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
+    async def get_document_projections_batch(
+        self,
+        document_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> dict[UUID, DocumentProjection]:
         """Fetch full DocumentProjection rows for recall responses.
 
         Args:
             document_ids: List of document IDs to fetch
+            namespace_id: Namespace scope — cross-namespace ids are
+                silently dropped from the result (IGR-225 close-out).
 
         Returns:
             Dictionary mapping document ID to DocumentProjection
@@ -1451,7 +1468,7 @@ class StorageCoordinator:
         if not document_ids:
             return {}
         if self._relational:
-            return await self._relational.get_document_projections_batch(document_ids)
+            return await self._relational.get_document_projections_batch(document_ids, namespace_id=namespace_id)
         return {}
 
     @_record_storage_op("get_neighborhoods_batch", "graph")

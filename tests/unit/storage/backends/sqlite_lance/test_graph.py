@@ -436,14 +436,14 @@ class TestTraversal:
     async def test_find_paths_direct(self, adapter: SQLiteLanceGraphAdapter):
         ns = uuid4()
         entities = await self._chain(adapter, ns, 2)
-        paths = await adapter.find_paths(ns, entities[0].id, entities[1].id, max_depth=1)
+        paths = await adapter.find_paths(entities[0].id, entities[1].id, namespace_id=ns, max_depth=1)
         assert len(paths) == 1
         assert len(paths[0]) == 1  # one hop
 
     async def test_find_paths_two_hops(self, adapter: SQLiteLanceGraphAdapter):
         ns = uuid4()
         entities = await self._chain(adapter, ns, 3)
-        paths = await adapter.find_paths(ns, entities[0].id, entities[2].id, max_depth=3)
+        paths = await adapter.find_paths(entities[0].id, entities[2].id, namespace_id=ns, max_depth=3)
         # Exactly one path in a linear chain.
         assert len(paths) == 1
         assert len(paths[0]) == 2
@@ -451,7 +451,7 @@ class TestTraversal:
     async def test_find_paths_three_hops(self, adapter: SQLiteLanceGraphAdapter):
         ns = uuid4()
         entities = await self._chain(adapter, ns, 4)
-        paths = await adapter.find_paths(ns, entities[0].id, entities[3].id, max_depth=3)
+        paths = await adapter.find_paths(entities[0].id, entities[3].id, namespace_id=ns, max_depth=3)
         assert len(paths) == 1
         assert len(paths[0]) == 3
         # First edge starts at the source, last edge ends at the target.
@@ -462,7 +462,7 @@ class TestTraversal:
         ns = uuid4()
         entities = await self._chain(adapter, ns, 5)
         # a -> b -> c -> d -> e, but we cap at 2.
-        paths = await adapter.find_paths(ns, entities[0].id, entities[4].id, max_depth=2)
+        paths = await adapter.find_paths(entities[0].id, entities[4].id, namespace_id=ns, max_depth=2)
         assert paths == []
 
     async def test_find_paths_disconnected(self, adapter: SQLiteLanceGraphAdapter):
@@ -471,7 +471,7 @@ class TestTraversal:
         b = _make_entity(ns, name="B")
         await adapter.create_entity(a)
         await adapter.create_entity(b)
-        paths = await adapter.find_paths(ns, a.id, b.id, max_depth=3)
+        paths = await adapter.find_paths(a.id, b.id, namespace_id=ns, max_depth=3)
         assert paths == []
 
     async def test_find_paths_rel_type_filter(self, adapter: SQLiteLanceGraphAdapter):
@@ -486,10 +486,12 @@ class TestTraversal:
         await adapter.create_relationship(_make_relationship(ns, b.id, c.id, rel_type="WORKS_WITH"))
 
         # Only KNOWS: can't reach c.
-        paths = await adapter.find_paths(ns, a.id, c.id, max_depth=3, relationship_types=["KNOWS"])
+        paths = await adapter.find_paths(a.id, c.id, namespace_id=ns, max_depth=3, relationship_types=["KNOWS"])
         assert paths == []
         # Both allowed: one path.
-        paths = await adapter.find_paths(ns, a.id, c.id, max_depth=3, relationship_types=["KNOWS", "WORKS_WITH"])
+        paths = await adapter.find_paths(
+            a.id, c.id, namespace_id=ns, max_depth=3, relationship_types=["KNOWS", "WORKS_WITH"]
+        )
         assert len(paths) == 1
 
     async def test_get_neighborhood_depth_1(self, adapter: SQLiteLanceGraphAdapter):
@@ -580,7 +582,7 @@ class TestTraversal:
         await adapter.create_relationship(r1)
         await adapter.create_relationship(r2)
 
-        paths = await adapter.find_paths(ns, a.id, a.id, max_depth=2)
+        paths = await adapter.find_paths(a.id, a.id, namespace_id=ns, max_depth=2)
         assert len(paths) == 1, f"expected the A→B→A round trip, got {len(paths)} paths"
         assert len(paths[0]) == 2
         edge_ids = [hop["data"]["id"] for hop in paths[0]]
@@ -603,7 +605,7 @@ class TestTraversal:
         for r in (r1, r2, r3):
             await adapter.create_relationship(r)
 
-        paths = await adapter.find_paths(ns, a.id, c.id, max_depth=2)
+        paths = await adapter.find_paths(a.id, c.id, namespace_id=ns, max_depth=2)
         assert len(paths) == 2  # one per parallel A→B edge
         starting_edges = {p[0]["data"]["id"] for p in paths}
         assert starting_edges == {str(r1.id), str(r2.id)}
@@ -771,7 +773,7 @@ class TestPreferCurrentEveryEdge:
         ns = uuid4()
         nodes = await self._build_expired_middle_chain(adapter, ns)
 
-        paths = await adapter.find_paths(ns, nodes["a"].id, nodes["d"].id, max_depth=3)
+        paths = await adapter.find_paths(nodes["a"].id, nodes["d"].id, namespace_id=ns, max_depth=3)
         assert len(paths) == 1
         assert len(paths[0]) == 3  # 3 edges A→B→C→D
 
@@ -784,7 +786,9 @@ class TestPreferCurrentEveryEdge:
         ns = uuid4()
         nodes = await self._build_expired_middle_chain(adapter, ns)
 
-        paths = await adapter.find_paths(ns, nodes["a"].id, nodes["d"].id, max_depth=3, prefer_current=True)
+        paths = await adapter.find_paths(
+            nodes["a"].id, nodes["d"].id, namespace_id=ns, max_depth=3, prefer_current=True
+        )
         assert paths == []
 
     async def test_find_paths_prefer_current_returns_all_current_path(self, adapter: SQLiteLanceGraphAdapter):
@@ -792,7 +796,9 @@ class TestPreferCurrentEveryEdge:
         ns = uuid4()
         nodes = await self._build_expired_middle_chain(adapter, ns)
 
-        paths = await adapter.find_paths(ns, nodes["a"].id, nodes["f"].id, max_depth=3, prefer_current=True)
+        paths = await adapter.find_paths(
+            nodes["a"].id, nodes["f"].id, namespace_id=ns, max_depth=3, prefer_current=True
+        )
         assert len(paths) == 1
         assert len(paths[0]) == 2  # A→E→F
 
@@ -829,7 +835,7 @@ class TestPreferCurrentEveryEdge:
         r.valid_until = datetime.now(UTC) - timedelta(days=1)
         await adapter.create_relationship(r)
 
-        paths = await adapter.find_paths(ns, a.id, b.id, max_depth=2, prefer_current=True)
+        paths = await adapter.find_paths(a.id, b.id, namespace_id=ns, max_depth=2, prefer_current=True)
         assert paths == []
 
 

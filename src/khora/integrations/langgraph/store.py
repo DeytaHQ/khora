@@ -340,7 +340,7 @@ class KhoraStore:
         # first — khora's remember() short-circuits on duplicate checksum
         # which would yield a stale entry on overwrite semantics
         # LangGraph callers expect.
-        existing = await self.kb.storage.get_document_by_external_id(self._init.namespace_id, external_id)
+        existing = await self.kb.storage.get_document_by_external_id(external_id, namespace_id=self._init.namespace_id)
         if existing is not None:
             await self.kb.forget(existing.id, namespace=self._init.namespace_id)
 
@@ -375,7 +375,7 @@ class KhoraStore:
         flat = flatten_namespace(namespace, self._init.namespace_sep)
         external_id = composite_external_id(flat, key, self._init.namespace_sep)
 
-        document = await self.kb.storage.get_document_by_external_id(self._init.namespace_id, external_id)
+        document = await self.kb.storage.get_document_by_external_id(external_id, namespace_id=self._init.namespace_id)
         if document is None:
             return None
         unpacked = item_from_metadata(document)
@@ -513,7 +513,7 @@ class KhoraStore:
         await self._ensure_namespace()
         flat = flatten_namespace(namespace, self._init.namespace_sep)
         external_id = composite_external_id(flat, key, self._init.namespace_sep)
-        document = await self.kb.storage.get_document_by_external_id(self._init.namespace_id, external_id)
+        document = await self.kb.storage.get_document_by_external_id(external_id, namespace_id=self._init.namespace_id)
         if document is None:
             return
         await self.kb.forget(document.id, namespace=self._init.namespace_id)

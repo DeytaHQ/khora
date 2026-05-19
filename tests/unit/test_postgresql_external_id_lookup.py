@@ -76,7 +76,7 @@ class TestGetDocumentByExternalId:
         session.execute = AsyncMock(return_value=result_mock)
 
         backend = _make_backend(session)
-        result = await backend.get_document_by_external_id(ns_id, "missing-ext")
+        result = await backend.get_document_by_external_id("missing-ext", namespace_id=ns_id)
 
         assert result is None
 
@@ -91,7 +91,7 @@ class TestGetDocumentByExternalId:
         session.execute = AsyncMock(return_value=result_mock)
 
         backend = _make_backend(session)
-        result = await backend.get_document_by_external_id(ns_id, "ext-42")
+        result = await backend.get_document_by_external_id("ext-42", namespace_id=ns_id)
 
         assert result is not None
         assert result.id == model.id
@@ -107,7 +107,7 @@ class TestGetDocumentByExternalId:
         session.execute = AsyncMock(return_value=result_mock)
 
         backend = _make_backend(session)
-        result = await backend.get_document_by_external_id(ns_id, "ext-42")
+        result = await backend.get_document_by_external_id("ext-42", namespace_id=ns_id)
 
         assert result is not None
         assert result.status == DocumentStatus.FAILED
@@ -123,7 +123,7 @@ class TestGetDocumentByExternalId:
         session.execute = AsyncMock(return_value=result_mock)
 
         backend = _make_backend(session)
-        result = await backend.get_document_by_external_id(ns_id, "ext-42")
+        result = await backend.get_document_by_external_id("ext-42", namespace_id=ns_id)
 
         assert result is not None
         assert result.status == DocumentStatus.PROCESSING
@@ -138,7 +138,7 @@ class TestGetDocumentByExternalId:
         session.execute = AsyncMock(return_value=result_mock)
 
         backend = _make_backend(session)
-        await backend.get_document_by_external_id(ns_id, "ext-1")
+        await backend.get_document_by_external_id("ext-1", namespace_id=ns_id)
 
         call_args = session.execute.call_args
         stmt = call_args[0][0]
@@ -156,7 +156,7 @@ class TestGetDocumentByExternalId:
         session.execute = AsyncMock()
 
         backend = _make_backend(session)
-        result = await backend.get_document_by_external_id(ns_id, None)
+        result = await backend.get_document_by_external_id(None, namespace_id=ns_id)
 
         assert result is None
         session.execute.assert_not_awaited()

@@ -537,7 +537,7 @@ class TestBackendProjectionsBatch:
             )
             await backend.create_document(doc)
 
-            projections = await backend.get_document_projections_batch([doc.id])
+            projections = await backend.get_document_projections_batch([doc.id], namespace_id=ns.id)
 
             assert doc.id in projections
             proj = projections[doc.id]
@@ -562,6 +562,6 @@ class TestBackendProjectionsBatch:
         backend = SQLiteRelationalBackend(":memory:")
         await backend.connect()
         try:
-            assert await backend.get_document_projections_batch([]) == {}
+            assert await backend.get_document_projections_batch([], namespace_id=uuid4()) == {}
         finally:
             await backend.disconnect()

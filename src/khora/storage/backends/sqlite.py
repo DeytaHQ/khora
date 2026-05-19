@@ -534,7 +534,7 @@ class SQLiteRelationalBackend:
             return None
         return self._row_to_document(row)
 
-    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+    async def get_document_by_external_id(self, external_id: str | None, *, namespace_id: UUID) -> Document | None:
         """Get a document by (namespace_id, external_id).
 
         Status is NOT filtered so FAILED rows can self-heal on the next
@@ -566,7 +566,9 @@ class SQLiteRelationalBackend:
             result[doc.id] = doc
         return result
 
-    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+    async def get_documents_by_external_ids(
+        self, external_ids: list[str], *, namespace_id: UUID
+    ) -> dict[str, Document]:
         """Batch lookup by ``(namespace_id, external_id)``.
 
         Status is NOT filtered (self-heal contract). Skips empty / None entries.
@@ -610,15 +612,20 @@ class SQLiteRelationalBackend:
             )
         return result
 
-    async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
+    async def get_document_projections_batch(
+        self,
+        document_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> dict[UUID, DocumentProjection]:
         if not document_ids:
             return {}
         placeholders = ",".join("?" for _ in document_ids)
         cursor = await self._conn.execute(
             f"SELECT id, created_at, source_type, title, external_id, source, source_name, "  # noqa: S608
             f"source_url, content_type, source_timestamp, metadata_ "
-            f"FROM documents WHERE id IN ({placeholders})",
-            [str(d) for d in document_ids],
+            f"FROM documents WHERE id IN ({placeholders}) AND namespace_id = ?",
+            [str(d) for d in document_ids] + [str(namespace_id)],
         )
         rows = await cursor.fetchall()
         result: dict[UUID, DocumentProjection] = {}

@@ -514,7 +514,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
             model = result.scalars().first()
             return self._document_model_to_domain(model) if model else None
 
-    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+    async def get_document_by_external_id(self, external_id: str | None, *, namespace_id: UUID) -> Document | None:
         """Get a document by (namespace_id, external_id).
 
         Status is NOT filtered: FAILED rows must be returned so the next
@@ -561,7 +561,9 @@ class PostgreSQLBackend(AsyncSessionMixin):
             models = result.scalars().all()
             return {m.id: self._document_model_to_domain(m) for m in models}
 
-    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+    async def get_documents_by_external_ids(
+        self, external_ids: list[str], *, namespace_id: UUID
+    ) -> dict[str, Document]:
         """Batch lookup for ``(namespace_id, external_id)``.
 
         Unlike ``get_documents_by_checksums``, does NOT filter by status so
@@ -660,12 +662,18 @@ class PostgreSQLBackend(AsyncSessionMixin):
                 for row in rows
             }
 
-    async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
+    async def get_document_projections_batch(
+        self,
+        document_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> dict[UUID, DocumentProjection]:
         """Fetch full DocumentProjection rows for recall responses.
 
         Wider SELECT than ``get_document_sources_batch`` — also pulls
         ``external_id``, ``source_name``, ``source_url``, ``content_type``,
-        and ``metadata``.
+        and ``metadata``. Filters by ``namespace_id`` at the query layer;
+        cross-namespace ids are silently dropped (IGR-225 close-out).
         """
         if not document_ids:
             return {}
@@ -684,7 +692,10 @@ class PostgreSQLBackend(AsyncSessionMixin):
                     DocumentModel.content_type,
                     DocumentModel.source_timestamp,
                     DocumentModel.metadata_,
-                ).where(DocumentModel.id.in_(document_ids))
+                ).where(
+                    DocumentModel.id.in_(document_ids),
+                    DocumentModel.namespace_id == namespace_id,
+                )
             )
             rows = result.all()
             return {

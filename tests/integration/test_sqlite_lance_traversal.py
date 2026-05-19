@@ -114,8 +114,12 @@ class TestSQLiteLanceTraversal:
             ns = await coord.create_namespace(MemoryNamespace())
             a, b, c, d = await _seed_chain(coord, ns.id, ["a", "b", "c", "d"])
 
-            paths = await coord.graph.find_paths(  # type: ignore[union-attr]
-                ns.id, a.id, d.id, max_depth=4
+            paths = await coord.graph.find_paths(
+                a.id,
+                d.id,
+                # type: ignore[union-attr]
+                namespace_id=ns.id,
+                max_depth=4,
             )
             assert paths, "expected at least one A->D path on a directed chain"
             # Chain A->B->C->D has exactly 3 edges.
@@ -132,8 +136,12 @@ class TestSQLiteLanceTraversal:
             a, b = await _seed_chain(coord, ns.id, ["a", "b"])
             c, d = await _seed_chain(coord, ns.id, ["c", "d"])
 
-            paths = await coord.graph.find_paths(  # type: ignore[union-attr]
-                ns.id, a.id, d.id, max_depth=5
+            paths = await coord.graph.find_paths(
+                a.id,
+                d.id,
+                # type: ignore[union-attr]
+                namespace_id=ns.id,
+                max_depth=5,
             )
             assert paths == []
         finally:

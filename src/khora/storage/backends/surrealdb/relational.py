@@ -487,7 +487,7 @@ class SurrealDBRelationalAdapter:
             return None
         return self._row_to_document(row)
 
-    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+    async def get_document_by_external_id(self, external_id: str | None, *, namespace_id: UUID) -> Document | None:
         """Get a document by (namespace_id, external_id).
 
         Status is NOT filtered so FAILED rows can self-heal on the next
@@ -547,7 +547,9 @@ class SurrealDBRelationalAdapter:
         )
         return {_parse_uuid(r["id"]): self._row_to_document(r) for r in rows}
 
-    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+    async def get_documents_by_external_ids(
+        self, external_ids: list[str], *, namespace_id: UUID
+    ) -> dict[str, Document]:
         """Batch lookup by ``(namespace_id, external_id)``. Status-agnostic."""
         filtered = [e for e in external_ids if e]
         if not filtered:
@@ -594,15 +596,25 @@ class SurrealDBRelationalAdapter:
             )
         return result
 
-    async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
-        """Fetch full DocumentProjection rows for recall responses."""
+    async def get_document_projections_batch(
+        self,
+        document_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> dict[UUID, DocumentProjection]:
+        """Fetch full DocumentProjection rows for recall responses.
+
+        Filters by ``namespace_id`` at the SurrealQL layer; cross-namespace
+        ids are silently dropped (IGR-225 close-out).
+        """
         if not document_ids:
             return {}
         id_strs = [_record_id("document", uid) for uid in document_ids]
         rows = await self._conn.query(
             "SELECT id, created_at, source_type, title, external_id, source, source_name, "
-            "source_url, content_type, source_timestamp, metadata_ FROM document WHERE id IN $ids",
-            {"ids": id_strs},
+            "source_url, content_type, source_timestamp, metadata_ FROM document "
+            "WHERE id IN $ids AND namespace_id = $ns",
+            {"ids": id_strs, "ns": namespace_id},
         )
         result: dict[UUID, DocumentProjection] = {}
         for r in rows:

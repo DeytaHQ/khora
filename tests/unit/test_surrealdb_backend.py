@@ -2512,7 +2512,7 @@ class TestSurrealDBGraphAdapterTraversal:
         conn.query = AsyncMock(return_value=single_result)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.find_paths(ns_id, src_id, tgt_id, max_depth=3)
+        result = await adapter.find_paths(src_id, tgt_id, namespace_id=ns_id, max_depth=3)
         assert isinstance(result, list)
         assert len(result) >= 1
         # Single query for all depths
@@ -3140,12 +3140,7 @@ class TestSurrealDBSQLInjectionVectors:
         adapter = SurrealDBGraphAdapter(conn)
 
         malicious_rt = "RELATES_TO'; DELETE entity WHERE true; --"
-        await adapter.find_paths(
-            uuid4(),
-            uuid4(),
-            uuid4(),
-            relationship_types=[malicious_rt],
-        )
+        await adapter.find_paths(uuid4(), uuid4(), namespace_id=uuid4(), relationship_types=[malicious_rt])
 
         # The SQL should use $rel_types parameter, not contain the raw payload
         call_args = conn.query.call_args
@@ -3405,12 +3400,7 @@ class TestSurrealDBInjectionPrevention:
         tgt_id = uuid4()
         ns_id = uuid4()
 
-        await adapter.find_paths(
-            ns_id,
-            src_id,
-            tgt_id,
-            relationship_types=["WORKS_AT", "KNOWS"],
-        )
+        await adapter.find_paths(src_id, tgt_id, namespace_id=ns_id, relationship_types=["WORKS_AT", "KNOWS"])
 
         # Verify that at least one call was made and the SQL uses $rel_types
         # parameter binding instead of inline string interpolation
@@ -3646,7 +3636,7 @@ class TestSurrealDBTemporalNeighbors:
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
 
         adapter = SurrealDBGraphAdapter(conn)
-        results = await adapter.get_temporal_neighbors(eid, ns_id, limit=10)
+        results = await adapter.get_temporal_neighbors(eid, namespace_id=ns_id, limit=10)
         assert len(results) >= 0  # May be empty depending on mock
         conn.query.assert_awaited()
 
@@ -3662,7 +3652,7 @@ class TestSurrealDBTemporalNeighbors:
         now = datetime.now(UTC)
         results = await adapter.get_temporal_neighbors(
             uuid4(),
-            uuid4(),
+            namespace_id=uuid4(),
             valid_after=now - timedelta(days=30),
             valid_before=now,
         )
@@ -3797,7 +3787,7 @@ class TestSurrealDBDepthCapRaised:
         conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBGraphAdapter(conn)
 
-        await adapter.find_paths(ns_id, src_id, tgt_id, max_depth=5)
+        await adapter.find_paths(src_id, tgt_id, namespace_id=ns_id, max_depth=5)
 
         conn.query.assert_awaited_once()
         sql = conn.query.call_args[0][0]
@@ -3818,7 +3808,7 @@ class TestSurrealDBDepthCapRaised:
         conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBGraphAdapter(conn)
 
-        await adapter.find_paths(ns_id, src_id, tgt_id, max_depth=8)
+        await adapter.find_paths(src_id, tgt_id, namespace_id=ns_id, max_depth=8)
 
         sql = conn.query.call_args[0][0]
         assert " AS d6" in sql
@@ -3840,7 +3830,7 @@ class TestSurrealDBSingleQueryTemporalNeighbors:
         conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBGraphAdapter(conn)
 
-        await adapter.get_temporal_neighbors(entity_id, ns_id, max_hops=4)
+        await adapter.get_temporal_neighbors(entity_id, namespace_id=ns_id, max_hops=4)
 
         # Should be exactly 1 query (not 4 separate queries)
         assert conn.query.await_count == 1
@@ -3856,7 +3846,7 @@ class TestSurrealDBSingleQueryTemporalNeighbors:
         conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBGraphAdapter(conn)
 
-        await adapter.get_temporal_neighbors(entity_id, ns_id, max_hops=4)
+        await adapter.get_temporal_neighbors(entity_id, namespace_id=ns_id, max_hops=4)
 
         sql = conn.query.call_args[0][0]
         assert " AS d1" in sql
@@ -3883,7 +3873,7 @@ class TestSurrealDBSingleQueryTemporalNeighbors:
         conn.query = AsyncMock(return_value=single_result)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_temporal_neighbors(entity_id, ns_id, max_hops=2)
+        result = await adapter.get_temporal_neighbors(entity_id, namespace_id=ns_id, max_hops=2)
         assert len(result) == 1
         assert result[0]["name"] == "Temporal-Neighbor"
 
@@ -3898,7 +3888,7 @@ class TestSurrealDBSingleQueryTemporalNeighbors:
         conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBGraphAdapter(conn)
 
-        await adapter.get_temporal_neighbors(entity_id, ns_id, max_hops=10)
+        await adapter.get_temporal_neighbors(entity_id, namespace_id=ns_id, max_hops=10)
 
         sql = conn.query.call_args[0][0]
         assert " AS d6" in sql

@@ -579,7 +579,7 @@ async def test_list_episodes_with_time_filters() -> None:
 async def test_find_paths_empty_result() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    paths = await b.find_paths(uuid4(), uuid4(), uuid4())
+    paths = await b.find_paths(uuid4(), uuid4(), namespace_id=uuid4())
     assert paths == []
 
 
@@ -587,7 +587,7 @@ async def test_find_paths_empty_result() -> None:
 async def test_find_paths_with_rel_filter_and_depth() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    await b.find_paths(uuid4(), uuid4(), uuid4(), relationship_types=["KNOWS", "WORKS_AT"], max_depth=4)
+    await b.find_paths(uuid4(), uuid4(), namespace_id=uuid4(), relationship_types=["KNOWS", "WORKS_AT"], max_depth=4)
     assembled = [str(call.args[0]) for call in session.execute.await_args_list]
     assert any(":KNOWS|WORKS_AT" in sql for sql in assembled)
     assert any("*1..4" in sql for sql in assembled)

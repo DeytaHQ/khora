@@ -873,10 +873,10 @@ class SurrealDBGraphAdapter:
     )
     async def find_paths(
         self,
-        namespace_id: UUID,
         source_entity_id: UUID,
         target_entity_id: UUID,
         *,
+        namespace_id: UUID,
         max_depth: int = 3,
         relationship_types: list[str] | None = None,
     ) -> list[list[dict[str, Any]]]:
@@ -1259,8 +1259,8 @@ class SurrealDBGraphAdapter:
     async def get_temporal_neighbors(
         self,
         entity_id: UUID,
-        namespace_id: UUID,
         *,
+        namespace_id: UUID,
         valid_after: datetime | None = None,
         valid_before: datetime | None = None,
         max_hops: int = 2,

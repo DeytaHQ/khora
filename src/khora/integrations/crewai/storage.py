@@ -356,7 +356,7 @@ class KhoraStorageBackend:
     ) -> Any | None:
         storage = self.kb.storage
         if doc_id is None:
-            doc = await storage.get_document_by_external_id(self.namespace_id, record_id)
+            doc = await storage.get_document_by_external_id(record_id, namespace_id=self.namespace_id)
             if doc is None:
                 return None
             doc_id = doc.id

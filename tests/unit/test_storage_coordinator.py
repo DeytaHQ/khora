@@ -239,17 +239,17 @@ class TestDocumentOps:
         rel.get_document_by_external_id = AsyncMock(return_value=doc)
         coord = StorageCoordinator(relational=rel)
 
-        result = await coord.get_document_by_external_id(ns_id, "ext-1")
+        result = await coord.get_document_by_external_id("ext-1", namespace_id=ns_id)
 
         assert result is doc
-        rel.get_document_by_external_id.assert_awaited_once_with(ns_id, "ext-1")
+        rel.get_document_by_external_id.assert_awaited_once_with("ext-1", namespace_id=ns_id)
 
     @pytest.mark.asyncio
     async def test_get_document_by_external_id_missing_relational(self) -> None:
         """get_document_by_external_id without relational raises RuntimeError."""
         coord = StorageCoordinator()
         with pytest.raises(RuntimeError, match="Relational backend not configured"):
-            await coord.get_document_by_external_id(uuid4(), "ext-1")
+            await coord.get_document_by_external_id("ext-1", namespace_id=uuid4())
 
     @pytest.mark.asyncio
     async def test_get_document_by_external_id_none_short_circuits(self) -> None:
@@ -260,7 +260,7 @@ class TestDocumentOps:
         rel.get_document_by_external_id = AsyncMock(return_value=None)
         coord = StorageCoordinator(relational=rel)
 
-        result = await coord.get_document_by_external_id(uuid4(), None)
+        result = await coord.get_document_by_external_id(None, namespace_id=uuid4())
 
         assert result is None
         rel.get_document_by_external_id.assert_awaited_once()
@@ -501,7 +501,7 @@ class TestGraphOps:
     async def test_find_paths_no_graph(self) -> None:
         """find_paths without graph returns empty list."""
         coord = StorageCoordinator()
-        result = await coord.find_paths(uuid4(), uuid4(), uuid4())
+        result = await coord.find_paths(uuid4(), uuid4(), namespace_id=uuid4())
         assert result == []
 
 

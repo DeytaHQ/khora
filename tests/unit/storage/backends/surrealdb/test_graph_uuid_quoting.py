@@ -209,7 +209,7 @@ async def test_get_temporal_neighbors_does_not_interpolate_bare_uuid() -> None:
 
     await adapter.get_temporal_neighbors(
         _BUGGY_UUID,
-        UUID("12345678-1234-1234-1234-123456789abc"),
+        namespace_id=UUID("12345678-1234-1234-1234-123456789abc"),
         max_hops=1,
         limit=5,
     )

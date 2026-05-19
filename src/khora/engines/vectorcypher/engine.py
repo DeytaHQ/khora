@@ -726,7 +726,7 @@ class VectorCypherEngine:
         # namespace. Lookup is status-agnostic (COMPLETED / PROCESSING / FAILED)
         # so the replace path self-heals previously failed rows.
         if external_id is not None:
-            existing_by_ext = await storage.get_document_by_external_id(namespace_id, external_id)
+            existing_by_ext = await storage.get_document_by_external_id(external_id, namespace_id=namespace_id)
             if existing_by_ext is not None:
                 return await self._remember_via_replace(
                     existing=existing_by_ext,
@@ -790,7 +790,7 @@ class VectorCypherEngine:
             # succeeds against the winner's row.
             if external_id is None:
                 raise
-            existing_after_race = await storage.get_document_by_external_id(namespace_id, external_id)
+            existing_after_race = await storage.get_document_by_external_id(external_id, namespace_id=namespace_id)
             if existing_after_race is None:
                 raise
             return await self._remember_via_replace(
@@ -2235,7 +2235,9 @@ class VectorCypherEngine:
 
         existing_by_ext_map: dict[str, Any] = {}
         if ext_id_to_idx:
-            existing_by_ext_map = await storage.get_documents_by_external_ids(namespace_id, list(ext_id_to_idx.keys()))
+            existing_by_ext_map = await storage.get_documents_by_external_ids(
+                list(ext_id_to_idx.keys()), namespace_id=namespace_id
+            )
 
         for ext_id, idx in ext_id_to_idx.items():
             existing_by_ext = existing_by_ext_map.get(ext_id)
