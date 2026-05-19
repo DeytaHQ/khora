@@ -1950,7 +1950,7 @@ class ChronicleEngine:
         entity_scores = {eid: score for eid, score in entity_results}
 
         try:
-            entities = await storage.get_entities_batch(entity_ids)
+            entities = await storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
         except Exception as e:
             logger.warning("Entity channel: get_entities_batch failed for {} IDs: {}", len(entity_ids), e)
             return []
@@ -2167,7 +2167,7 @@ class ChronicleEngine:
 
         entity_ids = [eid for eid, _ in entity_results]
         try:
-            entities = await storage.get_entities_batch(entity_ids)
+            entities = await storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
         except Exception:
             return chunks_with_scores
 
@@ -2213,20 +2213,20 @@ class ChronicleEngine:
         """Remove a memory from the engine."""
         storage = self._get_storage()
 
-        # Verify namespace if provided
-        ns_id = namespace_id
-        if ns_id:
-            document = await storage.get_document(document_id)
-            if document and document.namespace_id != ns_id:
-                logger.warning(f"Document {document_id} not in namespace {ns_id}")
-                return False
-        else:
-            document = await storage.get_document(document_id)
-            if document is None:
-                return False
-            ns_id = document.namespace_id
+        # namespace_id is required for IDOR-safe lookup (IGR-221). Callers
+        # going through Khora.forget always resolve it before calling here;
+        # bail loudly rather than allow a cross-tenant id probe.
+        if namespace_id is None:
+            logger.warning(f"Cannot forget document {document_id}: namespace_id is required")
+            return False
 
-        await self._cascade_forget_extraction(document_id, ns_id)
+        document = await storage.get_document(document_id, namespace_id=namespace_id)
+        if document is None:
+            # Either the document doesn't exist or it lives in another
+            # namespace — either way, nothing to forget for this caller.
+            return False
+
+        await self._cascade_forget_extraction(document_id, namespace_id)
 
         return await storage.delete_document(document_id)
 
@@ -2527,9 +2527,9 @@ class ChronicleEngine:
     # Document Operations
     # =========================================================================
 
-    async def get_document(self, document_id: UUID) -> Document | None:
-        """Get a document by ID."""
-        return await self._get_storage().get_document(document_id)
+    async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
+        """Get a document by ID, scoped to ``namespace_id`` (IGR-221)."""
+        return await self._get_storage().get_document(document_id, namespace_id=namespace_id)
 
     async def list_documents(
         self,
@@ -2568,7 +2568,7 @@ class ChronicleEngine:
             return []
 
         entity_ids = [entity_id for entity_id, _ in entity_ids_scores]
-        entities_map = await storage.get_entities_batch(entity_ids)
+        entities_map = await storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
 
         return [entities_map[eid] for eid, _score in entity_ids_scores if eid in entities_map]
 

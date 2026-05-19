@@ -730,7 +730,7 @@ class TestRelationalAdapterDocument:
         conn.query_one = AsyncMock(return_value=row)
         adapter = SurrealDBRelationalAdapter(conn)
 
-        result = await adapter.get_document(doc_id)
+        result = await adapter.get_document(doc_id, namespace_id=uuid4())
         assert result is not None
         assert result.id == doc_id
 
@@ -741,7 +741,7 @@ class TestRelationalAdapterDocument:
         conn.query_one = AsyncMock(return_value=None)
         adapter = SurrealDBRelationalAdapter(conn)
 
-        result = await adapter.get_document(uuid4())
+        result = await adapter.get_document(uuid4(), namespace_id=uuid4())
         assert result is None
 
     async def test_list_documents(self) -> None:
@@ -840,7 +840,7 @@ class TestRelationalAdapterDocument:
         conn.query = AsyncMock(return_value=rows)
         adapter = SurrealDBRelationalAdapter(conn)
 
-        result = await adapter.get_documents_batch([doc1, doc2])
+        result = await adapter.get_documents_batch([doc1, doc2], namespace_id=uuid4())
         assert len(result) == 2
         assert doc1 in result
         assert doc2 in result
@@ -851,7 +851,7 @@ class TestRelationalAdapterDocument:
         conn = _make_mock_conn()
         adapter = SurrealDBRelationalAdapter(conn)
 
-        result = await adapter.get_documents_batch([])
+        result = await adapter.get_documents_batch([], namespace_id=uuid4())
         assert result == {}
         conn.query.assert_not_awaited()
 
@@ -875,7 +875,7 @@ class TestRelationalAdapterDocument:
         )
         adapter = SurrealDBRelationalAdapter(conn)
 
-        result = await adapter.get_document_sources_batch([doc_id])
+        result = await adapter.get_document_sources_batch([doc_id], namespace_id=uuid4())
         assert doc_id in result
         assert isinstance(result[doc_id], DocumentSource)
         assert result[doc_id].title == "My Doc"
@@ -886,7 +886,7 @@ class TestRelationalAdapterDocument:
         conn = _make_mock_conn()
         adapter = SurrealDBRelationalAdapter(conn)
 
-        result = await adapter.get_document_sources_batch([])
+        result = await adapter.get_document_sources_batch([], namespace_id=uuid4())
         assert result == {}
 
     async def test_count_documents(self) -> None:
@@ -1739,7 +1739,7 @@ class TestVectorAdapterEntityOps:
         conn.query_one = AsyncMock(return_value={"cnt": 1})
         adapter = SurrealDBVectorAdapter(conn)
 
-        result = await adapter.entity_exists(uuid4())
+        result = await adapter.entity_exists(uuid4(), namespace_id=uuid4())
         assert result is True
 
     async def test_entity_exists_false(self) -> None:
@@ -1749,7 +1749,7 @@ class TestVectorAdapterEntityOps:
         conn.query_one = AsyncMock(return_value={"cnt": 0})
         adapter = SurrealDBVectorAdapter(conn)
 
-        result = await adapter.entity_exists(uuid4())
+        result = await adapter.entity_exists(uuid4(), namespace_id=uuid4())
         assert result is False
 
     async def test_entity_exists_none_row(self) -> None:
@@ -1759,7 +1759,7 @@ class TestVectorAdapterEntityOps:
         conn.query_one = AsyncMock(return_value=None)
         adapter = SurrealDBVectorAdapter(conn)
 
-        result = await adapter.entity_exists(uuid4())
+        result = await adapter.entity_exists(uuid4(), namespace_id=uuid4())
         assert result is False
 
     async def test_update_entity_embedding(self) -> None:
@@ -2114,7 +2114,7 @@ class TestSurrealDBGraphAdapterEntity:
         conn.query_one = AsyncMock(return_value=row)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_entity(eid)
+        result = await adapter.get_entity(eid, namespace_id=ns_id)
 
         assert result is not None
         assert result.id == eid
@@ -2128,7 +2128,7 @@ class TestSurrealDBGraphAdapterEntity:
         conn.query_one = AsyncMock(return_value=None)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_entity(uuid4())
+        result = await adapter.get_entity(uuid4(), namespace_id=uuid4())
         assert result is None
 
     async def test_get_entity_by_name(self) -> None:
@@ -2260,7 +2260,7 @@ class TestSurrealDBGraphAdapterEntity:
         conn.query = AsyncMock(return_value=rows)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_entities_batch([eid1, eid2])
+        result = await adapter.get_entities_batch([eid1, eid2], namespace_id=ns_id)
         assert len(result) == 2
         assert eid1 in result
         assert eid2 in result
@@ -2316,7 +2316,7 @@ class TestSurrealDBGraphAdapterRelationship:
         conn.query_one = AsyncMock(return_value=row)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_relationship(rel_id)
+        result = await adapter.get_relationship(rel_id, namespace_id=ns_id)
         assert result is not None
         assert result.id == rel_id
         assert result.source_entity_id == src_id
@@ -2346,7 +2346,7 @@ class TestSurrealDBGraphAdapterRelationship:
         conn.query = AsyncMock(return_value=rows)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_entity_relationships(entity_id, direction="outgoing")
+        result = await adapter.get_entity_relationships(entity_id, namespace_id=ns_id, direction="outgoing")
         assert len(result) == 1
         # Verify query uses in=entity:⟨id⟩ for outgoing (in = source in SurrealDB)
         call_args = conn.query.call_args
@@ -2364,7 +2364,7 @@ class TestSurrealDBGraphAdapterRelationship:
         conn.query = AsyncMock(return_value=rows)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_entity_relationships(entity_id, direction="incoming")
+        result = await adapter.get_entity_relationships(entity_id, namespace_id=ns_id, direction="incoming")
         assert len(result) == 1
 
     async def test_get_entity_relationships_both(self) -> None:
@@ -2381,7 +2381,7 @@ class TestSurrealDBGraphAdapterRelationship:
         conn.query = AsyncMock(return_value=rows)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_entity_relationships(entity_id, direction="both")
+        result = await adapter.get_entity_relationships(entity_id, namespace_id=ns_id, direction="both")
         assert len(result) == 2
 
     async def test_list_relationships(self) -> None:
@@ -2457,7 +2457,7 @@ class TestSurrealDBGraphAdapterEpisode:
         conn.query_one = AsyncMock(return_value=row)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_episode(ep_id)
+        result = await adapter.get_episode(ep_id, namespace_id=ns_id)
 
         assert result is not None
         assert result.id == ep_id
@@ -2530,10 +2530,13 @@ class TestSurrealDBGraphAdapterTraversal:
         ]
 
         conn = _make_mock_conn()
+        # IGR-223: get_neighborhood now verifies the seed entity belongs to
+        # ``namespace_id`` (via get_entity → query_one) before traversing.
+        conn.query_one = AsyncMock(return_value=_graph_entity_row(entity_id, ns_id, name="Seed"))
         conn.query = AsyncMock(return_value=neighborhood_data)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_neighborhood(entity_id, depth=1)
+        result = await adapter.get_neighborhood(entity_id, namespace_id=ns_id, depth=1)
         assert isinstance(result, dict)
         conn.query.assert_awaited()
 
@@ -2795,7 +2798,7 @@ class TestSurrealDBEventStoreOperations:
         conn.query = AsyncMock(return_value=rows)
         adapter = SurrealDBEventStoreAdapter(conn)
 
-        result = await adapter.get_events_for_resource("document", res_id)
+        result = await adapter.get_events_for_resource("document", res_id, namespace_id=uuid4())
         assert len(result) == 1
         # Verify resource_type and resource_id were used
         call_args = conn.query.call_args
@@ -2813,7 +2816,7 @@ class TestSurrealDBEventStoreOperations:
         conn.query_one = AsyncMock(return_value=row)
         adapter = SurrealDBEventStoreAdapter(conn)
 
-        result = await adapter.get_latest_event("entity", res_id)
+        result = await adapter.get_latest_event("entity", res_id, namespace_id=uuid4())
         assert result is not None
         # Verify LIMIT 1 and ORDER BY were used
         call_args = conn.query_one.call_args
@@ -2828,7 +2831,7 @@ class TestSurrealDBEventStoreOperations:
         conn.query_one = AsyncMock(return_value=None)
         adapter = SurrealDBEventStoreAdapter(conn)
 
-        result = await adapter.get_latest_event("document", uuid4())
+        result = await adapter.get_latest_event("document", uuid4(), namespace_id=uuid4())
         assert result is None
 
     async def test_count_events(self) -> None:
@@ -3428,13 +3431,20 @@ class TestSurrealDBInjectionPrevention:
         """get_neighborhood passes relationship_types as parameter, not f-string."""
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
 
-        conn = _make_mock_conn(query=[])
-        adapter = SurrealDBGraphAdapter(conn)
-
         entity_id = uuid4()
+        ns_id = uuid4()
+
+        # IGR-223: get_neighborhood now verifies the seed entity belongs to
+        # ``namespace_id`` (via get_entity → query_one) before traversing.
+        conn = _make_mock_conn(
+            query=[],
+            query_one=_graph_entity_row(entity_id, ns_id, name="Seed"),
+        )
+        adapter = SurrealDBGraphAdapter(conn)
 
         await adapter.get_neighborhood(
             entity_id,
+            namespace_id=ns_id,
             relationship_types=["MANAGES", "REPORTS_TO"],
         )
 
@@ -3928,7 +3938,7 @@ class TestSurrealDBBatchRelationshipFetch:
         conn.query = AsyncMock(side_effect=[entity_rows, []])
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_neighborhoods_batch([eid1, eid2], depth=1)
+        result = await adapter.get_neighborhoods_batch([eid1, eid2], namespace_id=ns_id, depth=1)
 
         # 2 queries total: 1 batch entity fetch + 1 batch relationship fetch
         assert conn.query.await_count == 2
@@ -3955,7 +3965,7 @@ class TestSurrealDBBatchRelationshipFetch:
         conn.query = AsyncMock(return_value=entity_rows)
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.get_neighborhoods_batch([eid], depth=1)
+        result = await adapter.get_neighborhoods_batch([eid], namespace_id=uuid4(), depth=1)
 
         # Only 1 query (entity fetch), no relationship fetch needed
         assert conn.query.await_count == 1

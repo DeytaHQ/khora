@@ -122,8 +122,14 @@ class RelationalBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def get_document(self, document_id: UUID) -> Document | None:
-        """Get a document by ID."""
+    async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
+        """Get a document by ID, scoped to ``namespace_id``.
+
+        Returns ``None`` if the document does not exist OR belongs to a
+        different namespace — the caller's namespace is the authority.
+        The ``namespace_id`` filter prevents cross-tenant document access
+        by id (IDOR — IGR-221).
+        """
         ...
 
     @abstractmethod
@@ -215,21 +221,30 @@ class RelationalBackendProtocol(Protocol):
         """
         ...
 
-    async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
-        """Fetch multiple documents in a single query.
+    async def get_documents_batch(self, document_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Document]:
+        """Fetch multiple documents in a single query, scoped to ``namespace_id``.
+
+        Documents belonging to any other namespace are silently dropped
+        from the result to prevent cross-tenant IDOR (IGR-221).
 
         Returns dictionary mapping document ID to Document object.
         """
         ...
 
-    async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
-        """Fetch lightweight document metadata for source attribution.
+    async def get_document_sources_batch(
+        self, document_ids: list[UUID], *, namespace_id: UUID
+    ) -> dict[UUID, DocumentSource]:
+        """Fetch lightweight document metadata for source attribution,
+        scoped to ``namespace_id``.
 
         Returns a column-limited projection (no content, processing stats,
-        or mutable state) for display and linking purposes.
+        or mutable state) for display and linking purposes. Documents in
+        other namespaces are silently dropped from the result (IGR-221).
 
         Args:
             document_ids: List of document IDs to fetch
+            namespace_id: Caller's namespace; documents belonging to any
+                other namespace are silently dropped from the result.
 
         Returns:
             Dictionary mapping document ID to DocumentSource
@@ -380,8 +395,13 @@ class VectorBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def entity_exists(self, entity_id: UUID) -> bool:
-        """Check if an entity exists in PostgreSQL."""
+    async def entity_exists(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Check if an entity exists in PostgreSQL within ``namespace_id``.
+
+        Returns ``False`` if the entity does not exist OR belongs to a
+        different namespace. The ``namespace_id`` filter prevents
+        cross-tenant entity-existence enumeration (IDOR — IGR-221).
+        """
         ...
 
     @abstractmethod
@@ -468,8 +488,13 @@ class GraphBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
-        """Get an entity by ID."""
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
+        """Get an entity by ID, scoped to ``namespace_id``.
+
+        Returns ``None`` if the entity does not exist OR belongs to a
+        different namespace. Prevents cross-tenant entity access by id
+        (IDOR — IGR-223).
+        """
         ...
 
     @abstractmethod
@@ -506,8 +531,13 @@ class GraphBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-        """Get a relationship by ID."""
+    async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
+        """Get a relationship by ID, scoped to ``namespace_id``.
+
+        Returns ``None`` if the relationship does not exist OR belongs to
+        a different namespace. Prevents cross-tenant relationship access
+        by id (IDOR — IGR-223).
+        """
         ...
 
     @abstractmethod
@@ -520,11 +550,18 @@ class GraphBackendProtocol(Protocol):
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         direction: str = "both",  # "outgoing", "incoming", "both"
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
-        """Get relationships for an entity."""
+        """Get relationships for an entity, scoped to ``namespace_id``.
+
+        Returns an empty list if the entity does not belong to the
+        caller's namespace. Edges that cross into other namespaces are
+        excluded from the result. Prevents cross-tenant subgraph leakage
+        (IGR-223).
+        """
         ...
 
     @abstractmethod
@@ -546,8 +583,13 @@ class GraphBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def get_episode(self, episode_id: UUID) -> Episode | None:
-        """Get an episode by ID."""
+    async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
+        """Get an episode by ID, scoped to ``namespace_id``.
+
+        Returns ``None`` if the episode does not exist OR belongs to a
+        different namespace. Prevents cross-tenant episode access by id
+        (IDOR — IGR-223).
+        """
         ...
 
     @abstractmethod
@@ -581,11 +623,19 @@ class GraphBackendProtocol(Protocol):
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """Get the neighborhood of an entity up to a certain depth."""
+        """Get the neighborhood of an entity up to a certain depth,
+        scoped to ``namespace_id``.
+
+        The seed entity is verified to belong to ``namespace_id``; the
+        traversal MUST NOT cross into other namespaces. Returns an empty
+        structure when the seed is in a different namespace. Prevents
+        cross-tenant subgraph leakage (IGR-223).
+        """
         ...
 
     @abstractmethod
@@ -602,8 +652,11 @@ class GraphBackendProtocol(Protocol):
 
     # Batch and aggregate operations (optional — have default implementations in GraphBackendBase)
 
-    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
-        """Fetch multiple entities in a single query.
+    async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Entity]:
+        """Fetch multiple entities in a single query, scoped to ``namespace_id``.
+
+        Entities belonging to any other namespace are silently dropped
+        from the result to prevent cross-tenant IDOR (IGR-223).
 
         Returns dictionary mapping entity ID to Entity object.
         """
@@ -613,11 +666,16 @@ class GraphBackendProtocol(Protocol):
         self,
         entity_ids: list[UUID],
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit_per_entity: int = 20,
     ) -> dict[UUID, dict[str, Any]]:
-        """Get neighborhoods for multiple entities.
+        """Get neighborhoods for multiple entities, scoped to ``namespace_id``.
+
+        Seed entities outside ``namespace_id`` are silently dropped; the
+        traversal MUST NOT cross into other namespaces. Prevents
+        cross-tenant subgraph leakage (IGR-223).
 
         Returns dictionary mapping entity ID to neighborhood data.
         """
@@ -710,9 +768,15 @@ class EventStoreProtocol(Protocol):
         resource_type: str,
         resource_id: UUID,
         *,
+        namespace_id: UUID,
         limit: int = 100,
     ) -> list[MemoryEvent]:
-        """Get all events for a specific resource."""
+        """Get all events for a specific resource, scoped to ``namespace_id``.
+
+        Returns an empty list if the resource belongs to a different
+        namespace. Prevents cross-tenant audit-log leakage (IGR-221 /
+        IGR-223 family).
+        """
         ...
 
     @abstractmethod
@@ -720,8 +784,14 @@ class EventStoreProtocol(Protocol):
         self,
         resource_type: str,
         resource_id: UUID,
+        *,
+        namespace_id: UUID,
     ) -> MemoryEvent | None:
-        """Get the latest event for a resource."""
+        """Get the latest event for a resource, scoped to ``namespace_id``.
+
+        Returns ``None`` if the resource belongs to a different namespace.
+        Prevents cross-tenant audit-log leakage (IGR-221 / IGR-223 family).
+        """
         ...
 
     @abstractmethod

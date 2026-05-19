@@ -1358,33 +1358,38 @@ class TestVectorCypherEngineForget:
 
     @pytest.mark.asyncio
     async def test_forget_namespace_mismatch(self, connected_engine: VectorCypherEngine) -> None:
-        """Test forget returns False when namespace doesn't match."""
+        """Test forget returns False when namespace doesn't match.
+
+        IGR-221: namespace mismatch is now enforced at the SQL layer —
+        ``storage.get_document(doc_id, namespace_id=wrong_ns)`` returns
+        ``None`` and the engine bails before any cascade work."""
         doc_id = uuid4()
         namespace_id = uuid4()
-        wrong_namespace = uuid4()
 
-        doc_mock = MagicMock()
-        doc_mock.namespace_id = wrong_namespace
-        connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
+        connected_engine._storage.get_document = AsyncMock(return_value=None)
 
         result = await connected_engine.forget(doc_id, namespace_id)
 
         assert result is False
+        connected_engine._storage.get_document.assert_awaited_once_with(doc_id, namespace_id=namespace_id)
 
     @pytest.mark.asyncio
     async def test_forget_without_namespace(self, connected_engine: VectorCypherEngine) -> None:
-        """Test forget without namespace looks up document's namespace."""
-        doc_id = uuid4()
-        namespace_id = uuid4()
+        """IGR-221: forget bails immediately when namespace_id is None.
 
-        doc_mock = MagicMock()
-        doc_mock.namespace_id = namespace_id
-        connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
-        connected_engine._storage.delete_document = AsyncMock(return_value=True)
+        Previously the engine looked up the document by id alone (an IDOR
+        vector) and trusted the document's own namespace. The new contract
+        requires the caller to pass namespace_id."""
+        doc_id = uuid4()
+
+        connected_engine._storage.get_document = AsyncMock()
+        connected_engine._storage.delete_document = AsyncMock()
 
         result = await connected_engine.forget(doc_id, None)
 
-        assert result is True
+        assert result is False
+        connected_engine._storage.get_document.assert_not_awaited()
+        connected_engine._storage.delete_document.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_forget_document_not_found(self, connected_engine: VectorCypherEngine) -> None:

@@ -1340,7 +1340,12 @@ class HybridQueryEngine:
                         )
                         for chunk, score in fused_chunks[: cfg.reranking_top_n]
                     ]
-                    await hydrate_doc_titles(candidates, self._storage, lambda c: getattr(c, "document_id", None))
+                    await hydrate_doc_titles(
+                        candidates,
+                        self._storage,
+                        lambda c: getattr(c, "document_id", None),
+                        namespace_id=namespace_id,
+                    )
                     async with pipeline_stage(
                         "query",
                         "reranking",
@@ -1683,7 +1688,7 @@ class HybridQueryEngine:
 
         # Fetch full entities in batch (optimization: single query instead of N queries)
         entity_ids = [eid for eid, _ in entity_ids_scores]
-        entities_map = await self._storage.get_entities_batch(entity_ids)
+        entities_map = await self._storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
         entities = [(entities_map[eid], score) for eid, score in entity_ids_scores if eid in entities_map]
 
         return {
@@ -1764,9 +1769,10 @@ class HybridQueryEngine:
             if all_entity_ids_to_fetch:
                 # Fetch entities and neighborhoods in parallel
                 entities_map, neighborhoods = await asyncio.gather(
-                    self._storage.get_entities_batch(all_entity_ids_to_fetch),
+                    self._storage.get_entities_batch(all_entity_ids_to_fetch, namespace_id=namespace_id),
                     self._storage.get_neighborhoods_batch(
                         all_entity_ids_to_fetch,
+                        namespace_id=namespace_id,
                         depth=config.max_graph_depth,
                         limit_per_entity=20,
                     ),
@@ -2497,6 +2503,7 @@ class HybridQueryEngine:
             chunks=stage3_chunks,
             query_text=query_text,
             config=config,
+            namespace_id=namespace_id,
         )
         metrics.stage4_rerank_timer.stop()
         metrics.stage4_reranked_count = len(stage4_chunks)
@@ -2879,6 +2886,8 @@ class HybridQueryEngine:
         chunks: list[tuple[Any, float]],
         query_text: str,
         config: QueryConfig,
+        *,
+        namespace_id: UUID,
     ) -> list[tuple[Any, float]]:
         """Stage 4: Neural reranking.
 
@@ -2915,7 +2924,12 @@ class HybridQueryEngine:
                     )
                     for chunk, score in candidates_to_rerank
                 ]
-                await hydrate_doc_titles(candidates, self._storage, lambda c: getattr(c, "document_id", None))
+                await hydrate_doc_titles(
+                    candidates,
+                    self._storage,
+                    lambda c: getattr(c, "document_id", None),
+                    namespace_id=namespace_id,
+                )
 
                 # Rerank - use max_chunks as final limit
                 reranked = await reranker.rerank(
@@ -3058,6 +3072,7 @@ class HybridQueryEngine:
         """
         neighborhood = await self._storage.get_neighborhood(
             entity_id,
+            namespace_id=namespace_id,
             depth=max_depth,
             limit=limit,
         )
@@ -3070,7 +3085,7 @@ class HybridQueryEngine:
         entity_ids = [UUID(node["id"]) for node in entity_nodes]
 
         # Batch fetch all entities in a single query (avoids N+1)
-        entities_map = await self._storage.get_entities_batch(entity_ids)
+        entities_map = await self._storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
 
         # Score based on path length (shorter = higher score)
         # This is simplified - full impl would consider actual path lengths

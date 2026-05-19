@@ -391,9 +391,10 @@ class TestDelegatingMethods:
         sentinel = MagicMock()
         eng._storage.get_document = AsyncMock(return_value=sentinel)
         did = uuid4()
-        out = await eng.get_document(did)
+        nsid = uuid4()
+        out = await eng.get_document(did, namespace_id=nsid)
         assert out is sentinel
-        eng._storage.get_document.assert_awaited_once_with(did)
+        eng._storage.get_document.assert_awaited_once_with(did, namespace_id=nsid)
 
     @pytest.mark.asyncio
     async def test_list_documents_delegates(self) -> None:

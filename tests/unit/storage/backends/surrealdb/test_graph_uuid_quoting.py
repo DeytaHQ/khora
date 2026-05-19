@@ -62,12 +62,30 @@ def _collect_sql(mock_method: AsyncMock) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+# A namespace used by tests that need ``get_neighborhood``'s seed check to
+# succeed so the traversal SQL is reached.
+_NS_ID = UUID("99999999-9999-9999-9999-999999999999")
+
+
+def _seed_entity_row(entity_id: UUID, ns_id: UUID = _NS_ID) -> dict:
+    """A SurrealDB-shaped entity row that satisfies the seed-namespace check."""
+    return {
+        "id": f"entity:⟨{entity_id}⟩",
+        "name": "seed",
+        "entity_type": "CONCEPT",
+        "namespace": f"memory_namespace:⟨{ns_id}⟩",
+        "namespace_id": str(ns_id),
+    }
+
+
 async def test_get_neighborhood_does_not_interpolate_bare_uuid() -> None:
     """Issue #635: ``get_neighborhood`` must not splice a bare RecordID into SQL."""
     conn = _make_conn()
+    # Seed-entity verification must succeed so we reach the traversal SQL.
+    conn.query_one = AsyncMock(return_value=_seed_entity_row(_BUGGY_UUID))
     adapter = SurrealDBGraphAdapter(conn)
 
-    await adapter.get_neighborhood(_BUGGY_UUID, depth=1, limit=10)
+    await adapter.get_neighborhood(_BUGGY_UUID, namespace_id=_NS_ID, depth=1, limit=10)
 
     bare_pattern = _bare_record_id_pattern("entity", _BUGGY_UUID)
     for sql in _collect_sql(conn.query):
@@ -82,9 +100,10 @@ async def test_get_neighborhood_does_not_interpolate_bare_uuid() -> None:
 async def test_get_neighborhood_binds_center_record() -> None:
     """The center entity id should arrive as a ``$eid`` parameter, not in the SQL."""
     conn = _make_conn()
+    conn.query_one = AsyncMock(return_value=_seed_entity_row(_BUGGY_UUID))
     adapter = SurrealDBGraphAdapter(conn)
 
-    await adapter.get_neighborhood(_BUGGY_UUID, depth=1, limit=10)
+    await adapter.get_neighborhood(_BUGGY_UUID, namespace_id=_NS_ID, depth=1, limit=10)
 
     # First query is the neighbourhood SELECT; second (if any) is the
     # relationships fetch.  Both must bind ``$eid``.
@@ -98,17 +117,28 @@ async def test_get_neighborhood_binds_center_record() -> None:
 async def test_get_neighborhood_relationships_fetch_uses_bindings() -> None:
     """The follow-up relationships fetch must also bind ids, not interpolate."""
     conn = _make_conn()
+    conn.query_one = AsyncMock(return_value=_seed_entity_row(_BUGGY_UUID))
     # Make the first SELECT return one neighbour so the relationship fetch runs.
     neighbour_uuid = UUID("11111111-2222-3333-4444-555555555555")
     conn.query = AsyncMock(
         side_effect=[
-            [{"out_neighbors": [{"id": f"entity:⟨{neighbour_uuid}⟩", "name": "n"}]}],
+            [
+                {
+                    "out_neighbors": [
+                        {
+                            "id": f"entity:⟨{neighbour_uuid}⟩",
+                            "name": "n",
+                            "namespace_id": str(_NS_ID),
+                        }
+                    ]
+                }
+            ],
             [],
         ]
     )
     adapter = SurrealDBGraphAdapter(conn)
 
-    await adapter.get_neighborhood(_BUGGY_UUID, depth=1, limit=10)
+    await adapter.get_neighborhood(_BUGGY_UUID, namespace_id=_NS_ID, depth=1, limit=10)
 
     assert conn.query.await_count == 2
     rel_sql = conn.query.await_args_list[1].args[0]
@@ -130,7 +160,7 @@ async def test_get_neighborhoods_batch_does_not_interpolate_bare_uuid() -> None:
     adapter = SurrealDBGraphAdapter(conn)
     ids = [_BUGGY_UUID, UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")]
 
-    await adapter.get_neighborhoods_batch(ids, depth=1, limit_per_entity=5)
+    await adapter.get_neighborhoods_batch(ids, namespace_id=_NS_ID, depth=1, limit_per_entity=5)
 
     for sql in _collect_sql(conn.query):
         for uid in ids:
@@ -165,7 +195,7 @@ async def test_get_entities_batch_does_not_interpolate_bare_uuid() -> None:
     adapter = SurrealDBGraphAdapter(conn)
     ids = [_BUGGY_UUID, UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")]
 
-    await adapter.get_entities_batch(ids)
+    await adapter.get_entities_batch(ids, namespace_id=_NS_ID)
 
     for sql in _collect_sql(conn.query):
         for uid in ids:

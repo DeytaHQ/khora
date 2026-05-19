@@ -353,27 +353,31 @@ class TestForget:
         eng = _connected()
         wrong_ns = uuid4()
         doc_id = uuid4()
-        document = MagicMock()
-        document.namespace_id = uuid4()  # different from wrong_ns
-        eng._storage.get_document = AsyncMock(return_value=document)
+        # IGR-221: storage.get_document now filters by namespace at the SQL
+        # layer; a cross-namespace lookup just returns None.
+        eng._storage.get_document = AsyncMock(return_value=None)
         result = await eng.forget(doc_id, wrong_ns)
         assert result is False
+        eng._storage.get_document.assert_awaited_once_with(doc_id, namespace_id=wrong_ns)
         eng._temporal_store.delete_chunks_by_document.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_forget_uses_namespace_from_document_when_kwarg_none(self) -> None:
+        # IGR-221: previously forget() would look up the document with a
+        # `namespace_id IS NULL` probe and then trust the doc's namespace.
+        # That is an IDOR vector — anyone with a doc_id could delete any
+        # document. Forget now bails immediately when namespace_id is None.
         eng = _connected()
         doc_id = uuid4()
-        ns = uuid4()
-        document = MagicMock()
-        document.namespace_id = ns
-        eng._storage.get_document = AsyncMock(return_value=document)
-        eng._storage.delete_document = AsyncMock(return_value=True)
+        eng._storage.get_document = AsyncMock()
+        eng._storage.delete_document = AsyncMock()
         eng._temporal_store.delete_chunks_by_document = AsyncMock()
 
         result = await eng.forget(doc_id, None)
-        assert result is True
-        eng._temporal_store.delete_chunks_by_document.assert_awaited_once_with(doc_id, ns)
+        assert result is False
+        eng._storage.get_document.assert_not_awaited()
+        eng._temporal_store.delete_chunks_by_document.assert_not_awaited()
+        eng._storage.delete_document.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_forget_no_namespace_no_document_returns_false(self) -> None:

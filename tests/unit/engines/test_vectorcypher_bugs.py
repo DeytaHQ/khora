@@ -498,7 +498,7 @@ class TestFindRelatedEntitiesGraphOnlyBackend:
         # asserted).
         assert {e.id for e, _ in result} == {neighbor_a.id, neighbor_b.id}
         assert all(score == 0.5 for _, score in result)
-        graph.get_neighborhood.assert_awaited_once_with(seed_id, depth=2, limit=10)
+        graph.get_neighborhood.assert_awaited_once_with(seed_id, namespace_id=ns_id, depth=2, limit=10)
 
     async def test_fallback_returns_empty_when_graph_backend_missing(self) -> None:
         from khora.engines.vectorcypher.engine import VectorCypherEngine

@@ -1954,7 +1954,7 @@ class Khora:
         namespace_id = await self._resolve_namespace(namespace)
         entity = await self._get_engine().get_entity(entity_id, namespace_id=namespace_id)
         if entity is not None and include_sources:
-            await self._populate_sources([], [entity], [])
+            await self._populate_sources([], [entity], [], namespace_id=namespace_id)
         return entity
 
     async def list_entities(
@@ -1980,7 +1980,7 @@ class Khora:
         namespace_id = await self._resolve_namespace(namespace)
         entities = await self._get_engine().list_entities(namespace_id, entity_type=entity_type, limit=limit)
         if include_sources:
-            await self._populate_sources([], entities, [])
+            await self._populate_sources([], entities, [], namespace_id=namespace_id)
         return entities
 
     async def find_related_entities(
@@ -2013,23 +2013,32 @@ class Khora:
             limit=limit,
         )
         if include_sources:
-            await self._populate_sources([], results, [])
+            await self._populate_sources([], results, [], namespace_id=namespace_id)
         return results
 
     # =========================================================================
     # Document Operations (Convenience Methods)
     # =========================================================================
 
-    async def get_document(self, document_id: UUID) -> Document | None:
-        """Get a document by ID.
+    async def get_document(
+        self,
+        document_id: UUID,
+        *,
+        namespace: str | UUID,
+    ) -> Document | None:
+        """Get a document by ID, scoped to ``namespace``.
 
         Args:
             document_id: Document UUID
+            namespace: Namespace UUID (as UUID or string) — the caller's
+                namespace; cross-tenant lookups by id return ``None``
+                (IDOR — IGR-221).
 
         Returns:
-            Document or None if not found
+            Document or None if not found (or not in this namespace)
         """
-        return await self._get_engine().get_document(document_id)
+        namespace_id = await self._resolve_namespace(namespace)
+        return await self._get_engine().get_document(document_id, namespace_id=namespace_id)
 
     async def list_documents(
         self,
@@ -2072,7 +2081,7 @@ class Khora:
         namespace_id = await self._resolve_namespace(namespace)
         entities = await self._get_engine().search_entities(query, namespace_id, limit=limit)
         if include_sources:
-            await self._populate_sources([], entities, [])
+            await self._populate_sources([], entities, [], namespace_id=namespace_id)
         return entities
 
     async def stats(self, *, namespace: str | UUID) -> Stats:
@@ -2096,6 +2105,8 @@ class Khora:
         chunks: list[tuple[Chunk, float]],
         entities: list[tuple[Entity, float]] | list[Entity],
         relationships: list[tuple[Relationship, float]],
+        *,
+        namespace_id: UUID,
     ) -> None:
         """Batch-fetch document sources and populate entity/chunk/relationship fields **in-place**.
 
@@ -2127,7 +2138,7 @@ class Khora:
         sources: dict = {}
         for i in range(0, len(sorted_ids), 1000):
             batch = sorted_ids[i : i + 1000]
-            sources.update(await self.storage.get_document_sources_batch(batch))
+            sources.update(await self.storage.get_document_sources_batch(batch, namespace_id=namespace_id))
 
         # Populate chunks
         for chunk, _score in chunks:

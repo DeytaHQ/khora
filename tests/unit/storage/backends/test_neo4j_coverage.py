@@ -651,7 +651,7 @@ class TestEmptyBatchShortCircuits:
     @pytest.mark.asyncio
     async def test_get_entities_batch_empty(self) -> None:
         b = _backend_with_session_mock(AsyncMock())
-        out = await b.get_entities_batch([])
+        out = await b.get_entities_batch([], namespace_id=uuid4())
         assert out == {}
 
     @pytest.mark.asyncio
@@ -671,7 +671,7 @@ class TestEmptyBatchShortCircuits:
     @pytest.mark.asyncio
     async def test_get_neighborhoods_batch_empty(self) -> None:
         b = _backend_with_session_mock(AsyncMock())
-        out = await b.get_neighborhoods_batch([])
+        out = await b.get_neighborhoods_batch([], namespace_id=uuid4())
         assert out == {}
 
 

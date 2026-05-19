@@ -437,7 +437,7 @@ class TestRelationalProtocol:
         created = await relational_backend.create_document(doc)
         assert created.id == doc.id
 
-        fetched = await relational_backend.get_document(doc.id)
+        fetched = await relational_backend.get_document(doc.id, namespace_id=ns.id)
         assert fetched is not None
         assert fetched.title == "Before"
 
@@ -445,13 +445,13 @@ class TestRelationalProtocol:
         fetched.status = DocumentStatus.COMPLETED
         await relational_backend.update_document(fetched)
 
-        refreshed = await relational_backend.get_document(doc.id)
+        refreshed = await relational_backend.get_document(doc.id, namespace_id=ns.id)
         assert refreshed is not None
         assert refreshed.title == "After"
         assert refreshed.status == DocumentStatus.COMPLETED
 
         assert await relational_backend.delete_document(doc.id) is True
-        assert await relational_backend.get_document(doc.id) is None
+        assert await relational_backend.get_document(doc.id, namespace_id=ns.id) is None
         # Idempotent — second delete is a no-op returning False.
         assert await relational_backend.delete_document(doc.id) is False
 
@@ -475,11 +475,11 @@ class TestRelationalProtocol:
         for d in docs:
             await relational_backend.create_document(d)
 
-        result = await relational_backend.get_documents_batch([d.id for d in docs] + [uuid4()])
+        result = await relational_backend.get_documents_batch([d.id for d in docs] + [uuid4()], namespace_id=ns.id)
         assert set(result.keys()) == {d.id for d in docs}
 
         # Empty input is a no-op.
-        assert await relational_backend.get_documents_batch([]) == {}
+        assert await relational_backend.get_documents_batch([], namespace_id=ns.id) == {}
 
     async def test_get_documents_by_checksums(self, relational_backend):
         ns = _make_namespace()
@@ -534,7 +534,7 @@ class TestRelationalProtocol:
         assert await relational_backend.count_documents(ns.id) == 0
 
     async def test_edge_case_nonexistent_id(self, relational_backend):
-        assert await relational_backend.get_document(uuid4()) is None
+        assert await relational_backend.get_document(uuid4(), namespace_id=uuid4()) is None
         assert await relational_backend.delete_document(uuid4()) is False
 
     async def test_unicode_content_roundtrip(self, relational_backend):
@@ -544,7 +544,7 @@ class TestRelationalProtocol:
         doc = _make_document(ns.id, checksum="u", title=payload, content=payload)
         await relational_backend.create_document(doc)
 
-        fetched = await relational_backend.get_document(doc.id)
+        fetched = await relational_backend.get_document(doc.id, namespace_id=ns.id)
         assert fetched is not None
         assert fetched.content == payload
         assert fetched.title == payload
@@ -569,18 +569,18 @@ class TestGraphProtocol:
         e = _make_entity(ns, name="Alice", attributes={"role": "eng"})
         await graph_backend.create_entity(e)
 
-        fetched = await graph_backend.get_entity(e.id)
+        fetched = await graph_backend.get_entity(e.id, namespace_id=ns)
         assert fetched is not None
         assert fetched.id == e.id
         assert fetched.attributes["role"] == "eng"
 
         e.description = "updated"
         await graph_backend.update_entity(e)
-        refreshed = await graph_backend.get_entity(e.id)
+        refreshed = await graph_backend.get_entity(e.id, namespace_id=ns)
         assert refreshed is not None and refreshed.description == "updated"
 
         assert await graph_backend.delete_entity(e.id) is True
-        assert await graph_backend.get_entity(e.id) is None
+        assert await graph_backend.get_entity(e.id, namespace_id=ns) is None
         # Deleting again is a no-op.
         assert await graph_backend.delete_entity(e.id) is False
 
@@ -630,12 +630,12 @@ class TestGraphProtocol:
         r = _make_relationship(ns, a.id, b.id, rel_type="KNOWS")
         await graph_backend.create_relationship(r)
 
-        fetched = await graph_backend.get_relationship(r.id)
+        fetched = await graph_backend.get_relationship(r.id, namespace_id=ns)
         assert fetched is not None
         assert fetched.relationship_type == "KNOWS"
 
         assert await graph_backend.delete_relationship(r.id) is True
-        assert await graph_backend.get_relationship(r.id) is None
+        assert await graph_backend.get_relationship(r.id, namespace_id=ns) is None
         assert await graph_backend.delete_relationship(r.id) is False
 
     async def test_get_entity_relationships_directions(self, graph_backend):
@@ -648,11 +648,11 @@ class TestGraphProtocol:
         await graph_backend.create_relationship(_make_relationship(ns, hub.id, n1.id))
         await graph_backend.create_relationship(_make_relationship(ns, n2.id, hub.id))
 
-        out = await graph_backend.get_entity_relationships(hub.id, direction="outgoing")
+        out = await graph_backend.get_entity_relationships(hub.id, namespace_id=ns, direction="outgoing")
         assert len(out) == 1
-        inc = await graph_backend.get_entity_relationships(hub.id, direction="incoming")
+        inc = await graph_backend.get_entity_relationships(hub.id, namespace_id=ns, direction="incoming")
         assert len(inc) == 1
-        both = await graph_backend.get_entity_relationships(hub.id, direction="both")
+        both = await graph_backend.get_entity_relationships(hub.id, namespace_id=ns, direction="both")
         assert len(both) == 2
 
     async def test_find_paths(self, graph_backend):
@@ -683,11 +683,11 @@ class TestGraphProtocol:
         for i in range(3):
             await graph_backend.create_relationship(_make_relationship(ns, entities[i].id, entities[i + 1].id))
 
-        nb1 = await graph_backend.get_neighborhood(entities[0].id, depth=1, limit=10)
+        nb1 = await graph_backend.get_neighborhood(entities[0].id, namespace_id=ns, depth=1, limit=10)
         names_d1 = {e.name for e in nb1["entities"]}
         assert names_d1 == {"n1"}
 
-        nb2 = await graph_backend.get_neighborhood(entities[0].id, depth=2, limit=10)
+        nb2 = await graph_backend.get_neighborhood(entities[0].id, namespace_id=ns, depth=2, limit=10)
         names_d2 = {e.name for e in nb2["entities"]}
         assert {"n1", "n2"}.issubset(names_d2)
         assert "n3" not in names_d2
@@ -704,13 +704,15 @@ class TestGraphProtocol:
         await graph_backend.create_relationship(_make_relationship(ns, hub_a.id, n1.id))
         await graph_backend.create_relationship(_make_relationship(ns, hub_b.id, n2.id))
 
-        result = await graph_backend.get_neighborhoods_batch([hub_a.id, hub_b.id], depth=1, limit_per_entity=10)
+        result = await graph_backend.get_neighborhoods_batch(
+            [hub_a.id, hub_b.id], namespace_id=ns, depth=1, limit_per_entity=10
+        )
         assert set(result.keys()) == {hub_a.id, hub_b.id}
         assert len(result[hub_a.id]["entities"]) == 1
         assert len(result[hub_b.id]["entities"]) == 1
 
         # Empty batch is a no-op.
-        assert await graph_backend.get_neighborhoods_batch([]) == {}
+        assert await graph_backend.get_neighborhoods_batch([], namespace_id=ns) == {}
 
     async def test_search_entities_by_attribute(self, graph_backend):
         ns = uuid4()
@@ -735,7 +737,7 @@ class TestGraphProtocol:
         )
         await graph_backend.create_episode(ep)
 
-        fetched = await graph_backend.get_episode(ep.id)
+        fetched = await graph_backend.get_episode(ep.id, namespace_id=ns)
         assert fetched is not None
         assert fetched.name == "Kickoff"
         assert fetched.duration_seconds == 600
@@ -744,7 +746,7 @@ class TestGraphProtocol:
         assert any(e.id == ep.id for e in listed)
 
         # Missing episode returns None.
-        assert await graph_backend.get_episode(uuid4()) is None
+        assert await graph_backend.get_episode(uuid4(), namespace_id=ns) is None
 
     async def test_relationship_label_sanitization(self, graph_backend):
         """Cypher label sanitization must hold for all graph backends."""
@@ -757,7 +759,7 @@ class TestGraphProtocol:
         r = _make_relationship(ns, a.id, b.id, rel_type="likes; DROP TABLE")
         await graph_backend.create_relationship(r)
 
-        fetched = await graph_backend.get_relationship(r.id)
+        fetched = await graph_backend.get_relationship(r.id, namespace_id=ns)
         assert fetched is not None
         # At minimum, the sanitized label must be upper-case and contain
         # no SQL metacharacters that could escape a quoted identifier.
@@ -937,8 +939,8 @@ class TestVectorProtocol:
         e = _make_entity(ns, name="Alice", embedding=_unit(8, 0))
         await entity_seeder(e)
 
-        assert await vector_backend.entity_exists(e.id) is True
-        assert await vector_backend.entity_exists(uuid4()) is False
+        assert await vector_backend.entity_exists(e.id, namespace_id=ns) is True
+        assert await vector_backend.entity_exists(uuid4(), namespace_id=ns) is False
 
         # Update → search still hits the row.
         e.description = "updated"
@@ -1122,16 +1124,16 @@ class TestEventStoreProtocol:
             ]
         )
 
-        hits = await event_store_backend.get_events_for_resource("document", target, limit=10)
+        hits = await event_store_backend.get_events_for_resource("document", target, namespace_id=ns, limit=10)
         assert len(hits) == 2
         assert all(e.resource_id == target for e in hits)
 
-        latest = await event_store_backend.get_latest_event("document", target)
+        latest = await event_store_backend.get_latest_event("document", target, namespace_id=ns)
         assert latest is not None
         assert latest.event_type == EventType.DOCUMENT_UPDATED
 
         # Unknown resource → None.
-        assert await event_store_backend.get_latest_event("document", uuid4()) is None
+        assert await event_store_backend.get_latest_event("document", uuid4(), namespace_id=ns) is None
 
     async def test_append_only_no_mutation_methods(self, event_store_backend):
         """An append-only event store must not expose update/delete hooks."""

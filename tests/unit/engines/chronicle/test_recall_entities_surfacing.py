@@ -137,7 +137,7 @@ class _FakeCoordinator:
         self.search_similar_entities_calls.append({"limit": limit})
         return list(self._similar_entity_results)
 
-    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+    async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Entity]:
         return {eid: self._entities_by_id[eid] for eid in entity_ids if eid in self._entities_by_id}
 
     # --- collect_entities dep (Chronicle #5) ---

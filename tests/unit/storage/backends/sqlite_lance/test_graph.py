@@ -140,14 +140,14 @@ class TestEntityCRUD:
         e = _make_entity(ns, name="Alice", attributes={"age": 30})
         await adapter.create_entity(e)
 
-        fetched = await adapter.get_entity(e.id)
+        fetched = await adapter.get_entity(e.id, namespace_id=ns)
         assert fetched is not None
         assert fetched.id == e.id
         assert fetched.name == "Alice"
         assert fetched.attributes["age"] == 30
 
     async def test_get_entity_missing(self, adapter: SQLiteLanceGraphAdapter):
-        assert await adapter.get_entity(uuid4()) is None
+        assert await adapter.get_entity(uuid4(), namespace_id=uuid4()) is None
 
     async def test_get_entity_by_name_hit(self, adapter: SQLiteLanceGraphAdapter):
         ns = uuid4()
@@ -170,7 +170,7 @@ class TestEntityCRUD:
         e.mention_count = 42
         await adapter.update_entity(e)
 
-        fetched = await adapter.get_entity(e.id)
+        fetched = await adapter.get_entity(e.id, namespace_id=ns)
         assert fetched is not None
         assert fetched.description == "updated"
         assert fetched.mention_count == 42
@@ -181,7 +181,7 @@ class TestEntityCRUD:
         await adapter.create_entity(e)
 
         assert await adapter.delete_entity(e.id) is True
-        assert await adapter.get_entity(e.id) is None
+        assert await adapter.get_entity(e.id, namespace_id=ns) is None
         assert await adapter.delete_entity(e.id) is False
 
     async def test_delete_entity_removes_relationships(self, adapter: SQLiteLanceGraphAdapter):
@@ -194,7 +194,7 @@ class TestEntityCRUD:
         await adapter.create_relationship(r)
 
         await adapter.delete_entity(a.id)
-        assert await adapter.get_relationship(r.id) is None
+        assert await adapter.get_relationship(r.id, namespace_id=ns) is None
 
     async def test_entity_exists(self, adapter: SQLiteLanceGraphAdapter):
         ns = uuid4()
@@ -302,7 +302,7 @@ class TestRelationships:
         r = _make_relationship(ns, a.id, b.id, rel_type="KNOWS")
         await adapter.create_relationship(r)
 
-        fetched = await adapter.get_relationship(r.id)
+        fetched = await adapter.get_relationship(r.id, namespace_id=ns)
         assert fetched is not None
         assert fetched.source_entity_id == a.id
         assert fetched.target_entity_id == b.id
@@ -318,7 +318,7 @@ class TestRelationships:
         await adapter.create_relationship(r)
 
         assert await adapter.delete_relationship(r.id) is True
-        assert await adapter.get_relationship(r.id) is None
+        assert await adapter.get_relationship(r.id, namespace_id=ns) is None
         assert await adapter.delete_relationship(r.id) is False
 
     async def test_get_entity_relationships_directions(self, adapter: SQLiteLanceGraphAdapter):
@@ -334,15 +334,15 @@ class TestRelationships:
         await adapter.create_relationship(_make_relationship(ns, hub.id, out2.id))
         await adapter.create_relationship(_make_relationship(ns, in1.id, hub.id))
 
-        out = await adapter.get_entity_relationships(hub.id, direction="outgoing")
+        out = await adapter.get_entity_relationships(hub.id, namespace_id=ns, direction="outgoing")
         assert len(out) == 2
         assert all(r.source_entity_id == hub.id for r in out)
 
-        incoming = await adapter.get_entity_relationships(hub.id, direction="incoming")
+        incoming = await adapter.get_entity_relationships(hub.id, namespace_id=ns, direction="incoming")
         assert len(incoming) == 1
         assert incoming[0].target_entity_id == hub.id
 
-        both = await adapter.get_entity_relationships(hub.id, direction="both")
+        both = await adapter.get_entity_relationships(hub.id, namespace_id=ns, direction="both")
         assert len(both) == 3
 
     async def test_get_entity_relationships_type_filter(self, adapter: SQLiteLanceGraphAdapter):
@@ -355,7 +355,9 @@ class TestRelationships:
         await adapter.create_relationship(_make_relationship(ns, a.id, b.id, rel_type="KNOWS"))
         await adapter.create_relationship(_make_relationship(ns, a.id, c.id, rel_type="WORKS_WITH"))
 
-        knows = await adapter.get_entity_relationships(a.id, direction="outgoing", relationship_types=["KNOWS"])
+        knows = await adapter.get_entity_relationships(
+            a.id, namespace_id=ns, direction="outgoing", relationship_types=["KNOWS"]
+        )
         assert len(knows) == 1
         assert knows[0].relationship_type == "KNOWS"
 
@@ -396,7 +398,7 @@ class TestRelationships:
         r = _make_relationship(ns, a.id, b.id, rel_type="likes food; DROP TABLE")
         await adapter.create_relationship(r)
 
-        fetched = await adapter.get_relationship(r.id)
+        fetched = await adapter.get_relationship(r.id, namespace_id=ns)
         assert fetched is not None
         assert fetched.relationship_type == "LIKES_FOOD__DROP_TABLE"
 
@@ -411,7 +413,7 @@ class TestRelationships:
         r = _make_relationship(ns, a.id, b.id, rel_type="   ")
         await adapter.create_relationship(r)
 
-        fetched = await adapter.get_relationship(r.id)
+        fetched = await adapter.get_relationship(r.id, namespace_id=ns)
         assert fetched is not None
         assert fetched.relationship_type == "RELATES_TO"
 
@@ -500,7 +502,7 @@ class TestTraversal:
         await adapter.create_relationship(_make_relationship(ns, hub.id, n1.id))
         await adapter.create_relationship(_make_relationship(ns, n2.id, hub.id))
 
-        nb = await adapter.get_neighborhood(hub.id, depth=1, limit=10)
+        nb = await adapter.get_neighborhood(hub.id, namespace_id=ns, depth=1, limit=10)
         names = {e.name for e in nb["entities"]}
         assert names == {"N1", "N2"}
         assert len(nb["relationships"]) == 2
@@ -509,7 +511,7 @@ class TestTraversal:
         ns = uuid4()
         entities = await self._chain(adapter, ns, 4)
         # Chain: n0 -> n1 -> n2 -> n3. Depth-2 from n0 should include n1, n2.
-        nb = await adapter.get_neighborhood(entities[0].id, depth=2, limit=10)
+        nb = await adapter.get_neighborhood(entities[0].id, namespace_id=ns, depth=2, limit=10)
         names = {e.name for e in nb["entities"]}
         assert {"n1", "n2"}.issubset(names)
         assert "n3" not in names
@@ -541,7 +543,9 @@ class TestTraversal:
 
         conn.execute = _wrap  # type: ignore[method-assign]
         try:
-            result = await adapter.get_neighborhoods_batch([hub_a.id, hub_b.id], depth=1, limit_per_entity=10)
+            result = await adapter.get_neighborhoods_batch(
+                [hub_a.id, hub_b.id], namespace_id=ns, depth=1, limit_per_entity=10
+            )
         finally:
             conn.execute = original_execute  # type: ignore[method-assign]
 
@@ -556,7 +560,7 @@ class TestTraversal:
         assert len(cte_calls) == 1
 
     async def test_get_neighborhoods_batch_empty(self, adapter: SQLiteLanceGraphAdapter):
-        assert await adapter.get_neighborhoods_batch([]) == {}
+        assert await adapter.get_neighborhoods_batch([], namespace_id=uuid4()) == {}
 
     async def test_find_paths_multigraph_back_and_forth(self, adapter: SQLiteLanceGraphAdapter):
         """A pair of nodes connected by two distinct directed edges
@@ -637,7 +641,7 @@ class TestTraversal:
         depth = 6
 
         # First: the public API returns a correct, bounded result.
-        result = await adapter.get_neighborhoods_batch([a.id], depth=depth, limit_per_entity=1000)
+        result = await adapter.get_neighborhoods_batch([a.id], namespace_id=ns, depth=depth, limit_per_entity=1000)
         bucket = result[a.id]
         assert len(bucket["relationships"]) == 2
         assert {e.name for e in bucket["entities"]} == {"cyc_A", "cyc_B"}
@@ -798,12 +802,14 @@ class TestPreferCurrentEveryEdge:
         nodes = await self._build_expired_middle_chain(adapter, ns)
 
         # Without the flag, B's depth-1 neighborhood includes C via r2.
-        nb_default = await adapter.get_neighborhood(nodes["b"].id, depth=1, limit=10)
+        nb_default = await adapter.get_neighborhood(nodes["b"].id, namespace_id=ns, depth=1, limit=10)
         names_default = {ent.name for ent in nb_default["entities"]}
         assert "C" in names_default
 
         # With prefer_current, r2 is filtered out → C is no longer reachable from B.
-        nb_current = await adapter.get_neighborhood(nodes["b"].id, depth=1, limit=10, prefer_current=True)
+        nb_current = await adapter.get_neighborhood(
+            nodes["b"].id, namespace_id=ns, depth=1, limit=10, prefer_current=True
+        )
         names_current = {ent.name for ent in nb_current["entities"]}
         assert "C" not in names_current
         # And the expired edge itself is not in the relationship list.
@@ -872,7 +878,7 @@ class TestEpisodes:
         )
         await adapter.create_episode(ep)
 
-        fetched = await adapter.get_episode(ep.id)
+        fetched = await adapter.get_episode(ep.id, namespace_id=ns)
         assert fetched is not None
         assert fetched.name == "Kickoff"
         assert fetched.duration_seconds == 3600

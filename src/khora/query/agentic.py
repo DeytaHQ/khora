@@ -247,7 +247,7 @@ class AgenticSearchAgent:
         trace.add_step(step1)
 
         # Collect results (batch fetch document sources for all chunks)
-        chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
+        chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks, namespace_id)
         for chunk, score in step1_result.chunks:
             source = chunk_sources.get(str(chunk.id), "unknown")
             all_chunks[str(chunk.id)] = (chunk, score, source)
@@ -286,7 +286,7 @@ class AgenticSearchAgent:
                 trace.add_step(step)
 
                 # Collect new results (keep higher scores) - batch fetch sources
-                step_chunk_sources = await self._get_chunk_sources_batch(step_result.chunks)
+                step_chunk_sources = await self._get_chunk_sources_batch(step_result.chunks, namespace_id)
                 for chunk, score in step_result.chunks:
                     chunk_id = str(chunk.id)
                     if chunk_id not in all_chunks or all_chunks[chunk_id][1] < score:
@@ -378,7 +378,7 @@ class AgenticSearchAgent:
         step1 = self._analyze_results(step1_result, query, 1, "Initial comprehensive search")
         trace.add_step(step1)
 
-        chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
+        chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks, namespace_id)
         for chunk, score in step1_result.chunks:
             all_chunks[str(chunk.id)] = (chunk, score, chunk_sources.get(str(chunk.id), "unknown"))
         for entity, score in step1_result.entities:
@@ -422,7 +422,7 @@ class AgenticSearchAgent:
                 step = self._analyze_results(step_result, fq_query_text, i + 2, reasoning)
                 trace.add_step(step)
 
-                step_sources = await self._get_chunk_sources_batch(step_result.chunks)
+                step_sources = await self._get_chunk_sources_batch(step_result.chunks, namespace_id)
                 for chunk, score in step_result.chunks:
                     cid = str(chunk.id)
                     if cid not in all_chunks or all_chunks[cid][1] < score:
@@ -489,7 +489,7 @@ class AgenticSearchAgent:
         logger.info(f"Agentic stream step 1: '{query[:50]}...'")
         step1_result = await self._engine.query(query, namespace_id, config=config, _lightweight_understanding=False)
 
-        chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks)
+        chunk_sources = await self._get_chunk_sources_batch(step1_result.chunks, namespace_id)
         for chunk, score in step1_result.chunks:
             source = chunk_sources.get(str(chunk.id), "unknown")
             all_chunks[str(chunk.id)] = (chunk, score, source)
@@ -522,7 +522,7 @@ class AgenticSearchAgent:
             logger.info(f"Agentic stream step {i + 2}: '{fq_query[:50]}...'")
             step_result = await self._engine.query(fq_query, namespace_id, config=config)
 
-            step_sources = await self._get_chunk_sources_batch(step_result.chunks)
+            step_sources = await self._get_chunk_sources_batch(step_result.chunks, namespace_id)
             for chunk, score in step_result.chunks:
                 cid = str(chunk.id)
                 if cid not in all_chunks or all_chunks[cid][1] < score:
@@ -624,7 +624,7 @@ class AgenticSearchAgent:
     async def _get_chunk_source(self, chunk: Chunk, namespace_id: UUID) -> str:
         """Get the source system for a chunk."""
         try:
-            doc = await self._engine._storage.get_document(chunk.document_id)
+            doc = await self._engine._storage.get_document(chunk.document_id, namespace_id=namespace_id)
             if doc:
                 source = (doc.metadata or {}).get("source_system", "")
                 if not source and doc.source:
@@ -634,11 +634,13 @@ class AgenticSearchAgent:
             logger.debug(f"Failed to get source system for chunk {chunk.id}: {e}")
         return "unknown"
 
-    async def _get_chunk_sources_batch(self, chunks: list[tuple[Chunk, float]]) -> dict[str, str]:
+    async def _get_chunk_sources_batch(self, chunks: list[tuple[Chunk, float]], namespace_id: UUID) -> dict[str, str]:
         """Get source systems for multiple chunks in a single batch query.
 
         Args:
             chunks: List of (chunk, score) tuples
+            namespace_id: Caller's namespace; cross-tenant document rows are
+                dropped at the storage layer (IDOR — IGR-221).
 
         Returns:
             Dictionary mapping chunk ID to source string
@@ -650,7 +652,7 @@ class AgenticSearchAgent:
         doc_ids = list({chunk.document_id for chunk, _ in chunks})
 
         # Batch fetch all documents
-        docs_map = await self._engine._storage.get_documents_batch(doc_ids)
+        docs_map = await self._engine._storage.get_documents_batch(doc_ids, namespace_id=namespace_id)
 
         # Build chunk_id -> source mapping
         sources: dict[str, str] = {}

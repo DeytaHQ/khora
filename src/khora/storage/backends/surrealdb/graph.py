@@ -73,6 +73,33 @@ class _SurrealDBEntityKeyGate:
 
 
 # ---------------------------------------------------------------------------
+# Namespace-membership guard for traversal rows
+# ---------------------------------------------------------------------------
+
+
+def _row_in_namespace(row: dict[str, Any], ns_str: str) -> bool:
+    """Return True if a SurrealDB row's namespace matches ``ns_str``.
+
+    Traversal rows expose ``namespace`` (a record link to
+    ``memory_namespace:⟨...⟩``) and ``namespace_id`` (a denormalized
+    string copy).  Either form is accepted.  If neither field is
+    present, the row is rejected — never silently passed through.
+    """
+    if "namespace_id" in row and row["namespace_id"] is not None:
+        return str(row["namespace_id"]) == ns_str
+    ns_field = row.get("namespace")
+    if ns_field is None:
+        return False
+    if isinstance(ns_field, dict) and "namespace_id" in ns_field:
+        return str(ns_field["namespace_id"]) == ns_str
+    # Record link form like "memory_namespace:⟨<uuid>⟩" — parse out the uuid.
+    try:
+        return str(_parse_uuid(ns_field)) == ns_str
+    except Exception:  # noqa: BLE001 — defensive: malformed shapes are not the caller's namespace
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Relationship row → domain model
 # ---------------------------------------------------------------------------
 
@@ -256,10 +283,26 @@ class SurrealDBGraphAdapter:
         await self._conn.execute(sql, _entity_to_bindings(entity))
         return entity
 
-    @trace("khora.surrealdb.graph.get_entity", include={"entity_id"})
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
-        sql = "SELECT * FROM entity:\u27e8$id\u27e9"
-        row = await self._conn.query_one(sql, {"id": str(entity_id)})
+    @trace("khora.surrealdb.graph.get_entity", include={"entity_id", "namespace_id"})
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
+        """Fetch an entity by primary key, scoped to ``namespace_id``.
+
+        Returns ``None`` if the entity does not exist OR belongs to a
+        different namespace.  ``RecordID`` lookup is not namespace-scoped
+        on its own, so we filter explicitly on the entity's ``namespace``
+        record link to prevent cross-tenant IDOR (IGR-223).
+        """
+        sql = (
+            "SELECT * FROM entity WHERE id = $rid AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) LIMIT 1"
+        )
+        row = await self._conn.query_one(
+            sql,
+            {
+                "rid": _rid("entity", entity_id),
+                "ns_rid": _rid("memory_namespace", namespace_id),
+                "ns_str": str(namespace_id),
+            },
+        )
         if not row:
             return None
         return _row_to_entity(row)
@@ -339,17 +382,29 @@ class SurrealDBGraphAdapter:
 
     @trace(
         "khora.surrealdb.graph.get_entities_batch",
-        include={"entity_ids"},
+        include={"entity_ids", "namespace_id"},
         result=lambda r: {"count": len(r)},
     )
-    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+    async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Entity]:
+        """Fetch multiple entities in a single query, scoped to ``namespace_id``.
+
+        Entities belonging to a different namespace are silently dropped
+        from the result to prevent cross-tenant IDOR (IGR-223).
+        """
         if not entity_ids:
             return {}
         # Bind RecordIDs as a parameter — bare ``entity:<uuid>`` interpolation
         # breaks SurrealQL's parser on the UUID hyphens (issue #635).
         eids = [_rid("entity", uid) for uid in entity_ids]
-        sql = "SELECT * FROM entity WHERE id IN $eids"
-        rows = await self._conn.query(sql, {"eids": eids})
+        sql = "SELECT * FROM entity WHERE id IN $eids AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str)"
+        rows = await self._conn.query(
+            sql,
+            {
+                "eids": eids,
+                "ns_rid": _rid("memory_namespace", namespace_id),
+                "ns_str": str(namespace_id),
+            },
+        )
         result: dict[UUID, Entity] = {}
         for row in rows:
             ent = _row_to_entity(row)
@@ -536,10 +591,19 @@ class SurrealDBGraphAdapter:
         await self._conn.execute(sql, bindings)
         return relationship
 
-    @trace("khora.surrealdb.graph.get_relationship", include={"relationship_id"})
-    async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-        sql = "SELECT * FROM relates_to WHERE rel_id = $rel_id LIMIT 1"
-        row = await self._conn.query_one(sql, {"rel_id": str(relationship_id)})
+    @trace("khora.surrealdb.graph.get_relationship", include={"relationship_id", "namespace_id"})
+    async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
+        """Fetch a relationship by id, scoped to ``namespace_id``.
+
+        Returns ``None`` if the relationship does not exist OR belongs to
+        a different namespace.  Prevents cross-tenant relationship access
+        by id (IDOR — IGR-223).
+        """
+        sql = "SELECT * FROM relates_to WHERE rel_id = $rel_id AND namespace_id = $ns LIMIT 1"
+        row = await self._conn.query_one(
+            sql,
+            {"rel_id": str(relationship_id), "ns": str(namespace_id)},
+        )
         if not row:
             return None
         return _row_to_relationship(row)
@@ -555,19 +619,31 @@ class SurrealDBGraphAdapter:
 
     @trace(
         "khora.surrealdb.graph.get_entity_relationships",
-        include={"entity_id", "direction", "limit"},
+        include={"entity_id", "namespace_id", "direction", "limit"},
         result=lambda r: {"count": len(r)},
     )
     async def get_entity_relationships(
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         direction: str = "both",
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
+        """Return relationships for an entity, scoped to ``namespace_id``.
+
+        Filters at the SurrealQL layer on the relationship's own
+        ``namespace_id`` column — edges that cross into another namespace
+        do not surface even if the seed entity is shared.  Prevents
+        cross-tenant subgraph leakage (IGR-223).
+        """
         eid = _rid("entity", entity_id)
-        bindings: dict[str, Any] = {"eid": eid, "limit": limit}
+        bindings: dict[str, Any] = {
+            "eid": eid,
+            "ns": str(namespace_id),
+            "limit": limit,
+        }
 
         if direction == "outgoing":
             where = "in = $eid"
@@ -576,7 +652,7 @@ class SurrealDBGraphAdapter:
         else:
             where = "(in = $eid OR out = $eid)"
 
-        conditions = [where]
+        conditions = [where, "namespace_id = $ns"]
 
         if relationship_types:
             conditions.append("relationship_type IN $rel_types")
@@ -729,10 +805,27 @@ class SurrealDBGraphAdapter:
 
         return episode
 
-    @trace("khora.surrealdb.graph.get_episode", include={"episode_id"})
-    async def get_episode(self, episode_id: UUID) -> Episode | None:
-        sql = "SELECT * FROM episode:\u27e8$id\u27e9"
-        row = await self._conn.query_one(sql, {"id": str(episode_id)})
+    @trace("khora.surrealdb.graph.get_episode", include={"episode_id", "namespace_id"})
+    async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
+        """Fetch an episode by id, scoped to ``namespace_id``.
+
+        Returns ``None`` if the episode does not exist OR belongs to a
+        different namespace.  Prevents cross-tenant episode access by id
+        (IDOR \u2014 IGR-223).
+        """
+        sql = (
+            "SELECT * FROM episode "
+            "WHERE id = $rid AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) "
+            "LIMIT 1"
+        )
+        row = await self._conn.query_one(
+            sql,
+            {
+                "rid": _rid("episode", episode_id),
+                "ns_rid": _rid("memory_namespace", namespace_id),
+                "ns_str": str(namespace_id),
+            },
+        )
         if not row:
             return None
         return _row_to_episode(row)
@@ -846,32 +939,63 @@ class SurrealDBGraphAdapter:
 
     @trace(
         "khora.surrealdb.graph.get_neighborhood",
-        include={"entity_id", "depth", "limit"},
+        include={"entity_id", "namespace_id", "depth", "limit"},
         result=lambda r: {"node_count": len(r.get("entities", [])), "rel_count": len(r.get("relationships", []))},
     )
     async def get_neighborhood(
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        eid = _rid("entity", entity_id)
+        """Return the neighborhood of an entity, scoped to ``namespace_id``.
 
-        rel_filter = ""
-        rel_bindings: dict[str, Any] = {"eid": eid}
+        The seed entity must belong to ``namespace_id`` — otherwise an
+        empty ``{"entities": [], "relationships": []}`` is returned.  Every
+        edge and node visited during traversal is filtered on
+        ``namespace_id`` so the result never crosses tenants
+        (IGR-223).
+        """
+        # Gate the traversal on the seed entity belonging to the caller's
+        # namespace.  Without this, a leaked entity_id from another tenant
+        # would still surface that tenant's first-hop neighbours.
+        seed = await self.get_entity(entity_id, namespace_id=namespace_id)
+        if seed is None:
+            return {"entities": [], "relationships": []}
+
+        eid = _rid("entity", entity_id)
+        ns_str = str(namespace_id)
+        ns_rid = _rid("memory_namespace", namespace_id)
+
+        rel_bindings: dict[str, Any] = {
+            "eid": eid,
+            "ns_str": ns_str,
+            "ns_rid": ns_rid,
+        }
+
+        # Filter edges to those whose denormalized namespace_id matches and
+        # optionally to selected relationship types.
+        rel_conds = ["namespace_id = $ns_str"]
         if relationship_types:
-            rel_filter = "[WHERE relationship_type IN $rel_types]"
+            rel_conds.append("relationship_type IN $rel_types")
             rel_bindings["rel_types"] = list(relationship_types)
+        rel_filter = "[WHERE " + " AND ".join(rel_conds) + "]"
+
+        # Filter neighbour nodes to the same namespace at each hop.
+        node_filter = "[WHERE namespace = $ns_rid OR namespace.namespace_id = $ns_str]"
+        hop_out = "->relates_to" + rel_filter + "->entity" + node_filter
+        hop_in = "<-relates_to" + rel_filter + "<-entity" + node_filter
 
         # Combine outgoing + incoming neighbor traversal in a single query.
         # NOTE: the center record is bound as $eid (not interpolated) — a bare
         # ``entity:<uuid>`` string makes SurrealQL's parser split on the UUID
         # hyphens and crash with ``Invalid token, found unexpected character``.
         # See issue #635.
-        out_arrow = ("->relates_to" + rel_filter + "->entity") * depth
-        in_arrow = ("<-relates_to" + rel_filter + "<-entity") * depth
+        out_arrow = hop_out * depth
+        in_arrow = hop_in * depth
         combined_sql = (
             f"SELECT {out_arrow} AS out_neighbors, "  # noqa: S608
             f"{in_arrow} AS in_neighbors "
@@ -894,6 +1018,10 @@ class SurrealDBGraphAdapter:
                 for item in flat:
                     if not isinstance(item, dict):
                         continue
+                    # Defensive: even with WHERE filtering at the SurrealQL
+                    # layer, drop any node whose namespace does not match.
+                    if not _row_in_namespace(item, ns_str):
+                        continue
                     item_id = str(_parse_uuid(item.get("id", "")))
                     if item_id not in seen_ids and len(entities) < limit:
                         seen_ids.add(item_id)
@@ -906,6 +1034,8 @@ class SurrealDBGraphAdapter:
                 if not isinstance(row, dict):
                     continue
                 if "id" in row and "name" in row:
+                    if not _row_in_namespace(row, ns_str):
+                        continue
                     item_id = str(_parse_uuid(row.get("id", "")))
                     if item_id not in seen_ids and len(entities) < limit:
                         seen_ids.add(item_id)
@@ -918,13 +1048,19 @@ class SurrealDBGraphAdapter:
             neighbor_rids = [_rid("entity", UUID(nid)) for nid in seen_ids]
             rel_sql = (
                 "SELECT * FROM relates_to WHERE "
-                "(in = $eid AND out IN $neighbor_rids) OR "
-                "(out = $eid AND in IN $neighbor_rids) "
+                "((in = $eid AND out IN $neighbor_rids) OR "
+                "(out = $eid AND in IN $neighbor_rids)) "
+                "AND namespace_id = $ns_str "
                 "LIMIT $limit"
             )
             rel_rows = await self._conn.query(
                 rel_sql,
-                {"eid": eid, "neighbor_rids": neighbor_rids, "limit": limit},
+                {
+                    "eid": eid,
+                    "neighbor_rids": neighbor_rids,
+                    "ns_str": ns_str,
+                    "limit": limit,
+                },
             )
             relationships = rel_rows
 
@@ -932,37 +1068,58 @@ class SurrealDBGraphAdapter:
 
     @trace(
         "khora.surrealdb.graph.get_neighborhoods_batch",
-        include={"entity_ids", "depth"},
+        include={"entity_ids", "namespace_id", "depth"},
         result=lambda r: {"count": len(r)},
     )
     async def get_neighborhoods_batch(
         self,
         entity_ids: list[UUID],
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit_per_entity: int = 20,
     ) -> dict[UUID, dict[str, Any]]:
+        """Return neighborhoods for many entities, scoped to ``namespace_id``.
+
+        Seed entities outside ``namespace_id`` are silently dropped (the
+        seed-set is intersected with the namespace via the same WHERE
+        predicate used by :meth:`get_entity`).  Every hop is filtered on
+        ``namespace_id`` so the traversal cannot leak into another
+        tenant's subgraph (IGR-223).
+        """
         if not entity_ids:
             return {}
 
-        rel_filter = ""
-        rel_bindings: dict[str, Any] = {}
+        ns_str = str(namespace_id)
+        ns_rid = _rid("memory_namespace", namespace_id)
+
+        rel_bindings: dict[str, Any] = {
+            "ns_str": ns_str,
+            "ns_rid": ns_rid,
+        }
+        rel_conds = ["namespace_id = $ns_str"]
         if relationship_types:
-            rel_filter = "[WHERE relationship_type IN $rel_types]"
+            rel_conds.append("relationship_type IN $rel_types")
             rel_bindings["rel_types"] = list(relationship_types)
+        rel_filter = "[WHERE " + " AND ".join(rel_conds) + "]"
+        node_filter = "[WHERE namespace = $ns_rid OR namespace.namespace_id = $ns_str]"
 
-        out_arrow = ("->relates_to" + rel_filter + "->entity") * depth
-        in_arrow = ("<-relates_to" + rel_filter + "<-entity") * depth
+        out_arrow = ("->relates_to" + rel_filter + "->entity" + node_filter) * depth
+        in_arrow = ("<-relates_to" + rel_filter + "<-entity" + node_filter) * depth
 
-        # Fetch all neighborhoods in a single query using an IN filter.
+        # Fetch all neighborhoods in a single query using an IN filter, with
+        # the seed-set also intersected with the namespace so leaked-id
+        # callers get nothing back.
         # Bind the entity RecordIDs — bare interpolation of ``entity:<uuid>``
         # makes SurrealQL parse the hyphens as arithmetic (issue #635).
         rel_bindings["eids"] = [_rid("entity", uid) for uid in entity_ids]
         batch_sql = (
             f"SELECT id, {out_arrow} AS out_neighbors, "  # noqa: S608
             f"{in_arrow} AS in_neighbors "
-            "FROM entity WHERE id IN $eids"
+            "FROM entity "
+            "WHERE id IN $eids "
+            "AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str)"
         )
         try:
             rows = await self._conn.query(batch_sql, rel_bindings)
@@ -973,6 +1130,7 @@ class SurrealDBGraphAdapter:
                 try:
                     neighborhood = await self.get_neighborhood(
                         eid,
+                        namespace_id=namespace_id,
                         depth=depth,
                         relationship_types=relationship_types,
                         limit=limit_per_entity,
@@ -995,6 +1153,7 @@ class SurrealDBGraphAdapter:
         for eid in entity_ids:
             eid_str = str(eid)
             row = row_by_id.get(eid_str)
+            # Seed missing from result-set => not in this namespace; drop.
             if not row:
                 result[eid] = {"entities": [], "relationships": []}
                 continue
@@ -1008,6 +1167,9 @@ class SurrealDBGraphAdapter:
                 flat = self._flatten(raw)
                 for item in flat:
                     if not isinstance(item, dict):
+                        continue
+                    # Defensive: drop any node whose namespace does not match.
+                    if not _row_in_namespace(item, ns_str):
                         continue
                     item_id = str(_parse_uuid(item.get("id", "")))
                     if item_id not in seen_ids and len(entities) < limit_per_entity:
@@ -1027,7 +1189,7 @@ class SurrealDBGraphAdapter:
         # UUID hyphens (issue #635).
         if pending_rels:
             or_conditions: list[str] = []
-            rel_query_bindings: dict[str, Any] = {}
+            rel_query_bindings: dict[str, Any] = {"rel_ns": ns_str}
             for idx, (eid, (center_rid, neighbor_ids)) in enumerate(pending_rels.items()):
                 center_key = f"c{idx}"
                 neighbor_key = f"n{idx}"
@@ -1041,9 +1203,9 @@ class SurrealDBGraphAdapter:
             if or_conditions:
                 rel_query_bindings["rel_limit"] = limit_per_entity * len(pending_rels)
                 batch_sql = (
-                    "SELECT * FROM relates_to WHERE "  # noqa: S608
+                    "SELECT * FROM relates_to WHERE ("  # noqa: S608
                     + " OR ".join(or_conditions)
-                    + " LIMIT $rel_limit"
+                    + ") AND namespace_id = $rel_ns LIMIT $rel_limit"
                 )
                 try:
                     all_rels = await self._conn.query(batch_sql, rel_query_bindings)

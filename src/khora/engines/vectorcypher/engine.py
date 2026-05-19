@@ -1955,29 +1955,26 @@ class VectorCypherEngine:
         temporal_store = self._get_temporal_store()
         dual_nodes = self._get_dual_nodes()
 
-        # Verify namespace if provided
-        if namespace_id:
-            document = await storage.get_document(document_id)
-            if document and document.namespace_id != namespace_id:
-                logger.warning(f"Document {document_id} not in namespace {namespace_id}")
-                return False
+        # namespace_id is required for IDOR-safe lookup (IGR-221). Callers
+        # going through Khora.forget always resolve it before calling here;
+        # bail loudly rather than allow a cross-tenant id probe.
+        if namespace_id is None:
+            logger.warning(f"Cannot forget document {document_id}: namespace_id is required")
+            return False
 
-        ns_id = namespace_id
-        if not ns_id:
-            document = await storage.get_document(document_id)
-            if document:
-                ns_id = document.namespace_id
-            else:
-                return False
+        # Verify the document exists in this namespace before doing any work.
+        document = await storage.get_document(document_id, namespace_id=namespace_id)
+        if document is None:
+            return False
 
-        await self._cascade_forget_extraction(document_id, ns_id)
+        await self._cascade_forget_extraction(document_id, namespace_id)
 
         # Delete from Neo4j (Chunk nodes and relationships)
         if dual_nodes is not None:
-            await dual_nodes.delete_chunks_by_document(document_id, ns_id)
+            await dual_nodes.delete_chunks_by_document(document_id, namespace_id)
 
         # Delete from pgvector
-        await temporal_store.delete_chunks_by_document(document_id, ns_id)
+        await temporal_store.delete_chunks_by_document(document_id, namespace_id)
 
         # Delete from relational storage
         return await storage.delete_document(document_id)
@@ -3068,6 +3065,7 @@ class VectorCypherEngine:
                 return []
             neighborhood = await storage.graph.get_neighborhood(
                 entity_id,
+                namespace_id=namespace_id,
                 depth=max_depth,
                 limit=limit,
             )
@@ -3127,7 +3125,7 @@ class VectorCypherEngine:
 
         # Batch fetch all entities in a single query (avoids N+1)
         entity_ids = [entity_id for entity_id, _ in entity_ids_scores]
-        entities_map = await storage.get_entities_batch(entity_ids)
+        entities_map = await storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
 
         # Return entities in score order, filtering out any that weren't found
         return [entities_map[eid] for eid, _score in entity_ids_scores if eid in entities_map]
@@ -3136,9 +3134,9 @@ class VectorCypherEngine:
     # Document Operations
     # =========================================================================
 
-    async def get_document(self, document_id: UUID) -> Document | None:
-        """Get a document by ID."""
-        return await self._get_storage().get_document(document_id)
+    async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
+        """Get a document by ID, scoped to ``namespace_id`` (IGR-221)."""
+        return await self._get_storage().get_document(document_id, namespace_id=namespace_id)
 
     async def list_documents(
         self,

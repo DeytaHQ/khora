@@ -553,13 +553,13 @@ class TestApplyRerankingExtra:
     @pytest.mark.asyncio
     async def test_empty_fused_results_returns_unchanged(self) -> None:
         retriever = _make_retriever()
-        out = await retriever._apply_reranking("q", [], limit=10)
+        out = await retriever._apply_reranking("q", [], limit=10, namespace_id=uuid4())
         assert out == []
 
     @pytest.mark.asyncio
     async def test_empty_fused_results_llm_returns_unchanged(self) -> None:
         retriever = _make_retriever()
-        out = await retriever._apply_llm_reranking("q", [], limit=10)
+        out = await retriever._apply_llm_reranking("q", [], limit=10, namespace_id=uuid4())
         assert out == []
 
     @pytest.mark.asyncio
@@ -580,7 +580,7 @@ class TestApplyRerankingExtra:
             instance.rerank = AsyncMock(side_effect=RuntimeError("model down"))
             # Force a fresh reranker per call
             retriever._reranker = instance
-            out = await retriever._apply_reranking("q", fused, limit=10)
+            out = await retriever._apply_reranking("q", fused, limit=10, namespace_id=uuid4())
             # On error, returns original list
             assert out == fused
 
@@ -598,7 +598,7 @@ class TestApplyRerankingExtra:
             instance = mock_cls.return_value
             instance.rerank = AsyncMock(side_effect=RuntimeError("llm down"))
             retriever._llm_reranker = instance
-            out = await retriever._apply_llm_reranking("q", fused, limit=10)
+            out = await retriever._apply_llm_reranking("q", fused, limit=10, namespace_id=uuid4())
             assert out == fused
 
 

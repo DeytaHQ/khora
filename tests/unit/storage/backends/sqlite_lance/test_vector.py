@@ -406,8 +406,26 @@ class TestEntities:
         # the LanceDB embedding.
         await graph.create_entity(e)
         await adapter.create_entity(e)
-        assert await adapter.entity_exists(e.id) is True
-        assert await adapter.entity_exists(uuid4()) is False
+        assert await adapter.entity_exists(e.id, namespace_id=ns) is True
+        assert await adapter.entity_exists(uuid4(), namespace_id=ns) is False
+
+    async def test_entity_exists_requires_namespace_kwarg(self, adapter: SQLiteLanceVectorAdapter, graph):
+        """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+        ns = uuid4()
+        e = _make_entity(ns, embedding=_unit(8, 0))
+        await graph.create_entity(e)
+        await adapter.create_entity(e)
+        with pytest.raises(TypeError):
+            await adapter.entity_exists(e.id)  # type: ignore[call-arg]
+
+    async def test_entity_exists_wrong_namespace_returns_false(self, adapter: SQLiteLanceVectorAdapter, graph):
+        """Cross-namespace probes return ``False`` (IGR-221)."""
+        ns = uuid4()
+        e = _make_entity(ns, embedding=_unit(8, 0))
+        await graph.create_entity(e)
+        await adapter.create_entity(e)
+        other_ns = uuid4()
+        assert await adapter.entity_exists(e.id, namespace_id=other_ns) is False
 
     async def test_update_entity(self, adapter: SQLiteLanceVectorAdapter, graph):
         ns = uuid4()

@@ -181,10 +181,26 @@ async def test_create_and_get_document(adapter, namespace):
     created = await adapter.create_document(doc)
     assert created.id == doc.id
 
-    fetched = await adapter.get_document(doc.id)
+    fetched = await adapter.get_document(doc.id, namespace_id=namespace.id)
     assert fetched is not None
     assert fetched.content == "hello world"
     assert fetched.title == "Doc"
+
+
+async def test_get_document_requires_namespace_kwarg(adapter, namespace):
+    """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+    doc = _make_document(namespace.id)
+    await adapter.create_document(doc)
+    with pytest.raises(TypeError):
+        await adapter.get_document(doc.id)  # type: ignore[call-arg]
+
+
+async def test_get_document_wrong_namespace_returns_none(adapter, namespace):
+    """Cross-namespace lookups return ``None`` — filter applied at SQL."""
+    doc = _make_document(namespace.id)
+    await adapter.create_document(doc)
+    other_ns = uuid4()
+    assert await adapter.get_document(doc.id, namespace_id=other_ns) is None
 
 
 async def test_list_documents_filters_by_status(adapter, namespace):
@@ -209,7 +225,7 @@ async def test_update_document(adapter, namespace):
     doc.status = DocumentStatus.COMPLETED
     await adapter.update_document(doc)
 
-    fetched = await adapter.get_document(doc.id)
+    fetched = await adapter.get_document(doc.id, namespace_id=namespace.id)
     assert fetched is not None
     assert fetched.title == "Updated"
     assert fetched.status == DocumentStatus.COMPLETED
@@ -219,7 +235,7 @@ async def test_delete_document(adapter, namespace):
     doc = _make_document(namespace.id)
     await adapter.create_document(doc)
     assert await adapter.delete_document(doc.id) is True
-    assert await adapter.get_document(doc.id) is None
+    assert await adapter.get_document(doc.id, namespace_id=namespace.id) is None
     assert await adapter.delete_document(doc.id) is False
 
 
@@ -268,9 +284,24 @@ async def test_get_documents_batch(adapter, namespace):
     await adapter.create_document(d1)
     await adapter.create_document(d2)
 
-    batch = await adapter.get_documents_batch([d1.id, d2.id, uuid4()])
+    batch = await adapter.get_documents_batch([d1.id, d2.id, uuid4()], namespace_id=namespace.id)
     assert set(batch.keys()) == {d1.id, d2.id}
     assert batch[d1.id].checksum == "1"
+
+
+async def test_get_documents_batch_requires_namespace_kwarg(adapter, namespace):
+    d = _make_document(namespace.id, checksum="rk")
+    await adapter.create_document(d)
+    with pytest.raises(TypeError):
+        await adapter.get_documents_batch([d.id])  # type: ignore[call-arg]
+
+
+async def test_get_documents_batch_wrong_namespace_drops_rows(adapter, namespace):
+    """Documents in other namespaces are silently dropped (IGR-221)."""
+    d = _make_document(namespace.id, checksum="leak")
+    await adapter.create_document(d)
+    other_ns = uuid4()
+    assert await adapter.get_documents_batch([d.id], namespace_id=other_ns) == {}
 
 
 async def test_get_documents_by_checksums(adapter, namespace):
@@ -287,7 +318,7 @@ async def test_get_document_sources_batch(adapter, namespace):
     doc = _make_document(namespace.id, title="Attribution")
     await adapter.create_document(doc)
 
-    sources = await adapter.get_document_sources_batch([doc.id])
+    sources = await adapter.get_document_sources_batch([doc.id], namespace_id=namespace.id)
     assert doc.id in sources
     src = sources[doc.id]
     assert src.title == "Attribution"
@@ -356,10 +387,27 @@ async def test_get_document_projections_batch_empty_input(adapter):
     assert await adapter.get_document_projections_batch([]) == {}
 
 
+async def test_get_document_sources_batch_requires_namespace_kwarg(adapter, namespace):
+    """IGR-221: namespace_id is a required kwarg-only parameter."""
+    doc = _make_document(namespace.id, title="X")
+    await adapter.create_document(doc)
+    with pytest.raises(TypeError):
+        await adapter.get_document_sources_batch([doc.id])  # type: ignore[call-arg]
+
+
+async def test_get_document_sources_batch_wrong_namespace_drops_rows(adapter, namespace):
+    """IGR-221: cross-namespace fetch returns no rows."""
+    doc = _make_document(namespace.id, title="X")
+    await adapter.create_document(doc)
+    other_ns = uuid4()
+    assert await adapter.get_document_sources_batch([doc.id], namespace_id=other_ns) == {}
+
+
 async def test_empty_batch_is_noop(adapter):
-    assert await adapter.get_documents_batch([]) == {}
-    assert await adapter.get_documents_by_checksums(uuid4(), []) == {}
-    assert await adapter.get_document_sources_batch([]) == {}
+    ns = uuid4()
+    assert await adapter.get_documents_batch([], namespace_id=ns) == {}
+    assert await adapter.get_documents_by_checksums(ns, []) == {}
+    assert await adapter.get_document_sources_batch([], namespace_id=ns) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -394,7 +442,7 @@ async def test_transaction_rollback_via_session_factory(adapter, namespace):
     try:
         await adapter.create_document(doc, session=session)
         # Sanity check: the insert is visible within the open transaction.
-        fetched = await adapter.get_document(doc.id)
+        fetched = await adapter.get_document(doc.id, namespace_id=namespace.id)
         # The outer ``get_document`` opens its own session and under SQLite
         # WAL may or may not see the uncommitted row depending on isolation.
         # Regardless, after rollback it must be gone.
@@ -403,7 +451,7 @@ async def test_transaction_rollback_via_session_factory(adapter, namespace):
     finally:
         await session.close()
 
-    assert await adapter.get_document(doc.id) is None
+    assert await adapter.get_document(doc.id, namespace_id=namespace.id) is None
 
 
 async def test_transaction_commit_via_session_factory(adapter, namespace):
@@ -417,6 +465,6 @@ async def test_transaction_commit_via_session_factory(adapter, namespace):
     finally:
         await session.close()
 
-    fetched = await adapter.get_document(doc.id)
+    fetched = await adapter.get_document(doc.id, namespace_id=namespace.id)
     assert fetched is not None
     assert fetched.checksum == "tx-commit"

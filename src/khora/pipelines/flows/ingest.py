@@ -2236,7 +2236,7 @@ async def backfill_entity_embeddings(
         if entity.embedding is None:
             # Also ensure entity exists in PostgreSQL, create if not
             if storage.vector:
-                exists = await storage.vector.entity_exists(entity.id)
+                exists = await storage.vector.entity_exists(entity.id, namespace_id=namespace_id)
                 if not exists:
                     await storage.vector.create_entity(entity)
             entities_needing_embeddings.append(entity)

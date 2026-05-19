@@ -336,12 +336,18 @@ class SurrealDBRelationalAdapter:
             raise RuntimeError(f"Failed to create document {document.id}")
         return self._row_to_document(row)
 
-    async def get_document(self, document_id: UUID) -> Document | None:
-        """Get a document by ID."""
+    async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
+        """Get a document by ID, scoped to ``namespace_id``.
+
+        Returns ``None`` if the document does not exist OR belongs to a
+        different namespace.  ``RecordID`` lookup is not namespace-scoped on
+        its own, so we filter explicitly on the document's ``namespace_id``
+        column to prevent cross-tenant IDOR (IGR-221).
+        """
         rid = _record_id("document", document_id)
         row = await self._conn.query_one(
-            "SELECT * FROM $rid",
-            {"rid": rid},
+            "SELECT * FROM $rid WHERE namespace_id = $ns",
+            {"rid": rid, "ns": str(namespace_id)},
         )
         if row is None:
             return None
@@ -526,14 +532,18 @@ class SurrealDBRelationalAdapter:
                 result[cs] = doc
         return result
 
-    async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
-        """Fetch multiple documents in a single query."""
+    async def get_documents_batch(self, document_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Document]:
+        """Fetch multiple documents in a single query, scoped to ``namespace_id``.
+
+        Documents belonging to a different namespace are silently dropped
+        from the result to prevent cross-tenant IDOR (IGR-221).
+        """
         if not document_ids:
             return {}
         id_strs = [_record_id("document", uid) for uid in document_ids]
         rows = await self._conn.query(
-            "SELECT * FROM document WHERE id IN $ids",
-            {"ids": id_strs},
+            "SELECT * FROM document WHERE id IN $ids AND namespace_id = $ns",
+            {"ids": id_strs, "ns": str(namespace_id)},
         )
         return {_parse_uuid(r["id"]): self._row_to_document(r) for r in rows}
 
@@ -554,14 +564,22 @@ class SurrealDBRelationalAdapter:
                 result[ext] = self._row_to_document(r)
         return result
 
-    async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
-        """Fetch lightweight document metadata for source attribution."""
+    async def get_document_sources_batch(
+        self, document_ids: list[UUID], *, namespace_id: UUID
+    ) -> dict[UUID, DocumentSource]:
+        """Fetch lightweight document metadata for source attribution,
+        scoped to ``namespace_id``.
+
+        Documents belonging to a different namespace are silently dropped
+        from the result to prevent cross-tenant IDOR (IGR-221).
+        """
         if not document_ids:
             return {}
         id_strs = [_record_id("document", uid) for uid in document_ids]
         rows = await self._conn.query(
-            "SELECT id, title, source, source_type, created_at, source_timestamp FROM document WHERE id IN $ids",
-            {"ids": id_strs},
+            "SELECT id, title, source, source_type, created_at, source_timestamp "
+            "FROM document WHERE id IN $ids AND namespace_id = $ns",
+            {"ids": id_strs, "ns": str(namespace_id)},
         )
         result: dict[UUID, DocumentSource] = {}
         for r in rows:

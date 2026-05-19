@@ -161,7 +161,7 @@ class TestNeo4jBackendGetNeighborhoodTimeout:
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
 
         with patch("khora.storage.backends.neo4j.logger"):
-            result = await backend.get_neighborhood(uuid4())
+            result = await backend.get_neighborhood(uuid4(), namespace_id=uuid4())
 
         assert result == {"entities": [], "relationships": []}
 
@@ -178,7 +178,7 @@ class TestNeo4jBackendGetNeighborhoodTimeout:
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
 
         with pytest.raises(ClientError) as excinfo:
-            await backend.get_neighborhood(uuid4())
+            await backend.get_neighborhood(uuid4(), namespace_id=uuid4())
 
         assert excinfo.value.code == "Neo.ClientError.Statement.SyntaxError"
 
@@ -198,7 +198,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchTimeout:
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
 
         with patch("khora.storage.backends.neo4j.logger"):
-            result = await backend.get_neighborhoods_batch([uuid4(), uuid4()])
+            result = await backend.get_neighborhoods_batch([uuid4(), uuid4()], namespace_id=uuid4())
 
         assert result == {}
 
@@ -215,7 +215,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchTimeout:
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
 
         with pytest.raises(ClientError) as excinfo:
-            await backend.get_neighborhoods_batch([uuid4()])
+            await backend.get_neighborhoods_batch([uuid4()], namespace_id=uuid4())
 
         assert excinfo.value.code == "Neo.ClientError.Statement.SyntaxError"
 
@@ -230,7 +230,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
         driver, session = _make_neo4j_driver()
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
 
-        result = await backend.get_neighborhoods_batch([])
+        result = await backend.get_neighborhoods_batch([], namespace_id=uuid4())
 
         assert result == {}
         session.execute_read.assert_not_called()
@@ -284,7 +284,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
         session.execute_read = AsyncMock(side_effect=mock_work)
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
-        result = await backend.get_neighborhoods_batch([entity_id])
+        result = await backend.get_neighborhoods_batch([entity_id], namespace_id=uuid4())
 
         assert entity_id in result
         assert "entities" in result[entity_id]
@@ -337,7 +337,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
         session.execute_read = AsyncMock(side_effect=mock_work)
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
-        result = await backend.get_neighborhoods_batch([entity_id])
+        result = await backend.get_neighborhoods_batch([entity_id], namespace_id=uuid4())
 
         rel = result[entity_id]["relationships"][0]
         # Verify all properties from props are included
@@ -414,7 +414,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
         session.execute_read = AsyncMock(side_effect=mock_work)
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
-        result = await backend.get_neighborhoods_batch([entity_id_1, entity_id_2])
+        result = await backend.get_neighborhoods_batch([entity_id_1, entity_id_2], namespace_id=uuid4())
 
         assert len(result) == 2
         assert entity_id_1 in result
@@ -441,7 +441,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
         session.execute_read = AsyncMock(side_effect=mock_work)
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
-        result = await backend.get_neighborhoods_batch([entity_id])
+        result = await backend.get_neighborhoods_batch([entity_id], namespace_id=uuid4())
 
         assert entity_id in result
         assert result[entity_id]["entities"] == []
@@ -508,7 +508,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
         session.execute_read = AsyncMock(side_effect=mock_work)
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
-        result = await backend.get_neighborhoods_batch([entity_id])
+        result = await backend.get_neighborhoods_batch([entity_id], namespace_id=uuid4())
 
         rels = result[entity_id]["relationships"]
         assert len(rels) == 2
@@ -556,7 +556,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
         session.execute_read = AsyncMock(side_effect=mock_work)
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
-        result = await backend.get_neighborhoods_batch([entity_id])
+        result = await backend.get_neighborhoods_batch([entity_id], namespace_id=uuid4())
 
         # Only the valid rel should be in the result
         assert len(result[entity_id]["relationships"]) == 1
@@ -589,7 +589,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
         backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
 
         with pytest.raises(AttributeError, match="get"):
-            await backend.get_neighborhoods_batch([entity_id])
+            await backend.get_neighborhoods_batch([entity_id], namespace_id=uuid4())
 
     @pytest.mark.asyncio
     async def test_relationship_types_filter_completes_without_error(self) -> None:
@@ -604,6 +604,7 @@ class TestNeo4jBackendGetNeighborhoodsBatchDataHandling:
 
         result = await backend.get_neighborhoods_batch(
             [uuid4()],
+            namespace_id=uuid4(),
             relationship_types=["KNOWS", "WORKS_WITH"],
         )
 
@@ -669,7 +670,7 @@ class TestNeo4jBackendGetEntityRelationships:
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=None)
 
-        got = await backend.get_entity_relationships(entity_id, direction="outgoing")
+        got = await backend.get_entity_relationships(entity_id, namespace_id=ns_id, direction="outgoing")
 
         assert isinstance(got, list)
         assert len(got) == 1
@@ -718,7 +719,7 @@ class TestNeo4jBackendGetEntityRelationships:
         backend = Neo4jBackend.from_driver(driver, query_timeout=None)
 
         with pytest.raises(TypeError, match="tuple indices"):
-            await backend.get_entity_relationships(entity_id, direction="outgoing")
+            await backend.get_entity_relationships(entity_id, namespace_id=uuid4(), direction="outgoing")
 
     @pytest.mark.asyncio
     async def test_returns_empty_list_when_no_relationships(self) -> None:
@@ -731,7 +732,7 @@ class TestNeo4jBackendGetEntityRelationships:
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=None)
 
-        got = await backend.get_entity_relationships(uuid4(), direction="outgoing")
+        got = await backend.get_entity_relationships(uuid4(), namespace_id=uuid4(), direction="outgoing")
 
         assert got == []
 
@@ -746,12 +747,13 @@ class TestNeo4jBackendGetEntityRelationships:
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=None)
 
-        await backend.get_entity_relationships(uuid4(), direction="incoming")
+        await backend.get_entity_relationships(uuid4(), namespace_id=uuid4(), direction="incoming")
 
         query = session.run.call_args.args[0]
-        assert "(other)-[r]->(e)" in query
+        # IGR-223: both endpoints now carry the namespace_id label filter.
+        assert "(other:Entity {namespace_id: $namespace_id})-[r]->(e:Entity {namespace_id: $namespace_id})" in query
         # Negative check: outgoing arrow must not be present.
-        assert "(e)-[r]->(other)" not in query
+        assert "(e:Entity {namespace_id: $namespace_id})-[r]->(other" not in query
 
     @pytest.mark.asyncio
     async def test_direction_both_uses_undirected_pattern(self) -> None:
@@ -764,13 +766,14 @@ class TestNeo4jBackendGetEntityRelationships:
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=None)
 
-        await backend.get_entity_relationships(uuid4(), direction="both")
+        await backend.get_entity_relationships(uuid4(), namespace_id=uuid4(), direction="both")
 
         query = session.run.call_args.args[0]
-        assert "(e)-[r]-(other)" in query
+        # IGR-223: both endpoints now carry the namespace_id label filter.
+        assert "(e:Entity {namespace_id: $namespace_id})-[r]-(other:Entity {namespace_id: $namespace_id})" in query
         # Negative checks: neither arrow form should appear for "both".
-        assert "(e)-[r]->(other)" not in query
-        assert "(other)-[r]->(e)" not in query
+        assert "(e:Entity {namespace_id: $namespace_id})-[r]->(other" not in query
+        assert "(other:Entity {namespace_id: $namespace_id})-[r]->(e" not in query
 
     @pytest.mark.asyncio
     async def test_relationship_types_filter_is_applied(self) -> None:
@@ -785,6 +788,7 @@ class TestNeo4jBackendGetEntityRelationships:
 
         await backend.get_entity_relationships(
             uuid4(),
+            namespace_id=uuid4(),
             direction="outgoing",
             relationship_types=["KNOWS", "WORKS_WITH"],
         )
@@ -830,7 +834,7 @@ class TestNeo4jBackendGetEntityRelationships:
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=None)
 
-        got = await backend.get_entity_relationships(entity_id, direction="outgoing")
+        got = await backend.get_entity_relationships(entity_id, namespace_id=ns_id, direction="outgoing")
 
         assert len(got) == 1
         rel = got[0]
@@ -863,7 +867,7 @@ class TestNeo4jBackendGetEntityRelationships:
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=None)
 
-        got = await backend.get_entity_relationships(entity_id, direction="outgoing")
+        got = await backend.get_entity_relationships(entity_id, namespace_id=uuid4(), direction="outgoing")
 
         assert len(got) == 3
         assert all(isinstance(r, Relationship) for r in got)

@@ -23,6 +23,7 @@ pytestmark = pytest.mark.integration
 
 # UUID that historically triggered the parse error (issue #635).
 _BUGGY_UUID = UUID("f6c351e7-eb0f-4ef4-a90b-bd20ff90e728")
+_NS_ID = UUID("11111111-2222-3333-4444-555555555555")
 
 
 async def test_get_neighborhood_does_not_parse_error_on_memory_surrealdb() -> None:
@@ -41,7 +42,7 @@ async def test_get_neighborhood_does_not_parse_error_on_memory_surrealdb() -> No
     await conn.connect()
     adapter = SurrealDBGraphAdapter(conn)
     try:
-        result = await adapter.get_neighborhood(_BUGGY_UUID, depth=1, limit=10)
+        result = await adapter.get_neighborhood(_BUGGY_UUID, namespace_id=_NS_ID, depth=1, limit=10)
         assert isinstance(result, dict)
         assert result == {"entities": [], "relationships": []}
     finally:
@@ -56,6 +57,7 @@ async def test_get_neighborhoods_batch_does_not_parse_error_on_memory_surrealdb(
     try:
         result = await adapter.get_neighborhoods_batch(
             [_BUGGY_UUID, UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")],
+            namespace_id=_NS_ID,
             depth=1,
             limit_per_entity=5,
         )

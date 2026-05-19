@@ -98,6 +98,7 @@ class TestDocTitleHydration:
                 engine_candidates,
                 coord,
                 lambda c: getattr(c, "document_id", None),
+                namespace_id=ns.id,
             )
 
             assert engine_candidates[0].doc_title == doc_a.title
@@ -130,6 +131,7 @@ class TestDocTitleHydration:
                 retriever_candidates,
                 coord,
                 lambda fr: getattr(getattr(fr, "item", None), "document_id", None),
+                namespace_id=ns.id,
             )
 
             assert retriever_candidates[0].doc_title == doc_a.title

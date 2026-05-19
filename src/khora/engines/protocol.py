@@ -278,14 +278,16 @@ class MemoryEngineProtocol(Protocol):
     # Document Operations
     # =========================================================================
 
-    async def get_document(self, document_id: UUID) -> Document | None:
-        """Get a document by ID.
+    async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
+        """Get a document by ID, scoped to ``namespace_id``.
 
         Args:
             document_id: Document UUID
+            namespace_id: Caller's namespace; out-of-namespace rows return ``None``
+                (IDOR — IGR-221).
 
         Returns:
-            Document or None if not found
+            Document or None if not found (or not in this namespace)
         """
         ...
 

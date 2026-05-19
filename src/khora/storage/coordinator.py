@@ -432,11 +432,17 @@ class StorageCoordinator:
             raise RuntimeError("Relational backend not configured")
         return await self.relational.create_document(document)
 
-    async def get_document(self, document_id: UUID) -> Document | None:
-        """Get a document by ID."""
+    async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
+        """Get a document by ID, scoped to ``namespace_id``.
+
+        Returns ``None`` if the document does not exist OR belongs to a
+        different namespace. The ``namespace_id`` filter is applied at the
+        backend's SQL layer to prevent cross-tenant document access by id
+        (IDOR — IGR-221).
+        """
         if not self.relational:
             raise RuntimeError("Relational backend not configured")
-        return await self.relational.get_document(document_id)
+        return await self.relational.get_document(document_id, namespace_id=namespace_id)
 
     async def list_documents(
         self,
@@ -964,7 +970,10 @@ class StorageCoordinator:
         backend's underlying ``get_entity`` only filters by ID.
         """
         if self.graph:
-            entity = await self.graph.get_entity(entity_id)
+            # Backend now filters at the Cypher/SQL layer (IGR-223). Keep the
+            # post-fetch check as defense-in-depth in case a backend's filter
+            # ever regresses.
+            entity = await self.graph.get_entity(entity_id, namespace_id=namespace_id)
             if entity is None or entity.namespace_id != namespace_id:
                 return None
             return entity
@@ -1170,7 +1179,7 @@ class StorageCoordinator:
         namespace. ``namespace_id`` is required to prevent cross-tenant IDOR.
         """
         if self.graph:
-            rel = await self.graph.get_relationship(relationship_id)
+            rel = await self.graph.get_relationship(relationship_id, namespace_id=namespace_id)
             if rel is None or rel.namespace_id != namespace_id:
                 return None
             return rel
@@ -1186,14 +1195,24 @@ class StorageCoordinator:
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         direction: str = "both",
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
-        """Get relationships for an entity."""
+        """Get relationships for an entity, scoped to ``namespace_id``.
+
+        Returns an empty list if the entity does not belong to the caller's
+        namespace. Edges that cross into other namespaces are excluded
+        (IGR-223).
+        """
         if self.graph:
             return await self.graph.get_entity_relationships(
-                entity_id, direction=direction, relationship_types=relationship_types, limit=limit
+                entity_id,
+                namespace_id=namespace_id,
+                direction=direction,
+                relationship_types=relationship_types,
+                limit=limit,
             )
         return []
 
@@ -1239,7 +1258,7 @@ class StorageCoordinator:
         ``namespace_id`` is required to prevent cross-tenant IDOR.
         """
         if self.graph:
-            ep = await self.graph.get_episode(episode_id)
+            ep = await self.graph.get_episode(episode_id, namespace_id=namespace_id)
             if ep is None or ep.namespace_id != namespace_id:
                 return None
             return ep
@@ -1286,14 +1305,24 @@ class StorageCoordinator:
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """Get the neighborhood of an entity."""
+        """Get the neighborhood of an entity, scoped to ``namespace_id``.
+
+        Returns ``{"entities": [], "relationships": []}`` if the seed entity
+        belongs to a different namespace. Traversal never crosses namespace
+        boundaries (IGR-223).
+        """
         if self.graph:
             return await self.graph.get_neighborhood(
-                entity_id, depth=depth, relationship_types=relationship_types, limit=limit
+                entity_id,
+                namespace_id=namespace_id,
+                depth=depth,
+                relationship_types=relationship_types,
+                limit=limit,
             )
         return {"entities": [], "relationships": []}
 
@@ -1301,11 +1330,15 @@ class StorageCoordinator:
     # Batch operations (optimized for parallel fetching)
     # =========================================================================
 
-    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
-        """Fetch multiple entities in a single query.
+    async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Entity]:
+        """Fetch multiple entities in a single query, scoped to ``namespace_id``.
+
+        Entities belonging to any other namespace are silently dropped from
+        the result (IGR-223).
 
         Args:
             entity_ids: List of entity IDs to fetch
+            namespace_id: Caller's namespace; out-of-namespace rows are dropped.
 
         Returns:
             Dictionary mapping entity ID to Entity object
@@ -1313,10 +1346,12 @@ class StorageCoordinator:
         if not entity_ids:
             return {}
         if self.graph:
-            return await self.graph.get_entities_batch(entity_ids)
+            return await self.graph.get_entities_batch(entity_ids, namespace_id=namespace_id)
         # Fallback to pgvector for engines without graph backend (e.g., Chronicle)
         if self.vector and hasattr(self.vector, "get_entities_batch"):
-            return await self.vector.get_entities_batch(entity_ids)
+            return await self.vector.get_entities_batch(  # type: ignore[unresolved-attribute]
+                entity_ids, namespace_id=namespace_id
+            )
         return {}
 
     async def get_entities_by_names_batch(self, namespace_id: UUID, names: list[str]) -> dict[str, Entity]:
@@ -1332,11 +1367,15 @@ class StorageCoordinator:
             return await self.vector.get_entities_by_names_batch(namespace_id, names)
         return {}
 
-    async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
-        """Fetch multiple documents in a single query.
+    async def get_documents_batch(self, document_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Document]:
+        """Fetch multiple documents in a single query, scoped to ``namespace_id``.
+
+        Documents belonging to any other namespace are silently dropped from
+        the result (IGR-221).
 
         Args:
             document_ids: List of document IDs to fetch
+            namespace_id: Caller's namespace; out-of-namespace rows are dropped.
 
         Returns:
             Dictionary mapping document ID to Document object
@@ -1344,14 +1383,21 @@ class StorageCoordinator:
         if not document_ids:
             return {}
         if self.relational:
-            return await self.relational.get_documents_batch(document_ids)
+            return await self.relational.get_documents_batch(document_ids, namespace_id=namespace_id)
         return {}
 
-    async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
-        """Fetch lightweight document metadata for source attribution.
+    async def get_document_sources_batch(
+        self, document_ids: list[UUID], *, namespace_id: UUID
+    ) -> dict[UUID, DocumentSource]:
+        """Fetch lightweight document metadata for source attribution,
+        scoped to ``namespace_id``.
+
+        Documents in other namespaces are silently dropped from the result
+        (IGR-221).
 
         Args:
             document_ids: List of document IDs to fetch
+            namespace_id: Caller's namespace; out-of-namespace rows are dropped.
 
         Returns:
             Dictionary mapping document ID to DocumentSource
@@ -1359,7 +1405,7 @@ class StorageCoordinator:
         if not document_ids:
             return {}
         if self.relational:
-            return await self.relational.get_document_sources_batch(document_ids)
+            return await self.relational.get_document_sources_batch(document_ids, namespace_id=namespace_id)
         return {}
 
     async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
@@ -1382,6 +1428,7 @@ class StorageCoordinator:
         self,
         entity_ids: list[UUID],
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit_per_entity: int = 20,
@@ -1406,6 +1453,7 @@ class StorageCoordinator:
             return {}
         if self.graph:
             kwargs: dict[str, Any] = {
+                "namespace_id": namespace_id,
                 "depth": depth,
                 "relationship_types": relationship_types,
                 "limit_per_entity": limit_per_entity,

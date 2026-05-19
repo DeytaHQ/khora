@@ -277,7 +277,7 @@ class TestChunkSources:
 
     async def test_get_chunk_sources_batch_empty(self) -> None:
         agent = AgenticSearchAgent(engine=MagicMock())
-        out = await agent._get_chunk_sources_batch([])
+        out = await agent._get_chunk_sources_batch([], uuid4())
         assert out == {}
 
     async def test_get_chunk_sources_batch_populates_map(self) -> None:
@@ -289,7 +289,7 @@ class TestChunkSources:
         engine._storage = MagicMock()
         engine._storage.get_documents_batch = AsyncMock(return_value={c1.document_id: doc1, c2.document_id: doc2})
         agent = AgenticSearchAgent(engine=engine)
-        out = await agent._get_chunk_sources_batch([(c1, 0.5), (c2, 0.5)])
+        out = await agent._get_chunk_sources_batch([(c1, 0.5), (c2, 0.5)], uuid4())
         assert out[str(c1.id)] == "slack"
         assert out[str(c2.id)] == "github"
 
@@ -301,7 +301,7 @@ class TestChunkSources:
         engine._storage = MagicMock()
         engine._storage.get_documents_batch = AsyncMock(return_value={})
         agent = AgenticSearchAgent(engine=engine)
-        out = await agent._get_chunk_sources_batch([(c, 0.5)])
+        out = await agent._get_chunk_sources_batch([(c, 0.5)], uuid4())
         assert out[str(c.id)] == "unknown"
 
 

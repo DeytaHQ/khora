@@ -106,7 +106,7 @@ class TestVectorCypherSearchEntities:
             limit=5,
             min_similarity=0.0,
         )
-        storage.get_entities_batch.assert_awaited_once_with([entity_id])
+        storage.get_entities_batch.assert_awaited_once_with([entity_id], namespace_id=namespace_id)
 
         # Verify results
         assert len(results) == 1

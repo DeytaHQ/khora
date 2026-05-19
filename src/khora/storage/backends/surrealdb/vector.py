@@ -441,10 +441,26 @@ class SurrealDBVectorAdapter:
         bindings.pop("created_at", None)
         await self._conn.execute(sql, bindings)
 
-    async def entity_exists(self, entity_id: UUID) -> bool:
-        """Check whether an entity record exists."""
-        sql = "SELECT count() AS cnt FROM entity WHERE id = entity:\u27e8$id\u27e9 GROUP ALL"
-        row = await self._conn.query_one(sql, {"id": str(entity_id)})
+    async def entity_exists(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Check whether an entity record exists within ``namespace_id``.
+
+        Returns ``False`` if the entity does not exist OR belongs to a
+        different namespace, preventing cross-tenant entity-existence
+        enumeration (IDOR \u2014 IGR-221 / IGR-223).
+        """
+        sql = (
+            "SELECT count() AS cnt FROM entity "
+            "WHERE id = $rid AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) "
+            "GROUP ALL"
+        )
+        row = await self._conn.query_one(
+            sql,
+            {
+                "rid": _rid("entity", entity_id),
+                "ns_rid": _rid("memory_namespace", namespace_id),
+                "ns_str": str(namespace_id),
+            },
+        )
         return int(row.get("cnt", 0)) > 0 if row else False
 
     async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
@@ -657,15 +673,26 @@ class SurrealDBVectorAdapter:
     # Entity retrieval (by ID + namespace)
     # ------------------------------------------------------------------
 
-    async def get_entity(self, entity_id: UUID, namespace_id: UUID | None = None) -> Entity | None:
-        """Fetch an entity by primary key.
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
+        """Fetch an entity by primary key, scoped to ``namespace_id``.
 
-        The *namespace_id* parameter is accepted for API compatibility with
-        other backends but is not used for filtering — SurrealDB record IDs
-        are globally unique.
+        Returns ``None`` if the entity does not exist OR belongs to a
+        different namespace.  Previously this method silently accepted a
+        ``namespace_id`` kwarg and ignored it — that was an IDOR bug
+        (IGR-221 / IGR-223).  ``namespace_id`` is now required and used
+        to filter at the SurrealQL layer.
         """
-        sql = "SELECT * FROM entity:⟨$id⟩"
-        row = await self._conn.query_one(sql, {"id": str(entity_id)})
+        sql = (
+            "SELECT * FROM entity WHERE id = $rid AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) LIMIT 1"
+        )
+        row = await self._conn.query_one(
+            sql,
+            {
+                "rid": _rid("entity", entity_id),
+                "ns_rid": _rid("memory_namespace", namespace_id),
+                "ns_str": str(namespace_id),
+            },
+        )
         if not row:
             return None
         return _row_to_entity(row)

@@ -1307,7 +1307,7 @@ class VectorCypherRetriever:
         # Step 8c: Cross-encoder reranking (after boosts, before version scoring)
         if self._config.enable_reranking:
             with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
-                fused_results = await self._apply_reranking(query, fused_results, limit)
+                fused_results = await self._apply_reranking(query, fused_results, limit, namespace_id=namespace_id)
 
         # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder)
         # Skip when:
@@ -1333,7 +1333,9 @@ class VectorCypherRetriever:
                     _skip_llm = True
             if not _skip_llm:
                 with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused_results)):
-                    fused_results = await self._apply_llm_reranking(query, fused_results, limit)
+                    fused_results = await self._apply_llm_reranking(
+                        query, fused_results, limit, namespace_id=namespace_id
+                    )
 
         # Step 8e: Version-aware scoring — the FINAL score adjustment.
         # Applied after ALL reranking (cross-encoder + LLM) so nothing can
@@ -1462,7 +1464,9 @@ class VectorCypherRetriever:
                 rels = []
                 for eid in entity_ids_to_fetch[:10]:
                     try:
-                        entity_rels = await self._storage.graph.get_entity_relationships(eid, limit=20)
+                        entity_rels = await self._storage.graph.get_entity_relationships(
+                            eid, namespace_id=namespace_id, limit=20
+                        )
                         for r in entity_rels:
                             rels.append(
                                 {
@@ -1484,7 +1488,7 @@ class VectorCypherRetriever:
 
         if entity_ids_to_fetch and self._storage:
             try:
-                entities_map = await self._storage.get_entities_batch(entity_ids_to_fetch)
+                entities_map = await self._storage.get_entities_batch(entity_ids_to_fetch, namespace_id=namespace_id)
                 for eid, score in all_entity_scores:
                     if eid in entities_map:
                         entity_results.append((entities_map[eid], score))
@@ -1646,6 +1650,8 @@ class VectorCypherRetriever:
         query: str,
         fused_results: list[FusedResult],
         limit: int,
+        *,
+        namespace_id: UUID,
     ) -> list[FusedResult]:
         """Apply cross-encoder reranking to fused results.
 
@@ -1706,7 +1712,10 @@ class VectorCypherRetriever:
                 )
             )
         await hydrate_doc_titles(
-            candidates, self._storage, lambda fr: getattr(getattr(fr, "item", None), "document_id", None)
+            candidates,
+            self._storage,
+            lambda fr: getattr(getattr(fr, "item", None), "document_id", None),
+            namespace_id=namespace_id,
         )
 
         try:
@@ -1769,6 +1778,8 @@ class VectorCypherRetriever:
         query: str,
         fused_results: list[FusedResult],
         limit: int,
+        *,
+        namespace_id: UUID,
     ) -> list[FusedResult]:
         """Apply LLM reranking to the top-N fused results for temporal queries.
 
@@ -1827,7 +1838,10 @@ class VectorCypherRetriever:
                 )
             )
         await hydrate_doc_titles(
-            candidates, self._storage, lambda fr: getattr(getattr(fr, "item", None), "document_id", None)
+            candidates,
+            self._storage,
+            lambda fr: getattr(getattr(fr, "item", None), "document_id", None),
+            namespace_id=namespace_id,
         )
 
         try:
@@ -1966,7 +1980,7 @@ class VectorCypherRetriever:
             if self._config.enable_reranking and chunk_results:
                 fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
                 with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused)):
-                    fused = await self._apply_reranking(query, fused, limit)
+                    fused = await self._apply_reranking(query, fused, limit, namespace_id=namespace_id)
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # LLM reranking of top-N for temporal queries (after cross-encoder)
@@ -1986,7 +2000,7 @@ class VectorCypherRetriever:
                 if not _skip_llm_simple:
                     fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
                     with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused)):
-                        fused = await self._apply_llm_reranking(query, fused, limit)
+                        fused = await self._apply_llm_reranking(query, fused, limit, namespace_id=namespace_id)
                     chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # Version-aware scoring — the FINAL score adjustment after ALL reranking.
@@ -2454,7 +2468,7 @@ class VectorCypherRetriever:
                 # SurrealDB fallback: get chunks via entity source_chunk_ids
                 chunk_records = []
                 try:
-                    entities_map = await self._storage.get_entities_batch(entity_ids)
+                    entities_map = await self._storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
                     all_chunk_ids: list[UUID] = []
                     for entity in entities_map.values():
                         all_chunk_ids.extend(entity.source_chunk_ids[:5])

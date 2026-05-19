@@ -306,7 +306,7 @@ async def test_get_events_for_resource(adapter: SQLiteLanceEventStoreAdapter, ns
     ]
     await adapter.append_events_batch(events)
 
-    got = await adapter.get_events_for_resource("document", target, limit=10)
+    got = await adapter.get_events_for_resource("document", target, namespace_id=ns, limit=10)
     assert len(got) == 2
     assert got[0].event_type == EventType.DOCUMENT_UPDATED  # newest first
     assert got[1].event_type == EventType.DOCUMENT_CREATED
@@ -335,12 +335,12 @@ async def test_get_latest_event(adapter: SQLiteLanceEventStoreAdapter, ns: UUID)
         ]
     )
 
-    latest = await adapter.get_latest_event("document", target)
+    latest = await adapter.get_latest_event("document", target, namespace_id=ns)
     assert latest is not None
     assert latest.event_type == EventType.DOCUMENT_UPDATED
 
     # Unknown resource -> None.
-    missing = await adapter.get_latest_event("document", uuid4())
+    missing = await adapter.get_latest_event("document", uuid4(), namespace_id=ns)
     assert missing is None
 
 

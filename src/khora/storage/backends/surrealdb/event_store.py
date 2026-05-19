@@ -247,16 +247,25 @@ class SurrealDBEventStoreAdapter:
         resource_type: str,
         resource_id: UUID,
         *,
+        namespace_id: UUID,
         limit: int = 100,
     ) -> list[MemoryEvent]:
-        """Get all events for a specific resource."""
+        """Get all events for a specific resource, scoped to ``namespace_id``.
+
+        Returns an empty list if the resource belongs to a different
+        namespace.  Prevents cross-tenant audit-log leakage (IGR-221 /
+        IGR-223 family).
+        """
         rows = await self._conn.query(
             f"SELECT * FROM {_TABLE} "  # noqa: S608
-            "WHERE resource_type = $resource_type AND resource_id = $resource_id "
+            "WHERE resource_type = $resource_type "
+            "AND resource_id = $resource_id "
+            "AND namespace_id = $namespace_id "
             "ORDER BY timestamp DESC LIMIT $lim",
             {
                 "resource_type": resource_type,
                 "resource_id": str(resource_id),
+                "namespace_id": str(namespace_id),
                 "lim": limit,
             },
         )
@@ -266,15 +275,24 @@ class SurrealDBEventStoreAdapter:
         self,
         resource_type: str,
         resource_id: UUID,
+        *,
+        namespace_id: UUID,
     ) -> MemoryEvent | None:
-        """Get the latest event for a resource."""
+        """Get the latest event for a resource, scoped to ``namespace_id``.
+
+        Returns ``None`` if the resource belongs to a different namespace.
+        Prevents cross-tenant audit-log leakage (IGR-221 / IGR-223 family).
+        """
         row = await self._conn.query_one(
             f"SELECT * FROM {_TABLE} "  # noqa: S608
-            "WHERE resource_type = $resource_type AND resource_id = $resource_id "
+            "WHERE resource_type = $resource_type "
+            "AND resource_id = $resource_id "
+            "AND namespace_id = $namespace_id "
             "ORDER BY timestamp DESC LIMIT 1",
             {
                 "resource_type": resource_type,
                 "resource_id": str(resource_id),
+                "namespace_id": str(namespace_id),
             },
         )
         if row is None:

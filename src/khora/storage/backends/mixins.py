@@ -9,12 +9,15 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
+if TYPE_CHECKING:
+    from khora.core.models import Entity
 
 # ---------------------------------------------------------------------------
 # Async session mixin (shared across SQL-based backends)
@@ -166,13 +169,16 @@ class GraphBackendBase:
     Backends that support native batch queries should override these methods.
     """
 
-    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:  # type: ignore[unresolved-reference]  # noqa: F821
-        """Default N+1 implementation — subclasses should override for efficiency."""
+    async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Entity]:
+        """Default N+1 implementation — subclasses should override for efficiency.
+
+        Scoped to ``namespace_id`` to prevent cross-tenant IDOR (IGR-223).
+        """
         if not entity_ids:
             return {}
         result: dict[UUID, Any] = {}
         for eid in entity_ids:
-            entity = await self.get_entity(eid)  # type: ignore[attr-defined]
+            entity = await self.get_entity(eid, namespace_id=namespace_id)  # type: ignore[attr-defined]
             if entity is not None:
                 result[eid] = entity
         return result
@@ -181,17 +187,23 @@ class GraphBackendBase:
         self,
         entity_ids: list[UUID],
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit_per_entity: int = 20,
     ) -> dict[UUID, dict[str, Any]]:
-        """Default N+1 implementation — subclasses should override for efficiency."""
+        """Default N+1 implementation — subclasses should override for efficiency.
+
+        Traversal is scoped to ``namespace_id`` so it never visits a node in
+        a different namespace (IGR-223).
+        """
         if not entity_ids:
             return {}
         result: dict[UUID, dict[str, Any]] = {}
         for eid in entity_ids:
             neighborhood = await self.get_neighborhood(  # type: ignore[attr-defined]
                 eid,
+                namespace_id=namespace_id,
                 depth=depth,
                 relationship_types=relationship_types,
                 limit=limit_per_entity,

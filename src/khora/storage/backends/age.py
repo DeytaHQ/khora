@@ -441,9 +441,15 @@ class AGEBackend(GraphBackendBase):
         return entity
 
     @trace("khora.age.get_entity")
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
+        """Get an entity by ID, scoped to ``namespace_id`` (IGR-223).
+
+        AGE Cypher is f-string-interpolated today (full bindparam migration
+        tracked as IGR-226). Both ``entity_id`` and ``namespace_id`` are
+        type-safe UUIDs from the call site, so this is not a SQLi vector.
+        """
         cypher = f"""
-            MATCH (e:Entity {{id: '{entity_id}'}})
+            MATCH (e:Entity {{id: '{entity_id}', namespace_id: '{namespace_id}'}})
             RETURN e
         """
         async with self._get_session_factory()() as session:
@@ -607,10 +613,15 @@ class AGEBackend(GraphBackendBase):
         return relationship
 
     @trace("khora.age.get_relationship")
-    async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+    async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
+        """Get a relationship by ID, scoped to ``namespace_id`` (IGR-223).
+
+        Both endpoint nodes are constrained to ``namespace_id`` so cross-tenant
+        edges never surface.
+        """
         cypher = f"""
-            MATCH (source:Entity)-[r]->(target:Entity)
-            WHERE r.id = '{relationship_id}'
+            MATCH (source:Entity {{namespace_id: '{namespace_id}'}})-[r]->(target:Entity {{namespace_id: '{namespace_id}'}})
+            WHERE r.id = '{relationship_id}' AND r.namespace_id = '{namespace_id}'
             RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
         """
         async with self._get_session_factory()() as session:
@@ -657,21 +668,28 @@ class AGEBackend(GraphBackendBase):
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         direction: str = "both",
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
+        """Get relationships for an entity, scoped to ``namespace_id`` (IGR-223).
+
+        Both endpoint nodes are constrained to ``namespace_id`` so edges
+        crossing into other namespaces don't surface.
+        """
         rel_filter = ""
         if relationship_types:
             sanitized = [self._sanitize_label(rt) for rt in relationship_types]
             rel_filter = ":" + "|".join(sanitized)
 
+        ns_lit = f"{{namespace_id: '{namespace_id}'}}"
         if direction == "outgoing":
-            pattern = f"(e)-[r{rel_filter}]->(other)"
+            pattern = f"(e:Entity {ns_lit})-[r{rel_filter}]->(other:Entity {ns_lit})"
         elif direction == "incoming":
-            pattern = f"(other)-[r{rel_filter}]->(e)"
+            pattern = f"(other:Entity {ns_lit})-[r{rel_filter}]->(e:Entity {ns_lit})"
         else:
-            pattern = f"(e)-[r{rel_filter}]-(other)"
+            pattern = f"(e:Entity {ns_lit})-[r{rel_filter}]-(other:Entity {ns_lit})"
 
         cypher = f"""
             MATCH {pattern}
@@ -792,9 +810,10 @@ class AGEBackend(GraphBackendBase):
         return episode
 
     @trace("khora.age.get_episode")
-    async def get_episode(self, episode_id: UUID) -> Episode | None:
+    async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
+        """Get an episode by ID, scoped to ``namespace_id`` (IGR-223)."""
         cypher = f"""
-            MATCH (ep:Episode {{id: '{episode_id}'}})
+            MATCH (ep:Episode {{id: '{episode_id}', namespace_id: '{namespace_id}'}})
             RETURN ep
         """
         async with self._get_session_factory()() as session:
@@ -857,9 +876,11 @@ class AGEBackend(GraphBackendBase):
             sanitized = [self._sanitize_label(rt) for rt in relationship_types]
             rel_filter = ":" + "|".join(sanitized)
 
+        # Every node on the path — endpoints AND intermediates — must share
+        # ``namespace_id`` so the traversal never crosses tenants (IGR-223).
         cypher = f"""
-            MATCH path = (source:Entity {{id: '{source_entity_id}'}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: '{target_entity_id}'}})
-            WHERE source.namespace_id = '{namespace_id}' AND target.namespace_id = '{namespace_id}'
+            MATCH path = (source:Entity {{id: '{source_entity_id}', namespace_id: '{namespace_id}'}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: '{target_entity_id}', namespace_id: '{namespace_id}'}})
+            WHERE ALL(n IN nodes(path) WHERE n.namespace_id = '{namespace_id}')
             RETURN path
             LIMIT 10
         """
@@ -890,17 +911,24 @@ class AGEBackend(GraphBackendBase):
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
+        """Get the neighborhood of an entity, scoped to ``namespace_id``.
+
+        Seed and every node reached during traversal are constrained to
+        ``namespace_id`` so the result never crosses into another namespace
+        (IGR-223).
+        """
         rel_filter = ""
         if relationship_types:
             sanitized = [self._sanitize_label(rt) for rt in relationship_types]
             rel_filter = ":" + "|".join(sanitized)
 
         cypher = f"""
-            MATCH (center:Entity {{id: '{entity_id}'}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+            MATCH (center:Entity {{id: '{entity_id}', namespace_id: '{namespace_id}'}})-[r{rel_filter}*1..{depth}]-(other:Entity {{namespace_id: '{namespace_id}'}})
             RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
             LIMIT {limit}
         """

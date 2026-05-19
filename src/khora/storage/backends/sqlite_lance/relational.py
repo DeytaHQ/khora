@@ -390,9 +390,20 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
         await session.refresh(model)
         return self._document_model_to_domain(model)
 
-    async def get_document(self, document_id: UUID) -> Document | None:
+    async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
+        """Get a document by ID, scoped to ``namespace_id``.
+
+        Returns ``None`` if the document does not exist OR belongs to a
+        different namespace. Prevents cross-tenant document access by id
+        (IDOR — IGR-221).
+        """
         async with self._get_session() as session:
-            result = await session.execute(select(DocumentModel).where(DocumentModel.id == document_id))
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.id == document_id,
+                    DocumentModel.namespace_id == namespace_id,
+                )
+            )
             model = result.scalar_one_or_none()
             return self._document_model_to_domain(model) if model else None
 
@@ -534,11 +545,21 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             model = result.scalars().first()
             return self._document_model_to_domain(model) if model else None
 
-    async def get_documents_batch(self, document_ids: list[UUID]) -> dict[UUID, Document]:
+    async def get_documents_batch(self, document_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Document]:
+        """Fetch multiple documents in a single query, scoped to ``namespace_id``.
+
+        Documents belonging to any other namespace are silently dropped
+        from the result to prevent cross-tenant IDOR (IGR-221).
+        """
         if not document_ids:
             return {}
         async with self._get_session() as session:
-            result = await session.execute(select(DocumentModel).where(DocumentModel.id.in_(document_ids)))
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.id.in_(document_ids),
+                    DocumentModel.namespace_id == namespace_id,
+                )
+            )
             models = result.scalars().all()
             return {m.id: self._document_model_to_domain(m) for m in models}
 
@@ -571,7 +592,15 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             models = result.scalars().all()
             return {m.external_id: self._document_model_to_domain(m) for m in models if m.external_id}
 
-    async def get_document_sources_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentSource]:
+    async def get_document_sources_batch(
+        self, document_ids: list[UUID], *, namespace_id: UUID
+    ) -> dict[UUID, DocumentSource]:
+        """Fetch lightweight document metadata for source attribution,
+        scoped to ``namespace_id``.
+
+        Documents in other namespaces are silently dropped from the
+        result (IGR-221).
+        """
         if not document_ids:
             return {}
         async with self._get_session() as session:
@@ -583,7 +612,10 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
                     DocumentModel.source_type,
                     DocumentModel.created_at,
                     DocumentModel.source_timestamp,
-                ).where(DocumentModel.id.in_(document_ids))
+                ).where(
+                    DocumentModel.id.in_(document_ids),
+                    DocumentModel.namespace_id == namespace_id,
+                )
             )
             rows = result.all()
             return {

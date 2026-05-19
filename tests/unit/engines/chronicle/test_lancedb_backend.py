@@ -292,7 +292,7 @@ class TestChronicleLanceDBBackend:
             assert alice.id in entity_ids
 
             # The N+1 fallback in GraphBackendBase handles batch fetch.
-            fetched = await engine._get_storage().get_entities_batch([alice.id, bob.id])
+            fetched = await engine._get_storage().get_entities_batch([alice.id, bob.id], namespace_id=ns.id)
             assert alice.id in fetched and bob.id in fetched
             assert fetched[alice.id].name == "Alice"
         finally:
