@@ -225,8 +225,8 @@ addopts = [
     "--cov-branch",
     "--cov-report=term-missing",
     # 85% target on changed surface; aggregate gate set to honest current floor.
-    # Ladders 65 → 70 → 72 → 75 → 80 → 85 per #695.
-    "--cov-fail-under=72",
+    # Ladders 65 → 70 → 72 → 77 → 80 → 85 per #695.
+    "--cov-fail-under=77",
     "-m",
     "not slow",
 ]

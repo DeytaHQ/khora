@@ -8,6 +8,8 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Changed
 
+- **Coverage floor lifted 72% → 77%** ([#695](https://github.com/DeytaHQ/khora/issues/695) step 3+). ~500 new unit tests across 9 modules with the largest remaining gaps. Unit-only coverage rose from 73.15% to **76.87%**; combined unit+integration on CI projected ≥78%. Per-module before → after: `query/engine.py` 52→84%, `query/router.py` 52→96%, `query/reranking.py` 12→96%, `engines/vectorcypher/engine.py` 50→83%, `engines/vectorcypher/retriever.py` 71→85%, `engines/skeleton/engine.py` 49→63%, `engines/skeleton/backends/pgvector.py` 18→72%, `storage/backends/pgvector.py` (unit-only) 39→67%, `storage/backends/neo4j.py` (unit-only) 15→46%. Next ladder step is 80%.
+
 - **Coverage floor lifted 65% → 72%** ([#695](https://github.com/DeytaHQ/khora/issues/695) step 2). `--cov-fail-under` raised in `pyproject.toml`, `Makefile`, and `.github/workflows/ci.yml`. Backed by 500+ new unit tests across 15 previously under-covered modules (query/{normalization,agentic,understanding,hyde,linking,temporal_detection}, storage/{optimize,expertise_store,event_store}, storage/backends/postgresql, pipelines/tasks/extract, pipelines/flows/ingest, extraction/{entity_resolution,expansion/rule_engine,extractors/llm}, integrations/crewai/storage). Unit-only coverage rose from ~68% to **73.15%**; combined unit+integration projected at ~75%. Next ladder steps remain at 75% / 80% / 85% per the issue plan.
 
 ### Fixed
