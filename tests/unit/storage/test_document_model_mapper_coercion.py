@@ -272,6 +272,29 @@ class TestDocumentSourceTimestampRoundTrip:
         doc = adapter._document_model_to_domain(model)
         assert doc.source_timestamp == when
 
+    def test_source_timestamp_roundtrips_surrealdb(self) -> None:
+        from datetime import UTC, datetime
+
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        adapter = SurrealDBRelationalAdapter.__new__(SurrealDBRelationalAdapter)
+        when = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        row = {
+            "id": str(uuid4()),
+            "namespace_id": str(uuid4()),
+            "content": "body",
+            "status": "completed",
+            "source_type": "library",
+            "source_timestamp": when,
+            "size_bytes": 0,
+            "metadata_": {},
+            "chunk_count": 0,
+            "entity_count": 0,
+            "relationship_count": 0,
+        }
+        doc = adapter._row_to_document(row)
+        assert doc.source_timestamp == when
+
 
 @pytest.mark.unit
 class TestDocumentSourceNameUrlRoundTrip:
@@ -320,3 +343,73 @@ class TestDocumentSourceNameUrlRoundTrip:
         doc = adapter._document_model_to_domain(model)
         assert doc.source_name == "nango_gmail"
         assert doc.source_url == "https://example.com/x"
+
+    def test_source_name_and_url_roundtrip_surrealdb(self) -> None:
+        from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
+
+        adapter = SurrealDBRelationalAdapter.__new__(SurrealDBRelationalAdapter)
+        row = {
+            "id": str(uuid4()),
+            "namespace_id": str(uuid4()),
+            "content": "body",
+            "status": "completed",
+            "source_type": "library",
+            "source_name": "nango_gmail",
+            "source_url": "https://example.com/x",
+            "size_bytes": 0,
+            "metadata_": {},
+            "chunk_count": 0,
+            "entity_count": 0,
+            "relationship_count": 0,
+        }
+        doc = adapter._row_to_document(row)
+        assert doc.source_name == "nango_gmail"
+        assert doc.source_url == "https://example.com/x"
+
+
+@pytest.mark.unit
+class TestSurrealDBChunkerInfoRoundTrip:
+    """`chunker_info` is a new dict field on Chunk, separate from metadata."""
+
+    def test_chunker_info_roundtrips_surrealdb(self) -> None:
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        adapter = SurrealDBVectorAdapter.__new__(SurrealDBVectorAdapter)
+        chunk_id = uuid4()
+        ns_id = uuid4()
+        doc_id = uuid4()
+        row = {
+            "id": str(chunk_id),
+            "namespace": str(ns_id),
+            "document": str(doc_id),
+            "content": "chunk body",
+            "chunk_index": 2,
+            "start_char": 10,
+            "end_char": 50,
+            "token_count": 8,
+            "metadata_": {"doc_key": "doc_value"},
+            "chunker_info": {"strategy": "fixed", "tokens": 256},
+            "embedding_model": "test-model",
+        }
+        chunk = adapter._row_to_chunk(row)
+        assert chunk.metadata == {"doc_key": "doc_value"}
+        assert chunk.chunker_info == {"strategy": "fixed", "tokens": 256}
+        # Isolation: the two dicts must not bleed into each other.
+        assert "strategy" not in chunk.metadata
+        assert "doc_key" not in chunk.chunker_info
+
+    def test_chunker_info_non_dict_coerces_to_empty(self) -> None:
+        """If the storage row returns a non-dict (driver edge case), coerce safely."""
+        from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
+
+        adapter = SurrealDBVectorAdapter.__new__(SurrealDBVectorAdapter)
+        row = {
+            "id": str(uuid4()),
+            "namespace": str(uuid4()),
+            "document": str(uuid4()),
+            "content": "chunk body",
+            "chunker_info": "not-a-dict",
+            "embedding_model": "test-model",
+        }
+        chunk = adapter._row_to_chunk(row)
+        assert chunk.chunker_info == {}
