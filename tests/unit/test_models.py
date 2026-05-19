@@ -5,8 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import pytest
+
 from khora.core.models import Chunk, Document, Entity, Relationship
-from khora.core.models.document import ChunkMetadata, DocumentMetadata, DocumentStatus
+from khora.core.models.document import DocumentStatus
 from khora.core.models.entity import Episode
 from khora.core.models.event import EventType, MemoryEvent
 from khora.core.models.tenancy import MemoryNamespace, TenancyMode
@@ -23,12 +25,18 @@ class TestDocument:
         assert doc.id is not None
 
     def test_document_with_metadata(self) -> None:
-        """Test document with metadata."""
-        metadata = DocumentMetadata(source="test", author="user", title="Test Doc")
-        doc = Document(content="Content", metadata=metadata)
-        assert doc.metadata.source == "test"
-        assert doc.metadata.author == "user"
-        assert doc.metadata.title == "Test Doc"
+        """Test document with flat source/author/title fields and arbitrary metadata dict."""
+        doc = Document(
+            content="Content",
+            source="test",
+            author="user",
+            title="Test Doc",
+            metadata={"extra": "value"},
+        )
+        assert doc.source == "test"
+        assert doc.author == "user"
+        assert doc.title == "Test Doc"
+        assert doc.metadata == {"extra": "value"}
 
     def test_document_timestamps(self) -> None:
         """Test document timestamp handling."""
@@ -79,22 +87,16 @@ class TestDocument:
 
     def test_document_external_id_rejects_empty_string(self) -> None:
         """Test that empty string external_id is rejected."""
-        import pytest
-
         with pytest.raises(ValueError, match="non-blank"):
             Document(content="Content", external_id="")
 
     def test_document_external_id_rejects_blank_string(self) -> None:
         """Test that blank (whitespace-only) external_id is rejected."""
-        import pytest
-
         with pytest.raises(ValueError, match="non-blank"):
             Document(content="Content", external_id="   ")
 
     def test_document_external_id_rejects_too_long(self) -> None:
         """Test that external_id exceeding 512 chars is rejected."""
-        import pytest
-
         with pytest.raises(ValueError, match="at most 512"):
             Document(content="Content", external_id="x" * 513)
 
@@ -131,21 +133,23 @@ class TestChunk:
         assert not chunk.has_embedding
 
     def test_chunk_with_metadata(self) -> None:
-        """Test chunk with metadata."""
+        """Test chunk with flat positional fields and arbitrary metadata dict."""
         doc_id = uuid4()
-        metadata = ChunkMetadata(
+        chunk = Chunk(
+            content="Content",
             document_id=doc_id,
             chunk_index=1,
             start_char=100,
             end_char=200,
             token_count=25,
+            metadata={"page": 3},
         )
-        chunk = Chunk(content="Content", metadata=metadata)
-        assert chunk.metadata.document_id == doc_id
-        assert chunk.metadata.chunk_index == 1
-        assert chunk.metadata.start_char == 100
-        assert chunk.metadata.end_char == 200
-        assert chunk.metadata.token_count == 25
+        assert chunk.document_id == doc_id
+        assert chunk.chunk_index == 1
+        assert chunk.start_char == 100
+        assert chunk.end_char == 200
+        assert chunk.token_count == 25
+        assert chunk.metadata == {"page": 3}
 
 
 class TestEntity:
@@ -500,3 +504,43 @@ class TestTenancyModels:
         assert v2.namespace_id == v1.namespace_id
         assert v2.id != v1.id
         assert v2.version == 2
+
+
+class TestDocumentSourceFields:
+    """Lock in that newly added source_* fields are first-class on Document."""
+
+    def test_document_source_name_url_timestamp_populated(self) -> None:
+        when = datetime(2026, 1, 1, tzinfo=UTC)
+        doc = Document(
+            content="payload",
+            source_name="nango_gmail",
+            source_url="https://example.com/x",
+            source_timestamp=when,
+        )
+        assert doc.source_name == "nango_gmail"
+        assert doc.source_url == "https://example.com/x"
+        assert doc.source_timestamp == when
+
+    def test_document_source_name_url_default_none(self) -> None:
+        doc = Document(content="payload")
+        assert doc.source_name is None
+        assert doc.source_url is None
+        assert doc.source_timestamp is None
+
+
+class TestMetadataWrappersRemoved:
+    """The DocumentMetadata / ChunkMetadata dataclasses must not exist anymore."""
+
+    def test_document_metadata_import_fails(self) -> None:
+        with pytest.raises(ImportError):
+            from khora.core.models.document import DocumentMetadata  # noqa: F401
+
+    def test_chunk_metadata_import_fails(self) -> None:
+        with pytest.raises(ImportError):
+            from khora.core.models.document import ChunkMetadata  # noqa: F401
+
+    def test_metadata_wrappers_not_exported(self) -> None:
+        import khora.core.models as core_models
+
+        assert "DocumentMetadata" not in dir(core_models)
+        assert "ChunkMetadata" not in dir(core_models)

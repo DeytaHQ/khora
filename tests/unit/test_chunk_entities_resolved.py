@@ -33,14 +33,13 @@ def _make_storage_mock(upsert_results) -> MagicMock:
 
 
 def _make_chunk(ns_id: UUID, doc_id: UUID, *, content: str = "x", occurred_at=None):
-    from khora.core.models import Chunk, ChunkMetadata
+    from khora.core.models import Chunk
 
     chunk = Chunk(
         id=uuid4(),
         namespace_id=ns_id,
         document_id=doc_id,
         content=content,
-        metadata=ChunkMetadata(),
         embedding=[0.1, 0.2, 0.3],
         created_at=datetime.now(UTC),
     )

@@ -79,10 +79,10 @@ def _make_chunk(
     document_id: UUID | None = None,
     custom: dict[str, Any] | None = None,
 ) -> Any:
-    from khora.core.models.document import Chunk, ChunkMetadata
+    from khora.core.models.document import Chunk
 
-    md = ChunkMetadata(document_id=document_id or uuid4(), custom=dict(custom or {}))
-    return Chunk(content=content, document_id=md.document_id, metadata=md)
+    doc_id = document_id or uuid4()
+    return Chunk(content=content, document_id=doc_id, metadata=dict(custom or {}))
 
 
 # ---------------------------------------------------------------------------
@@ -392,19 +392,19 @@ def test_list_records_honours_scope_prefix_filter() -> None:
     ns = uuid4()
     backend = _make_backend(kb, namespace_id=ns)
 
-    from khora.core.models.document import Document, DocumentMetadata
+    from khora.core.models.document import Document
 
     d1_id, d2_id = uuid4(), uuid4()
     docs = [
         Document(
             id=d1_id,
             namespace_id=ns,
-            metadata=DocumentMetadata(custom={"crewai_scope": "/team/eng"}),
+            metadata={"crewai_scope": "/team/eng"},
         ),
         Document(
             id=d2_id,
             namespace_id=ns,
-            metadata=DocumentMetadata(custom={"crewai_scope": "/team/sales"}),
+            metadata={"crewai_scope": "/team/sales"},
         ),
     ]
     c1 = _make_chunk(content="eng-doc", document_id=d1_id, custom={"crewai_scope": "/team/eng"})

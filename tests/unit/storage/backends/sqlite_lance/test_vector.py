@@ -18,7 +18,7 @@ try:
 except ImportError:
     _HAS_LANCEDB = False
 
-from khora.core.models import Chunk, ChunkMetadata
+from khora.core.models import Chunk
 from khora.core.models.entity import Entity
 
 pytestmark = pytest.mark.skipif(not _HAS_LANCEDB, reason="lancedb not installed")
@@ -108,13 +108,15 @@ def _make_chunk(
     index: int = 0,
     created_at: datetime | None = None,
     source_timestamp: datetime | None = None,
+    chunker_info: dict | None = None,
 ) -> Chunk:
     return Chunk(
         id=uuid4(),
         namespace_id=namespace_id,
         document_id=document_id,
         content=content,
-        metadata=ChunkMetadata(document_id=document_id, chunk_index=index),
+        chunk_index=index,
+        chunker_info=chunker_info or {},
         embedding=embedding,
         embedding_model="test-model" if embedding else "",
         created_at=created_at or datetime.now(UTC),
@@ -220,7 +222,7 @@ class TestChunkCRUD:
         fetched = await adapter.get_chunks_by_document(doc, namespace_id=ns)
         assert len(fetched) == 3
         # Ordered by chunk_index
-        assert [c.metadata.chunk_index for c in fetched] == [0, 1, 2]
+        assert [c.chunk_index for c in fetched] == [0, 1, 2]
 
     async def test_delete_chunks_by_document(self, adapter: SQLiteLanceVectorAdapter):
         ns, doc = uuid4(), uuid4()
@@ -233,6 +235,23 @@ class TestChunkCRUD:
         assert await adapter.count_chunks(ns) == 0
         tbl = await adapter._chunks_table()  # type: ignore[reportPrivateUsage]
         assert await tbl.count_rows() == 0
+
+    async def test_chunker_info_roundtrip(self, adapter: SQLiteLanceVectorAdapter):
+        """chunker_info round-trips independently of metadata."""
+        ns, doc = uuid4(), uuid4()
+        c = _make_chunk(
+            ns,
+            doc,
+            embedding=_unit(8, 0),
+            chunker_info={"strategy": "fixed", "tokens": 256},
+        )
+        c.metadata = {"doc_key": "doc_val"}
+        await adapter.create_chunk(c)
+
+        fetched = await adapter.get_chunk(c.id, namespace_id=ns)
+        assert fetched is not None
+        assert fetched.chunker_info == {"strategy": "fixed", "tokens": 256}
+        assert fetched.metadata == {"doc_key": "doc_val"}
 
     async def test_delete_chunks_by_document_with_session_skips_commit(self, adapter: SQLiteLanceVectorAdapter):
         """When a session is provided the caller owns commits.

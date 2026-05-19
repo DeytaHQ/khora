@@ -28,7 +28,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models import Chunk, ChunkMetadata
+from khora.core.models import Chunk
 from khora.engines.vectorcypher.fusion import FusedResult
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
@@ -69,7 +69,7 @@ def _make_chunk(
         namespace_id=uuid4(),
         document_id=uuid4(),
         content=content,
-        metadata=ChunkMetadata(custom=custom),
+        metadata=custom,
     )
 
 
@@ -1395,8 +1395,8 @@ class TestFetchChunksFromEntities:
         assert chunk.document_id == doc_id
         # Score: 3 * (1 + 0.1 * 2) = 3.6
         assert score == pytest.approx(3.6)
-        assert chunk.metadata.custom["author"] == "alice"
-        assert chunk.metadata.custom["occurred_at"] == "2026-04-01"
+        assert chunk.metadata["author"] == "alice"
+        assert chunk.metadata["occurred_at"] == "2026-04-01"
 
     @pytest.mark.asyncio
     async def test_no_dual_nodes_and_no_storage_returns_empty(self) -> None:
@@ -1469,8 +1469,8 @@ class TestVectorSearchChunksAndEntities:
         assert len(result) == 1
         cid, score, chunk = result[0]
         assert score == 0.7  # combined_score takes precedence
-        assert chunk.metadata.custom["source"] == "x"
-        assert chunk.metadata.custom["occurred_at"] == "2026-04-01T00:00:00+00:00"
+        assert chunk.metadata["source"] == "x"
+        assert chunk.metadata["occurred_at"] == "2026-04-01T00:00:00+00:00"
 
     @pytest.mark.asyncio
     async def test_vector_search_chunks_hybrid_alpha_override(self) -> None:

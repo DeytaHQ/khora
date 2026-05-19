@@ -2346,7 +2346,7 @@ class TestSubmitBatch:
         updated = kb._engine._storage.update_document.call_args[0][0]
         assert updated.status == DocumentStatus.PENDING
         assert updated.content == "new content"
-        assert updated.metadata.source == "updated-source"
+        assert updated.source == "updated-source"
 
         assert len(results) == 1
         assert results[0].success is True
@@ -2696,7 +2696,7 @@ class TestSubmitBatch:
         updated = kb._engine._storage.update_document.call_args[0][0]
         assert updated.status == DocumentStatus.PENDING
         assert updated.content == "refreshed content"
-        assert updated.metadata.source == "refresh"
+        assert updated.source == "refresh"
         assert updated.error_message is None
 
         # Prior extraction state was cleared before re-processing (H1)

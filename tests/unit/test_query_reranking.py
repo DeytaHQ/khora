@@ -232,7 +232,7 @@ class TestCrossEncoderDatePrefix:
             item="x",
             original_score=0.5,
             content="meeting notes",
-            metadata={"custom": {"occurred_at": "2026-05-14T10:00:00Z"}},
+            metadata={"occurred_at": "2026-05-14T10:00:00Z"},
         )
         await reranker.rerank("query", [candidate], top_k=1)
         assert captured[0][1] == "meeting notes"
@@ -253,7 +253,7 @@ class TestCrossEncoderDatePrefix:
             item="x",
             original_score=0.5,
             content="meeting notes",
-            metadata={"custom": {"occurred_at": "2026-05-14T10:00:00Z"}},
+            metadata={"occurred_at": "2026-05-14T10:00:00Z"},
         )
         await reranker.rerank("query", [candidate], top_k=1)
         # ISO timestamp truncated to YYYY-MM-DD.
@@ -277,13 +277,12 @@ class TestCrossEncoderDatePrefix:
             item="a",
             original_score=0.5,
             content="email body",
-            metadata={"custom": {"sent_at": "2026-04-01"}},
+            metadata={"sent_at": "2026-04-01"},
         )
         # No occurred_at or sent_at, fall back to metadata.created_at.
         from datetime import UTC, datetime
 
         created_only_meta = MagicMock()
-        created_only_meta.custom = {}
         created_only_meta.created_at = datetime(2026, 3, 15, tzinfo=UTC)
         created_only = RerankCandidate(
             item="b",
@@ -334,7 +333,7 @@ class TestCrossEncoderDatePrefix:
             item="x",
             original_score=0.5,
             content="body text",
-            metadata={"custom": {"occurred_at": "2026-05-14", "title": "Q2 review"}},
+            metadata={"occurred_at": "2026-05-14", "title": "Q2 review"},
         )
         await reranker.rerank("query", [candidate], top_k=1)
         assert "[2026-05-14]" in captured[0][1]

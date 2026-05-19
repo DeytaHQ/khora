@@ -35,7 +35,7 @@ except ImportError:
     ConnectionAcquisitionTimeoutError = ServiceUnavailable  # type: ignore[misc,assignment]
     ConnectionPoolError = ServiceUnavailable  # type: ignore[misc,assignment]
 
-from khora.core.models import Chunk, ChunkMetadata, Entity, Relationship
+from khora.core.models import Chunk, Entity, Relationship
 from khora.telemetry import bounded_text_hash, trace_span
 
 from .dual_nodes import DualNodeManager
@@ -143,7 +143,7 @@ class RetrieverConfig:
     #   a synthesized ``TemporalFilter(occurred_after=now-default_window_days)``.
     # ``temporal_per_source_decay``: when True, ``_calculate_recency_scores``
     #   looks up a per-chunk decay window via
-    #   ``chunk.metadata.custom["source_system"]`` against
+    #   ``chunk.metadata["source_system"]`` against
     #   ``temporal_default_decay_by_source`` (falling back to ``_default``).
     # ``temporal_default_decay_by_source``: dict[source_system, decay_days].
     #   Must include a ``"_default"`` key used when ``source_system`` is
@@ -247,8 +247,7 @@ class RetrieverConfig:
 def _extract_occurred_at(item: Any) -> str | None:
     """Extract occurred_at string from a Chunk or dict item."""
     if isinstance(item, Chunk):
-        custom = item.metadata.custom if item.metadata else {}
-        return custom.get("occurred_at")
+        return (item.metadata or {}).get("occurred_at")
     elif isinstance(item, dict):
         return item.get("occurred_at")
     return None
@@ -263,8 +262,7 @@ def _extract_source_system(item: Any) -> str | None:
     so we explicitly treat None and empty strings as "unknown source".
     """
     if isinstance(item, Chunk):
-        custom = item.metadata.custom if item.metadata else {}
-        value = custom.get("source_system")
+        value = (item.metadata or {}).get("source_system")
     elif isinstance(item, dict):
         value = item.get("source_system")
     else:
@@ -621,9 +619,9 @@ class VectorCypherRetriever:
                     raw = result.chunks[0]
                     top_chunk = raw[0] if isinstance(raw, tuple) else raw
                     occurred_at_iso = None
-                    if getattr(top_chunk, "metadata", None) is not None:
-                        custom = getattr(top_chunk.metadata, "custom", None) or {}
-                        occurred_at_iso = custom.get("occurred_at")
+                    meta = getattr(top_chunk, "metadata", None)
+                    if isinstance(meta, dict):
+                        occurred_at_iso = meta.get("occurred_at")
                     if occurred_at_iso:
                         occurred_at = datetime.fromisoformat(occurred_at_iso.replace("Z", "+00:00"))
                         if occurred_at.tzinfo is None:
@@ -797,7 +795,7 @@ class VectorCypherRetriever:
                         namespace_id=namespace_id,
                         document_id=UUID(c_data["document_id"]),
                         content=c_data.get("content", ""),
-                        metadata=ChunkMetadata(custom={"occurred_at": c_data.get("occurred_at")}),
+                        metadata={"occurred_at": c_data.get("occurred_at")},
                     )
                     chunks.append((chunk, rank_score))
 
@@ -1320,13 +1318,9 @@ class VectorCypherRetriever:
             _skip_llm = False
             # Check if any results carry version metadata (enterprise temporal signal)
             _has_versions = any(
-                (
-                    (
-                        r.item.metadata.custom if isinstance(r.item.metadata, ChunkMetadata) else r.item.metadata or {}
-                    ).get("version")
-                    if hasattr(r.item, "metadata") and r.item.metadata
-                    else False
-                )
+                (r.item.metadata or {}).get("version")
+                if hasattr(r.item, "metadata") and isinstance(r.item.metadata, dict)
+                else False
                 for r in fused_results[:10]
             )
             if not _has_versions:
@@ -1359,8 +1353,6 @@ class VectorCypherRetriever:
 
             for r in fused_results:
                 meta = r.item.metadata if hasattr(r.item, "metadata") and r.item.metadata else {}
-                if isinstance(meta, ChunkMetadata):
-                    meta = meta.custom or {}
                 if isinstance(meta, dict):
                     version = meta.get("version") or meta.get("entity_version", 0)
                     if version:
@@ -1374,8 +1366,6 @@ class VectorCypherRetriever:
                     v = chunk_versions.get(r.item_id, 0)
                     if v > 0:
                         meta = r.item.metadata if hasattr(r.item, "metadata") and r.item.metadata else {}
-                        if isinstance(meta, ChunkMetadata):
-                            meta = meta.custom or {}
                         if isinstance(meta, dict):
                             for ref in meta.get("entity_refs") or []:
                                 max_v = entity_versions.get(ref, v)
@@ -1694,10 +1684,8 @@ class VectorCypherRetriever:
         for r in candidates_to_rerank:
             # Build content with optional temporal prefix for cross-encoder context
             chunk_content = r.item.content if hasattr(r.item, "content") else str(r.item)
-            if hasattr(r.item, "metadata") and r.item.metadata:
-                meta = r.item.metadata
-                # Support both ChunkMetadata objects and plain dicts
-                raw = meta.custom if hasattr(meta, "custom") else (meta if isinstance(meta, dict) else {})
+            if hasattr(r.item, "metadata") and isinstance(r.item.metadata, dict):
+                raw = r.item.metadata
                 if raw:
                     prefix_parts = []
                     session_id = raw.get("session_id") or raw.get("conversation_id")
@@ -1916,12 +1904,10 @@ class VectorCypherRetriever:
                     namespace_id=r.chunk.namespace_id,
                     document_id=r.chunk.document_id,
                     content=r.chunk.content,
-                    metadata=ChunkMetadata(
-                        custom={
-                            "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
-                            **(r.chunk.metadata or {}),
-                        }
-                    ),
+                    metadata={
+                        "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
+                        **(r.chunk.metadata or {}),
+                    },
                     created_at=r.chunk.created_at or r.chunk.occurred_at,
                 )
                 chunk_results.append((chunk, r.combined_score or r.similarity))
@@ -1980,9 +1966,7 @@ class VectorCypherRetriever:
             if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal and chunk_results:
                 _skip_llm_simple = False
                 _has_versions_simple = any(
-                    (c.metadata.custom if isinstance(c.metadata, ChunkMetadata) else {}).get("version")
-                    for c, _ in chunk_results[:10]
-                    if c.metadata
+                    (c.metadata or {}).get("version") for c, _ in chunk_results[:10] if isinstance(c.metadata, dict)
                 )
                 if not _has_versions_simple:
                     _skip_llm_simple = True
@@ -2014,7 +1998,7 @@ class VectorCypherRetriever:
                 _chunk_versions: dict[UUID, int] = {}
 
                 for c, _s in chunk_results:
-                    meta = c.metadata.custom if c.metadata and isinstance(c.metadata, ChunkMetadata) else {}
+                    meta = c.metadata if isinstance(c.metadata, dict) else {}
                     if isinstance(meta, dict):
                         version = meta.get("version") or meta.get("entity_version", 0)
                         if version:
@@ -2028,7 +2012,7 @@ class VectorCypherRetriever:
                     for c, s in chunk_results:
                         v = _chunk_versions.get(c.id, 0)
                         if v > 0:
-                            meta = c.metadata.custom if c.metadata and isinstance(c.metadata, ChunkMetadata) else {}
+                            meta = c.metadata if isinstance(c.metadata, dict) else {}
                             if isinstance(meta, dict):
                                 for ref in meta.get("entity_refs") or []:
                                     max_v = _entity_versions.get(ref, v)
@@ -2051,7 +2035,7 @@ class VectorCypherRetriever:
                 from datetime import datetime as _dt
 
                 def _ts(pair: tuple[Chunk, float]) -> _dt:
-                    occ = (pair[0].metadata.custom or {}).get("occurred_at") if pair[0].metadata else None
+                    occ = (pair[0].metadata or {}).get("occurred_at") if isinstance(pair[0].metadata, dict) else None
                     if occ:
                         try:
                             return _dt.fromisoformat(occ)
@@ -2498,13 +2482,11 @@ class VectorCypherRetriever:
                     namespace_id=namespace_id,
                     document_id=UUID(record["document_id"]),
                     content=record["content"],
-                    metadata=ChunkMetadata(
-                        custom={
-                            "occurred_at": record.get("occurred_at"),
-                            "connected_entities": record.get("entity_ids", []),
-                            **(record.get("metadata") or {}),
-                        }
-                    ),
+                    metadata={
+                        "occurred_at": record.get("occurred_at"),
+                        "connected_entities": record.get("entity_ids", []),
+                        **(record.get("metadata") or {}),
+                    },
                 )
                 results.append((chunk_id, score, chunk))
 
@@ -2557,12 +2539,10 @@ class VectorCypherRetriever:
                         namespace_id=r.chunk.namespace_id,
                         document_id=r.chunk.document_id,
                         content=r.chunk.content,
-                        metadata=ChunkMetadata(
-                            custom={
-                                "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
-                                **(r.chunk.metadata or {}),
-                            }
-                        ),
+                        metadata={
+                            "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
+                            **(r.chunk.metadata or {}),
+                        },
                         created_at=r.chunk.created_at or r.chunk.occurred_at,
                     ),
                 )
@@ -2650,14 +2630,12 @@ class VectorCypherRetriever:
                             namespace_id=chunk.namespace_id,
                             document_id=chunk.document_id,
                             content=chunk.content,
-                            metadata=ChunkMetadata(
-                                custom={
-                                    "occurred_at": (
-                                        chunk.occurred_at.isoformat() if getattr(chunk, "occurred_at", None) else None
-                                    ),
-                                    **(getattr(chunk, "metadata", None) or {}),
-                                }
-                            ),
+                            metadata={
+                                "occurred_at": (
+                                    chunk.occurred_at.isoformat() if getattr(chunk, "occurred_at", None) else None
+                                ),
+                                **(getattr(chunk, "metadata", None) or {}),
+                            },
                             created_at=getattr(chunk, "created_at", None) or getattr(chunk, "occurred_at", None),
                         ),
                     )
@@ -2939,7 +2917,7 @@ class VectorCypherRetriever:
         Decay window selection (issue #567 A4):
         - When ``RetrieverConfig.temporal_per_source_decay`` is True, each
           chunk's decay window is looked up from
-          ``temporal_default_decay_by_source[chunk.metadata.custom['source_system']]``
+          ``temporal_default_decay_by_source[chunk.metadata['source_system']]``
           with fallback to the ``"_default"`` key when ``source_system`` is
           None, empty, or absent from the dict.
         - When the flag is False, behaviour is unchanged:

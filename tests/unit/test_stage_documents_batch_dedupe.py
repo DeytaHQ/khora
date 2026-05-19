@@ -18,7 +18,7 @@ def _make_existing_doc(checksum: str) -> MagicMock:
     doc.id = uuid4()
     doc.namespace_id = NAMESPACE_ID
     doc.status = "completed"
-    doc.metadata.checksum = checksum
+    doc.checksum = checksum
     return doc
 
 

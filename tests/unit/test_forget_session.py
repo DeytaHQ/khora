@@ -26,7 +26,7 @@ except ImportError:
     _HAS_EMBEDDED = False
     aiosqlite = None  # type: ignore[assignment]
 
-from khora.core.models import Document, DocumentMetadata, MemoryNamespace
+from khora.core.models import Document, MemoryNamespace
 
 pytestmark = pytest.mark.skipif(not _HAS_EMBEDDED, reason="aiosqlite/lancedb not installed")
 
@@ -89,13 +89,11 @@ def _make_document(namespace_id, *, checksum: str, title: str, session_id=None) 
     return Document(
         namespace_id=namespace_id,
         content=f"content for {title}",
-        metadata=DocumentMetadata(
-            source="file:///tmp/a.txt",
-            source_type="file",
-            title=title,
-            checksum=checksum,
-            size_bytes=32,
-        ),
+        source="file:///tmp/a.txt",
+        source_type="file",
+        title=title,
+        checksum=checksum,
+        size_bytes=32,
         session_id=session_id,
     )
 
@@ -205,14 +203,13 @@ async def test_session_delete_isolates_target_session(adapter, namespace):
 
 async def test_chunk_dataclass_propagates_session_id():
     """Chunk dataclass surfaces session_id as a public field (#620)."""
-    from khora.core.models import Chunk, ChunkMetadata
+    from khora.core.models import Chunk
 
     sid = uuid4()
     chunk = Chunk(
         namespace_id=uuid4(),
         document_id=uuid4(),
         content="x",
-        metadata=ChunkMetadata(),
         session_id=sid,
     )
     assert chunk.session_id == sid
@@ -220,14 +217,13 @@ async def test_chunk_dataclass_propagates_session_id():
 
 async def test_chunk_task_propagates_session_id_from_document():
     """chunk_document copies Document.session_id onto every emitted Chunk."""
-    from khora.core.models import Document, DocumentMetadata
+    from khora.core.models import Document
     from khora.pipelines.tasks.chunk import chunk_document
 
     sid = uuid4()
     doc = Document(
         namespace_id=uuid4(),
         content="A short document of just a few sentences. Another sentence here.",
-        metadata=DocumentMetadata(),
         session_id=sid,
     )
     chunks = await chunk_document(doc, strategy="fixed", chunk_size=64, chunk_overlap=0)

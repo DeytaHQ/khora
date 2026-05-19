@@ -22,7 +22,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from khora.config import KhoraConfig
-from khora.core.models import Chunk, ChunkMetadata, MemoryNamespace
+from khora.core.models import Chunk, MemoryNamespace
 from khora.engines.chronicle.compression import (
     FactOperation,
     MemoryFact,
@@ -46,7 +46,7 @@ def _make_chunk(content: str, namespace_id: UUID) -> Chunk:
         namespace_id=namespace_id,
         document_id=document_id,
         content=content,
-        metadata=ChunkMetadata(document_id=document_id, chunk_index=0),
+        chunk_index=0,
     )
 
 

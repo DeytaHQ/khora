@@ -351,21 +351,8 @@ class QueryResult:
     def _extract_chunk_title(chunk: Any) -> str:
         """Extract title from chunk metadata."""
         meta = getattr(chunk, "metadata", None)
-        if meta is None:
-            return ""
-        # DocumentMetadata object with .title attribute
-        title = getattr(meta, "title", "")
-        if title:
-            return title
-        # dict-style metadata
         if isinstance(meta, dict):
-            title = meta.get("title", "")
-            if title:
-                return title
-        # Try custom dict
-        custom = getattr(meta, "custom", None)
-        if isinstance(custom, dict):
-            return custom.get("title", "")
+            return meta.get("title", "") or ""
         return ""
 
     def get_full_metadata(self) -> dict[str, Any]:
@@ -1490,14 +1477,8 @@ class HybridQueryEngine:
         # --- Fallback: sequential session_id ± 1 ---
         session_ids: set[int] = set()
         for chunk, _ in chunks:
-            meta = getattr(chunk, "metadata", None)
-            if meta is None:
-                continue
-            if isinstance(meta, dict):
-                sid = meta.get("session_id") or (meta.get("custom", {}) or {}).get("session_id")
-            else:
-                custom = getattr(meta, "custom", None)
-                sid = custom.get("session_id") if isinstance(custom, dict) else None
+            meta = getattr(chunk, "metadata", None) or {}
+            sid = meta.get("session_id") if isinstance(meta, dict) else None
             if sid is not None:
                 session_ids.add(int(sid))
 
@@ -2054,8 +2035,9 @@ class HybridQueryEngine:
         boosted = []
         for chunk, score in results:
             source_tool = ""
-            if hasattr(chunk, "metadata") and hasattr(chunk.metadata, "custom"):
-                source_tool = chunk.metadata.custom.get("source_tool", "")
+            meta = getattr(chunk, "metadata", None)
+            if isinstance(meta, dict):
+                source_tool = meta.get("source_tool", "")
 
             if not source_tool:
                 boosted.append((chunk, score))

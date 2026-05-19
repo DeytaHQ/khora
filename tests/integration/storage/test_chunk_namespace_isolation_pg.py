@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, MemoryNamespace
+from khora.core.models import Chunk, Document, MemoryNamespace
 from khora.core.models.document import DocumentStatus
 from khora.db.session import run_migrations
 from khora.storage.backends.pgvector import PgVectorBackend
@@ -75,7 +75,7 @@ def _make_chunk(namespace_id, document_id) -> Chunk:
         namespace_id=namespace_id,
         document_id=document_id,
         content="integration content",
-        metadata=ChunkMetadata(document_id=document_id, chunk_index=0),
+        chunk_index=0,
         embedding=None,
         embedding_model="test-model",
         created_at=datetime.now(UTC),
@@ -88,14 +88,12 @@ def _make_doc(namespace_id) -> Document:
         namespace_id=namespace_id,
         content="doc content",
         status=DocumentStatus.PENDING,
-        metadata=DocumentMetadata(
-            source="test",
-            source_type="file",
-            content_type="text/plain",
-            title="t",
-            author="a",
-            checksum="x",
-        ),
+        source="test",
+        source_type="file",
+        content_type="text/plain",
+        title="t",
+        author="a",
+        checksum="x",
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
@@ -148,3 +146,19 @@ class TestChunkNamespaceIsolationPg:
         # Same-namespace returns the rows.
         same_ns = await backend.get_chunks_by_document(doc.id, namespace_id=ns_a.id)
         assert len(same_ns) == 2
+
+    async def test_chunker_info_roundtrip(self, backend: PgVectorBackend) -> None:
+        """chunker_info round-trips independently of metadata via pgvector."""
+        ns = await backend.create_namespace(MemoryNamespace())
+        doc = _make_doc(ns.id)
+        await backend.create_document(doc)
+
+        chunk = _make_chunk(ns.id, doc.id)
+        chunk.chunker_info = {"strategy": "fixed", "tokens": 256}
+        chunk.metadata = {"doc_key": "doc_val"}
+        await backend.create_chunk(chunk)
+
+        fetched = await backend.get_chunk(chunk.id, namespace_id=ns.id)
+        assert fetched is not None
+        assert fetched.chunker_info == {"strategy": "fixed", "tokens": 256}
+        assert fetched.metadata == {"doc_key": "doc_val"}

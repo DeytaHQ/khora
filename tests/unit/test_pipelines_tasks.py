@@ -15,7 +15,6 @@ from uuid import uuid4
 import pytest
 
 from khora.core.models import Chunk, Document
-from khora.core.models.document import ChunkMetadata, DocumentMetadata
 from khora.extraction.chunkers import create_chunker
 
 
@@ -24,13 +23,11 @@ def _make_document(content: str = "test content") -> Document:
     return Document(
         namespace_id=uuid4(),
         content=content,
-        metadata=DocumentMetadata(
-            title="Test",
-            source="test",
-            checksum="abc123",
-            size_bytes=len(content),
-            custom={"key": "value"},
-        ),
+        title="Test",
+        source="test",
+        checksum="abc123",
+        size_bytes=len(content),
+        metadata={"key": "value"},
         created_at=datetime(2024, 6, 1, tzinfo=UTC),
     )
 
@@ -41,7 +38,7 @@ def _make_chunk(content: str = "chunk text", ns_id=None) -> Chunk:
         namespace_id=ns_id or uuid4(),
         document_id=uuid4(),
         content=content,
-        metadata=ChunkMetadata(document_id=uuid4(), chunk_index=0),
+        chunk_index=0,
         created_at=datetime(2024, 6, 1, tzinfo=UTC),
     )
 
@@ -56,22 +53,18 @@ def _chunk_document(document: Document, strategy: str = "fixed", chunk_size: int
     chunker = create_chunker(strategy, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     chunk_results = chunker.chunk(document.content)
 
-    doc_custom = document.metadata.custom if document.metadata else {}
     chunks = []
     for result in chunk_results:
-        custom = {**doc_custom, **result.metadata} if doc_custom else result.metadata
         chunk = Chunk(
             namespace_id=document.namespace_id,
             document_id=document.id,
             content=result.content,
-            metadata=ChunkMetadata(
-                document_id=document.id,
-                chunk_index=result.index,
-                start_char=result.start_char,
-                end_char=result.end_char,
-                token_count=result.token_count,
-                custom=custom,
-            ),
+            chunk_index=result.index,
+            start_char=result.start_char,
+            end_char=result.end_char,
+            token_count=result.token_count,
+            metadata=dict(document.metadata),
+            chunker_info=dict(result.metadata),
             created_at=document.created_at,
             source_timestamp=document.source_timestamp,
         )
@@ -101,11 +94,11 @@ class TestChunkDocument:
         assert chunks[0].created_at == doc.created_at
 
     def test_metadata_propagation(self) -> None:
-        """Document custom metadata propagates to chunks."""
+        """Document metadata propagates verbatim onto chunks."""
         doc = _make_document("Content with metadata")
         chunks = _chunk_document(doc, strategy="fixed", chunk_size=500)
         assert len(chunks) >= 1
-        assert chunks[0].metadata.custom.get("key") == "value"
+        assert chunks[0].metadata.get("key") == "value"
 
     @pytest.mark.asyncio
     async def test_source_timestamp_propagates_from_document(self) -> None:
@@ -119,7 +112,7 @@ class TestChunkDocument:
         doc = Document(
             namespace_id=uuid4(),
             content="PagerDuty triggered for the payments service at 14:00 UTC.",
-            metadata=DocumentMetadata(custom={"occurred_at": when.isoformat()}),
+            metadata={"occurred_at": when.isoformat()},
             created_at=when,
             source_timestamp=when,  # what the ingest pipeline populates
         )
@@ -141,13 +134,97 @@ class TestChunkDocument:
         doc = Document(
             namespace_id=uuid4(),
             content="A note with no occurred_at metadata.",
-            metadata=DocumentMetadata(),
             # source_timestamp left at its default (None)
         )
         chunks = await chunk_document(doc, strategy="fixed", chunk_size=500)
         assert chunks
         for chunk in chunks:
             assert chunk.source_timestamp is None
+
+    @pytest.mark.asyncio
+    async def test_chunk_document_separates_metadata_and_chunker_info(self) -> None:
+        """Doc-level metadata and chunker output live in two separate dicts."""
+        from khora.extraction.chunkers.base import ChunkResult
+        from khora.pipelines.tasks.chunk import chunk_document
+
+        doc = Document(
+            namespace_id=uuid4(),
+            content="anything",
+            metadata={"title_seed": "foo", "shared_key": "doc-value"},
+        )
+
+        stub_results = [
+            ChunkResult(
+                content="anything",
+                index=0,
+                start_char=0,
+                end_char=len("anything"),
+                token_count=2,
+                metadata={"shared_key": "chunker-value", "model_name": "test-chunker"},
+            )
+        ]
+
+        with patch("khora.extraction.chunkers.create_chunker") as factory:
+            factory.return_value = MagicMock(chunk=MagicMock(return_value=stub_results))
+            chunks = await chunk_document(doc, strategy="fixed", chunk_size=500)
+
+        assert len(chunks) == 1
+        assert chunks[0].metadata == {"title_seed": "foo", "shared_key": "doc-value"}
+        assert chunks[0].chunker_info == {"shared_key": "chunker-value", "model_name": "test-chunker"}
+
+    @pytest.mark.asyncio
+    async def test_chunk_document_key_collision_does_not_overwrite(self) -> None:
+        """Chunker keys must not shadow doc keys (the OLD merge bug)."""
+        from khora.extraction.chunkers.base import ChunkResult
+        from khora.pipelines.tasks.chunk import chunk_document
+
+        doc = Document(namespace_id=uuid4(), content="x", metadata={"k": "doc"})
+        stub_results = [
+            ChunkResult(
+                content="x",
+                index=0,
+                start_char=0,
+                end_char=1,
+                token_count=1,
+                metadata={"k": "chunker"},
+            )
+        ]
+        with patch("khora.extraction.chunkers.create_chunker") as factory:
+            factory.return_value = MagicMock(chunk=MagicMock(return_value=stub_results))
+            chunks = await chunk_document(doc, strategy="fixed", chunk_size=500)
+
+        assert chunks[0].metadata == {"k": "doc"}
+        assert chunks[0].chunker_info == {"k": "chunker"}
+
+    @pytest.mark.asyncio
+    async def test_chunk_document_dicts_are_isolated_copies(self) -> None:
+        """Mutating the source dicts after construction must not bleed into chunks."""
+        from khora.extraction.chunkers.base import ChunkResult
+        from khora.pipelines.tasks.chunk import chunk_document
+
+        doc_meta: dict = {"a": 1}
+        chunker_meta: dict = {"b": 2}
+        doc = Document(namespace_id=uuid4(), content="x", metadata=doc_meta)
+        stub_results = [
+            ChunkResult(
+                content="x",
+                index=0,
+                start_char=0,
+                end_char=1,
+                token_count=1,
+                metadata=chunker_meta,
+            )
+        ]
+        with patch("khora.extraction.chunkers.create_chunker") as factory:
+            factory.return_value = MagicMock(chunk=MagicMock(return_value=stub_results))
+            chunks = await chunk_document(doc, strategy="fixed", chunk_size=500)
+
+        # Mutate originals after chunking.
+        doc_meta["new_key"] = "x"
+        chunker_meta["new_key"] = "y"
+
+        assert chunks[0].metadata == {"a": 1}
+        assert chunks[0].chunker_info == {"b": 2}
 
 
 # ---------------------------------------------------------------------------

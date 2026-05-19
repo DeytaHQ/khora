@@ -119,10 +119,10 @@ class ChatEngine:
                 else:
                     try:
                         doc = await self.khora.get_document(chunk.document_id)
-                        if doc and doc.metadata:
-                            source = doc.metadata.custom.get("source_system", "")
+                        if doc:
+                            source = (doc.metadata or {}).get("source_system", "")
                             if not source:
-                                source = doc.metadata.source.split("/")[0] if doc.metadata.source else "unknown"
+                                source = doc.source.split("/")[0] if doc.source else "unknown"
                             doc_cache[doc_id_str] = source
                     except Exception as e:
                         logger.debug(f"Failed to fetch document source for {doc_id_str}: {e}")

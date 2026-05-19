@@ -69,7 +69,7 @@ def _stored_doc(
     extra: dict[str, Any] | None = None,
 ) -> Any:
     """Build a khora Document stamped as if KhoraSession.add_items wrote it."""
-    from khora.core.models.document import Document, DocumentMetadata
+    from khora.core.models.document import Document
 
     custom: dict[str, Any] = {
         KEY_SESSION_ID: session_id,
@@ -82,7 +82,7 @@ def _stored_doc(
         id=uuid4(),
         namespace_id=namespace_id,
         external_id=f"oai:{session_id}:{seq}",
-        metadata=DocumentMetadata(custom=custom),
+        metadata=custom,
     )
 
 
@@ -216,7 +216,7 @@ async def test_get_items_honours_limit() -> None:
 
 async def test_get_items_skips_foreign_documents_in_same_namespace() -> None:
     """Documents missing the session_id stamp must be skipped silently."""
-    from khora.core.models.document import Document, DocumentMetadata
+    from khora.core.models.document import Document
 
     kb = _make_kb()
     session = _make_session(kb)
@@ -224,7 +224,7 @@ async def test_get_items_skips_foreign_documents_in_same_namespace() -> None:
 
     own_item = {"role": "user", "content": "mine"}
     own = _stored_doc(ns, seq=0, item=own_item)
-    foreign = Document(id=uuid4(), namespace_id=ns, metadata=DocumentMetadata(custom={"foo": "bar"}))
+    foreign = Document(id=uuid4(), namespace_id=ns, metadata={"foo": "bar"})
     other_session = _stored_doc(ns, seq=0, item={"role": "user", "content": "other"}, session_id="conv-2")
     kb.storage.list_documents = AsyncMock(side_effect=[[foreign, own, other_session], []])
 

@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
-from khora.core.models import Document, DocumentMetadata
+from khora.core.models import Document
 from khora.gc import expire_sessions
 
 
@@ -21,7 +21,6 @@ def _make_doc(ns_id, sid, *, ts: datetime) -> Document:
     return Document(
         namespace_id=ns_id,
         content="x",
-        metadata=DocumentMetadata(),
         created_at=ts,
         source_timestamp=ts,
         session_id=sid,
@@ -164,7 +163,6 @@ async def test_source_timestamp_preferred_over_created_at() -> None:
     doc = Document(
         namespace_id=ns_id,
         content="x",
-        metadata=DocumentMetadata(),
         created_at=recent_ingest,
         source_timestamp=old_event,
         session_id=sid,

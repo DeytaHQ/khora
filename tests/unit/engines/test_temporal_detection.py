@@ -220,7 +220,7 @@ class TestRelativeRecency:
 
     def test_relative_recency_discriminates(self) -> None:
         """Two chunks from 2024-01 and 2024-05: should get different scores."""
-        from khora.core.models import Chunk, ChunkMetadata
+        from khora.core.models import Chunk
         from khora.engines.vectorcypher.fusion import FusedResult
         from khora.engines.vectorcypher.retriever import RetrieverConfig
 
@@ -236,14 +236,14 @@ class TestRelativeRecency:
             namespace_id=ns_id,
             document_id=uuid4(),
             content="January event",
-            metadata=ChunkMetadata(custom={"occurred_at": "2024-01-15T00:00:00+00:00"}),
+            metadata={"occurred_at": "2024-01-15T00:00:00+00:00"},
         )
         chunk_may = Chunk(
             id=may_id,
             namespace_id=ns_id,
             document_id=uuid4(),
             content="May event",
-            metadata=ChunkMetadata(custom={"occurred_at": "2024-05-15T00:00:00+00:00"}),
+            metadata={"occurred_at": "2024-05-15T00:00:00+00:00"},
         )
 
         fused = [
@@ -273,7 +273,7 @@ class TestRelativeRecency:
 
     def test_relative_recency_independent_of_execution_year(self) -> None:
         """Recency scores should be same regardless of when test runs."""
-        from khora.core.models import Chunk, ChunkMetadata
+        from khora.core.models import Chunk
         from khora.engines.vectorcypher.fusion import FusedResult
         from khora.engines.vectorcypher.retriever import RetrieverConfig
 
@@ -287,14 +287,14 @@ class TestRelativeRecency:
             namespace_id=ns_id,
             document_id=uuid4(),
             content="Old",
-            metadata=ChunkMetadata(custom={"occurred_at": "2020-01-01T00:00:00+00:00"}),
+            metadata={"occurred_at": "2020-01-01T00:00:00+00:00"},
         )
         chunk2 = Chunk(
             id=id2,
             namespace_id=ns_id,
             document_id=uuid4(),
             content="New",
-            metadata=ChunkMetadata(custom={"occurred_at": "2020-05-01T00:00:00+00:00"}),
+            metadata={"occurred_at": "2020-05-01T00:00:00+00:00"},
         )
 
         fused = [
@@ -317,7 +317,7 @@ class TestRelativeRecency:
 
     def test_relative_recency_fallback_to_now(self) -> None:
         """When no timestamps exist, falls back to datetime.now(UTC)."""
-        from khora.core.models import Chunk, ChunkMetadata
+        from khora.core.models import Chunk
         from khora.engines.vectorcypher.fusion import FusedResult
         from khora.engines.vectorcypher.retriever import RetrieverConfig
 
@@ -331,7 +331,7 @@ class TestRelativeRecency:
             namespace_id=ns_id,
             document_id=uuid4(),
             content="No timestamp",
-            metadata=ChunkMetadata(custom={}),
+            metadata={},
         )
 
         fused = [FusedResult(item=chunk1, rrf_score=0.5, item_id=id1)]
@@ -349,7 +349,7 @@ class TestRelativeRecency:
 
     def test_decay_days_override(self) -> None:
         """decay_days_override should change the decay rate."""
-        from khora.core.models import Chunk, ChunkMetadata
+        from khora.core.models import Chunk
         from khora.engines.vectorcypher.fusion import FusedResult
         from khora.engines.vectorcypher.retriever import RetrieverConfig
 
@@ -363,14 +363,14 @@ class TestRelativeRecency:
             namespace_id=ns_id,
             document_id=uuid4(),
             content="Old",
-            metadata=ChunkMetadata(custom={"occurred_at": "2024-01-01T00:00:00+00:00"}),
+            metadata={"occurred_at": "2024-01-01T00:00:00+00:00"},
         )
         chunk2 = Chunk(
             id=id2,
             namespace_id=ns_id,
             document_id=uuid4(),
             content="New",
-            metadata=ChunkMetadata(custom={"occurred_at": "2024-01-08T00:00:00+00:00"}),
+            metadata={"occurred_at": "2024-01-08T00:00:00+00:00"},
         )
 
         fused = [

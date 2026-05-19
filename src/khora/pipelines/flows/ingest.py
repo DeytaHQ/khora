@@ -101,7 +101,7 @@ async def _extract_cross_chunk_relationships(
     Increases LLM calls by up to ``len(chunks) - 1`` (capped at ``max_windows``).
 
     Args:
-        chunks: Chunk objects with ``.content``, ``.id``, and optional ``.metadata.chunk_index``
+        chunks: Chunk objects with ``.content``, ``.id``, and optional ``.chunk_index``
         entities_by_chunk: Mapping of chunk_id to list of entity name strings in that chunk
         extractor: Initialized entity extractor (e.g. LLMEntityExtractor)
         extraction_context: Context dict; must contain ``cross_chunk_extraction=True``
@@ -116,9 +116,7 @@ async def _extract_cross_chunk_relationships(
         return []
 
     def _chunk_index(c) -> int:
-        if hasattr(c, "metadata") and c.metadata and hasattr(c.metadata, "chunk_index"):
-            return c.metadata.chunk_index or 0
-        return 0
+        return getattr(c, "chunk_index", 0) or 0
 
     sorted_chunks = sorted(chunks, key=_chunk_index)
     seen_triples: set[tuple[str, str, str]] = set()
@@ -623,7 +621,7 @@ async def stage_document(
     """
     from datetime import UTC, datetime
 
-    from khora.core.models import Document, DocumentMetadata
+    from khora.core.models import Document
 
     content = doc_input.get("content", "")
     checksum = compute_checksum(content)
@@ -637,19 +635,6 @@ async def stage_document(
     # Extract custom metadata
     custom_metadata = doc_input.get("metadata", {})
 
-    # Create document
-    metadata = DocumentMetadata(
-        source=doc_input.get("source", ""),
-        source_type=doc_input.get("source_type", "manual"),
-        content_type=doc_input.get("content_type", "text/plain"),
-        title=doc_input.get("title", ""),
-        author=doc_input.get("author", ""),
-        language=doc_input.get("language", "en"),
-        checksum=checksum,
-        size_bytes=len(content.encode("utf-8")),
-        custom=custom_metadata,
-    )
-
     # Use source timestamp if available, otherwise use current time
     source_timestamp = _extract_source_timestamp(custom_metadata)
     created_at = source_timestamp or datetime.now(UTC)
@@ -658,7 +643,15 @@ async def stage_document(
     document = Document(
         namespace_id=namespace_id,
         content=content,
-        metadata=metadata,
+        source=doc_input.get("source") or None,
+        source_type=doc_input.get("source_type", "manual"),
+        content_type=doc_input.get("content_type", "text/plain"),
+        title=doc_input.get("title") or None,
+        author=doc_input.get("author") or None,
+        language=doc_input.get("language", "en"),
+        checksum=checksum,
+        size_bytes=len(content.encode("utf-8")),
+        metadata=dict(custom_metadata),
         created_at=created_at,
         updated_at=created_at,  # Set updated_at to source time too
         source_timestamp=source_timestamp,
@@ -683,7 +676,7 @@ async def stage_documents_batch(
     """
     from datetime import UTC, datetime
 
-    from khora.core.models import Document, DocumentMetadata
+    from khora.core.models import Document
 
     if not doc_inputs:
         return []
@@ -718,17 +711,6 @@ async def stage_documents_batch(
 
         content = doc_input.get("content", "")
         custom_metadata = doc_input.get("metadata", {})
-        metadata = DocumentMetadata(
-            source=doc_input.get("source", ""),
-            source_type=doc_input.get("source_type", "manual"),
-            content_type=doc_input.get("content_type", "text/plain"),
-            title=doc_input.get("title", ""),
-            author=doc_input.get("author", ""),
-            language=doc_input.get("language", "en"),
-            checksum=checksum,
-            size_bytes=len(content.encode("utf-8")),
-            custom=custom_metadata,
-        )
 
         source_timestamp = _extract_source_timestamp(custom_metadata)
         created_at = source_timestamp or datetime.now(UTC)
@@ -737,7 +719,15 @@ async def stage_documents_batch(
         document = Document(
             namespace_id=namespace_id,
             content=content,
-            metadata=metadata,
+            source=doc_input.get("source") or None,
+            source_type=doc_input.get("source_type", "manual"),
+            content_type=doc_input.get("content_type", "text/plain"),
+            title=doc_input.get("title") or None,
+            author=doc_input.get("author") or None,
+            language=doc_input.get("language", "en"),
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            metadata=dict(custom_metadata),
             extraction_config_hash=doc_input.get("extraction_config_hash"),
             external_id=doc_input.get("external_id"),
             created_at=created_at,
@@ -779,7 +769,7 @@ async def _stage_all_documents(
     """
     from datetime import UTC, datetime
 
-    from khora.core.models import Document, DocumentMetadata
+    from khora.core.models import Document
 
     if not doc_inputs:
         return []
@@ -791,17 +781,6 @@ async def _stage_all_documents(
         content = doc_input.get("content", "")
         custom_metadata = doc_input.get("metadata", {})
         checksum = compute_checksum(content)
-        metadata = DocumentMetadata(
-            source=doc_input.get("source", ""),
-            source_type=doc_input.get("source_type", "manual"),
-            content_type=doc_input.get("content_type", "text/plain"),
-            title=doc_input.get("title", ""),
-            author=doc_input.get("author", ""),
-            language=doc_input.get("language", "en"),
-            checksum=checksum,
-            size_bytes=len(content.encode("utf-8")),
-            custom=custom_metadata,
-        )
 
         source_timestamp = _extract_source_timestamp(custom_metadata)
         created_at = source_timestamp or datetime.now(UTC)
@@ -810,7 +789,15 @@ async def _stage_all_documents(
         document = Document(
             namespace_id=namespace_id,
             content=content,
-            metadata=metadata,
+            source=doc_input.get("source") or None,
+            source_type=doc_input.get("source_type", "manual"),
+            content_type=doc_input.get("content_type", "text/plain"),
+            title=doc_input.get("title") or None,
+            author=doc_input.get("author") or None,
+            language=doc_input.get("language", "en"),
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            metadata=dict(custom_metadata),
             extraction_config_hash=doc_input.get("extraction_config_hash"),
             external_id=doc_input.get("external_id"),
             created_at=created_at,
@@ -943,13 +930,13 @@ async def process_document(
                 chunk.created_at = document.created_at
 
         # R-2: Prepend document title for embeddings (better embedding space separation)
-        doc_title = document.metadata.title if document.metadata and hasattr(document.metadata, "title") else ""
+        doc_title = document.title or ""
 
         # R-4: Propagate document title into chunk metadata for reranker context
         if doc_title:
             for chunk in chunks:
-                if chunk.metadata and isinstance(chunk.metadata.custom, dict):
-                    chunk.metadata.custom.setdefault("title", doc_title)
+                if isinstance(chunk.metadata, dict):
+                    chunk.metadata.setdefault("title", doc_title)
 
         original_contents: dict[UUID, str] = {}
         if doc_title:
@@ -1120,9 +1107,7 @@ async def process_document(
                     from khora.telemetry import trace_span
                     from khora.telemetry.temporal_metrics import record_ingestion_fallback
 
-                    doc_metadata: dict[str, Any] = {}
-                    if document.metadata and document.metadata.custom:
-                        doc_metadata = document.metadata.custom
+                    doc_metadata: dict[str, Any] = document.metadata or {}
 
                     # Determine source of the timestamp for telemetry.
                     # "metadata" — a connector populated metadata.custom with a
@@ -1171,17 +1156,13 @@ async def process_document(
                                 channel=doc_metadata.get("channel"),
                                 tags=doc_metadata.get("tags", []),
                                 confidence=1.0,
-                                metadata=(
-                                    {
-                                        "chunk_index": chunk.metadata.chunk_index,
-                                        "start_char": chunk.metadata.start_char,
-                                        "end_char": chunk.metadata.end_char,
-                                        "token_count": chunk.metadata.token_count,
-                                        **chunk.metadata.custom,
-                                    }
-                                    if chunk.metadata
-                                    else {}
-                                ),
+                                metadata={
+                                    "chunk_index": chunk.chunk_index,
+                                    "start_char": chunk.start_char,
+                                    "end_char": chunk.end_char,
+                                    "token_count": chunk.token_count,
+                                    **(chunk.metadata or {}),
+                                },
                             )
                             for chunk in chunks
                         ]
@@ -1891,9 +1872,8 @@ async def _create_session_episodes(
         if isinstance(result, Exception):
             continue
         # Get thread_id from original doc metadata
-        meta = getattr(doc, "metadata", None)
-        custom = getattr(meta, "custom", {}) if meta else {}
-        thread_id = custom.get("thread_id")
+        meta = getattr(doc, "metadata", None) or {}
+        thread_id = meta.get("thread_id")
         if not thread_id:
             continue
         sessions[thread_id].append((doc, result))

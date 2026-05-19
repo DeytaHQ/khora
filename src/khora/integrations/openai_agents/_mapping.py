@@ -44,7 +44,7 @@ _SESSION_ROOT = uuid5(NAMESPACE_DNS, "khora.integrations.openai_agents.session.v
 # even when documents share a millisecond timestamp.
 _EXTERNAL_ID_MAX_LEN = 512
 
-# Metadata keys this adapter owns under ``Document.metadata.custom``.
+# Metadata keys this adapter owns under ``Document.metadata``.
 # Prefix with ``oai_`` so caller-supplied metadata cannot collide.
 KEY_APP_ID = "oai_app_id"
 KEY_SESSION_ID = "oai_session_id"  # original SDK session string id
@@ -196,11 +196,11 @@ def chunk_to_item(chunk: Chunk) -> Any | None:
     """Recover the original ``TResponseInputItem`` from a stored chunk.
 
     Returns ``None`` if the chunk wasn't written by this adapter (no
-    ``oai_item`` key in ``metadata.custom``) or if the stored JSON has
+    ``oai_item`` key in ``metadata``) or if the stored JSON has
     been corrupted. The SDK silently skips invalid items in its reference
     ``SQLiteSession`` and we mirror that behaviour.
     """
-    custom = (chunk.metadata.custom if chunk.metadata else {}) or {}
+    custom = chunk.metadata or {}
     raw = custom.get(KEY_ITEM_JSON)
     if raw is None:
         return None
@@ -215,7 +215,7 @@ def chunk_to_item(chunk: Chunk) -> Any | None:
 
 def chunk_seq(chunk: Chunk) -> int | None:
     """Return the monotonic in-session sequence number stamped at write."""
-    custom = (chunk.metadata.custom if chunk.metadata else {}) or {}
+    custom = chunk.metadata or {}
     seq = custom.get(KEY_SEQ)
     if isinstance(seq, int):
         return seq

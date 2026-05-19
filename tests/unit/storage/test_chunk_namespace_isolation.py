@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models import Chunk, ChunkMetadata
+from khora.core.models import Chunk
 from khora.storage.backends.sqlite import SQLiteVectorBackend
 
 
@@ -31,7 +31,7 @@ def _make_chunk(namespace_id, document_id) -> Chunk:
         namespace_id=namespace_id,
         document_id=document_id,
         content="content",
-        metadata=ChunkMetadata(document_id=document_id, chunk_index=0),
+        chunk_index=0,
         embedding=None,
         embedding_model="test-model",
         created_at=datetime.now(UTC),

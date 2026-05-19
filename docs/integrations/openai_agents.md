@@ -82,9 +82,9 @@ static checker insists on a `RunHooks` subclass.
 
 | OpenAI Agents SDK                                | khora                                                            |
 | ------------------------------------------------ | ---------------------------------------------------------------- |
-| `Session.session_id` (string)                    | `Document.metadata.custom["oai_session_id"]` + UUID5 `session_id` |
-| One `TResponseInputItem`                         | One `Document`. Verbatim JSON stored in `metadata.custom["oai_item"]`. |
-| Monotonic write order                            | `metadata.custom["oai_seq"]` (0, 1, 2, ...) — ordering key on read-back. |
+| `Session.session_id` (string)                    | `Document.metadata["oai_session_id"]` + UUID5 `session_id` |
+| One `TResponseInputItem`                         | One `Document`. Verbatim JSON stored in `metadata["oai_item"]`. |
+| Monotonic write order                            | `metadata["oai_seq"]` (0, 1, 2, ...) — ordering key on read-back. |
 | `function_tool` call output                      | (Via `KhoraMemoryHooks.on_tool_end`) one `Document` tagged with `oai_tool_name`. |
 
 Documents stamped by this adapter use the prefix `oai:` on their
@@ -104,7 +104,7 @@ variants beyond projecting a human-readable text body onto
 khora's chunk storage layout varies per backend (the `sqlite_lance`
 embedded stack stores chunks in LanceDB plus a Skeleton temporal
 table). `storage.list_documents` is the universally reliable
-iteration surface, and a `Document.metadata.custom` dict survives the
+iteration surface, and a `Document.metadata` dict survives the
 round trip on every backend. We keep the verbatim item JSON on the
 document so `get_items` never needs to peek at chunks.
 

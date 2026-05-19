@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models.document import Chunk, ChunkMetadata, DocumentMetadata
+from khora.core.models.document import Chunk
 from khora.core.models.entity import Entity, Episode, Relationship
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 
@@ -19,8 +19,6 @@ from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 
 # High-frequency models that are allocated in hot loops.
 _HOT_PATH_CLASSES = [
-    DocumentMetadata,
-    ChunkMetadata,
     Chunk,
     Entity,
     Relationship,

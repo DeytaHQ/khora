@@ -91,16 +91,16 @@ this:
 | CrewAI                              | Khora                                                  |
 |-------------------------------------|--------------------------------------------------------|
 | `namespace` arg to `KhoraMemory`    | `Document.namespace_id`                                |
-| `MemoryRecord.scope`                | `Document.metadata.custom["crewai_scope"]`             |
+| `MemoryRecord.scope`                | `Document.metadata["crewai_scope"]`                    |
 | trailing UUID on the scope path     | `Document.session_id` (and `Chunk.session_id`)         |
-| `MemoryRecord.categories`           | `Document.metadata.custom["crewai_categories"]`        |
-| `MemoryRecord.importance`           | `Document.metadata.custom["crewai_importance"]`        |
-| `MemoryRecord.source`               | `Document.metadata.custom["crewai_source"]`            |
-| `user_id` arg to `KhoraMemory`      | `Document.metadata.custom["crewai_user_id"]`           |
+| `MemoryRecord.categories`           | `Document.metadata["crewai_categories"]`               |
+| `MemoryRecord.importance`           | `Document.metadata["crewai_importance"]`               |
+| `MemoryRecord.source`               | `Document.metadata["crewai_source"]`                   |
+| `user_id` arg to `KhoraMemory`      | `Document.metadata["crewai_user_id"]`                  |
 
 Filtering on `scope_prefix` / `categories` / `metadata_filter` in
 `search` and `list_records` is performed **post-recall** against
-`Document.metadata.custom` — khora has no per-document scope or
+`Document.metadata` — khora has no per-document scope or
 category columns to push the filter down into. For typical CrewAI
 working-set sizes (hundreds to low thousands of records per
 namespace), the post-filter is fast enough. Deployments with deep
@@ -149,7 +149,7 @@ skips its own analysis on most queries, leaving HyDE to khora alone.
 CrewAI's `Memory.remember` runs its own LLM-driven scope / categories
 / importance analysis before calling `StorageBackend.save([record])`.
 The adapter forwards those fields directly via
-`Document.metadata.custom` — `kb.remember` is called with
+`Document.metadata` — `kb.remember` is called with
 `entity_types=[]` and `relationship_types=[]` so khora does **not**
 trigger a second extraction LLM call.
 

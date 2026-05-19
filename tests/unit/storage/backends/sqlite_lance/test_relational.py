@@ -15,7 +15,7 @@ try:
 except ImportError:
     _HAS_EMBEDDED = False
 
-from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
+from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentStatus
 
 pytestmark = pytest.mark.skipif(not _HAS_EMBEDDED, reason="aiosqlite/lancedb not installed")
@@ -168,13 +168,11 @@ def _make_document(namespace_id, *, checksum: str = "abc", title: str = "Doc") -
     return Document(
         namespace_id=namespace_id,
         content="hello world",
-        metadata=DocumentMetadata(
-            source="file:///tmp/a.txt",
-            source_type="file",
-            title=title,
-            checksum=checksum,
-            size_bytes=11,
-        ),
+        source="file:///tmp/a.txt",
+        source_type="file",
+        title=title,
+        checksum=checksum,
+        size_bytes=11,
     )
 
 
@@ -186,7 +184,7 @@ async def test_create_and_get_document(adapter, namespace):
     fetched = await adapter.get_document(doc.id)
     assert fetched is not None
     assert fetched.content == "hello world"
-    assert fetched.metadata.title == "Doc"
+    assert fetched.title == "Doc"
 
 
 async def test_list_documents_filters_by_status(adapter, namespace):
@@ -201,19 +199,19 @@ async def test_list_documents_filters_by_status(adapter, namespace):
 
     only_completed = await adapter.list_documents(namespace.id, status="completed")
     assert len(only_completed) == 1
-    assert only_completed[0].metadata.title == "C"
+    assert only_completed[0].title == "C"
 
 
 async def test_update_document(adapter, namespace):
     doc = _make_document(namespace.id)
     await adapter.create_document(doc)
-    doc.metadata.title = "Updated"
+    doc.title = "Updated"
     doc.status = DocumentStatus.COMPLETED
     await adapter.update_document(doc)
 
     fetched = await adapter.get_document(doc.id)
     assert fetched is not None
-    assert fetched.metadata.title == "Updated"
+    assert fetched.title == "Updated"
     assert fetched.status == DocumentStatus.COMPLETED
 
 
@@ -272,7 +270,7 @@ async def test_get_documents_batch(adapter, namespace):
 
     batch = await adapter.get_documents_batch([d1.id, d2.id, uuid4()])
     assert set(batch.keys()) == {d1.id, d2.id}
-    assert batch[d1.id].metadata.checksum == "1"
+    assert batch[d1.id].checksum == "1"
 
 
 async def test_get_documents_by_checksums(adapter, namespace):
@@ -359,4 +357,4 @@ async def test_transaction_commit_via_session_factory(adapter, namespace):
 
     fetched = await adapter.get_document(doc.id)
     assert fetched is not None
-    assert fetched.metadata.checksum == "tx-commit"
+    assert fetched.checksum == "tx-commit"

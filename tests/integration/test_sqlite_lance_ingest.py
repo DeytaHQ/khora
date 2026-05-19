@@ -20,7 +20,7 @@ try:
 except ImportError:
     _HAS_EMBEDDED = False
 
-from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, Entity, MemoryNamespace
+from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from tests.integration._sqlite_lance_fixtures import (
     build_sqlite_lance_coordinator,
     fake_embedding,
@@ -39,7 +39,8 @@ def _make_document(namespace_id, *, idx: int, topic: str) -> Document:
         namespace_id=namespace_id,
         content=content,
         external_id=f"doc-{idx}",
-        metadata=DocumentMetadata(source="test", title=f"doc-{idx}"),
+        source="test",
+        title=f"doc-{idx}",
     )
 
 
@@ -48,7 +49,7 @@ def _make_chunk(namespace_id, document_id, *, idx: int, content: str) -> Chunk:
         namespace_id=namespace_id,
         document_id=document_id,
         content=content,
-        metadata=ChunkMetadata(document_id=document_id, chunk_index=idx),
+        chunk_index=idx,
         embedding=fake_embedding(content),
         embedding_model="fake",
     )

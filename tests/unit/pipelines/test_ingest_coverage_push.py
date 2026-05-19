@@ -29,7 +29,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, Entity, Relationship
+from khora.core.models import Chunk, Document, Entity, Relationship
 from khora.extraction.extractors.base import (
     ExtractedEntity,
     ExtractedRelationship,
@@ -64,7 +64,7 @@ def _make_chunk(ns_id: UUID, doc_id: UUID, content: str = "hello world", idx: in
         namespace_id=ns_id,
         document_id=doc_id,
         content=content,
-        metadata=ChunkMetadata(document_id=doc_id, chunk_index=idx),
+        chunk_index=idx,
         created_at=datetime.now(UTC),
     )
 
@@ -269,7 +269,7 @@ class TestStageDocument:
             storage,
         )
         assert doc is not None
-        assert doc.metadata.title == "Alpha"
+        assert doc.title == "Alpha"
         assert doc.source_timestamp is not None
         assert doc.source_timestamp.isoformat() == "2026-05-13T14:00:00+00:00"
         # created_at + updated_at align with the source timestamp
@@ -571,15 +571,15 @@ class TestCreateSessionEpisodes:
         thread = "thr-1"
         # Two docs share a thread_id; one third doc has no thread → ignored.
         doc_a = Document(namespace_id=ns, content="a")
-        doc_a.metadata = DocumentMetadata(custom={"thread_id": thread})
+        doc_a.metadata = {"thread_id": thread}
         doc_a.source_timestamp = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
 
         doc_b = Document(namespace_id=ns, content="b")
-        doc_b.metadata = DocumentMetadata(custom={"thread_id": thread})
+        doc_b.metadata = {"thread_id": thread}
         doc_b.source_timestamp = datetime(2026, 5, 13, 12, 0, tzinfo=UTC)
 
         doc_c = Document(namespace_id=ns, content="c")
-        doc_c.metadata = DocumentMetadata(custom={})
+        doc_c.metadata = {}
 
         eid1, eid2, cid = uuid4(), uuid4(), uuid4()
         results = [
@@ -608,7 +608,7 @@ class TestCreateSessionEpisodes:
         ns = uuid4()
         storage = _make_storage(create_episode=AsyncMock(side_effect=RuntimeError("boom")))
         doc = Document(namespace_id=ns, content="x")
-        doc.metadata = DocumentMetadata(custom={"thread_id": "tx"})
+        doc.metadata = {"thread_id": "tx"}
         doc.source_timestamp = datetime.now(UTC)
         result = {"entity_ids": [uuid4()], "chunk_ids": []}
         # Must not raise.
@@ -625,7 +625,7 @@ class TestCreateSessionEpisodes:
         ns = uuid4()
         storage = _make_storage()
         doc = Document(namespace_id=ns, content="x")
-        doc.metadata = DocumentMetadata(custom={"thread_id": "tx"})
+        doc.metadata = {"thread_id": "tx"}
         # Force both timestamp fields to None
         doc.source_timestamp = None
         doc.created_at = None
@@ -874,13 +874,10 @@ class TestExtractCrossChunkRelationships:
 
     async def test_finds_and_dedupes_across_windows(self):
         cid_a, cid_b, cid_c = uuid4(), uuid4(), uuid4()
-        # Each chunk needs .content, .id, optional .metadata.chunk_index
-        chunk_a = MagicMock(content="Alice met Bob.", id=cid_a)
-        chunk_a.metadata = MagicMock(chunk_index=0)
-        chunk_b = MagicMock(content="Bob works for Acme.", id=cid_b)
-        chunk_b.metadata = MagicMock(chunk_index=1)
-        chunk_c = MagicMock(content="Acme is in Boston.", id=cid_c)
-        chunk_c.metadata = MagicMock(chunk_index=2)
+        # Each chunk needs .content, .id, optional chunk_index (flat field)
+        chunk_a = MagicMock(content="Alice met Bob.", id=cid_a, chunk_index=0)
+        chunk_b = MagicMock(content="Bob works for Acme.", id=cid_b, chunk_index=1)
+        chunk_c = MagicMock(content="Acme is in Boston.", id=cid_c, chunk_index=2)
 
         entities_by_chunk = {
             cid_a: ["Alice", "Bob"],
@@ -923,10 +920,8 @@ class TestExtractCrossChunkRelationships:
 
     async def test_window_failure_is_swallowed(self):
         cid_a, cid_b = uuid4(), uuid4()
-        chunk_a = MagicMock(content="x", id=cid_a)
-        chunk_a.metadata = MagicMock(chunk_index=0)
-        chunk_b = MagicMock(content="y", id=cid_b)
-        chunk_b.metadata = MagicMock(chunk_index=1)
+        chunk_a = MagicMock(content="x", id=cid_a, chunk_index=0)
+        chunk_b = MagicMock(content="y", id=cid_b, chunk_index=1)
 
         extractor = MagicMock()
         extractor.extract_multi = AsyncMock(side_effect=RuntimeError("LLM blew up"))
@@ -944,10 +939,8 @@ class TestExtractCrossChunkRelationships:
 
     async def test_skips_window_with_no_entities(self):
         cid_a, cid_b = uuid4(), uuid4()
-        chunk_a = MagicMock(content="x", id=cid_a)
-        chunk_a.metadata = MagicMock(chunk_index=0)
-        chunk_b = MagicMock(content="y", id=cid_b)
-        chunk_b.metadata = MagicMock(chunk_index=1)
+        chunk_a = MagicMock(content="x", id=cid_a, chunk_index=0)
+        chunk_b = MagicMock(content="y", id=cid_b, chunk_index=1)
 
         extractor = MagicMock()
         extractor.extract_multi = AsyncMock(return_value=[ExtractionResult()])

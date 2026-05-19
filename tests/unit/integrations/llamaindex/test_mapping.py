@@ -13,7 +13,7 @@ import pytest
 
 pytest.importorskip("llama_index.core")
 
-from khora.core.models.document import Chunk, ChunkMetadata  # noqa: E402
+from khora.core.models.document import Chunk  # noqa: E402
 from khora.core.models.entity import Entity  # noqa: E402
 from khora.integrations.llamaindex._mapping import (  # noqa: E402
     chat_message_metadata,
@@ -31,7 +31,8 @@ def _mk_chunk(*, content: str = "hello world", custom: dict | None = None) -> Ch
         document_id=document_id,
         namespace_id=uuid4(),
         content=content,
-        metadata=ChunkMetadata(document_id=document_id, chunk_index=0, custom=dict(custom or {})),
+        chunk_index=0,
+        metadata=dict(custom or {}),
         created_at=datetime.now(UTC),
     )
 

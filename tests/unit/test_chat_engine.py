@@ -53,8 +53,8 @@ def _make_mock_kb() -> MagicMock:
 
     # get_document returns a doc with metadata
     mock_doc = MagicMock()
-    mock_doc.metadata.custom = {"source_system": "confluence"}
-    mock_doc.metadata.source = "confluence/page"
+    mock_doc.metadata = {"source_system": "confluence"}
+    mock_doc.source = "confluence/page"
     kb.get_document = AsyncMock(return_value=mock_doc)
 
     return kb

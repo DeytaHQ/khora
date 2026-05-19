@@ -17,7 +17,7 @@ pytest.importorskip("llama_index.core")
 
 
 from khora import Khora  # noqa: E402
-from khora.core.models.document import Chunk, ChunkMetadata  # noqa: E402
+from khora.core.models.document import Chunk  # noqa: E402
 from khora.core.models.entity import Entity  # noqa: E402
 
 
@@ -35,7 +35,7 @@ def _mk_chunk(content: str = "alpha") -> Chunk:
         document_id=document_id,
         namespace_id=uuid4(),
         content=content,
-        metadata=ChunkMetadata(document_id=document_id, chunk_index=0),
+        chunk_index=0,
         created_at=datetime.now(UTC),
     )
 

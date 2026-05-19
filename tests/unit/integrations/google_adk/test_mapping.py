@@ -31,7 +31,7 @@ except ImportError:
 pytestmark = pytest.mark.skipif(not _HAS_ADK, reason="google-adk not installed")
 
 
-from khora.core.models.document import Chunk, ChunkMetadata  # noqa: E402
+from khora.core.models.document import Chunk  # noqa: E402
 from khora.integrations.google_adk._mapping import (  # noqa: E402
     KEY_AUTHOR,
     KEY_EVENT_ID,
@@ -231,7 +231,7 @@ def _mk_chunk(*, content: str, custom: dict[str, Any]) -> Chunk:
         namespace_id=uuid4(),
         document_id=uuid4(),
         content=content,
-        metadata=ChunkMetadata(document_id=uuid4(), custom=custom),
+        metadata=custom,
         created_at=datetime(2026, 5, 15, tzinfo=UTC),
     )
 

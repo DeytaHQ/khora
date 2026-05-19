@@ -1,27 +1,14 @@
-"""Pin the NULL-to-empty-string DTO coercion in document-row mappers.
+"""Pin the empty-string-to-None coercion in document-row mappers.
 
-Migration 037 flips six ``documents`` columns — ``source``,
-``content_type``, ``title``, ``author``, ``language``, ``checksum`` —
-from ``NOT NULL DEFAULT ''`` to nullable. The ``DocumentMetadata`` DTO
-surface is part of the stable public API and still types those fields
-as ``str``. The DTO widening (allowing ``str | None``) lands in a
-follow-up; until then, every backend's
-row → ``Document`` mapper MUST coerce ``None`` to ``""`` at the DTO
-boundary so downstream consumers (khora-cli, khora-explorer,
-integrations) never see ``None`` where they expect ``str``.
+The storage row → ``Document`` mappers see legacy rows where the migrated
+columns (``source``, ``content_type``, ``title``, ``author``, ``language``,
+``checksum``) still carry ``""``. The flattened ``Document`` domain model
+now types these as ``str | None``; the mappers MUST coerce the legacy
+``""`` back to ``None`` so downstream consumers can rely on truthy checks
+and don't confuse "explicitly unset" with "empty string".
 
-These tests pin the coercion for every backend that shipped it in the
-migration-037 diff. Removing the ``or ""`` from any mapper will break
-a test here — that's the point. The accompanying DTO widening will
-update both the mapper and these tests in one PR.
-
-SurrealDB language divergence: the SurrealDB mapper defaults
-``language`` to ``"en"`` (literal "en") rather than ``""``. This is a
-deliberate historical divergence — the SurrealDB ``language`` column
-schema defaults to ``"en"`` and downstream consumers of the Surreal
-backend expect that. The test for surrealdb asserts ``"en"`` rather
-than ``""`` for language, while still asserting ``""`` for the other
-five nullable fields.
+``source_type`` keeps its NOT NULL contract and defaults to ``"library"``
+post-migration — including when a legacy row has ``""``.
 
 The mapper helpers are stateless instance methods — they don't touch
 ``self``. Tests instantiate the adapter classes via ``Klass.__new__``
@@ -39,14 +26,35 @@ from khora.core.models.document import DocumentStatus
 from khora.db.models import DocumentModel
 
 
-def _make_document_model_with_null_nullable_fields() -> DocumentModel:
-    """Build a ``DocumentModel`` with every newly-nullable column set to ``None``.
+def _make_document_model_with_legacy_empty_strings() -> DocumentModel:
+    """Build a ``DocumentModel`` where every nullable text column is ``""``.
 
-    Mirrors the post-migration-037 state where a row's ``source``,
-    ``content_type``, ``title``, ``author``, ``language``, ``checksum``
-    may be ``NULL`` (because empty-string rows were normalized away by
-    the migration, or because callers passed ``None`` going forward).
+    Mirrors the pre-migration row shape that still lives in long-lived
+    databases. The mapper must coerce these legacy empty strings back to
+    ``None`` at the DTO boundary.
     """
+    return DocumentModel(
+        id=uuid4(),
+        namespace_id=uuid4(),
+        content="document body",
+        status="completed",
+        source="",
+        source_type="",
+        content_type="",
+        title="",
+        author="",
+        language="",
+        checksum="",
+        size_bytes=0,
+        metadata_={},
+        chunk_count=0,
+        entity_count=0,
+        relationship_count=0,
+    )
+
+
+def _make_document_model_with_null_nullable_fields() -> DocumentModel:
+    """Build a ``DocumentModel`` with every newly-nullable column set to ``None``."""
     return DocumentModel(
         id=uuid4(),
         namespace_id=uuid4(),
@@ -69,7 +77,27 @@ def _make_document_model_with_null_nullable_fields() -> DocumentModel:
 
 @pytest.mark.unit
 class TestPostgreSQLBackendMapperCoercion:
-    def test_null_columns_coerce_to_empty_string_on_read(self) -> None:
+    def test_legacy_empty_strings_coerce_to_none_on_read(self) -> None:
+        from khora.storage.backends.postgresql import PostgreSQLBackend
+
+        backend = PostgreSQLBackend.__new__(PostgreSQLBackend)
+        model = _make_document_model_with_legacy_empty_strings()
+
+        doc = backend._document_model_to_domain(model)
+
+        # Legacy "" must come back as None on the flat fields.
+        assert doc.source is None
+        assert doc.content_type is None
+        assert doc.title is None
+        assert doc.author is None
+        assert doc.language is None
+        assert doc.checksum is None
+        # source_type keeps NOT NULL contract: "" → "library".
+        assert doc.source_type == "library"
+        assert doc.content == "document body"
+        assert doc.status == DocumentStatus.COMPLETED
+
+    def test_null_columns_remain_none_on_read(self) -> None:
         from khora.storage.backends.postgresql import PostgreSQLBackend
 
         backend = PostgreSQLBackend.__new__(PostgreSQLBackend)
@@ -77,18 +105,13 @@ class TestPostgreSQLBackendMapperCoercion:
 
         doc = backend._document_model_to_domain(model)
 
-        # All six nullable columns coerce to "" (the DocumentMetadata str contract).
-        assert doc.metadata.source == ""
-        assert doc.metadata.content_type == ""
-        assert doc.metadata.title == ""
-        assert doc.metadata.author == ""
-        assert doc.metadata.language == ""
-        assert doc.metadata.checksum == ""
-        # source_type is NOT NULL post-migration (default 'library') — passes through unchanged.
-        assert doc.metadata.source_type == "library"
-        # Document body is plumbed through directly.
-        assert doc.content == "document body"
-        assert doc.status == DocumentStatus.COMPLETED
+        assert doc.source is None
+        assert doc.content_type is None
+        assert doc.title is None
+        assert doc.author is None
+        assert doc.language is None
+        assert doc.checksum is None
+        assert doc.source_type == "library"
 
     def test_non_null_columns_pass_through_unchanged(self) -> None:
         """A row with all fields populated reads back with those exact values."""
@@ -116,32 +139,33 @@ class TestPostgreSQLBackendMapperCoercion:
 
         doc = backend._document_model_to_domain(model)
 
-        assert doc.metadata.source == "nango://linear/issues"
-        assert doc.metadata.source_type == "external"
-        assert doc.metadata.content_type == "text/plain"
-        assert doc.metadata.title == "Some title"
-        assert doc.metadata.author == "alice"
-        assert doc.metadata.language == "fr"
-        assert doc.metadata.checksum == "deadbeef"
+        assert doc.source == "nango://linear/issues"
+        assert doc.source_type == "external"
+        assert doc.content_type == "text/plain"
+        assert doc.title == "Some title"
+        assert doc.author == "alice"
+        assert doc.language == "fr"
+        assert doc.checksum == "deadbeef"
+        assert doc.metadata == {"custom": "kv"}
 
 
 @pytest.mark.unit
 class TestSqliteLanceBackendMapperCoercion:
-    def test_null_columns_coerce_to_empty_string_on_read(self) -> None:
+    def test_legacy_empty_strings_coerce_to_none_on_read(self) -> None:
         from khora.storage.backends.sqlite_lance.relational import SQLiteLanceRelationalAdapter
 
         adapter = SQLiteLanceRelationalAdapter.__new__(SQLiteLanceRelationalAdapter)
-        model = _make_document_model_with_null_nullable_fields()
+        model = _make_document_model_with_legacy_empty_strings()
 
         doc = adapter._document_model_to_domain(model)
 
-        assert doc.metadata.source == ""
-        assert doc.metadata.content_type == ""
-        assert doc.metadata.title == ""
-        assert doc.metadata.author == ""
-        assert doc.metadata.language == ""
-        assert doc.metadata.checksum == ""
-        assert doc.metadata.source_type == "library"
+        assert doc.source is None
+        assert doc.content_type is None
+        assert doc.title is None
+        assert doc.author is None
+        assert doc.language is None
+        assert doc.checksum is None
+        assert doc.source_type == "library"
 
     def test_metadata_none_coerces_to_empty_dict(self) -> None:
         """SQLite mapper coerces ``metadata_`` of ``None`` to ``{}`` to preserve dict contract."""
@@ -150,21 +174,15 @@ class TestSqliteLanceBackendMapperCoercion:
         adapter = SQLiteLanceRelationalAdapter.__new__(SQLiteLanceRelationalAdapter)
         model = _make_document_model_with_null_nullable_fields()
         # ORM default is dict for metadata_, but a manually-built model can carry None.
-        # Force the edge case the ``or {}`` guards against.
         model.metadata_ = None  # type: ignore[assignment]
 
         doc = adapter._document_model_to_domain(model)
-        assert doc.metadata.custom == {}
+        assert doc.metadata == {}
 
 
 @pytest.mark.unit
 class TestSurrealDBBackendMapperCoercion:
-    """SurrealDB mapper takes a row ``dict``, not a ``DocumentModel``.
-
-    Language divergence: ``language`` defaults to ``"en"`` (literal "en"),
-    matching the SurrealDB schema's ``DEFINE FIELD language ... DEFAULT 'en'``.
-    Other nullable fields coerce to ``""`` like the SQL backends.
-    """
+    """SurrealDB mapper takes a row ``dict``, not a ``DocumentModel``."""
 
     def _null_row(self) -> dict[str, Any]:
         return {
@@ -192,16 +210,113 @@ class TestSurrealDBBackendMapperCoercion:
         adapter = SurrealDBRelationalAdapter.__new__(SurrealDBRelationalAdapter)
         doc = adapter._row_to_document(self._null_row())
 
-        # Five of six nullable fields coerce to "".
-        assert doc.metadata.source == ""
-        assert doc.metadata.source_type == ""
-        assert doc.metadata.content_type == ""
-        assert doc.metadata.title == ""
-        assert doc.metadata.author == ""
-        assert doc.metadata.checksum == ""
-        # SurrealDB schema declares language with DEFAULT 'en' — the mapper
-        # mirrors that with ``or "en"`` rather than ``or ""``. Documented in
-        # the migration's "SurrealDB language divergence" carve-out.
-        assert doc.metadata.language == "en"
-        # custom defaults to {} when row's metadata_ is None.
-        assert doc.metadata.custom == {}
+        assert doc.source is None
+        # source_type keeps NOT NULL contract — coerced to "library".
+        assert doc.source_type == "library"
+        assert doc.content_type is None
+        assert doc.title is None
+        assert doc.author is None
+        assert doc.checksum is None
+        assert doc.language is None
+        # metadata defaults to {} when row's metadata_ is None.
+        assert doc.metadata == {}
+
+
+@pytest.mark.unit
+class TestDocumentSourceTimestampRoundTrip:
+    """``source_timestamp`` previously missed at least two converters — pin it."""
+
+    def test_source_timestamp_roundtrips_postgresql(self) -> None:
+        from datetime import UTC, datetime
+
+        from khora.storage.backends.postgresql import PostgreSQLBackend
+
+        backend = PostgreSQLBackend.__new__(PostgreSQLBackend)
+        when = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        model = DocumentModel(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            content="body",
+            status="completed",
+            source_type="library",
+            source_timestamp=when,
+            size_bytes=0,
+            metadata_={},
+            chunk_count=0,
+            entity_count=0,
+            relationship_count=0,
+        )
+        doc = backend._document_model_to_domain(model)
+        assert doc.source_timestamp == when
+
+    def test_source_timestamp_roundtrips_sqlite_lance(self) -> None:
+        from datetime import UTC, datetime
+
+        from khora.storage.backends.sqlite_lance.relational import SQLiteLanceRelationalAdapter
+
+        adapter = SQLiteLanceRelationalAdapter.__new__(SQLiteLanceRelationalAdapter)
+        when = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+        model = DocumentModel(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            content="body",
+            status="completed",
+            source_type="library",
+            source_timestamp=when,
+            size_bytes=0,
+            metadata_={},
+            chunk_count=0,
+            entity_count=0,
+            relationship_count=0,
+        )
+        doc = adapter._document_model_to_domain(model)
+        assert doc.source_timestamp == when
+
+
+@pytest.mark.unit
+class TestDocumentSourceNameUrlRoundTrip:
+    """``source_name`` and ``source_url`` were added in the same migration."""
+
+    def test_source_name_and_url_roundtrip_postgresql(self) -> None:
+        from khora.storage.backends.postgresql import PostgreSQLBackend
+
+        backend = PostgreSQLBackend.__new__(PostgreSQLBackend)
+        model = DocumentModel(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            content="body",
+            status="completed",
+            source_type="library",
+            source_name="nango_gmail",
+            source_url="https://example.com/x",
+            size_bytes=0,
+            metadata_={},
+            chunk_count=0,
+            entity_count=0,
+            relationship_count=0,
+        )
+        doc = backend._document_model_to_domain(model)
+        assert doc.source_name == "nango_gmail"
+        assert doc.source_url == "https://example.com/x"
+
+    def test_source_name_and_url_roundtrip_sqlite_lance(self) -> None:
+        from khora.storage.backends.sqlite_lance.relational import SQLiteLanceRelationalAdapter
+
+        adapter = SQLiteLanceRelationalAdapter.__new__(SQLiteLanceRelationalAdapter)
+        model = DocumentModel(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            content="body",
+            status="completed",
+            source_type="library",
+            source_name="nango_gmail",
+            source_url="https://example.com/x",
+            size_bytes=0,
+            metadata_={},
+            chunk_count=0,
+            entity_count=0,
+            relationship_count=0,
+        )
+        doc = adapter._document_model_to_domain(model)
+        assert doc.source_name == "nango_gmail"
+        assert doc.source_url == "https://example.com/x"

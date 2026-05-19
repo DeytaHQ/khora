@@ -242,7 +242,7 @@ class KhoraMemoryService:
         which is indexed in every khora backend.
 
         ``custom_metadata`` is merged into each event's
-        ``Document.metadata.custom`` so callers can stamp portable
+        ``Document.metadata`` so callers can stamp portable
         fields (e.g. ``ttl_hint``) without subclassing the service.
         """
         namespace_id = namespace_uuid(app_name=app_name, user_id=user_id)
@@ -300,7 +300,7 @@ class KhoraMemoryService:
         response = SearchMemoryResponse()
         seen_events: set[str] = set()
         for chunk, _score in recall.chunks:
-            custom = chunk.metadata.custom if chunk.metadata else {}
+            custom = chunk.metadata or {}
             event_id = str(custom.get(KEY_EVENT_ID) or "")
             # Same event may produce multiple chunks; surface each event once.
             if event_id and event_id in seen_events:

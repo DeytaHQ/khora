@@ -13,7 +13,7 @@ from uuid import UUID
 
 from loguru import logger
 
-from khora.core.models import Chunk, ChunkMetadata, Entity
+from khora.core.models import Chunk, Entity
 from khora.storage.backends.surrealdb._helpers import (
     _HAS_NUMPY,
     _entity_to_bindings,
@@ -127,6 +127,7 @@ class SurrealDBVectorAdapter:
             "end_char = $end_char, "
             "token_count = $token_count, "
             "metadata_ = $metadata_, "
+            "chunker_info = $chunker_info, "
             "created_at = $created_at, "
             "source_timestamp = $source_timestamp, "
             "session_id = $session_id"
@@ -150,11 +151,12 @@ class SurrealDBVectorAdapter:
                     "content": chunk.content,
                     "embedding": list(chunk.embedding) if chunk.embedding is not None else None,
                     "embedding_model": chunk.embedding_model,
-                    "chunk_index": chunk.metadata.chunk_index,
-                    "start_char": chunk.metadata.start_char,
-                    "end_char": chunk.metadata.end_char,
-                    "token_count": chunk.metadata.token_count,
-                    "metadata_": chunk.metadata.custom or {},
+                    "chunk_index": chunk.chunk_index,
+                    "start_char": chunk.start_char,
+                    "end_char": chunk.end_char,
+                    "token_count": chunk.token_count,
+                    "metadata_": chunk.metadata or {},
+                    "chunker_info": chunk.chunker_info or {},
                     "created_at": chunk.created_at,
                     "source_timestamp": chunk.source_timestamp,
                     "session_id": str(chunk.session_id) if chunk.session_id else None,
@@ -707,11 +709,12 @@ class SurrealDBVectorAdapter:
             "content": chunk.content,
             "embedding": list(chunk.embedding) if chunk.embedding is not None else None,
             "embedding_model": chunk.embedding_model,
-            "chunk_index": chunk.metadata.chunk_index,
-            "start_char": chunk.metadata.start_char,
-            "end_char": chunk.metadata.end_char,
-            "token_count": chunk.metadata.token_count,
-            "metadata_": chunk.metadata.custom or {},
+            "chunk_index": chunk.chunk_index,
+            "start_char": chunk.start_char,
+            "end_char": chunk.end_char,
+            "token_count": chunk.token_count,
+            "metadata_": chunk.metadata or {},
+            "chunker_info": chunk.chunker_info or {},
             "created_at": chunk.created_at,
             "source_timestamp": chunk.source_timestamp,
             "session_id": str(chunk.session_id) if chunk.session_id else None,
@@ -736,19 +739,21 @@ class SurrealDBVectorAdapter:
         if not isinstance(custom_meta, dict):
             custom_meta = {}
 
+        chunker_info_raw = row.get("chunker_info") or {}
+        if not isinstance(chunker_info_raw, dict):
+            chunker_info_raw = {}
+
         return Chunk(
             id=chunk_id,
             namespace_id=namespace_id,
             document_id=document_id,
             content=row.get("content", ""),
-            metadata=ChunkMetadata(
-                document_id=document_id,
-                chunk_index=int(row.get("chunk_index", 0)),
-                start_char=int(row.get("start_char", 0)),
-                end_char=int(row.get("end_char", 0)),
-                token_count=int(row.get("token_count", 0)),
-                custom=custom_meta,
-            ),
+            chunk_index=int(row.get("chunk_index", 0)),
+            start_char=int(row.get("start_char", 0)),
+            end_char=int(row.get("end_char", 0)),
+            token_count=int(row.get("token_count", 0)),
+            metadata=dict(custom_meta),
+            chunker_info=dict(chunker_info_raw),
             embedding=embedding,
             embedding_model=row.get("embedding_model", ""),
             created_at=_parse_dt(row.get("created_at")) or datetime.now(UTC),

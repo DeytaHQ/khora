@@ -68,7 +68,7 @@ no sync bridging is involved.
   — incremental delta of events for an existing namespace. Same
   deduplication contract as `add_session_to_memory`.
   `custom_metadata` is merged into every event's
-  `Document.metadata.custom`.
+  `Document.metadata`.
 - `search_memory(*, app_name, user_id, query)` — `Khora.recall`
   against the resolved namespace. Returns `SearchMemoryResponse` with
   one `MemoryEntry` per matched event (chunks belonging to the same
@@ -85,7 +85,7 @@ conversation atomically.
 ### Non-text Parts
 
 `function_call`, `function_response`, and `inline_data` parts are
-JSON-encoded into `Document.metadata.custom["adk_parts"]`. The bytes
+JSON-encoded into `Document.metadata["adk_parts"]`. The bytes
 of `inline_data` are dropped (mime type + sha1 prefix kept) — they
 would bloat the document store without being useful for vector recall.
 A short placeholder is rendered as the document content for events

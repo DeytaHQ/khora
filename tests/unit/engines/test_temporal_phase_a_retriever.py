@@ -20,7 +20,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models import Chunk, ChunkMetadata
+from khora.core.models import Chunk
 from khora.engines.skeleton.backends import TemporalFilter
 from khora.engines.vectorcypher.fusion import FusedResult
 from khora.engines.vectorcypher.retriever import (
@@ -43,7 +43,7 @@ def _chunk(occurred_at: datetime | None, *, source_system: str | None = None) ->
         namespace_id=uuid4(),
         document_id=uuid4(),
         content="test",
-        metadata=ChunkMetadata(custom=custom) if custom else None,
+        metadata=custom,
     )
 
 

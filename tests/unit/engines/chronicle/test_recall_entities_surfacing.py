@@ -21,7 +21,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from khora.config import KhoraConfig
-from khora.core.models import Chunk, ChunkMetadata, Entity
+from khora.core.models import Chunk, Entity
 from khora.engines.chronicle.engine import ChronicleEngine
 from khora.engines.chronicle.events import ChronicleEvent
 from khora.query.temporal import TemporalFilter
@@ -38,7 +38,7 @@ def _make_chunk(content: str = "x", *, namespace_id: UUID | None = None) -> Chun
         namespace_id=ns_id,
         document_id=document_id,
         content=content,
-        metadata=ChunkMetadata(document_id=document_id, chunk_index=0),
+        chunk_index=0,
     )
 
 

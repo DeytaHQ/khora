@@ -48,9 +48,7 @@ pytestmark = pytest.mark.skipif(
 if _HAS_EMBEDDED:
     from khora.core.models import (
         Chunk,
-        ChunkMetadata,
         Document,
-        DocumentMetadata,
         Entity,
         Episode,
         MemoryNamespace,
@@ -269,13 +267,11 @@ def _make_document(
     return Document(
         namespace_id=namespace_id,
         content=content,
-        metadata=DocumentMetadata(
-            source="file:///tmp/a.txt",
-            source_type="file",
-            title=title,
-            checksum=checksum,
-            size_bytes=len(content.encode("utf-8")),
-        ),
+        source="file:///tmp/a.txt",
+        source_type="file",
+        title=title,
+        checksum=checksum,
+        size_bytes=len(content.encode("utf-8")),
     )
 
 
@@ -339,7 +335,7 @@ def _make_chunk(
         namespace_id=namespace_id,
         document_id=document_id,
         content=content,
-        metadata=ChunkMetadata(document_id=document_id, chunk_index=index),
+        chunk_index=index,
         embedding=embedding,
         embedding_model="test-model" if embedding else "",
         created_at=created_at or datetime.now(UTC),
@@ -443,15 +439,15 @@ class TestRelationalProtocol:
 
         fetched = await relational_backend.get_document(doc.id)
         assert fetched is not None
-        assert fetched.metadata.title == "Before"
+        assert fetched.title == "Before"
 
-        fetched.metadata.title = "After"
+        fetched.title = "After"
         fetched.status = DocumentStatus.COMPLETED
         await relational_backend.update_document(fetched)
 
         refreshed = await relational_backend.get_document(doc.id)
         assert refreshed is not None
-        assert refreshed.metadata.title == "After"
+        assert refreshed.title == "After"
         assert refreshed.status == DocumentStatus.COMPLETED
 
         assert await relational_backend.delete_document(doc.id) is True
@@ -551,7 +547,7 @@ class TestRelationalProtocol:
         fetched = await relational_backend.get_document(doc.id)
         assert fetched is not None
         assert fetched.content == payload
-        assert fetched.metadata.title == payload
+        assert fetched.title == payload
 
 
 # ===========================================================================
@@ -846,7 +842,7 @@ class TestVectorProtocol:
         fetched = await vector_backend.get_chunks_by_document(doc, namespace_id=ns)
         assert len(fetched) == 3
         # Contract: ordered by chunk_index ascending.
-        assert [c.metadata.chunk_index for c in fetched] == [0, 1, 2]
+        assert [c.chunk_index for c in fetched] == [0, 1, 2]
 
     async def test_delete_chunks_by_document(self, vector_backend):
         ns, doc = uuid4(), uuid4()

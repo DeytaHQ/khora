@@ -118,7 +118,7 @@ class TestStageDocument:
     @pytest.mark.asyncio
     async def test_new_document_created(self) -> None:
         """New document is created when no checksum match."""
-        from khora.core.models import Document, DocumentMetadata
+        from khora.core.models import Document
 
         ns_id = uuid4()
         storage = MagicMock()
@@ -128,14 +128,15 @@ class TestStageDocument:
         content = "hello world"
         checksum = _compute_checksum(content)
 
-        metadata = DocumentMetadata(
+        doc = Document(
+            namespace_id=ns_id,
+            content=content,
             source="api",
             title="Test",
             checksum=checksum,
             size_bytes=len(content.encode("utf-8")),
-            custom={},
+            created_at=datetime.now(UTC),
         )
-        doc = Document(namespace_id=ns_id, content=content, metadata=metadata, created_at=datetime.now(UTC))
         created = await storage.create_document(doc)
 
         assert created is not None
@@ -159,7 +160,7 @@ class TestStageDocument:
     @pytest.mark.asyncio
     async def test_source_timestamp_used(self) -> None:
         """Source timestamp from metadata is used for created_at."""
-        from khora.core.models import Document, DocumentMetadata
+        from khora.core.models import Document
 
         ns_id = uuid4()
         custom_metadata = {"sent_at": "2024-01-15T10:00:00Z"}
@@ -169,14 +170,14 @@ class TestStageDocument:
         content = "test content"
         checksum = _compute_checksum(content)
 
-        metadata = DocumentMetadata(
-            source="",
-            title="",
+        doc = Document(
+            namespace_id=ns_id,
+            content=content,
             checksum=checksum,
             size_bytes=len(content.encode("utf-8")),
-            custom=custom_metadata,
+            metadata=custom_metadata,
+            created_at=created_at,
         )
-        doc = Document(namespace_id=ns_id, content=content, metadata=metadata, created_at=created_at)
 
         assert doc.created_at.year == 2024
         assert doc.created_at.month == 1
@@ -209,7 +210,7 @@ class TestStreamExtractAndEmbedEntities:
         """Extracted entities receive embeddings."""
         from unittest.mock import patch
 
-        from khora.core.models import Chunk, ChunkMetadata
+        from khora.core.models import Chunk
         from khora.pipelines.flows.ingest import stream_extract_and_embed_entities
 
         ns_id = uuid4()
@@ -220,7 +221,6 @@ class TestStreamExtractAndEmbedEntities:
             namespace_id=ns_id,
             document_id=doc_id,
             content="Alice works at Acme Corp.",
-            metadata=ChunkMetadata(),
             embedding=[],
         )
 
@@ -271,7 +271,7 @@ class TestStreamExtractAndEmbedEntities:
         """Relationships between entities are extracted."""
         from unittest.mock import patch
 
-        from khora.core.models import Chunk, ChunkMetadata
+        from khora.core.models import Chunk
         from khora.pipelines.flows.ingest import stream_extract_and_embed_entities
 
         ns_id = uuid4()
@@ -282,7 +282,6 @@ class TestStreamExtractAndEmbedEntities:
             namespace_id=ns_id,
             document_id=doc_id,
             content="Alice works for Bob.",
-            metadata=ChunkMetadata(),
             embedding=[],
         )
 
@@ -348,7 +347,7 @@ class TestStreamExtractAndEmbedEntities:
         """Entities are embedded in batches."""
         from unittest.mock import patch
 
-        from khora.core.models import Chunk, ChunkMetadata
+        from khora.core.models import Chunk
         from khora.pipelines.flows.ingest import stream_extract_and_embed_entities
 
         ns_id = uuid4()
@@ -361,7 +360,6 @@ class TestStreamExtractAndEmbedEntities:
                 namespace_id=ns_id,
                 document_id=doc_id,
                 content=f"Entity{i} is important.",
-                metadata=ChunkMetadata(),
                 embedding=[],
             )
             for i in range(5)

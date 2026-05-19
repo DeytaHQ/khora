@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, MemoryNamespace
+from khora.core.models import Chunk, Document, MemoryNamespace
 from khora.core.models.document import DocumentStatus
 from khora.core.models.entity import Entity
 from khora.core.models.tenancy import TenancyMode
@@ -57,14 +57,12 @@ def _make_document(namespace_id, **kwargs) -> Document:
         namespace_id=namespace_id,
         content="Hello world",
         status=DocumentStatus.PENDING,
-        metadata=DocumentMetadata(
-            source="test.txt",
-            source_type="file",
-            content_type="text/plain",
-            title="Test Document",
-            author="tester",
-            checksum="abc123",
-        ),
+        source="test.txt",
+        source_type="file",
+        content_type="text/plain",
+        title="Test Document",
+        author="tester",
+        checksum="abc123",
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
@@ -78,7 +76,7 @@ def _make_chunk(namespace_id, document_id, embedding=None, **kwargs) -> Chunk:
         namespace_id=namespace_id,
         document_id=document_id,
         content="Test chunk content",
-        metadata=ChunkMetadata(document_id=document_id, chunk_index=0),
+        chunk_index=0,
         embedding=embedding,
         embedding_model="test-model",
         created_at=datetime.now(UTC),
@@ -215,7 +213,7 @@ class TestDocumentCRUD:
 
         fetched = await relational.get_document(doc.id)
         assert fetched is not None
-        assert fetched.metadata.title == "Test Document"
+        assert fetched.title == "Test Document"
 
     async def test_list_documents(self, relational: SQLiteRelationalBackend):
         ns = _make_namespace()
@@ -223,7 +221,7 @@ class TestDocumentCRUD:
 
         doc1 = _make_document(ns.id)
         doc2 = _make_document(ns.id)
-        doc2.metadata.checksum = "def456"
+        doc2.checksum = "def456"
         await relational.create_document(doc1)
         await relational.create_document(doc2)
 
@@ -368,7 +366,7 @@ class TestDocumentCRUD:
 
         doc1 = _make_document(ns.id)
         doc2 = _make_document(ns.id)
-        doc2.metadata.checksum = "xyz789"
+        doc2.checksum = "xyz789"
         await relational.create_document(doc1)
         await relational.create_document(doc2)
 
@@ -455,15 +453,13 @@ class TestChunkOperations:
     async def test_get_chunks_by_document(self, vector: SQLiteVectorBackend):
         ns_id = uuid4()
         doc_id = uuid4()
-        chunks = [
-            _make_chunk(ns_id, doc_id, metadata=ChunkMetadata(document_id=doc_id, chunk_index=i)) for i in range(3)
-        ]
+        chunks = [_make_chunk(ns_id, doc_id, chunk_index=i) for i in range(3)]
         await vector.create_chunks_batch(chunks)
 
         result = await vector.get_chunks_by_document(doc_id, namespace_id=ns_id)
         assert len(result) == 3
         # Should be ordered by chunk_index
-        assert [c.metadata.chunk_index for c in result] == [0, 1, 2]
+        assert [c.chunk_index for c in result] == [0, 1, 2]
 
     async def test_delete_chunks_by_document(self, vector: SQLiteVectorBackend):
         ns_id = uuid4()
@@ -485,6 +481,22 @@ class TestChunkOperations:
 
         count = await vector.count_chunks(ns_id)
         assert count == 4
+
+    async def test_chunker_info_roundtrip(self, vector: SQLiteVectorBackend):
+        """chunker_info round-trips independently of metadata."""
+        ns_id = uuid4()
+        doc_id = uuid4()
+        chunk = _make_chunk(
+            ns_id,
+            doc_id,
+            chunker_info={"strategy": "fixed", "tokens": 256},
+            metadata={"doc_key": "doc_val"},
+        )
+        await vector.create_chunks_batch([chunk])
+
+        fetched = (await vector.get_chunks_by_document(doc_id, namespace_id=ns_id))[0]
+        assert fetched.chunker_info == {"strategy": "fixed", "tokens": 256}
+        assert fetched.metadata == {"doc_key": "doc_val"}
 
 
 # ---------------------------------------------------------------------------

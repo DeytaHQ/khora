@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 from loguru import logger
 
-from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
+from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.storage.backends.base import PaginatedResult
 from khora.storage.backends.surrealdb._helpers import (
@@ -280,6 +280,8 @@ class SurrealDBRelationalAdapter:
             "status = $status, "
             "source = $source, "
             "source_type = $source_type, "
+            "source_name = $source_name, "
+            "source_url = $source_url, "
             "content_type = $content_type, "
             "title = $title, "
             "author = $author, "
@@ -304,15 +306,17 @@ class SurrealDBRelationalAdapter:
                 "namespace_id": str(document.namespace_id),
                 "content": document.content,
                 "status": document.status.value if isinstance(document.status, DocumentStatus) else document.status,
-                "source": document.metadata.source,
-                "source_type": document.metadata.source_type,
-                "content_type": document.metadata.content_type,
-                "title": document.metadata.title,
-                "author": document.metadata.author,
-                "language": document.metadata.language,
-                "checksum": document.metadata.checksum,
-                "size_bytes": document.metadata.size_bytes,
-                "metadata_": document.metadata.custom or {},
+                "source": document.source,
+                "source_type": document.source_type,
+                "source_name": document.source_name,
+                "source_url": document.source_url,
+                "content_type": document.content_type,
+                "title": document.title,
+                "author": document.author,
+                "language": document.language,
+                "checksum": document.checksum,
+                "size_bytes": document.size_bytes,
+                "metadata_": document.metadata or {},
                 "chunk_count": document.chunk_count,
                 "entity_count": document.entity_count,
                 "relationship_count": document.relationship_count,
@@ -377,6 +381,8 @@ class SurrealDBRelationalAdapter:
             "status = $status, "
             "source = $source, "
             "source_type = $source_type, "
+            "source_name = $source_name, "
+            "source_url = $source_url, "
             "content_type = $content_type, "
             "title = $title, "
             "author = $author, "
@@ -399,15 +405,17 @@ class SurrealDBRelationalAdapter:
                 "rid": rid,
                 "content": document.content,
                 "status": document.status.value if isinstance(document.status, DocumentStatus) else document.status,
-                "source": document.metadata.source,
-                "source_type": document.metadata.source_type,
-                "content_type": document.metadata.content_type,
-                "title": document.metadata.title,
-                "author": document.metadata.author,
-                "language": document.metadata.language,
-                "checksum": document.metadata.checksum,
-                "size_bytes": document.metadata.size_bytes,
-                "metadata_": document.metadata.custom or {},
+                "source": document.source,
+                "source_type": document.source_type,
+                "source_name": document.source_name,
+                "source_url": document.source_url,
+                "content_type": document.content_type,
+                "title": document.title,
+                "author": document.author,
+                "language": document.language,
+                "checksum": document.checksum,
+                "size_bytes": document.size_bytes,
+                "metadata_": document.metadata or {},
                 "chunk_count": document.chunk_count,
                 "entity_count": document.entity_count,
                 "relationship_count": document.relationship_count,
@@ -570,26 +578,26 @@ class SurrealDBRelationalAdapter:
     # -- document row → domain model --
 
     def _row_to_document(self, row: dict[str, Any]) -> Document:
+        def _none_if_empty(v: str | None) -> str | None:
+            return v if v else None
+
         status_raw = row.get("status", "pending")
         return Document(
             id=_parse_uuid(row["id"]),
             namespace_id=UUID(row["namespace_id"]) if isinstance(row["namespace_id"], str) else row["namespace_id"],
             content=row.get("content", ""),
             status=DocumentStatus(status_raw) if isinstance(status_raw, str) else status_raw,
-            metadata=DocumentMetadata(
-                # ``row.get(..., default)`` returns ``None`` if the key exists with
-                # a None value — coerce with ``or`` so the DTO's str contract holds
-                # after migration 037 made these columns nullable on the SQL backends.
-                source=row.get("source") or "",
-                source_type=row.get("source_type") or "",
-                content_type=row.get("content_type") or "",
-                title=row.get("title") or "",
-                author=row.get("author") or "",
-                language=row.get("language") or "en",
-                checksum=row.get("checksum") or "",
-                size_bytes=row.get("size_bytes", 0),
-                custom=row.get("metadata_") or {},
-            ),
+            title=_none_if_empty(row.get("title")),
+            source=_none_if_empty(row.get("source")),
+            source_type=row.get("source_type") or "library",
+            source_name=_none_if_empty(row.get("source_name")),
+            source_url=_none_if_empty(row.get("source_url")),
+            content_type=_none_if_empty(row.get("content_type")),
+            author=_none_if_empty(row.get("author")),
+            language=_none_if_empty(row.get("language")),
+            checksum=_none_if_empty(row.get("checksum")),
+            size_bytes=row.get("size_bytes", 0),
+            metadata=dict(row.get("metadata_") or {}),
             chunk_count=row.get("chunk_count", 0),
             entity_count=row.get("entity_count", 0),
             relationship_count=row.get("relationship_count", 0),
