@@ -21,9 +21,7 @@ import pytest
 
 from khora.core.models import (
     Chunk,
-    ChunkMetadata,
     Document,
-    DocumentMetadata,
     Entity,
     Relationship,
 )
@@ -81,7 +79,7 @@ class TestCreateSessionEpisodesExtras:
         ns = uuid4()
         storage = _make_storage()
         doc = Document(namespace_id=ns, content="x")
-        doc.metadata = DocumentMetadata(custom={"thread_id": "thr-x"})
+        doc.metadata = {"thread_id": "thr-x"}
         doc.source_timestamp = datetime(2026, 5, 13, tzinfo=UTC)
 
         created = await _create_session_episodes(
@@ -98,7 +96,7 @@ class TestCreateSessionEpisodesExtras:
         ns = uuid4()
         storage = _make_storage()
         doc_a = Document(namespace_id=ns, content="a")
-        doc_a.metadata = DocumentMetadata(custom={"thread_id": "thr-x"})
+        doc_a.metadata = {"thread_id": "thr-x"}
         doc_a.source_timestamp = None  # fall through to created_at
         doc_a.created_at = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
 
@@ -116,7 +114,7 @@ class TestCreateSessionEpisodesExtras:
         ns = uuid4()
         storage = _make_storage(create_episode=AsyncMock(side_effect=Exception("db down")))
         doc = Document(namespace_id=ns, content="x")
-        doc.metadata = DocumentMetadata(custom={"thread_id": "thr-x"})
+        doc.metadata = {"thread_id": "thr-x"}
         doc.source_timestamp = datetime(2026, 5, 13, tzinfo=UTC)
 
         results = [{"entity_ids": [uuid4()], "chunk_ids": [uuid4()]}]
@@ -331,7 +329,7 @@ def _make_chunk(ns_id: UUID, doc_id: UUID, content: str, idx: int = 0) -> Chunk:
         namespace_id=ns_id,
         document_id=doc_id,
         content=content,
-        metadata=ChunkMetadata(document_id=doc_id, chunk_index=idx),
+        chunk_index=idx,
         created_at=datetime.now(UTC),
     )
 

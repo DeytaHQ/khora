@@ -22,7 +22,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from khora.core.models.document import Chunk, ChunkMetadata, Document, DocumentMetadata
+from khora.core.models.document import Chunk, Document
 from khora.integrations.crewai.storage import (
     KhoraStorageBackend,
     _matches_filters,
@@ -88,8 +88,8 @@ def _make_backend(kb: Any, *, namespace_id: UUID | None = None) -> KhoraStorageB
 
 
 def _make_chunk(*, content: str = "x", document_id: UUID | None = None, custom: dict[str, Any] | None = None) -> Chunk:
-    md = ChunkMetadata(document_id=document_id or uuid4(), custom=dict(custom or {}))
-    return Chunk(content=content, document_id=md.document_id, metadata=md)
+    doc_id = document_id or uuid4()
+    return Chunk(content=content, document_id=doc_id, metadata=dict(custom or {}))
 
 
 def _make_doc(
@@ -103,7 +103,7 @@ def _make_doc(
         id=uuid4(),
         namespace_id=namespace_id,
         external_id=external_id,
-        metadata=DocumentMetadata(custom=dict(custom or {})),
+        metadata=dict(custom or {}),
     )
     if created_at is not None:
         doc.created_at = created_at

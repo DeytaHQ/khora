@@ -13,6 +13,7 @@ storage. Both are fully mocked. Tests exercise:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
@@ -20,9 +21,7 @@ import pytest
 
 from khora.core.models.document import (
     Chunk,
-    ChunkMetadata,
     Document,
-    DocumentMetadata,
 )
 from khora.core.models.entity import Entity
 from khora.query.agentic import (
@@ -48,7 +47,6 @@ def _chunk(doc_id: UUID | None = None, content: str = "x") -> Chunk:
         id=uuid4(),
         document_id=doc_id or uuid4(),
         content=content,
-        metadata=ChunkMetadata(),
     )
 
 
@@ -62,11 +60,10 @@ def _doc(
     source_system: str = "",
     source: str = "",
 ) -> Document:
-    meta = DocumentMetadata()
-    meta.source = source
+    metadata: dict[str, Any] = {}
     if source_system:
-        meta.custom = {"source_system": source_system}
-    return Document(id=doc_id, metadata=meta)
+        metadata["source_system"] = source_system
+    return Document(id=doc_id, source=source or None, metadata=metadata)
 
 
 def _query_result(

@@ -15,7 +15,6 @@ from uuid import UUID, uuid4
 import pytest
 
 from khora.core.models import Chunk
-from khora.core.models.document import ChunkMetadata
 from khora.extraction.extractors.base import (
     ExtractedEntity,
     ExtractedEvent,
@@ -42,7 +41,6 @@ def _make_chunk(
         namespace_id=namespace_id or uuid4(),
         document_id=document_id or uuid4(),
         content=content,
-        metadata=ChunkMetadata(),
         created_at=created_at or datetime.now(UTC),
     )
 
