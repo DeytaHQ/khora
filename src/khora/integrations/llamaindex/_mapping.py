@@ -83,7 +83,7 @@ def chunk_to_node_with_score(
     """
     from llama_index.core.schema import NodeWithScore, TextNode  # noqa: PLC0415
 
-    custom = (chunk.metadata.custom if chunk.metadata else {}) or {}
+    custom = chunk.metadata or {}
     metadata: dict[str, Any] = {
         "document_id": str(chunk.document_id),
         "chunk_id": str(chunk.id),

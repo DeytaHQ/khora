@@ -46,7 +46,7 @@ _SESSION_ROOT = uuid5(NAMESPACE_DNS, "khora.integrations.google_adk.session.v1")
 # guard is defensive in case ADK changes its id generator upstream.
 _EXTERNAL_ID_MAX_LEN = 512
 
-# Metadata keys this adapter owns under ``Document.metadata.custom``. Prefix
+# Metadata keys this adapter owns under ``Document.metadata``. Prefix
 # with ``adk_`` so caller-supplied metadata cannot collide.
 KEY_APP_ID = "adk_app_id"
 KEY_USER_ID = "adk_user_id"
@@ -279,7 +279,7 @@ def chunk_to_memory_entry(
     Returns:
         A populated ``MemoryEntry``.
     """
-    custom = (chunk.metadata.custom if chunk.metadata else {}) or {}
+    custom = chunk.metadata or {}
     text = chunk.content or ""
 
     parts: list[Any] = []

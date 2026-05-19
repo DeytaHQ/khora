@@ -27,7 +27,7 @@ async def chunk_document(
     Returns:
         List of Chunk objects
     """
-    from khora.core.models import Chunk, ChunkMetadata
+    from khora.core.models import Chunk
     from khora.extraction.chunkers import create_chunker
 
     # Create chunker
@@ -37,24 +37,18 @@ async def chunk_document(
     chunk_results = await asyncio.to_thread(chunker.chunk, document.content)
 
     # Convert to Chunk objects
-    # Inherit document timestamp and custom metadata so they propagate to search results
-    doc_custom = document.metadata.custom if document.metadata else {}
     chunks = []
     for result in chunk_results:
-        # Merge document custom metadata with any chunk-level metadata
-        custom = {**doc_custom, **result.metadata} if doc_custom else result.metadata
         chunk = Chunk(
             namespace_id=document.namespace_id,
             document_id=document.id,
             content=result.content,
-            metadata=ChunkMetadata(
-                document_id=document.id,
-                chunk_index=result.index,
-                start_char=result.start_char,
-                end_char=result.end_char,
-                token_count=result.token_count,
-                custom=custom,
-            ),
+            chunk_index=result.index,
+            start_char=result.start_char,
+            end_char=result.end_char,
+            token_count=result.token_count,
+            metadata=dict(document.metadata),
+            chunker_info=dict(result.metadata),
             created_at=document.created_at,  # Inherit doc created_at (which is source_timestamp when known)
             # Propagate the parsed source_timestamp so date-bounded
             # recalls don't fall back to chunk.created_at and surface

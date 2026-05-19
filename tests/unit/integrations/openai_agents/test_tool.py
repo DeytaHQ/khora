@@ -46,10 +46,9 @@ class _RecallResultStub:
 
 
 def _make_chunk(content: str) -> Any:
-    from khora.core.models.document import Chunk, ChunkMetadata
+    from khora.core.models.document import Chunk
 
-    md = ChunkMetadata(document_id=uuid4())
-    return Chunk(content=content, document_id=md.document_id, metadata=md)
+    return Chunk(content=content, document_id=uuid4())
 
 
 def _make_kb() -> Any:

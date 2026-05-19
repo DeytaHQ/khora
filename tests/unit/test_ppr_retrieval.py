@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from khora.core.models import Chunk, ChunkMetadata, Entity, Relationship
+from khora.core.models import Chunk, Entity, Relationship
 from khora.engines.vectorcypher.ppr_retrieval import (
     build_personalization_vector,
     build_ppr_graph,
@@ -39,7 +39,6 @@ def _make_chunk(content: str) -> Chunk:
         namespace_id=uuid4(),
         document_id=uuid4(),
         content=content,
-        metadata=ChunkMetadata(),
     )
 
 

@@ -14,7 +14,7 @@ This module converts in both directions:
   single string capped at 512 chars — the khora ``Document.external_id``
   column length. We hash the prefix so we never exceed the cap.
 * ``item_metadata`` / ``item_from_metadata`` round-trips the LangGraph
-  ``value`` dict + tuple namespace through ``Document.metadata.custom``.
+  ``value`` dict + tuple namespace through ``Document.metadata``.
 
 These helpers are private to the LangGraph adapter — not part of the
 public ``khora.integrations`` API. Adapter-internal refactors are free.
@@ -90,7 +90,7 @@ def composite_external_id(flat_namespace: str, key: str, sep: str = "/") -> str:
 
     Short forms pass through unchanged. Long forms hash-prefix the
     namespace portion to fit under the 512-char DB column cap. The
-    raw namespace + key always live in ``Document.metadata.custom`` so
+    raw namespace + key always live in ``Document.metadata`` so
     nothing is lost — this is only the lookup index.
     """
     raw = f"{flat_namespace}::{key}"
@@ -114,7 +114,7 @@ def item_metadata(
     """Build the ``metadata`` dict that ``Khora.remember`` should stamp.
 
     The fields prefixed ``lg_`` round-trip the LangGraph identity (tuple
-    namespace, string key, dict value) through ``Document.metadata.custom``
+    namespace, string key, dict value) through ``Document.metadata``
     so :func:`item_from_metadata` can reconstruct an :class:`Item` later.
 
     Kept simple — no JSON re-encoding, no flattening of ``value``. khora
@@ -134,11 +134,11 @@ def item_from_metadata(
     """Project a ``Document`` back to ``(namespace, key, value, created, updated)``.
 
     Returns ``None`` if the document was not written by this adapter
-    (``lg_namespace`` / ``lg_key`` missing from ``metadata.custom``).
+    (``lg_namespace`` / ``lg_key`` missing from ``metadata``).
     Used by ``aget`` and ``asearch`` to skip foreign documents that share
     the khora namespace (e.g. data ingested through a non-LangGraph path).
     """
-    custom = document.metadata.custom if document.metadata else {}
+    custom = document.metadata or {}
     ns_raw = custom.get("lg_namespace")
     key = custom.get("lg_key")
     if ns_raw is None or key is None:

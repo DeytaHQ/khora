@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from khora._accel import pagerank as _pagerank
-from khora.core.models import Chunk, ChunkMetadata, Entity
+from khora.core.models import Chunk, Entity
 from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
@@ -247,21 +247,13 @@ async def ppr_retrieve_chunks(
                         namespace_id=chunk.namespace_id,
                         document_id=chunk.document_id,
                         content=chunk.content,
-                        metadata=ChunkMetadata(
-                            custom={
-                                "occurred_at": (
-                                    chunk.metadata.custom.get("occurred_at")
-                                    if isinstance(chunk.metadata, ChunkMetadata)
-                                    else None
-                                ),
-                                "ppr_score": score_map[cid],
-                                **(
-                                    chunk.metadata.custom
-                                    if isinstance(chunk.metadata, ChunkMetadata)
-                                    else (chunk.metadata or {})
-                                ),
-                            }
-                        ),
+                        metadata={
+                            "occurred_at": (
+                                chunk.metadata.get("occurred_at") if isinstance(chunk.metadata, dict) else None
+                            ),
+                            "ppr_score": score_map[cid],
+                            **(chunk.metadata if isinstance(chunk.metadata, dict) else {}),
+                        },
                         created_at=getattr(chunk, "created_at", None),
                     ),
                 )

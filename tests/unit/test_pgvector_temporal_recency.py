@@ -40,6 +40,7 @@ def _make_chunk_model(*, idx: int) -> SimpleNamespace:
         end_char=10,
         token_count=2,
         metadata_={},
+        chunker_info={},
         embedding=None,
         embedding_model="test-model",
         created_at=now,

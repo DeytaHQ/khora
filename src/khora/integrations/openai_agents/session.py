@@ -278,7 +278,7 @@ class KhoraSession:
             if not page:
                 break
             for doc in page:
-                custom = doc.metadata.custom if doc.metadata else {}
+                custom = doc.metadata or {}
                 if custom.get(KEY_SESSION_ID) != self.session_id:
                     continue
                 seq_val = custom.get(KEY_SEQ)
@@ -318,13 +318,13 @@ def _decode_item_from_doc(doc: Any) -> Any | None:
     """Recover the original ``TResponseInputItem`` from a stored document.
 
     Returns ``None`` if the document wasn't written by this adapter (no
-    ``oai_item`` key in ``metadata.custom``) or if the stored JSON is
+    ``oai_item`` key in ``metadata``) or if the stored JSON is
     corrupt. The SDK silently skips invalid items in its reference
     ``SQLiteSession``; we mirror that behaviour.
     """
     import json  # noqa: PLC0415 — only used here, keeps the import surface tight
 
-    custom = (doc.metadata.custom if doc.metadata else {}) or {}
+    custom = doc.metadata or {}
     raw = custom.get(KEY_ITEM_JSON)
     if raw is None:
         return None

@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models import Chunk, ChunkMetadata
+from khora.core.models import Chunk
 from khora.engines.chronicle.engine import _apply_version_scoring, _has_version_intent
 
 # ---------------------------------------------------------------------------
@@ -35,10 +35,7 @@ def _make_chunk(
         namespace_id=uuid4(),
         document_id=doc_id,
         content="test content",
-        metadata=ChunkMetadata(
-            document_id=doc_id,
-            custom=custom,
-        ),
+        metadata=custom,
         created_at=datetime.now(UTC),
     )
 
@@ -115,7 +112,7 @@ class TestApplyVersionScoring:
         original = [(c_v3, 0.8), (c_v1, 0.9)]
         result = _apply_version_scoring(original, "current status")
 
-        scores = {chunk.metadata.custom["version"]: score for chunk, score in result}
+        scores = {chunk.metadata["version"]: score for chunk, score in result}
         # v3 keeps full score: 0.8 * (3/3)**0.5 = 0.8
         assert scores[3] == pytest.approx(0.8)
         # v1 penalized: 0.9 * (1/3)**0.5 ~ 0.5196
@@ -130,8 +127,8 @@ class TestApplyVersionScoring:
         result = _apply_version_scoring(original, "What is the latest status?")
 
         # After penalty: v1 = 1.0 * (1/5)**0.5 ~ 0.447; v5 = 0.6
-        assert result[0][0].metadata.custom["version"] == 5
-        assert result[1][0].metadata.custom["version"] == 1
+        assert result[0][0].metadata["version"] == 5
+        assert result[1][0].metadata["version"] == 1
 
     def test_different_entity_groups_independent(self):
         """Version scoring is per-entity-group, not global."""
@@ -144,7 +141,7 @@ class TestApplyVersionScoring:
 
         scores = {}
         for chunk, score in result:
-            key = (chunk.metadata.custom["entity_refs"][0], chunk.metadata.custom["version"])
+            key = (chunk.metadata["entity_refs"][0], chunk.metadata["version"])
             scores[key] = score
 
         # acme v2 is max -> no penalty
@@ -161,7 +158,7 @@ class TestApplyVersionScoring:
         original = [(c_v1, 0.9), (c_v2, 0.8)]
         result = _apply_version_scoring(original, "current status")
 
-        scores = {chunk.metadata.custom["version"]: score for chunk, score in result}
+        scores = {chunk.metadata["version"]: score for chunk, score in result}
         assert scores[2] == pytest.approx(0.8)
         assert scores[1] == pytest.approx(0.9 * (1 / 2) ** 0.5)
 

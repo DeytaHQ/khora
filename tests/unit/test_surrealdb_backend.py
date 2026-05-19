@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from khora.core.models import Document, DocumentMetadata, MemoryNamespace
+from khora.core.models import Document, MemoryNamespace
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.storage.backends.surrealdb import _HAS_SURREALDB
 
@@ -702,13 +702,13 @@ class TestRelationalAdapterDocument:
             id=doc_id,
             namespace_id=ns_id,
             content="test content",
-            metadata=DocumentMetadata(title="Test Doc"),
+            title="Test Doc",
         )
         result = await adapter.create_document(doc)
 
         assert result.id == doc_id
         assert result.content == "test content"
-        assert result.metadata.title == "Test Doc"
+        assert result.title == "Test Doc"
 
     async def test_create_document_raises_on_none(self) -> None:
         from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
@@ -817,7 +817,7 @@ class TestRelationalAdapterDocument:
 
         result = await adapter.get_document_by_checksum(ns_id, "sha256abc")
         assert result is not None
-        assert result.metadata.checksum == "sha256abc"
+        assert result.checksum == "sha256abc"
 
     async def test_get_document_by_checksum_returns_none(self) -> None:
         from khora.storage.backends.surrealdb.relational import SurrealDBRelationalAdapter
@@ -926,7 +926,7 @@ class TestRelationalAdapterDocument:
             id=doc_id,
             namespace_id=ns_id,
             content="test content",
-            metadata=DocumentMetadata(title="Test Doc"),
+            title="Test Doc",
             external_id="ext-123",
         )
         result = await adapter.create_document(doc)
@@ -952,7 +952,7 @@ class TestRelationalAdapterDocument:
             id=doc_id,
             namespace_id=ns_id,
             content="test content",
-            metadata=DocumentMetadata(title="Test Doc"),
+            title="Test Doc",
         )
         result = await adapter.create_document(doc)
 
@@ -1081,10 +1081,10 @@ class TestRelationalRowConversion:
         assert result.namespace_id == ns_id
         assert result.content == "test content"
         assert result.status == DocumentStatus.PENDING
-        assert result.metadata.source == "test-source"
-        assert result.metadata.source_type == "file"
-        assert result.metadata.title == "Test Doc"
-        assert result.metadata.custom == {"key": "value"}
+        assert result.source == "test-source"
+        assert result.source_type == "file"
+        assert result.title == "Test Doc"
+        assert result.metadata == {"key": "value"}
         assert result.external_id is None
 
     def test_row_to_document_with_external_id(self) -> None:
@@ -1408,13 +1408,13 @@ class TestVectorAdapterChunkOps:
         conn = _make_mock_conn()
         adapter = SurrealDBVectorAdapter(conn)
 
-        from khora.core.models import Chunk, ChunkMetadata
+        from khora.core.models import Chunk
 
         chunk = Chunk(
             content="hello world",
             embedding=[0.1] * 10,
             embedding_model="test",
-            metadata=ChunkMetadata(chunk_index=0),
+            chunk_index=0,
         )
         result = await adapter.create_chunk(chunk)
         conn.execute.assert_awaited_once()
@@ -1426,11 +1426,11 @@ class TestVectorAdapterChunkOps:
         conn = _make_mock_conn()
         adapter = SurrealDBVectorAdapter(conn)
 
-        from khora.core.models import Chunk, ChunkMetadata
+        from khora.core.models import Chunk
 
         chunks = [
-            Chunk(content="a", embedding=[0.1], metadata=ChunkMetadata()),
-            Chunk(content="b", embedding=[0.2], metadata=ChunkMetadata()),
+            Chunk(content="a", embedding=[0.1]),
+            Chunk(content="b", embedding=[0.2]),
         ]
         result = await adapter.create_chunks_batch(chunks)
         conn.execute.assert_awaited_once()
@@ -1818,7 +1818,7 @@ class TestVectorRowConversion:
         assert result.document_id == doc_id
         assert result.content == "test chunk content"
         assert result.embedding is not None
-        assert result.metadata.chunk_index == 0
+        assert result.chunk_index == 0
 
     def test_row_to_chunk_no_embedding(self) -> None:
         from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
@@ -1839,7 +1839,7 @@ class TestVectorRowConversion:
         row = _chunk_row()
         row["metadata_"] = "not-a-dict"
         result = adapter._row_to_chunk(row)
-        assert result.metadata.custom == {}
+        assert result.metadata == {}
 
     def test_row_to_entity(self) -> None:
         from khora.storage.backends.surrealdb.vector import SurrealDBVectorAdapter
@@ -1864,13 +1864,16 @@ class TestVectorRowConversion:
         conn = _make_mock_conn()
         adapter = SurrealDBVectorAdapter(conn)
 
-        from khora.core.models import Chunk, ChunkMetadata
+        from khora.core.models import Chunk
 
         chunk = Chunk(
             content="test",
             embedding=[0.1, 0.2],
             embedding_model="model",
-            metadata=ChunkMetadata(chunk_index=3, start_char=10, end_char=20, token_count=5),
+            chunk_index=3,
+            start_char=10,
+            end_char=20,
+            token_count=5,
         )
         bindings = adapter._chunk_to_bindings(chunk)
         assert bindings["content"] == "test"

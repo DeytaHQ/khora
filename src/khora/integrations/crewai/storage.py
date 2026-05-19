@@ -175,7 +175,7 @@ class KhoraStorageBackend:
           khora today. khora has no per-document scope/category columns
           to filter on. The adapter post-filters returned chunks
           against ``crewai_scope`` / ``crewai_categories`` in
-          ``Document.metadata.custom``.
+          ``Document.metadata``.
         * ``metadata_filter`` is similarly post-filtered.
         """
         del query_embedding  # explicitly ignored
@@ -271,7 +271,7 @@ class KhoraStorageBackend:
             if not page:
                 break
             for doc in page:
-                custom = doc.metadata.custom if doc.metadata else {}
+                custom = doc.metadata or {}
                 if scope_prefix is not None:
                     doc_scope = str(custom.get("crewai_scope", "/"))
                     if not doc_scope.startswith(scope_prefix):
@@ -398,7 +398,7 @@ class KhoraStorageBackend:
             if not page:
                 break
             for doc in page:
-                custom = doc.metadata.custom if doc.metadata else {}
+                custom = doc.metadata or {}
                 if scope_prefix is not None:
                     doc_scope = str(custom.get("crewai_scope", "/"))
                     if not doc_scope.startswith(scope_prefix):
@@ -497,7 +497,7 @@ class KhoraStorageBackend:
     # scope / category / count / reset — admin surface CrewAI's encoding
     # flow exercises during ``save``. khora does not natively model
     # "scope" as a first-class entity; the adapter derives scopes from
-    # ``chunk.metadata.custom["crewai_scope"]`` and treats them as
+    # ``chunk.metadata["crewai_scope"]`` and treats them as
     # filesystem-style paths.
     # ------------------------------------------------------------------
 
@@ -515,7 +515,7 @@ class KhoraStorageBackend:
             if not page:
                 break
             for doc in page:
-                custom = doc.metadata.custom if doc.metadata else {}
+                custom = doc.metadata or {}
                 scope = str(custom.get("crewai_scope", "/"))
                 if scope.startswith(parent):
                     seen.add(scope)
@@ -554,7 +554,7 @@ class KhoraStorageBackend:
             if not page:
                 break
             for doc in page:
-                custom = doc.metadata.custom if doc.metadata else {}
+                custom = doc.metadata or {}
                 if scope_prefix is not None:
                     doc_scope = str(custom.get("crewai_scope", "/"))
                     if not doc_scope.startswith(scope_prefix):
@@ -586,7 +586,7 @@ class KhoraStorageBackend:
             if not page:
                 break
             for doc in page:
-                custom = doc.metadata.custom if doc.metadata else {}
+                custom = doc.metadata or {}
                 doc_scope = str(custom.get("crewai_scope", "/"))
                 if doc_scope.startswith(scope_prefix):
                     total += 1

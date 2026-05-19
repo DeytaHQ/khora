@@ -1079,7 +1079,7 @@ class Khora:
             namespace_id = await self._resolve_namespace(namespace)
             # Stamp session_id into the metadata dict so engines that bypass
             # the ingest pipeline (vectorcypher builds Document directly)
-            # can recover it from ``document.metadata.custom["session_id"]``
+            # can recover it from ``document.metadata["session_id"]``
             # without needing a dedicated kwarg on every engine's remember().
             if session_id is not None:
                 metadata = {**(metadata or {}), "session_id": str(session_id)}
@@ -1279,7 +1279,7 @@ class Khora:
         Raises:
             RuntimeError: If the engine does not support staged document processing.
         """
-        from khora.core.models.document import Document, DocumentMetadata
+        from khora.core.models.document import Document
 
         if not documents:
             handle = BatchHandle(batch_id=uuid4(), total=0)
@@ -1411,14 +1411,12 @@ class Khora:
                 if prior_status in (DocumentStatus.FAILED, DocumentStatus.ARCHIVED):
                     pre_failed_doc_ids.add(existing.id)
                 existing.content = content
-                existing.metadata = DocumentMetadata(
-                    title=doc_data.get("title", ""),
-                    source=doc_data.get("source", ""),
-                    source_type="api",
-                    checksum=checksum,
-                    size_bytes=len(content.encode("utf-8")),
-                    custom=doc_data.get("metadata") or {},
-                )
+                existing.title = doc_data.get("title") or None
+                existing.source = doc_data.get("source") or None
+                existing.source_type = "api"
+                existing.checksum = checksum
+                existing.size_bytes = len(content.encode("utf-8"))
+                existing.metadata = doc_data.get("metadata") or {}
                 existing.status = DocumentStatus.PENDING
                 existing.extraction_config_hash = extraction_config_hash
                 existing.extraction_params = extraction_params_payload
@@ -1447,14 +1445,12 @@ class Khora:
             doc = Document(
                 namespace_id=namespace_id,
                 content=content,
-                metadata=DocumentMetadata(
-                    title=doc_data.get("title", ""),
-                    source=doc_data.get("source", ""),
-                    source_type="api",
-                    checksum=checksum,
-                    size_bytes=len(content.encode("utf-8")),
-                    custom=doc_data.get("metadata") or {},
-                ),
+                title=doc_data.get("title") or None,
+                source=doc_data.get("source") or None,
+                source_type="api",
+                checksum=checksum,
+                size_bytes=len(content.encode("utf-8")),
+                metadata=doc_data.get("metadata") or {},
                 extraction_config_hash=extraction_config_hash,
                 extraction_params=extraction_params_payload,
                 external_id=external_id,

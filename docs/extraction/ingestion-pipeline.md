@@ -94,13 +94,11 @@ Finally, we create the document record:
 document = Document(
     namespace_id=namespace_id,
     content=content,
-    metadata=DocumentMetadata(
-        title=title,
-        source=source,
-        checksum=checksum,
-    ),
+    title=title,
+    source=source,
+    checksum=checksum,
     status=DocumentStatus.PENDING,
-    created_at=source_timestamp or now()
+    created_at=source_timestamp or now(),
 )
 
 await storage.create_document(document)

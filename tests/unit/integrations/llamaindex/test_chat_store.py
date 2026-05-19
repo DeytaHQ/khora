@@ -20,7 +20,6 @@ pytest.importorskip("llama_index.core")
 from khora import Khora  # noqa: E402
 from khora.core.models.document import (  # noqa: E402
     Document,
-    DocumentMetadata,
     DocumentStatus,
 )
 
@@ -39,11 +38,9 @@ class _ShadowStore:
             namespace_id=kwargs["namespace"],
             content=content,
             external_id=kwargs.get("external_id"),
-            metadata=DocumentMetadata(
-                title=kwargs.get("title", ""),
-                source=kwargs.get("source", ""),
-                custom=metadata_custom,
-            ),
+            title=kwargs.get("title", ""),
+            source=kwargs.get("source", ""),
+            metadata=metadata_custom,
             status=DocumentStatus.COMPLETED,
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),

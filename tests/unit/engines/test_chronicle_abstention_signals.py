@@ -15,7 +15,7 @@ from uuid import uuid4
 import pytest
 
 from khora.config import KhoraConfig
-from khora.core.models import Chunk, ChunkMetadata, Entity
+from khora.core.models import Chunk, Entity
 from khora.engines.chronicle.engine import ChronicleEngine
 from khora.khora import RecallResult
 
@@ -32,7 +32,6 @@ def _make_chunk() -> Chunk:
         namespace_id=uuid4(),
         document_id=doc_id,
         content="content",
-        metadata=ChunkMetadata(document_id=doc_id),
         created_at=datetime.now(UTC),
     )
 

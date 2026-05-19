@@ -11,15 +11,15 @@ Mapping summary:
 
 * ``MemoryRecord.id``           ↔ khora document ``external_id`` (stable round-trip)
 * ``MemoryRecord.content``      ↔ khora ``Document.content`` / ``Chunk.content``
-* ``MemoryRecord.scope``        ↔ stamped on ``Document.metadata.custom["crewai_scope"]``
+* ``MemoryRecord.scope``        ↔ stamped on ``Document.metadata["crewai_scope"]``
 *                                 + parsed for a trailing UUID-shaped tail
 *                                   that becomes ``Chunk.session_id``
-* ``MemoryRecord.categories``   ↔ ``Document.metadata.custom["crewai_categories"]``
-* ``MemoryRecord.importance``   ↔ ``Document.metadata.custom["crewai_importance"]``
-* ``MemoryRecord.metadata``     ↔ merged into ``Document.metadata.custom``
+* ``MemoryRecord.categories``   ↔ ``Document.metadata["crewai_categories"]``
+* ``MemoryRecord.importance``   ↔ ``Document.metadata["crewai_importance"]``
+* ``MemoryRecord.metadata``     ↔ merged into ``Document.metadata``
 * ``MemoryRecord.created_at``   ↔ best-effort from ``Chunk.created_at``
-* ``MemoryRecord.source``       ↔ ``Document.metadata.custom["crewai_source"]``
-* ``MemoryRecord.private``      ↔ ``Document.metadata.custom["crewai_private"]``
+* ``MemoryRecord.source``       ↔ ``Document.metadata["crewai_source"]``
+* ``MemoryRecord.private``      ↔ ``Document.metadata["crewai_private"]``
 
 The translation is one-way enriched: round-tripping a record through
 ``record_to_remember_kwargs`` then ``chunk_to_record`` preserves the
@@ -39,7 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from khora.core.models.document import Chunk
 
 
-# Sentinel keys we own under ``Document.metadata.custom``. Prefix with
+# Sentinel keys we own under ``Document.metadata``. Prefix with
 # ``crewai_`` so adapter writes don't collide with the user's own
 # metadata, which is merged in alongside.
 _KEY_SCOPE = "crewai_scope"
@@ -172,7 +172,7 @@ def chunk_to_record(
     Returns:
         A populated ``MemoryRecord``.
     """
-    custom = (chunk.metadata.custom if chunk.metadata else {}) or {}
+    custom = chunk.metadata or {}
     # Strip our internal keys so the round-tripped ``metadata`` dict
     # contains only the user's own keys.
     user_metadata = {k: v for k, v in custom.items() if not k.startswith("crewai_")}

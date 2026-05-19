@@ -625,10 +625,10 @@ class AgenticSearchAgent:
         """Get the source system for a chunk."""
         try:
             doc = await self._engine._storage.get_document(chunk.document_id)
-            if doc and doc.metadata:
-                source = doc.metadata.custom.get("source_system", "")
-                if not source and doc.metadata.source:
-                    source = doc.metadata.source.split("/")[0]
+            if doc:
+                source = (doc.metadata or {}).get("source_system", "")
+                if not source and doc.source:
+                    source = doc.source.split("/")[0]
                 return source or "unknown"
         except Exception as e:
             logger.debug(f"Failed to get source system for chunk {chunk.id}: {e}")
@@ -656,10 +656,10 @@ class AgenticSearchAgent:
         sources: dict[str, str] = {}
         for chunk, _ in chunks:
             doc = docs_map.get(chunk.document_id)
-            if doc and doc.metadata:
-                source = doc.metadata.custom.get("source_system", "")
-                if not source and doc.metadata.source:
-                    source = doc.metadata.source.split("/")[0]
+            if doc:
+                source = (doc.metadata or {}).get("source_system", "")
+                if not source and doc.source:
+                    source = doc.source.split("/")[0]
                 sources[str(chunk.id)] = source or "unknown"
             else:
                 sources[str(chunk.id)] = "unknown"

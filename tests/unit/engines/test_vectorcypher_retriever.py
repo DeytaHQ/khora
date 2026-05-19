@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from khora.core.models import Chunk, ChunkMetadata
+from khora.core.models import Chunk
 from khora.engines.vectorcypher.fusion import FusedResult, normalize_scores
 from khora.engines.vectorcypher.retriever import (
     RetrieverConfig,
@@ -379,14 +379,14 @@ class TestRetrieverRecencyScores:
             namespace_id=uuid4(),
             document_id=uuid4(),
             content="old",
-            metadata=ChunkMetadata(custom={"occurred_at": "2020-01-01T00:00:00+00:00"}),
+            metadata={"occurred_at": "2020-01-01T00:00:00+00:00"},
         )
         chunk2 = Chunk(
             id=id2,
             namespace_id=uuid4(),
             document_id=uuid4(),
             content="recent",
-            metadata=ChunkMetadata(custom={"occurred_at": "2026-02-14T00:00:00+00:00"}),
+            metadata={"occurred_at": "2026-02-14T00:00:00+00:00"},
         )
         results = [
             FusedResult(item_id=id1, item=chunk1, rrf_score=0.9),

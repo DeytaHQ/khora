@@ -31,9 +31,7 @@ from sqlalchemy.exc import IntegrityError
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import (
     Chunk,
-    ChunkMetadata,
     Document,
-    DocumentMetadata,
     Entity,
     MemoryNamespace,
     Relationship,
@@ -753,18 +751,15 @@ class VectorCypherEngine:
             )
 
         # Create document
-        doc_metadata = DocumentMetadata(
-            title=title,
-            source=source,
-            source_type="api",
-            checksum=checksum,
-            size_bytes=len(content.encode("utf-8")),
-            custom=metadata or {},
-        )
         document = Document(
             namespace_id=namespace_id,
             content=content,
-            metadata=doc_metadata,
+            title=title or None,
+            source=source or None,
+            source_type="api",
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            metadata=dict(metadata or {}),
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
             session_id=_coerce_session_id_from_metadata(metadata),
@@ -877,7 +872,7 @@ class VectorCypherEngine:
                 return 0, 0, 0
 
             # Extract metadata (computed once, not per window)
-            doc_metadata = document.metadata.custom if document.metadata else {}
+            doc_metadata = document.metadata or {}
 
             # Split into windows when max_chunks_in_flight is set; otherwise one window.
             # Per-call override takes precedence over the engine config.
@@ -1368,19 +1363,17 @@ class VectorCypherEngine:
         # 1. Build the replacement Document row. Reuse existing.id; refresh
         #    content/checksum/metadata/external_id/extraction_config_hash.
         #    Preserve created_at from the existing row.
-        new_metadata = DocumentMetadata(
-            title=title,
-            source=source,
-            source_type="api",
-            checksum=checksum,
-            size_bytes=len(content.encode("utf-8")),
-            custom=metadata or {},
-        )
+        new_doc_metadata = dict(metadata or {})
         new_document = Document(
             id=existing.id,
             namespace_id=namespace_id,
             content=content,
-            metadata=new_metadata,
+            title=title or None,
+            source=source or None,
+            source_type="api",
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            metadata=new_doc_metadata,
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
             created_at=existing.created_at,
@@ -1402,22 +1395,17 @@ class VectorCypherEngine:
         if raw_chunks:
             embed_texts = [c.content for c in raw_chunks]
             embeddings = await embedder.embed_batch(embed_texts)
-            doc_custom = new_metadata.custom
             now = datetime.now(UTC)
             for i, (raw_chunk, embedding) in enumerate(zip(raw_chunks, embeddings)):
-                chunk_meta = ChunkMetadata(
-                    document_id=new_document.id,
-                    chunk_index=i,
-                    start_char=getattr(raw_chunk, "start_char", 0),
-                    end_char=getattr(raw_chunk, "end_char", len(raw_chunk.content)),
-                    custom={**doc_custom, "chunk_index": i},
-                )
                 new_chunks.append(
                     Chunk(
                         namespace_id=namespace_id,
                         document_id=new_document.id,
                         content=raw_chunk.content,
-                        metadata=chunk_meta,
+                        chunk_index=i,
+                        start_char=getattr(raw_chunk, "start_char", 0),
+                        end_char=getattr(raw_chunk, "end_char", len(raw_chunk.content)),
+                        metadata={**new_doc_metadata, "chunk_index": i},
                         embedding=embedding,
                         embedding_model=embedder.model_name,
                         created_at=now,
@@ -1494,7 +1482,7 @@ class VectorCypherEngine:
         #    retired entities to old chunks.
         temporal_store = self._get_temporal_store()
         dual_nodes = self._get_dual_nodes()
-        doc_metadata = new_metadata.custom
+        doc_metadata = new_doc_metadata
 
         new_temporal_chunks: list[TemporalChunk] = []
         for i, c in enumerate(new_chunks):
@@ -1515,8 +1503,8 @@ class VectorCypherEngine:
                     metadata={
                         **doc_metadata,
                         "chunk_index": i,
-                        "start_char": c.metadata.start_char if c.metadata else 0,
-                        "end_char": c.metadata.end_char if c.metadata else len(c.content),
+                        "start_char": c.start_char,
+                        "end_char": c.end_char or len(c.content),
                     },
                 )
             )
@@ -2282,13 +2270,11 @@ class VectorCypherEngine:
                     document = Document(
                         namespace_id=namespace_id,
                         content=doc_data.get("content", ""),
-                        metadata=DocumentMetadata(
-                            title=doc_data.get("title", ""),
-                            source=doc_data.get("source", ""),
-                            checksum=checksum,
-                            source_type="api",
-                            custom=doc_metadata,
-                        ),
+                        title=doc_data.get("title") or None,
+                        source=doc_data.get("source") or None,
+                        checksum=checksum,
+                        source_type="api",
+                        metadata=dict(doc_metadata),
                         extraction_config_hash=extraction_config_hash,
                         external_id=doc_data.get("external_id"),
                         session_id=_coerce_session_id_from_metadata(doc_metadata),
@@ -2400,7 +2386,7 @@ class VectorCypherEngine:
             for si, state in enumerate(window_states):
                 doc = state.document
                 assert doc is not None
-                doc_metadata = doc.metadata.custom if doc.metadata else {}
+                doc_metadata = doc.metadata or {}
                 occurred = state.occurred_at or datetime.now(UTC)
 
                 start_idx = len(all_temporal_chunks)

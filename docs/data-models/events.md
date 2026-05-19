@@ -115,9 +115,9 @@ event = MemoryEvent.document_created(
     namespace_id=ns_id,
     document_id=doc.id,
     data={
-        "title": doc.metadata.title,
-        "source": doc.metadata.source,
-        "checksum": doc.metadata.checksum,
+        "title": doc.title,
+        "source": doc.source,
+        "checksum": doc.checksum,
     },
     actor_id="user:123",
     actor_type="user",

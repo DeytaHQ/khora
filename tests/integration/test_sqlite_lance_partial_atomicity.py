@@ -32,7 +32,7 @@ try:
 except ImportError:
     _HAS_EMBEDDED = False
 
-from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, MemoryNamespace
+from khora.core.models import Chunk, Document, MemoryNamespace
 from tests.integration._sqlite_lance_fixtures import (
     build_sqlite_lance_coordinator,
     fake_embedding,
@@ -58,7 +58,8 @@ async def test_lance_add_failure_leaves_sqlite_consistent(tmp_path: Path, monkey
             namespace_id=ns.id,
             content="partial-atomicity-test",
             external_id="atomicity-1",
-            metadata=DocumentMetadata(source="test", title="atomicity"),
+            source="test",
+            title="atomicity",
         )
         await coord.create_document(doc)
 
@@ -66,7 +67,7 @@ async def test_lance_add_failure_leaves_sqlite_consistent(tmp_path: Path, monkey
             namespace_id=ns.id,
             document_id=doc.id,
             content="partial-atomicity content",
-            metadata=ChunkMetadata(document_id=doc.id, chunk_index=0),
+            chunk_index=0,
             embedding=fake_embedding("partial-atomicity content"),
             embedding_model="fake",
         )

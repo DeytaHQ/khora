@@ -22,9 +22,7 @@ from loguru import logger
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import (
     Chunk,
-    ChunkMetadata,
     Document,
-    DocumentMetadata,
     Entity,
     MemoryNamespace,
 )
@@ -272,18 +270,15 @@ class SkeletonConstructionEngine:
             )
 
         # Create document in relational storage
-        doc_metadata = DocumentMetadata(
-            title=title,
-            source=source,
-            source_type="api",
-            checksum=checksum,
-            size_bytes=len(content.encode("utf-8")),
-            custom=metadata or {},
-        )
         document = Document(
             namespace_id=namespace_id,
             content=content,
-            metadata=doc_metadata,
+            title=title or None,
+            source=source or None,
+            source_type="api",
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            metadata=dict(metadata or {}),
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
         )
@@ -383,7 +378,7 @@ class SkeletonConstructionEngine:
             embed_map[id(chunk)] = embedding
 
         # Extract metadata for filtering (source_system, author, channel, etc.)
-        doc_metadata = document.metadata.custom if document.metadata else {}
+        doc_metadata = document.metadata or {}
 
         # Create temporal chunks (all chunks, with None embedding for skipped)
         temporal_chunks = []
@@ -501,12 +496,10 @@ class SkeletonConstructionEngine:
                 namespace_id=result.chunk.namespace_id,
                 document_id=result.chunk.document_id,
                 content=result.chunk.content,
-                metadata=ChunkMetadata(
-                    custom={
-                        "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
-                        **(result.chunk.metadata or {}),
-                    }
-                ),
+                metadata={
+                    "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
+                    **(result.chunk.metadata or {}),
+                },
                 created_at=result.chunk.created_at or result.chunk.occurred_at,
             )
             chunks_with_scores.append((chunk, result.combined_score or result.similarity))
@@ -788,18 +781,15 @@ class SkeletonConstructionEngine:
                     except ValueError:
                         pass
 
-                doc_meta = DocumentMetadata(
-                    title=doc_data.get("title", ""),
-                    source=doc_data.get("source", ""),
-                    source_type="api",
-                    checksum=checksum,
-                    size_bytes=len(content.encode("utf-8")),
-                    custom=doc_metadata,
-                )
                 document = Document(
                     namespace_id=namespace_id,
                     content=content,
-                    metadata=doc_meta,
+                    title=doc_data.get("title") or None,
+                    source=doc_data.get("source") or None,
+                    source_type="api",
+                    checksum=checksum,
+                    size_bytes=len(content.encode("utf-8")),
+                    metadata=dict(doc_metadata),
                     extraction_config_hash=extraction_config_hash,
                     external_id=doc_data.get("external_id"),
                 )

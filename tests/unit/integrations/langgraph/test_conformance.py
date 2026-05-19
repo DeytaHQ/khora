@@ -26,7 +26,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from khora import Khora
-from khora.core.models.document import Document, DocumentMetadata, DocumentStatus
+from khora.core.models.document import Document, DocumentStatus
 
 
 class _ShadowStore:
@@ -56,11 +56,9 @@ class _ShadowStore:
             namespace_id=self.namespace_id,
             content=content,
             external_id=external_id,
-            metadata=DocumentMetadata(
-                title=kwargs.get("title", ""),
-                source=kwargs.get("source", ""),
-                custom=custom,
-            ),
+            title=kwargs.get("title", ""),
+            source=kwargs.get("source", ""),
+            metadata=custom,
             status=DocumentStatus.COMPLETED,
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),

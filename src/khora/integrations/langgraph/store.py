@@ -6,7 +6,7 @@ contract onto khora's ``Khora.remember`` / ``Khora.recall`` /
 instance and one logical user (``user_id``), and all LangGraph
 namespace tuples map onto the same khora ``namespace_id`` (a UUID5
 derived from ``namespace_root`` + ``user_id``). The tuple itself round-
-trips through ``Document.metadata.custom["lg_namespace"]``.
+trips through ``Document.metadata["lg_namespace"]``.
 
 Scope (per #624): this module ships ``KhoraStore`` only.
 A LangGraph ``Checkpointer`` adapter is intentionally NOT included —
@@ -432,7 +432,7 @@ class KhoraStore:
             recall = await self.kb.recall(query, namespace=self._init.namespace_id, limit=pool)
             seen_keys: set[tuple[tuple[str, ...], str]] = set()
             for chunk, score in recall.chunks:
-                custom = chunk.metadata.custom if chunk.metadata else {}
+                custom = chunk.metadata or {}
                 ns_raw = custom.get("lg_namespace")
                 key = custom.get("lg_key")
                 value = custom.get("lg_value", {})

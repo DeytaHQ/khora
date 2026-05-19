@@ -13,8 +13,22 @@ class Document:
     namespace_id: UUID
     content: str
     external_id: str | None = None  # Caller-supplied source identity
-    metadata: DocumentMetadata
     status: DocumentStatus = DocumentStatus.PENDING
+
+    # Source / provenance (flat fields)
+    title: str | None = None
+    source: str | None = None           # "slack/channel-123", "notion/page-id"
+    source_type: str = "library"
+    source_name: str | None = None
+    source_url: str | None = None
+    content_type: str | None = None
+    author: str | None = None
+    language: str | None = None
+    checksum: str | None = None         # SHA-256 for deduplication
+    size_bytes: int = 0
+
+    # Free-form metadata
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     # Processing stats
     chunk_count: int = 0
@@ -24,29 +38,6 @@ class Document:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     processed_at: datetime | None = None
-```
-
-### Document Metadata
-
-```python
-@dataclass
-class DocumentMetadata:
-    # Source information
-    source: str = ""           # "slack/channel-123", "notion/page-id"
-    source_type: str = "manual"  # manual, api, sync
-    content_type: str = "text/plain"
-
-    # Document info
-    title: str = ""
-    author: str = ""
-    language: str = "en"
-
-    # Integrity
-    checksum: str = ""         # SHA-256 for deduplication
-    size_bytes: int = 0
-
-    # Custom metadata
-    custom: dict[str, Any] = field(default_factory=dict)
 ```
 
 ### Document Status
@@ -73,7 +64,7 @@ document.mark_completed(chunk_count=5, entity_count=10)
 
 # Mark as failed
 document.mark_failed("Error: LLM timeout")
-# status → FAILED, metadata.custom["error"] = "Error: LLM timeout"
+# status → FAILED, error_message = "Error: LLM timeout"
 # updated_at → now
 ```
 
@@ -97,43 +88,45 @@ if existing:
 Chunks are segments of documents optimized for embedding and retrieval.
 
 ```python
-@dataclass
+@dataclass(slots=True)
 class Chunk:
     id: UUID
     document_id: UUID
     namespace_id: UUID
     content: str
 
+    # Position in document (flat)
+    chunk_index: int = 0       # 0-based chunk index
+    start_char: int = 0        # Character offset start
+    end_char: int = 0          # Character offset end
+    token_count: int = 0       # Token count (for chunking decisions)
+
+    # Free-form metadata propagated from the parent document
+    metadata: dict[str, Any] = field(default_factory=dict)
+    # Chunker output (strategy, overlap, etc.) — distinct from metadata
+    chunker_info: dict[str, Any] = field(default_factory=dict)
+
     # Embedding
     embedding: list[float] | None = None
 
-    # Position in document
-    index: int = 0             # 0-based chunk index
-    start_char: int = 0        # Character offset start
-    end_char: int = 0          # Character offset end
-
-    # Size info
-    token_count: int = 0       # Token count (for chunking decisions)
-
-    # Metadata
-    metadata: dict[str, Any] = field(default_factory=dict)
-
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 ```
 
-### Chunk Metadata
+### Chunk Metadata vs chunker_info
 
-Chunks inherit document metadata and add chunk-specific info:
+``Chunk.metadata`` is the propagated document-level free-form dict (callers'
+own keys). ``Chunk.chunker_info`` carries chunker output (strategy, overlap
+settings, etc.) and is kept separate so chunker keys never shadow document
+metadata:
 
 ```python
 chunk.metadata = {
-    # Inherited from document
+    # Propagated from document.metadata
     "source": "slack/channel-123",
     "title": "Team Discussion",
-
-    # Chunk-specific
+}
+chunk.chunker_info = {
     "chunker": "semantic",
     "overlap_tokens": 50,
 }
@@ -167,15 +160,15 @@ This enables accurate temporal queries based on when content was originally crea
 ```
 Document
     │
-    ├── Chunk 0 (index=0, start_char=0, end_char=512)
+    ├── Chunk 0 (chunk_index=0, start_char=0, end_char=512)
     │       │
     │       └── embedding: [0.12, -0.34, ...]
     │
-    ├── Chunk 1 (index=1, start_char=462, end_char=974)  ← overlap
+    ├── Chunk 1 (chunk_index=1, start_char=462, end_char=974)  ← overlap
     │       │
     │       └── embedding: [0.08, -0.22, ...]
     │
-    └── Chunk 2 (index=2, start_char=924, end_char=1250)
+    └── Chunk 2 (chunk_index=2, start_char=924, end_char=1250)
             │
             └── embedding: [0.15, -0.41, ...]
 ```
@@ -225,7 +218,7 @@ print(f"Chunk count: {doc.chunk_count}")
 # Get chunks for a document
 chunks = await kb.storage.get_document_chunks(document_id)
 for chunk in chunks:
-    print(f"Chunk {chunk.index}: {chunk.content[:100]}...")
+    print(f"Chunk {chunk.chunk_index}: {chunk.content[:100]}...")
 ```
 
 ### Batch Document Creation

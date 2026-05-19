@@ -37,9 +37,7 @@ pytestmark = pytest.mark.skipif(not _HAS_ADK, reason="google-adk not installed")
 from khora import Khora  # noqa: E402
 from khora.core.models.document import (  # noqa: E402
     Chunk,
-    ChunkMetadata,
     Document,
-    DocumentMetadata,
     DocumentStatus,
 )
 from khora.integrations.google_adk._mapping import (  # noqa: E402
@@ -96,7 +94,7 @@ def _mk_chunk(
         namespace_id=namespace_id,
         document_id=uuid4(),
         content=content,
-        metadata=ChunkMetadata(document_id=uuid4(), custom=custom),
+        metadata=custom,
         created_at=datetime(2026, 5, 15, tzinfo=UTC),
     )
 
@@ -196,7 +194,6 @@ async def test_add_session_is_idempotent_on_reingest():
         namespace_id=uuid4(),
         content="hello",
         external_id="adk_event:abc",
-        metadata=DocumentMetadata(),
         status=DocumentStatus.COMPLETED,
     )
     kb.storage.get_document_by_external_id = AsyncMock(return_value=existing_doc)

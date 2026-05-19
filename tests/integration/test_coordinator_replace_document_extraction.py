@@ -32,7 +32,7 @@ from uuid import uuid4
 import pytest
 
 from khora.core.models import Chunk, Document, Entity, MemoryNamespace, Relationship
-from khora.core.models.document import ChunkMetadata, DocumentMetadata, DocumentStatus
+from khora.core.models.document import DocumentStatus
 from khora.storage.backends.neo4j import Neo4jBackend
 from khora.storage.backends.pgvector import PgVectorBackend
 from khora.storage.backends.postgresql import PostgreSQLBackend
@@ -47,7 +47,7 @@ def _chunks(namespace_id, document_id, count=2) -> list[Chunk]:
             namespace_id=namespace_id,
             document_id=document_id,
             content=f"chunk-{i}",
-            metadata=ChunkMetadata(document_id=document_id, chunk_index=i),
+            chunk_index=i,
             embedding=[0.1 * (i + 1)] * EMBED_DIM,
             embedding_model="test",
         )
@@ -98,7 +98,7 @@ class TestReplaceDocumentExtractionIntegration:
             namespace_id=namespace_id,
             content="old body",
             external_id=f"replace-happy-{uuid4().hex[:8]}",
-            metadata=DocumentMetadata(source="test"),
+            source="test",
         )
         await coord.create_document(old_doc)
         old_chunks = _chunks(namespace_id, old_doc.id, count=2)
@@ -134,7 +134,7 @@ class TestReplaceDocumentExtractionIntegration:
             namespace_id=namespace_id,
             content="new body",
             external_id=old_doc.external_id,
-            metadata=DocumentMetadata(source="test"),
+            source="test",
         )
         new_doc.mark_processing()
         new_chunks = _chunks(namespace_id, new_doc.id, count=3)
@@ -203,7 +203,7 @@ class TestReplaceDocumentExtractionIntegration:
             namespace_id=namespace_id,
             content="seed",
             external_id=f"replace-heal-{uuid4().hex[:8]}",
-            metadata=DocumentMetadata(source="test"),
+            source="test",
         )
         await coord.create_document(old_doc)
         old_chunks = _chunks(namespace_id, old_doc.id, count=1)
@@ -214,7 +214,7 @@ class TestReplaceDocumentExtractionIntegration:
             namespace_id=namespace_id,
             content="new",
             external_id=old_doc.external_id,
-            metadata=DocumentMetadata(source="test"),
+            source="test",
         )
         new_doc.mark_processing()
         new_chunks = _chunks(namespace_id, new_doc.id, count=2)
@@ -267,7 +267,7 @@ class TestReplaceDocumentExtractionIntegration:
             namespace_id=namespace_id,
             content="heal",
             external_id=new_doc.external_id,
-            metadata=DocumentMetadata(source="test"),
+            source="test",
         )
         new_doc2.mark_processing()
         new_chunks2 = _chunks(namespace_id, new_doc2.id, count=1)

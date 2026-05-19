@@ -54,22 +54,20 @@ Document(
     id=UUID("..."),
     namespace_id=UUID("..."),
     content="Einstein published his theory...",
-    metadata=DocumentMetadata(
-        title="Physics History",
-        source="upload",
-        content_type="text/plain",
-        checksum="sha256:abc123..."
-    ),
+    title="Physics History",
+    source="upload",
+    content_type="text/plain",
+    checksum="sha256:abc123...",
     status=DocumentStatus.COMPLETED,
     chunk_count=5,
     entity_count=12,
-    created_at=datetime(2024, 1, 15, 10, 30)
+    created_at=datetime(2024, 1, 15, 10, 30),
 )
 ```
 
 **Key fields:**
 - `content` - The actual text
-- `metadata.checksum` - SHA-256 hash for deduplication
+- `checksum` - SHA-256 hash for deduplication
 - `status` - Where it is in processing (PENDING → PROCESSING → COMPLETED or FAILED)
 - `chunk_count`, `entity_count` - Summary stats after processing
 
@@ -284,14 +282,14 @@ Namespace
 ### Creating and Storing
 
 ```python
-from khora.core.models import Document, DocumentMetadata, DocumentStatus
+from khora.core.models import Document, DocumentStatus
 
 doc = Document(
     id=uuid4(),
     namespace_id=namespace_id,
     content="Your content here",
-    metadata=DocumentMetadata(title="My Doc"),
-    status=DocumentStatus.PENDING
+    title="My Doc",
+    status=DocumentStatus.PENDING,
 )
 
 await storage.create_document(doc)

@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, Entity, Relationship
+from khora.core.models import Chunk, Document, Entity, Relationship
 from khora.khora import BatchResult, Khora, RecallResult, RememberResult
 
 # ---------------------------------------------------------------------------
@@ -66,7 +66,7 @@ def _make_chunk(
         namespace_id=NAMESPACE_ID,
         document_id=doc_id,
         content=content,
-        metadata=ChunkMetadata(document_id=doc_id, chunk_index=chunk_index),
+        chunk_index=chunk_index,
         embedding=embedding or [0.1] * 8,
     )
 
@@ -138,7 +138,7 @@ class IncrementalStorageState:
         self.chunks.extend(chunks)
 
         for doc in documents:
-            self._checksums[doc.metadata.checksum] = doc
+            self._checksums[doc.checksum] = doc
 
         # Merge entities by name (simulates MERGE behavior)
         for new_entity in entities:
@@ -251,11 +251,9 @@ class TestIncrementalIngestion:
                 id=doc_ids[i],
                 namespace_id=NAMESPACE_ID,
                 content=d["content"],
-                metadata=DocumentMetadata(
-                    title=d["title"],
-                    source=d["source"],
-                    checksum=f"checksum_batch1_{i}",
-                ),
+                title=d["title"],
+                source=d["source"],
+                checksum=f"checksum_batch1_{i}",
             )
             for i, d in enumerate(BATCH_1_DOCS)
         ]
@@ -285,11 +283,9 @@ class TestIncrementalIngestion:
                 id=doc_ids[i],
                 namespace_id=NAMESPACE_ID,
                 content=d["content"],
-                metadata=DocumentMetadata(
-                    title=d["title"],
-                    source=d["source"],
-                    checksum=f"checksum_batch2_{i}",
-                ),
+                title=d["title"],
+                source=d["source"],
+                checksum=f"checksum_batch2_{i}",
             )
             for i, d in enumerate(BATCH_2_DOCS)
         ]
@@ -671,11 +667,9 @@ class TestIncrementalIngestion:
                 id=doc_ids[i],
                 namespace_id=NAMESPACE_ID,
                 content=d["content"],
-                metadata=DocumentMetadata(
-                    title=d["title"],
-                    source=d["source"],
-                    checksum=f"checksum_batch3_{i}",
-                ),
+                title=d["title"],
+                source=d["source"],
+                checksum=f"checksum_batch3_{i}",
             )
             for i, d in enumerate(batch3_docs)
         ]

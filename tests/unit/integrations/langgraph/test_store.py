@@ -21,9 +21,7 @@ import pytest
 
 from khora import Khora
 from khora.core.models.document import (
-    ChunkMetadata,
     Document,
-    DocumentMetadata,
     DocumentStatus,
 )
 
@@ -60,16 +58,14 @@ def _mk_document(
         namespace_id=namespace_id,
         content=str(lg_value.get("text", "stub")),
         external_id=external_id,
-        metadata=DocumentMetadata(
-            title=lg_key,
-            source="langgraph:test",
-            custom={
-                "lg_namespace": list(lg_namespace),
-                "lg_namespace_flat": "/".join(lg_namespace),
-                "lg_key": lg_key,
-                "lg_value": lg_value,
-            },
-        ),
+        title=lg_key,
+        source="langgraph:test",
+        metadata={
+            "lg_namespace": list(lg_namespace),
+            "lg_namespace_flat": "/".join(lg_namespace),
+            "lg_key": lg_key,
+            "lg_value": lg_value,
+        },
         status=DocumentStatus.COMPLETED,
         created_at=datetime(2026, 5, 15, tzinfo=UTC),
         updated_at=datetime(2026, 5, 15, tzinfo=UTC),
@@ -311,7 +307,7 @@ async def test_aget_returns_none_on_foreign_document():
     foreign = Document(
         namespace_id=store.namespace_id,
         content="hi",
-        metadata=DocumentMetadata(custom={"other": "system"}),
+        metadata={"other": "system"},
     )
     kb.storage.get_document_by_external_id.return_value = foreign
     assert await store.aget(("ns",), "k1") is None
@@ -336,25 +332,21 @@ async def test_asearch_with_query_maps_chunks_to_search_items():
     c1 = Chunk(
         namespace_id=store.namespace_id,
         content="alpha",
-        metadata=ChunkMetadata(
-            custom={
-                "lg_namespace": ["memories", "facts"],
-                "lg_key": "k1",
-                "lg_value": {"text": "alpha"},
-            }
-        ),
+        metadata={
+            "lg_namespace": ["memories", "facts"],
+            "lg_key": "k1",
+            "lg_value": {"text": "alpha"},
+        },
         created_at=datetime(2026, 5, 15, tzinfo=UTC),
     )
     c2 = Chunk(
         namespace_id=store.namespace_id,
         content="beta",
-        metadata=ChunkMetadata(
-            custom={
-                "lg_namespace": ["memories", "other"],
-                "lg_key": "k2",
-                "lg_value": {"text": "beta"},
-            }
-        ),
+        metadata={
+            "lg_namespace": ["memories", "other"],
+            "lg_key": "k2",
+            "lg_value": {"text": "beta"},
+        },
         created_at=datetime(2026, 5, 15, tzinfo=UTC),
     )
     recall_result = MagicMock()

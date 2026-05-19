@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models.document import Chunk, ChunkMetadata
+from khora.core.models.document import Chunk
 from khora.core.models.entity import Entity, Relationship
 from khora.khora import RecallResult
 from khora.query.engine import format_entity_section, format_relationship_section
@@ -30,7 +30,6 @@ class TestGetContextTextIncludesEntities:
             namespace_id=ns_id,
             document_id=uuid4(),
             content="First paragraph.",
-            metadata=ChunkMetadata(),
         )
         entity = Entity(
             id=uuid4(),
@@ -179,7 +178,6 @@ class TestContextTextEntityRegressions:
             namespace_id=ns_id,
             document_id=uuid4(),
             content="First paragraph.",
-            metadata=ChunkMetadata(),
         )
         entity = Entity(
             id=uuid4(),
@@ -308,7 +306,6 @@ class TestRelationshipFormatting:
             namespace_id=ns_id,
             document_id=uuid4(),
             content="Alice founded Acme Corp.",
-            metadata=ChunkMetadata(),
         )
         entity_alice = Entity(
             id=alice_id,
@@ -379,7 +376,6 @@ class TestRelationshipFormatting:
             namespace_id=ns_id,
             document_id=uuid4(),
             content="Some content.",
-            metadata=ChunkMetadata(),
         )
 
         # Construct without passing relationships — should default to []

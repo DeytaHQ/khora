@@ -35,7 +35,7 @@ from uuid import UUID
 from loguru import logger
 
 from khora.config import KhoraConfig, LiteLLMConfig
-from khora.core.models import Chunk, Document, DocumentMetadata, Entity, MemoryNamespace
+from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.engines._storage_config import build_storage_config
 from khora.engines.chronicle.compression import (
     FactExtractor,
@@ -276,7 +276,7 @@ def _apply_version_scoring(
       - At least one chunk carries ``version`` metadata
 
     Chunks are grouped by entity (first ``entity_refs`` entry, falling back
-    to document title stored in ``chunk.metadata.custom``).  Within each
+    to document title stored in ``chunk.metadata``).  Within each
     group the maximum version is identified, and older versions receive a
     soft penalty::
 
@@ -296,7 +296,7 @@ def _apply_version_scoring(
     has_any_version = False
     chunk_meta: list[tuple[str, int | None]] = []  # (group_key, version)
     for chunk, _score in chunks_with_scores:
-        custom = chunk.metadata.custom if chunk.metadata else {}
+        custom = chunk.metadata or {}
         version = custom.get("version")
         if version is not None:
             has_any_version = True
@@ -1079,18 +1079,15 @@ class ChronicleEngine:
 
         # Create document record
         start = time.perf_counter()
-        doc_metadata = DocumentMetadata(
-            title=title,
-            source=source,
-            source_type="api",
-            checksum=checksum,
-            size_bytes=len(content.encode("utf-8")),
-            custom=metadata or {},
-        )
         document = Document(
             namespace_id=namespace_id,
             content=content,
-            metadata=doc_metadata,
+            title=title or None,
+            source=source or None,
+            source_type="api",
+            checksum=checksum,
+            size_bytes=len(content.encode("utf-8")),
+            metadata=dict(metadata or {}),
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
             session_id=_coerce_session_id_from_metadata(metadata),
@@ -2081,7 +2078,7 @@ class ChronicleEngine:
         seen_chunk_ids: set[UUID] = set()
         for chunk, _ in chunks_with_scores:
             seen_chunk_ids.add(chunk.id)
-            custom = chunk.metadata.custom if chunk.metadata else {}
+            custom = chunk.metadata or {}
             sid = custom.get("session_id") or custom.get("thread_id")
             if sid:
                 seen_sessions.add(str(sid))

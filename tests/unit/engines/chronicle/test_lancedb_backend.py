@@ -22,7 +22,7 @@ except ImportError:
 
 from khora.config import KhoraConfig
 from khora.config.schema import LLMSettings, SQLiteLanceConfig, StorageSettings
-from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata
+from khora.core.models import Chunk, Document
 from tests.integration._sqlite_lance_fixtures import EMBED_DIM, fake_embedding
 
 pytestmark = [
@@ -52,14 +52,15 @@ async def _seed(coord, namespace_id, items: list[tuple[str, str]]) -> list[Chunk
         doc = Document(
             namespace_id=namespace_id,
             content=content,
-            metadata=DocumentMetadata(title=title, source="test"),
+            title=title,
+            source="test",
         )
         await coord.create_document(doc)
         chunk = Chunk(
             namespace_id=namespace_id,
             document_id=doc.id,
             content=content,
-            metadata=ChunkMetadata(document_id=doc.id, chunk_index=0),
+            chunk_index=0,
             embedding=fake_embedding(content),
             embedding_model="fake",
         )
@@ -168,12 +169,14 @@ class TestChronicleLanceDBBackend:
             old_doc = Document(
                 namespace_id=ns.id,
                 content="old chunk content about neural networks",
-                metadata=DocumentMetadata(title="old", source="test"),
+                title="old",
+                source="test",
             )
             new_doc = Document(
                 namespace_id=ns.id,
                 content="new chunk content about neural networks",
-                metadata=DocumentMetadata(title="new", source="test"),
+                title="new",
+                source="test",
             )
             for d in (old_doc, new_doc):
                 await engine._get_storage().create_document(d)
@@ -182,7 +185,7 @@ class TestChronicleLanceDBBackend:
                 namespace_id=ns.id,
                 document_id=old_doc.id,
                 content="old chunk content about neural networks",
-                metadata=ChunkMetadata(document_id=old_doc.id, chunk_index=0),
+                chunk_index=0,
                 embedding=fake_embedding("old chunk content about neural networks"),
                 embedding_model="fake",
                 created_at=old_cutoff,
@@ -191,7 +194,7 @@ class TestChronicleLanceDBBackend:
                 namespace_id=ns.id,
                 document_id=new_doc.id,
                 content="new chunk content about neural networks",
-                metadata=ChunkMetadata(document_id=new_doc.id, chunk_index=0),
+                chunk_index=0,
                 embedding=fake_embedding("new chunk content about neural networks"),
                 embedding_model="fake",
                 created_at=now,
@@ -246,7 +249,8 @@ class TestChronicleLanceDBBackend:
             doc = Document(
                 namespace_id=ns.id,
                 content="alice and bob",
-                metadata=DocumentMetadata(title="people", source="test"),
+                title="people",
+                source="test",
             )
             await engine._get_storage().create_document(doc)
 

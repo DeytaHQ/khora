@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 
 from loguru import logger
 
-from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, MemoryNamespace
+from khora.core.models import Chunk, Document, MemoryNamespace
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.core.models.entity import Entity
 from khora.core.models.tenancy import TenancyMode
@@ -53,10 +53,12 @@ CREATE TABLE IF NOT EXISTS documents (
     status TEXT DEFAULT 'pending',
     source TEXT DEFAULT '',
     source_type TEXT DEFAULT '',
+    source_name TEXT DEFAULT '',
+    source_url TEXT DEFAULT '',
     content_type TEXT DEFAULT '',
     title TEXT DEFAULT '',
     author TEXT DEFAULT '',
-    language TEXT DEFAULT 'en',
+    language TEXT,
     checksum TEXT DEFAULT '',
     size_bytes INTEGER DEFAULT 0,
     metadata_ TEXT DEFAULT '{}',
@@ -88,6 +90,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     end_char INTEGER DEFAULT 0,
     token_count INTEGER DEFAULT 0,
     metadata_ TEXT DEFAULT '{}',
+    chunker_info TEXT DEFAULT '{}',
     embedding TEXT,
     embedding_model TEXT DEFAULT '',
     created_at TEXT NOT NULL,
@@ -373,25 +376,27 @@ class SQLiteRelationalBackend:
         status = document.status.value if isinstance(document.status, DocumentStatus) else document.status
         await self._conn.execute(
             "INSERT INTO documents "
-            "(id, namespace_id, content, status, source, source_type, content_type, "
+            "(id, namespace_id, content, status, source, source_type, source_name, source_url, content_type, "
             "title, author, language, checksum, size_bytes, metadata_, "
             "chunk_count, entity_count, relationship_count, error_message, extraction_config_hash, "
             "extraction_params, created_at, updated_at, processed_at, source_timestamp, external_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(document.id),
                 str(document.namespace_id),
                 document.content,
                 status,
-                document.metadata.source,
-                document.metadata.source_type,
-                document.metadata.content_type,
-                document.metadata.title,
-                document.metadata.author,
-                document.metadata.language,
-                document.metadata.checksum,
-                document.metadata.size_bytes,
-                _json_dumps(document.metadata.custom),
+                document.source,
+                document.source_type,
+                document.source_name,
+                document.source_url,
+                document.content_type,
+                document.title,
+                document.author,
+                document.language,
+                document.checksum,
+                document.size_bytes,
+                _json_dumps(document.metadata),
                 document.chunk_count,
                 document.entity_count,
                 document.relationship_count,
@@ -447,7 +452,7 @@ class SQLiteRelationalBackend:
         status = document.status.value if isinstance(document.status, DocumentStatus) else document.status
         await self._conn.execute(
             "UPDATE documents SET "
-            "content = ?, status = ?, source = ?, source_type = ?, content_type = ?, "
+            "content = ?, status = ?, source = ?, source_type = ?, source_name = ?, source_url = ?, content_type = ?, "
             "title = ?, author = ?, language = ?, checksum = ?, size_bytes = ?, "
             "metadata_ = ?, chunk_count = ?, entity_count = ?, relationship_count = ?, error_message = ?, "
             "extraction_config_hash = ?, extraction_params = ?, external_id = ?, updated_at = ?, processed_at = ?, source_timestamp = ? "
@@ -455,15 +460,17 @@ class SQLiteRelationalBackend:
             (
                 document.content,
                 status,
-                document.metadata.source,
-                document.metadata.source_type,
-                document.metadata.content_type,
-                document.metadata.title,
-                document.metadata.author,
-                document.metadata.language,
-                document.metadata.checksum,
-                document.metadata.size_bytes,
-                _json_dumps(document.metadata.custom),
+                document.source,
+                document.source_type,
+                document.source_name,
+                document.source_url,
+                document.content_type,
+                document.title,
+                document.author,
+                document.language,
+                document.checksum,
+                document.size_bytes,
+                _json_dumps(document.metadata),
                 document.chunk_count,
                 document.entity_count,
                 document.relationship_count,
@@ -648,23 +655,32 @@ class SQLiteRelationalBackend:
 
     @staticmethod
     def _row_to_document(row: Any) -> Document:
+        def _none_if_empty(v: str | None) -> str | None:
+            return v if v else None
+
+        def _row_get(key: str) -> Any:
+            try:
+                return row[key]
+            except (KeyError, IndexError):
+                return None
+
         status_raw = row["status"] or "pending"
         return Document(
             id=UUID(row["id"]),
             namespace_id=UUID(row["namespace_id"]),
             content=row["content"] or "",
             status=DocumentStatus(status_raw),
-            metadata=DocumentMetadata(
-                source=row["source"] or "",
-                source_type=row["source_type"] or "",
-                content_type=row["content_type"] or "",
-                title=row["title"] or "",
-                author=row["author"] or "",
-                language=row["language"] or "en",
-                checksum=row["checksum"] or "",
-                size_bytes=row["size_bytes"] or 0,
-                custom=_json_loads(row["metadata_"]),
-            ),
+            title=_none_if_empty(row["title"]),
+            source=_none_if_empty(row["source"]),
+            source_type=row["source_type"] or "library",
+            source_name=_none_if_empty(_row_get("source_name")),
+            source_url=_none_if_empty(_row_get("source_url")),
+            content_type=_none_if_empty(row["content_type"]),
+            author=_none_if_empty(row["author"]),
+            language=_none_if_empty(row["language"]),
+            checksum=_none_if_empty(row["checksum"]),
+            size_bytes=row["size_bytes"] or 0,
+            metadata=_json_loads(row["metadata_"]),
             chunk_count=row["chunk_count"] or 0,
             entity_count=row["entity_count"] or 0,
             relationship_count=row["relationship_count"] or 0,
@@ -757,19 +773,20 @@ class SQLiteVectorBackend:
         await self._conn.execute(
             "INSERT INTO chunks "
             "(id, namespace_id, document_id, content, chunk_index, start_char, "
-            "end_char, token_count, metadata_, embedding, embedding_model, "
+            "end_char, token_count, metadata_, chunker_info, embedding, embedding_model, "
             "created_at, source_timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(chunk.id),
                 str(chunk.namespace_id),
                 str(chunk.document_id),
                 chunk.content,
-                chunk.metadata.chunk_index,
-                chunk.metadata.start_char,
-                chunk.metadata.end_char,
-                chunk.metadata.token_count,
-                _json_dumps(chunk.metadata.custom),
+                chunk.chunk_index,
+                chunk.start_char,
+                chunk.end_char,
+                chunk.token_count,
+                _json_dumps(chunk.metadata),
+                _json_dumps(chunk.chunker_info),
                 embedding_json,
                 chunk.embedding_model,
                 _dt_to_str(chunk.created_at) or now,
@@ -794,11 +811,12 @@ class SQLiteVectorBackend:
                     str(c.namespace_id),
                     str(c.document_id),
                     c.content,
-                    c.metadata.chunk_index,
-                    c.metadata.start_char,
-                    c.metadata.end_char,
-                    c.metadata.token_count,
-                    _json_dumps(c.metadata.custom),
+                    c.chunk_index,
+                    c.start_char,
+                    c.end_char,
+                    c.token_count,
+                    _json_dumps(c.metadata),
+                    _json_dumps(c.chunker_info),
                     embedding_json,
                     c.embedding_model,
                     _dt_to_str(c.created_at) or now,
@@ -808,9 +826,9 @@ class SQLiteVectorBackend:
         await self._conn.executemany(
             "INSERT INTO chunks "
             "(id, namespace_id, document_id, content, chunk_index, start_char, "
-            "end_char, token_count, metadata_, embedding, embedding_model, "
+            "end_char, token_count, metadata_, chunker_info, embedding, embedding_model, "
             "created_at, source_timestamp) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         for c in chunks:
@@ -1147,19 +1165,23 @@ class SQLiteVectorBackend:
         if raw_embedding:
             embedding = json.loads(raw_embedding)
 
+        def _row_get(key: str) -> Any:
+            try:
+                return row[key]
+            except (KeyError, IndexError):
+                return None
+
         return Chunk(
             id=UUID(row["id"]),
             namespace_id=UUID(row["namespace_id"]),
             document_id=UUID(row["document_id"]),
             content=row["content"] or "",
-            metadata=ChunkMetadata(
-                document_id=UUID(row["document_id"]),
-                chunk_index=row["chunk_index"] or 0,
-                start_char=row["start_char"] or 0,
-                end_char=row["end_char"] or 0,
-                token_count=row["token_count"] or 0,
-                custom=_json_loads(row["metadata_"]),
-            ),
+            chunk_index=row["chunk_index"] or 0,
+            start_char=row["start_char"] or 0,
+            end_char=row["end_char"] or 0,
+            token_count=row["token_count"] or 0,
+            metadata=_json_loads(row["metadata_"]),
+            chunker_info=_json_loads(_row_get("chunker_info")),
             embedding=embedding,
             embedding_model=row["embedding_model"] or "",
             created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),

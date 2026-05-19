@@ -32,7 +32,7 @@ from uuid import UUID
 import pyarrow as pa
 from loguru import logger
 
-from khora.core.models import Chunk, ChunkMetadata, Entity
+from khora.core.models import Chunk, Entity
 from khora.exceptions import EmbeddingError
 from khora.storage.backends._fts5 import escape_fts5_query
 
@@ -182,11 +182,12 @@ class SQLiteLanceVectorAdapter:
                     uuid_to_text(c.namespace_id),
                     uuid_to_text(c.document_id),
                     c.content,
-                    c.metadata.chunk_index,
-                    c.metadata.start_char,
-                    c.metadata.end_char,
-                    c.metadata.token_count,
-                    to_json_text(c.metadata.custom or {}),
+                    c.chunk_index,
+                    c.start_char,
+                    c.end_char,
+                    c.token_count,
+                    to_json_text(c.metadata or {}),
+                    to_json_text(c.chunker_info or {}),
                     c.embedding_model,
                     _dt_to_str(c.created_at) or now,
                     _dt_to_str(c.source_timestamp),
@@ -215,9 +216,9 @@ class SQLiteLanceVectorAdapter:
         await self._sqlite.executemany(
             "INSERT INTO chunks "
             "(id, namespace_id, document_id, content, chunk_index, start_char, "
-            "end_char, token_count, metadata, embedding_model, "
+            "end_char, token_count, metadata, chunker_info, embedding_model, "
             "created_at, source_timestamp, session_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             sqlite_rows,
         )
         await self._sqlite.commit()
@@ -793,19 +794,24 @@ class SQLiteLanceVectorAdapter:
         # Embeddings live in LanceDB — not in the SQLite ``chunks`` table.
         # Callers that need the vector should fetch it from LanceDB; the
         # search paths return it indirectly via similarity results.
+        def _row_get(key: str) -> Any:
+            try:
+                return row[key]
+            except (KeyError, IndexError):
+                return None
+
+        chunker_info_raw = _row_get("chunker_info")
         return Chunk(
             id=UUID(row["id"]),
             namespace_id=UUID(row["namespace_id"]),
             document_id=UUID(row["document_id"]),
             content=row["content"] or "",
-            metadata=ChunkMetadata(
-                document_id=UUID(row["document_id"]),
-                chunk_index=row["chunk_index"] or 0,
-                start_char=row["start_char"] or 0,
-                end_char=row["end_char"] or 0,
-                token_count=row["token_count"] or 0,
-                custom=from_json_text(row["metadata"]) if row["metadata"] else {},
-            ),
+            chunk_index=row["chunk_index"] or 0,
+            start_char=row["start_char"] or 0,
+            end_char=row["end_char"] or 0,
+            token_count=row["token_count"] or 0,
+            metadata=from_json_text(row["metadata"]) if row["metadata"] else {},
+            chunker_info=from_json_text(chunker_info_raw) if chunker_info_raw else {},
             embedding=None,
             embedding_model=row["embedding_model"] or "",
             created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),

@@ -665,7 +665,7 @@ class QuerySettings(BaseSettings):
         default=False,
         description=(
             "When True, _calculate_recency_scores looks up decay_days per "
-            "chunk via chunk.metadata.custom['source_system'] in "
+            "chunk via chunk.metadata['source_system'] in "
             "temporal_default_decay_by_source. Falls back to the category's "
             "decay_days_override when no per-source entry exists."
         ),

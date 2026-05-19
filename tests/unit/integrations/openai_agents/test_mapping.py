@@ -29,10 +29,10 @@ from khora.integrations.openai_agents._mapping import (
 
 def _make_chunk(custom: dict[str, Any]) -> Any:
     """Return a minimal khora Chunk carrying ``custom`` metadata."""
-    from khora.core.models.document import Chunk, ChunkMetadata
+    from khora.core.models.document import Chunk
 
-    md = ChunkMetadata(document_id=uuid4(), custom=dict(custom))
-    return Chunk(content=custom.get("oai_item_text", ""), document_id=md.document_id, metadata=md)
+    doc_id = uuid4()
+    return Chunk(content=custom.get("oai_item_text", ""), document_id=doc_id, metadata=dict(custom))
 
 
 # ---------------------------------------------------------------------------

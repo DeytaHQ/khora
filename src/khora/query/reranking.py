@@ -179,15 +179,11 @@ class CrossEncoderReranker(Reranker):
             # Prepare pairs for cross-encoder
             pairs = []
             for c in candidates:
-                doc_title = ""
-                custom = getattr(c.metadata, "custom", None) if hasattr(c.metadata, "custom") else None
-                if custom is None and isinstance(c.metadata, dict):
-                    custom = c.metadata.get("custom")
-                if isinstance(custom, dict):
-                    doc_title = custom.get("title", "")
+                meta = c.metadata if isinstance(c.metadata, dict) else {}
+                doc_title = meta.get("title", "") or ""
                 content_with_meta = f"[{doc_title}] {c.content}" if doc_title else c.content
                 if self._include_date_prefix:
-                    date_prefix = _date_prefix_for(c.metadata, custom)
+                    date_prefix = _date_prefix_for(c.metadata, meta)
                     if date_prefix:
                         content_with_meta = f"[{date_prefix}] {content_with_meta}"
                 pairs.append((query, content_with_meta))
@@ -356,12 +352,8 @@ class LLMReranker(Reranker):
             """Score a batch of candidates in a single LLM call."""
             passage_lines = []
             for i, c in enumerate(batch):
-                doc_title = ""
-                custom = getattr(c.metadata, "custom", None) if hasattr(c.metadata, "custom") else None
-                if custom is None and isinstance(c.metadata, dict):
-                    custom = c.metadata.get("custom")
-                if isinstance(custom, dict):
-                    doc_title = custom.get("title", "")
+                meta = c.metadata if isinstance(c.metadata, dict) else {}
+                doc_title = meta.get("title", "") or ""
                 prefix = f"[{doc_title}] " if doc_title else ""
                 passage_lines.append(f"[{i + 1}] {prefix}{c.content[:500]}")
             passages = "\n".join(passage_lines)

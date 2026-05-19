@@ -44,7 +44,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.types import Uuid
 
-from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
+from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.db.models import DocumentModel, MemoryNamespaceModel, SyncCheckpointModel
 from khora.engines.chronicle.compression import MemoryFact
@@ -357,15 +357,17 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             namespace_id=document.namespace_id,
             content=document.content,
             status=document.status,
-            source=document.metadata.source,
-            source_type=document.metadata.source_type,
-            content_type=document.metadata.content_type,
-            title=document.metadata.title,
-            author=document.metadata.author,
-            language=document.metadata.language,
-            checksum=document.metadata.checksum,
-            size_bytes=document.metadata.size_bytes,
-            metadata_=document.metadata.custom,
+            source=document.source,
+            source_type=document.source_type,
+            source_name=document.source_name,
+            source_url=document.source_url,
+            content_type=document.content_type,
+            title=document.title,
+            author=document.author,
+            language=document.language,
+            checksum=document.checksum,
+            size_bytes=document.size_bytes,
+            metadata_=document.metadata,
             chunk_count=document.chunk_count,
             entity_count=document.entity_count,
             relationship_count=document.relationship_count,
@@ -376,6 +378,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             created_at=document.created_at,
             updated_at=document.updated_at,
             processed_at=document.processed_at,
+            source_timestamp=document.source_timestamp,
             session_id=document.session_id,
         )
         session.add(model)
@@ -426,15 +429,17 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             .values(
                 content=document.content,
                 status=document.status,
-                source=document.metadata.source,
-                source_type=document.metadata.source_type,
-                content_type=document.metadata.content_type,
-                title=document.metadata.title,
-                author=document.metadata.author,
-                language=document.metadata.language,
-                checksum=document.metadata.checksum,
-                size_bytes=document.metadata.size_bytes,
-                metadata_=document.metadata.custom,
+                source=document.source,
+                source_type=document.source_type,
+                source_name=document.source_name,
+                source_url=document.source_url,
+                content_type=document.content_type,
+                title=document.title,
+                author=document.author,
+                language=document.language,
+                checksum=document.checksum,
+                size_bytes=document.size_bytes,
+                metadata_=document.metadata,
                 chunk_count=document.chunk_count,
                 entity_count=document.entity_count,
                 relationship_count=document.relationship_count,
@@ -444,6 +449,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
                 external_id=document.external_id,
                 updated_at=datetime.now(UTC),
                 processed_at=document.processed_at,
+                source_timestamp=document.source_timestamp,
                 session_id=document.session_id,
             )
         )
@@ -592,25 +598,25 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             }
 
     def _document_model_to_domain(self, model: DocumentModel) -> Document:
+        def _none_if_empty(v: str | None) -> str | None:
+            return v if v else None
+
         return Document(
             id=model.id,
             namespace_id=model.namespace_id,
             content=model.content,
             status=DocumentStatus(model.status) if isinstance(model.status, str) else model.status,
-            metadata=DocumentMetadata(
-                # See postgresql.py — migration 037 makes these columns nullable;
-                # coerce to "" so DocumentMetadata's str contract holds. DTO widening
-                # lands in a follow-up.
-                source=model.source or "",
-                source_type=model.source_type,
-                content_type=model.content_type or "",
-                title=model.title or "",
-                author=model.author or "",
-                language=model.language or "",
-                checksum=model.checksum or "",
-                size_bytes=model.size_bytes,
-                custom=model.metadata_ or {},
-            ),
+            title=_none_if_empty(model.title),
+            source=_none_if_empty(model.source),
+            source_type=model.source_type or "library",
+            source_name=_none_if_empty(getattr(model, "source_name", None)),
+            source_url=_none_if_empty(getattr(model, "source_url", None)),
+            content_type=_none_if_empty(model.content_type),
+            author=_none_if_empty(model.author),
+            language=_none_if_empty(model.language),
+            checksum=_none_if_empty(model.checksum),
+            size_bytes=model.size_bytes,
+            metadata=dict(model.metadata_) if model.metadata_ else {},
             chunk_count=model.chunk_count,
             entity_count=model.entity_count,
             relationship_count=model.relationship_count,
@@ -621,6 +627,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             created_at=model.created_at,
             updated_at=model.updated_at,
             processed_at=model.processed_at,
+            source_timestamp=getattr(model, "source_timestamp", None),
             session_id=getattr(model, "session_id", None),
         )
 

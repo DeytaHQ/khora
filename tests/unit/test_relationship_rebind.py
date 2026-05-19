@@ -45,14 +45,13 @@ def _make_document_mock(doc_id: UUID, ns_id: UUID, content: str = "doc content")
 
 
 def _make_chunk(ns_id: UUID, doc_id: UUID, content: str = "chunk content"):
-    from khora.core.models import Chunk, ChunkMetadata
+    from khora.core.models import Chunk
 
     return Chunk(
         id=uuid4(),
         namespace_id=ns_id,
         document_id=doc_id,
         content=content,
-        metadata=ChunkMetadata(),
         embedding=[0.1] * 1536,
         created_at=datetime.now(UTC),
     )

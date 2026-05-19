@@ -23,22 +23,6 @@ class DocumentStatus(str, Enum):
     ARCHIVED = "archived"  # Archived, not actively used
 
 
-@dataclass(slots=True)
-class DocumentMetadata:
-    """Metadata associated with a document."""
-
-    source: str = ""  # Source identifier (URL, file path, etc.)
-    source_type: str = ""  # Type of source (file, url, api, etc.)
-    source_tool: str = ""  # Canonical SaaS tool identifier (see core.models.source.SourceTool)
-    content_type: str = ""  # MIME type or content classification
-    title: str = ""
-    author: str = ""
-    language: str = "en"
-    checksum: str = ""  # For change detection
-    size_bytes: int = 0
-    custom: dict[str, Any] = field(default_factory=dict)
-
-
 @dataclass(slots=True, frozen=True)
 class DocumentSource:
     """Lightweight document metadata projection for source attribution.
@@ -69,8 +53,20 @@ class Document:
     namespace_id: UUID = field(default_factory=uuid4)
     content: str = ""
     external_id: str | None = None
-    metadata: DocumentMetadata = field(default_factory=DocumentMetadata)
     status: DocumentStatus = DocumentStatus.PENDING
+
+    # Source/provenance fields (flat).
+    title: str | None = None
+    source: str | None = None
+    source_type: str = "library"
+    source_name: str | None = None
+    source_url: str | None = None
+    content_type: str | None = None
+    author: str | None = None
+    language: str | None = None
+    checksum: str | None = None
+    size_bytes: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     # Processing info
     chunk_count: int = 0
@@ -145,18 +141,6 @@ class Document:
 
 
 @dataclass(slots=True)
-class ChunkMetadata:
-    """Metadata associated with a chunk."""
-
-    document_id: UUID = field(default_factory=uuid4)
-    chunk_index: int = 0  # Position in document
-    start_char: int = 0  # Start character offset
-    end_char: int = 0  # End character offset
-    token_count: int = 0
-    custom: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
 class Chunk:
     """A chunk of text from a document with its embedding.
 
@@ -168,7 +152,13 @@ class Chunk:
     namespace_id: UUID = field(default_factory=uuid4)
     document_id: UUID = field(default_factory=uuid4)
     content: str = ""
-    metadata: ChunkMetadata = field(default_factory=ChunkMetadata)
+
+    chunk_index: int = 0
+    start_char: int = 0
+    end_char: int = 0
+    token_count: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+    chunker_info: dict[str, Any] = field(default_factory=dict)
 
     # Embedding vector (stored in pgvector)
     embedding: list[float] | None = None

@@ -30,7 +30,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from khora.core.models.document import Chunk, ChunkMetadata
+from khora.core.models.document import Chunk
 from khora.core.models.entity import Entity
 from khora.query.engine import (
     HybridQueryEngine,
@@ -59,11 +59,10 @@ def _make_chunk(
     embedding: list[float] | None = None,
     custom: dict | None = None,
 ) -> Chunk:
-    meta = ChunkMetadata(custom=custom or {})
     return Chunk(
         id=uuid4(),
         content=content,
-        metadata=meta,
+        metadata=custom or {},
         embedding=embedding,
         created_at=created_at or datetime.now(UTC),
         source_timestamp=source_timestamp,
@@ -1189,13 +1188,6 @@ class TestExtractChunkTitle:
         chunk = MagicMock(spec=[])
         assert QueryResult._extract_chunk_title(chunk) == ""
 
-    def test_title_from_attribute(self) -> None:
-        from khora.query.engine import QueryResult
-
-        chunk = MagicMock()
-        chunk.metadata.title = "My Doc"
-        assert QueryResult._extract_chunk_title(chunk) == "My Doc"
-
     def test_title_from_dict(self) -> None:
         from khora.query.engine import QueryResult
 
@@ -1203,11 +1195,10 @@ class TestExtractChunkTitle:
         chunk.metadata = {"title": "From Dict"}
         assert QueryResult._extract_chunk_title(chunk) == "From Dict"
 
-    def test_title_from_custom_dict(self) -> None:
+    def test_title_from_real_chunk_metadata_dict(self) -> None:
         from khora.query.engine import QueryResult
 
         chunk = _make_chunk(custom={"title": "Custom Title"})
-        # ChunkMetadata.title attribute does not exist; falls back to custom dict
         assert QueryResult._extract_chunk_title(chunk) == "Custom Title"
 
     def test_no_title_anywhere(self) -> None:

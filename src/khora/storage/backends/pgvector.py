@@ -16,7 +16,7 @@ from sqlalchemy import delete, func, literal_column, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
-from khora.core.models import Chunk, ChunkMetadata
+from khora.core.models import Chunk
 from khora.db.models import (
     Base,
     ChronicleEventModel,
@@ -321,11 +321,12 @@ class PgVectorBackend(AsyncSessionMixin):
             namespace_id=chunk.namespace_id,
             document_id=chunk.document_id,
             content=chunk.content,
-            chunk_index=chunk.metadata.chunk_index,
-            start_char=chunk.metadata.start_char,
-            end_char=chunk.metadata.end_char,
-            token_count=chunk.metadata.token_count,
-            metadata_=chunk.metadata.custom,
+            chunk_index=chunk.chunk_index,
+            start_char=chunk.start_char,
+            end_char=chunk.end_char,
+            token_count=chunk.token_count,
+            metadata_=chunk.metadata,
+            chunker_info=chunk.chunker_info,
             embedding=chunk.embedding,
             embedding_model=chunk.embedding_model,
             created_at=chunk.created_at,
@@ -359,11 +360,12 @@ class PgVectorBackend(AsyncSessionMixin):
                 namespace_id=chunk.namespace_id,
                 document_id=chunk.document_id,
                 content=chunk.content,
-                chunk_index=chunk.metadata.chunk_index,
-                start_char=chunk.metadata.start_char,
-                end_char=chunk.metadata.end_char,
-                token_count=chunk.metadata.token_count,
-                metadata_=chunk.metadata.custom,
+                chunk_index=chunk.chunk_index,
+                start_char=chunk.start_char,
+                end_char=chunk.end_char,
+                token_count=chunk.token_count,
+                metadata_=chunk.metadata,
+                chunker_info=chunk.chunker_info,
                 embedding=chunk.embedding,
                 embedding_model=chunk.embedding_model,
                 created_at=chunk.created_at,
@@ -665,14 +667,12 @@ class PgVectorBackend(AsyncSessionMixin):
             namespace_id=model.namespace_id,
             document_id=model.document_id,
             content=model.content,
-            metadata=ChunkMetadata(
-                document_id=model.document_id,
-                chunk_index=model.chunk_index,
-                start_char=model.start_char,
-                end_char=model.end_char,
-                token_count=model.token_count,
-                custom=model.metadata_,
-            ),
+            chunk_index=model.chunk_index,
+            start_char=model.start_char,
+            end_char=model.end_char,
+            token_count=model.token_count,
+            metadata=dict(model.metadata_) if model.metadata_ else {},
+            chunker_info=dict(model.chunker_info) if model.chunker_info else {},
             embedding=(
                 np.asarray(model.embedding, dtype=np.float32)
                 if (_HAS_NUMPY and model.embedding is not None)

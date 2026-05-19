@@ -107,7 +107,7 @@ Canonical machine-readable contract: `__all__` in `src/khora/extraction/skills/b
 ### What's NOT pinned
 
 - Anything not listed in either `__all__`.
-- Internal models exported from `khora.core.models` — `Document`, `DocumentMetadata`, `Chunk`, `ChunkMetadata`, `Entity`, `Episode`, `Relationship`, `MemoryEvent`. Their shapes are dictated by storage schemas and may evolve; consumers that persist these objects should copy them into their own types.
+- Internal models exported from `khora.core.models` — `Document`, `Chunk`, `Entity`, `Episode`, `Relationship`, `MemoryEvent`. Their shapes are dictated by storage schemas and may evolve; consumers that persist these objects should copy them into their own types.
 - The `khora.chat` module aside from `ChatResponse`. The rest (`ChatEngine`, `ChatMessage`, `ConversationHistory`, `HistoryManager`, `PersonaConfig`, `load_persona_config`, `PromptGenerator`) is evolving; breaking changes are announced in CHANGELOG `### Deprecated` one minor release before removal.
 - The `khora.storage.StorageCoordinator` surface exposed via the `Khora.storage` property. The property exists; its API is not pinned.
 - Anything whose name starts with an underscore.

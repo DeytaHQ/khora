@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models import Document, DocumentMetadata, MemoryNamespace, TenancyMode
+from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentStatus
 from khora.db.models import DocumentModel, MemoryNamespaceModel
 from khora.storage.backends.postgresql import PostgreSQLBackend
@@ -96,7 +96,10 @@ def _domain_document(namespace_id: Any) -> Document:
         id=uuid4(),
         namespace_id=namespace_id,
         content="hello",
-        metadata=DocumentMetadata(source="t.txt", source_type="file", checksum="ck", size_bytes=5),
+        source="t.txt",
+        source_type="file",
+        checksum="ck",
+        size_bytes=5,
     )
 
 

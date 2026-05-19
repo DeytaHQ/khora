@@ -27,7 +27,7 @@ try:
 except ImportError:
     _HAS_EMBEDDED = False
 
-from khora.core.models import Chunk, ChunkMetadata, Document, DocumentMetadata, MemoryNamespace
+from khora.core.models import Chunk, Document, MemoryNamespace
 from khora.storage.backends.sqlite_lance.vector import _ANN_INDEX_THRESHOLD
 from tests.integration._sqlite_lance_fixtures import build_sqlite_lance_coordinator
 
@@ -69,7 +69,8 @@ async def test_ivfpq_index_trains_at_5000_threshold(tmp_path: Path) -> None:
             namespace_id=ns.id,
             content="ivfpq-threshold",
             external_id="ivfpq-test",
-            metadata=DocumentMetadata(source="test", title="ivfpq"),
+            source="test",
+            title="ivfpq",
         )
         await coord.create_document(doc)
 
@@ -82,7 +83,7 @@ async def test_ivfpq_index_trains_at_5000_threshold(tmp_path: Path) -> None:
                     namespace_id=ns.id,
                     document_id=doc.id,
                     content=f"chunk-{i}",
-                    metadata=ChunkMetadata(document_id=doc.id, chunk_index=i),
+                    chunk_index=i,
                     embedding=_synthetic_embedding(i),
                     embedding_model="synthetic",
                 )

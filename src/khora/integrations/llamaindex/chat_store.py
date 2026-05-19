@@ -154,7 +154,7 @@ def KhoraChatStore(  # noqa: N802 — class-shaped factory
             )
             matched: list[Any] = []
             for document in documents:
-                custom = document.metadata.custom if document.metadata else {}
+                custom = document.metadata or {}
                 if not custom:
                     continue
                 if custom.get(_KEY_SOURCE) != "chat_store":
@@ -162,13 +162,13 @@ def KhoraChatStore(  # noqa: N802 — class-shaped factory
                 if custom.get(_KEY_CHAT_KEY) != key:
                     continue
                 matched.append(document)
-            matched.sort(key=lambda d: int(d.metadata.custom.get(_KEY_CHAT_INDEX, 0)))
+            matched.sort(key=lambda d: int((d.metadata or {}).get(_KEY_CHAT_INDEX, 0)))
             return matched
 
         def _document_to_message(self, document: Any) -> ChatMessage:
             """Project a stored khora ``Document`` back to a ``ChatMessage``."""
             ChatMessage = _import_chat_message()  # noqa: N806
-            custom = document.metadata.custom if document.metadata else {}
+            custom = document.metadata or {}
             role = custom.get(_KEY_CHAT_ROLE, "user")
             additional = dict(custom.get(_KEY_CHAT_ADDITIONAL) or {})
             return ChatMessage(
@@ -193,7 +193,7 @@ def KhoraChatStore(  # noqa: N802 — class-shaped factory
         async def _aadd_message(self, key: str, message: ChatMessage) -> None:
             existing = await self._list_for_key(key)
             next_index = (
-                int(existing[-1].metadata.custom.get(_KEY_CHAT_INDEX, len(existing) - 1)) + 1 if existing else 0
+                int((existing[-1].metadata or {}).get(_KEY_CHAT_INDEX, len(existing) - 1)) + 1 if existing else 0
             )
             await self._remember_message(key, next_index, message)
 
@@ -231,7 +231,7 @@ def KhoraChatStore(  # noqa: N802 — class-shaped factory
             )
             keys: set[str] = set()
             for document in documents:
-                custom = document.metadata.custom if document.metadata else {}
+                custom = document.metadata or {}
                 if custom.get(_KEY_SOURCE) != "chat_store":
                     continue
                 key = custom.get(_KEY_CHAT_KEY)

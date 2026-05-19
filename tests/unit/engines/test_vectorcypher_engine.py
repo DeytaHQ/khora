@@ -333,8 +333,7 @@ class TestVectorCypherEngineRemember:
         created_doc.id = doc_id
         created_doc.namespace_id = namespace_id
         created_doc.content = "test content"
-        created_doc.metadata = MagicMock()
-        created_doc.metadata.custom = {}
+        created_doc.metadata = {}
         connected_engine._storage.create_document = AsyncMock(return_value=created_doc)
 
         with patch.object(connected_engine, "_process_document", new_callable=AsyncMock, return_value=(3, 5, 2)):
@@ -368,8 +367,7 @@ class TestVectorCypherEngineRemember:
         created_doc.id = doc_id
         created_doc.namespace_id = namespace_id
         created_doc.content = "test content"
-        created_doc.metadata = MagicMock()
-        created_doc.metadata.custom = {}
+        created_doc.metadata = {}
         connected_engine._storage.create_document = AsyncMock(return_value=created_doc)
 
         with patch.object(connected_engine, "_process_document", new_callable=AsyncMock, return_value=(3, 5, 2)):
@@ -397,8 +395,7 @@ class TestVectorCypherEngineRemember:
         created_doc.id = doc_id
         created_doc.namespace_id = namespace_id
         created_doc.content = "test content"
-        created_doc.metadata = MagicMock()
-        created_doc.metadata.custom = {}
+        created_doc.metadata = {}
         connected_engine._storage.create_document = AsyncMock(return_value=created_doc)
 
         with patch.object(connected_engine, "_process_document", new_callable=AsyncMock, return_value=(3, 5, 2)):
@@ -2010,8 +2007,7 @@ class TestProcessDocumentWindowing:
         doc.id = uuid4()
         doc.namespace_id = uuid4()
         doc.content = "test content"
-        doc.metadata = MagicMock()
-        doc.metadata.custom = {}
+        doc.metadata = {}
 
         # Mock chunker to return our raw chunks
         mock_chunker = MagicMock()
@@ -2054,8 +2050,7 @@ class TestProcessDocumentWindowing:
         doc.id = uuid4()
         doc.namespace_id = uuid4()
         doc.content = "test"
-        doc.metadata = MagicMock()
-        doc.metadata.custom = {}
+        doc.metadata = {}
 
         mock_chunker = MagicMock()
         mock_chunker.chunk.return_value = raw_chunks
@@ -2089,8 +2084,7 @@ class TestProcessDocumentWindowing:
         doc.id = uuid4()
         doc.namespace_id = uuid4()
         doc.content = "test"
-        doc.metadata = MagicMock()
-        doc.metadata.custom = {}
+        doc.metadata = {}
 
         mock_chunker = MagicMock()
         mock_chunker.chunk.return_value = raw_chunks
@@ -2127,8 +2121,7 @@ class TestProcessDocumentWindowing:
         doc.id = uuid4()
         doc.namespace_id = uuid4()
         doc.content = "test"
-        doc.metadata = MagicMock()
-        doc.metadata.custom = {}
+        doc.metadata = {}
 
         mock_chunker = MagicMock()
         mock_chunker.chunk.return_value = raw_chunks
