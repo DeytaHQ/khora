@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from uuid import UUID
 
 from loguru import logger
 
 if TYPE_CHECKING:
     from khora.config.llm import LiteLLMConfig
     from khora.core.models import Chunk, Entity
+    from khora.storage.coordinator import StorageCoordinator
 
 T = TypeVar("T")
 
@@ -30,6 +33,45 @@ class RerankCandidate(Generic[T]):
     content: str  # Text content for reranking
     metadata: dict[str, Any] = field(default_factory=dict)
     doc_title: str = ""
+
+
+async def hydrate_doc_titles(
+    candidates: list[RerankCandidate[Any]],
+    storage: StorageCoordinator | None,
+    document_id_of: Callable[[Any], UUID | None],
+) -> None:
+    """Fill ``doc_title`` on each candidate from one batch source-fetch.
+
+    Mutates ``candidates`` in place; safe to call when ``storage`` is ``None``
+    or the document-id extractor yields ``None`` for every item.
+    """
+    if storage is None or not candidates:
+        return
+    doc_ids: list[UUID] = []
+    seen: set[UUID] = set()
+    per_candidate: list[UUID | None] = []
+    for c in candidates:
+        try:
+            doc_id = document_id_of(c.item)
+        except Exception:
+            doc_id = None
+        per_candidate.append(doc_id)
+        if doc_id is not None and doc_id not in seen:
+            seen.add(doc_id)
+            doc_ids.append(doc_id)
+    if not doc_ids:
+        return
+    try:
+        sources = await storage.get_document_sources_batch(doc_ids)
+    except Exception as exc:
+        logger.debug(f"doc_title hydration skipped: {exc}")
+        return
+    for c, doc_id in zip(candidates, per_candidate):
+        if doc_id is None or c.doc_title:
+            continue
+        source = sources.get(doc_id)
+        if source is not None and source.title:
+            c.doc_title = source.title
 
 
 @dataclass
