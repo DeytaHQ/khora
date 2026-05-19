@@ -140,7 +140,7 @@ def KhoraMemoryBlock(  # noqa: N802 — factory matches class-like usage
                 namespace=self._namespace_id,
                 limit=self._top_k,
             )
-            return _format_recall(result)
+            return _format_recall(result, max_chunks=self._top_k)
 
         async def _aput(  # type: ignore[override]
             self,
@@ -232,16 +232,15 @@ def _pick_query(messages: list[ChatMessage] | None) -> str:
     return ""
 
 
-def _format_recall(result: Any) -> str:
+def _format_recall(result: Any, *, max_chunks: int) -> str:
     """Render a ``RecallResult`` as a bounded text block.
 
-    Delegates to the public ``khora.context_text`` helper (with its
-    default ``max_chunks=5`` — matches the legacy
-    ``RecallResult.context_text`` field's effective limit) and wraps the
-    output in a ``<khora_memory>`` envelope so a downstream prompt
-    template can spot it.
+    Delegates to the public ``khora.context_text`` helper and wraps its
+    output in a ``<khora_memory>`` envelope. ``max_chunks`` is passed
+    through so the rendered context respects the caller's
+    ``similarity_top_k`` instead of the helper's smaller default.
     """
-    context = context_text(result).strip()
+    context = context_text(result, max_chunks=max_chunks).strip()
     if not context:
         return ""
     return f"{_RECALL_HEADER}\n{context}\n{_RECALL_FOOTER}"
