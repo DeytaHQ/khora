@@ -92,7 +92,7 @@ async def test_ivfpq_index_trains_at_5000_threshold(tmp_path: Path) -> None:
             await coord.create_chunks_batch(batch)
 
         # Pre-search: index has never been trained (no search has run yet).
-        assert coord.vector._chunks_at_last_index is None  # type: ignore[union-attr]
+        assert coord._vector._chunks_at_last_index is None  # type: ignore[union-attr]
 
         # First search after crossing the threshold trains IVF-PQ inline.
         query = _synthetic_embedding(42)
@@ -101,7 +101,7 @@ async def test_ivfpq_index_trains_at_5000_threshold(tmp_path: Path) -> None:
 
         # Index must have been built — the inline train-on-first-need path
         # records the row count at training time.
-        trained_at = coord.vector._chunks_at_last_index  # type: ignore[union-attr]
+        trained_at = coord._vector._chunks_at_last_index  # type: ignore[union-attr]
         assert trained_at is not None, (
             f"crossed the {_ANN_INDEX_THRESHOLD}-row IVF-PQ threshold ({total} chunks "
             f"inserted) but the index didn't train on first search"

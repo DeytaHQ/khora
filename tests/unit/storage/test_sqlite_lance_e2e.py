@@ -79,20 +79,20 @@ async def test_factory_builds_all_four_adapters(tmp_path: Path) -> None:
     )
     coord = StorageFactory(config=cfg).create_coordinator()
 
-    assert isinstance(coord.relational, SQLiteLanceRelationalAdapter)
-    assert isinstance(coord.graph, SQLiteLanceGraphAdapter)
-    assert isinstance(coord.vector, SQLiteLanceVectorAdapter)
-    assert isinstance(coord.event_store, SQLiteLanceEventStoreAdapter)
+    assert isinstance(coord._relational, SQLiteLanceRelationalAdapter)
+    assert isinstance(coord._graph, SQLiteLanceGraphAdapter)
+    assert isinstance(coord._vector, SQLiteLanceVectorAdapter)
+    assert isinstance(coord._event_store, SQLiteLanceEventStoreAdapter)
 
     # Two engines (SQLite + LanceDB), so unified-backend flag must stay False;
     # the coordinator still dual-writes entities to graph and vector.
     assert coord._is_unified_backend is False
 
     # All four adapters must share the same EmbeddedStorageHandle instance.
-    handle = coord.graph._handle  # type: ignore[attr-defined]
-    assert coord.vector._handle is handle  # type: ignore[attr-defined]
-    assert coord.event_store._handle is handle  # type: ignore[attr-defined]
-    assert coord.relational._handle is handle  # type: ignore[attr-defined]
+    handle = coord._graph._handle  # type: ignore[attr-defined]
+    assert coord._vector._handle is handle  # type: ignore[attr-defined]
+    assert coord._event_store._handle is handle  # type: ignore[attr-defined]
+    assert coord._relational._handle is handle  # type: ignore[attr-defined]
 
 
 async def test_factory_raises_when_config_missing(tmp_path: Path) -> None:
@@ -121,8 +121,8 @@ async def test_coordinator_relational_session_runs_migrated_schema(
     ``_session_factory`` off the relational backend) has a working
     session to hand out.
     """
-    assert coordinator.relational is not None
-    session_factory = coordinator.relational._session_factory  # type: ignore[attr-defined]
+    assert coordinator._relational is not None
+    session_factory = coordinator._relational._session_factory  # type: ignore[attr-defined]
     assert session_factory is not None
 
     async with session_factory() as session:
