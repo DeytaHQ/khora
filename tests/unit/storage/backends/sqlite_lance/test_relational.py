@@ -294,6 +294,68 @@ async def test_get_document_sources_batch(adapter, namespace):
     assert src.source == "file:///tmp/a.txt"
 
 
+async def test_get_document_projections_batch_full_field_roundtrip(adapter, namespace):
+    """Every projection column round-trips through the wider SELECT."""
+    from khora.core.models import DocumentProjection
+
+    doc = Document(
+        namespace_id=namespace.id,
+        content="hello",
+        title="Doc Title",
+        external_id="ext-42",
+        source="file:///tmp/x.md",
+        source_name="Source Name",
+        source_url="https://example.com/x",
+        source_type="file",
+        content_type="text/markdown",
+        checksum="proj-roundtrip",
+        size_bytes=5,
+        metadata={"k1": "v1", "k2": 2},
+    )
+    await adapter.create_document(doc)
+
+    projections = await adapter.get_document_projections_batch([doc.id])
+
+    assert doc.id in projections
+    proj = projections[doc.id]
+    assert isinstance(proj, DocumentProjection)
+    assert proj.id == doc.id
+    assert proj.title == "Doc Title"
+    assert proj.external_id == "ext-42"
+    assert proj.source == "file:///tmp/x.md"
+    assert proj.source_name == "Source Name"
+    assert proj.source_url == "https://example.com/x"
+    assert proj.source_type == "file"
+    assert proj.content_type == "text/markdown"
+    assert proj.metadata == {"k1": "v1", "k2": 2}
+    assert proj.created_at is not None
+
+
+async def test_get_document_projections_batch_null_source_type_defaults_to_library(adapter, namespace):
+    """``source_type`` defaults to ``"library"`` when the column is NULL/empty."""
+    from khora.core.models import DocumentProjection
+
+    doc = Document(
+        namespace_id=namespace.id,
+        content="x",
+        title="No source_type",
+        checksum="proj-null-st",
+        source_type="",  # falsy — should coerce to "library" on the projection
+    )
+    await adapter.create_document(doc)
+
+    projections = await adapter.get_document_projections_batch([doc.id])
+
+    proj = projections[doc.id]
+    assert isinstance(proj, DocumentProjection)
+    assert proj.source_type == "library"
+
+
+async def test_get_document_projections_batch_empty_input(adapter):
+    """Empty input short-circuits to ``{}`` without a SQL round-trip."""
+    assert await adapter.get_document_projections_batch([]) == {}
+
+
 async def test_empty_batch_is_noop(adapter):
     assert await adapter.get_documents_batch([]) == {}
     assert await adapter.get_documents_by_checksums(uuid4(), []) == {}

@@ -51,8 +51,16 @@ class RecallChunk:
     own dedicated column. The chunker self-identification contract
     requires at minimum ``{"chunker": "<name>"}``.
 
-    ``occurred_at`` and ``connected_entity_ids`` are engine-populated
-    typed fields.
+    ``occurred_at`` is engine-populated.
+
+    ``connected_entity_ids`` is the set of entities the recall pipeline
+    linked to this chunk, derived by inverting
+    ``RecallEntity.source_chunk_ids`` after the engine returns. Empty
+    list semantics: **unknown**, not "no edges" — engines that return no
+    entities (skeleton, chronicle without entity hits, graph-less
+    stacks) leave this empty even when the underlying graph backend
+    might know edges to entities that simply weren't returned in this
+    result.
     """
 
     id: UUID

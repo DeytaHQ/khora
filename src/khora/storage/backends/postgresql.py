@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentSource, DocumentStatus
+from khora.core.models.recall import DocumentProjection
 from khora.db.models import (
     Base,
     DocumentModel,
@@ -626,6 +627,50 @@ class PostgreSQLBackend(AsyncSessionMixin):
                     source_type=row.source_type,
                     created_at=row.created_at,
                     source_timestamp=row.source_timestamp,
+                )
+                for row in rows
+            }
+
+    async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
+        """Fetch full DocumentProjection rows for recall responses.
+
+        Wider SELECT than ``get_document_sources_batch`` — also pulls
+        ``external_id``, ``source_name``, ``source_url``, ``content_type``,
+        and ``metadata``.
+        """
+        if not document_ids:
+            return {}
+
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(
+                    DocumentModel.id,
+                    DocumentModel.created_at,
+                    DocumentModel.source_type,
+                    DocumentModel.title,
+                    DocumentModel.external_id,
+                    DocumentModel.source,
+                    DocumentModel.source_name,
+                    DocumentModel.source_url,
+                    DocumentModel.content_type,
+                    DocumentModel.source_timestamp,
+                    DocumentModel.metadata_,
+                ).where(DocumentModel.id.in_(document_ids))
+            )
+            rows = result.all()
+            return {
+                row.id: DocumentProjection(
+                    id=row.id,
+                    created_at=row.created_at,
+                    source_type=row.source_type or "library",
+                    title=row.title,
+                    external_id=row.external_id,
+                    source=row.source,
+                    source_name=row.source_name,
+                    source_url=row.source_url,
+                    content_type=row.content_type,
+                    source_timestamp=row.source_timestamp,
+                    metadata=dict(row.metadata_ or {}),
                 )
                 for row in rows
             }

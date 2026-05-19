@@ -24,6 +24,16 @@ from khora.config import KhoraConfig, load_config
 from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
+from khora.telemetry.metrics import metric_counter
+
+# Module-level counter — a dangling ref means an engine emitted a chunk /
+# entity / relationship pointing at a document_id that the relational store
+# could not resolve (deleted, namespace mismatch, or replication lag). No
+# namespace_id label by cardinality contract (see CLAUDE.md).
+_RECALL_DANGLING_REF_COUNTER = metric_counter(
+    "khora.recall.dangling_ref",
+    description="Dangling document references in recall results, by referrer kind.",
+)
 
 
 def _coerce_session_id_from_dict(metadata: dict[str, Any] | None) -> UUID | None:
@@ -1576,7 +1586,6 @@ class Khora:
         min_similarity: float = 0.0,
         agentic: bool = False,
         raw: bool = False,
-        include_sources: bool = False,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
     ) -> RecallResult:
@@ -1609,8 +1618,6 @@ class Khora:
             min_similarity: Minimum similarity threshold
             agentic: If True, use multi-step agentic search (default: False)
             raw: If True, skip all LLM features (default: False)
-            include_sources: If True, populate source document metadata on
-                returned chunks and entities (default: False)
             start_time: Optional lower bound (inclusive) for memory time.
                 Timezone-aware datetimes are recommended; naive datetimes are
                 assumed UTC. When provided, bypasses NLP temporal detection.
@@ -1695,12 +1702,10 @@ class Khora:
                     raw=raw,
                     temporal_filter=temporal_filter,
                 )
-                # Source attribution lives on engine-produced
-                # ``RecallResult.documents``; ``_populate_sources`` is no
-                # longer reachable from the recall path (projections are
-                # frozen and lack the mutation targets it expected).
-                # ``include_sources`` is still accepted for API stability.
-                del include_sources
+                # Engines return DocumentProjection stubs (id + bare
+                # essentials). Batch-fetch full source metadata, derive
+                # per-chunk entity linkage, and emit a new RecallResult.
+                result = await self._upgrade_recall_documents(result, namespace_id)
 
                 # Emit RECALL_RESULTS_READY after engine returns, before packaging.
                 try:
@@ -2140,6 +2145,143 @@ class Khora:
         for rel, _score in relationships:
             rel_sources = {did: sources[did] for did in rel.source_document_ids if did in sources}
             rel.source_documents = rel_sources if rel_sources else None
+
+    async def _upgrade_recall_documents(self, result: RecallResult, namespace_id: UUID) -> RecallResult:
+        """Batch-fetch document sources and return an upgraded RecallResult.
+
+        Engines return ``RecallResult`` with ``DocumentProjection`` stubs
+        that carry an ``id`` plus whatever fields the engine already had
+        in hand (typically just ``created_at`` and ``source_type``). This
+        helper unions every document id referenced by chunks, entities,
+        or relationships, performs a single batched lookup via
+        ``storage.get_document_projections_batch``, and produces a fresh
+        ``RecallResult`` with:
+
+        - ``documents``: replaced with full ``DocumentProjection`` rows
+          where the relational store returned a row; stubs that the
+          relational store can't resolve are preserved (and counted as
+          dangling refs).
+        - ``chunks``: ``connected_entity_ids`` populated by inverting
+          ``RecallEntity.source_chunk_ids`` (the canonical chunk → entity
+          linkage produced upstream by extraction).
+
+        ``RecallResult`` is frozen, so the return value is a new instance
+        via ``dataclasses.replace`` — never an in-place mutation.
+        """
+        # Collect every document id referenced anywhere in the result.
+        doc_ids: set[UUID] = set()
+        for chunk in result.chunks:
+            doc_ids.add(chunk.document_id)
+        for entity in result.entities:
+            doc_ids.update(entity.source_document_ids)
+        for rel in result.relationships:
+            doc_ids.update(rel.source_document_ids)
+
+        if not doc_ids:
+            return result
+
+        sorted_ids = sorted(doc_ids)
+        projections: dict[UUID, DocumentProjection] = {}
+        upgrade_failed_reason: str | None = None
+        with trace_span(
+            "khora.recall.document_upgrade",
+            namespace_id=str(namespace_id),
+            doc_count=len(sorted_ids),
+        ):
+            try:
+                for i in range(0, len(sorted_ids), 1000):
+                    batch = sorted_ids[i : i + 1000]
+                    projections.update(await self.storage.get_document_projections_batch(batch))
+            except Exception as exc:
+                # Fail open: the engine call already succeeded; degrading the
+                # document-upgrade pass to "stubs only" is strictly better than
+                # crashing the recall. Surface the reason in engine_info so
+                # consumers can detect the degraded state.
+                upgrade_failed_reason = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "recall document upgrade failed; returning engine stubs (reason={}) ns={}",
+                    upgrade_failed_reason,
+                    namespace_id,
+                )
+                projections = {}
+
+        # Preserve the engine-emitted document list order: replace stubs
+        # whose id resolved against the relational store, leave the rest
+        # untouched.
+        seen_ids: set[UUID] = set()
+        upgraded_documents: list[DocumentProjection] = []
+        for stub in result.documents:
+            seen_ids.add(stub.id)
+            upgraded_documents.append(projections.get(stub.id, stub))
+
+        # Producer invariant: every referenced doc id must appear in
+        # ``documents``. Engines mostly emit a stub for every id they
+        # touch, but if any slip through, materialise an entry here —
+        # using the storage row when available, otherwise a minimal
+        # stub — rather than corrupting the invariant.
+        for did in sorted(doc_ids - seen_ids):
+            proj = projections.get(did)
+            if proj is not None:
+                upgraded_documents.append(proj)
+                continue
+            upgraded_documents.append(DocumentProjection(id=did, created_at=datetime.now(UTC), source_type="library"))
+
+        # Dangling refs: ids referenced by some chunk / entity / rel that
+        # the relational store could not resolve. Counted by referrer
+        # kind for triage; ``namespace_id`` stays on the span / log.
+        unresolved = doc_ids - set(projections.keys())
+        if unresolved:
+            chunk_dangling = sum(1 for c in result.chunks if c.document_id in unresolved)
+            entity_dangling = sum(1 for e in result.entities for did in e.source_document_ids if did in unresolved)
+            rel_dangling = sum(1 for r in result.relationships for did in r.source_document_ids if did in unresolved)
+            if chunk_dangling:
+                _RECALL_DANGLING_REF_COUNTER.add(chunk_dangling, attributes={"referrer": "chunk"})
+            if entity_dangling:
+                _RECALL_DANGLING_REF_COUNTER.add(entity_dangling, attributes={"referrer": "entity"})
+            if rel_dangling:
+                _RECALL_DANGLING_REF_COUNTER.add(rel_dangling, attributes={"referrer": "relationship"})
+            logger.debug(
+                "recall: {} dangling document refs (chunks={}, entities={}, rels={}) ns={}",
+                len(unresolved),
+                chunk_dangling,
+                entity_dangling,
+                rel_dangling,
+                namespace_id,
+            )
+
+        # Per-chunk entity linkage: invert ``RecallEntity.source_chunk_ids``
+        # — the canonical chunk → entity mapping produced by extraction.
+        # ``connected_entity_ids`` reflects only entities that survived
+        # the engine's filtering and made it into ``result.entities``;
+        # chunks may reference additional entities that fell below the
+        # recall threshold (or were never extracted) — those are
+        # intentionally omitted. Empty list means "no linkage in this
+        # result", not "no edges in the graph". Entity-less stacks
+        # (skeleton, chronicle without entity hits) leave every chunk
+        # with the default empty list. Ordering follows
+        # ``result.entities`` (the engine's score-sorted order).
+        chunk_to_entities: dict[UUID, list[UUID]] = {}
+        for entity in result.entities:
+            for cid in entity.source_chunk_ids:
+                chunk_to_entities.setdefault(cid, []).append(entity.id)
+
+        if chunk_to_entities:
+            upgraded_chunks = [
+                replace(chunk, connected_entity_ids=chunk_to_entities.get(chunk.id, [])) for chunk in result.chunks
+            ]
+        else:
+            upgraded_chunks = list(result.chunks)
+
+        if upgrade_failed_reason is not None:
+            engine_info = dict(result.engine_info)
+            engine_info["document_upgrade_failed"] = upgrade_failed_reason
+            return replace(
+                result,
+                documents=upgraded_documents,
+                chunks=upgraded_chunks,
+                engine_info=engine_info,
+            )
+        return replace(result, documents=upgraded_documents, chunks=upgraded_chunks)
 
     # ------------------------------------------------------------------
     # Semantic hooks (subscription API)

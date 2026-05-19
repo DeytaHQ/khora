@@ -1326,8 +1326,8 @@ class TestIncludeSources:
     """Tests for include_sources parameter on read methods."""
 
     @pytest.mark.asyncio
-    async def test_recall_include_sources_false(self) -> None:
-        """Default include_sources=False does not call get_document_sources_batch."""
+    async def test_recall_no_referenced_docs_skips_fetch(self) -> None:
+        """Empty recall result skips the document upgrade fetch entirely."""
         kb = _make_kb(connected=True)
         ns_id = uuid4()
 
@@ -1352,14 +1352,8 @@ class TestIncludeSources:
         kb._engine._storage.get_document_sources_batch.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_recall_include_sources_true(self) -> None:
-        """include_sources=True is accepted (kept for API stability) and the engine-produced
-        ``RecallResult.documents`` flow through to the caller unchanged.
-
-        Source attribution now lives on ``RecallResult.documents`` rather than being
-        mutated onto each chunk/entity post-recall. Engines build the ``documents``
-        list from their own data; ``kb.recall`` passes it through.
-        """
+    async def test_recall_upgrades_document_stubs(self) -> None:
+        """Khora.recall() batch-fetches DocumentProjection rows and produces an upgraded RecallResult."""
         from datetime import UTC, datetime
 
         from khora.core.models import DocumentProjection, RecallChunk, RecallEntity
@@ -1380,35 +1374,57 @@ class TestIncludeSources:
             attributes={},
             mention_count=0,
             source_document_ids=[doc_id_1, doc_id_2],
-            source_chunk_ids=[],
+            source_chunk_ids=[chunk.id],
         )
-        doc_1 = DocumentProjection(id=doc_id_1, created_at=now, title="Doc 1")
-        doc_2 = DocumentProjection(id=doc_id_2, created_at=now, title="Doc 2")
+        doc_1_stub = DocumentProjection(id=doc_id_1, created_at=now)
+        doc_2_stub = DocumentProjection(id=doc_id_2, created_at=now)
 
         mock_result = RecallResult(
             query="test",
             namespace_id=ns_id,
-            documents=[doc_1, doc_2],
+            documents=[doc_1_stub, doc_2_stub],
             chunks=[chunk],
             entities=[entity],
             relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
+        kb._engine._storage.get_document_projections_batch = AsyncMock(
+            return_value={
+                doc_id_1: DocumentProjection(
+                    id=doc_id_1,
+                    created_at=now,
+                    title="Doc 1",
+                    source="src-1",
+                    external_id="ext-1",
+                    source_url="https://example.com/1",
+                ),
+                doc_id_2: DocumentProjection(
+                    id=doc_id_2,
+                    created_at=now,
+                    title="Doc 2",
+                    source="src-2",
+                    content_type="text/markdown",
+                ),
+            }
+        )
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await kb.recall("test", namespace=ns_id, include_sources=True)
+            result = await kb.recall("test", namespace=ns_id)
 
-        # documents flow through; callers join chunk → DocumentProjection by id.
+        kb._engine._storage.get_document_projections_batch.assert_awaited_once()
         docs_by_id = {d.id: d for d in result.documents}
-        assert docs_by_id.get(result.chunks[0].document_id) is not None
-        # Entity exposes its source document IDs (the DocumentSource→DocumentProjection
-        # mapping isn't 1:1 — assertion is on id membership).
+        # Full DocumentProjection round-trip — all 11 fields available.
+        assert docs_by_id[doc_id_1].title == "Doc 1"
+        assert docs_by_id[doc_id_1].external_id == "ext-1"
+        assert docs_by_id[doc_id_1].source_url == "https://example.com/1"
+        assert docs_by_id[doc_id_2].title == "Doc 2"
+        assert docs_by_id[doc_id_2].content_type == "text/markdown"
+        # connected_entity_ids inverted from RecallEntity.source_chunk_ids.
+        assert result.chunks[0].connected_entity_ids == [entity.id]
         assert set(result.entities[0].source_document_ids) == {doc_id_1, doc_id_2}
-        # Both docs the entity references resolved to a DocumentProjection.
-        assert all(docs_by_id.get(did) is not None for did in result.entities[0].source_document_ids)
 
     @pytest.mark.asyncio
     async def test_list_entities_include_sources(self) -> None:
@@ -1493,8 +1509,8 @@ class TestIncludeSources:
         kb._engine._storage.get_document_sources_batch.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_include_sources_empty_results(self) -> None:
-        """Empty chunks/entities with include_sources=True does not crash or fetch."""
+    async def test_recall_empty_results(self) -> None:
+        """Empty chunks/entities does not crash or fetch."""
         kb = _make_kb(connected=True)
         ns_id = uuid4()
 
@@ -1513,7 +1529,7 @@ class TestIncludeSources:
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await kb.recall("nothing", namespace=ns_id, include_sources=True)
+            result = await kb.recall("nothing", namespace=ns_id)
 
         assert result.chunks == []
         assert result.entities == []
@@ -1626,23 +1642,32 @@ class TestIncludeSources:
             relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
+        kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={})
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await kb.recall("test", namespace=ns_id, include_sources=True)
+            result = await kb.recall("test", namespace=ns_id)
 
+        # Producer invariant: every doc_id referenced by an entity / chunk /
+        # rel must appear in ``documents`` — unresolvable ids get a minimal
+        # stub rather than being dropped (downstream code does
+        # ``{d.id: d for d in result.documents}[chunk.document_id]``).
         doc_ids_in_result = {d.id for d in result.documents}
-        assert doc_ids_in_result == {doc_id_1}
-        assert doc_id_2 not in doc_ids_in_result
-        # The entity still references both, but only doc_1 resolved.
+        assert doc_ids_in_result == {doc_id_1, doc_id_2}
+        # doc_1 keeps the engine-supplied title; doc_2 is a minimal stub.
+        docs_by_id = {d.id: d for d in result.documents}
+        assert docs_by_id[doc_id_1].title == "Doc 1"
+        assert docs_by_id[doc_id_2].title is None
+        # The entity still references both.
         assert set(result.entities[0].source_document_ids) == {doc_id_1, doc_id_2}
 
     @pytest.mark.asyncio
     async def test_chunk_with_missing_document(self) -> None:
-        """A chunk whose document_id has no matching ``documents[]`` entry is OK —
-        caller's doc-lookup simply returns no projection.
+        """A chunk whose document_id is unresolvable still gets a minimal
+        DocumentProjection stub — preserves the producer invariant that every
+        referenced doc_id appears in ``result.documents``.
         """
         from datetime import UTC, datetime
 
@@ -1665,15 +1690,22 @@ class TestIncludeSources:
             relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
+        kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={})
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await kb.recall("test", namespace=ns_id, include_sources=True)
+            result = await kb.recall("test", namespace=ns_id)
 
         docs_by_id = {d.id: d for d in result.documents}
-        assert docs_by_id.get(result.chunks[0].document_id) is None
+        # Invariant: chunk's document_id MUST resolve to some
+        # DocumentProjection in result.documents — minimal stub if the
+        # relational store couldn't resolve it.
+        proj = docs_by_id.get(result.chunks[0].document_id)
+        assert proj is not None
+        assert proj.id == doc_id
+        assert proj.title is None  # minimal stub — no upstream metadata
 
     @pytest.mark.asyncio
     async def test_storage_exception_propagation(self) -> None:
@@ -1688,7 +1720,7 @@ class TestIncludeSources:
             patch("khora.telemetry.context.clear_trace_id"),
         ):
             with pytest.raises(RuntimeError, match="DB error"):
-                await kb.recall("test", namespace=ns_id, include_sources=True)
+                await kb.recall("test", namespace=ns_id)
 
     @pytest.mark.asyncio
     async def test_entity_empty_source_document_ids(self) -> None:
@@ -1719,15 +1751,17 @@ class TestIncludeSources:
             relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
+        kb._engine._storage.get_document_sources_batch = AsyncMock()
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            result = await kb.recall("test", namespace=ns_id, include_sources=True)
+            result = await kb.recall("test", namespace=ns_id)
 
         assert result.documents == []
         assert result.entities[0].source_document_ids == []
+        kb._engine._storage.get_document_sources_batch.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

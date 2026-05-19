@@ -46,6 +46,7 @@ from sqlalchemy.types import Uuid
 
 from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentSource, DocumentStatus
+from khora.core.models.recall import DocumentProjection
 from khora.db.models import DocumentModel, MemoryNamespaceModel, SyncCheckpointModel
 from khora.engines.chronicle.compression import MemoryFact
 from khora.engines.chronicle.events import ChronicleEvent
@@ -593,6 +594,43 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
                     source_type=row.source_type,
                     created_at=row.created_at,
                     source_timestamp=row.source_timestamp,
+                )
+                for row in rows
+            }
+
+    async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
+        if not document_ids:
+            return {}
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(
+                    DocumentModel.id,
+                    DocumentModel.created_at,
+                    DocumentModel.source_type,
+                    DocumentModel.title,
+                    DocumentModel.external_id,
+                    DocumentModel.source,
+                    DocumentModel.source_name,
+                    DocumentModel.source_url,
+                    DocumentModel.content_type,
+                    DocumentModel.source_timestamp,
+                    DocumentModel.metadata_,
+                ).where(DocumentModel.id.in_(document_ids))
+            )
+            rows = result.all()
+            return {
+                row.id: DocumentProjection(
+                    id=row.id,
+                    created_at=row.created_at or datetime.now(UTC),
+                    source_type=row.source_type or "library",
+                    title=row.title or None,
+                    external_id=row.external_id or None,
+                    source=row.source or None,
+                    source_name=row.source_name or None,
+                    source_url=row.source_url or None,
+                    content_type=row.content_type or None,
+                    source_timestamp=row.source_timestamp,
+                    metadata=dict(row.metadata_ or {}),
                 )
                 for row in rows
             }
