@@ -6,6 +6,10 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+### Changed
+
+- **Coverage floor lifted 65% → 72%** ([#695](https://github.com/DeytaHQ/khora/issues/695) step 2). `--cov-fail-under` raised in `pyproject.toml`, `Makefile`, and `.github/workflows/ci.yml`. Backed by 500+ new unit tests across 15 previously under-covered modules (query/{normalization,agentic,understanding,hyde,linking,temporal_detection}, storage/{optimize,expertise_store,event_store}, storage/backends/postgresql, pipelines/tasks/extract, pipelines/flows/ingest, extraction/{entity_resolution,expansion/rule_engine,extractors/llm}, integrations/crewai/storage). Unit-only coverage rose from ~68% to **73.15%**; combined unit+integration projected at ~75%. Next ladder steps remain at 75% / 80% / 85% per the issue plan.
+
 ### Fixed
 
 - Stale results from `Khora.recall()` after `remember`/`forget`. The in-process query result cache in the vectorcypher retriever held results for up to 5 minutes without invalidation on writes.
