@@ -128,15 +128,15 @@ class TestNeo4jGetEntityRelationshipsIntegration:
             # Best-effort cleanup; swallow errors so one failure doesn't
             # mask another.
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()

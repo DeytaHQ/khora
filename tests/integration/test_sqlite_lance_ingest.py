@@ -237,7 +237,7 @@ class TestSQLiteLanceIngest:
                 source_chunk_ids=[chunk.id],
             )
             await coord.write_facts([replacement], namespace_id=ns.id)
-            await coord.supersede_fact(f1.id, replacement.id)
+            await coord.supersede_fact(f1.id, replacement.id, namespace_id=ns.id)
 
             active = await coord.query_active_facts_for_subject(ns.id, "Marie Curie")
             # f2 + replacement should remain active; f1 was superseded.

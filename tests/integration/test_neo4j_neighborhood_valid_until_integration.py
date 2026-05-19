@@ -116,15 +116,15 @@ class TestDualNodeManagerValidUntilFiltering:
         finally:
             # Best-effort cleanup
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -193,15 +193,15 @@ class TestDualNodeManagerValidUntilFiltering:
         finally:
             # Best-effort cleanup
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -270,15 +270,15 @@ class TestDualNodeManagerValidUntilFiltering:
         finally:
             # Best-effort cleanup
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -348,15 +348,15 @@ class TestDualNodeManagerValidUntilFiltering:
         finally:
             # Best-effort cleanup
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -448,12 +448,12 @@ class TestDualNodeManagerValidUntilFiltering:
         finally:
             for rel_id in (rel_ab.id, rel_bc.id):
                 try:
-                    await backend.delete_relationship(rel_id)
+                    await backend.delete_relationship(rel_id, namespace_id=namespace_id)
                 except Exception:  # noqa: BLE001
                     pass
             for ent_id in (entity_a.id, entity_b.id, entity_c.id):
                 try:
-                    await backend.delete_entity(ent_id)
+                    await backend.delete_entity(ent_id, namespace_id=namespace_id)
                 except Exception:  # noqa: BLE001
                     pass
             await backend.disconnect()
@@ -532,12 +532,12 @@ class TestDualNodeManagerValidUntilFiltering:
         finally:
             for rel_id in (rel1.id, rel2.id):
                 try:
-                    await backend.delete_relationship(rel_id)
+                    await backend.delete_relationship(rel_id, namespace_id=namespace_id)
                 except Exception:  # noqa: BLE001
                     pass
             for ent_id in (entity_a.id, entity_b.id):
                 try:
-                    await backend.delete_entity(ent_id)
+                    await backend.delete_entity(ent_id, namespace_id=namespace_id)
                 except Exception:  # noqa: BLE001
                     pass
             await backend.disconnect()

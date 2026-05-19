@@ -229,7 +229,7 @@ class TestChunkCRUD:
         chunks = [_make_chunk(ns, doc, embedding=_unit(8, i)) for i in range(3)]
         await adapter.create_chunks_batch(chunks)
 
-        deleted = await adapter.delete_chunks_by_document(doc)
+        deleted = await adapter.delete_chunks_by_document(doc, namespace_id=ns)
         assert deleted == 3
 
         assert await adapter.count_chunks(ns) == 0
@@ -265,7 +265,7 @@ class TestChunkCRUD:
         await adapter.create_chunks_batch(chunks)
 
         sentinel = object()
-        deleted = await adapter.delete_chunks_by_document(doc, session=sentinel)  # type: ignore[arg-type]
+        deleted = await adapter.delete_chunks_by_document(doc, namespace_id=ns, session=sentinel)  # type: ignore[arg-type]
         assert deleted == 2
 
         # SQLite wasn't committed so the row count per query (inside this
@@ -434,8 +434,8 @@ class TestEntities:
         await adapter.create_entity(e)
 
         e.description = "updated"
-        await graph.update_entity(e)
-        await adapter.update_entity(e)
+        await graph.update_entity(e, namespace_id=ns)
+        await adapter.update_entity(e, namespace_id=ns)
 
         # Search should still find it (upsert preserves vector row).
         results = await adapter.search_similar_entities(ns, _unit(8, 0), limit=5)
@@ -448,7 +448,7 @@ class TestEntities:
         await adapter.create_entity(e)
 
         # Change the embedding to point in a different direction.
-        await adapter.update_entity_embedding(e.id, _unit(8, 3), "new-model")
+        await adapter.update_entity_embedding(e.id, _unit(8, 3), "new-model", namespace_id=ns)
 
         results = await adapter.search_similar_entities(ns, _unit(8, 3), limit=5)
         assert results
@@ -457,7 +457,7 @@ class TestEntities:
 
     async def test_update_entity_embedding_missing_raises(self, adapter: SQLiteLanceVectorAdapter):
         with pytest.raises(ValueError, match="not found"):
-            await adapter.update_entity_embedding(uuid4(), _unit(8, 0), "m")
+            await adapter.update_entity_embedding(uuid4(), _unit(8, 0), "m", namespace_id=uuid4())
 
     async def test_update_entity_embeddings_batch(self, adapter: SQLiteLanceVectorAdapter, graph):
         ns = uuid4()
@@ -467,7 +467,7 @@ class TestEntities:
             await adapter.create_entity(e)
 
         updates = [(e.id, _unit(8, 7), "v2") for e in entities]
-        count = await adapter.update_entity_embeddings_batch(updates)
+        count = await adapter.update_entity_embeddings_batch(updates, namespace_id=ns)
         assert count == 3
 
         results = await adapter.search_similar_entities(ns, _unit(8, 7), limit=5)
@@ -475,7 +475,7 @@ class TestEntities:
         assert {e.id for e in entities}.issubset(top_ids)
 
     async def test_update_entity_embeddings_batch_empty(self, adapter: SQLiteLanceVectorAdapter):
-        assert await adapter.update_entity_embeddings_batch([]) == 0
+        assert await adapter.update_entity_embeddings_batch([], namespace_id=uuid4()) == 0
 
     async def test_search_similar_entities_min_similarity(self, adapter: SQLiteLanceVectorAdapter, graph):
         ns = uuid4()

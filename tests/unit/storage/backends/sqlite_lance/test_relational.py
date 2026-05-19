@@ -234,9 +234,9 @@ async def test_update_document(adapter, namespace):
 async def test_delete_document(adapter, namespace):
     doc = _make_document(namespace.id)
     await adapter.create_document(doc)
-    assert await adapter.delete_document(doc.id) is True
+    assert await adapter.delete_document(doc.id, namespace_id=namespace.id) is True
     assert await adapter.get_document(doc.id, namespace_id=namespace.id) is None
-    assert await adapter.delete_document(doc.id) is False
+    assert await adapter.delete_document(doc.id, namespace_id=namespace.id) is False
 
 
 async def test_dedup_by_checksum(adapter, namespace):

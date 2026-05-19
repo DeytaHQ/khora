@@ -87,12 +87,13 @@ class TestNeo4jRetireOrphanedRelationshipsBatch:
                         "old_doc_id": doc_id,
                         "retired_at": retired_at,
                     }
-                ]
+                ],
+                namespace_id=namespace_id,
             )
 
             assert count == 1
 
-            rel = await backend.get_relationship(relationship.id)
+            rel = await backend.get_relationship(relationship.id, namespace_id=namespace_id)
             assert rel is not None
             assert rel.valid_until is not None
             assert rel.valid_until == retired_at
@@ -104,15 +105,15 @@ class TestNeo4jRetireOrphanedRelationshipsBatch:
             assert len(rel.source_document_ids) == 1
         finally:
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -166,25 +167,26 @@ class TestNeo4jRetireOrphanedRelationshipsBatch:
                         "old_doc_id": doc_id,
                         "retired_at": retired_at,
                     }
-                ]
+                ],
+                namespace_id=namespace_id,
             )
 
             assert count == 0
 
-            rel = await backend.get_relationship(relationship.id)
+            rel = await backend.get_relationship(relationship.id, namespace_id=namespace_id)
             assert rel is not None
             assert rel.valid_until is None
         finally:
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -238,25 +240,26 @@ class TestNeo4jRetireOrphanedRelationshipsBatch:
                         "old_doc_id": wrong_doc_id,
                         "retired_at": retired_at,
                     }
-                ]
+                ],
+                namespace_id=namespace_id,
             )
 
             assert count == 0
 
-            rel = await backend.get_relationship(relationship.id)
+            rel = await backend.get_relationship(relationship.id, namespace_id=namespace_id)
             assert rel is not None
             assert rel.valid_until is None
         finally:
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
@@ -272,7 +275,7 @@ class TestNeo4jRetireOrphanedRelationshipsBatch:
         await backend.connect()
 
         try:
-            count = await backend.retire_orphaned_relationships_batch([])
+            count = await backend.retire_orphaned_relationships_batch([], namespace_id=uuid4())
             assert count == 0
         finally:
             await backend.disconnect()
@@ -295,7 +298,8 @@ class TestNeo4jRetireOrphanedRelationshipsBatch:
                         "old_doc_id": uuid4(),
                         "retired_at": datetime.now(UTC),
                     }
-                ]
+                ],
+                namespace_id=uuid4(),
             )
             assert count == 0
         finally:
@@ -350,7 +354,8 @@ class TestNeo4jRetireOrphanedRelationshipsBatch:
                         "old_doc_id": doc_id,
                         "retired_at": first_retired_at,
                     }
-                ]
+                ],
+                namespace_id=namespace_id,
             )
             assert count1 == 1
 
@@ -363,24 +368,25 @@ class TestNeo4jRetireOrphanedRelationshipsBatch:
                         "old_doc_id": doc_id,
                         "retired_at": second_retired_at,
                     }
-                ]
+                ],
+                namespace_id=namespace_id,
             )
             assert count2 == 1
 
-            rel = await backend.get_relationship(relationship.id)
+            rel = await backend.get_relationship(relationship.id, namespace_id=namespace_id)
             assert rel is not None
             assert rel.valid_until == second_retired_at
         finally:
             try:
-                await backend.delete_relationship(relationship.id)
+                await backend.delete_relationship(relationship.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_a.id)
+                await backend.delete_entity(entity_a.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             try:
-                await backend.delete_entity(entity_b.id)
+                await backend.delete_entity(entity_b.id, namespace_id=namespace_id)
             except Exception:  # noqa: BLE001
                 pass
             await backend.disconnect()
