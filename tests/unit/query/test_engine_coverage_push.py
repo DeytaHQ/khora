@@ -605,7 +605,7 @@ class TestStage4Rerank:
         engine = _make_engine()
         chunks = [(_make_chunk(), 0.5) for _ in range(5)]
         cfg = QueryConfig(enable_reranking=False)
-        out = await engine._stage4_rerank(chunks, "q", cfg)
+        out = await engine._stage4_rerank(chunks, "q", cfg, namespace_id=uuid4())
         assert out == chunks
 
     @pytest.mark.asyncio
@@ -613,7 +613,7 @@ class TestStage4Rerank:
         engine = _make_engine()
         chunks = [(_make_chunk(), 0.5), (_make_chunk(), 0.4)]  # only 2 < 3
         cfg = QueryConfig(enable_reranking=True)
-        out = await engine._stage4_rerank(chunks, "q", cfg)
+        out = await engine._stage4_rerank(chunks, "q", cfg, namespace_id=uuid4())
         assert out == chunks
 
     @pytest.mark.asyncio
@@ -637,7 +637,7 @@ class TestStage4Rerank:
             stage4_rerank_limit=50,
             max_chunks=10,
         )
-        out = await engine._stage4_rerank(chunks, "q", cfg)
+        out = await engine._stage4_rerank(chunks, "q", cfg, namespace_id=uuid4())
         assert len(out) == 5
 
     @pytest.mark.asyncio
@@ -653,7 +653,7 @@ class TestStage4Rerank:
         mock_reranker.rerank = boom
         engine._rerankers["cross_encoder"] = mock_reranker
         cfg = QueryConfig(enable_reranking=True, reranking_method="cross_encoder")
-        out = await engine._stage4_rerank(chunks, "q", cfg)
+        out = await engine._stage4_rerank(chunks, "q", cfg, namespace_id=uuid4())
         # Failure → returns original chunks
         assert out == chunks
 
