@@ -60,7 +60,7 @@ class TestSQLiteLanceTraversal:
             ns = await coord.create_namespace(MemoryNamespace())
             a, b, c = await _seed_chain(coord, ns.id, ["alice", "bob", "carol"])
 
-            hood = await coord.graph.get_neighborhood(b.id, depth=1, limit=50)  # type: ignore[union-attr]
+            hood = await coord.graph.get_neighborhood(b.id, namespace_id=ns.id, depth=1, limit=50)  # type: ignore[union-attr]
             ids = {e.id for e in hood["entities"]}
             assert a.id in ids
             assert c.id in ids
@@ -76,8 +76,8 @@ class TestSQLiteLanceTraversal:
             ns = await coord.create_namespace(MemoryNamespace())
             a, b, c, d = await _seed_chain(coord, ns.id, ["a", "b", "c", "d"])
 
-            hood_1 = await coord.graph.get_neighborhood(a.id, depth=1, limit=50)  # type: ignore[union-attr]
-            hood_2 = await coord.graph.get_neighborhood(a.id, depth=2, limit=50)  # type: ignore[union-attr]
+            hood_1 = await coord.graph.get_neighborhood(a.id, namespace_id=ns.id, depth=1, limit=50)  # type: ignore[union-attr]
+            hood_2 = await coord.graph.get_neighborhood(a.id, namespace_id=ns.id, depth=2, limit=50)  # type: ignore[union-attr]
 
             ids_1 = {e.id for e in hood_1["entities"]}
             ids_2 = {e.id for e in hood_2["entities"]}
@@ -99,7 +99,7 @@ class TestSQLiteLanceTraversal:
             ns = await coord.create_namespace(MemoryNamespace())
             a, b, c, d = await _seed_chain(coord, ns.id, ["a", "b", "c", "d"])
 
-            hood = await coord.graph.get_neighborhood(a.id, depth=3, limit=50)  # type: ignore[union-attr]
+            hood = await coord.graph.get_neighborhood(a.id, namespace_id=ns.id, depth=3, limit=50)  # type: ignore[union-attr]
             ids = {e.id for e in hood["entities"]}
             assert {b.id, c.id, d.id}.issubset(ids)
             # All 3 chain edges are reachable in the subgraph.
@@ -148,6 +148,7 @@ class TestSQLiteLanceTraversal:
 
             result = await coord.graph.get_neighborhoods_batch(  # type: ignore[union-attr]
                 [a.id, d.id],
+                namespace_id=ns.id,
                 depth=1,
                 limit_per_entity=10,
             )

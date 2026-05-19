@@ -375,7 +375,7 @@ class TestApplyReranking:
     @pytest.mark.asyncio
     async def test_empty_input_returns_empty(self) -> None:
         retriever = _make_retriever()
-        result = await retriever._apply_reranking("q", [], limit=5)
+        result = await retriever._apply_reranking("q", [], limit=5, namespace_id=uuid4())
         assert result == []
 
     @pytest.mark.asyncio
@@ -417,7 +417,7 @@ class TestApplyReranking:
         mock_reranker.rerank = AsyncMock(return_value=mock_results)
         retriever._reranker = mock_reranker
 
-        result = await retriever._apply_reranking("query", fused, limit=10)
+        result = await retriever._apply_reranking("query", fused, limit=10, namespace_id=uuid4())
         # First three are reranked, rest is the original remainder
         assert len(result) == 8
         assert result[0].item_id == fused[2].item_id
@@ -457,7 +457,7 @@ class TestApplyReranking:
                 ]
 
         with patch("khora.query.reranking.CrossEncoderReranker", FakeReranker):
-            result = await retriever._apply_reranking("q", fused, limit=5)
+            result = await retriever._apply_reranking("q", fused, limit=5, namespace_id=uuid4())
 
         assert len(result) == 1
         assert instantiated == [retriever._config.reranking_model]
@@ -473,7 +473,7 @@ class TestApplyReranking:
         bad.rerank = AsyncMock(side_effect=RuntimeError("model load failed"))
         retriever._reranker = bad
 
-        result = await retriever._apply_reranking("q", fused, limit=5)
+        result = await retriever._apply_reranking("q", fused, limit=5, namespace_id=uuid4())
         assert result == fused
 
     @pytest.mark.asyncio
@@ -514,7 +514,7 @@ class TestApplyReranking:
                 ]
 
         retriever._reranker = CaptureReranker()  # type: ignore[assignment]
-        await retriever._apply_reranking("q", fused, limit=5)
+        await retriever._apply_reranking("q", fused, limit=5, namespace_id=uuid4())
         assert captured
         assert "Session: S123" in captured[0].content
         assert "Date: 2026-04-01" in captured[0].content
@@ -530,7 +530,7 @@ class TestApplyLLMReranking:
     @pytest.mark.asyncio
     async def test_empty_input_returns_empty(self) -> None:
         retriever = _make_retriever()
-        result = await retriever._apply_llm_reranking("q", [], limit=5)
+        result = await retriever._apply_llm_reranking("q", [], limit=5, namespace_id=uuid4())
         assert result == []
 
     @pytest.mark.asyncio
@@ -569,7 +569,7 @@ class TestApplyLLMReranking:
         )
         retriever._llm_reranker = mock_reranker
 
-        result = await retriever._apply_llm_reranking("q", fused, limit=10)
+        result = await retriever._apply_llm_reranking("q", fused, limit=10, namespace_id=uuid4())
         assert len(result) == 6
         assert result[0].item_id == fused[1].item_id
         assert result[3].item_id == fused[3].item_id  # remainder preserved
@@ -583,7 +583,7 @@ class TestApplyLLMReranking:
         bad.rerank = AsyncMock(side_effect=RuntimeError("llm timeout"))
         retriever._llm_reranker = bad
 
-        result = await retriever._apply_llm_reranking("q", fused, limit=5)
+        result = await retriever._apply_llm_reranking("q", fused, limit=5, namespace_id=uuid4())
         assert result == fused
 
     @pytest.mark.asyncio
@@ -618,7 +618,7 @@ class TestApplyLLMReranking:
                 ]
 
         with patch("khora.query.reranking.LLMReranker", FakeLLMReranker):
-            await retriever._apply_llm_reranking("q", fused, limit=5)
+            await retriever._apply_llm_reranking("q", fused, limit=5, namespace_id=uuid4())
 
         assert models == [retriever._config.llm_reranking_model]
         assert retriever._llm_reranker is not None

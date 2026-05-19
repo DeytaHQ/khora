@@ -39,11 +39,16 @@ async def hydrate_doc_titles(
     candidates: list[RerankCandidate[Any]],
     storage: StorageCoordinator | None,
     document_id_of: Callable[[Any], UUID | None],
+    *,
+    namespace_id: UUID,
 ) -> None:
-    """Fill ``doc_title`` on each candidate from one batch source-fetch.
+    """Fill ``doc_title`` on each candidate from one batch source-fetch,
+    scoped to ``namespace_id``.
 
     Mutates ``candidates`` in place; safe to call when ``storage`` is ``None``
     or the document-id extractor yields ``None`` for every item.
+    The ``namespace_id`` kwarg prevents cross-tenant document-title leakage
+    via the source-attribution path (IGR-221).
     """
     if storage is None or not candidates:
         return
@@ -62,7 +67,7 @@ async def hydrate_doc_titles(
     if not doc_ids:
         return
     try:
-        sources = await storage.get_document_sources_batch(doc_ids)
+        sources = await storage.get_document_sources_batch(doc_ids, namespace_id=namespace_id)
     except Exception as exc:
         logger.debug(f"doc_title hydration skipped: {exc}")
         return

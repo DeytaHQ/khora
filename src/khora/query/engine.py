@@ -1340,7 +1340,12 @@ class HybridQueryEngine:
                         )
                         for chunk, score in fused_chunks[: cfg.reranking_top_n]
                     ]
-                    await hydrate_doc_titles(candidates, self._storage, lambda c: getattr(c, "document_id", None))
+                    await hydrate_doc_titles(
+                        candidates,
+                        self._storage,
+                        lambda c: getattr(c, "document_id", None),
+                        namespace_id=namespace_id,
+                    )
                     async with pipeline_stage(
                         "query",
                         "reranking",
@@ -2498,6 +2503,7 @@ class HybridQueryEngine:
             chunks=stage3_chunks,
             query_text=query_text,
             config=config,
+            namespace_id=namespace_id,
         )
         metrics.stage4_rerank_timer.stop()
         metrics.stage4_reranked_count = len(stage4_chunks)
@@ -2880,6 +2886,8 @@ class HybridQueryEngine:
         chunks: list[tuple[Any, float]],
         query_text: str,
         config: QueryConfig,
+        *,
+        namespace_id: UUID,
     ) -> list[tuple[Any, float]]:
         """Stage 4: Neural reranking.
 
@@ -2916,7 +2924,12 @@ class HybridQueryEngine:
                     )
                     for chunk, score in candidates_to_rerank
                 ]
-                await hydrate_doc_titles(candidates, self._storage, lambda c: getattr(c, "document_id", None))
+                await hydrate_doc_titles(
+                    candidates,
+                    self._storage,
+                    lambda c: getattr(c, "document_id", None),
+                    namespace_id=namespace_id,
+                )
 
                 # Rerank - use max_chunks as final limit
                 reranked = await reranker.rerank(

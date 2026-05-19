@@ -85,7 +85,7 @@ class TestSQLiteLanceIngest:
 
             # Spot-check one document survives a round-trip.
             sample_doc, sample_chunk = pairs[42]
-            fetched = await coord.get_document(sample_doc.id)
+            fetched = await coord.get_document(sample_doc.id, namespace_id=ns.id)
             assert fetched is not None
             assert fetched.external_id == "doc-42"
 

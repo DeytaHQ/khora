@@ -1307,7 +1307,7 @@ class VectorCypherRetriever:
         # Step 8c: Cross-encoder reranking (after boosts, before version scoring)
         if self._config.enable_reranking:
             with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
-                fused_results = await self._apply_reranking(query, fused_results, limit)
+                fused_results = await self._apply_reranking(query, fused_results, limit, namespace_id=namespace_id)
 
         # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder)
         # Skip when:
@@ -1333,7 +1333,9 @@ class VectorCypherRetriever:
                     _skip_llm = True
             if not _skip_llm:
                 with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused_results)):
-                    fused_results = await self._apply_llm_reranking(query, fused_results, limit)
+                    fused_results = await self._apply_llm_reranking(
+                        query, fused_results, limit, namespace_id=namespace_id
+                    )
 
         # Step 8e: Version-aware scoring — the FINAL score adjustment.
         # Applied after ALL reranking (cross-encoder + LLM) so nothing can
@@ -1648,6 +1650,8 @@ class VectorCypherRetriever:
         query: str,
         fused_results: list[FusedResult],
         limit: int,
+        *,
+        namespace_id: UUID,
     ) -> list[FusedResult]:
         """Apply cross-encoder reranking to fused results.
 
@@ -1708,7 +1712,10 @@ class VectorCypherRetriever:
                 )
             )
         await hydrate_doc_titles(
-            candidates, self._storage, lambda fr: getattr(getattr(fr, "item", None), "document_id", None)
+            candidates,
+            self._storage,
+            lambda fr: getattr(getattr(fr, "item", None), "document_id", None),
+            namespace_id=namespace_id,
         )
 
         try:
@@ -1771,6 +1778,8 @@ class VectorCypherRetriever:
         query: str,
         fused_results: list[FusedResult],
         limit: int,
+        *,
+        namespace_id: UUID,
     ) -> list[FusedResult]:
         """Apply LLM reranking to the top-N fused results for temporal queries.
 
@@ -1829,7 +1838,10 @@ class VectorCypherRetriever:
                 )
             )
         await hydrate_doc_titles(
-            candidates, self._storage, lambda fr: getattr(getattr(fr, "item", None), "document_id", None)
+            candidates,
+            self._storage,
+            lambda fr: getattr(getattr(fr, "item", None), "document_id", None),
+            namespace_id=namespace_id,
         )
 
         try:
@@ -1968,7 +1980,7 @@ class VectorCypherRetriever:
             if self._config.enable_reranking and chunk_results:
                 fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
                 with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused)):
-                    fused = await self._apply_reranking(query, fused, limit)
+                    fused = await self._apply_reranking(query, fused, limit, namespace_id=namespace_id)
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # LLM reranking of top-N for temporal queries (after cross-encoder)
@@ -1988,7 +2000,7 @@ class VectorCypherRetriever:
                 if not _skip_llm_simple:
                     fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
                     with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused)):
-                        fused = await self._apply_llm_reranking(query, fused, limit)
+                        fused = await self._apply_llm_reranking(query, fused, limit, namespace_id=namespace_id)
                     chunk_results = [(r.item, r.rrf_score) for r in fused]
 
             # Version-aware scoring — the FINAL score adjustment after ALL reranking.
