@@ -1,10 +1,9 @@
-"""Tests for entity and relationship inclusion in context_text.
+"""Tests for the ``format_entity_section`` and ``format_relationship_section`` helpers.
 
-Verifies that RecallResult.context_text includes an entity section
-when entities are present in the recall result.
-
-Verifies relationship formatting in context_text and RecallResult
-relationship support.
+Verifies that the entity-section formatter renders entities (name, type,
+description) and de-duplicates by ID, and that the relationship-section
+formatter renders source/type/target/description tuples. Callers compose
+these alongside ``chunk.content`` to build an LLM context string.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from khora.query.engine import format_entity_section, format_relationship_sectio
 
 @pytest.mark.unit
 class TestGetContextTextIncludesEntities:
-    """Verify that entity data appears in RecallResult.context_text."""
+    """Verify that entity data appears when callers compose a context string."""
 
     def test_chunks_and_entities(self) -> None:
         """When both chunks and entities are present, context_text has both."""

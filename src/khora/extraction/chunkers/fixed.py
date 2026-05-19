@@ -59,6 +59,7 @@ class FixedChunker(Chunker):
                     start_char=start_char,
                     end_char=end_char,
                     token_count=len(chunk_tokens),
+                    metadata={"chunker": "fixed"},
                 )
             )
 
@@ -96,6 +97,7 @@ class FixedChunker(Chunker):
                         start_char=start,
                         end_char=end,
                         token_count=len(chunk_text) // 4,
+                        metadata={"chunker": "fixed"},
                     )
                 )
                 chunk_index += 1

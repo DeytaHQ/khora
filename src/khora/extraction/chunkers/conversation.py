@@ -330,7 +330,7 @@ class ConversationChunker(Chunker):
         thread_ts = next((m.thread_ts for m in messages if m.thread_ts), None)
 
         metadata: dict[str, Any] = {
-            "source_type": "slack_conversation",
+            "chunker": "conversation",
             "channel": channel,
             "thread_ts": thread_ts,
             "session_id": session_id,

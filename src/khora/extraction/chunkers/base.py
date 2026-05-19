@@ -32,7 +32,11 @@ def _get_tiktoken_encoding() -> _tiktoken.Encoding | None:
 
 @dataclass
 class ChunkResult:
-    """Result of chunking a document."""
+    """Result of chunking a document.
+
+    Every chunker MUST stamp ``metadata["chunker"]`` with its registered
+    strategy name (``"fixed"``, ``"recursive"``, ``"semantic"``, ``"conversation"``).
+    """
 
     content: str
     index: int

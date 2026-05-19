@@ -132,7 +132,6 @@ def _mk_kb(**recall_attrs: Any) -> Any:
     recall_result = MagicMock(
         chunks=recall_attrs.get("chunks", []),
         entities=recall_attrs.get("entities", []),
-        context_text=recall_attrs.get("context_text", ""),
         metadata=recall_attrs.get("metadata", {}),
     )
     kb.recall = AsyncMock(return_value=recall_result)
@@ -199,11 +198,11 @@ async def test_memory_aget_joins_chunk_content_into_envelope() -> None:
     assert out.startswith("<khora_memory>")
 
 
-async def test_memory_aget_returns_empty_when_recall_has_no_context_and_no_chunks() -> None:
-    """No context_text + no chunks → empty payload (no envelope)."""
+async def test_memory_aget_returns_empty_when_recall_returns_no_chunks() -> None:
+    """No chunks → empty payload (no envelope)."""
     from khora.integrations.llamaindex import KhoraMemoryBlock
 
-    kb = _mk_kb(chunks=[], context_text="")
+    kb = _mk_kb(chunks=[])
     block = KhoraMemoryBlock(kb=kb, namespace_id=uuid4())
     out = await block.aget(messages=[ChatMessage(role="user", content="why?")])
     assert out == ""

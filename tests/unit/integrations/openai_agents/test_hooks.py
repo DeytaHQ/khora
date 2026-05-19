@@ -28,7 +28,6 @@ class _RecallResultStub:
     query: str = ""
     namespace_id: UUID = field(default_factory=uuid4)
     entities: list[Any] = field(default_factory=list)
-    context_text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
