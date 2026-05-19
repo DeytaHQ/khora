@@ -33,7 +33,7 @@ pytest.importorskip("llama_index.core")
 
 from llama_index.core.llms import ChatMessage  # noqa: E402
 
-from khora.core.models.entity import Entity  # noqa: E402
+from khora.core.models.recall import RecallChunk, RecallEntity  # noqa: E402
 from khora.integrations.llamaindex._mapping import (  # noqa: E402
     chunk_to_node_with_score,
     entity_to_node_with_score,
@@ -59,14 +59,18 @@ def test_message_to_text_handles_none_content() -> None:
 
 def test_entity_to_node_with_score_no_entity_type_renders_bare_name() -> None:
     """Entity with empty ``entity_type`` skips the ``(TYPE)`` suffix."""
-    entity = Entity(
+    entity = RecallEntity(
         id=uuid4(),
-        namespace_id=uuid4(),
         name="Bob",
         entity_type="",
         description="a guy",
+        score=0.5,
+        attributes={},
+        mention_count=0,
+        source_document_ids=[],
+        source_chunk_ids=[],
     )
-    node = entity_to_node_with_score(entity, 0.5)
+    node = entity_to_node_with_score(entity, namespace_id=uuid4())
     # No parens-wrapped type segment.
     assert "(" not in node.node.text
     assert node.node.text.strip() == "Bob: a guy"
@@ -76,30 +80,39 @@ def test_chunk_to_node_with_score_should_abstain_false_keeps_key() -> None:
     """When signals exist but ``should_abstain`` is False, the metadata key still appears."""
     from datetime import UTC, datetime
 
-    from khora.core.models.document import Chunk
-
-    chunk = Chunk(
+    chunk = RecallChunk(
         id=uuid4(),
         document_id=uuid4(),
-        namespace_id=uuid4(),
         content="hello",
-        chunk_index=0,
-        metadata={},
+        score=0.5,
         created_at=datetime.now(UTC),
     )
-    node = chunk_to_node_with_score(chunk, 0.5, abstention_signals={"should_abstain": False})
+    node = chunk_to_node_with_score(
+        chunk,
+        namespace_id=uuid4(),
+        document_metadata={},
+        abstention_signals={"should_abstain": False},
+    )
     assert node.node.metadata["khora_should_abstain"] is False
 
 
 def test_entity_to_node_with_score_should_abstain_signal_propagates() -> None:
-    entity = Entity(
+    entity = RecallEntity(
         id=uuid4(),
-        namespace_id=uuid4(),
         name="Alice",
         entity_type="PERSON",
         description="x",
+        score=0.5,
+        attributes={},
+        mention_count=0,
+        source_document_ids=[],
+        source_chunk_ids=[],
     )
-    node = entity_to_node_with_score(entity, 0.5, abstention_signals={"should_abstain": True})
+    node = entity_to_node_with_score(
+        entity,
+        namespace_id=uuid4(),
+        abstention_signals={"should_abstain": True},
+    )
     assert node.node.metadata["khora_should_abstain"] is True
 
 
@@ -141,7 +154,7 @@ async def test_memory_aget_falls_back_when_user_messages_have_only_empty_text() 
     """User-role match found but text empty → fall through to "any role"  loop."""
     from khora.integrations.llamaindex import KhoraMemoryBlock
 
-    kb = _mk_kb(context_text="recalled")
+    kb = _mk_kb(chunks=[MagicMock(content="recalled")])
     block = KhoraMemoryBlock(kb=kb, namespace_id=uuid4())
     messages = [
         ChatMessage(role="assistant", content="assistant content"),
@@ -168,15 +181,15 @@ async def test_memory_aget_returns_empty_when_all_messages_whitespace() -> None:
     kb.recall.assert_not_awaited()
 
 
-async def test_memory_aget_falls_back_to_chunk_content_when_context_text_empty() -> None:
-    """``_format_recall`` joins chunk.content when context_text is empty."""
+async def test_memory_aget_joins_chunk_content_into_envelope() -> None:
+    """``_format_recall`` joins chunk.content into the ``<khora_memory>`` envelope."""
     from khora.integrations.llamaindex import KhoraMemoryBlock
 
     chunks = [
-        (MagicMock(content="chunk A"), 0.9),
-        (MagicMock(content="chunk B"), 0.8),
+        MagicMock(content="chunk A"),
+        MagicMock(content="chunk B"),
     ]
-    kb = _mk_kb(chunks=chunks, context_text="")
+    kb = _mk_kb(chunks=chunks)
     block = KhoraMemoryBlock(kb=kb, namespace_id=uuid4())
     messages = [ChatMessage(role="user", content="why?")]
     out = await block.aget(messages=messages)
@@ -196,15 +209,15 @@ async def test_memory_aget_returns_empty_when_recall_has_no_context_and_no_chunk
     assert out == ""
 
 
-async def test_memory_aget_chunk_fallback_drops_empty_chunk_text() -> None:
-    """Chunks with empty ``content`` are dropped from the chunk-join fallback."""
+async def test_memory_aget_chunk_join_drops_empty_chunk_text() -> None:
+    """Chunks with empty ``content`` are dropped from the chunk-join."""
     from khora.integrations.llamaindex import KhoraMemoryBlock
 
     chunks = [
-        (MagicMock(content="real chunk"), 0.9),
-        (MagicMock(content=""), 0.8),
+        MagicMock(content="real chunk"),
+        MagicMock(content=""),
     ]
-    kb = _mk_kb(chunks=chunks, context_text="")
+    kb = _mk_kb(chunks=chunks)
     block = KhoraMemoryBlock(kb=kb, namespace_id=uuid4())
     out = await block.aget(messages=[ChatMessage(role="user", content="q")])
     assert "real chunk" in out
