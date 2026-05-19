@@ -488,8 +488,17 @@ class SQLiteLanceVectorAdapter:
         if entity.embedding:
             await self._upsert_entity_vector(entity.id, entity.namespace_id, entity.embedding)
 
-    async def entity_exists(self, entity_id: UUID) -> bool:
-        cur = await self._sqlite.execute("SELECT 1 FROM entities WHERE id = ?", (uuid_to_text(entity_id),))
+    async def entity_exists(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Check if an entity exists in SQLite within ``namespace_id``.
+
+        Returns ``False`` if the entity does not exist OR belongs to a
+        different namespace. Prevents cross-tenant entity-existence
+        enumeration (IDOR — IGR-221).
+        """
+        cur = await self._sqlite.execute(
+            "SELECT 1 FROM entities WHERE id = ? AND namespace_id = ?",
+            (uuid_to_text(entity_id), uuid_to_text(namespace_id)),
+        )
         row = await cur.fetchone()
         return row is not None
 

@@ -1127,13 +1127,14 @@ class Neo4jBackend(GraphBackendBase):
 
         return entity
 
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
-        """Get an entity by ID."""
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
+        """Get an entity by ID, scoped to ``namespace_id`` (IGR-223)."""
 
         async with self._session() as session:
             result = await session.run(
-                "MATCH (e:Entity {id: $id}) RETURN e",
+                "MATCH (e:Entity {id: $id, namespace_id: $namespace_id}) RETURN e",
                 id=str(entity_id),
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             if record:
@@ -1159,11 +1160,16 @@ class Neo4jBackend(GraphBackendBase):
                 return self._record_to_entity(record["e"])
             return None
 
-    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
-        """Fetch multiple entities in a single query.
+    async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Entity]:
+        """Fetch multiple entities in a single query, scoped to ``namespace_id``.
+
+        Entities belonging to any other namespace are silently dropped from
+        the result to prevent cross-tenant IDOR (IGR-223).
 
         Args:
             entity_ids: List of entity IDs to fetch
+            namespace_id: Caller's namespace; entities in any other namespace
+                are dropped.
 
         Returns:
             Dictionary mapping entity ID to Entity object
@@ -1177,10 +1183,11 @@ class Neo4jBackend(GraphBackendBase):
             result = await session.run(
                 """
                 MATCH (e:Entity)
-                WHERE e.id IN $ids
+                WHERE e.id IN $ids AND e.namespace_id = $namespace_id
                 RETURN e
                 """,
                 ids=id_strings,
+                namespace_id=str(namespace_id),
             )
             records = await result.data()
             return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
@@ -2067,16 +2074,21 @@ RETURN count(r) AS updated
 
         return relationship
 
-    async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-        """Get a relationship by ID."""
+    async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
+        """Get a relationship by ID, scoped to ``namespace_id`` (IGR-223).
+
+        Source and target nodes must both belong to ``namespace_id`` so the
+        result never leaks edges that cross into another namespace.
+        """
 
         async with self._session() as session:
             result = await session.run(
                 """
-                MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
+                MATCH (source:Entity {namespace_id: $namespace_id})-[r {id: $id, namespace_id: $namespace_id}]->(target:Entity {namespace_id: $namespace_id})
                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
                 """,
                 id=str(relationship_id),
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             if record:
@@ -2176,24 +2188,29 @@ RETURN count(r) AS updated
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         direction: str = "both",
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
-        """Get relationships for an entity."""
+        """Get relationships for an entity, scoped to ``namespace_id`` (IGR-223).
+
+        Both endpoint nodes are constrained to ``namespace_id`` so edges that
+        cross into other namespaces never surface.
+        """
 
         # Build relationship type filter
         rel_filter = ""
         if relationship_types:
             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
-        # Build direction query
+        # Build direction query — both endpoint nodes constrained to namespace.
         if direction == "outgoing":
-            pattern = f"(e)-[r{rel_filter}]->(other)"
+            pattern = f"(e:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]->(other:Entity {{namespace_id: $namespace_id}})"
         elif direction == "incoming":
-            pattern = f"(other)-[r{rel_filter}]->(e)"
+            pattern = f"(other:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]->(e:Entity {{namespace_id: $namespace_id}})"
         else:  # both
-            pattern = f"(e)-[r{rel_filter}]-(other)"
+            pattern = f"(e:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]-(other:Entity {{namespace_id: $namespace_id}})"
 
         query = f"""
         MATCH {pattern}
@@ -2203,7 +2220,12 @@ RETURN count(r) AS updated
         """
 
         async with self._session() as session:
-            result = await session.run(query, entity_id=str(entity_id), limit=limit)
+            result = await session.run(
+                query,
+                entity_id=str(entity_id),
+                namespace_id=str(namespace_id),
+                limit=limit,
+            )
             records = await result.data()
             return [
                 self._record_to_relationship(r["r"], r["source_id"], r["target_id"], r["rel_type"]) for r in records
@@ -2325,13 +2347,14 @@ RETURN count(r) AS updated
 
         return episode
 
-    async def get_episode(self, episode_id: UUID) -> Episode | None:
-        """Get an episode by ID."""
+    async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
+        """Get an episode by ID, scoped to ``namespace_id`` (IGR-223)."""
 
         async with self._session() as session:
             result = await session.run(
-                "MATCH (ep:Episode {id: $id}) RETURN ep",
+                "MATCH (ep:Episode {id: $id, namespace_id: $namespace_id}) RETURN ep",
                 id=str(episode_id),
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             if record:
@@ -2411,11 +2434,13 @@ RETURN count(r) AS updated
         if relationship_types:
             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
+        # All nodes on the path — endpoints AND intermediates — must share
+        # $namespace_id so the traversal never crosses tenants (IGR-223).
         query = f"""
         MATCH path = shortestPath(
-            (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
+            (source:Entity {{id: $source_id, namespace_id: $namespace_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id, namespace_id: $namespace_id}})
         )
-        WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
+        WHERE ALL(n IN nodes(path) WHERE n.namespace_id = $namespace_id)
         RETURN path
         LIMIT 10
         """
@@ -2451,72 +2476,50 @@ RETURN count(r) AS updated
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """Get the neighborhood of an entity up to a certain depth.
+        """Get the neighborhood of an entity up to a certain depth, scoped to
+        ``namespace_id``.
 
-        Returns ``{"entities": [], "relationships": []}`` on query timeout.
+        The traversal MUST NOT cross into other namespaces (IGR-223). Because
+        APOC's ``subgraphAll`` does not let us constrain expanded nodes by
+        property — relationshipFilter cannot filter destination labels by
+        namespace — we use vanilla Cypher with the namespace predicate baked
+        into the pattern. Returns ``{"entities": [], "relationships": []}``
+        on query timeout.
         """
 
         rel_filter = ""
         if relationship_types:
             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
+        # Vanilla Cypher (no APOC) — the namespace predicate has to hold for
+        # *both* endpoint nodes at every hop. We can't express that cleanly
+        # inside apoc.path.subgraphAll, so we stick to the pattern form.
         query = f"""
-        MATCH (center:Entity {{id: $entity_id}})
-        CALL apoc.path.subgraphAll(center, {{
-            maxLevel: {depth},
-            relationshipFilter: '{rel_filter.lstrip(":")}',
-            limit: $limit
-        }})
-        YIELD nodes, relationships
-        RETURN nodes, relationships
-        """
-
-        # Fallback query if APOC is not available
-        fallback_query = f"""
-        MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+        MATCH (center:Entity {{id: $entity_id, namespace_id: $namespace_id}})-[r{rel_filter}*1..{depth}]-(other:Entity {{namespace_id: $namespace_id}})
         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT [rel IN r | {{props: properties(rel), type: type(rel)}}]) as relationships
         LIMIT $limit
         """
 
-        _apoc_failed = False
-
-        async def _work_apoc(tx):
-            result = await tx.run(query, entity_id=str(entity_id), limit=limit)
-            return await result.single()
-
-        async def _work_fallback(tx):
-            result = await tx.run(fallback_query, entity_id=str(entity_id), limit=limit)
+        async def _work(tx):
+            result = await tx.run(
+                query,
+                entity_id=str(entity_id),
+                namespace_id=str(namespace_id),
+                limit=limit,
+            )
             return await result.single()
 
         if self._timed_unit_of_work is not None:
-            _work_apoc = self._timed_unit_of_work(_work_apoc)
-            _work_fallback = self._timed_unit_of_work(_work_fallback)
+            _work = self._timed_unit_of_work(_work)
 
-        # Nested exception strategy: the inner try handles APOC availability.
-        # If APOC times out, re-raise immediately — the fallback query would
-        # also time out (similar traversal). Only non-timeout errors (APOC not
-        # installed) fall through to the fallback. Both paths feed the outer
-        # catch which converts timeouts to empty results.
         try:
             async with self._session() as session:
-                try:
-                    record = await session.execute_read(_work_apoc)
-                except ClientError as exc:
-                    if exc.code in _NEO4J_TIMEOUT_CODES:
-                        raise
-                    # APOC not available — fall through to fallback
-                    _apoc_failed = True
-                    record = None
-                except Exception:
-                    _apoc_failed = True
-                    record = None
-
-                if _apoc_failed:
-                    record = await session.execute_read(_work_fallback)
+                record = await session.execute_read(_work)
         except ClientError as exc:
             if exc.code in _NEO4J_TIMEOUT_CODES:
                 with trace_span(
@@ -2559,14 +2562,22 @@ RETURN count(r) AS updated
         self,
         entity_ids: list[UUID],
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit_per_entity: int = 20,
     ) -> dict[UUID, dict[str, Any]]:
-        """Get neighborhoods for multiple entities in parallel.
+        """Get neighborhoods for multiple entities in parallel, scoped to
+        ``namespace_id``.
+
+        Seed entities and every node reached during traversal are constrained
+        to ``namespace_id`` so the result never crosses into another
+        namespace (IGR-223).
 
         Args:
             entity_ids: List of entity IDs
+            namespace_id: Caller's namespace; seeds in any other namespace
+                are silently dropped, and traversal never crosses out.
             depth: Max traversal depth
             relationship_types: Optional relationship type filter
             limit_per_entity: Max nodes per entity neighborhood
@@ -2584,21 +2595,23 @@ RETURN count(r) AS updated
         if relationship_types:
             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
-        # Use UNWIND to process all entities in a single query.
-        # Project relationship properties in Cypher: [r*1..N] binds a list
-        # of relationships per path, so collect(r) yields list-of-lists.
-        # Projecting via list comprehension avoids raw Relationship objects
-        # that serialize as opaque tuples.
+        # UNWIND seeds, expand only nodes that share namespace_id. Both the
+        # center and every node hit during traversal must be in $namespace_id.
         query = f"""
         UNWIND $entity_ids AS eid
-        MATCH (center:Entity {{id: eid}})
-        OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity)
+        MATCH (center:Entity {{id: eid, namespace_id: $namespace_id}})
+        OPTIONAL MATCH (center)-[r{rel_filter}*1..{depth}]-(other:Entity {{namespace_id: $namespace_id}})
         With eid, center, collect(DISTINCT other)[0..$limit] as neighbors, collect(DISTINCT [rel IN r | {{props: properties(rel), type: type(rel)}}])[0..$limit] as rels
         RETURN eid, neighbors, rels
         """
 
         async def _work(tx):
-            result = await tx.run(query, entity_ids=id_strings, limit=limit_per_entity)
+            result = await tx.run(
+                query,
+                entity_ids=id_strings,
+                namespace_id=str(namespace_id),
+                limit=limit_per_entity,
+            )
             return await result.data()
 
         if self._timed_unit_of_work is not None:

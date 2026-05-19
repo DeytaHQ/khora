@@ -176,15 +176,25 @@ class SQLiteLanceEventStoreAdapter:
         resource_type: str,
         resource_id: UUID,
         *,
+        namespace_id: UUID,
         limit: int = 100,
     ) -> list[MemoryEvent]:
-        """Return all events for a specific resource, newest first."""
+        """Return all events for a specific resource, newest first.
+
+        Scoped to ``namespace_id`` so cross-tenant audit-log access is
+        impossible (IGR-221 / IGR-223 family). Returns an empty list when
+        the resource belongs to a different namespace.
+        """
         sql = (
             f"{_SELECT} WHERE resource_type = ? AND resource_id = ? "  # noqa: S608
+            "AND namespace_id = ? "
             "ORDER BY timestamp DESC LIMIT ?"
         )
         conn = self._handle.sqlite
-        async with conn.execute(sql, (resource_type, uuid_to_text(resource_id), limit)) as cursor:
+        async with conn.execute(
+            sql,
+            (resource_type, uuid_to_text(resource_id), uuid_to_text(namespace_id), limit),
+        ) as cursor:
             rows = await cursor.fetchall()
         return [self._row_to_event(r) for r in rows]
 
@@ -192,14 +202,22 @@ class SQLiteLanceEventStoreAdapter:
         self,
         resource_type: str,
         resource_id: UUID,
+        *,
+        namespace_id: UUID,
     ) -> MemoryEvent | None:
-        """Return the most recent event for the given resource, or None."""
+        """Return the most recent event for the given resource, or None.
+
+        Scoped to ``namespace_id`` so cross-tenant audit-log access is
+        impossible (IGR-221 / IGR-223 family). Returns ``None`` when the
+        resource belongs to a different namespace.
+        """
         sql = (
             f"{_SELECT} WHERE resource_type = ? AND resource_id = ? "  # noqa: S608
+            "AND namespace_id = ? "
             "ORDER BY timestamp DESC LIMIT 1"
         )
         conn = self._handle.sqlite
-        async with conn.execute(sql, (resource_type, uuid_to_text(resource_id))) as cursor:
+        async with conn.execute(sql, (resource_type, uuid_to_text(resource_id), uuid_to_text(namespace_id))) as cursor:
             row = await cursor.fetchone()
         if row is None:
             return None

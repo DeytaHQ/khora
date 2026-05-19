@@ -19,6 +19,12 @@ import pytest
 from khora.core.models import Entity, Episode, Relationship
 from khora.storage.backends.age import AGEBackend
 
+# IGR-221/223: read-side methods now require a kwarg-only ``namespace_id`` so
+# the backend can scope every match to the caller's tenant.  Tests use this
+# fixed UUID rather than a fresh ``uuid4()`` per call so assertions against the
+# generated Cypher can pin the embedded literal.
+_NS = uuid4()
+
 # ---------------------------------------------------------------------------
 # Mock session plumbing
 # ---------------------------------------------------------------------------
@@ -356,7 +362,7 @@ async def test_create_entity_builds_cypher_and_returns_entity() -> None:
 async def test_get_entity_returns_none_when_no_rows() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    out = await b.get_entity(uuid4())
+    out = await b.get_entity(uuid4(), namespace_id=_NS)
     assert out is None
 
 
@@ -447,7 +453,7 @@ async def test_create_relationship_returns_input_and_sanitizes_label() -> None:
 async def test_get_relationship_none_when_no_rows() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    assert await b.get_relationship(uuid4()) is None
+    assert await b.get_relationship(uuid4(), namespace_id=_NS) is None
 
 
 @pytest.mark.unit
@@ -461,25 +467,30 @@ async def test_delete_relationship_false_when_no_rows() -> None:
 @pytest.mark.parametrize(
     "direction,expected_fragment",
     [
-        ("outgoing", "(e)-[r"),
-        ("incoming", "(other)-[r"),
-        ("both", "(e)-[r"),
+        # IGR-223: patterns now embed ``{namespace_id: '<uuid>'}`` on every
+        # node, so the bare ``(e)-[r`` form no longer appears.  Each fragment
+        # below is the smallest substring unique to the chosen direction.
+        ("outgoing", "]->(other:Entity"),
+        ("incoming", "]->(e:Entity"),
+        ("both", "]-(other:Entity"),
     ],
 )
 async def test_get_entity_relationships_direction(direction: str, expected_fragment: str) -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    out = await b.get_entity_relationships(uuid4(), direction=direction)
+    out = await b.get_entity_relationships(uuid4(), namespace_id=_NS, direction=direction)
     assert out == []
     assembled = [str(call.args[0]) for call in session.execute.await_args_list]
     assert any(expected_fragment in sql for sql in assembled)
+    # And the per-tenant namespace literal appears on the pattern.
+    assert any(f"namespace_id: '{_NS}'" in sql for sql in assembled)
 
 
 @pytest.mark.unit
 async def test_get_entity_relationships_with_rel_types_join() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    await b.get_entity_relationships(uuid4(), relationship_types=["knows", "WORKS_AT"])
+    await b.get_entity_relationships(uuid4(), namespace_id=_NS, relationship_types=["knows", "WORKS_AT"])
     assembled = [str(call.args[0]) for call in session.execute.await_args_list]
     assert any("knows|WORKS_AT" in sql for sql in assembled)
 
@@ -533,7 +544,7 @@ async def test_create_episode_with_entity_ids_emits_involves() -> None:
 async def test_get_episode_none_when_no_rows() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    assert await b.get_episode(uuid4()) is None
+    assert await b.get_episode(uuid4(), namespace_id=_NS) is None
 
 
 @pytest.mark.unit
@@ -586,7 +597,7 @@ async def test_find_paths_with_rel_filter_and_depth() -> None:
 async def test_get_neighborhood_empty() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    result = await b.get_neighborhood(uuid4())
+    result = await b.get_neighborhood(uuid4(), namespace_id=_NS)
     assert result == {"entities": [], "relationships": []}
 
 
@@ -594,7 +605,7 @@ async def test_get_neighborhood_empty() -> None:
 async def test_get_neighborhood_with_rel_types() -> None:
     session = _make_session(rows=[])
     b = _connected_backend(session)
-    await b.get_neighborhood(uuid4(), relationship_types=["RELATES"], depth=3)
+    await b.get_neighborhood(uuid4(), namespace_id=_NS, relationship_types=["RELATES"], depth=3)
     assembled = [str(call.args[0]) for call in session.execute.await_args_list]
     assert any(":RELATES" in sql for sql in assembled)
     assert any("*1..3" in sql for sql in assembled)
@@ -633,7 +644,7 @@ async def test_get_neighborhood_with_nested_relationship_lists() -> None:
         ]
     )
     b = _connected_backend(session)
-    result = await b.get_neighborhood(uuid4())
+    result = await b.get_neighborhood(uuid4(), namespace_id=_NS)
     # 1 node, 2 flattened relationships.
     assert isinstance(result, dict)
     assert "entities" in result and "relationships" in result
@@ -647,6 +658,6 @@ async def test_get_neighborhood_with_non_list_nodes_falls_back_to_empty() -> Non
     """When the parsed value for ``nodes`` isn't a list, default to ``[]``."""
     session = _make_session(rows=[("not-a-list-just-a-string", '"also-not-a-list"')])
     b = _connected_backend(session)
-    result = await b.get_neighborhood(uuid4())
+    result = await b.get_neighborhood(uuid4(), namespace_id=_NS)
     assert result["entities"] == []
     assert result["relationships"] == []

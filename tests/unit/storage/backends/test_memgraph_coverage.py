@@ -20,6 +20,12 @@ from khora.config.schema import MemgraphConfig
 from khora.core.models import Entity, Episode, Relationship
 from khora.storage.backends.memgraph import MemgraphBackend
 
+# IGR-221/223: read-side methods now require a kwarg-only ``namespace_id`` so
+# the backend can scope every Cypher MATCH to the caller's tenant.  Tests use
+# this fixed UUID across the file so assertions against the generated query
+# parameters can pin the value.
+_NS = uuid4()
+
 # ---------------------------------------------------------------------------
 # Mock driver / session plumbing
 # ---------------------------------------------------------------------------
@@ -378,7 +384,7 @@ async def test_create_entity_sends_expected_params() -> None:
 async def test_get_entity_returns_none_when_missing() -> None:
     session = _make_session_with_records(single=None)
     b = _connected_backend(session)
-    got = await b.get_entity(uuid4())
+    got = await b.get_entity(uuid4(), namespace_id=_NS)
     assert got is None
 
 
@@ -387,7 +393,7 @@ async def test_get_entity_returns_domain_model() -> None:
     node = _entity_node()
     session = _make_session_with_records(single={"e": node})
     b = _connected_backend(session)
-    got = await b.get_entity(UUID(node["id"]))
+    got = await b.get_entity(UUID(node["id"]), namespace_id=UUID(node["namespace_id"]))
     assert got is not None
     assert got.name == "Alice"
 
@@ -414,7 +420,7 @@ async def test_get_entity_by_name_returns_entity() -> None:
 async def test_get_entities_batch_empty_short_circuits() -> None:
     session = _make_session_with_records()
     b = _connected_backend(session)
-    result = await b.get_entities_batch([])
+    result = await b.get_entities_batch([], namespace_id=_NS)
     assert result == {}
     session.run.assert_not_called()
 
@@ -424,7 +430,7 @@ async def test_get_entities_batch_returns_mapping() -> None:
     node = _entity_node()
     session = _make_session_with_records(records=[{"e": node}])
     b = _connected_backend(session)
-    result = await b.get_entities_batch([UUID(node["id"])])
+    result = await b.get_entities_batch([UUID(node["id"])], namespace_id=UUID(node["namespace_id"]))
     assert UUID(node["id"]) in result
 
 
@@ -525,7 +531,7 @@ async def test_create_relationship_sanitizes_label() -> None:
 async def test_get_relationship_returns_none_when_missing() -> None:
     session = _make_session_with_records(single=None)
     b = _connected_backend(session)
-    got = await b.get_relationship(uuid4())
+    got = await b.get_relationship(uuid4(), namespace_id=_NS)
     assert got is None
 
 
@@ -553,7 +559,7 @@ async def test_get_relationship_returns_domain_model() -> None:
         }
     )
     b = _connected_backend(session)
-    got = await b.get_relationship(uuid4())
+    got = await b.get_relationship(uuid4(), namespace_id=_NS)
     assert got is not None
     assert got.relationship_type == "KNOWS"
 
@@ -576,25 +582,30 @@ async def test_delete_relationship_false_when_missing() -> None:
 @pytest.mark.parametrize(
     "direction,expected_fragment",
     [
-        ("outgoing", "(e)-[r"),
-        ("incoming", "(other)-[r"),
-        ("both", "(e)-[r"),
+        # IGR-223: each pattern node carries ``{namespace_id: $namespace_id}``
+        # so the legacy ``(e)-[r`` form no longer appears.  Pin on the direction
+        # arrow instead.
+        ("outgoing", "]->(other:Entity"),
+        ("incoming", "]->(e:Entity"),
+        ("both", "]-(other:Entity"),
     ],
 )
 async def test_get_entity_relationships_direction_pattern(direction: str, expected_fragment: str) -> None:
     session = _make_session_with_records(records=[])
     b = _connected_backend(session)
-    out = await b.get_entity_relationships(uuid4(), direction=direction)
+    out = await b.get_entity_relationships(uuid4(), namespace_id=_NS, direction=direction)
     assert out == []
     cypher = session.run.await_args.args[0]
     assert expected_fragment in cypher
+    # Bound parameter carries the per-tenant namespace.
+    assert session.run.await_args.kwargs.get("namespace_id") == str(_NS)
 
 
 @pytest.mark.unit
 async def test_get_entity_relationships_rel_type_filter() -> None:
     session = _make_session_with_records(records=[])
     b = _connected_backend(session)
-    await b.get_entity_relationships(uuid4(), relationship_types=["likes", "KNOWS"])
+    await b.get_entity_relationships(uuid4(), namespace_id=_NS, relationship_types=["likes", "KNOWS"])
     cypher = session.run.await_args.args[0]
     # Both labels sanitized and joined with |
     assert "LIKES" in cypher
@@ -653,7 +664,7 @@ async def test_create_episode_with_entity_ids_emits_involves() -> None:
 async def test_get_episode_returns_none_when_missing() -> None:
     session = _make_session_with_records(single=None)
     b = _connected_backend(session)
-    got = await b.get_episode(uuid4())
+    got = await b.get_episode(uuid4(), namespace_id=_NS)
     assert got is None
 
 
@@ -675,7 +686,7 @@ async def test_get_episode_returns_domain_model() -> None:
     }
     session = _make_session_with_records(single={"ep": ep_node})
     b = _connected_backend(session)
-    got = await b.get_episode(UUID(ep_node["id"]))
+    got = await b.get_episode(UUID(ep_node["id"]), namespace_id=UUID(ep_node["namespace_id"]))
     assert got is not None
     assert got.name == "ep"
 
@@ -737,7 +748,7 @@ async def test_find_paths_with_rel_filter() -> None:
 async def test_get_neighborhood_empty() -> None:
     session = _make_session_with_records(single={"nodes": [], "relationships": []})
     b = _connected_backend(session)
-    result = await b.get_neighborhood(uuid4(), depth=2)
+    result = await b.get_neighborhood(uuid4(), namespace_id=_NS, depth=2)
     assert result == {"entities": [], "relationships": []}
 
 
@@ -745,7 +756,7 @@ async def test_get_neighborhood_empty() -> None:
 async def test_get_neighborhood_returns_none_record() -> None:
     session = _make_session_with_records(single=None)
     b = _connected_backend(session)
-    result = await b.get_neighborhood(uuid4())
+    result = await b.get_neighborhood(uuid4(), namespace_id=_NS)
     assert result == {"entities": [], "relationships": []}
 
 
@@ -753,7 +764,7 @@ async def test_get_neighborhood_returns_none_record() -> None:
 async def test_get_neighborhood_with_rel_types() -> None:
     session = _make_session_with_records(single={"nodes": [], "relationships": []})
     b = _connected_backend(session)
-    await b.get_neighborhood(uuid4(), relationship_types=["likes"])
+    await b.get_neighborhood(uuid4(), namespace_id=_NS, relationship_types=["likes"])
     cypher = session.run.await_args.args[0]
     assert ":LIKES" in cypher
 

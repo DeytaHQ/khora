@@ -118,7 +118,7 @@ class ChatEngine:
                     source = doc_cache[doc_id_str]
                 else:
                     try:
-                        doc = await self.khora.get_document(chunk.document_id)
+                        doc = await self.khora.get_document(chunk.document_id, namespace=namespace_id)
                         if doc:
                             source = (doc.metadata or {}).get("source_system", "")
                             if not source:

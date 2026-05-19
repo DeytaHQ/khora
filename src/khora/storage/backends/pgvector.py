@@ -816,25 +816,43 @@ class PgVectorBackend(AsyncSessionMixin):
             await session.execute(stmt)
             await session.commit()
 
-    async def get_entity(self, entity_id: UUID):
-        """Get an entity by ID from PostgreSQL."""
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID):
+        """Get an entity by ID from PostgreSQL, scoped to ``namespace_id``.
+
+        Returns ``None`` if the entity does not exist OR belongs to a
+        different namespace. Prevents cross-tenant entity access by id
+        (IDOR — IGR-223).
+        """
         async with self._get_session() as session:
-            result = await session.execute(select(EntityModel).where(EntityModel.id == entity_id))
+            result = await session.execute(
+                select(EntityModel).where(
+                    EntityModel.id == entity_id,
+                    EntityModel.namespace_id == namespace_id,
+                )
+            )
             model = result.scalar_one_or_none()
             if model is None:
                 return None
             return self._entity_model_to_domain(model)
 
-    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict:
-        """Fetch multiple entities by ID from pgvector storage.
+    async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict:
+        """Fetch multiple entities by ID from pgvector storage, scoped to ``namespace_id``.
 
         Provides a pgvector-backed fallback for Chronicle (which has no graph
         backend) so the entity co-occurrence channel can resolve entities.
+
+        Entities belonging to any other namespace are silently dropped from
+        the result to prevent cross-tenant IDOR (IGR-223).
         """
         if not entity_ids:
             return {}
         async with self._get_session() as session:
-            result = await session.execute(select(EntityModel).where(EntityModel.id.in_(entity_ids)))
+            result = await session.execute(
+                select(EntityModel).where(
+                    EntityModel.id.in_(entity_ids),
+                    EntityModel.namespace_id == namespace_id,
+                )
+            )
             return {model.id: self._entity_model_to_domain(model) for model in result.scalars()}
 
     async def get_entities_by_names_batch(self, namespace_id: UUID, names: list[str]) -> dict:
@@ -864,10 +882,20 @@ class PgVectorBackend(AsyncSessionMixin):
                     out[model.name] = self._entity_model_to_domain(model)
             return out
 
-    async def entity_exists(self, entity_id: UUID) -> bool:
-        """Check if an entity exists in PostgreSQL."""
+    async def entity_exists(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Check if an entity exists in PostgreSQL within ``namespace_id``.
+
+        Returns ``False`` if the entity does not exist OR belongs to a
+        different namespace. Prevents cross-tenant entity-existence
+        enumeration (IDOR — IGR-221).
+        """
         async with self._get_session() as session:
-            result = await session.execute(select(func.count(EntityModel.id)).where(EntityModel.id == entity_id))
+            result = await session.execute(
+                select(func.count(EntityModel.id)).where(
+                    EntityModel.id == entity_id,
+                    EntityModel.namespace_id == namespace_id,
+                )
+            )
             return result.scalar_one() > 0
 
     def _entity_model_to_domain(self, model: EntityModel):

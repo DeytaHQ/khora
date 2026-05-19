@@ -197,18 +197,20 @@ class TestChronicleEngineForget:
     @pytest.mark.asyncio
     async def test_forget_namespace_mismatch_skips_cascade(self, connected_engine: ChronicleEngine) -> None:
         """When the caller-supplied namespace does not match the document's,
-        forget short-circuits to False BEFORE the cascade runs."""
+        forget short-circuits to False BEFORE the cascade runs.
+
+        IGR-221: namespace mismatch is now enforced at the SQL layer —
+        ``storage.get_document(doc_id, namespace_id=wrong_ns)`` just returns
+        ``None`` and the engine bails."""
         doc_id = uuid4()
         namespace_id = uuid4()
-        wrong_namespace = uuid4()
 
-        doc_mock = MagicMock()
-        doc_mock.namespace_id = wrong_namespace
-        connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
+        connected_engine._storage.get_document = AsyncMock(return_value=None)
 
         result = await connected_engine.forget(doc_id, namespace_id)
 
         assert result is False
+        connected_engine._storage.get_document.assert_awaited_once_with(doc_id, namespace_id=namespace_id)
         connected_engine._storage.graph.fetch_document_extraction_state.assert_not_called()
         connected_engine._storage.graph.delete_entities_batch.assert_not_called()
         connected_engine._storage.delete_document.assert_not_called()

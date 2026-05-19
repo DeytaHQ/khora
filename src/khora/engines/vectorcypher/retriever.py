@@ -1462,7 +1462,9 @@ class VectorCypherRetriever:
                 rels = []
                 for eid in entity_ids_to_fetch[:10]:
                     try:
-                        entity_rels = await self._storage.graph.get_entity_relationships(eid, limit=20)
+                        entity_rels = await self._storage.graph.get_entity_relationships(
+                            eid, namespace_id=namespace_id, limit=20
+                        )
                         for r in entity_rels:
                             rels.append(
                                 {
@@ -1484,7 +1486,7 @@ class VectorCypherRetriever:
 
         if entity_ids_to_fetch and self._storage:
             try:
-                entities_map = await self._storage.get_entities_batch(entity_ids_to_fetch)
+                entities_map = await self._storage.get_entities_batch(entity_ids_to_fetch, namespace_id=namespace_id)
                 for eid, score in all_entity_scores:
                     if eid in entities_map:
                         entity_results.append((entities_map[eid], score))
@@ -2454,7 +2456,7 @@ class VectorCypherRetriever:
                 # SurrealDB fallback: get chunks via entity source_chunk_ids
                 chunk_records = []
                 try:
-                    entities_map = await self._storage.get_entities_batch(entity_ids)
+                    entities_map = await self._storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
                     all_chunk_ids: list[UUID] = []
                     for entity in entities_map.values():
                         all_chunk_ids.extend(entity.source_chunk_ids[:5])

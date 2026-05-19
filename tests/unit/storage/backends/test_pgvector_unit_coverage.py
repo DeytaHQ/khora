@@ -378,7 +378,7 @@ class TestSessionBackedReads:
         result.scalar_one = MagicMock(return_value=1)
         session.execute = AsyncMock(return_value=result)
         b = _backend_with_session(session)
-        assert await b.entity_exists(uuid4()) is True
+        assert await b.entity_exists(uuid4(), namespace_id=uuid4()) is True
 
     @pytest.mark.asyncio
     async def test_entity_exists_false(self) -> None:
@@ -387,7 +387,57 @@ class TestSessionBackedReads:
         result.scalar_one = MagicMock(return_value=0)
         session.execute = AsyncMock(return_value=result)
         b = _backend_with_session(session)
-        assert await b.entity_exists(uuid4()) is False
+        assert await b.entity_exists(uuid4(), namespace_id=uuid4()) is False
+
+    @pytest.mark.asyncio
+    async def test_entity_exists_requires_namespace_kwarg(self) -> None:
+        """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+        b = _backend_with_session(AsyncMock())
+        with pytest.raises(TypeError):
+            await b.entity_exists(uuid4())  # type: ignore[call-arg]
+
+    @pytest.mark.asyncio
+    async def test_entity_exists_wrong_namespace_returns_false(self) -> None:
+        """Cross-namespace lookups return False — verified by the SQL filter
+        producing a zero count."""
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalar_one = MagicMock(return_value=0)
+        session.execute = AsyncMock(return_value=result)
+        b = _backend_with_session(session)
+        assert await b.entity_exists(uuid4(), namespace_id=uuid4()) is False
+
+    @pytest.mark.asyncio
+    async def test_get_entity_requires_namespace_kwarg(self) -> None:
+        b = _backend_with_session(AsyncMock())
+        with pytest.raises(TypeError):
+            await b.get_entity(uuid4())  # type: ignore[call-arg]
+
+    @pytest.mark.asyncio
+    async def test_get_entity_wrong_namespace_returns_none(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=None)
+        session.execute = AsyncMock(return_value=result)
+        b = _backend_with_session(session)
+        assert await b.get_entity(uuid4(), namespace_id=uuid4()) is None
+
+    @pytest.mark.asyncio
+    async def test_get_entities_batch_requires_namespace_kwarg(self) -> None:
+        b = _backend_with_session(AsyncMock())
+        with pytest.raises(TypeError):
+            await b.get_entities_batch([uuid4()])  # type: ignore[call-arg]
+
+    @pytest.mark.asyncio
+    async def test_get_entities_batch_wrong_namespace_returns_empty(self) -> None:
+        """SQL filter drops cross-namespace rows — mock returns no models."""
+        session = AsyncMock()
+        result = MagicMock()
+        result.scalars = MagicMock(return_value=[])
+        session.execute = AsyncMock(return_value=result)
+        b = _backend_with_session(session)
+        out = await b.get_entities_batch([uuid4()], namespace_id=uuid4())
+        assert out == {}
 
     @pytest.mark.asyncio
     async def test_get_embedding_stats(self) -> None:
@@ -438,7 +488,7 @@ class TestEmptyShortCircuits:
     @pytest.mark.asyncio
     async def test_get_entities_batch_empty(self) -> None:
         b = _backend()
-        assert await b.get_entities_batch([]) == {}
+        assert await b.get_entities_batch([], namespace_id=uuid4()) == {}
 
     @pytest.mark.asyncio
     async def test_get_entities_by_names_batch_empty(self) -> None:

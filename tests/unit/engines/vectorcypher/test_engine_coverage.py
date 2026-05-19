@@ -508,10 +508,11 @@ class TestPassthroughOperations:
     async def test_get_document(self) -> None:
         engine = _make_connected_engine()
         doc_id = uuid4()
+        ns_id = uuid4()
         engine._storage.get_document = AsyncMock(return_value=None)
-        result = await engine.get_document(doc_id)
+        result = await engine.get_document(doc_id, namespace_id=ns_id)
         assert result is None
-        engine._storage.get_document.assert_awaited_once_with(doc_id)
+        engine._storage.get_document.assert_awaited_once_with(doc_id, namespace_id=ns_id)
 
     @pytest.mark.asyncio
     async def test_list_documents(self) -> None:

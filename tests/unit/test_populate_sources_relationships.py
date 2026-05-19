@@ -80,7 +80,7 @@ class TestPopulateSourcesRelationships:
         src = DocumentSource(id=doc_id, title="Contract")
         kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id: src})
 
-        await kb._populate_sources([], [], [(rel, 0.8)])
+        await kb._populate_sources([], [], [(rel, 0.8)], namespace_id=ns_id)
 
         assert rel.source_documents == {doc_id: src}
         kb._engine._storage.get_document_sources_batch.assert_awaited_once()
@@ -101,7 +101,7 @@ class TestPopulateSourcesRelationships:
         # No doc IDs to fetch → get_document_sources_batch should not be called
         kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={})
 
-        await kb._populate_sources([], [], [(rel, 0.5)])
+        await kb._populate_sources([], [], [(rel, 0.5)], namespace_id=uuid4())
 
         assert rel.source_documents is None
         kb._engine._storage.get_document_sources_batch.assert_not_awaited()
@@ -113,7 +113,7 @@ class TestPopulateSourcesRelationships:
         kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={})
 
         # Should not raise
-        await kb._populate_sources([], [], [])
+        await kb._populate_sources([], [], [], namespace_id=uuid4())
 
         kb._engine._storage.get_document_sources_batch.assert_not_awaited()
 
@@ -148,7 +148,7 @@ class TestPopulateSourcesRelationships:
             return_value={doc_id_1: src_1, doc_id_2: src_2, doc_id_3: src_3}
         )
 
-        await kb._populate_sources([(chunk, 0.9)], [(entity, 0.8)], [(rel, 0.7)])
+        await kb._populate_sources([(chunk, 0.9)], [(entity, 0.8)], [(rel, 0.7)], namespace_id=ns_id)
 
         assert chunk.source_document is src_1
         assert entity.source_documents == {doc_id_2: src_2}

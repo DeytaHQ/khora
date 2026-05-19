@@ -650,19 +650,20 @@ class SkeletonConstructionEngine:
         storage = self._get_storage()
         temporal_store = self._get_temporal_store()
 
-        # Fetch document once and verify namespace if provided
-        document = await storage.get_document(document_id)
-        if namespace_id:
-            if document and document.namespace_id != namespace_id:
-                logger.warning(f"Document {document_id} not in namespace {namespace_id}")
-                return False
+        # namespace_id is required for IDOR-safe lookup (IGR-221). Callers
+        # going through Khora.forget always resolve it before calling here;
+        # bail loudly rather than allow a cross-tenant id probe.
+        if namespace_id is None:
+            logger.warning(f"Cannot forget document {document_id}: namespace_id is required")
+            return False
+
+        # Verify the document exists in this namespace before doing any work.
+        document = await storage.get_document(document_id, namespace_id=namespace_id)
+        if document is None:
+            return False
 
         # Delete from temporal store
-        ns_id = namespace_id or (document.namespace_id if document else namespace_id)
-        if ns_id is None:
-            logger.warning(f"Cannot determine namespace for document {document_id}")
-            return False
-        await temporal_store.delete_chunks_by_document(document_id, ns_id)
+        await temporal_store.delete_chunks_by_document(document_id, namespace_id)
 
         # Delete from relational storage
         return await storage.delete_document(document_id)
@@ -1044,9 +1045,9 @@ class SkeletonConstructionEngine:
     # Document Operations
     # =========================================================================
 
-    async def get_document(self, document_id: UUID) -> Document | None:
-        """Get a document by ID."""
-        return await self._get_storage().get_document(document_id)
+    async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
+        """Get a document by ID, scoped to ``namespace_id`` (IGR-221)."""
+        return await self._get_storage().get_document(document_id, namespace_id=namespace_id)
 
     async def list_documents(
         self,

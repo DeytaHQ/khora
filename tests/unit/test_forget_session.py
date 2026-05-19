@@ -133,7 +133,7 @@ async def test_session_id_roundtrips_through_document(adapter, namespace):
     doc = _make_document(namespace.id, checksum="s1", title="With Session", session_id=sid)
     await adapter.create_document(doc)
 
-    fetched = await adapter.get_document(doc.id)
+    fetched = await adapter.get_document(doc.id, namespace_id=namespace.id)
     assert fetched is not None
     assert fetched.session_id == sid
 
@@ -143,7 +143,7 @@ async def test_session_id_none_when_not_set(adapter, namespace):
     doc = _make_document(namespace.id, checksum="s2", title="No Session")
     await adapter.create_document(doc)
 
-    fetched = await adapter.get_document(doc.id)
+    fetched = await adapter.get_document(doc.id, namespace_id=namespace.id)
     assert fetched is not None
     assert fetched.session_id is None
 

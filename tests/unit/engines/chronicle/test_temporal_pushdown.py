@@ -103,7 +103,7 @@ class _PushdownCoordinator:
         self.search_similar_entities_calls.append({"limit": limit})
         return list(self._entity_search_results)
 
-    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+    async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Entity]:
         return {eid: self._entities[eid] for eid in entity_ids if eid in self._entities}
 
     async def get_chunks_batch(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Chunk]:

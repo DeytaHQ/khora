@@ -141,11 +141,12 @@ class TestDocumentOps:
     async def test_get_document(self) -> None:
         """get_document delegates to relational."""
         doc_id = uuid4()
+        ns_id = uuid4()
         rel = MagicMock()
         rel.get_document = AsyncMock(return_value=None)
         coord = StorageCoordinator(relational=rel)
-        await coord.get_document(doc_id)
-        rel.get_document.assert_awaited_once_with(doc_id)
+        await coord.get_document(doc_id, namespace_id=ns_id)
+        rel.get_document.assert_awaited_once_with(doc_id, namespace_id=ns_id)
 
     @pytest.mark.asyncio
     async def test_update_document(self) -> None:
@@ -439,10 +440,11 @@ class TestRelationshipOps:
     async def test_get_entity_relationships(self) -> None:
         """get_entity_relationships delegates to graph."""
         entity_id = uuid4()
+        ns_id = uuid4()
         graph = MagicMock()
         graph.get_entity_relationships = AsyncMock(return_value=[])
         coord = StorageCoordinator(graph=graph)
-        result = await coord.get_entity_relationships(entity_id)
+        result = await coord.get_entity_relationships(entity_id, namespace_id=ns_id)
         assert result == []
 
     @pytest.mark.asyncio
@@ -492,7 +494,7 @@ class TestGraphOps:
     async def test_get_neighborhood_no_graph(self) -> None:
         """get_neighborhood without graph returns empty structure."""
         coord = StorageCoordinator()
-        result = await coord.get_neighborhood(uuid4())
+        result = await coord.get_neighborhood(uuid4(), namespace_id=uuid4())
         assert result == {"entities": [], "relationships": []}
 
     @pytest.mark.asyncio
@@ -541,21 +543,21 @@ class TestBatchOps:
     async def test_get_entities_batch_empty(self) -> None:
         """Empty entity_ids returns empty dict."""
         coord = StorageCoordinator()
-        result = await coord.get_entities_batch([])
+        result = await coord.get_entities_batch([], namespace_id=uuid4())
         assert result == {}
 
     @pytest.mark.asyncio
     async def test_get_documents_batch_empty(self) -> None:
         """Empty document_ids returns empty dict."""
         coord = StorageCoordinator()
-        result = await coord.get_documents_batch([])
+        result = await coord.get_documents_batch([], namespace_id=uuid4())
         assert result == {}
 
     @pytest.mark.asyncio
     async def test_get_neighborhoods_batch_empty(self) -> None:
         """Empty entity_ids returns empty dict."""
         coord = StorageCoordinator()
-        result = await coord.get_neighborhoods_batch([])
+        result = await coord.get_neighborhoods_batch([], namespace_id=uuid4())
         assert result == {}
 
     @pytest.mark.asyncio
@@ -588,16 +590,17 @@ class TestDocumentSourcesBatch:
         from khora.core.models.document import DocumentSource
 
         doc_id = uuid4()
+        ns_id = uuid4()
         src = DocumentSource(id=doc_id, title="Test Doc")
 
         rel = MagicMock()
         rel.get_document_sources_batch = AsyncMock(return_value={doc_id: src})
 
         coord = StorageCoordinator(relational=rel)
-        result = await coord.get_document_sources_batch([doc_id])
+        result = await coord.get_document_sources_batch([doc_id], namespace_id=ns_id)
 
         assert result == {doc_id: src}
-        rel.get_document_sources_batch.assert_awaited_once_with([doc_id])
+        rel.get_document_sources_batch.assert_awaited_once_with([doc_id], namespace_id=ns_id)
 
     @pytest.mark.asyncio
     async def test_get_document_sources_batch_empty(self) -> None:
@@ -606,7 +609,7 @@ class TestDocumentSourcesBatch:
         rel.get_document_sources_batch = AsyncMock()
 
         coord = StorageCoordinator(relational=rel)
-        result = await coord.get_document_sources_batch([])
+        result = await coord.get_document_sources_batch([], namespace_id=uuid4())
 
         assert result == {}
         rel.get_document_sources_batch.assert_not_awaited()

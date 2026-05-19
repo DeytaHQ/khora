@@ -246,13 +246,15 @@ class MemgraphBackend(GraphBackendBase):
 
         return entity
 
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
+        """Get an entity by ID, scoped to ``namespace_id`` (IGR-223)."""
         driver = self._get_driver()
 
         async with driver.session() as session:
             result = await session.run(
-                "MATCH (e:Entity {id: $id}) RETURN e",
+                "MATCH (e:Entity {id: $id, namespace_id: $namespace_id}) RETURN e",
                 id=str(entity_id),
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             if record:
@@ -278,7 +280,11 @@ class MemgraphBackend(GraphBackendBase):
                 return self._record_to_entity(element_to_dict(record["e"]))
             return None
 
-    async def get_entities_batch(self, entity_ids: list[UUID]) -> dict[UUID, Entity]:
+    async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Entity]:
+        """Fetch multiple entities scoped to ``namespace_id`` (IGR-223).
+
+        Entities in any other namespace are silently dropped from the result.
+        """
         if not entity_ids:
             return {}
 
@@ -289,10 +295,11 @@ class MemgraphBackend(GraphBackendBase):
             result = await session.run(
                 """
                 MATCH (e:Entity)
-                WHERE e.id IN $ids
+                WHERE e.id IN $ids AND e.namespace_id = $namespace_id
                 RETURN e
                 """,
                 ids=id_strings,
+                namespace_id=str(namespace_id),
             )
             records = await result.data()
             return {
@@ -443,16 +450,18 @@ class MemgraphBackend(GraphBackendBase):
 
         return relationship
 
-    async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
+    async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
+        """Get a relationship by ID, scoped to ``namespace_id`` (IGR-223)."""
         driver = self._get_driver()
 
         async with driver.session() as session:
             result = await session.run(
                 """
-                MATCH (source:Entity)-[r {id: $id}]->(target:Entity)
+                MATCH (source:Entity {namespace_id: $namespace_id})-[r {id: $id, namespace_id: $namespace_id}]->(target:Entity {namespace_id: $namespace_id})
                 RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
                 """,
                 id=str(relationship_id),
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             if record:
@@ -483,10 +492,16 @@ class MemgraphBackend(GraphBackendBase):
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         direction: str = "both",
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
+        """Get relationships for an entity, scoped to ``namespace_id`` (IGR-223).
+
+        Both endpoint nodes are constrained to ``namespace_id`` so cross-tenant
+        edges don't surface.
+        """
         driver = self._get_driver()
 
         rel_filter = ""
@@ -495,11 +510,11 @@ class MemgraphBackend(GraphBackendBase):
             rel_filter = ":" + "|".join(sanitized)
 
         if direction == "outgoing":
-            pattern = f"(e)-[r{rel_filter}]->(other)"
+            pattern = f"(e:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]->(other:Entity {{namespace_id: $namespace_id}})"
         elif direction == "incoming":
-            pattern = f"(other)-[r{rel_filter}]->(e)"
+            pattern = f"(other:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]->(e:Entity {{namespace_id: $namespace_id}})"
         else:
-            pattern = f"(e)-[r{rel_filter}]-(other)"
+            pattern = f"(e:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]-(other:Entity {{namespace_id: $namespace_id}})"
 
         query = f"""
         MATCH {pattern}
@@ -509,7 +524,12 @@ class MemgraphBackend(GraphBackendBase):
         """
 
         async with driver.session() as session:
-            result = await session.run(query, entity_id=str(entity_id), limit=limit)
+            result = await session.run(
+                query,
+                entity_id=str(entity_id),
+                namespace_id=str(namespace_id),
+                limit=limit,
+            )
             records = await result.data()
             return [
                 self._record_to_relationship(element_to_dict(r["r"]), r["source_id"], r["target_id"], r["rel_type"])
@@ -602,13 +622,15 @@ class MemgraphBackend(GraphBackendBase):
 
         return episode
 
-    async def get_episode(self, episode_id: UUID) -> Episode | None:
+    async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
+        """Get an episode by ID, scoped to ``namespace_id`` (IGR-223)."""
         driver = self._get_driver()
 
         async with driver.session() as session:
             result = await session.run(
-                "MATCH (ep:Episode {id: $id}) RETURN ep",
+                "MATCH (ep:Episode {id: $id, namespace_id: $namespace_id}) RETURN ep",
                 id=str(episode_id),
+                namespace_id=str(namespace_id),
             )
             record = await result.single()
             if record:
@@ -667,10 +689,12 @@ class MemgraphBackend(GraphBackendBase):
             sanitized = [sanitize_cypher_label(rt) for rt in relationship_types]
             rel_filter = ":" + "|".join(sanitized)
 
-        # Memgraph supports BFS shortest path
+        # Memgraph supports BFS shortest path. All nodes — endpoints and
+        # intermediates — must share ``namespace_id`` so the traversal never
+        # crosses tenants (IGR-223).
         query = f"""
-        MATCH path = (source:Entity {{id: $source_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id}})
-        WHERE source.namespace_id = $namespace_id AND target.namespace_id = $namespace_id
+        MATCH path = (source:Entity {{id: $source_id, namespace_id: $namespace_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id, namespace_id: $namespace_id}})
+        WHERE ALL(n IN nodes(path) WHERE n.namespace_id = $namespace_id)
         RETURN path
         LIMIT 10
         """
@@ -702,10 +726,16 @@ class MemgraphBackend(GraphBackendBase):
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
+        """Get the neighborhood of an entity, scoped to ``namespace_id`` (IGR-223).
+
+        Seed and every node reached during traversal are constrained to
+        ``namespace_id`` so the result never crosses into another namespace.
+        """
         driver = self._get_driver()
 
         rel_filter = ""
@@ -713,15 +743,21 @@ class MemgraphBackend(GraphBackendBase):
             sanitized = [sanitize_cypher_label(rt) for rt in relationship_types]
             rel_filter = ":" + "|".join(sanitized)
 
-        # Pure Cypher — no APOC needed
+        # Pure Cypher — no APOC needed. Center and every expanded node must
+        # share ``namespace_id``.
         query = f"""
-        MATCH (center:Entity {{id: $entity_id}})-[r{rel_filter}*1..{depth}]-(other:Entity)
+        MATCH (center:Entity {{id: $entity_id, namespace_id: $namespace_id}})-[r{rel_filter}*1..{depth}]-(other:Entity {{namespace_id: $namespace_id}})
         RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
         LIMIT $limit
         """
 
         async with driver.session() as session:
-            result = await session.run(query, entity_id=str(entity_id), limit=limit)
+            result = await session.run(
+                query,
+                entity_id=str(entity_id),
+                namespace_id=str(namespace_id),
+                limit=limit,
+            )
             record = await result.single()
 
             if record:

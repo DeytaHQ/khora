@@ -290,9 +290,13 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         await self._conn.commit()
         return entity
 
-    async def get_entity(self, entity_id: UUID) -> Entity | None:
-        sql = f"SELECT {_ENTITY_COLUMNS} FROM entities WHERE id = ? LIMIT 1"  # noqa: S608
-        async with self._conn.execute(sql, (uuid_to_text(entity_id),)) as cur:
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
+        """Get an entity by ID, scoped to ``namespace_id`` (IGR-223)."""
+        sql = (
+            f"SELECT {_ENTITY_COLUMNS} FROM entities "  # noqa: S608
+            "WHERE id = ? AND namespace_id = ? LIMIT 1"
+        )
+        async with self._conn.execute(sql, (uuid_to_text(entity_id), uuid_to_text(namespace_id))) as cur:
             row = await cur.fetchone()
         return _row_to_entity(row) if row else None
 
@@ -456,9 +460,13 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         relationship.relationship_type = sanitize_cypher_label(relationship.relationship_type or "RELATES_TO")
         return relationship
 
-    async def get_relationship(self, relationship_id: UUID) -> Relationship | None:
-        sql = f"SELECT {_RELATIONSHIP_COLUMNS} FROM relationships WHERE id = ? LIMIT 1"  # noqa: S608
-        async with self._conn.execute(sql, (uuid_to_text(relationship_id),)) as cur:
+    async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
+        """Get a relationship by ID, scoped to ``namespace_id`` (IGR-223)."""
+        sql = (
+            f"SELECT {_RELATIONSHIP_COLUMNS} FROM relationships "  # noqa: S608
+            "WHERE id = ? AND namespace_id = ? LIMIT 1"
+        )
+        async with self._conn.execute(sql, (uuid_to_text(relationship_id), uuid_to_text(namespace_id))) as cur:
             row = await cur.fetchone()
         return _row_to_relationship(row) if row else None
 
@@ -474,20 +482,28 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         direction: str = "both",
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
+        """Get relationships for an entity, scoped to ``namespace_id`` (IGR-223).
+
+        ``relationships.namespace_id`` is filtered directly. Since edges in
+        this schema are owned by a single namespace, this excludes any cross-
+        tenant edges from the result.
+        """
         eid = uuid_to_text(entity_id)
+        ns = uuid_to_text(namespace_id)
         if direction == "outgoing":
-            where = "source_entity_id = ?"
-            params: list[Any] = [eid]
+            where = "source_entity_id = ? AND namespace_id = ?"
+            params: list[Any] = [eid, ns]
         elif direction == "incoming":
-            where = "target_entity_id = ?"
-            params = [eid]
+            where = "target_entity_id = ? AND namespace_id = ?"
+            params = [eid, ns]
         else:
-            where = "(source_entity_id = ? OR target_entity_id = ?)"
-            params = [eid, eid]
+            where = "(source_entity_id = ? OR target_entity_id = ?) AND namespace_id = ?"
+            params = [eid, eid, ns]
 
         if relationship_types:
             placeholders = ", ".join("?" for _ in relationship_types)
@@ -694,23 +710,27 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         self,
         entity_id: UUID,
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit: int = 50,
         prefer_current: bool = False,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Get the outbound+inbound neighborhood of an entity up to ``depth``.
+        """Get the outbound+inbound neighborhood of an entity up to ``depth``,
+        scoped to ``namespace_id`` (IGR-223).
 
-        Uses a single recursive CTE that expands both directions.
-        Returns ``{"entities": [...], "relationships": [...]}`` with
-        Entity / Relationship domain objects.
+        Uses a single recursive CTE that expands both directions. Every hop
+        is constrained to ``namespace_id`` so the traversal never crosses
+        into another namespace. Returns ``{"entities": [...], "relationships": [...]}``
+        with Entity / Relationship domain objects.
 
         See :meth:`get_neighborhoods_batch` for the semantics of
         ``prefer_current`` / ``now``.
         """
         result = await self.get_neighborhoods_batch(
             [entity_id],
+            namespace_id=namespace_id,
             depth=depth,
             relationship_types=relationship_types,
             limit_per_entity=limit,
@@ -723,17 +743,25 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         self,
         entity_ids: list[UUID],
         *,
+        namespace_id: UUID,
         depth: int = 1,
         relationship_types: list[str] | None = None,
         limit_per_entity: int = 20,
         prefer_current: bool = False,
         now: datetime | None = None,
     ) -> dict[UUID, dict[str, Any]]:
-        """Batch neighborhood expansion using a single recursive CTE.
+        """Batch neighborhood expansion using a single recursive CTE,
+        scoped to ``namespace_id`` (IGR-223).
 
         Overrides :meth:`GraphBackendBase.get_neighborhoods_batch` to
         avoid the default N+1 loop.  All entity seeds are expanded in
         one query; results are partitioned per seed on return.
+
+        Every hop of the recursive CTE — anchor and recursive — adds
+        ``r.namespace_id = ?`` so the traversal never visits an edge in
+        another namespace. The seed entities are also filtered against
+        ``namespace_id`` after the walk to drop any whose row was deleted
+        or never belonged to the caller.
 
         When ``prefer_current`` is True, every edge of the expansion
         path must satisfy ``valid_until IS NULL OR valid_until > now`` —
@@ -744,6 +772,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
             return {}
 
         effective_depth = max(1, min(depth, 6))
+        ns_text = uuid_to_text(namespace_id)
         seed_texts = [uuid_to_text(eid) for eid in entity_ids]
         seed_placeholders = ", ".join("?" for _ in seed_texts)
 
@@ -760,22 +789,27 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
             valid_filter = " AND (r.valid_until IS NULL OR r.valid_until > ?)"
             valid_params = [iso8601(now or datetime.now(UTC))]
 
-        # Anchor params: seed ids for both outbound + inbound arms,
-        # plus the relationship_type filter twice and the valid_until
-        # predicate twice (one per anchor arm).
+        # Every clause (2 anchor arms + 2 recursive arms) gets a
+        # ``r.namespace_id = ?`` predicate. Param order is:
+        #   anchor-out:    seed_texts..., ns, rel_params..., valid_params...
+        #   anchor-in:     seed_texts..., ns, rel_params..., valid_params...
+        #   recursive-out: depth, ns, rel_params..., valid_params...
+        #   recursive-in:  depth, ns, rel_params..., valid_params...
         params: list[Any] = []
         params.extend(seed_texts)
+        params.append(ns_text)
         params.extend(rel_params)
         params.extend(valid_params)
         params.extend(seed_texts)
-        params.extend(rel_params)
-        params.extend(valid_params)
-        # Recursive arms: depth bound twice (out + in), rel filter twice,
-        # valid_until predicate twice.
-        params.append(effective_depth)
+        params.append(ns_text)
         params.extend(rel_params)
         params.extend(valid_params)
         params.append(effective_depth)
+        params.append(ns_text)
+        params.extend(rel_params)
+        params.extend(valid_params)
+        params.append(effective_depth)
+        params.append(ns_text)
         params.extend(rel_params)
         params.extend(valid_params)
 
@@ -790,6 +824,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
                        '|' || r.id || '|'
                 FROM relationships r
                 WHERE r.source_entity_id IN ({seed_placeholders})
+                  AND r.namespace_id = ?
                   {rel_filter}
                   {valid_filter}
                 UNION ALL
@@ -797,6 +832,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
                        '|' || r.id || '|'
                 FROM relationships r
                 WHERE r.target_entity_id IN ({seed_placeholders})
+                  AND r.namespace_id = ?
                   {rel_filter}
                   {valid_filter}
                 UNION ALL
@@ -805,6 +841,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
                 FROM walk
                 JOIN relationships r ON r.source_entity_id = walk.cur
                 WHERE walk.depth < ?
+                  AND r.namespace_id = ?
                   AND instr(walk.visited, '|' || r.id || '|') = 0
                   {rel_filter}
                   {valid_filter}
@@ -814,6 +851,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
                 FROM walk
                 JOIN relationships r ON r.target_entity_id = walk.cur
                 WHERE walk.depth < ?
+                  AND r.namespace_id = ?
                   AND instr(walk.visited, '|' || r.id || '|') = 0
                   {rel_filter}
                   {valid_filter}
@@ -841,14 +879,18 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
             needed_entity_ids.add(ent)
             needed_edge_ids.add(edge)
 
+        # Belt-and-suspenders: entity/relationship row fetches are
+        # additionally constrained by ``namespace_id``. The CTE already
+        # filtered edges, but if a misrouted edge ever points to an
+        # out-of-namespace entity, this final guard keeps it out.
         ent_by_id: dict[str, Entity] = {}
         if needed_entity_ids:
             placeholders = ", ".join("?" for _ in needed_entity_ids)
             sql_e = (
                 f"SELECT {_ENTITY_COLUMNS} FROM entities "  # noqa: S608
-                f"WHERE id IN ({placeholders})"
+                f"WHERE id IN ({placeholders}) AND namespace_id = ?"
             )
-            async with self._conn.execute(sql_e, list(needed_entity_ids)) as cur_e:
+            async with self._conn.execute(sql_e, [*needed_entity_ids, ns_text]) as cur_e:
                 rows_e = await cur_e.fetchall()
             ent_by_id = {str(r["id"]): _row_to_entity(r) for r in rows_e}
 
@@ -857,9 +899,9 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
             placeholders = ", ".join("?" for _ in needed_edge_ids)
             sql_r = (
                 f"SELECT {_RELATIONSHIP_COLUMNS} FROM relationships "  # noqa: S608
-                f"WHERE id IN ({placeholders})"
+                f"WHERE id IN ({placeholders}) AND namespace_id = ?"
             )
-            async with self._conn.execute(sql_r, list(needed_edge_ids)) as cur_r:
+            async with self._conn.execute(sql_r, [*needed_edge_ids, ns_text]) as cur_r:
                 rows_r = await cur_r.fetchall()
             rel_by_id = {str(r["id"]): _row_to_relationship(r) for r in rows_r}
 
@@ -935,14 +977,15 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         await self._conn.commit()
         return episode
 
-    async def get_episode(self, episode_id: UUID) -> Episode | None:
+    async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
+        """Get an episode by ID, scoped to ``namespace_id`` (IGR-223)."""
         sql = (
             "SELECT id, namespace_id, name, description, occurred_at, duration_seconds, "
             "entity_ids, source_document_ids, source_chunk_ids, embedding_model, "
             "metadata, created_at, updated_at "
-            "FROM episodes WHERE id = ? LIMIT 1"
+            "FROM episodes WHERE id = ? AND namespace_id = ? LIMIT 1"
         )
-        async with self._conn.execute(sql, (uuid_to_text(episode_id),)) as cur:
+        async with self._conn.execute(sql, (uuid_to_text(episode_id), uuid_to_text(namespace_id))) as cur:
             row = await cur.fetchone()
         return _row_to_episode(row) if row else None
 

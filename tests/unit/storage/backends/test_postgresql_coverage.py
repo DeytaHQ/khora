@@ -426,7 +426,7 @@ async def test_get_document_returns_none_when_missing() -> None:
     result.scalar_one_or_none = MagicMock(return_value=None)
     session.execute = AsyncMock(return_value=result)
     b = _make_backend_with_session(session)
-    assert await b.get_document(uuid4()) is None
+    assert await b.get_document(uuid4(), namespace_id=uuid4()) is None
 
 
 @pytest.mark.unit
@@ -438,9 +438,29 @@ async def test_get_document_returns_domain_model() -> None:
     result.scalar_one_or_none = MagicMock(return_value=model)
     session.execute = AsyncMock(return_value=result)
     b = _make_backend_with_session(session)
-    out = await b.get_document(uuid4())
+    out = await b.get_document(uuid4(), namespace_id=ns_id)
     assert out is not None
     assert out.id == model.id
+
+
+@pytest.mark.unit
+async def test_get_document_requires_namespace_kwarg() -> None:
+    """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+    b = PostgreSQLBackend.__new__(PostgreSQLBackend)
+    with pytest.raises(TypeError):
+        await b.get_document(uuid4())  # type: ignore[call-arg]
+
+
+@pytest.mark.unit
+async def test_get_document_wrong_namespace_returns_none() -> None:
+    """When the SQL ``namespace_id`` filter does not match, ``None`` is
+    returned — verified by the mock yielding no row."""
+    session = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none = MagicMock(return_value=None)
+    session.execute = AsyncMock(return_value=result)
+    b = _make_backend_with_session(session)
+    assert await b.get_document(uuid4(), namespace_id=uuid4()) is None
 
 
 @pytest.mark.unit
@@ -530,7 +550,7 @@ async def test_get_document_by_external_id_short_circuits_on_none() -> None:
 @pytest.mark.unit
 async def test_get_documents_batch_empty_returns_empty_dict() -> None:
     b = PostgreSQLBackend.__new__(PostgreSQLBackend)
-    assert await b.get_documents_batch([]) == {}
+    assert await b.get_documents_batch([], namespace_id=uuid4()) == {}
 
 
 @pytest.mark.unit
@@ -545,8 +565,31 @@ async def test_get_documents_batch_returns_keyed_dict() -> None:
     result.scalars = MagicMock(return_value=scalars)
     session.execute = AsyncMock(return_value=result)
     b = _make_backend_with_session(session)
-    out = await b.get_documents_batch([m1.id, m2.id])
+    out = await b.get_documents_batch([m1.id, m2.id], namespace_id=ns_id)
     assert set(out.keys()) == {m1.id, m2.id}
+
+
+@pytest.mark.unit
+async def test_get_documents_batch_requires_namespace_kwarg() -> None:
+    """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+    b = PostgreSQLBackend.__new__(PostgreSQLBackend)
+    with pytest.raises(TypeError):
+        await b.get_documents_batch([uuid4()])  # type: ignore[call-arg]
+
+
+@pytest.mark.unit
+async def test_get_documents_batch_wrong_namespace_drops_rows() -> None:
+    """SQL filter drops cross-namespace rows; the mock returns no rows for
+    a non-matching namespace_id, mirroring real DB behaviour."""
+    session = AsyncMock()
+    result = MagicMock()
+    scalars = MagicMock()
+    scalars.all = MagicMock(return_value=[])
+    result.scalars = MagicMock(return_value=scalars)
+    session.execute = AsyncMock(return_value=result)
+    b = _make_backend_with_session(session)
+    out = await b.get_documents_batch([uuid4(), uuid4()], namespace_id=uuid4())
+    assert out == {}
 
 
 @pytest.mark.unit
@@ -600,7 +643,7 @@ async def test_get_documents_by_checksums_keyed() -> None:
 @pytest.mark.unit
 async def test_get_document_sources_batch_empty_returns_empty() -> None:
     b = PostgreSQLBackend.__new__(PostgreSQLBackend)
-    assert await b.get_document_sources_batch([]) == {}
+    assert await b.get_document_sources_batch([], namespace_id=uuid4()) == {}
 
 
 @pytest.mark.unit
@@ -626,9 +669,29 @@ async def test_get_document_sources_batch_returns_keyed_dict() -> None:
     result.all = MagicMock(return_value=[row1, row2])
     session.execute = AsyncMock(return_value=result)
     b = _make_backend_with_session(session)
-    out = await b.get_document_sources_batch([row1.id, row2.id])
+    out = await b.get_document_sources_batch([row1.id, row2.id], namespace_id=uuid4())
     assert set(out.keys()) == {row1.id, row2.id}
     assert out[row1.id].title == "t1"
+
+
+@pytest.mark.unit
+async def test_get_document_sources_batch_requires_namespace_kwarg() -> None:
+    """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+    b = PostgreSQLBackend.__new__(PostgreSQLBackend)
+    with pytest.raises(TypeError):
+        await b.get_document_sources_batch([uuid4()])  # type: ignore[call-arg]
+
+
+@pytest.mark.unit
+async def test_get_document_sources_batch_wrong_namespace_drops_rows() -> None:
+    """SQL filter drops cross-namespace rows."""
+    session = AsyncMock()
+    result = MagicMock()
+    result.all = MagicMock(return_value=[])
+    session.execute = AsyncMock(return_value=result)
+    b = _make_backend_with_session(session)
+    out = await b.get_document_sources_batch([uuid4()], namespace_id=uuid4())
+    assert out == {}
 
 
 # ---------------------------------------------------------------------------

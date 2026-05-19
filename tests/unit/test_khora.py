@@ -1168,13 +1168,14 @@ class TestConvenienceMethods:
         """get_document delegates to engine."""
         kb = _make_kb(connected=True)
         doc_id = uuid4()
+        ns_id = uuid4()
         mock_doc = MagicMock()
 
         kb._engine.get_document = AsyncMock(return_value=mock_doc)
 
-        result = await kb.get_document(doc_id)
+        result = await kb.get_document(doc_id, namespace=ns_id)
         assert result is mock_doc
-        kb._engine.get_document.assert_awaited_once_with(doc_id)
+        kb._engine.get_document.assert_awaited_once_with(doc_id, namespace_id=_RESOLVE_ROW_ID)
 
     @pytest.mark.asyncio
     async def test_list_documents(self) -> None:
