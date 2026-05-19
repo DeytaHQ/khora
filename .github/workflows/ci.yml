@@ -231,7 +231,7 @@ jobs:
 
       - name: Run integration tests with coverage (serial)
         run: |
-          uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-report=xml:coverage-integration.xml --cov-fail-under=72 -m integration
+          uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-report=xml:coverage-integration.xml --cov-fail-under=77 -m integration
 
       - name: Generate JSON coverage for floor check
         run: uv run coverage json -o coverage.json
