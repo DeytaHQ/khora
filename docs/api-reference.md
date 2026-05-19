@@ -297,16 +297,77 @@ Delivered to the `on_result` callback per document as `submit_batch` work comple
 
 ### `RecallResult`
 
-| Field | Type |
-|---|---|
-| `query` | `str` |
-| `namespace_id` | `UUID` |
-| `chunks` | `list[tuple[Chunk, float]]` |
-| `entities` | `list[tuple[Entity, float]]` |
-| `relationships` | `list[tuple[Relationship, float]]` — only populated by VectorCypher |
-| `context_text` | `str` — pre-formatted for LLM context |
-| `metadata` | `dict[str, Any]` |
-| `llm_usage` | `list[LLMUsage]` |
+JSON-serializable response projection. Lives at `khora.core.models.recall.RecallResult` and is re-exported from `khora` for back-compat.
+
+| Field | Type | Description |
+|---|---|---|
+| `query` | `str` | The original query string. |
+| `namespace_id` | `UUID` | Namespace the recall was executed against. |
+| `documents` | `list[DocumentProjection]` | Deduplicated set of source documents referenced by any chunk, entity, or relationship in the result. |
+| `chunks` | `list[RecallChunk]` | Scored chunks. Score is a typed field, not a tuple position. |
+| `entities` | `list[RecallEntity]` | Scored entities with document/chunk provenance ids. |
+| `relationships` | `list[RecallRelationship]` | Scored relationships. Always present; populated by graph-backed engines (VectorCypher), empty list for others (Chronicle, Skeleton). |
+| `usage` | `list[LLMUsage]` | Token usage incurred during the recall. |
+| `engine_info` | `dict[str, Any]` | Free-form engine telemetry. **Every engine emits the mandatory key `"engine": "<strategy-name>"`** (`vectorcypher` / `chronicle` / `skeleton`) so consumers can route on producer identity. |
+
+**Producer invariant:** every `chunks[i].document_id` and every id in `entities[i].source_document_ids` / `relationships[i].source_document_ids` is guaranteed to appear as some `documents[j].id`.
+
+#### `DocumentProjection`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `UUID` | Document id. |
+| `created_at` | `datetime` | Document creation timestamp. |
+| `source_type` | `str` | Category; defaults to `"library"` for direct library calls. Free-form — Khora does not validate or enumerate. |
+| `title` | `str \| None` | Optional title. |
+| `external_id` | `str \| None` | Caller-supplied opaque identifier. |
+| `source` | `str \| None` | Optional connector URI. |
+| `source_name` | `str \| None` | SaaS-tool / connector identifier. |
+| `source_url` | `str \| None` | Addressable doc URL. |
+| `content_type` | `str \| None` | MIME / content type. |
+| `source_timestamp` | `datetime \| None` | Source-system timestamp (e.g., message sent-at), distinct from ingest `created_at`. |
+| `metadata` | `dict[str, Any]` | Free-form user metadata. |
+
+#### `RecallChunk`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `UUID` | Chunk id. |
+| `document_id` | `UUID` | Foreign key into `RecallResult.documents`. |
+| `content` | `str` | Chunk text. |
+| `score` | `float` | Retrieval score. |
+| `created_at` | `datetime` | Chunk creation timestamp. |
+| `occurred_at` | `datetime \| None` | Event-time anchor when applicable (e.g., chat message sent-at). |
+| `connected_entity_ids` | `list[UUID]` | Engine-populated entity ids linked to this chunk. |
+| `chunker_info` | `dict[str, Any]` | Chunker self-identification dict (min `{"chunker": "<name>"}`). |
+
+#### `RecallEntity`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `UUID` | Entity id. |
+| `name` | `str` | Entity name. |
+| `entity_type` | `str` | Entity type label (e.g., `PERSON`). |
+| `description` | `str` | Description (may be empty). |
+| `score` | `float` | Retrieval score. |
+| `attributes` | `dict[str, Any]` | Free-form entity attributes. |
+| `mention_count` | `int` | Number of mentions seen. |
+| `source_document_ids` | `list[UUID]` | Source document ids; all entries appear in `RecallResult.documents`. |
+| `source_chunk_ids` | `list[UUID]` | Source chunk ids. |
+
+#### `RecallRelationship`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | `UUID` | Relationship id. |
+| `source_entity_id` | `UUID` | Source entity. |
+| `target_entity_id` | `UUID` | Target entity. |
+| `relationship_type` | `str` | Relationship type label. |
+| `description` | `str` | Description (may be empty). |
+| `score` | `float` | Retrieval score. |
+| `valid_from` | `datetime \| None` | Validity window start. |
+| `valid_until` | `datetime \| None` | Validity window end. |
+| `source_document_ids` | `list[UUID]` | Source document ids; all entries appear in `RecallResult.documents`. |
 
 ### `Stats`
 

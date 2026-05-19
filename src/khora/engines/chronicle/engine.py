@@ -1577,6 +1577,21 @@ class ChronicleEngine:
                     metadata=dict(chunk.metadata or {}),
                 )
             )
+        # Producer invariant: every id in entities[i].source_document_ids must
+        # appear in documents[]. Add stubs for entity-referenced docs not
+        # already covered by the chunk loop above.
+        for re_ in recall_entities:
+            for did in re_.source_document_ids:
+                if did in seen_doc_ids:
+                    continue
+                seen_doc_ids.add(did)
+                documents.append(
+                    DocumentProjection(
+                        id=did,
+                        created_at=datetime.now(UTC),
+                        source_type="library",
+                    )
+                )
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
