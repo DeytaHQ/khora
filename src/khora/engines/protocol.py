@@ -54,6 +54,9 @@ class MemoryEngineProtocol(Protocol):
         *,
         title: str = "",
         source: str = "",
+        source_type: str = "library",
+        source_name: str | None = None,
+        source_url: str | None = None,
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         entity_types: list[str],
@@ -70,6 +73,9 @@ class MemoryEngineProtocol(Protocol):
             namespace_id: Target namespace UUID
             title: Optional title for the content
             source: Optional source identifier
+            source_type: Provenance category (e.g. "library", "api", "file").
+            source_name: Optional provider-level identifier (e.g. "slack", "linear").
+            source_url: Optional original-source URL.
             metadata: Optional metadata
             skill_name: Extraction skill to use
             entity_types: Required entity types to extract
@@ -150,12 +156,18 @@ class MemoryEngineProtocol(Protocol):
         expertise: ExpertiseConfig | None = None,
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        source_type: str = "library",
+        source_name: str | None = None,
+        source_url: str | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
         Args:
-            documents: List of document dicts with keys: content, title, source, metadata,
-                external_id (optional caller-supplied external identifier)
+            documents: List of document dicts with keys: content, title, source,
+                source_type, source_name, source_url, metadata, external_id
+                (optional caller-supplied external identifier). Top-level
+                source_type/source_name/source_url per-doc keys override the
+                corresponding kwargs.
             namespace_id: Target namespace UUID
             skill_name: Extraction skill to use
             max_concurrent: Maximum concurrent document processing

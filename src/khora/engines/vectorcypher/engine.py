@@ -667,6 +667,9 @@ class VectorCypherEngine:
         *,
         title: str = "",
         source: str = "",
+        source_type: str = "library",
+        source_name: str | None = None,
+        source_url: str | None = None,
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         expertise: ExpertiseConfig | str | None = None,
@@ -725,6 +728,9 @@ class VectorCypherEngine:
                     namespace_id=namespace_id,
                     title=title,
                     source=source,
+                    source_type=source_type,
+                    source_name=source_name,
+                    source_url=source_url,
                     metadata=metadata,
                     skill_name=skill_name,
                     expertise=expertise,
@@ -756,7 +762,9 @@ class VectorCypherEngine:
             content=content,
             title=title or None,
             source=source or None,
-            source_type="api",
+            source_type=source_type,
+            source_name=source_name or None,
+            source_url=source_url or None,
             checksum=checksum,
             size_bytes=len(content.encode("utf-8")),
             metadata=dict(metadata or {}),
@@ -1315,6 +1323,9 @@ class VectorCypherEngine:
         namespace_id: UUID,
         title: str,
         source: str,
+        source_type: str = "library",
+        source_name: str | None = None,
+        source_url: str | None = None,
         metadata: dict[str, Any] | None,
         skill_name: str,
         expertise: ExpertiseConfig | str | None,
@@ -1370,7 +1381,9 @@ class VectorCypherEngine:
             content=content,
             title=title or None,
             source=source or None,
-            source_type="api",
+            source_type=source_type,
+            source_name=source_name or None,
+            source_url=source_url or None,
             checksum=checksum,
             size_bytes=len(content.encode("utf-8")),
             metadata=new_doc_metadata,
@@ -2003,6 +2016,9 @@ class VectorCypherEngine:
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        source_type: str = "library",
+        source_name: str | None = None,
+        source_url: str | None = None,
         bulk_mode: bool = False,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
@@ -2057,6 +2073,9 @@ class VectorCypherEngine:
                 relationship_types=relationship_types,
                 extraction_config_hash=extraction_config_hash,
                 chunk_strategy=chunk_strategy,
+                source_type=source_type,
+                source_name=source_name,
+                source_url=source_url,
             )
         finally:
             if bulk_mode:
@@ -2080,6 +2099,9 @@ class VectorCypherEngine:
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        source_type: str = "library",
+        source_name: str | None = None,
+        source_url: str | None = None,
     ) -> BatchResult:
         """Internal implementation of remember_batch (separated for bulk_mode wrapping)."""
         use_streaming = self._vc_config.streaming_pipeline
@@ -2098,6 +2120,9 @@ class VectorCypherEngine:
                 relationship_types=relationship_types,
                 extraction_config_hash=extraction_config_hash,
                 chunk_strategy=chunk_strategy,
+                source_type=source_type,
+                source_name=source_name,
+                source_url=source_url,
             )
 
         from khora.extraction.chunkers import create_chunker
@@ -2163,6 +2188,9 @@ class VectorCypherEngine:
                     namespace_id,
                     title=doc_data.get("title", ""),
                     source=doc_data.get("source", ""),
+                    source_type=doc_data.get("source_type", source_type),
+                    source_name=doc_data.get("source_name", source_name),
+                    source_url=doc_data.get("source_url", source_url),
                     metadata=doc_metadata,
                     skill_name=skill_name,
                     expertise=expertise,
@@ -2273,7 +2301,9 @@ class VectorCypherEngine:
                         title=doc_data.get("title") or None,
                         source=doc_data.get("source") or None,
                         checksum=checksum,
-                        source_type="api",
+                        source_type=doc_data.get("source_type", source_type),
+                        source_name=doc_data.get("source_name", source_name) or None,
+                        source_url=doc_data.get("source_url", source_url) or None,
                         metadata=dict(doc_metadata),
                         extraction_config_hash=extraction_config_hash,
                         external_id=doc_data.get("external_id"),
@@ -2733,6 +2763,9 @@ class VectorCypherEngine:
         relationship_types: list[str],
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
+        source_type: str = "library",
+        source_name: str | None = None,
+        source_url: str | None = None,
     ) -> BatchResult:
         """Legacy per-document remember_batch (non-streaming pipeline)."""
         storage = self._get_storage()
@@ -2783,6 +2816,9 @@ class VectorCypherEngine:
                         namespace_id,
                         title=doc_data.get("title", ""),
                         source=doc_data.get("source", ""),
+                        source_type=doc_data.get("source_type", source_type),
+                        source_name=doc_data.get("source_name", source_name),
+                        source_url=doc_data.get("source_url", source_url),
                         metadata=doc_metadata,
                         skill_name=skill_name,
                         expertise=expertise,

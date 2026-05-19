@@ -89,6 +89,9 @@ result: RememberResult = await kb.remember(
     namespace: str | UUID,
     title: str = "",
     source: str = "",
+    source_type: str = "library",
+    source_name: str | None = None,
+    source_url: str | None = None,
     metadata: dict[str, Any] | None = None,
     skill_name: str = "general_entities",
     entity_types: list[str],
@@ -103,6 +106,8 @@ result: RememberResult = await kb.remember(
 
 Ingests content through the 3-phase pipeline (stage → enrich → expand). `chunk_strategy` accepts `"fixed"`, `"semantic"`, `"recursive"`, or `"conversation"`. `external_id` must be `None` or a non-blank string (≤ 512 chars); otherwise `ValueError` is raised. `session_id` is propagated to `Document.session_id` and every chunk's `Chunk.session_id` so session-scoped recall hits the partial composite index (#620).
 
+`source_type` / `source_name` / `source_url` populate the typed provenance columns on the documents table. `source_type` defaults to `"library"` for direct callers; producers that ingest from a connector (API, database, object store, …) override it. `source_name` is the connector/provider identifier (e.g. `"slack"`, `"linear"`, `"s3"`); `source_url` is the canonical URL for the source row, when one exists.
+
 ### `remember_batch`
 
 ```python
@@ -111,6 +116,9 @@ result: BatchResult = await kb.remember_batch(
     *,
     namespace: str | UUID,
     skill_name: str = "general_entities",
+    source_type: str = "library",
+    source_name: str | None = None,
+    source_url: str | None = None,
     max_concurrent: int = 10,
     deduplicate: bool = True,
     infer_relationships: bool = True,
@@ -125,7 +133,33 @@ result: BatchResult = await kb.remember_batch(
 )
 ```
 
-Concurrent ingestion with per-document deduplication and optional expansion. Each dict in `documents` has the same fields you'd pass to `remember()`.
+Concurrent ingestion with per-document deduplication and optional expansion. Each dict in `documents` accepts the same per-document fields as `remember()` — including `source_type`, `source_name`, `source_url` at the top level of the doc dict (siblings of `content`, `title`, `source`, `external_id`). **Per-doc dict values override the top-level kwargs** for that document; absent keys fall back to the kwarg, which itself defaults to `source_type="library"` / `source_name=None` / `source_url=None`.
+
+### `submit_batch`
+
+```python
+handle: BatchHandle = await kb.submit_batch(
+    documents: list[dict[str, Any]],
+    *,
+    on_result: Callable[[int, int, DocumentResult], None],
+    namespace: str | UUID,
+    skill_name: str = "general_entities",
+    source_type: str = "library",
+    source_name: str | None = None,
+    source_url: str | None = None,
+    entity_types: list[str],
+    relationship_types: list[str],
+    expertise: ExpertiseConfig | None = None,
+    extraction_config_hash: str | None = None,
+    chunk_strategy: ChunkStrategy | None = None,
+    max_chunks_in_flight: int | None = None,
+    max_concurrent: int = 20,
+    reprocess_archived: bool = False,
+    session_id: UUID | None = None,
+)
+```
+
+Deferred sibling of `remember_batch()`: persists every document as `PENDING` and returns a `BatchHandle` immediately; processing continues in the background and fires `on_result` per document as it completes. Accepts the same provenance kwargs and per-doc dict shape as `remember_batch()` — per-doc dict values override the top-level kwargs. See [`BatchHandle`](#batchhandle) below for the wait/identity surface.
 
 ### `recall`
 
