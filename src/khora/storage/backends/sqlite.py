@@ -21,6 +21,7 @@ from loguru import logger
 from khora.core.models import Chunk, Document, MemoryNamespace
 from khora.core.models.document import DocumentSource, DocumentStatus
 from khora.core.models.entity import Entity
+from khora.core.models.recall import DocumentProjection
 from khora.core.models.tenancy import TenancyMode
 from khora.storage.backends._fts5 import escape_fts5_query
 from khora.storage.backends.base import PaginatedResult
@@ -606,6 +607,39 @@ class SQLiteRelationalBackend:
                 source_type=r["source_type"] or "",
                 created_at=_parse_dt(r["created_at"]),
                 source_timestamp=_parse_dt(r["source_timestamp"]),
+            )
+        return result
+
+    async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
+        if not document_ids:
+            return {}
+        placeholders = ",".join("?" for _ in document_ids)
+        cursor = await self._conn.execute(
+            f"SELECT id, created_at, source_type, title, external_id, source, source_name, "  # noqa: S608
+            f"source_url, content_type, source_timestamp, metadata_ "
+            f"FROM documents WHERE id IN ({placeholders})",
+            [str(d) for d in document_ids],
+        )
+        rows = await cursor.fetchall()
+        result: dict[UUID, DocumentProjection] = {}
+        for r in rows:
+            uid = UUID(r["id"])
+            try:
+                metadata = json.loads(r["metadata_"]) if r["metadata_"] else {}
+            except (ValueError, TypeError):
+                metadata = {}
+            result[uid] = DocumentProjection(
+                id=uid,
+                created_at=_parse_dt(r["created_at"]) or datetime.now(UTC),
+                source_type=r["source_type"] or "library",
+                title=r["title"] or None,
+                external_id=r["external_id"] or None,
+                source=r["source"] or None,
+                source_name=r["source_name"] or None,
+                source_url=r["source_url"] or None,
+                content_type=r["content_type"] or None,
+                source_timestamp=_parse_dt(r["source_timestamp"]),
+                metadata=metadata if isinstance(metadata, dict) else {},
             )
         return result
 

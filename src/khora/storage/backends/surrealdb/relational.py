@@ -16,6 +16,7 @@ from loguru import logger
 
 from khora.core.models import Document, MemoryNamespace, TenancyMode
 from khora.core.models.document import DocumentSource, DocumentStatus
+from khora.core.models.recall import DocumentProjection
 from khora.storage.backends.base import PaginatedResult
 from khora.storage.backends.surrealdb._helpers import (
     _parse_dt,
@@ -572,6 +573,34 @@ class SurrealDBRelationalAdapter:
                 source_type=r.get("source_type", ""),
                 created_at=_parse_dt(r.get("created_at")),
                 source_timestamp=_parse_dt(r.get("source_timestamp")),
+            )
+        return result
+
+    async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
+        """Fetch full DocumentProjection rows for recall responses."""
+        if not document_ids:
+            return {}
+        id_strs = [_record_id("document", uid) for uid in document_ids]
+        rows = await self._conn.query(
+            "SELECT id, created_at, source_type, title, external_id, source, source_name, "
+            "source_url, content_type, source_timestamp, metadata_ FROM document WHERE id IN $ids",
+            {"ids": id_strs},
+        )
+        result: dict[UUID, DocumentProjection] = {}
+        for r in rows:
+            uid = _parse_uuid(r["id"])
+            result[uid] = DocumentProjection(
+                id=uid,
+                created_at=_parse_dt(r.get("created_at")) or datetime.now(UTC),
+                source_type=r.get("source_type") or "library",
+                title=r.get("title") or None,
+                external_id=r.get("external_id") or None,
+                source=r.get("source") or None,
+                source_name=r.get("source_name") or None,
+                source_url=r.get("source_url") or None,
+                content_type=r.get("content_type") or None,
+                source_timestamp=_parse_dt(r.get("source_timestamp")),
+                metadata=dict(r.get("metadata_") or {}),
             )
         return result
 

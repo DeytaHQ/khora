@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         Relationship,
     )
     from khora.core.models.document import DocumentSource
+    from khora.core.models.recall import DocumentProjection
 
 
 @dataclass(frozen=True)
@@ -232,6 +233,26 @@ class RelationalBackendProtocol(Protocol):
 
         Returns:
             Dictionary mapping document ID to DocumentSource
+        """
+        ...
+
+    async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
+        """Fetch full ``DocumentProjection`` rows for recall responses.
+
+        Returns the typed projection shape used by ``Khora.recall()``:
+        ``id``, ``created_at``, ``source_type``, ``title``, ``external_id``,
+        ``source``, ``source_name``, ``source_url``, ``content_type``,
+        ``source_timestamp``, ``metadata``.
+
+        Distinct from ``get_document_sources_batch`` (which returns the
+        narrower ``DocumentSource`` for entity-source attribution) so the
+        two consumers can evolve their column sets independently.
+
+        Args:
+            document_ids: List of document IDs to fetch
+
+        Returns:
+            Dictionary mapping document ID to DocumentProjection
         """
         ...
 

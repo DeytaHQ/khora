@@ -173,7 +173,6 @@ result: RecallResult = await kb.recall(
     min_similarity: float = 0.0,
     agentic: bool = False,
     raw: bool = False,
-    include_sources: bool = False,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
 )

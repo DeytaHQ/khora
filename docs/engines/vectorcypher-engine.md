@@ -120,19 +120,16 @@ This rich context enables downstream consumers (e.g., LLM chat) to answer questi
 
 ### Source Document Population
 
-All read methods (`recall()`, `get_entity()`, `list_entities()`, `find_related_entities()`, `search_entities()`) accept `include_sources: bool = False`:
+`recall()` always returns a `RecallResult` whose `documents` list holds full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship in the result. Khora batch-fetches `DocumentSource` metadata after the engine returns (chunked at 1,000 IDs) and replaces the engine's lightweight stubs in place.
 
 ```python
-# Default: no source metadata (zero overhead)
-results = await kb.recall("query")
-
-# With sources: populates source_document metadata on chunks/entities
-results = await kb.recall("query", include_sources=True)
-for chunk, score in results.chunks:
-    print(chunk.source_document)  # DocumentSource with title, source, etc.
+result = await kb.recall("query", namespace=ns_id)
+docs_by_id = {d.id: d for d in result.documents}
+for chunk in result.chunks:
+    print(docs_by_id[chunk.document_id].title)
 ```
 
-When `False` (default), no extra query runs. When `True`, `_populate_sources()` batch-fetches `DocumentSource` metadata (chunked at 1,000 IDs) and populates `chunk.source_document`, `entity.source_documents`, and `relationship.source_documents` in-place.
+Entity-read methods (`get_entity()`, `list_entities()`, `find_related_entities()`, `search_entities()`) still accept `include_sources: bool = False` to opt-in to per-entity `source_documents` population.
 
 ### VectorCypherRetriever (`src/khora/engines/vectorcypher/retriever.py`)
 

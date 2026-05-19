@@ -50,6 +50,10 @@ def mock_engine() -> MagicMock:
     _empty_ns_page = MagicMock()
     _empty_ns_page.items = []
     mock_eng._storage.list_namespaces = AsyncMock(return_value=_empty_ns_page)
+    # Default to empty maps — tests that exercise the recall document
+    # upgrade pass can override these per-test.
+    mock_eng._storage.get_document_sources_batch = AsyncMock(return_value={})
+    mock_eng._storage.get_document_projections_batch = AsyncMock(return_value={})
     mock_eng._embedder = MagicMock()
 
     # Lifecycle
