@@ -97,7 +97,7 @@ async def store_expansion_results(
     async def update_entity(entity):
         nonlocal stored_entities
         async with entity_semaphore:
-            await storage.update_entity(entity)
+            await storage.update_entity(entity, namespace_id=entity.namespace_id)
             stored_entities += 1
 
     if result.merged_entity_count > 0:
@@ -291,7 +291,7 @@ async def unify_entities(
 
         async def update_entity(entity):
             async with entity_semaphore:
-                await storage.update_entity(entity)
+                await storage.update_entity(entity, namespace_id=entity.namespace_id)
 
         await asyncio.gather(*[update_entity(e) for e in result.unified_entities])
         stored = True

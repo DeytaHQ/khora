@@ -151,8 +151,13 @@ class RelationalBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def delete_document(self, document_id: UUID) -> bool:
-        """Delete a document."""
+    async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a document, scoped to ``namespace_id``.
+
+        Returns ``False`` if the document does not exist OR belongs to a
+        different namespace — the caller's namespace is the authority. The
+        ``namespace_id`` filter prevents cross-tenant deletion by id.
+        """
         ...
 
     @abstractmethod
@@ -375,12 +380,19 @@ class VectorBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def delete_chunks_by_document(self, document_id: UUID, *, session: AsyncSession | None = None) -> int:
-        """Delete all chunks for a document.
+    async def delete_chunks_by_document(
+        self,
+        document_id: UUID,
+        *,
+        namespace_id: UUID,
+        session: AsyncSession | None = None,
+    ) -> int:
+        """Delete all chunks for a document, scoped to ``namespace_id``.
 
         When *session* is provided the caller owns the transaction —
         no commit is issued.  When ``None``, a private session is used
-        and committed automatically.
+        and committed automatically. The ``namespace_id`` filter prevents
+        cross-tenant deletion by document id.
         """
         ...
 
@@ -407,8 +419,12 @@ class VectorBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def update_entity(self, entity: Entity) -> None:
-        """Update an entity record in PostgreSQL."""
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> None:
+        """Update an entity record in PostgreSQL, scoped to ``namespace_id``.
+
+        Updates are skipped silently when the entity belongs to a different
+        namespace — prevents cross-tenant entity mutation by id.
+        """
         ...
 
     @abstractmethod
@@ -422,12 +438,32 @@ class VectorBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-        """Update the embedding for an entity."""
+    async def update_entity_embedding(
+        self,
+        entity_id: UUID,
+        embedding: list[float],
+        model: str,
+        *,
+        namespace_id: UUID,
+    ) -> None:
+        """Update the embedding for an entity, scoped to ``namespace_id``.
+
+        Updates are skipped silently when the entity belongs to a different
+        namespace — prevents cross-tenant embedding mutation.
+        """
         ...
 
-    async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
-        """Update embeddings for multiple entities in a single transaction."""
+    async def update_entity_embeddings_batch(
+        self,
+        updates: list[tuple[UUID, list[float], str]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
+        """Update embeddings for multiple entities in a single transaction.
+
+        Updates are restricted to the caller's namespace; ids outside it
+        are silently skipped from the count.
+        """
         ...
 
     @abstractmethod
@@ -520,13 +556,21 @@ class GraphBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def update_entity(self, entity: Entity) -> Entity:
-        """Update an entity."""
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
+        """Update an entity, scoped to ``namespace_id``.
+
+        Updates are skipped when the entity belongs to a different
+        namespace — prevents cross-tenant entity mutation by id.
+        """
         ...
 
     @abstractmethod
-    async def delete_entity(self, entity_id: UUID) -> bool:
-        """Delete an entity and its relationships."""
+    async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete an entity and its relationships, scoped to ``namespace_id``.
+
+        Returns ``False`` if the entity does not exist OR belongs to a
+        different namespace. Prevents cross-tenant deletion by id.
+        """
         ...
 
     @abstractmethod
@@ -558,8 +602,12 @@ class GraphBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def delete_relationship(self, relationship_id: UUID) -> bool:
-        """Delete a relationship."""
+    async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a relationship, scoped to ``namespace_id``.
+
+        Returns ``False`` if the relationship does not exist OR belongs to
+        a different namespace. Prevents cross-tenant deletion by id.
+        """
         ...
 
     @abstractmethod

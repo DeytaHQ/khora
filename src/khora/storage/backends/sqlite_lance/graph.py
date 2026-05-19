@@ -173,7 +173,7 @@ def _entity_insert_params(entity: Entity) -> tuple:
 
 
 def _entity_update_params(entity: Entity) -> tuple:
-    """Parameter tuple for an ``UPDATE entities`` statement (matched by id)."""
+    """Parameter tuple for an ``UPDATE entities`` statement (matched by id + namespace_id)."""
     now_iso = datetime.now(UTC).isoformat()
     return (
         entity.name,
@@ -190,6 +190,7 @@ def _entity_update_params(entity: Entity) -> tuple:
         to_json_text(entity.metadata or {}),
         iso8601(entity.updated_at) or now_iso,
         uuid_to_text(entity.id),
+        uuid_to_text(entity.namespace_id),
     )
 
 
@@ -206,7 +207,7 @@ _ENTITY_UPDATE_SQL = (
     "name = ?, entity_type = ?, description = ?, attributes = ?, "
     "source_document_ids = ?, source_chunk_ids = ?, mention_count = ?, "
     "embedding_model = ?, valid_from = ?, valid_until = ?, confidence = ?, "
-    "metadata = ?, updated_at = ? WHERE id = ?"
+    "metadata = ?, updated_at = ? WHERE id = ? AND namespace_id = ?"
 )
 
 _ENTITY_COLUMNS = (
@@ -309,21 +310,36 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
             row = await cur.fetchone()
         return _row_to_entity(row) if row else None
 
-    async def update_entity(self, entity: Entity) -> Entity:
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
+        """Update an entity, scoped to ``namespace_id`` (IGR-226).
+
+        The ``namespace_id`` kwarg is defense-in-depth — asserted equal to
+        ``entity.namespace_id`` before the WHERE clause filters by both id
+        and namespace.
+        """
+        if entity.namespace_id != namespace_id:
+            raise ValueError(
+                f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
+            )
         entity.updated_at = datetime.now(UTC)
         await self._conn.execute(_ENTITY_UPDATE_SQL, _entity_update_params(entity))
         await self._conn.commit()
         return entity
 
-    async def delete_entity(self, entity_id: UUID) -> bool:
+    async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete an entity and its relationships, scoped to ``namespace_id`` (IGR-226)."""
         eid = uuid_to_text(entity_id)
+        ns_text = uuid_to_text(namespace_id)
         # Delete edges first so the operation succeeds regardless of whether
-        # the Alembic-generated FK cascade is active.
+        # the Alembic-generated FK cascade is active. Scoped by namespace.
         await self._conn.execute(
-            "DELETE FROM relationships WHERE source_entity_id = ? OR target_entity_id = ?",
-            (eid, eid),
+            "DELETE FROM relationships WHERE namespace_id = ? AND (source_entity_id = ? OR target_entity_id = ?)",
+            (ns_text, eid, eid),
         )
-        async with self._conn.execute("DELETE FROM entities WHERE id = ?", (eid,)) as cur:
+        async with self._conn.execute(
+            "DELETE FROM entities WHERE id = ? AND namespace_id = ?",
+            (eid, ns_text),
+        ) as cur:
             deleted = cur.rowcount
         await self._conn.commit()
         return bool(deleted)
@@ -470,9 +486,11 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
             row = await cur.fetchone()
         return _row_to_relationship(row) if row else None
 
-    async def delete_relationship(self, relationship_id: UUID) -> bool:
+    async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
         async with self._conn.execute(
-            "DELETE FROM relationships WHERE id = ?", (uuid_to_text(relationship_id),)
+            "DELETE FROM relationships WHERE id = ? AND namespace_id = ?",
+            (uuid_to_text(relationship_id), uuid_to_text(namespace_id)),
         ) as cur:
             deleted = cur.rowcount
         await self._conn.commit()

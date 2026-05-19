@@ -789,7 +789,7 @@ class TestRelationalAdapterDocument:
         conn.query = AsyncMock(return_value=[{"id": f"document:⟨{doc_id!s}⟩"}])
         adapter = SurrealDBRelationalAdapter(conn)
 
-        result = await adapter.delete_document(doc_id)
+        result = await adapter.delete_document(doc_id, namespace_id=uuid4())
         assert result is True
         conn.query.assert_awaited_once()
 
@@ -800,7 +800,7 @@ class TestRelationalAdapterDocument:
         conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBRelationalAdapter(conn)
 
-        result = await adapter.delete_document(uuid4())
+        result = await adapter.delete_document(uuid4(), namespace_id=uuid4())
         assert result is False
         conn.query.assert_awaited_once()
 
@@ -1513,7 +1513,7 @@ class TestVectorAdapterChunkOps:
         conn.query_one = AsyncMock(return_value={"cnt": 3})
         adapter = SurrealDBVectorAdapter(conn)
 
-        result = await adapter.delete_chunks_by_document(uuid4())
+        result = await adapter.delete_chunks_by_document(uuid4(), namespace_id=uuid4())
         assert result == 3
         conn.execute.assert_awaited_once()
 
@@ -1524,7 +1524,7 @@ class TestVectorAdapterChunkOps:
         conn.query_one = AsyncMock(return_value={"cnt": 0})
         adapter = SurrealDBVectorAdapter(conn)
 
-        result = await adapter.delete_chunks_by_document(uuid4())
+        result = await adapter.delete_chunks_by_document(uuid4(), namespace_id=uuid4())
         assert result == 0
         conn.execute.assert_not_awaited()
 
@@ -1729,7 +1729,7 @@ class TestVectorAdapterEntityOps:
         from khora.core.models import Entity
 
         entity = Entity(name="Alice", entity_type="PERSON", description="updated")
-        await adapter.update_entity(entity)
+        await adapter.update_entity(entity, namespace_id=entity.namespace_id)
         conn.execute.assert_awaited_once()
 
     async def test_entity_exists_true(self) -> None:
@@ -1768,7 +1768,7 @@ class TestVectorAdapterEntityOps:
         conn = _make_mock_conn()
         adapter = SurrealDBVectorAdapter(conn)
 
-        await adapter.update_entity_embedding(uuid4(), [0.1] * 10, "test-model")
+        await adapter.update_entity_embedding(uuid4(), [0.1] * 10, "test-model", namespace_id=uuid4())
         conn.execute.assert_awaited_once()
 
     async def test_update_entity_embeddings_batch(self) -> None:
@@ -1781,7 +1781,7 @@ class TestVectorAdapterEntityOps:
             (uuid4(), [0.1] * 10, "model-a"),
             (uuid4(), [0.2] * 10, "model-b"),
         ]
-        result = await adapter.update_entity_embeddings_batch(updates)
+        result = await adapter.update_entity_embeddings_batch(updates, namespace_id=uuid4())
         assert result == 2
         conn.execute.assert_awaited_once()
 
@@ -1791,7 +1791,7 @@ class TestVectorAdapterEntityOps:
         conn = _make_mock_conn()
         adapter = SurrealDBVectorAdapter(conn)
 
-        result = await adapter.update_entity_embeddings_batch([])
+        result = await adapter.update_entity_embeddings_batch([], namespace_id=uuid4())
         assert result == 0
         conn.execute.assert_not_awaited()
 
@@ -2167,7 +2167,7 @@ class TestSurrealDBGraphAdapterEntity:
         from khora.core.models.entity import Entity
 
         entity = Entity(id=eid, namespace_id=ns_id, name="Updated", entity_type="PERSON")
-        result = await adapter.update_entity(entity)
+        result = await adapter.update_entity(entity, namespace_id=ns_id)
 
         assert result.id == eid
         assert result.name == "Updated"
@@ -2181,7 +2181,7 @@ class TestSurrealDBGraphAdapterEntity:
         conn.query = AsyncMock(return_value=[{"id": f"entity:⟨{eid}⟩"}])
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.delete_entity(eid)
+        result = await adapter.delete_entity(eid, namespace_id=uuid4())
         assert result is True
         conn.execute.assert_awaited()  # relationship delete
         conn.query.assert_awaited()  # entity DELETE RETURN BEFORE
@@ -2194,7 +2194,7 @@ class TestSurrealDBGraphAdapterEntity:
         conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.delete_entity(uuid4())
+        result = await adapter.delete_entity(uuid4(), namespace_id=uuid4())
         assert result is False
 
     async def test_list_entities(self) -> None:
@@ -2331,7 +2331,7 @@ class TestSurrealDBGraphAdapterRelationship:
         conn.query = AsyncMock(return_value=[{"rel_id": str(rel_id)}])
         adapter = SurrealDBGraphAdapter(conn)
 
-        result = await adapter.delete_relationship(rel_id)
+        result = await adapter.delete_relationship(rel_id, namespace_id=uuid4())
         assert result is True
         conn.query.assert_awaited_once()
 
@@ -3978,7 +3978,7 @@ class TestSurrealDBSingleQueryDelete:
         conn.query = AsyncMock(return_value=[{"id": f"document:\u27e8{doc_id!s}\u27e9"}])
         adapter = SurrealDBRelationalAdapter(conn)
 
-        result = await adapter.delete_document(doc_id)
+        result = await adapter.delete_document(doc_id, namespace_id=uuid4())
         assert result is True
         # Single query call (no separate SELECT + DELETE)
         conn.query.assert_awaited_once()
@@ -3995,7 +3995,7 @@ class TestSurrealDBSingleQueryDelete:
         conn.query = AsyncMock(return_value=[])
         adapter = SurrealDBRelationalAdapter(conn)
 
-        result = await adapter.delete_document(uuid4())
+        result = await adapter.delete_document(uuid4(), namespace_id=uuid4())
         assert result is False
         conn.query.assert_awaited_once()
 

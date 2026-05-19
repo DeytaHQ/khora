@@ -2788,7 +2788,9 @@ class TestSubmitBatch:
         assert updated.error_message is None
 
         # Prior extraction state was cleared before re-processing (H1)
-        kb._engine._storage.vector.delete_chunks_by_document.assert_called_once_with(existing_doc.id)
+        kb._engine._storage.vector.delete_chunks_by_document.assert_called_once_with(
+            existing_doc.id, namespace_id=ns_id
+        )
         kb._engine.clear_document_extraction_state.assert_called_once_with(existing_doc.id, ns_id)
 
         # Document was re-processed

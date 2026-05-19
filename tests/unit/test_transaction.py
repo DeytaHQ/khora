@@ -228,7 +228,7 @@ class TestBackendSessionParam:
         mock_session.execute = AsyncMock(return_value=mock_result)
 
         doc_id = uuid4()
-        count = await backend.delete_chunks_by_document(doc_id, session=mock_session)
+        count = await backend.delete_chunks_by_document(doc_id, namespace_id=uuid4(), session=mock_session)
 
         assert count == 5
         mock_session.execute.assert_awaited_once()
@@ -253,7 +253,7 @@ class TestBackendSessionParam:
 
         with patch.object(backend, "_get_session", return_value=mock_own_session):
             doc_id = uuid4()
-            count = await backend.delete_chunks_by_document(doc_id)
+            count = await backend.delete_chunks_by_document(doc_id, namespace_id=uuid4())
 
         assert count == 3
         mock_own_session.execute.assert_awaited_once()
@@ -272,7 +272,7 @@ class TestBackendSessionParam:
         mock_result.rowcount = 0
         mock_session.execute = AsyncMock(return_value=mock_result)
 
-        count = await backend.delete_chunks_by_document(uuid4(), session=mock_session)
+        count = await backend.delete_chunks_by_document(uuid4(), namespace_id=uuid4(), session=mock_session)
         assert count == 0
 
     @pytest.mark.asyncio
@@ -287,4 +287,4 @@ class TestBackendSessionParam:
         mock_session.execute = AsyncMock(side_effect=RuntimeError("connection lost"))
 
         with pytest.raises(RuntimeError, match="connection lost"):
-            await backend.delete_chunks_by_document(uuid4(), session=mock_session)
+            await backend.delete_chunks_by_document(uuid4(), namespace_id=uuid4(), session=mock_session)

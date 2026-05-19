@@ -960,7 +960,7 @@ class ChronicleEngine:
         # Supersede old → new for UPDATEs.
         for old_id, new_fact in pending_supersedes:
             try:
-                await storage.supersede_fact(old_id, new_fact.id)
+                await storage.supersede_fact(old_id, new_fact.id, namespace_id=namespace_id)
             except Exception as exc:
                 logger.warning("supersede_fact failed for {} -> {}: {}", old_id, new_fact.id, exc)
 
@@ -970,7 +970,7 @@ class ChronicleEngine:
         # self-reference as the "tombstone" pointer.
         for old_id in deletes:
             try:
-                await storage.supersede_fact(old_id, old_id)
+                await storage.supersede_fact(old_id, old_id, namespace_id=namespace_id)
             except Exception as exc:
                 logger.warning("supersede_fact (delete) failed for {}: {}", old_id, exc)
 
@@ -2228,7 +2228,7 @@ class ChronicleEngine:
 
         await self._cascade_forget_extraction(document_id, namespace_id)
 
-        return await storage.delete_document(document_id)
+        return await storage.delete_document(document_id, namespace_id=namespace_id)
 
     async def _cascade_forget_extraction(self, document_id: UUID, namespace_id: UUID) -> None:
         """Drop / decrement entities and relationships extracted from a document.
@@ -2255,13 +2255,13 @@ class ChronicleEngine:
         survive_rel_ids = [UUID(r["id"]) for r in relationships if r["source_document_count"] > 1]
 
         if orphan_ent_ids:
-            await graph.delete_entities_batch(orphan_ent_ids, namespace_id)  # type: ignore[unresolved-attribute]
+            await graph.delete_entities_batch(orphan_ent_ids, namespace_id=namespace_id)  # type: ignore[unresolved-attribute]
             if vector is not None and hasattr(vector, "delete_entities_batch"):
-                await vector.delete_entities_batch(orphan_ent_ids)
+                await vector.delete_entities_batch(orphan_ent_ids, namespace_id=namespace_id)
         if orphan_rel_ids:
-            await graph.delete_relationships_batch(orphan_rel_ids)  # type: ignore[unresolved-attribute]
+            await graph.delete_relationships_batch(orphan_rel_ids, namespace_id=namespace_id)  # type: ignore[unresolved-attribute]
             if vector is not None and hasattr(vector, "delete_relationships_batch"):
-                await vector.delete_relationships_batch(orphan_rel_ids)
+                await vector.delete_relationships_batch(orphan_rel_ids, namespace_id=namespace_id)
 
         if survive_ent_ids:
             await graph.remove_document_from_entity_sources_batch(  # type: ignore[unresolved-attribute]

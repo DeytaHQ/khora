@@ -429,46 +429,75 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             return [self._chunk_model_to_domain(m) for m in result.scalars().all()]
 
-    async def delete_chunks_by_document(self, document_id: UUID, *, session: AsyncSession | None = None) -> int:
-        """Delete all chunks for a document.
+    async def delete_chunks_by_document(
+        self,
+        document_id: UUID,
+        *,
+        namespace_id: UUID,
+        session: AsyncSession | None = None,
+    ) -> int:
+        """Delete all chunks for a document, scoped to ``namespace_id``.
 
         When *session* is provided the caller owns the transaction —
         no commit is issued.  When ``None``, a private session is used
-        and committed automatically.
+        and committed automatically. The ``namespace_id`` filter prevents
+        cross-tenant deletion by document id (IGR-226).
         """
         if session is not None:
-            result = await session.execute(delete(ChunkModel).where(ChunkModel.document_id == document_id))
+            result = await session.execute(
+                delete(ChunkModel).where(
+                    ChunkModel.document_id == document_id,
+                    ChunkModel.namespace_id == namespace_id,
+                )
+            )
             return result.rowcount  # type: ignore[unresolved-attribute]
         async with self._get_session() as own_session:
-            result = await own_session.execute(delete(ChunkModel).where(ChunkModel.document_id == document_id))
+            result = await own_session.execute(
+                delete(ChunkModel).where(
+                    ChunkModel.document_id == document_id,
+                    ChunkModel.namespace_id == namespace_id,
+                )
+            )
             await own_session.commit()
             return result.rowcount  # type: ignore[unresolved-attribute]
 
-    async def delete_entities_batch(self, entity_ids: list[UUID]) -> int:
-        """Hard-delete entities by id.
+    async def delete_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> int:
+        """Hard-delete entities by id, scoped to ``namespace_id``.
 
         Used by the forget cascade to remove orphan entities from pgvector
-        after the graph backend has dropped them.
+        after the graph backend has dropped them. The ``namespace_id``
+        filter prevents cross-tenant deletion by id (IGR-226).
         """
         if not entity_ids:
             return 0
         async with self._get_session() as session:
-            result = await session.execute(delete(EntityModel).where(EntityModel.id.in_(entity_ids)))
+            result = await session.execute(
+                delete(EntityModel).where(
+                    EntityModel.id.in_(entity_ids),
+                    EntityModel.namespace_id == namespace_id,
+                )
+            )
             await session.commit()
             return result.rowcount  # type: ignore[unresolved-attribute]
 
-    async def delete_relationships_batch(self, relationship_ids: list[UUID]) -> int:
-        """Hard-delete relationships by id.
+    async def delete_relationships_batch(self, relationship_ids: list[UUID], *, namespace_id: UUID) -> int:
+        """Hard-delete relationships by id, scoped to ``namespace_id``.
 
         Sibling to :meth:`delete_entities_batch`. ``relationships`` is not
         actively written by pgvector today (edges live in the graph
         backend) but the table exists and is kept consistent for any
-        downstream reader or future migration.
+        downstream reader or future migration. The ``namespace_id``
+        filter prevents cross-tenant deletion by id (IGR-226).
         """
         if not relationship_ids:
             return 0
         async with self._get_session() as session:
-            result = await session.execute(delete(RelationshipModel).where(RelationshipModel.id.in_(relationship_ids)))
+            result = await session.execute(
+                delete(RelationshipModel).where(
+                    RelationshipModel.id.in_(relationship_ids),
+                    RelationshipModel.namespace_id == namespace_id,
+                )
+            )
             await session.commit()
             return result.rowcount  # type: ignore[unresolved-attribute]
 
@@ -749,12 +778,17 @@ class PgVectorBackend(AsyncSessionMixin):
         """
         await _retry_on_deadlock(self._upsert_entity, entity)
 
-    async def update_entity(self, entity) -> None:
-        """Update an entity record in PostgreSQL.
+    async def update_entity(self, entity, *, namespace_id: UUID) -> None:
+        """Update an entity record in PostgreSQL, scoped to ``namespace_id``.
 
         Uses upsert to handle race conditions and entities created before
-        dual-storage was implemented.
+        dual-storage was implemented. The ``namespace_id`` kwarg is
+        defense-in-depth (IGR-226) — asserted equal to ``entity.namespace_id``.
         """
+        if entity.namespace_id != namespace_id:
+            raise ValueError(
+                f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
+            )
         await _retry_on_deadlock(self._upsert_entity, entity)
 
     async def _upsert_entity(self, entity) -> None:
@@ -1036,12 +1070,26 @@ class PgVectorBackend(AsyncSessionMixin):
     # Entity embedding operations
     # =========================================================================
 
-    async def update_entity_embedding(self, entity_id: UUID, embedding: list[float], model: str) -> None:
-        """Update the embedding for an entity."""
+    async def update_entity_embedding(
+        self,
+        entity_id: UUID,
+        embedding: list[float],
+        model: str,
+        *,
+        namespace_id: UUID,
+    ) -> None:
+        """Update the embedding for an entity, scoped to ``namespace_id``.
+
+        Updates are skipped silently when the entity belongs to a different
+        namespace (cross-namespace IDOR — IGR-226).
+        """
         async with self._get_session() as session:
             await session.execute(
                 update(EntityModel)
-                .where(EntityModel.id == entity_id)
+                .where(
+                    EntityModel.id == entity_id,
+                    EntityModel.namespace_id == namespace_id,
+                )
                 .values(
                     embedding=embedding,
                     embedding_model=model,
@@ -1050,11 +1098,18 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             await session.commit()
 
-    async def update_entity_embeddings_batch(self, updates: list[tuple[UUID, list[float], str]]) -> int:
+    async def update_entity_embeddings_batch(
+        self,
+        updates: list[tuple[UUID, list[float], str]],
+        *,
+        namespace_id: UUID,
+    ) -> int:
         """Update embeddings for multiple entities in a single transaction.
 
         Uses executemany semantics to send all updates in a single round-trip
-        instead of N individual UPDATE statements.
+        instead of N individual UPDATE statements. Updates are restricted to
+        ``namespace_id``; ids in other namespaces are silently skipped
+        (IGR-226).
 
         Args:
             updates: List of (entity_id, embedding, model) tuples
@@ -1076,7 +1131,10 @@ class PgVectorBackend(AsyncSessionMixin):
             tbl = EntityModel.__table__
             stmt = (
                 tbl.update()  # type: ignore[unresolved-attribute]
-                .where(tbl.c.id == bindparam("eid"))
+                .where(
+                    tbl.c.id == bindparam("eid"),
+                    tbl.c.namespace_id == namespace_id,
+                )
                 .values(
                     embedding=bindparam("emb"),
                     embedding_model=bindparam("mdl"),
@@ -1089,6 +1147,8 @@ class PgVectorBackend(AsyncSessionMixin):
                 await session.connection()
                 await session.execute(stmt, params)
                 await session.commit()
+            # Return the input count — executemany rowcount is unreliable.
+            # Ids outside the namespace are silently filtered by WHERE.
             return len(sorted_updates)
 
         return await _retry_on_deadlock(_do_batch)
@@ -1363,12 +1423,19 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             return list(result.scalars().all())
 
-    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID) -> None:
-        """Mark a fact inactive and link it to its replacement."""
+    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID, *, namespace_id: UUID) -> None:
+        """Mark a fact inactive and link it to its replacement.
+
+        Scoped to ``namespace_id`` — no-op when the fact belongs to a
+        different namespace (cross-namespace IDOR — IGR-226).
+        """
         async with self._get_session() as session:
             await session.execute(
                 update(MemoryFactModel)
-                .where(MemoryFactModel.id == fact_id)
+                .where(
+                    MemoryFactModel.id == fact_id,
+                    MemoryFactModel.namespace_id == namespace_id,
+                )
                 .values(is_active=False, superseded_by=superseded_by, updated_at=datetime.now(UTC))
             )
             await session.commit()

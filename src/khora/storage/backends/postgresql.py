@@ -458,10 +458,19 @@ class PostgreSQLBackend(AsyncSessionMixin):
         return document
 
     @retry_on_deadlock
-    async def delete_document(self, document_id: UUID) -> bool:
-        """Delete a document."""
+    async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a document, scoped to ``namespace_id``.
+
+        Returns ``False`` if the document does not exist OR belongs to a
+        different namespace (cross-namespace IDOR — IGR-226).
+        """
         async with self._get_session() as session:
-            result = await session.execute(select(DocumentModel).where(DocumentModel.id == document_id))
+            result = await session.execute(
+                select(DocumentModel).where(
+                    DocumentModel.id == document_id,
+                    DocumentModel.namespace_id == namespace_id,
+                )
+            )
             model = result.scalar_one_or_none()
             if model:
                 await session.delete(model)

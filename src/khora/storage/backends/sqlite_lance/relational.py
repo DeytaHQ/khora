@@ -469,8 +469,8 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             await session.commit()
         return document
 
-    async def delete_document(self, document_id: UUID) -> bool:
-        """Delete a document.
+    async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a document, scoped to ``namespace_id`` (IGR-226).
 
         Uses a core ``DELETE`` rather than ORM cascade because the
         ORM ``ChunkModel`` has Postgres-only columns (pgvector
@@ -480,7 +480,12 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
         ``ON DELETE CASCADE`` so cleanup happens at the DB level.
         """
         async with self._get_session() as session:
-            result = await session.execute(delete(DocumentModel).where(DocumentModel.id == document_id))
+            result = await session.execute(
+                delete(DocumentModel).where(
+                    DocumentModel.id == document_id,
+                    DocumentModel.namespace_id == namespace_id,
+                )
+            )
             await session.commit()
             rowcount: int = getattr(result, "rowcount", 0)
             return rowcount > 0
@@ -902,13 +907,20 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             result = await session.execute(stmt)
             return [_row_to_memory_fact(row) for row in result.all()]
 
-    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID) -> None:
-        """Mark a fact inactive and link it to its replacement."""
+    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID, *, namespace_id: UUID) -> None:
+        """Mark a fact inactive and link it to its replacement.
+
+        Scoped to ``namespace_id`` (IGR-226) — no-op when the fact belongs
+        to a different namespace.
+        """
         t = _memory_facts_sqlite
         async with self._get_session() as session:
             await session.execute(
                 update(t)
-                .where(t.c.id == fact_id)
+                .where(
+                    t.c.id == fact_id,
+                    t.c.namespace_id == namespace_id,
+                )
                 .values(is_active=False, superseded_by=superseded_by, updated_at=datetime.now(UTC))
             )
             await session.commit()

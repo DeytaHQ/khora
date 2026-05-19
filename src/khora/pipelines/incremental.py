@@ -160,7 +160,7 @@ class IncrementalUpdateManager:
         # Handle deletions
         if changes.deleted_document_ids:
             for doc_id in changes.deleted_document_ids:
-                await self._storage.delete_document(doc_id)
+                await self._storage.delete_document(doc_id, namespace_id=namespace_id)
             logger.info(f"Deleted {len(changes.deleted_document_ids)} documents")
 
         return {

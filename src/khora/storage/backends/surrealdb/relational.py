@@ -438,10 +438,19 @@ class SurrealDBRelationalAdapter:
         )
         return document
 
-    async def delete_document(self, document_id: UUID) -> bool:
-        """Delete a document, returning True if it existed."""
+    async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a document, scoped to ``namespace_id`` (IGR-226).
+
+        Returns ``False`` if the document does not exist OR belongs to a
+        different namespace.  ``RecordID`` deletion alone is not namespace-
+        scoped, so we filter on ``namespace_id`` to prevent cross-tenant
+        deletion by id.
+        """
         rid = _record_id("document", document_id)
-        deleted = await self._conn.query("DELETE $rid RETURN BEFORE", {"rid": rid})
+        deleted = await self._conn.query(
+            "DELETE $rid WHERE namespace_id = $ns RETURN BEFORE",
+            {"rid": rid, "ns": str(namespace_id)},
+        )
         return bool(deleted)
 
     async def count_documents(self, namespace_id: UUID) -> int:
@@ -862,14 +871,20 @@ class SurrealDBRelationalAdapter:
         )
         return [_row_to_memory_fact(r) for r in rows]
 
-    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID) -> None:
-        """Mark a fact inactive and link it to its replacement."""
+    async def supersede_fact(self, fact_id: UUID, superseded_by: UUID, *, namespace_id: UUID) -> None:
+        """Mark a fact inactive and link it to its replacement.
+
+        Scoped to ``namespace_id`` (IGR-226) — no-op when the fact belongs
+        to a different namespace.
+        """
         await self._conn.execute(
-            "UPDATE $rid SET is_active = false, superseded_by = $superseded_by, updated_at = $updated_at",
+            "UPDATE $rid SET is_active = false, superseded_by = $superseded_by, updated_at = $updated_at "
+            "WHERE namespace_id = $ns",
             {
                 "rid": _record_id("memory_fact", fact_id),
                 "superseded_by": str(superseded_by),
                 "updated_at": datetime.now(UTC),
+                "ns": str(namespace_id),
             },
         )
 

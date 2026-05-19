@@ -400,7 +400,7 @@ class TestForget:
         result = await eng.forget(doc_id, ns)
         assert result is True
         eng._temporal_store.delete_chunks_by_document.assert_awaited_once_with(doc_id, ns)
-        eng._storage.delete_document.assert_awaited_once_with(doc_id)
+        eng._storage.delete_document.assert_awaited_once_with(doc_id, namespace_id=ns)
 
 
 # ---------------------------------------------------------------------------

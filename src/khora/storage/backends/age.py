@@ -296,6 +296,22 @@ class AGEBackend(GraphBackendBase):
         """
         return re.sub(r"[^A-Za-z0-9_]", "_", label)
 
+    @staticmethod
+    def _uuid_lit(value: UUID | str) -> str:
+        """Coerce a UUID-shaped value to its canonical 36-char string form.
+
+        AGE's ``cypher()`` SQL function rejects ``$param`` placeholders, so
+        UUIDs are interpolated directly into the Cypher source.  Routing
+        them through :class:`UUID` validates the input (type-safe today,
+        injection-resistant if a caller is ever duck-typed to a ``str``) and
+        normalises the form so any junk like surrounding quotes / spaces
+        fails fast at the boundary rather than reaching the graph store
+        (IGR-226).
+        """
+        if isinstance(value, UUID):
+            return str(value)
+        return str(UUID(str(value)))
+
     # ------------------------------------------------------------------
     # agtype -> domain model converters
     # ------------------------------------------------------------------
@@ -409,10 +425,12 @@ class AGEBackend(GraphBackendBase):
         src_doc_ids = self._cypher_str_list([str(d) for d in entity.source_document_ids])
         src_chunk_ids = self._cypher_str_list([str(c) for c in entity.source_chunk_ids])
 
+        eid_lit = self._uuid_lit(entity.id)
+        ns_lit_val = self._uuid_lit(entity.namespace_id)
         cypher = f"""
             CREATE (e:Entity {{
-                id: '{entity.id}',
-                namespace_id: '{entity.namespace_id}',
+                id: '{eid_lit}',
+                namespace_id: '{ns_lit_val}',
                 name: '{self._escape(entity.name)}',
                 entity_type: '{self._escape(entity.entity_type)}',
                 description: '{self._escape(entity.description or "")}',
@@ -442,14 +460,17 @@ class AGEBackend(GraphBackendBase):
 
     @trace("khora.age.get_entity")
     async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
-        """Get an entity by ID, scoped to ``namespace_id`` (IGR-223).
+        """Get an entity by ID, scoped to ``namespace_id`` (IGR-223 / IGR-226).
 
-        AGE Cypher is f-string-interpolated today (full bindparam migration
-        tracked as IGR-226). Both ``entity_id`` and ``namespace_id`` are
-        type-safe UUIDs from the call site, so this is not a SQLi vector.
+        AGE Cypher is f-string-interpolated (the ``cypher()`` SQL function
+        rejects ``$param`` placeholders). UUID values are routed through
+        :meth:`_uuid_lit` to validate type and normalise to the canonical
+        36-char form, so a duck-typed string caller cannot inject Cypher.
         """
+        eid_lit = self._uuid_lit(entity_id)
+        ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
-            MATCH (e:Entity {{id: '{entity_id}', namespace_id: '{namespace_id}'}})
+            MATCH (e:Entity {{id: '{eid_lit}', namespace_id: '{ns_lit_val}'}})
             RETURN e
         """
         async with self._get_session_factory()() as session:
@@ -462,9 +483,10 @@ class AGEBackend(GraphBackendBase):
 
     @trace("khora.age.get_entity_by_name")
     async def get_entity_by_name(self, namespace_id: UUID, name: str, entity_type: str) -> Entity | None:
+        ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
             MATCH (e:Entity {{
-                namespace_id: '{namespace_id}',
+                namespace_id: '{ns_lit_val}',
                 name: '{self._escape(name)}',
                 entity_type: '{self._escape(entity_type)}'
             }})
@@ -480,13 +502,20 @@ class AGEBackend(GraphBackendBase):
         return None
 
     @trace("khora.age.update_entity")
-    async def update_entity(self, entity: Entity) -> Entity:
+    async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
+        """Update an entity, scoped to ``namespace_id`` (IGR-226)."""
+        if entity.namespace_id != namespace_id:
+            raise ValueError(
+                f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
+            )
         now = datetime.now(UTC).isoformat()
         src_doc_ids = self._cypher_str_list([str(d) for d in entity.source_document_ids])
         src_chunk_ids = self._cypher_str_list([str(c) for c in entity.source_chunk_ids])
+        eid_lit = self._uuid_lit(entity.id)
+        ns_lit_val = self._uuid_lit(namespace_id)
 
         cypher = f"""
-            MATCH (e:Entity {{id: '{entity.id}'}})
+            MATCH (e:Entity {{id: '{eid_lit}', namespace_id: '{ns_lit_val}'}})
             SET e.name = '{self._escape(entity.name)}',
                 e.description = '{self._escape(entity.description or "")}',
                 e.attributes = '{self._serialize_dict_literal(entity.attributes)}',
@@ -507,9 +536,12 @@ class AGEBackend(GraphBackendBase):
         return entity
 
     @trace("khora.age.delete_entity")
-    async def delete_entity(self, entity_id: UUID) -> bool:
+    async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete an entity and its relationships, scoped to ``namespace_id`` (IGR-226)."""
+        eid_lit = self._uuid_lit(entity_id)
+        ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
-            MATCH (e:Entity {{id: '{entity_id}'}})
+            MATCH (e:Entity {{id: '{eid_lit}', namespace_id: '{ns_lit_val}'}})
             DETACH DELETE e
             RETURN count(e) as deleted
         """
@@ -530,7 +562,8 @@ class AGEBackend(GraphBackendBase):
         limit: int = 100,
         offset: int = 0,
     ) -> list[Entity]:
-        match_clause = f"MATCH (e:Entity {{namespace_id: '{namespace_id}'}})"
+        ns_lit_val = self._uuid_lit(namespace_id)
+        match_clause = f"MATCH (e:Entity {{namespace_id: '{ns_lit_val}'}})"
         where_clause = ""
         if entity_type:
             where_clause = f" WHERE e.entity_type = '{self._escape(entity_type)}'"
@@ -556,8 +589,9 @@ class AGEBackend(GraphBackendBase):
 
     @trace("khora.age.count_entities")
     async def count_entities(self, namespace_id: UUID) -> int:
+        ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
-            MATCH (e:Entity {{namespace_id: '{namespace_id}'}})
+            MATCH (e:Entity {{namespace_id: '{ns_lit_val}'}})
             RETURN count(e) AS cnt
         """
         async with self._get_session_factory()() as session:
@@ -582,12 +616,16 @@ class AGEBackend(GraphBackendBase):
         src_doc_ids = self._cypher_str_list([str(d) for d in relationship.source_document_ids])
         src_chunk_ids = self._cypher_str_list([str(c) for c in relationship.source_chunk_ids])
 
+        src_lit = self._uuid_lit(relationship.source_entity_id)
+        tgt_lit = self._uuid_lit(relationship.target_entity_id)
+        rid_lit = self._uuid_lit(relationship.id)
+        rel_ns_lit = self._uuid_lit(relationship.namespace_id)
         cypher = f"""
-            MATCH (source:Entity {{id: '{relationship.source_entity_id}'}})
-            MATCH (target:Entity {{id: '{relationship.target_entity_id}'}})
+            MATCH (source:Entity {{id: '{src_lit}'}})
+            MATCH (target:Entity {{id: '{tgt_lit}'}})
             CREATE (source)-[r:{rel_type} {{
-                id: '{relationship.id}',
-                namespace_id: '{relationship.namespace_id}',
+                id: '{rid_lit}',
+                namespace_id: '{rel_ns_lit}',
                 description: '{self._escape(relationship.description or "")}',
                 properties: '{self._serialize_dict_literal(relationship.properties)}',
                 source_document_ids: {src_doc_ids},
@@ -619,9 +657,11 @@ class AGEBackend(GraphBackendBase):
         Both endpoint nodes are constrained to ``namespace_id`` so cross-tenant
         edges never surface.
         """
+        ns_lit_val = self._uuid_lit(namespace_id)
+        rid_lit = self._uuid_lit(relationship_id)
         cypher = f"""
-            MATCH (source:Entity {{namespace_id: '{namespace_id}'}})-[r]->(target:Entity {{namespace_id: '{namespace_id}'}})
-            WHERE r.id = '{relationship_id}' AND r.namespace_id = '{namespace_id}'
+            MATCH (source:Entity {{namespace_id: '{ns_lit_val}'}})-[r]->(target:Entity {{namespace_id: '{ns_lit_val}'}})
+            WHERE r.id = '{rid_lit}' AND r.namespace_id = '{ns_lit_val}'
             RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
         """
         async with self._get_session_factory()() as session:
@@ -648,10 +688,13 @@ class AGEBackend(GraphBackendBase):
         return None
 
     @trace("khora.age.delete_relationship")
-    async def delete_relationship(self, relationship_id: UUID) -> bool:
+    async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
+        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
+        rid_lit = self._uuid_lit(relationship_id)
+        ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
             MATCH ()-[r]->()
-            WHERE r.id = '{relationship_id}'
+            WHERE r.id = '{rid_lit}' AND r.namespace_id = '{ns_lit_val}'
             DELETE r
             RETURN count(r) as deleted
         """
@@ -683,7 +726,9 @@ class AGEBackend(GraphBackendBase):
             sanitized = [self._sanitize_label(rt) for rt in relationship_types]
             rel_filter = ":" + "|".join(sanitized)
 
-        ns_lit = f"{{namespace_id: '{namespace_id}'}}"
+        ns_lit_val = self._uuid_lit(namespace_id)
+        eid_lit = self._uuid_lit(entity_id)
+        ns_lit = f"{{namespace_id: '{ns_lit_val}'}}"
         if direction == "outgoing":
             pattern = f"(e:Entity {ns_lit})-[r{rel_filter}]->(other:Entity {ns_lit})"
         elif direction == "incoming":
@@ -693,7 +738,7 @@ class AGEBackend(GraphBackendBase):
 
         cypher = f"""
             MATCH {pattern}
-            WHERE e.id = '{entity_id}'
+            WHERE e.id = '{eid_lit}'
             RETURN r, e.id as source_id, other.id as target_id, type(r) as rel_type
             LIMIT {limit}
         """
@@ -733,9 +778,10 @@ class AGEBackend(GraphBackendBase):
         if relationship_type:
             rel_filter = f":{self._sanitize_label(relationship_type)}"
 
+        ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
             MATCH (source:Entity)-[r{rel_filter}]->(target:Entity)
-            WHERE r.namespace_id = '{namespace_id}'
+            WHERE r.namespace_id = '{ns_lit_val}'
             RETURN r, source.id as source_id, target.id as target_id, type(r) as rel_type
             ORDER BY r.created_at DESC
             SKIP {offset}
@@ -775,10 +821,12 @@ class AGEBackend(GraphBackendBase):
         src_doc_ids = self._cypher_str_list([str(d) for d in episode.source_document_ids])
         src_chunk_ids = self._cypher_str_list([str(c) for c in episode.source_chunk_ids])
 
+        ep_id_lit = self._uuid_lit(episode.id)
+        ep_ns_lit = self._uuid_lit(episode.namespace_id)
         cypher = f"""
             CREATE (ep:Episode {{
-                id: '{episode.id}',
-                namespace_id: '{episode.namespace_id}',
+                id: '{ep_id_lit}',
+                namespace_id: '{ep_ns_lit}',
                 name: '{self._escape(episode.name)}',
                 description: '{self._escape(episode.description or "")}',
                 occurred_at: '{episode.occurred_at.isoformat()}',
@@ -800,9 +848,10 @@ class AGEBackend(GraphBackendBase):
                 # Link episode to its entities
                 if episode.entity_ids:
                     for eid in episode.entity_ids:
+                        eid_lit = self._uuid_lit(eid)
                         link_cypher = f"""
-                            MATCH (ep:Episode {{id: '{episode.id}'}})
-                            MATCH (e:Entity {{id: '{eid}'}})
+                            MATCH (ep:Episode {{id: '{ep_id_lit}'}})
+                            MATCH (e:Entity {{id: '{eid_lit}'}})
                             CREATE (ep)-[:INVOLVES]->(e)
                         """
                         await self._cypher(session, link_cypher, columns=["v agtype"])
@@ -812,8 +861,10 @@ class AGEBackend(GraphBackendBase):
     @trace("khora.age.get_episode")
     async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
         """Get an episode by ID, scoped to ``namespace_id`` (IGR-223)."""
+        ep_id_lit = self._uuid_lit(episode_id)
+        ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
-            MATCH (ep:Episode {{id: '{episode_id}', namespace_id: '{namespace_id}'}})
+            MATCH (ep:Episode {{id: '{ep_id_lit}', namespace_id: '{ns_lit_val}'}})
             RETURN ep
         """
         async with self._get_session_factory()() as session:
@@ -833,7 +884,8 @@ class AGEBackend(GraphBackendBase):
         end_time: datetime | None = None,
         limit: int = 100,
     ) -> list[Episode]:
-        match_clause = f"MATCH (ep:Episode {{namespace_id: '{namespace_id}'}})"
+        ns_lit_val = self._uuid_lit(namespace_id)
+        match_clause = f"MATCH (ep:Episode {{namespace_id: '{ns_lit_val}'}})"
         conditions: list[str] = []
         if start_time:
             conditions.append(f"ep.occurred_at >= '{start_time.isoformat()}'")
@@ -878,9 +930,12 @@ class AGEBackend(GraphBackendBase):
 
         # Every node on the path — endpoints AND intermediates — must share
         # ``namespace_id`` so the traversal never crosses tenants (IGR-223).
+        src_lit = self._uuid_lit(source_entity_id)
+        tgt_lit = self._uuid_lit(target_entity_id)
+        ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
-            MATCH path = (source:Entity {{id: '{source_entity_id}', namespace_id: '{namespace_id}'}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: '{target_entity_id}', namespace_id: '{namespace_id}'}})
-            WHERE ALL(n IN nodes(path) WHERE n.namespace_id = '{namespace_id}')
+            MATCH path = (source:Entity {{id: '{src_lit}', namespace_id: '{ns_lit_val}'}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: '{tgt_lit}', namespace_id: '{ns_lit_val}'}})
+            WHERE ALL(n IN nodes(path) WHERE n.namespace_id = '{ns_lit_val}')
             RETURN path
             LIMIT 10
         """
@@ -927,8 +982,10 @@ class AGEBackend(GraphBackendBase):
             sanitized = [self._sanitize_label(rt) for rt in relationship_types]
             rel_filter = ":" + "|".join(sanitized)
 
+        eid_lit = self._uuid_lit(entity_id)
+        ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
-            MATCH (center:Entity {{id: '{entity_id}', namespace_id: '{namespace_id}'}})-[r{rel_filter}*1..{depth}]-(other:Entity {{namespace_id: '{namespace_id}'}})
+            MATCH (center:Entity {{id: '{eid_lit}', namespace_id: '{ns_lit_val}'}})-[r{rel_filter}*1..{depth}]-(other:Entity {{namespace_id: '{ns_lit_val}'}})
             RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
             LIMIT {limit}
         """
@@ -971,9 +1028,10 @@ class AGEBackend(GraphBackendBase):
         # pattern in the serialised JSON.  This is a best-effort approach.
         escaped_name = self._escape(str(attribute_name))
         escaped_value = self._escape(str(attribute_value))
+        ns_lit_val = self._uuid_lit(namespace_id)
 
         cypher = f"""
-            MATCH (e:Entity {{namespace_id: '{namespace_id}'}})
+            MATCH (e:Entity {{namespace_id: '{ns_lit_val}'}})
             WHERE e.attributes CONTAINS '"{escaped_name}"'
               AND e.attributes CONTAINS '{escaped_value}'
             RETURN e

@@ -752,7 +752,7 @@ class Khora:
         if doc.id in pre_failed_doc_ids:
             if storage.vector is not None:
                 try:
-                    await storage.vector.delete_chunks_by_document(doc.id)
+                    await storage.vector.delete_chunks_by_document(doc.id, namespace_id=namespace_id)
                 except Exception as exc:
                     logger.warning(f"pending_processor: could not clear chunks table for {doc.id}: {exc}")
             clear_fn = getattr(engine, "clear_document_extraction_state", None)

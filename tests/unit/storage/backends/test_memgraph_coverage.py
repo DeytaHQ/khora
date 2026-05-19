@@ -439,7 +439,7 @@ async def test_update_entity_sends_set_clause() -> None:
     session = _make_session_with_records()
     b = _connected_backend(session)
     ent = Entity(name="Bob", entity_type="PERSON")
-    result = await b.update_entity(ent)
+    result = await b.update_entity(ent, namespace_id=ent.namespace_id)
     assert result is ent
     cypher = session.run.await_args.args[0]
     assert "MATCH (e:Entity" in cypher
@@ -450,21 +450,21 @@ async def test_update_entity_sends_set_clause() -> None:
 async def test_delete_entity_returns_true_when_deleted() -> None:
     session = _make_session_with_records(single={"deleted": 1})
     b = _connected_backend(session)
-    assert await b.delete_entity(uuid4()) is True
+    assert await b.delete_entity(uuid4(), namespace_id=uuid4()) is True
 
 
 @pytest.mark.unit
 async def test_delete_entity_returns_false_when_missing() -> None:
     session = _make_session_with_records(single={"deleted": 0})
     b = _connected_backend(session)
-    assert await b.delete_entity(uuid4()) is False
+    assert await b.delete_entity(uuid4(), namespace_id=uuid4()) is False
 
 
 @pytest.mark.unit
 async def test_delete_entity_returns_false_when_no_record() -> None:
     session = _make_session_with_records(single=None)
     b = _connected_backend(session)
-    assert await b.delete_entity(uuid4()) is False
+    assert await b.delete_entity(uuid4(), namespace_id=uuid4()) is False
 
 
 @pytest.mark.unit
@@ -568,14 +568,14 @@ async def test_get_relationship_returns_domain_model() -> None:
 async def test_delete_relationship_true_when_deleted() -> None:
     session = _make_session_with_records(single={"deleted": 1})
     b = _connected_backend(session)
-    assert await b.delete_relationship(uuid4()) is True
+    assert await b.delete_relationship(uuid4(), namespace_id=uuid4()) is True
 
 
 @pytest.mark.unit
 async def test_delete_relationship_false_when_missing() -> None:
     session = _make_session_with_records(single={"deleted": 0})
     b = _connected_backend(session)
-    assert await b.delete_relationship(uuid4()) is False
+    assert await b.delete_relationship(uuid4(), namespace_id=uuid4()) is False
 
 
 @pytest.mark.unit
