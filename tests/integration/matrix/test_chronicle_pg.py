@@ -282,10 +282,10 @@ async def test_chronicle_remember_recall_roundtrip(kb: Khora, namespace_id: UUID
 
     result = await kb.recall("Python conference Berlin", namespace=namespace_id, limit=10)
 
-    assert result.metadata.get("engine") == "chronicle"
+    assert result.engine_info.get("engine") == "chronicle"
     assert len(result.chunks) >= 1, "expected at least one chunk back"
     # The most-relevant ingested text should be visible to the LLM context.
-    assert "Python conference" in result.context_text
+    assert any("Python conference" in c.content for c in result.chunks)
 
 
 async def test_chronicle_four_channels_contribute(kb: Khora, namespace_id: UUID) -> None:
@@ -306,7 +306,7 @@ async def test_chronicle_four_channels_contribute(kb: Khora, namespace_id: UUID)
 
     result = await kb.recall("Alice Berlin", namespace=namespace_id, limit=10)
 
-    channels = result.metadata["channels"]
+    channels = result.engine_info["channels"]
     # Semantic + temporal always run on HYBRID. BM25 + entity also run for
     # MODERATE/COMPLEX/ENTITY_ANCHORED routing, which "Alice Berlin" triggers.
     assert channels["semantic"] >= 1, f"semantic channel empty: {channels}"
@@ -330,7 +330,7 @@ async def test_chronicle_abstention_signals_on_topic(kb: Khora, namespace_id: UU
 
     result = await kb.recall("Alice keynote conference", namespace=namespace_id, limit=5)
 
-    sig = result.metadata["abstention_signals"]
+    sig = result.engine_info["abstention_signals"]
     assert sig["chunks_empty"] is False
     assert sig["should_abstain"] is False, f"unexpected abstention: {sig}"
     assert sig["combined_score"] < 0.5, f"combined too high: {sig}"
@@ -355,7 +355,7 @@ async def test_chronicle_abstention_signals_off_topic(kb: Khora, namespace_id: U
 
     result = await kb.recall("quantum chromodynamics gauge symmetry", namespace=namespace_id, limit=5)
 
-    sig = result.metadata["abstention_signals"]
+    sig = result.engine_info["abstention_signals"]
     # Required keys present.
     for key in (
         "entities_empty",
@@ -469,7 +469,7 @@ async def test_chronicle_temporal_old_doc_excluded(kb: Khora, namespace_id: UUID
         limit=10,
         start_time=seven_days_ago,
     )
-    returned_doc_ids = {c.document_id for c, _ in result.chunks}
+    returned_doc_ids = {c.document_id for c in result.chunks}
     assert r_old.document_id not in returned_doc_ids
 
 
@@ -492,8 +492,8 @@ async def test_chronicle_entity_anchored_routing(kb: Khora, namespace_id: UUID) 
 
     result = await kb.recall("Who is Alice?", namespace=namespace_id, limit=5)
 
-    assert result.metadata["routing"] == "entity_anchored", (
-        f"expected entity_anchored, got {result.metadata['routing']!r}"
+    assert result.engine_info["routing"] == "entity_anchored", (
+        f"expected entity_anchored, got {result.engine_info['routing']!r}"
     )
 
 
@@ -508,8 +508,8 @@ async def test_chronicle_namespace_isolation(kb: Khora) -> None:
     result_a = await kb.recall("animals", namespace=ns_a, limit=10)
     result_b = await kb.recall("animals", namespace=ns_b, limit=10)
 
-    a_text = " ".join(c.content for c, _ in result_a.chunks)
-    b_text = " ".join(c.content for c, _ in result_b.chunks)
+    a_text = " ".join(c.content for c in result_a.chunks)
+    b_text = " ".join(c.content for c in result_b.chunks)
 
     assert "kangaroos" in a_text
     assert "penguins" not in a_text, "namespace_b content leaked into namespace_a"
@@ -523,7 +523,7 @@ async def test_chronicle_recall_metadata_completeness(kb: Khora, namespace_id: U
 
     result = await kb.recall("apples", namespace=namespace_id, limit=5)
 
-    md = result.metadata
+    md = result.engine_info
     expected_top_level = {
         "engine",
         "channels",
@@ -569,5 +569,5 @@ async def test_chronicle_concurrent_remember(kb: Khora, namespace_id: UUID) -> N
 
     # All five recoverable via recall.
     result = await kb.recall("widget", namespace=namespace_id, limit=20)
-    contents_returned = {c.content for c, _ in result.chunks}
+    contents_returned = {c.content for c in result.chunks}
     assert len(contents_returned) >= 5

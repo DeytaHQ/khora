@@ -293,10 +293,10 @@ async def test_skeleton_remember_recall_roundtrip(kb: Khora, namespace_id: UUID)
 
     result = await _recall(kb, "falcon launch", namespace=namespace_id, limit=10)
 
-    assert result.metadata.get("backend") == "pgvector"
+    assert result.engine_info.get("backend") == "pgvector"
     assert len(result.chunks) >= 1, "expected at least one chunk back"
     # The most-relevant ingested text should be visible in the context block.
-    assert "falcon" in result.context_text.lower()
+    assert any("falcon" in c.content.lower() for c in result.chunks)
 
 
 async def test_skeleton_namespace_isolation(kb: Khora) -> None:
@@ -310,8 +310,8 @@ async def test_skeleton_namespace_isolation(kb: Khora) -> None:
     result_a = await _recall(kb, "animals", namespace=ns_a, limit=10)
     result_b = await _recall(kb, "animals", namespace=ns_b, limit=10)
 
-    a_text = " ".join(c.content for c, _ in result_a.chunks)
-    b_text = " ".join(c.content for c, _ in result_b.chunks)
+    a_text = " ".join(c.content for c in result_a.chunks)
+    b_text = " ".join(c.content for c in result_b.chunks)
 
     assert "kangaroos" in a_text
     assert "penguins" not in a_text, "namespace_b content leaked into namespace_a"
@@ -342,7 +342,7 @@ async def test_skeleton_recall_top_k_ordering(kb: Khora, namespace_id: UUID) -> 
     result = await _recall(kb, "alpha bravo charlie delta echo", namespace=namespace_id, limit=10)
 
     assert len(result.chunks) >= 3
-    scores = [score for _, score in result.chunks]
+    scores = [c.score for c in result.chunks]
     # Strictly non-increasing — pgvector returns ORDER BY similarity DESC.
     for prev, curr in zip(scores, scores[1:]):
         assert prev >= curr, f"similarity ordering violated: {prev} < {curr} in {scores}"
@@ -391,9 +391,9 @@ async def test_skeleton_recall_with_metadata_filter(kb: Khora, namespace_id: UUI
     )
 
     assert len(result.chunks) >= 1
-    for chunk, _score in result.chunks:
+    for chunk in result.chunks:
         assert "group A" in chunk.content, f"non-group-A leaked in: {chunk.content!r}"
-    assert all("group B" not in c.content for c, _ in result.chunks), "group-B chunk leaked through tag filter"
+    assert all("group B" not in c.content for c in result.chunks), "group-B chunk leaked through tag filter"
 
 
 async def test_skeleton_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
@@ -440,12 +440,12 @@ async def test_skeleton_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
         start_time=seven_days_ago,
     )
 
-    returned_doc_ids = {c.document_id for c, _ in result.chunks}
+    returned_doc_ids = {c.document_id for c in result.chunks}
     assert r_old.document_id not in returned_doc_ids, (
         f"20-day-old document leaked through occurred_after filter; returned doc_ids={returned_doc_ids}"
     )
     # The recent doc should still surface.
-    assert any("recent" in c.content for c, _ in result.chunks), "recent doc not returned"
+    assert any("recent" in c.content for c in result.chunks), "recent doc not returned"
 
 
 async def test_skeleton_remember_batch(kb: Khora, namespace_id: UUID) -> None:
@@ -470,7 +470,7 @@ async def test_skeleton_remember_batch(kb: Khora, namespace_id: UUID) -> None:
 
     # All 20 should be queryable.
     result = await _recall(kb, "widget batch document", namespace=namespace_id, limit=25)
-    contents_returned = {c.content for c, _ in result.chunks}
+    contents_returned = {c.content for c in result.chunks}
     assert len(contents_returned) >= 20, f"expected ≥20 distinct chunks returned, got {len(contents_returned)}"
 
 
@@ -483,7 +483,7 @@ async def test_skeleton_recall_empty_namespace(kb: Khora) -> None:
     assert result.chunks == []
     assert result.entities == []  # Skeleton never returns entities anyway.
     # Metadata should still be populated (engine identity, backend, etc.).
-    assert result.metadata.get("backend") == "pgvector"
+    assert result.engine_info.get("backend") == "pgvector"
 
 
 async def test_skeleton_recall_metadata_keys(kb: Khora, namespace_id: UUID) -> None:
@@ -492,7 +492,7 @@ async def test_skeleton_recall_metadata_keys(kb: Khora, namespace_id: UUID) -> N
 
     result = await _recall(kb, "alpha", namespace=namespace_id, limit=5)
 
-    md = result.metadata
+    md = result.engine_info
     # Skeleton populates these three keys at engine.py:485-489.
     expected = {"backend", "hybrid_alpha", "temporal_filter"}
     missing = expected - md.keys()
@@ -518,9 +518,9 @@ async def test_skeleton_recall_default_hybrid_mode(kb: Khora, namespace_id: UUID
     # default path (no explicit ``mode`` kwarg → ``SearchMode.HYBRID``).
     result = await kb.recall("alpha", namespace=namespace_id, limit=5)
 
-    assert result.metadata.get("backend") == "pgvector"
+    assert result.engine_info.get("backend") == "pgvector"
     # HYBRID maps to ``hybrid_alpha=0.7`` per engine.py:444.
-    assert result.metadata.get("hybrid_alpha") == 0.7
+    assert result.engine_info.get("hybrid_alpha") == 0.7
 
 
 async def test_skeleton_concurrent_remember(kb: Khora, namespace_id: UUID) -> None:
@@ -540,5 +540,5 @@ async def test_skeleton_concurrent_remember(kb: Khora, namespace_id: UUID) -> No
 
     # All five recoverable via recall.
     result = await _recall(kb, "widget", namespace=namespace_id, limit=20)
-    contents_returned = {c.content for c, _ in result.chunks}
+    contents_returned = {c.content for c in result.chunks}
     assert len(contents_returned) >= 5

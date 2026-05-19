@@ -18,11 +18,15 @@ from khora import Khora  # noqa: E402
 
 def _mk_kb(*, recall_result=None, document_id=None) -> Khora:
     kb = AsyncMock(spec=Khora)
-    kb.recall = AsyncMock(
-        return_value=recall_result or MagicMock(chunks=[], entities=[], context_text="recalled text", metadata={})
-    )
+    kb.recall = AsyncMock(return_value=recall_result or MagicMock(chunks=[], entities=[], documents=[], engine_info={}))
     kb.remember = AsyncMock(return_value=MagicMock(document_id=document_id or uuid4()))
     return kb
+
+
+def _mk_chunk_stub(content: str) -> MagicMock:
+    chunk = MagicMock()
+    chunk.content = content
+    return chunk
 
 
 def test_block_is_base_memory_block():
@@ -59,7 +63,12 @@ async def test_aget_calls_recall_with_last_user_message():
 
     from khora.integrations.llamaindex import KhoraMemoryBlock
 
-    recall = MagicMock(chunks=[], entities=[], context_text="rendered chunk", metadata={})
+    recall = MagicMock(
+        chunks=[_mk_chunk_stub("rendered chunk")],
+        entities=[],
+        documents=[],
+        engine_info={},
+    )
     kb = _mk_kb(recall_result=recall)
     block = KhoraMemoryBlock(kb=kb, namespace_id=uuid4(), similarity_top_k=4)
 
@@ -159,7 +168,12 @@ async def test_aget_falls_back_to_non_user_message():
 
     from khora.integrations.llamaindex import KhoraMemoryBlock
 
-    recall = MagicMock(chunks=[], entities=[], context_text="from-assistant", metadata={})
+    recall = MagicMock(
+        chunks=[_mk_chunk_stub("from-assistant")],
+        entities=[],
+        documents=[],
+        engine_info={},
+    )
     kb = _mk_kb(recall_result=recall)
     block = KhoraMemoryBlock(kb=kb, namespace_id=uuid4())
 

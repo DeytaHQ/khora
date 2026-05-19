@@ -26,6 +26,7 @@ from khora.core.models import (
     Entity,
     MemoryNamespace,
 )
+from khora.core.models.recall import DocumentProjection, RecallChunk
 from khora.engines._storage_config import build_storage_config
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
@@ -491,11 +492,8 @@ class SkeletonConstructionEngine:
             query_text=query,
         )
 
-        # Build context text
-        context_parts = []
         chunks_with_scores: list[tuple[Chunk, float]] = []
         for result in results:
-            context_parts.append(result.chunk.content)
             chunk = Chunk(
                 id=result.chunk.id,
                 namespace_id=result.chunk.namespace_id,
@@ -505,19 +503,53 @@ class SkeletonConstructionEngine:
                     "occurred_at": result.chunk.occurred_at.isoformat() if result.chunk.occurred_at else None,
                     **(result.chunk.metadata or {}),
                 },
-                created_at=result.chunk.created_at or result.chunk.occurred_at,
+                created_at=result.chunk.created_at or result.chunk.occurred_at or datetime.now(UTC),
+                source_timestamp=result.chunk.occurred_at,
             )
             chunks_with_scores.append((chunk, result.combined_score or result.similarity))
 
-        context_text = "\n\n---\n\n".join(context_parts[:limit])
+        recall_chunks = [
+            RecallChunk(
+                id=chunk.id,
+                document_id=chunk.document_id,
+                content=chunk.content,
+                score=score,
+                created_at=chunk.created_at,
+                occurred_at=chunk.source_timestamp,
+                chunker_info=chunk.chunker_info or {},
+            )
+            for chunk, score in chunks_with_scores
+        ]
+
+        # Document stubs — fuller projections land with the recall-method rewrite.
+        seen_doc_ids: set[UUID] = set()
+        documents: list[DocumentProjection] = []
+        for chunk, _ in chunks_with_scores:
+            if chunk.document_id in seen_doc_ids:
+                continue
+            seen_doc_ids.add(chunk.document_id)
+            src = chunk.source_document
+            documents.append(
+                DocumentProjection(
+                    id=chunk.document_id,
+                    created_at=chunk.created_at,
+                    source_type=(src.source_type if src and src.source_type else "library"),
+                    title=(src.title if src and src.title else None),
+                    source=(src.source if src and src.source else None),
+                    source_timestamp=(src.source_timestamp if src else None),
+                    metadata=dict(chunk.metadata or {}),
+                )
+            )
 
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
-            chunks=chunks_with_scores,
+            documents=documents,
+            chunks=recall_chunks,
             entities=[],  # Skeleton engine focuses on chunks, not entities
-            context_text=context_text,
-            metadata={
+            relationships=[],
+            engine_info={
+                "engine": "skeleton",
                 "backend": self._backend_type,
                 "hybrid_alpha": hybrid_alpha,
                 "temporal_filter": str(temporal_filter) if temporal_filter else None,

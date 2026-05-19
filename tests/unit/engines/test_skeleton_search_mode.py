@@ -90,7 +90,7 @@ async def test_recall_resolves_hybrid_alpha_per_mode(mode: SearchMode, expected_
 
     result = await engine.recall("alpha", namespace_id, mode=mode)
 
-    assert result.metadata["hybrid_alpha"] == expected_alpha
+    assert result.engine_info["hybrid_alpha"] == expected_alpha
     temporal_store.search.assert_awaited_once()
     forwarded = temporal_store.search.await_args.kwargs["hybrid_alpha"]
     assert forwarded == expected_alpha
@@ -107,6 +107,6 @@ async def test_recall_explicit_hybrid_alpha_overrides_mode_default() -> None:
 
     result = await engine.recall("alpha", namespace_id, mode=SearchMode.HYBRID, hybrid_alpha=0.25)
 
-    assert result.metadata["hybrid_alpha"] == 0.25
+    assert result.engine_info["hybrid_alpha"] == 0.25
     forwarded = temporal_store.search.await_args.kwargs["hybrid_alpha"]
     assert forwarded == 0.25

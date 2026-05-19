@@ -297,10 +297,14 @@ class KhoraMemoryService:
             min_similarity=self.min_similarity,
         )
 
+        # Document-level metadata (where KEY_EVENT_ID lives) is on the
+        # top-level ``RecallResult.documents`` list; join via document_id.
+        doc_metadata: dict[UUID, dict[str, Any]] = {doc.id: dict(doc.metadata or {}) for doc in recall.documents}
+
         response = SearchMemoryResponse()
         seen_events: set[str] = set()
-        for chunk, _score in recall.chunks:
-            custom = chunk.metadata or {}
+        for chunk in recall.chunks:
+            custom = doc_metadata.get(chunk.document_id, {})
             event_id = str(custom.get(KEY_EVENT_ID) or "")
             # Same event may produce multiple chunks; surface each event once.
             if event_id and event_id in seen_events:
@@ -308,6 +312,7 @@ class KhoraMemoryService:
             seen_events.add(event_id)
             entry = chunk_to_memory_entry(
                 chunk,
+                custom_metadata=custom,
                 memory_entry_cls=MemoryEntry,
                 content_cls=Content,
                 part_cls=Part,

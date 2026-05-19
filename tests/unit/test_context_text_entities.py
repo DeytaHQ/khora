@@ -371,6 +371,8 @@ class TestRelationshipFormatting:
 
     def test_backward_compat_no_relationships(self) -> None:
         """RecallResult without relationships kwarg works (default empty list)."""
+        from khora.core.models import RecallChunk
+
         ns_id = uuid4()
         chunk = Chunk(
             namespace_id=ns_id,
@@ -382,10 +384,19 @@ class TestRelationshipFormatting:
         result = RecallResult(
             query="test query",
             namespace_id=ns_id,
-            chunks=[(chunk, 0.9)],
+            documents=[],
+            chunks=[
+                RecallChunk(
+                    id=chunk.id,
+                    document_id=chunk.document_id,
+                    content=chunk.content,
+                    score=0.9,
+                    created_at=chunk.created_at,
+                )
+            ],
             entities=[],
-            context_text="Some content.",
+            relationships=[],
         )
 
         assert result.relationships == []
-        assert result.context_text == "Some content."
+        assert result.chunks[0].content == "Some content."

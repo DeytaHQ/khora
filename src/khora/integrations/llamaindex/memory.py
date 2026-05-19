@@ -234,16 +234,12 @@ def _pick_query(messages: list[ChatMessage] | None) -> str:
 def _format_recall(result: Any) -> str:
     """Render a ``RecallResult`` as a bounded text block.
 
-    Uses ``context_text`` when khora populated it (the standard
-    vectorcypher engine path); falls back to a chunk-content join
-    otherwise. The output is wrapped in a ``<khora_memory>`` envelope so
-    a downstream prompt template can spot it.
+    Joins the chunk contents into a single block. The output is wrapped
+    in a ``<khora_memory>`` envelope so a downstream prompt template can
+    spot it.
     """
-    context = (result.context_text or "").strip()
-    if not context:
-        # Some engines return empty context_text — assemble our own.
-        parts = [chunk.content for chunk, _score in result.chunks]
-        context = "\n".join(p for p in parts if p)
+    parts = [chunk.content for chunk in result.chunks]
+    context = "\n".join(p for p in parts if p).strip()
     if not context:
         return ""
     return f"{_RECALL_HEADER}\n{context}\n{_RECALL_FOOTER}"

@@ -8,8 +8,18 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Changed
 
+- **`Khora.recall()` returns a typed projection — BREAKING.** `RecallResult` is rewritten as a JSON-serializable response projection at `khora.core.models.recall` (re-exported from `khora`). Migration:
+  - `result.chunks: list[tuple[Chunk, float]]` → `list[RecallChunk]`. Read `chunk.score` / `chunk.content` / `chunk.id` directly; the per-chunk tuple is gone.
+  - `result.entities: list[tuple[Entity, float]]` → `list[RecallEntity]`. Read `entity.score` / `entity.source_document_ids` / `entity.source_chunk_ids`. The new projection no longer carries the full `Entity` ORM object.
+  - `result.relationships: list[tuple[Relationship, float]]` → `list[RecallRelationship]`. Same shape change. Always present (possibly empty) on every engine; previously populated only by VectorCypher.
+  - **Renames:** `result.metadata` → `result.engine_info`; `result.llm_usage` → `result.usage`.
+  - **Removed:** `result.context_text` is gone from the public surface — adapters that need a context string build it locally from `result.chunks[i].content`. A `khora.context_text(result)` helper will return in a follow-up.
+  - **New top-level field:** `result.documents: list[DocumentProjection]` — deduplicated source documents referenced by any chunk/entity/relationship. Every `chunks[i].document_id` and every id in `entities[i].source_document_ids` / `relationships[i].source_document_ids` is guaranteed to appear in `documents[]` (producer-enforced invariant).
+  - **New mandatory engine telemetry key:** every engine emits `engine_info["engine"] = "<strategy-name>"` (`vectorcypher` / `chronicle` / `skeleton`) so consumers can route on producer identity.
+  - **`Khora.recall(..., include_sources=True)`** is now a documented no-op kept for API stability — the prior implementation mutated `Chunk.source_document` / `Entity.source_documents` in place, which is incompatible with frozen projections. Full source population returns with the recall-method rewrite.
+  - **New public exports** from `khora` and `khora.core.models`: `DocumentProjection`, `RecallChunk`, `RecallEntity`, `RecallRelationship` (alongside the rewritten `RecallResult`).
+  - **Downstream consumers** (`khora-cli`, `khora-explorer`) must be updated in lockstep — `__all__` in `khora/__init__.py` and `khora/core/models/__init__.py` is the machine-readable contract.
 - **Coverage floor lifted 72% → 77%** ([#695](https://github.com/DeytaHQ/khora/issues/695) step 3+). ~500 new unit tests across 9 modules with the largest remaining gaps. Unit-only coverage rose from 73.15% to **76.87%**; combined unit+integration on CI projected ≥78%. Per-module before → after: `query/engine.py` 52→84%, `query/router.py` 52→96%, `query/reranking.py` 12→96%, `engines/vectorcypher/engine.py` 50→83%, `engines/vectorcypher/retriever.py` 71→85%, `engines/skeleton/engine.py` 49→63%, `engines/skeleton/backends/pgvector.py` 18→72%, `storage/backends/pgvector.py` (unit-only) 39→67%, `storage/backends/neo4j.py` (unit-only) 15→46%. Next ladder step is 80%.
-
 - **Coverage floor lifted 65% → 72%** ([#695](https://github.com/DeytaHQ/khora/issues/695) step 2). `--cov-fail-under` raised in `pyproject.toml`, `Makefile`, and `.github/workflows/ci.yml`. Backed by 500+ new unit tests across 15 previously under-covered modules (query/{normalization,agentic,understanding,hyde,linking,temporal_detection}, storage/{optimize,expertise_store,event_store}, storage/backends/postgresql, pipelines/tasks/extract, pipelines/flows/ingest, extraction/{entity_resolution,expansion/rule_engine,extractors/llm}, integrations/crewai/storage). Unit-only coverage rose from ~68% to **73.15%**; combined unit+integration projected at ~75%. Next ladder steps remain at 75% / 80% / 85% per the issue plan.
 
 ### Fixed

@@ -202,8 +202,8 @@ async def test_recall_populates_abstention_signals_metadata():
     namespace_id = uuid4()
     result: RecallResult = await engine.recall("who founded Acme", namespace_id, limit=5)
 
-    assert "abstention_signals" in result.metadata
-    sig = result.metadata["abstention_signals"]
+    assert "abstention_signals" in result.engine_info
+    sig = result.engine_info["abstention_signals"]
     # Empty stores → all signals fire, full abstention
     assert sig["entities_empty"] is True
     assert sig["chunks_empty"] is True
@@ -232,10 +232,10 @@ async def test_recall_metadata_keeps_existing_keys():
     result = await engine.recall("query", uuid4())
 
     # Pre-existing keys (regression guard)
-    assert result.metadata["engine"] == "chronicle"
-    assert "channels" in result.metadata
-    assert "decay_weight" in result.metadata
-    assert "max_raw_vector_score" in result.metadata
-    assert "timings" in result.metadata
+    assert result.engine_info["engine"] == "chronicle"
+    assert "channels" in result.engine_info
+    assert "decay_weight" in result.engine_info
+    assert "max_raw_vector_score" in result.engine_info
+    assert "timings" in result.engine_info
     # New key
-    assert "abstention_signals" in result.metadata
+    assert "abstention_signals" in result.engine_info

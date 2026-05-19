@@ -32,12 +32,8 @@ chunk would waste space on the embedded sqlite_lance backend.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import UUID
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from khora.core.models.document import Chunk
-
 
 # Sentinel keys we own under ``Document.metadata``. Prefix with
 # ``crewai_`` so adapter writes don't collide with the user's own
@@ -154,25 +150,32 @@ def _strip_tz(value: datetime | None) -> datetime | None:
 
 
 def chunk_to_record(
-    chunk: Chunk,
+    chunk: Any,
     memory_record_cls: type,
+    *,
+    document_metadata: dict[str, Any] | None = None,
 ) -> Any:
-    """Rebuild a ``MemoryRecord`` from a khora ``Chunk``.
+    """Rebuild a ``MemoryRecord`` from a recall chunk.
 
     ``memory_record_cls`` is passed in (rather than imported at module
     scope) so this module stays free of any top-level ``crewai`` import
     — the adapter loads it lazily inside ``KhoraStorageBackend``.
 
     Args:
-        chunk: A ``khora.core.models.document.Chunk``.
+        chunk: A ``RecallChunk`` (or any object exposing ``content``,
+            ``document_id``, ``created_at``).
         memory_record_cls: The ``crewai.memory.types.MemoryRecord``
             class — passed as a runtime parameter so this module never
             imports crewai at top level.
+        document_metadata: Joined ``DocumentProjection.metadata`` for
+            ``chunk.document_id`` (callers build the doc-id lookup from
+            ``RecallResult.documents``). All the crewai-internal keys
+            (scope, categories, importance, etc.) live on the document.
 
     Returns:
         A populated ``MemoryRecord``.
     """
-    custom = chunk.metadata or {}
+    custom = document_metadata or {}
     # Strip our internal keys so the round-tripped ``metadata`` dict
     # contains only the user's own keys.
     user_metadata = {k: v for k, v in custom.items() if not k.startswith("crewai_")}

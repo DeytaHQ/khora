@@ -139,9 +139,9 @@ class TestChronicleLanceDBBackend:
             assert result.chunks, "recall should return chunks via LanceDB"
             assert len(result.chunks) <= 3
             # Top hit must come from a real chunk, not an empty fallback.
-            top_chunk, top_score = result.chunks[0]
+            top_chunk = result.chunks[0]
             assert top_chunk.content
-            assert top_score > 0.0
+            assert top_chunk.score > 0.0
         finally:
             await engine.disconnect()
 

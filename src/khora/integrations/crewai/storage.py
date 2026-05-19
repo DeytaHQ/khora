@@ -190,9 +190,15 @@ class KhoraStorageBackend:
             ),
         )
 
+        docs_by_id = {d.id: d for d in recall_result.documents}
         out: list[tuple[Any, float]] = []
-        for chunk, score in recall_result.chunks:
-            record = chunk_to_record(chunk, self._memory_record_cls)
+        for chunk in recall_result.chunks:
+            doc = docs_by_id.get(chunk.document_id)
+            record = chunk_to_record(
+                chunk,
+                self._memory_record_cls,
+                document_metadata=(doc.metadata if doc else None) or {},
+            )
             if not _matches_filters(
                 record,
                 scope_prefix=scope_prefix,
@@ -200,7 +206,7 @@ class KhoraStorageBackend:
                 metadata_filter=metadata_filter,
             ):
                 continue
-            out.append((record, float(score)))
+            out.append((record, float(chunk.score)))
             if len(out) >= limit:
                 break
         return out
@@ -337,7 +343,11 @@ class KhoraStorageBackend:
         chunk = run_sync(self._first_chunk_for(record_id, doc_id))
         if chunk is None:
             return None
-        return chunk_to_record(chunk, self._memory_record_cls)
+        return chunk_to_record(
+            chunk,
+            self._memory_record_cls,
+            document_metadata=chunk.metadata or {},
+        )
 
     async def _first_chunk_for(
         self,
@@ -409,7 +419,13 @@ class KhoraStorageBackend:
                 chunks = await storage.get_chunks_by_document(doc.id, namespace_id=self.namespace_id)
                 if not chunks:
                     continue
-                out.append(chunk_to_record(chunks[0], self._memory_record_cls))
+                out.append(
+                    chunk_to_record(
+                        chunks[0],
+                        self._memory_record_cls,
+                        document_metadata=chunks[0].metadata or {},
+                    )
+                )
                 if len(out) >= limit:
                     break
             if len(page) < page_size:
@@ -452,9 +468,15 @@ class KhoraStorageBackend:
             limit=max(limit, 1),
             min_similarity=min_score,
         )
+        docs_by_id = {d.id: d for d in recall_result.documents}
         out: list[tuple[Any, float]] = []
-        for chunk, score in recall_result.chunks:
-            record = chunk_to_record(chunk, self._memory_record_cls)
+        for chunk in recall_result.chunks:
+            doc = docs_by_id.get(chunk.document_id)
+            record = chunk_to_record(
+                chunk,
+                self._memory_record_cls,
+                document_metadata=(doc.metadata if doc else None) or {},
+            )
             if not _matches_filters(
                 record,
                 scope_prefix=scope_prefix,
@@ -462,7 +484,7 @@ class KhoraStorageBackend:
                 metadata_filter=metadata_filter,
             ):
                 continue
-            out.append((record, float(score)))
+            out.append((record, float(chunk.score)))
             if len(out) >= limit:
                 break
         return out

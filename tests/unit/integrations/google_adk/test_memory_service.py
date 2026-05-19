@@ -36,9 +36,12 @@ pytestmark = pytest.mark.skipif(not _HAS_ADK, reason="google-adk not installed")
 
 from khora import Khora  # noqa: E402
 from khora.core.models.document import (  # noqa: E402
-    Chunk,
     Document,
     DocumentStatus,
+)
+from khora.core.models.recall import (  # noqa: E402
+    DocumentProjection,
+    RecallChunk,
 )
 from khora.integrations.google_adk._mapping import (  # noqa: E402
     KEY_AUTHOR,
@@ -82,21 +85,30 @@ def _mk_chunk(
     event_id: str,
     session_id: str,
     author: str = "user",
-) -> Chunk:
+    score: float = 0.9,
+) -> tuple[RecallChunk, DocumentProjection]:
     custom = {
         KEY_AUTHOR: author,
         KEY_EVENT_ID: event_id,
         KEY_SESSION_ID: session_id,
         KEY_TIMESTAMP: "2026-05-15T00:00:00+00:00",
     }
-    return Chunk(
+    doc_id = uuid4()
+    created_at = datetime(2026, 5, 15, tzinfo=UTC)
+    chunk = RecallChunk(
         id=uuid4(),
-        namespace_id=namespace_id,
-        document_id=uuid4(),
+        document_id=doc_id,
         content=content,
-        metadata=custom,
-        created_at=datetime(2026, 5, 15, tzinfo=UTC),
+        score=score,
+        created_at=created_at,
     )
+    doc = DocumentProjection(
+        id=doc_id,
+        created_at=created_at,
+        source_type="library",
+        metadata=custom,
+    )
+    return chunk, doc
 
 
 # ----------------------------------------------------------------------
@@ -275,11 +287,12 @@ async def test_search_memory_maps_chunks_to_memory_entries():
     kb = _mk_kb()
     namespace = namespace_uuid(app_name="app", user_id="user-xyz")
     kb._resolve_namespace = AsyncMock(return_value=namespace)
-    chunk1 = _mk_chunk(namespace, content="alpha", event_id="ev1", session_id="s1")
-    chunk2 = _mk_chunk(namespace, content="beta", event_id="ev2", session_id="s1", author="model")
+    chunk1, doc1 = _mk_chunk(namespace, content="alpha", event_id="ev1", session_id="s1", score=0.9)
+    chunk2, doc2 = _mk_chunk(namespace, content="beta", event_id="ev2", session_id="s1", author="model", score=0.8)
 
     recall_result = MagicMock()
-    recall_result.chunks = [(chunk1, 0.9), (chunk2, 0.8)]
+    recall_result.chunks = [chunk1, chunk2]
+    recall_result.documents = [doc1, doc2]
     kb.recall = AsyncMock(return_value=recall_result)
 
     svc = KhoraMemoryService(kb=kb)
@@ -299,11 +312,12 @@ async def test_search_memory_dedupes_chunks_by_event_id():
     kb = _mk_kb()
     namespace = namespace_uuid(app_name="app", user_id="user-xyz")
     kb._resolve_namespace = AsyncMock(return_value=namespace)
-    chunk_a = _mk_chunk(namespace, content="first half", event_id="same-event", session_id="s1")
-    chunk_b = _mk_chunk(namespace, content="second half", event_id="same-event", session_id="s1")
+    chunk_a, doc_a = _mk_chunk(namespace, content="first half", event_id="same-event", session_id="s1", score=0.9)
+    chunk_b, doc_b = _mk_chunk(namespace, content="second half", event_id="same-event", session_id="s1", score=0.85)
 
     recall_result = MagicMock()
-    recall_result.chunks = [(chunk_a, 0.9), (chunk_b, 0.85)]
+    recall_result.chunks = [chunk_a, chunk_b]
+    recall_result.documents = [doc_a, doc_b]
     kb.recall = AsyncMock(return_value=recall_result)
 
     svc = KhoraMemoryService(kb=kb)
@@ -321,6 +335,7 @@ async def test_search_memory_forwards_recall_limit_and_min_similarity():
     kb._resolve_namespace = AsyncMock(return_value=namespace)
     empty = MagicMock()
     empty.chunks = []
+    empty.documents = []
     kb.recall = AsyncMock(return_value=empty)
 
     svc = KhoraMemoryService(kb=kb, recall_limit=25, min_similarity=0.4)

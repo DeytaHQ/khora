@@ -86,9 +86,10 @@ async def _run_recall(kb: Khora, query: str, captured: list[dict]) -> None:
         return_value=RecallResult(
             query=query,
             namespace_id=ns_id,
+            documents=[],
             chunks=[],
             entities=[],
-            context_text="",
+            relationships=[],
         )
     )
     with (

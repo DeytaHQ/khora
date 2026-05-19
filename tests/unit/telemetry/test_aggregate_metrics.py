@@ -132,9 +132,10 @@ async def test_recall_emits_duration_histogram(recall_histogram: _RecordingHisto
         return_value=RecallResult(
             query="q",
             namespace_id=ns_id,
+            documents=[],
             chunks=[],
             entities=[],
-            context_text="",
+            relationships=[],
         )
     )
 

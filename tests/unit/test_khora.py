@@ -56,6 +56,7 @@ class TestRecallResult:
 
     def test_fields(self) -> None:
         """All fields are accessible."""
+        from khora.core.models import RecallChunk, RecallEntity
         from khora.core.models.document import Chunk
         from khora.core.models.entity import Entity
 
@@ -65,26 +66,48 @@ class TestRecallResult:
         r = RecallResult(
             query="test query",
             namespace_id=ns_id,
-            chunks=[(chunk, 0.9)],
-            entities=[(entity, 0.8)],
-            context_text="some text",
+            documents=[],
+            chunks=[
+                RecallChunk(
+                    id=chunk.id,
+                    document_id=chunk.document_id,
+                    content=chunk.content,
+                    score=0.9,
+                    created_at=chunk.created_at,
+                )
+            ],
+            entities=[
+                RecallEntity(
+                    id=entity.id,
+                    name=entity.name,
+                    entity_type=entity.entity_type,
+                    description="",
+                    score=0.8,
+                    attributes={},
+                    mention_count=0,
+                    source_document_ids=[],
+                    source_chunk_ids=[],
+                )
+            ],
+            relationships=[],
         )
         assert r.query == "test query"
         assert r.namespace_id == ns_id
         assert len(r.chunks) == 1
         assert len(r.entities) == 1
-        assert r.context_text == "some text"
+        assert r.chunks[0].content == "hello"
 
-    def test_default_metadata(self) -> None:
-        """Default metadata is empty dict."""
+    def test_default_engine_info(self) -> None:
+        """Default engine_info is empty dict."""
         r = RecallResult(
             query="q",
             namespace_id=uuid4(),
+            documents=[],
             chunks=[],
             entities=[],
-            context_text="",
+            relationships=[],
         )
-        assert r.metadata == {}
+        assert r.engine_info == {}
 
 
 # ---------------------------------------------------------------------------
@@ -554,10 +577,11 @@ class TestRecall:
         mock_result = RecallResult(
             query="search query",
             namespace_id=ns_id,
-            chunks=[("chunk", 0.9)],
-            entities=[("entity", 0.8)],
-            context_text="found content",
-            metadata={"mode": "HYBRID"},
+            documents=[],
+            chunks=[],
+            entities=[],
+            relationships=[],
+            engine_info={"mode": "HYBRID"},
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
 
@@ -582,9 +606,10 @@ class TestRecall:
         mock_result = RecallResult(
             query="test",
             namespace_id=ns_id,
+            documents=[],
             chunks=[],
             entities=[],
-            context_text="",
+            relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
 
@@ -612,9 +637,10 @@ class TestRecallTemporalBounds:
         return RecallResult(
             query="q",
             namespace_id=ns_id,  # type: ignore[arg-type]
+            documents=[],
             chunks=[],
             entities=[],
-            context_text="",
+            relationships=[],
         )
 
     @pytest.mark.asyncio
@@ -1112,9 +1138,10 @@ class TestRecallRawMode:
         mock_result = RecallResult(
             query="test",
             namespace_id=ns_id,
+            documents=[],
             chunks=[],
             entities=[],
-            context_text="",
+            relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
 
@@ -1307,9 +1334,10 @@ class TestIncludeSources:
         mock_result = RecallResult(
             query="test",
             namespace_id=ns_id,
+            documents=[],
             chunks=[],
             entities=[],
-            context_text="",
+            relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
         kb._engine._storage.get_document_sources_batch = AsyncMock()
@@ -1325,35 +1353,47 @@ class TestIncludeSources:
 
     @pytest.mark.asyncio
     async def test_recall_include_sources_true(self) -> None:
-        """include_sources=True populates source_document on chunks and source_documents on entities."""
-        from khora.core.models.document import Chunk, DocumentSource
-        from khora.core.models.entity import Entity
+        """include_sources=True is accepted (kept for API stability) and the engine-produced
+        ``RecallResult.documents`` flow through to the caller unchanged.
+
+        Source attribution now lives on ``RecallResult.documents`` rather than being
+        mutated onto each chunk/entity post-recall. Engines build the ``documents``
+        list from their own data; ``kb.recall`` passes it through.
+        """
+        from datetime import UTC, datetime
+
+        from khora.core.models import DocumentProjection, RecallChunk, RecallEntity
 
         kb = _make_kb(connected=True)
         ns_id = uuid4()
         doc_id_1 = uuid4()
         doc_id_2 = uuid4()
+        now = datetime.now(UTC)
 
-        chunk = Chunk(namespace_id=ns_id, document_id=doc_id_1, content="hello")
-        entity = Entity(
-            namespace_id=ns_id,
+        chunk = RecallChunk(id=uuid4(), document_id=doc_id_1, content="hello", score=0.9, created_at=now)
+        entity = RecallEntity(
+            id=uuid4(),
             name="Alice",
             entity_type="PERSON",
+            description="",
+            score=0.8,
+            attributes={},
+            mention_count=0,
             source_document_ids=[doc_id_1, doc_id_2],
+            source_chunk_ids=[],
         )
+        doc_1 = DocumentProjection(id=doc_id_1, created_at=now, title="Doc 1")
+        doc_2 = DocumentProjection(id=doc_id_2, created_at=now, title="Doc 2")
 
         mock_result = RecallResult(
             query="test",
             namespace_id=ns_id,
-            chunks=[(chunk, 0.9)],
-            entities=[(entity, 0.8)],
-            context_text="hello",
+            documents=[doc_1, doc_2],
+            chunks=[chunk],
+            entities=[entity],
+            relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
-
-        src_1 = DocumentSource(id=doc_id_1, title="Doc 1")
-        src_2 = DocumentSource(id=doc_id_2, title="Doc 2")
-        kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id_1: src_1, doc_id_2: src_2})
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
@@ -1361,13 +1401,14 @@ class TestIncludeSources:
         ):
             result = await kb.recall("test", namespace=ns_id, include_sources=True)
 
-        # Chunk should have source_document populated
-        assert result.chunks[0][0].source_document is src_1
-
-        # Entity should have source_documents populated
-        assert result.entities[0][0].source_documents == {doc_id_1: src_1, doc_id_2: src_2}
-
-        kb._engine._storage.get_document_sources_batch.assert_awaited_once()
+        # documents flow through; callers join chunk → DocumentProjection by id.
+        docs_by_id = {d.id: d for d in result.documents}
+        assert docs_by_id.get(result.chunks[0].document_id) is not None
+        # Entity exposes its source document IDs (the DocumentSource→DocumentProjection
+        # mapping isn't 1:1 — assertion is on id membership).
+        assert set(result.entities[0].source_document_ids) == {doc_id_1, doc_id_2}
+        # Both docs the entity references resolved to a DocumentProjection.
+        assert all(docs_by_id.get(did) is not None for did in result.entities[0].source_document_ids)
 
     @pytest.mark.asyncio
     async def test_list_entities_include_sources(self) -> None:
@@ -1460,9 +1501,10 @@ class TestIncludeSources:
         mock_result = RecallResult(
             query="nothing",
             namespace_id=ns_id,
+            documents=[],
             chunks=[],
             entities=[],
-            context_text="",
+            relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
         kb._engine._storage.get_document_sources_batch = AsyncMock()
@@ -1544,34 +1586,46 @@ class TestIncludeSources:
 
     @pytest.mark.asyncio
     async def test_deleted_document_skipped_on_entities(self) -> None:
-        """Entity with partially-deleted source docs only gets found sources."""
-        from khora.core.models.document import DocumentSource
-        from khora.core.models.entity import Entity
+        """Engine-produced ``documents`` reflects only the doc IDs the engine could resolve.
+
+        Previously, ``_populate_sources`` looked up each entity ID in storage and skipped
+        deleted ones. Now the engine builds ``RecallResult.documents`` and the missing
+        doc IDs simply don't appear there — the entity's ``source_document_ids`` still
+        carries the full list, but only resolvable docs land in ``result.documents``.
+        """
+        from datetime import UTC, datetime
+
+        from khora.core.models import DocumentProjection, RecallEntity
 
         kb = _make_kb(connected=True)
         ns_id = uuid4()
         doc_id_1 = uuid4()
         doc_id_2 = uuid4()
+        now = datetime.now(UTC)
 
-        entity = Entity(
-            namespace_id=ns_id,
+        entity = RecallEntity(
+            id=uuid4(),
             name="Alice",
             entity_type="PERSON",
+            description="",
+            score=0.8,
+            attributes={},
+            mention_count=0,
             source_document_ids=[doc_id_1, doc_id_2],
+            source_chunk_ids=[],
         )
+        # Engine only includes the doc it could resolve (doc_id_2 was deleted).
+        doc_1 = DocumentProjection(id=doc_id_1, created_at=now, title="Doc 1")
 
         mock_result = RecallResult(
             query="test",
             namespace_id=ns_id,
+            documents=[doc_1],
             chunks=[],
-            entities=[(entity, 0.8)],
-            context_text="",
+            entities=[entity],
+            relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
-
-        # Only doc_id_1 is returned; doc_id_2 was deleted
-        src_1 = DocumentSource(id=doc_id_1, title="Doc 1")
-        kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={doc_id_1: src_1})
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
@@ -1579,31 +1633,38 @@ class TestIncludeSources:
         ):
             result = await kb.recall("test", namespace=ns_id, include_sources=True)
 
-        assert result.entities[0][0].source_documents == {doc_id_1: src_1}
-        assert doc_id_2 not in result.entities[0][0].source_documents
+        doc_ids_in_result = {d.id for d in result.documents}
+        assert doc_ids_in_result == {doc_id_1}
+        assert doc_id_2 not in doc_ids_in_result
+        # The entity still references both, but only doc_1 resolved.
+        assert set(result.entities[0].source_document_ids) == {doc_id_1, doc_id_2}
 
     @pytest.mark.asyncio
     async def test_chunk_with_missing_document(self) -> None:
-        """Chunk whose document_id is not in sources gets source_document=None."""
-        from khora.core.models.document import Chunk
+        """A chunk whose document_id has no matching ``documents[]`` entry is OK —
+        caller's doc-lookup simply returns no projection.
+        """
+        from datetime import UTC, datetime
+
+        from khora.core.models import RecallChunk
 
         kb = _make_kb(connected=True)
         ns_id = uuid4()
         doc_id = uuid4()
+        now = datetime.now(UTC)
 
-        chunk = Chunk(namespace_id=ns_id, document_id=doc_id, content="orphan chunk")
+        chunk = RecallChunk(id=uuid4(), document_id=doc_id, content="orphan chunk", score=0.9, created_at=now)
 
+        # Engine returns empty documents — the chunk's doc was deleted.
         mock_result = RecallResult(
             query="test",
             namespace_id=ns_id,
-            chunks=[(chunk, 0.9)],
+            documents=[],
+            chunks=[chunk],
             entities=[],
-            context_text="orphan chunk",
+            relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
-
-        # get_document_sources_batch returns empty dict (document was deleted)
-        kb._engine._storage.get_document_sources_batch = AsyncMock(return_value={})
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
@@ -1611,28 +1672,16 @@ class TestIncludeSources:
         ):
             result = await kb.recall("test", namespace=ns_id, include_sources=True)
 
-        assert result.chunks[0][0].source_document is None
+        docs_by_id = {d.id: d for d in result.documents}
+        assert docs_by_id.get(result.chunks[0].document_id) is None
 
     @pytest.mark.asyncio
     async def test_storage_exception_propagation(self) -> None:
-        """RuntimeError from get_document_sources_batch propagates to caller."""
-        from khora.core.models.document import Chunk
-
+        """RuntimeError raised by the engine propagates to caller (no swallowing)."""
         kb = _make_kb(connected=True)
         ns_id = uuid4()
-        doc_id = uuid4()
 
-        chunk = Chunk(namespace_id=ns_id, document_id=doc_id, content="test")
-
-        mock_result = RecallResult(
-            query="test",
-            namespace_id=ns_id,
-            chunks=[(chunk, 0.9)],
-            entities=[],
-            context_text="test",
-        )
-        kb._engine.recall = AsyncMock(return_value=mock_result)
-        kb._engine._storage.get_document_sources_batch = AsyncMock(side_effect=RuntimeError("DB error"))
+        kb._engine.recall = AsyncMock(side_effect=RuntimeError("DB error"))
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
@@ -1643,28 +1692,33 @@ class TestIncludeSources:
 
     @pytest.mark.asyncio
     async def test_entity_empty_source_document_ids(self) -> None:
-        """Entity with empty source_document_ids skips fetch and gets source_documents=None."""
-        from khora.core.models.entity import Entity
+        """An entity with no source_document_ids leaves ``documents`` empty."""
+        from khora.core.models import RecallEntity
 
         kb = _make_kb(connected=True)
         ns_id = uuid4()
 
-        entity = Entity(
-            namespace_id=ns_id,
+        entity = RecallEntity(
+            id=uuid4(),
             name="Lonely",
             entity_type="CONCEPT",
+            description="",
+            score=0.7,
+            attributes={},
+            mention_count=0,
             source_document_ids=[],
+            source_chunk_ids=[],
         )
 
         mock_result = RecallResult(
             query="test",
             namespace_id=ns_id,
+            documents=[],
             chunks=[],
-            entities=[(entity, 0.7)],
-            context_text="",
+            entities=[entity],
+            relationships=[],
         )
         kb._engine.recall = AsyncMock(return_value=mock_result)
-        kb._engine._storage.get_document_sources_batch = AsyncMock()
 
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
@@ -1672,9 +1726,8 @@ class TestIncludeSources:
         ):
             result = await kb.recall("test", namespace=ns_id, include_sources=True)
 
-        # No doc IDs to fetch, so get_document_sources_batch should NOT be called
-        kb._engine._storage.get_document_sources_batch.assert_not_awaited()
-        assert result.entities[0][0].source_documents is None
+        assert result.documents == []
+        assert result.entities[0].source_document_ids == []
 
 
 # ---------------------------------------------------------------------------

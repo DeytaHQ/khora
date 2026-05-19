@@ -58,12 +58,13 @@ class _RememberResultStub:
 
 @dataclass
 class _RecallResultStub:
-    chunks: list[tuple[Any, float]]
+    chunks: list[Any]
     query: str = ""
     namespace_id: UUID = field(default_factory=uuid4)
+    documents: list[Any] = field(default_factory=list)
     entities: list[Any] = field(default_factory=list)
-    context_text: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
+    relationships: list[Any] = field(default_factory=list)
+    engine_info: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -88,8 +89,32 @@ def _make_backend(kb: Any, *, namespace_id: UUID | None = None) -> KhoraStorageB
 
 
 def _make_chunk(*, content: str = "x", document_id: UUID | None = None, custom: dict[str, Any] | None = None) -> Chunk:
+    """Build a storage-layer ``Chunk`` (used by ``get_chunks_by_document`` callers)."""
     doc_id = document_id or uuid4()
     return Chunk(content=content, document_id=doc_id, metadata=dict(custom or {}))
+
+
+def _make_recall_chunk(
+    *,
+    content: str = "x",
+    document_id: UUID | None = None,
+    score: float = 0.9,
+    custom: dict[str, Any] | None = None,
+) -> tuple[Any, Any]:
+    """Build a (RecallChunk, DocumentProjection) pair for recall-path fixtures."""
+    from khora.core.models import DocumentProjection, RecallChunk
+
+    doc_id = document_id or uuid4()
+    now = datetime.now(UTC)
+    chunk = RecallChunk(
+        id=uuid4(),
+        document_id=doc_id,
+        content=content,
+        score=score,
+        created_at=now,
+    )
+    doc = DocumentProjection(id=doc_id, created_at=now, metadata=dict(custom or {}))
+    return chunk, doc
 
 
 def _make_doc(
@@ -273,8 +298,8 @@ class TestAsyncSiblings:
 
     async def test_asearch_returns_filtered(self) -> None:
         kb = _make_kb()
-        chunk = _make_chunk(content="hit", custom={"crewai_scope": "/"})
-        kb.recall.return_value = _RecallResultStub(chunks=[(chunk, 0.85)])
+        chunk, doc = _make_recall_chunk(content="hit", score=0.85, custom={"crewai_scope": "/"})
+        kb.recall.return_value = _RecallResultStub(chunks=[chunk], documents=[doc])
         backend = _make_backend(kb)
         _stash_query_text("q")
         out = await backend.asearch([0.0], limit=5)
@@ -283,9 +308,9 @@ class TestAsyncSiblings:
 
     async def test_asearch_post_filters_scope(self) -> None:
         kb = _make_kb()
-        in_scope = _make_chunk(content="in", custom={"crewai_scope": "/team/eng"})
-        out_scope = _make_chunk(content="out", custom={"crewai_scope": "/team/sales"})
-        kb.recall.return_value = _RecallResultStub(chunks=[(in_scope, 0.9), (out_scope, 0.8)])
+        in_scope, in_doc = _make_recall_chunk(content="in", score=0.9, custom={"crewai_scope": "/team/eng"})
+        out_scope, out_doc = _make_recall_chunk(content="out", score=0.8, custom={"crewai_scope": "/team/sales"})
+        kb.recall.return_value = _RecallResultStub(chunks=[in_scope, out_scope], documents=[in_doc, out_doc])
         backend = _make_backend(kb)
         _stash_query_text("q")
         out = await backend.asearch([0.0], scope_prefix="/team/eng", limit=10)

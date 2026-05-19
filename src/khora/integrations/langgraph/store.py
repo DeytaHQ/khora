@@ -430,9 +430,15 @@ class KhoraStore:
             # outside the requested LangGraph prefix.
             pool = max(limit * 4 + offset, limit)
             recall = await self.kb.recall(query, namespace=self._init.namespace_id, limit=pool)
+            # Build the doc-id → metadata lookup: per the recall projection
+            # contract, per-chunk metadata is no longer surfaced — the
+            # custom keys (lg_namespace, lg_key, lg_value) live on the
+            # parent ``DocumentProjection.metadata``.
+            docs_by_id = {doc.id: doc for doc in recall.documents}
             seen_keys: set[tuple[tuple[str, ...], str]] = set()
-            for chunk, score in recall.chunks:
-                custom = chunk.metadata or {}
+            for chunk in recall.chunks:
+                doc = docs_by_id.get(chunk.document_id)
+                custom = (doc.metadata if doc else None) or {}
                 ns_raw = custom.get("lg_namespace")
                 key = custom.get("lg_key")
                 value = custom.get("lg_value", {})
@@ -463,7 +469,7 @@ class KhoraStore:
                         value=value if isinstance(value, dict) else {},
                         created_at=ts,
                         updated_at=ts,
-                        score=float(score) if score is not None else None,
+                        score=float(chunk.score) if chunk.score is not None else None,
                     )
                 )
                 if len(results) >= limit + offset:

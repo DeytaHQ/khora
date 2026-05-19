@@ -322,35 +322,51 @@ async def test_aget_returns_none_on_foreign_document():
 async def test_asearch_with_query_maps_chunks_to_search_items():
     from langgraph.store.base import SearchItem
 
-    from khora.core.models.document import Chunk
+    from khora.core.models.recall import DocumentProjection, RecallChunk
     from khora.integrations.langgraph import KhoraStore
 
     kb = _mk_kb()
     store = KhoraStore(kb, user_id="alice-1234")
 
     # Construct two chunks belonging to two different LangGraph items.
-    c1 = Chunk(
-        namespace_id=store.namespace_id,
+    doc1_id = uuid4()
+    doc2_id = uuid4()
+    created_at = datetime(2026, 5, 15, tzinfo=UTC)
+    c1 = RecallChunk(
+        id=uuid4(),
+        document_id=doc1_id,
         content="alpha",
+        score=0.9,
+        created_at=created_at,
+    )
+    c2 = RecallChunk(
+        id=uuid4(),
+        document_id=doc2_id,
+        content="beta",
+        score=0.5,
+        created_at=created_at,
+    )
+    d1 = DocumentProjection(
+        id=doc1_id,
+        created_at=created_at,
         metadata={
             "lg_namespace": ["memories", "facts"],
             "lg_key": "k1",
             "lg_value": {"text": "alpha"},
         },
-        created_at=datetime(2026, 5, 15, tzinfo=UTC),
     )
-    c2 = Chunk(
-        namespace_id=store.namespace_id,
-        content="beta",
+    d2 = DocumentProjection(
+        id=doc2_id,
+        created_at=created_at,
         metadata={
             "lg_namespace": ["memories", "other"],
             "lg_key": "k2",
             "lg_value": {"text": "beta"},
         },
-        created_at=datetime(2026, 5, 15, tzinfo=UTC),
     )
     recall_result = MagicMock()
-    recall_result.chunks = [(c1, 0.9), (c2, 0.5)]
+    recall_result.chunks = [c1, c2]
+    recall_result.documents = [d1, d2]
     kb.recall.return_value = recall_result
 
     results = await store.asearch(("memories", "facts"), query="alpha", limit=10)

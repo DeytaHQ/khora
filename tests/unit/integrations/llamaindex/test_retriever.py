@@ -17,8 +17,7 @@ pytest.importorskip("llama_index.core")
 
 
 from khora import Khora  # noqa: E402
-from khora.core.models.document import Chunk  # noqa: E402
-from khora.core.models.entity import Entity  # noqa: E402
+from khora.core.models import DocumentProjection, RecallChunk, RecallEntity  # noqa: E402
 
 
 def _mk_kb(*, recall_result) -> Khora:
@@ -28,35 +27,58 @@ def _mk_kb(*, recall_result) -> Khora:
     return kb
 
 
-def _mk_chunk(content: str = "alpha") -> Chunk:
+def _mk_chunk(content: str = "alpha", score: float = 0.9) -> tuple[RecallChunk, DocumentProjection]:
+    """Build a (RecallChunk, DocumentProjection) pair linked by document_id."""
     document_id = uuid4()
-    return Chunk(
+    now = datetime.now(UTC)
+    chunk = RecallChunk(
         id=uuid4(),
         document_id=document_id,
-        namespace_id=uuid4(),
         content=content,
-        chunk_index=0,
-        created_at=datetime.now(UTC),
+        score=score,
+        created_at=now,
     )
+    doc = DocumentProjection(id=document_id, created_at=now)
+    return chunk, doc
 
 
-def _mk_entity(name: str = "Alice") -> Entity:
-    return Entity(
+def _mk_entity(name: str = "Alice", score: float = 0.3) -> RecallEntity:
+    return RecallEntity(
         id=uuid4(),
-        namespace_id=uuid4(),
         name=name,
         entity_type="PERSON",
         description="example",
+        score=score,
+        attributes={},
+        mention_count=0,
+        source_document_ids=[],
+        source_chunk_ids=[],
     )
 
 
 def _mk_recall_result(*, chunks=None, entities=None, abstain=False):
-    """Minimal stub matching the public fields of ``RecallResult``."""
+    """Minimal stub matching the public fields of ``RecallResult``.
+
+    ``chunks`` is a list of ``RecallChunk`` (or a list of (RecallChunk,
+    DocumentProjection) tuples — in that case we split them).
+    """
+    chunk_list: list[RecallChunk] = []
+    doc_list: list[DocumentProjection] = []
+    for item in chunks or []:
+        if isinstance(item, tuple):
+            ch, doc = item
+            chunk_list.append(ch)
+            doc_list.append(doc)
+        else:
+            chunk_list.append(item)
+    engine_info = {"abstention_signals": {"should_abstain": abstain}} if abstain else {}
     return MagicMock(
-        chunks=chunks or [],
+        namespace_id=uuid4(),
+        documents=doc_list,
+        chunks=chunk_list,
         entities=entities or [],
-        context_text="",
-        metadata={"abstention_signals": {"should_abstain": abstain}} if abstain else {},
+        relationships=[],
+        engine_info=engine_info,
     )
 
 
@@ -65,8 +87,8 @@ async def test_aretrieve_returns_nodes_for_each_chunk():
     """One chunk in → one ``NodeWithScore`` out."""
     from khora.integrations.llamaindex import KhoraRetriever
 
-    chunk = _mk_chunk("hello")
-    kb = _mk_kb(recall_result=_mk_recall_result(chunks=[(chunk, 0.9)]))
+    chunk_pair = _mk_chunk("hello", score=0.9)
+    kb = _mk_kb(recall_result=_mk_recall_result(chunks=[chunk_pair]))
     ns = uuid4()
     retriever = KhoraRetriever(kb, namespace_id=ns, similarity_top_k=3)
 
@@ -88,9 +110,9 @@ async def test_aretrieve_excludes_entities_by_default():
     """Default ``include_entities=False`` — entity hits are ignored."""
     from khora.integrations.llamaindex import KhoraRetriever
 
-    chunk = _mk_chunk()
+    chunk_pair = _mk_chunk(score=0.5)
     entity = _mk_entity()
-    kb = _mk_kb(recall_result=_mk_recall_result(chunks=[(chunk, 0.5)], entities=[(entity, 0.3)]))
+    kb = _mk_kb(recall_result=_mk_recall_result(chunks=[chunk_pair], entities=[entity]))
     retriever = KhoraRetriever(kb, namespace_id=uuid4())
 
     nodes = await retriever.aretrieve("hi")
@@ -104,9 +126,9 @@ async def test_aretrieve_includes_entities_when_opted_in():
     """``include_entities=True`` surfaces entities alongside chunks."""
     from khora.integrations.llamaindex import KhoraRetriever
 
-    chunk = _mk_chunk()
+    chunk_pair = _mk_chunk(score=0.5)
     entity = _mk_entity()
-    kb = _mk_kb(recall_result=_mk_recall_result(chunks=[(chunk, 0.5)], entities=[(entity, 0.3)]))
+    kb = _mk_kb(recall_result=_mk_recall_result(chunks=[chunk_pair], entities=[entity]))
     retriever = KhoraRetriever(kb, namespace_id=uuid4(), include_entities=True)
 
     nodes = await retriever.aretrieve("hi")
@@ -120,8 +142,8 @@ async def test_aretrieve_propagates_abstention_signal():
     """When khora flags abstain, every node carries ``khora_should_abstain=True``."""
     from khora.integrations.llamaindex import KhoraRetriever
 
-    chunk = _mk_chunk()
-    kb = _mk_kb(recall_result=_mk_recall_result(chunks=[(chunk, 0.1)], abstain=True))
+    chunk_pair = _mk_chunk(score=0.1)
+    kb = _mk_kb(recall_result=_mk_recall_result(chunks=[chunk_pair], abstain=True))
     retriever = KhoraRetriever(kb, namespace_id=uuid4())
 
     nodes = await retriever.aretrieve("hi")
