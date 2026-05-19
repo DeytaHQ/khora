@@ -173,19 +173,17 @@ class TestCrossEncoderReranker:
         fake_model.predict.return_value = [0.5, 0.5]
         r._model = fake_model
 
-        # Post-#748: Chunk.metadata is a flat dict, so the title key lives
-        # at the top level of the metadata dict (no longer behind .custom).
         cand1 = RerankCandidate(
             item="x",
             original_score=0.5,
             content="hello",
-            metadata={"title": "TitleA"},
+            doc_title="TitleA",
         )
         cand2 = RerankCandidate(
             item="y",
             original_score=0.5,
             content="world",
-            metadata={"title": "TitleB"},
+            doc_title="TitleB",
         )
         await r.rerank("q", [cand1, cand2])
         pairs = fake_model.predict.call_args[0][0]
@@ -203,7 +201,8 @@ class TestCrossEncoderReranker:
             item="x",
             original_score=0.5,
             content="hello",
-            metadata={"occurred_at": "2024-05-12T00:00:00", "title": "T"},
+            metadata={"occurred_at": "2024-05-12T00:00:00"},
+            doc_title="T",
         )
         await r.rerank("q", [cand])
         pair = fake_model.predict.call_args[0][0][0]
@@ -329,7 +328,7 @@ class TestLLMReranker:
                 item="x",
                 original_score=0.5,
                 content="hello",
-                metadata={"title": "MyTitle"},
+                doc_title="MyTitle",
             )
             await r.rerank("hello query", [cand])
         prompt = ac.call_args[0][0]
