@@ -328,7 +328,7 @@ class SurrealDBGraphAdapter:
                 f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
             )
         sql = (
-            "UPDATE entity:\u27e8$id\u27e9 SET "
+            "UPDATE $rid SET "
             "name = $name, "
             "entity_type = $entity_type, "
             "description = $description, "
@@ -547,7 +547,7 @@ class SurrealDBGraphAdapter:
             for ent in to_update:
                 update_data.append(
                     {
-                        "id": str(ent.id),
+                        "rid": _rid("entity", ent.id),
                         "description": ent.description,
                         "attributes": ent.attributes or {},
                         "source_document_ids": [str(uid) for uid in ent.source_document_ids],
@@ -560,7 +560,7 @@ class SurrealDBGraphAdapter:
                 )
             update_sql = (
                 "FOR $e IN $entities {"
-                "  UPDATE entity:\u27e8$e.id\u27e9 SET "
+                "  UPDATE (type::thing($e.rid)) SET "
                 "    description = $e.description, "
                 "    attributes = $e.attributes, "
                 "    source_document_ids = $e.source_document_ids, "
@@ -720,13 +720,13 @@ class SurrealDBGraphAdapter:
         rels_data: list[dict[str, Any]] = []
         for rel in relationships:
             b = _relationship_to_bindings(rel)
-            b["source_rid"] = str(rel.source_entity_id)
-            b["target_rid"] = str(rel.target_entity_id)
+            b["source_rid"] = _rid("entity", rel.source_entity_id)
+            b["target_rid"] = _rid("entity", rel.target_entity_id)
             rels_data.append(b)
 
         sql = (
             "FOR $rel IN $rels {"
-            "  RELATE entity:\u27e8$rel.source_rid\u27e9->relates_to->entity:\u27e8$rel.target_rid\u27e9 SET "
+            "  RELATE (type::thing($rel.source_rid))->relates_to->(type::thing($rel.target_rid)) SET "
             "    rel_id = $rel.rel_id, "
             "    namespace_id = $rel.namespace_id, "
             "    relationship_type = $rel.relationship_type, "
@@ -767,8 +767,8 @@ class SurrealDBGraphAdapter:
     @trace("khora.surrealdb.graph.create_episode", include={"episode"})
     async def create_episode(self, episode: Episode) -> Episode:
         sql = (
-            "CREATE episode:\u27e8$id\u27e9 SET "
-            "namespace = memory_namespace:\u27e8$ns\u27e9, "
+            "CREATE $rid SET "
+            "namespace = $ns_rid, "
             "name = $name, "
             "description = $description, "
             "occurred_at = $occurred_at, "
@@ -783,8 +783,8 @@ class SurrealDBGraphAdapter:
             "updated_at = $updated_at"
         )
         bindings = {
-            "id": str(episode.id),
-            "ns": str(episode.namespace_id),
+            "rid": _rid("episode", episode.id),
+            "ns_rid": _rid("memory_namespace", episode.namespace_id),
             "name": episode.name,
             "description": episode.description,
             "occurred_at": episode.occurred_at,
@@ -802,9 +802,10 @@ class SurrealDBGraphAdapter:
 
         # Create involvement edges: episode -> entity (single batch round-trip)
         if episode.entity_ids:
+            involve_records = [{"eid_rid": _rid("entity", eid)} for eid in episode.entity_ids]
             involve_sql = (
-                "FOR $eid IN $entity_ids {"
-                f"  RELATE episode:\u27e8{episode.id}\u27e9->involves->entity:\u27e8$eid\u27e9 "
+                "FOR $r IN $records {"
+                "  RELATE $ep_rid->involves->(type::thing($r.eid_rid)) "
                 "    SET namespace_id = $ns, created_at = $created_at;"
                 "}"
             )
@@ -812,7 +813,8 @@ class SurrealDBGraphAdapter:
                 await self._conn.execute(
                     involve_sql,
                     {
-                        "entity_ids": [str(eid) for eid in episode.entity_ids],
+                        "records": involve_records,
+                        "ep_rid": _rid("episode", episode.id),
                         "ns": str(episode.namespace_id),
                         "created_at": episode.created_at,
                     },
@@ -1422,13 +1424,13 @@ class SurrealDBGraphAdapter:
         ordered_sessions = sorted(sessions.values(), key=_earliest_ts)
 
         # 4. Build link pairs: last chunk of session A -> first chunk of session B
-        links: list[dict[str, str]] = []
+        links: list[dict[str, Any]] = []
         for i in range(len(ordered_sessions) - 1):
             from_chunk = ordered_sessions[i][-1]
             to_chunk = ordered_sessions[i + 1][0]
-            from_id = str(_parse_uuid(from_chunk["id"]))
-            to_id = str(_parse_uuid(to_chunk["id"]))
-            links.append({"from_id": from_id, "to_id": to_id})
+            from_uuid = _parse_uuid(from_chunk["id"])
+            to_uuid = _parse_uuid(to_chunk["id"])
+            links.append({"from_rid": _rid("chunk", from_uuid), "to_rid": _rid("chunk", to_uuid)})
 
         if not links:
             return 0
@@ -1438,7 +1440,7 @@ class SurrealDBGraphAdapter:
         now_iso = datetime.now(UTC)
         sql = (
             "FOR $link IN $links {"
-            "  RELATE chunk:⟨$link.from_id⟩->next_session->chunk:⟨$link.to_id⟩ SET "
+            "  RELATE (type::thing($link.from_rid))->next_session->(type::thing($link.to_rid)) SET "
             "    namespace_id = $ns, "
             "    created_at = $created_at;"
             "}"

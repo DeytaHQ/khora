@@ -116,9 +116,9 @@ class SurrealDBVectorAdapter:
     async def create_chunk(self, chunk: Chunk, *, session: Any = None) -> Chunk:
         """Create a single chunk record in SurrealDB."""
         sql = (
-            "CREATE chunk:\u27e8$id\u27e9 SET "
-            "namespace = memory_namespace:\u27e8$ns\u27e9, "
-            "document = document:\u27e8$doc\u27e9, "
+            "CREATE $rid SET "
+            "namespace = $ns_rid, "
+            "document = $doc_rid, "
             "content = $content, "
             "embedding = $embedding, "
             "embedding_model = $embedding_model, "
@@ -169,11 +169,13 @@ class SurrealDBVectorAdapter:
 
     async def get_chunk(self, chunk_id: UUID, *, namespace_id: UUID) -> Chunk | None:
         """Fetch a single chunk by primary key, filtered to ``namespace_id``."""
-        sql = "SELECT * FROM chunk:\u27e8$id\u27e9 WHERE (namespace = $ns_rid OR namespace.namespace_id = $ns_str)"
+        sql = (
+            "SELECT * FROM chunk WHERE id = $rid AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) LIMIT 1"
+        )
         row = await self._conn.query_one(
             sql,
             {
-                "id": str(chunk_id),
+                "rid": _rid("chunk", chunk_id),
                 "ns_rid": _rid("memory_namespace", namespace_id),
                 "ns_str": str(namespace_id),
             },
@@ -207,14 +209,14 @@ class SurrealDBVectorAdapter:
         """Return all chunks belonging to a document, filtered to ``namespace_id``."""
         sql = (
             "SELECT * FROM chunk "
-            "WHERE document = document:\u27e8$doc\u27e9 "
+            "WHERE document = $doc_rid "
             "AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) "
             "ORDER BY chunk_index ASC"
         )
         rows = await self._conn.query(
             sql,
             {
-                "doc": str(document_id),
+                "doc_rid": _rid("document", document_id),
                 "ns_rid": _rid("memory_namespace", namespace_id),
                 "ns_str": str(namespace_id),
             },
@@ -227,22 +229,21 @@ class SurrealDBVectorAdapter:
         Returns the count deleted. Chunks in other namespaces are silently
         skipped, preventing cross-tenant deletion by document id.
         """
+        doc_rid = _rid("document", document_id)
+        ns_str = str(namespace_id)
         # First count so we can report back
-        count_sql = (
-            "SELECT count() AS cnt FROM chunk "
-            "WHERE document = document:\u27e8$doc\u27e9 AND namespace_id = $ns GROUP ALL"
-        )
+        count_sql = "SELECT count() AS cnt FROM chunk WHERE document = $doc_rid AND namespace_id = $ns GROUP ALL"
         count_row = await self._conn.query_one(
             count_sql,
-            {"doc": str(document_id), "ns": str(namespace_id)},
+            {"doc_rid": doc_rid, "ns": ns_str},
         )
         count = int(count_row.get("cnt", 0)) if count_row else 0
 
         if count > 0:
-            del_sql = "DELETE FROM chunk WHERE document = document:\u27e8$doc\u27e9 AND namespace_id = $ns"
+            del_sql = "DELETE FROM chunk WHERE document = $doc_rid AND namespace_id = $ns"
             await self._conn.execute(
                 del_sql,
-                {"doc": str(document_id), "ns": str(namespace_id)},
+                {"doc_rid": doc_rid, "ns": ns_str},
             )
 
         return count
@@ -408,8 +409,8 @@ class SurrealDBVectorAdapter:
     async def create_entity(self, entity: Entity) -> None:
         """Create an entity record for vector search."""
         sql = (
-            "CREATE entity:\u27e8$id\u27e9 SET "
-            "namespace = memory_namespace:\u27e8$ns\u27e9, "
+            "CREATE $rid SET "
+            "namespace = $ns_rid, "
             "name = $name, "
             "entity_type = $entity_type, "
             "description = $description, "
@@ -440,7 +441,7 @@ class SurrealDBVectorAdapter:
                 f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
             )
         sql = (
-            "UPDATE entity:\u27e8$id\u27e9 SET "
+            "UPDATE $rid SET "
             "name = $name, "
             "entity_type = $entity_type, "
             "description = $description, "
@@ -497,7 +498,7 @@ class SurrealDBVectorAdapter:
     ) -> None:
         """Set the embedding vector on a single entity, scoped to ``namespace_id`` (IGR-226)."""
         sql = (
-            "UPDATE entity:\u27e8$id\u27e9 SET "
+            "UPDATE $rid SET "
             "embedding = $embedding, "
             "embedding_model = $embedding_model, "
             "updated_at = $updated_at "
@@ -506,7 +507,7 @@ class SurrealDBVectorAdapter:
         await self._conn.execute(
             sql,
             {
-                "id": str(entity_id),
+                "rid": _rid("entity", entity_id),
                 "embedding": list(embedding),
                 "embedding_model": model,
                 "updated_at": datetime.now(UTC),
@@ -649,7 +650,7 @@ class SurrealDBVectorAdapter:
             for ent in to_update:
                 update_data.append(
                     {
-                        "id": str(ent.id),
+                        "rid": _rid("entity", ent.id),
                         "description": ent.description,
                         "attributes": ent.attributes or {},
                         "source_document_ids": [str(uid) for uid in ent.source_document_ids],
@@ -662,7 +663,7 @@ class SurrealDBVectorAdapter:
                 )
             update_sql = (
                 "FOR $e IN $entities {"
-                "  UPDATE entity:\u27e8$e.id\u27e9 SET "
+                "  UPDATE (type::thing($e.rid)) SET "
                 "    description = $e.description, "
                 "    attributes = $e.attributes, "
                 "    source_document_ids = $e.source_document_ids, "
@@ -778,9 +779,9 @@ class SurrealDBVectorAdapter:
     def _chunk_to_bindings(self, chunk: Chunk) -> dict[str, Any]:
         """Convert a :class:`Chunk` to SurrealQL parameter bindings."""
         return {
-            "id": str(chunk.id),
-            "ns": str(chunk.namespace_id),
-            "doc": str(chunk.document_id),
+            "rid": _rid("chunk", chunk.id),
+            "ns_rid": _rid("memory_namespace", chunk.namespace_id),
+            "doc_rid": _rid("document", chunk.document_id),
             "content": chunk.content,
             "embedding": list(chunk.embedding) if chunk.embedding is not None else None,
             "embedding_model": chunk.embedding_model,

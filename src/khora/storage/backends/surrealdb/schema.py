@@ -140,6 +140,7 @@ DEFINE INDEX IF NOT EXISTS idx_entity_ns_created ON entity FIELDS namespace, cre
 
 -- Relates-to (graph edge between entities)
 DEFINE TABLE IF NOT EXISTS relates_to TYPE RELATION SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS rel_id ON relates_to TYPE string;
 DEFINE FIELD IF NOT EXISTS namespace_id ON relates_to TYPE string;
 DEFINE FIELD IF NOT EXISTS relationship_type ON relates_to TYPE string;
 DEFINE FIELD IF NOT EXISTS weight ON relates_to TYPE float DEFAULT 1.0;
@@ -154,6 +155,7 @@ DEFINE FIELD IF NOT EXISTS metadata_ ON relates_to FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS created_at ON relates_to TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS updated_at ON relates_to TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_relates_to_namespace ON relates_to FIELDS namespace_id;
+DEFINE INDEX IF NOT EXISTS idx_relates_to_rel_id ON relates_to FIELDS rel_id UNIQUE;
 DEFINE INDEX IF NOT EXISTS idx_relates_to_ns_type ON relates_to FIELDS namespace_id, relationship_type;
 DEFINE INDEX IF NOT EXISTS idx_relates_to_ns_weight ON relates_to FIELDS namespace_id, relationship_type, weight;
 DEFINE INDEX IF NOT EXISTS idx_relates_to_in ON relates_to FIELDS in;
