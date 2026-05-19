@@ -90,8 +90,8 @@ result: RememberResult = await kb.remember(
     title: str = "",
     source: str = "",
     source_type: str = "library",
-    source_name: str = "",
-    source_url: str = "",
+    source_name: str | None = None,
+    source_url: str | None = None,
     metadata: dict[str, Any] | None = None,
     skill_name: str = "general_entities",
     entity_types: list[str],
@@ -117,8 +117,8 @@ result: BatchResult = await kb.remember_batch(
     namespace: str | UUID,
     skill_name: str = "general_entities",
     source_type: str = "library",
-    source_name: str = "",
-    source_url: str = "",
+    source_name: str | None = None,
+    source_url: str | None = None,
     max_concurrent: int = 10,
     deduplicate: bool = True,
     infer_relationships: bool = True,
@@ -133,7 +133,7 @@ result: BatchResult = await kb.remember_batch(
 )
 ```
 
-Concurrent ingestion with per-document deduplication and optional expansion. Each dict in `documents` accepts the same per-document fields as `remember()` — including `source_type`, `source_name`, `source_url` at the top level of the doc dict (siblings of `content`, `title`, `source`, `external_id`). **Per-doc dict values override the top-level kwargs** for that document; absent keys fall back to the kwarg, which itself defaults to `source_type="library"` / `source_name=""` / `source_url=""`.
+Concurrent ingestion with per-document deduplication and optional expansion. Each dict in `documents` accepts the same per-document fields as `remember()` — including `source_type`, `source_name`, `source_url` at the top level of the doc dict (siblings of `content`, `title`, `source`, `external_id`). **Per-doc dict values override the top-level kwargs** for that document; absent keys fall back to the kwarg, which itself defaults to `source_type="library"` / `source_name=None` / `source_url=None`.
 
 ### `submit_batch`
 
@@ -145,8 +145,8 @@ handle: BatchHandle = await kb.submit_batch(
     namespace: str | UUID,
     skill_name: str = "general_entities",
     source_type: str = "library",
-    source_name: str = "",
-    source_url: str = "",
+    source_name: str | None = None,
+    source_url: str | None = None,
     entity_types: list[str],
     relationship_types: list[str],
     expertise: ExpertiseConfig | None = None,

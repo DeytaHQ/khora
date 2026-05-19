@@ -55,8 +55,8 @@ class MemoryEngineProtocol(Protocol):
         title: str = "",
         source: str = "",
         source_type: str = "library",
-        source_name: str = "",
-        source_url: str = "",
+        source_name: str | None = None,
+        source_url: str | None = None,
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         entity_types: list[str],
@@ -157,8 +157,8 @@ class MemoryEngineProtocol(Protocol):
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         source_type: str = "library",
-        source_name: str = "",
-        source_url: str = "",
+        source_name: str | None = None,
+        source_url: str | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 

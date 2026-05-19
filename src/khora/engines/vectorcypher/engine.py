@@ -668,8 +668,8 @@ class VectorCypherEngine:
         title: str = "",
         source: str = "",
         source_type: str = "library",
-        source_name: str = "",
-        source_url: str = "",
+        source_name: str | None = None,
+        source_url: str | None = None,
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         expertise: ExpertiseConfig | str | None = None,
@@ -1324,8 +1324,8 @@ class VectorCypherEngine:
         title: str,
         source: str,
         source_type: str = "library",
-        source_name: str = "",
-        source_url: str = "",
+        source_name: str | None = None,
+        source_url: str | None = None,
         metadata: dict[str, Any] | None,
         skill_name: str,
         expertise: ExpertiseConfig | str | None,
@@ -2017,8 +2017,8 @@ class VectorCypherEngine:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         source_type: str = "library",
-        source_name: str = "",
-        source_url: str = "",
+        source_name: str | None = None,
+        source_url: str | None = None,
         bulk_mode: bool = False,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
@@ -2100,8 +2100,8 @@ class VectorCypherEngine:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         source_type: str = "library",
-        source_name: str = "",
-        source_url: str = "",
+        source_name: str | None = None,
+        source_url: str | None = None,
     ) -> BatchResult:
         """Internal implementation of remember_batch (separated for bulk_mode wrapping)."""
         use_streaming = self._vc_config.streaming_pipeline
@@ -2764,8 +2764,8 @@ class VectorCypherEngine:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         source_type: str = "library",
-        source_name: str = "",
-        source_url: str = "",
+        source_name: str | None = None,
+        source_url: str | None = None,
     ) -> BatchResult:
         """Legacy per-document remember_batch (non-streaming pipeline)."""
         storage = self._get_storage()

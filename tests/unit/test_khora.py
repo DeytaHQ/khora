@@ -3659,8 +3659,8 @@ class TestProvenanceKwargsRemember:
 
         kwargs = kb._engine.remember.call_args.kwargs
         assert kwargs["source_type"] == "library"
-        assert kwargs["source_name"] == ""
-        assert kwargs["source_url"] == ""
+        assert kwargs["source_name"] is None
+        assert kwargs["source_url"] is None
 
 
 class TestProvenanceKwargsRememberBatch:
@@ -3772,8 +3772,8 @@ class TestProvenanceKwargsRememberBatch:
             )
 
         assert docs[0]["source_type"] == "library"
-        assert docs[0]["source_name"] == ""
-        assert docs[0]["source_url"] == ""
+        assert docs[0]["source_name"] is None
+        assert docs[0]["source_url"] is None
 
 
 class TestProvenanceKwargsSubmitBatch:
