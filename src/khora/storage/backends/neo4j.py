@@ -2235,9 +2235,16 @@ RETURN count(r) AS updated
         self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
     ) -> Relationship:
         """Convert a Neo4j relationship to a domain Relationship."""
+        rel_id = rel.get("id")
+        rel_ns = rel.get("namespace_id")
+        if rel_id is None or rel_ns is None:
+            logger.warning(
+                f"Relationship missing id/namespace_id (type={rel_type}, "
+                f"{source_id}->{target_id}); using synthesized identity"
+            )
         return Relationship(
-            id=UUID(rel["id"]),
-            namespace_id=UUID(rel["namespace_id"]),
+            id=UUID(rel_id) if rel_id else uuid4(),
+            namespace_id=UUID(rel_ns) if rel_ns else uuid4(),
             source_entity_id=UUID(source_id),
             target_entity_id=UUID(target_id),
             relationship_type=rel_type,
