@@ -857,18 +857,18 @@ class TestRecallContextFormatting:
         return engine
 
     @pytest.mark.asyncio
-    async def test_recall_includes_entity_section_in_context(self) -> None:
+    async def test_recall_includes_entity_in_projection(self) -> None:
         engine = self._make_recall_engine()
         result = await engine.recall("q", uuid4())
-        # The entity section is appended after chunk content
-        assert "Alice" in result.context_text
+        # Entities are surfaced as typed projections (no context_text rendering).
+        assert any(e.name == "Alice" for e in result.entities)
 
     @pytest.mark.asyncio
-    async def test_recall_includes_relationship_section_in_context(self) -> None:
+    async def test_recall_includes_relationship_in_projection(self) -> None:
         engine = self._make_recall_engine()
         result = await engine.recall("q", uuid4())
-        # Relationship section is also rendered
-        assert "Bob" in result.context_text or "KNOWS" in result.context_text
+        # Relationships are surfaced as typed projections.
+        assert any(r.relationship_type == "KNOWS" for r in result.relationships)
 
     @pytest.mark.asyncio
     async def test_recall_hybrid_alpha_override_restored(self) -> None:
@@ -911,7 +911,7 @@ class TestRecallContextFormatting:
         """Single-chunk result still computes mean_score, variance=0, gap=0."""
         engine = self._make_recall_engine()
         result = await engine.recall("q", uuid4())
-        meta = result.metadata
+        meta = result.engine_info
         assert meta["retrieval_mean_score"] >= 0.0
         # With only one chunk after validation, variance == 0 and gap == 0
         assert meta["retrieval_score_variance"] == 0.0
@@ -936,9 +936,9 @@ class TestRecallContextFormatting:
         )
         result = await engine.recall("nothing", uuid4())
         assert result.chunks == []
-        assert result.metadata["retrieval_mean_score"] == 0.0
-        assert result.metadata["retrieval_score_variance"] == 0.0
-        assert result.metadata["retrieval_top_score_gap"] == 0.0
+        assert result.engine_info["retrieval_mean_score"] == 0.0
+        assert result.engine_info["retrieval_score_variance"] == 0.0
+        assert result.engine_info["retrieval_top_score_gap"] == 0.0
 
 
 # ---------------------------------------------------------------------------
