@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from khora.core.recall_context import context_text
 from khora.integrations.llamaindex._mapping import message_to_text, stamp_event_id
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -234,12 +235,13 @@ def _pick_query(messages: list[ChatMessage] | None) -> str:
 def _format_recall(result: Any) -> str:
     """Render a ``RecallResult`` as a bounded text block.
 
-    Joins the chunk contents into a single block. The output is wrapped
-    in a ``<khora_memory>`` envelope so a downstream prompt template can
-    spot it.
+    Delegates to the public ``khora.context_text`` helper (with its
+    default ``max_chunks=5`` — matches the legacy
+    ``RecallResult.context_text`` field's effective limit) and wraps the
+    output in a ``<khora_memory>`` envelope so a downstream prompt
+    template can spot it.
     """
-    parts = [chunk.content for chunk in result.chunks]
-    context = "\n".join(p for p in parts if p).strip()
+    context = context_text(result).strip()
     if not context:
         return ""
     return f"{_RECALL_HEADER}\n{context}\n{_RECALL_FOOTER}"

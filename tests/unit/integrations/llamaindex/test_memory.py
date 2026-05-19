@@ -180,3 +180,180 @@ async def test_aget_falls_back_to_non_user_message():
     out = await block.aget(messages=[ChatMessage(role="assistant", content="some assistant statement")])
     assert kb.recall.call_args.args[0] == "some assistant statement"
     assert "from-assistant" in out
+
+
+@pytest.mark.asyncio
+async def test_aget_envelope_contains_entity_section():
+    """When the recall carries entities, the rendered envelope includes an `--- Entities ---` section."""
+    from datetime import UTC, datetime
+
+    from llama_index.core.llms import ChatMessage
+
+    from khora.core.models.recall import RecallChunk, RecallEntity, RecallResult
+    from khora.integrations.llamaindex import KhoraMemoryBlock
+
+    ns = uuid4()
+    doc_id = uuid4()
+    recall = RecallResult(
+        query="q",
+        namespace_id=ns,
+        documents=[],
+        chunks=[
+            RecallChunk(
+                id=uuid4(),
+                document_id=doc_id,
+                content="some chunk",
+                score=0.9,
+                created_at=datetime.now(UTC),
+            )
+        ],
+        entities=[
+            RecallEntity(
+                id=uuid4(),
+                name="Alice",
+                entity_type="PERSON",
+                description="founder",
+                score=0.8,
+                attributes={},
+                mention_count=1,
+                source_document_ids=[],
+                source_chunk_ids=[],
+            )
+        ],
+        relationships=[],
+    )
+    kb = _mk_kb(recall_result=recall)
+    block = KhoraMemoryBlock(kb=kb, namespace_id=ns)
+
+    out = await block.aget(messages=[ChatMessage(role="user", content="who is alice?")])
+
+    assert "<khora_memory>" in out
+    assert "</khora_memory>" in out
+    assert "some chunk" in out
+    assert "--- Entities ---" in out
+    assert "- Alice (PERSON): founder" in out
+
+
+@pytest.mark.asyncio
+async def test_aget_envelope_contains_relationship_section():
+    """When the recall carries relationships, the envelope includes an `--- Relationships ---` section.
+
+    Endpoint names are resolved through the entities map; missing endpoints
+    fall back to the UUID string.
+    """
+    from datetime import UTC, datetime
+
+    from llama_index.core.llms import ChatMessage
+
+    from khora.core.models.recall import (
+        RecallChunk,
+        RecallEntity,
+        RecallRelationship,
+        RecallResult,
+    )
+    from khora.integrations.llamaindex import KhoraMemoryBlock
+
+    ns = uuid4()
+    doc_id = uuid4()
+    alice_id = uuid4()
+    acme_id = uuid4()
+    recall = RecallResult(
+        query="q",
+        namespace_id=ns,
+        documents=[],
+        chunks=[
+            RecallChunk(
+                id=uuid4(),
+                document_id=doc_id,
+                content="alice founded acme",
+                score=0.9,
+                created_at=datetime.now(UTC),
+            )
+        ],
+        entities=[
+            RecallEntity(
+                id=alice_id,
+                name="Alice",
+                entity_type="PERSON",
+                description="",
+                score=0.8,
+                attributes={},
+                mention_count=1,
+                source_document_ids=[],
+                source_chunk_ids=[],
+            ),
+            RecallEntity(
+                id=acme_id,
+                name="Acme Corp",
+                entity_type="ORG",
+                description="",
+                score=0.7,
+                attributes={},
+                mention_count=1,
+                source_document_ids=[],
+                source_chunk_ids=[],
+            ),
+        ],
+        relationships=[
+            RecallRelationship(
+                id=uuid4(),
+                source_entity_id=alice_id,
+                target_entity_id=acme_id,
+                relationship_type="FOUNDED",
+                description="founded it",
+                score=0.9,
+                valid_from=None,
+                valid_until=None,
+                source_document_ids=[],
+            )
+        ],
+    )
+    kb = _mk_kb(recall_result=recall)
+    block = KhoraMemoryBlock(kb=kb, namespace_id=ns)
+
+    out = await block.aget(messages=[ChatMessage(role="user", content="why?")])
+
+    assert "--- Relationships ---" in out
+    assert "- Alice --FOUNDED--> Acme Corp: founded it" in out
+
+
+@pytest.mark.asyncio
+async def test_aget_envelope_contains_document_title_headers():
+    """When recall documents carry titles, chunks render under `--- From: <title> ---` headers."""
+    from datetime import UTC, datetime
+
+    from llama_index.core.llms import ChatMessage
+
+    from khora.core.models.recall import (
+        DocumentProjection,
+        RecallChunk,
+        RecallResult,
+    )
+    from khora.integrations.llamaindex import KhoraMemoryBlock
+
+    ns = uuid4()
+    doc_id = uuid4()
+    doc = DocumentProjection(id=doc_id, created_at=datetime.now(UTC), title="Founding Story")
+    recall = RecallResult(
+        query="q",
+        namespace_id=ns,
+        documents=[doc],
+        chunks=[
+            RecallChunk(
+                id=uuid4(),
+                document_id=doc_id,
+                content="alpha",
+                score=0.9,
+                created_at=datetime.now(UTC),
+            )
+        ],
+        entities=[],
+        relationships=[],
+    )
+    kb = _mk_kb(recall_result=recall)
+    block = KhoraMemoryBlock(kb=kb, namespace_id=ns)
+
+    out = await block.aget(messages=[ChatMessage(role="user", content="q")])
+
+    assert "--- From: Founding Story ---" in out
+    assert "alpha" in out

@@ -78,6 +78,7 @@ Two public API surfaces are pinned as stable.
 | Entry point | `Khora`, `KhoraConfig` |
 | Operation results | `RememberResult`, `RecallResult`, `BatchResult`, `BatchHandle`, `DocumentResult`, `Stats`, `LLMUsage` |
 | Query types | `SearchMode`, `SemanticFilter` |
+| Helpers | `context_text` (render a `RecallResult` as an LLM context string) |
 | Errors | `KhoraError` |
 | Domain enums at the boundary | `DocumentSource`, `EventType` |
 | Engine registry | `create_engine`, `list_engines`, `register_engine` |
