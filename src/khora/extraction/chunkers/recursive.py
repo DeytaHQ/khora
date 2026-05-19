@@ -161,4 +161,5 @@ class RecursiveChunker(Chunker):
             start_char=max(0, start_char),
             end_char=end_char,
             token_count=self.count_tokens(content),
+            metadata={"chunker": "recursive"},
         )

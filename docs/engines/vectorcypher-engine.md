@@ -111,12 +111,14 @@ async with Khora("postgresql://...", engine="vectorcypher") as kb:
 
 ### RecallResult Context
 
-`recall()` returns `RecallResult` objects whose `context_text` field includes:
-- **Chunk content** — The matching text passages
-- **Entity data** — Names, types, descriptions of entities mentioned in matching chunks
-- **Relationship data** — Connections between entities in the result set
+`recall()` returns `RecallResult` objects whose typed projections expose:
+- **`chunks`** — Matching text passages as `RecallChunk` entries (`chunk.content`)
+- **`entities`** — Entities mentioned in matching chunks
+- **`relationships`** — Connections between entities in the result set
 
-This rich context enables downstream consumers (e.g., LLM chat) to answer questions about relationships without additional queries.
+Callers that need a flat context string for an LLM can compose one from
+`chunk.content` plus the `format_entity_section` / `format_relationship_section`
+helpers — no additional queries required.
 
 ### Source Document Population
 

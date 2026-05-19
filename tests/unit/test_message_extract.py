@@ -15,7 +15,7 @@ def _sample_chunk():
     line2 = "[10:01] bob: hi there"
     content = f"{line1}\n{line2}"
     metadata = {
-        "source_type": "slack_conversation",
+        "chunker": "conversation",
         "messages": [
             {
                 "id": "m1",

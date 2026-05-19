@@ -206,4 +206,5 @@ class SemanticChunker(Chunker):
             start_char=start_char,
             end_char=end_char,
             token_count=self.count_tokens(content),
+            metadata={"chunker": "semantic"},
         )

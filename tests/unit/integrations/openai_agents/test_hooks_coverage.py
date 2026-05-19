@@ -162,7 +162,6 @@ async def test_on_agent_start_picks_run_input_when_top_level_input_empty() -> No
         query: str = ""
         namespace_id: UUID = field(default_factory=uuid4)
         entities: list[Any] = field(default_factory=list)
-        context_text: str = ""
         metadata: dict[str, Any] = field(default_factory=dict)
 
     kb.recall.return_value = _Stub()
@@ -192,7 +191,6 @@ async def test_on_agent_start_skips_when_recall_returns_no_chunks() -> None:
         query: str = ""
         namespace_id: Any = field(default_factory=uuid4)
         entities: list[Any] = field(default_factory=list)
-        context_text: str = ""
         metadata: dict[str, Any] = field(default_factory=dict)
 
     kb.recall.return_value = _Stub()  # empty chunks

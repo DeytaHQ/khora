@@ -240,7 +240,7 @@ async def _remember(
 
 
 async def test_vc_remember_recall_roundtrip(kb: Khora, namespace_id: UUID) -> None:
-    """Ingest 3 docs, recall, assert ingested text appears in ``context_text``."""
+    """Ingest 3 docs, recall, assert ingested text appears in ``result.chunks[*].content``."""
     contents = [
         "Alice met Bob at the Python conference in Berlin.",
         "Carol presented research on graph databases at the same event.",

@@ -9,6 +9,7 @@ from khora.extraction.chunkers import (
     ChunkResult,
     FixedChunker,
     RecursiveChunker,
+    SemanticChunker,
     create_chunker,
 )
 
@@ -237,3 +238,32 @@ class TestChunkerBase:
         """Test that negative overlap raises ValueError."""
         with pytest.raises(ValueError, match="chunk_overlap must be non-negative"):
             FixedChunker(chunk_size=100, chunk_overlap=-1)
+
+
+class TestChunkerSelfId:
+    """Every chunker stamps ``metadata["chunker"]`` with its registered name."""
+
+    def test_fixed_chunker_self_id(self) -> None:
+        chunker = FixedChunker(chunk_size=100, chunk_overlap=20)
+        chunks = chunker.chunk("Hello world, this is a fixed-chunker test.")
+        assert chunks
+        assert all(c.metadata["chunker"] == "fixed" for c in chunks)
+
+    def test_fixed_chunker_self_id_char_fallback(self) -> None:
+        """Char-fallback path (overlap >= effective token chunk) also stamps the name."""
+        chunker = FixedChunker(chunk_size=20, chunk_overlap=10)
+        chunks = chunker.chunk("A" * 200)
+        assert chunks
+        assert all(c.metadata["chunker"] == "fixed" for c in chunks)
+
+    def test_recursive_chunker_self_id(self) -> None:
+        chunker = RecursiveChunker(chunk_size=50, chunk_overlap=10)
+        chunks = chunker.chunk("First paragraph.\n\nSecond paragraph.\n\nThird paragraph.")
+        assert chunks
+        assert all(c.metadata["chunker"] == "recursive" for c in chunks)
+
+    def test_semantic_chunker_self_id(self) -> None:
+        chunker = SemanticChunker(chunk_size=80, chunk_overlap=10)
+        chunks = chunker.chunk("Sentence one. Sentence two. Sentence three. Sentence four.")
+        assert chunks
+        assert all(c.metadata["chunker"] == "semantic" for c in chunks)

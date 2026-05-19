@@ -238,7 +238,7 @@ class TestConversationChunker:
         chunker = ConversationChunker(config=ConversationChunkerConfig(min_group_size=1))
         results = chunker.chunk_messages(msgs)
         meta = results[0].metadata
-        assert meta["source_type"] == "slack_conversation"
+        assert meta["chunker"] == "conversation"
         assert meta["channel"] == "dev"
         assert meta["message_count"] == 1
         assert "time_start" in meta

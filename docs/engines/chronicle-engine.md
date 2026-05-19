@@ -99,7 +99,8 @@ async def main():
             "What is Alice's current position on release cadence?",
             namespace=ns.namespace_id,
         )
-        print(result.context_text)
+        for chunk in result.chunks:
+            print(chunk.content)
 
 asyncio.run(main())
 ```
