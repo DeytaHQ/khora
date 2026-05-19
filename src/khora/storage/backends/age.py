@@ -864,10 +864,10 @@ class AGEBackend(GraphBackendBase):
     @trace("khora.age.find_paths")
     async def find_paths(
         self,
-        namespace_id: UUID,
         source_entity_id: UUID,
         target_entity_id: UUID,
         *,
+        namespace_id: UUID,
         max_depth: int = 3,
         relationship_types: list[str] | None = None,
     ) -> list[list[dict[str, Any]]]:

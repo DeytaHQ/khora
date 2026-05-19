@@ -728,7 +728,7 @@ async def test_list_episodes_with_start_and_end() -> None:
 async def test_find_paths_empty_result() -> None:
     session = _make_session_with_records(records=[])
     b = _connected_backend(session)
-    paths = await b.find_paths(uuid4(), uuid4(), uuid4())
+    paths = await b.find_paths(uuid4(), uuid4(), namespace_id=uuid4())
     assert paths == []
     cypher = session.run.await_args.args[0]
     assert "MATCH path" in cypher
@@ -738,7 +738,7 @@ async def test_find_paths_empty_result() -> None:
 async def test_find_paths_with_rel_filter() -> None:
     session = _make_session_with_records(records=[])
     b = _connected_backend(session)
-    await b.find_paths(uuid4(), uuid4(), uuid4(), relationship_types=["KNOWS"], max_depth=5)
+    await b.find_paths(uuid4(), uuid4(), namespace_id=uuid4(), relationship_types=["KNOWS"], max_depth=5)
     cypher = session.run.await_args.args[0]
     assert ":KNOWS" in cypher
     assert "*1..5" in cypher

@@ -1361,7 +1361,9 @@ class Khora:
         existing_by_ext_id: dict[str, Document] = {}
         if all_external_ids:
             try:
-                existing_by_ext_id = await storage.get_documents_by_external_ids(namespace_id, all_external_ids)
+                existing_by_ext_id = await storage.get_documents_by_external_ids(
+                    all_external_ids, namespace_id=namespace_id
+                )
             except Exception as exc:
                 # M2: Fall through to the normal insert path if the lookup fails.
                 logger.warning(
@@ -2203,7 +2205,9 @@ class Khora:
             try:
                 for i in range(0, len(sorted_ids), 1000):
                     batch = sorted_ids[i : i + 1000]
-                    projections.update(await self.storage.get_document_projections_batch(batch))
+                    projections.update(
+                        await self.storage.get_document_projections_batch(batch, namespace_id=namespace_id)
+                    )
             except Exception as exc:
                 # Fail open: the engine call already succeeded; degrading the
                 # document-upgrade pass to "stubs only" is strictly better than

@@ -238,7 +238,7 @@ class KhoraMemoryService:
         Treats ``events`` as a delta on top of whatever is already in
         memory — only new events (by ``event.id``) are written. The
         deduplication probe uses
-        ``storage.get_document_by_external_id(namespace, adk_event:<id>)``
+        ``storage.get_document_by_external_id(adk_event:<id>, namespace_id=namespace)``
         which is indexed in every khora backend.
 
         ``custom_metadata`` is merged into each event's
@@ -351,7 +351,7 @@ class KhoraMemoryService:
         external_id = kwargs["external_id"]
         # Idempotency: if a document for this event already exists, forget
         # it first so we don't accumulate duplicate chunks on re-ingest.
-        existing = await self.kb.storage.get_document_by_external_id(namespace_id, external_id)
+        existing = await self.kb.storage.get_document_by_external_id(external_id, namespace_id=namespace_id)
         if existing is not None:
             await self.kb.forget(existing.id, namespace=namespace_id)
 

@@ -544,7 +544,7 @@ async def test_get_document_by_checksum_returns_model() -> None:
 async def test_get_document_by_external_id_short_circuits_on_none() -> None:
     b = PostgreSQLBackend.__new__(PostgreSQLBackend)
     # No session needed because we short-circuit.
-    assert await b.get_document_by_external_id(uuid4(), None) is None
+    assert await b.get_document_by_external_id(None, namespace_id=uuid4()) is None
 
 
 @pytest.mark.unit
@@ -597,7 +597,7 @@ async def test_get_documents_by_external_ids_filters_empty_strings() -> None:
     b = PostgreSQLBackend.__new__(PostgreSQLBackend)
     # Filter is ``if e:`` so None and "" are dropped; whitespace strings would
     # still hit the DB.  This test only exercises the all-empty short-circuit.
-    assert await b.get_documents_by_external_ids(uuid4(), [None, ""]) == {}  # type: ignore[list-item]
+    assert await b.get_documents_by_external_ids([None, ""], namespace_id=uuid4()) == {}  # type: ignore[list-item]
 
 
 @pytest.mark.unit
@@ -614,7 +614,7 @@ async def test_get_documents_by_external_ids_returns_keyed_dict() -> None:
     result.scalars = MagicMock(return_value=scalars)
     session.execute = AsyncMock(return_value=result)
     b = _make_backend_with_session(session)
-    out = await b.get_documents_by_external_ids(ns_id, ["ext1", "ext2"])
+    out = await b.get_documents_by_external_ids(["ext1", "ext2"], namespace_id=ns_id)
     assert set(out.keys()) == {"ext1", "ext2"}
 
 

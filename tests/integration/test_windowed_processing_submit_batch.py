@@ -393,7 +393,7 @@ class TestSubmitBatchIntegration:
 
             # Wait until processing starts, then inspect DB (use row_ns_id for direct query)
             await asyncio.wait_for(processing_started.wait(), timeout=5.0)
-            doc_in_db = await kb.storage.get_document_by_external_id(row_ns_id, ext_id)
+            doc_in_db = await kb.storage.get_document_by_external_id(ext_id, namespace_id=row_ns_id)
             assert doc_in_db is not None, "document must exist in DB after submit_batch returns"
             assert doc_in_db.status in (
                 DocumentStatus.PENDING,
@@ -516,7 +516,7 @@ class TestSubmitBatchIntegration:
             )
 
             # Document must be in DB immediately (durability contract)
-            doc_before = await kb.storage.get_document_by_external_id(row_ns_id, ext_id)
+            doc_before = await kb.storage.get_document_by_external_id(ext_id, namespace_id=row_ns_id)
             assert doc_before is not None, "document must be in DB after submit_batch returns"
 
             # Wait until processing has started before cancelling
@@ -528,7 +528,7 @@ class TestSubmitBatchIntegration:
             await asyncio.sleep(0.1)
 
             # Document must still be in DB (PENDING)
-            doc_after = await kb.storage.get_document_by_external_id(row_ns_id, ext_id)
+            doc_after = await kb.storage.get_document_by_external_id(ext_id, namespace_id=row_ns_id)
             assert doc_after is not None, "PENDING document must survive task cancellation"
             assert doc_after.status in (
                 DocumentStatus.PENDING,

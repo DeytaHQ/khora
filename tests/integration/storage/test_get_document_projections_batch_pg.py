@@ -102,7 +102,7 @@ class TestGetDocumentProjectionsBatchPg:
         )
         await backend.create_document(doc)
 
-        projections = await backend.get_document_projections_batch([doc.id])
+        projections = await backend.get_document_projections_batch([doc.id], namespace_id=ns.id)
 
         assert doc.id in projections
         proj = projections[doc.id]
@@ -135,12 +135,12 @@ class TestGetDocumentProjectionsBatchPg:
         )
         await backend.create_document(doc)
 
-        projections = await backend.get_document_projections_batch([doc.id])
+        projections = await backend.get_document_projections_batch([doc.id], namespace_id=ns.id)
         proj = projections[doc.id]
         assert proj.source_type == "library"
 
     async def test_empty_input(self, backend: PostgreSQLBackend) -> None:
-        assert await backend.get_document_projections_batch([]) == {}
+        assert await backend.get_document_projections_batch([], namespace_id=uuid4()) == {}
 
     async def test_unknown_id_omitted(self, backend: PostgreSQLBackend) -> None:
         ns = await backend.create_namespace(MemoryNamespace())
@@ -155,5 +155,5 @@ class TestGetDocumentProjectionsBatchPg:
         )
         await backend.create_document(doc)
 
-        projections = await backend.get_document_projections_batch([doc.id, uuid4()])
+        projections = await backend.get_document_projections_batch([doc.id, uuid4()], namespace_id=ns.id)
         assert set(projections.keys()) == {doc.id}

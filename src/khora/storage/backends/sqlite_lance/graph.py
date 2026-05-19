@@ -570,10 +570,10 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
 
     async def find_paths(
         self,
-        namespace_id: UUID,
         source_entity_id: UUID,
         target_entity_id: UUID,
         *,
+        namespace_id: UUID,
         max_depth: int = 3,
         relationship_types: list[str] | None = None,
         prefer_current: bool = False,

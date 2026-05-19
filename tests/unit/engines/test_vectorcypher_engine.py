@@ -407,7 +407,9 @@ class TestVectorCypherEngineRemember:
                 external_id="ext-new",
             )
 
-        connected_engine._storage.get_document_by_external_id.assert_awaited_once_with(namespace_id, "ext-new")
+        connected_engine._storage.get_document_by_external_id.assert_awaited_once_with(
+            "ext-new", namespace_id=namespace_id
+        )
         connected_engine._storage.replace_document_extraction.assert_not_called()
         connected_engine._storage.create_document.assert_called_once()
         assert result.document_id == doc_id
@@ -1076,10 +1078,10 @@ class TestVectorCypherEngineRemember:
         existing.created_at = datetime(2026, 1, 1, tzinfo=UTC)
 
         # Backend lookups: "ext-a" exists, "ext-b" does not.
-        async def _ext_lookup(_ns, ext_id):
+        async def _ext_lookup(ext_id, *, namespace_id):
             return existing if ext_id == "ext-a" else None
 
-        async def _ext_batch(_ns, ext_ids):
+        async def _ext_batch(ext_ids, *, namespace_id):
             return {e: existing for e in ext_ids if e == "ext-a"}
 
         connected_engine._storage.get_document_by_external_id = AsyncMock(side_effect=_ext_lookup)
@@ -1143,10 +1145,10 @@ class TestVectorCypherEngineRemember:
         existing.id = matched_doc_id
         existing.created_at = datetime(2026, 1, 1, tzinfo=UTC)
 
-        async def _ext_lookup(_ns, ext_id):
+        async def _ext_lookup(ext_id, *, namespace_id):
             return existing if ext_id == "ext-a" else None
 
-        async def _ext_batch(_ns, ext_ids):
+        async def _ext_batch(ext_ids, *, namespace_id):
             return {e: existing for e in ext_ids if e == "ext-a"}
 
         connected_engine._storage.get_document_by_external_id = AsyncMock(side_effect=_ext_lookup)
@@ -1187,8 +1189,8 @@ class TestVectorCypherEngineRemember:
         # Single batch lookup for all matched external_ids — not N serial calls.
         connected_engine._storage.get_documents_by_external_ids.assert_awaited_once()
         call_args = connected_engine._storage.get_documents_by_external_ids.await_args
-        assert call_args.args[0] == namespace_id
-        assert list(call_args.args[1]) == ["ext-a"]
+        assert call_args.kwargs.get("namespace_id") == namespace_id
+        assert list(call_args.args[0]) == ["ext-a"]
         assert result.total == 1
         assert result.processed == 1
         assert result.chunks == 2

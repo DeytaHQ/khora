@@ -665,14 +665,14 @@ class TestGraphProtocol:
         await graph_backend.create_relationship(_make_relationship(ns, a.id, b.id))
         await graph_backend.create_relationship(_make_relationship(ns, b.id, c.id))
 
-        paths = await graph_backend.find_paths(ns, a.id, c.id, max_depth=3)
+        paths = await graph_backend.find_paths(a.id, c.id, namespace_id=ns, max_depth=3)
         assert len(paths) == 1
         assert len(paths[0]) == 2
 
         # Disconnected — no path.
         lone = _make_entity(ns, name="lone")
         await graph_backend.create_entity(lone)
-        assert await graph_backend.find_paths(ns, a.id, lone.id, max_depth=3) == []
+        assert await graph_backend.find_paths(a.id, lone.id, namespace_id=ns, max_depth=3) == []
 
     async def test_get_neighborhood_depths(self, graph_backend):
         ns = uuid4()

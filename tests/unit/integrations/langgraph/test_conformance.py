@@ -42,7 +42,7 @@ class _ShadowStore:
         self.namespace_id = namespace_id
         self.by_external_id: dict[str, Document] = {}
 
-    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+    async def get_document_by_external_id(self, external_id: str | None, *, namespace_id: UUID) -> Document | None:
         if external_id is None:
             return None
         return self.by_external_id.get(external_id)

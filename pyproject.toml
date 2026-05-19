@@ -237,6 +237,7 @@ markers = [
     "slow: Slow tests (skipped by default; run with -m slow)",
     "soak: Long-running soak/burn-in tests (skipped by default; run with -m soak --no-cov)",
     "embedded: Tests that exercise the SQLite+LanceDB embedded stack (no Docker required)",
+    "security: Structural/regression tests for the security surface (IGR-225 IDOR gate, etc.)",
 ]
 asyncio_mode = "auto"
 

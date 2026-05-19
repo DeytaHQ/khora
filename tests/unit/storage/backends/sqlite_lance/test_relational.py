@@ -345,7 +345,7 @@ async def test_get_document_projections_batch_full_field_roundtrip(adapter, name
     )
     await adapter.create_document(doc)
 
-    projections = await adapter.get_document_projections_batch([doc.id])
+    projections = await adapter.get_document_projections_batch([doc.id], namespace_id=namespace.id)
 
     assert doc.id in projections
     proj = projections[doc.id]
@@ -375,7 +375,7 @@ async def test_get_document_projections_batch_null_source_type_defaults_to_libra
     )
     await adapter.create_document(doc)
 
-    projections = await adapter.get_document_projections_batch([doc.id])
+    projections = await adapter.get_document_projections_batch([doc.id], namespace_id=namespace.id)
 
     proj = projections[doc.id]
     assert isinstance(proj, DocumentProjection)
@@ -384,7 +384,7 @@ async def test_get_document_projections_batch_null_source_type_defaults_to_libra
 
 async def test_get_document_projections_batch_empty_input(adapter):
     """Empty input short-circuits to ``{}`` without a SQL round-trip."""
-    assert await adapter.get_document_projections_batch([]) == {}
+    assert await adapter.get_document_projections_batch([], namespace_id=uuid4()) == {}
 
 
 async def test_get_document_sources_batch_requires_namespace_kwarg(adapter, namespace):

@@ -196,7 +196,12 @@ class RelationalBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def get_document_by_external_id(self, namespace_id: UUID, external_id: str | None) -> Document | None:
+    async def get_document_by_external_id(
+        self,
+        external_id: str | None,
+        *,
+        namespace_id: UUID,
+    ) -> Document | None:
         """Get a document by its caller-supplied external_id.
 
         Unlike ``get_document_by_checksum``, this lookup does NOT filter by
@@ -209,7 +214,12 @@ class RelationalBackendProtocol(Protocol):
         ...
 
     @abstractmethod
-    async def get_documents_by_external_ids(self, namespace_id: UUID, external_ids: list[str]) -> dict[str, Document]:
+    async def get_documents_by_external_ids(
+        self,
+        external_ids: list[str],
+        *,
+        namespace_id: UUID,
+    ) -> dict[str, Document]:
         """Batch equivalent of :meth:`get_document_by_external_id`.
 
         Returns a mapping of ``external_id -> Document`` for every external_id
@@ -251,7 +261,12 @@ class RelationalBackendProtocol(Protocol):
         """
         ...
 
-    async def get_document_projections_batch(self, document_ids: list[UUID]) -> dict[UUID, DocumentProjection]:
+    async def get_document_projections_batch(
+        self,
+        document_ids: list[UUID],
+        *,
+        namespace_id: UUID,
+    ) -> dict[UUID, DocumentProjection]:
         """Fetch full ``DocumentProjection`` rows for recall responses.
 
         Returns the typed projection shape used by ``Khora.recall()``:
@@ -265,6 +280,8 @@ class RelationalBackendProtocol(Protocol):
 
         Args:
             document_ids: List of document IDs to fetch
+            namespace_id: Namespace scope — rows from other namespaces are
+                filtered at the query layer (IGR-225 close-out).
 
         Returns:
             Dictionary mapping document ID to DocumentProjection
@@ -608,10 +625,10 @@ class GraphBackendProtocol(Protocol):
     @abstractmethod
     async def find_paths(
         self,
-        namespace_id: UUID,
         source_entity_id: UUID,
         target_entity_id: UUID,
         *,
+        namespace_id: UUID,
         max_depth: int = 3,
         relationship_types: list[str] | None = None,
     ) -> list[list[dict[str, Any]]]:

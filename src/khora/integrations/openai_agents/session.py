@@ -202,7 +202,7 @@ class KhoraSession:
             # Idempotency: if a document at this (session, seq) external
             # id already exists, drop it first so chunk lists don't grow
             # on re-ingest (a Runner retry, say).
-            existing = await self.kb.storage.get_document_by_external_id(row_ns, kwargs["external_id"])
+            existing = await self.kb.storage.get_document_by_external_id(kwargs["external_id"], namespace_id=row_ns)
             if existing is not None:
                 await self.kb.forget(existing.id, namespace=self.namespace_id)
             await self.kb.remember(namespace=self.namespace_id, **kwargs)

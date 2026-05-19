@@ -250,12 +250,12 @@ class TestRelationalGuards:
     @pytest.mark.asyncio
     async def test_get_document_by_external_id(self, empty_coord) -> None:
         with pytest.raises(RuntimeError, match="Relational backend not configured"):
-            await empty_coord.get_document_by_external_id(uuid4(), "ext")
+            await empty_coord.get_document_by_external_id("ext", namespace_id=uuid4())
 
     @pytest.mark.asyncio
     async def test_get_documents_by_external_ids(self, empty_coord) -> None:
         with pytest.raises(RuntimeError, match="Relational backend not configured"):
-            await empty_coord.get_documents_by_external_ids(uuid4(), ["e"])
+            await empty_coord.get_documents_by_external_ids(["e"], namespace_id=uuid4())
 
     @pytest.mark.asyncio
     async def test_get_last_activity_at(self, empty_coord) -> None:
