@@ -28,7 +28,7 @@ from .fusion import reciprocal_rank_fusion
 from .keyword import KeywordSearcher, normalize_bm25_score
 from .linking import EntityLinker, LinkingResult
 from .metrics import SearchMetrics
-from .reranking import RerankCandidate, create_reranker
+from .reranking import RerankCandidate, create_reranker, hydrate_doc_titles
 from .temporal import TemporalFilter, TemporalQuery
 from .understanding import QueryIntent, QueryUnderstanding, UnderstandingResult
 
@@ -1336,9 +1336,11 @@ class HybridQueryEngine:
                             original_score=score,
                             content=chunk.content,
                             metadata=chunk.metadata,
+                            doc_title="",
                         )
                         for chunk, score in fused_chunks[: cfg.reranking_top_n]
                     ]
+                    await hydrate_doc_titles(candidates, self._storage, lambda c: getattr(c, "document_id", None))
                     async with pipeline_stage(
                         "query",
                         "reranking",
@@ -2909,9 +2911,11 @@ class HybridQueryEngine:
                         original_score=score,
                         content=chunk.content,
                         metadata=chunk.metadata,
+                        doc_title="",
                     )
                     for chunk, score in candidates_to_rerank
                 ]
+                await hydrate_doc_titles(candidates, self._storage, lambda c: getattr(c, "document_id", None))
 
                 # Rerank - use max_chunks as final limit
                 reranked = await reranker.rerank(

@@ -17,9 +17,9 @@ from khora.query.reranking import (
 )
 
 
-def _make_candidate(content: str = "test", score: float = 0.5) -> RerankCandidate:
+def _make_candidate(content: str = "test", score: float = 0.5, doc_title: str = "") -> RerankCandidate:
     """Create a RerankCandidate."""
-    return RerankCandidate(item=content, original_score=score, content=content)
+    return RerankCandidate(item=content, original_score=score, content=content, doc_title=doc_title)
 
 
 class TestRerankCandidate:
@@ -32,6 +32,17 @@ class TestRerankCandidate:
         assert c.original_score == 0.8
         assert c.content == "doc text"
         assert c.metadata == {}
+        assert c.doc_title == ""
+
+    def test_doc_title_defaults_to_empty(self) -> None:
+        """doc_title is an optional typed field defaulting to ''."""
+        c = RerankCandidate(item="x", original_score=0.5, content="body")
+        assert c.doc_title == ""
+
+    def test_doc_title_set_explicitly(self) -> None:
+        """doc_title accepts a string and round-trips on the dataclass."""
+        c = RerankCandidate(item="x", original_score=0.5, content="body", doc_title="Q2 review")
+        assert c.doc_title == "Q2 review"
 
 
 class TestRerankResult:
@@ -233,6 +244,7 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="meeting notes",
             metadata={"occurred_at": "2026-05-14T10:00:00Z"},
+            doc_title="",
         )
         await reranker.rerank("query", [candidate], top_k=1)
         assert captured[0][1] == "meeting notes"
@@ -254,6 +266,7 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="meeting notes",
             metadata={"occurred_at": "2026-05-14T10:00:00Z"},
+            doc_title="",
         )
         await reranker.rerank("query", [candidate], top_k=1)
         # ISO timestamp truncated to YYYY-MM-DD.
@@ -278,6 +291,7 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="email body",
             metadata={"sent_at": "2026-04-01"},
+            doc_title="",
         )
         # No occurred_at or sent_at, fall back to metadata.created_at.
         from datetime import UTC, datetime
@@ -289,6 +303,7 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="legacy doc",
             metadata=created_only_meta,
+            doc_title="",
         )
         await reranker.rerank("query", [sent_only, created_only], top_k=2)
         assert captured[0][1].startswith("[2026-04-01] ")
@@ -312,13 +327,18 @@ class TestCrossEncoderDatePrefix:
             original_score=0.5,
             content="no metadata",
             metadata={},
+            doc_title="",
         )
         await reranker.rerank("query", [candidate], top_k=1)
         assert captured[0][1] == "no metadata"
 
     @pytest.mark.asyncio
     async def test_date_prefix_with_title_keeps_both(self) -> None:
-        """Title and date prefix coexist — date wraps the title."""
+        """Title and date prefix coexist — date wraps the title.
+
+        Title now flows from the typed ``doc_title`` field rather than
+        ``metadata["title"]``.
+        """
         reranker = CrossEncoderReranker(include_date_prefix=True)
         captured: list = []
 
@@ -333,7 +353,8 @@ class TestCrossEncoderDatePrefix:
             item="x",
             original_score=0.5,
             content="body text",
-            metadata={"occurred_at": "2026-05-14", "title": "Q2 review"},
+            metadata={"occurred_at": "2026-05-14"},
+            doc_title="Q2 review",
         )
         await reranker.rerank("query", [candidate], top_k=1)
         assert "[2026-05-14]" in captured[0][1]
@@ -351,3 +372,122 @@ class TestCrossEncoderDatePrefix:
         assert plain is not prefixed
         assert plain._include_date_prefix is False
         assert prefixed._include_date_prefix is True
+
+
+class TestCrossEncoderRerankerDocTitleTypedField:
+    """Cross-encoder reads the document title from the typed ``doc_title`` field.
+
+    The title-prefix path on the cross-encoder is driven by ``doc_title``;
+    ``metadata["title"]`` is no longer consulted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_doc_title_is_prepended_to_content(self) -> None:
+        reranker = CrossEncoderReranker()
+        captured: list = []
+
+        def fake_predict(pairs, batch_size=32):
+            captured.extend(pairs)
+            return [0.5] * len(pairs)
+
+        reranker._model = MagicMock()
+        reranker._model.predict.side_effect = fake_predict
+
+        candidate = RerankCandidate(
+            item="x",
+            original_score=0.5,
+            content="body text",
+            metadata={},
+            doc_title="Doc A",
+        )
+        await reranker.rerank("query", [candidate], top_k=1)
+        assert captured[0][1] == "[Doc A] body text"
+
+    @pytest.mark.asyncio
+    async def test_metadata_title_is_ignored_when_doc_title_empty(self) -> None:
+        """Regression: ``metadata["title"]`` must no longer leak into the prefix.
+
+        Before the contract switch the cross-encoder fell back to
+        ``metadata["title"]`` for the prefix. After the switch only the
+        typed ``doc_title`` field is read, so a populated metadata title
+        with an empty ``doc_title`` must produce un-prefixed content.
+        """
+        reranker = CrossEncoderReranker()
+        captured: list = []
+
+        def fake_predict(pairs, batch_size=32):
+            captured.extend(pairs)
+            return [0.5] * len(pairs)
+
+        reranker._model = MagicMock()
+        reranker._model.predict.side_effect = fake_predict
+
+        candidate = RerankCandidate(
+            item="x",
+            original_score=0.5,
+            content="body text",
+            metadata={"title": "Stale metadata title"},
+            doc_title="",
+        )
+        await reranker.rerank("query", [candidate], top_k=1)
+        assert captured[0][1] == "body text"
+        assert "Stale metadata title" not in captured[0][1]
+
+
+class TestLLMRerankerDocTitleTypedField:
+    """LLM reranker reads the document title from the typed ``doc_title`` field.
+
+    The title-prefix path on the LLM reranker is driven by ``doc_title``;
+    ``metadata["title"]`` is no longer consulted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_doc_title_is_prepended_to_passage(self) -> None:
+        reranker = LLMReranker(batch_size=10)
+        captured_prompts: list = []
+
+        async def fake_acompletion(prompt, *_args, **_kwargs):
+            captured_prompts.append(prompt)
+            return '{"scores": [9.0]}'
+
+        candidate = RerankCandidate(
+            item="x",
+            original_score=0.5,
+            content="body text",
+            metadata={},
+            doc_title="Doc A",
+        )
+        with patch("khora.config.llm.acompletion", side_effect=fake_acompletion):
+            await reranker.rerank("query", [candidate], top_k=1)
+        assert len(captured_prompts) == 1
+        assert "[Doc A] body text" in captured_prompts[0]
+
+    @pytest.mark.asyncio
+    async def test_metadata_title_is_ignored_when_doc_title_empty(self) -> None:
+        """Regression: ``metadata["title"]`` must no longer leak into the prompt.
+
+        Before the contract switch the LLM reranker pulled the title from
+        ``metadata["title"]`` when building the batched prompt. After the
+        switch only the typed ``doc_title`` field is read, so a populated
+        metadata title with an empty ``doc_title`` must produce an
+        un-prefixed passage.
+        """
+        reranker = LLMReranker(batch_size=10)
+        captured_prompts: list = []
+
+        async def fake_acompletion(prompt, *_args, **_kwargs):
+            captured_prompts.append(prompt)
+            return '{"scores": [9.0]}'
+
+        candidate = RerankCandidate(
+            item="x",
+            original_score=0.5,
+            content="body text",
+            metadata={"title": "Stale metadata title"},
+            doc_title="",
+        )
+        with patch("khora.config.llm.acompletion", side_effect=fake_acompletion):
+            await reranker.rerank("query", [candidate], top_k=1)
+        assert len(captured_prompts) == 1
+        assert "Stale metadata title" not in captured_prompts[0]
+        assert "[1] body text" in captured_prompts[0]

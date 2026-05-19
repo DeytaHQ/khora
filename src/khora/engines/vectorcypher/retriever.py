@@ -1667,7 +1667,7 @@ class VectorCypherRetriever:
         if not fused_results:
             return fused_results
 
-        from khora.query.reranking import CrossEncoderReranker, RerankCandidate
+        from khora.query.reranking import CrossEncoderReranker, RerankCandidate, hydrate_doc_titles
 
         top_n = min(self._config.reranking_top_n, len(fused_results))
         candidates_to_rerank = fused_results[:top_n]
@@ -1702,8 +1702,12 @@ class VectorCypherRetriever:
                     original_score=(r.rrf_score - score_min) / score_range if score_range > 1e-9 else 0.5,
                     content=chunk_content,
                     metadata=r.item.metadata if hasattr(r.item, "metadata") else {},
+                    doc_title="",
                 )
             )
+        await hydrate_doc_titles(
+            candidates, self._storage, lambda fr: getattr(getattr(fr, "item", None), "document_id", None)
+        )
 
         try:
             if self._reranker is None:
@@ -1784,7 +1788,7 @@ class VectorCypherRetriever:
         if not fused_results:
             return fused_results
 
-        from khora.query.reranking import LLMReranker, RerankCandidate
+        from khora.query.reranking import LLMReranker, RerankCandidate, hydrate_doc_titles
 
         top_n = min(self._config.llm_reranking_top_n, len(fused_results))
         candidates_to_rerank = fused_results[:top_n]
@@ -1819,8 +1823,12 @@ class VectorCypherRetriever:
                     original_score=(r.rrf_score - score_min) / score_range if score_range > 1e-9 else 0.5,
                     content=chunk_content,
                     metadata=r.item.metadata if hasattr(r.item, "metadata") else {},
+                    doc_title="",
                 )
             )
+        await hydrate_doc_titles(
+            candidates, self._storage, lambda fr: getattr(getattr(fr, "item", None), "document_id", None)
+        )
 
         try:
             if self._llm_reranker is None:
