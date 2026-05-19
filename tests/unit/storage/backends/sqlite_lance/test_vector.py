@@ -455,9 +455,16 @@ class TestEntities:
         assert results[0][0] == e.id
         assert math.isclose(results[0][1], 1.0, abs_tol=1e-3)
 
-    async def test_update_entity_embedding_missing_raises(self, adapter: SQLiteLanceVectorAdapter):
-        with pytest.raises(ValueError, match="not found"):
-            await adapter.update_entity_embedding(uuid4(), _unit(8, 0), "m", namespace_id=uuid4())
+    async def test_update_entity_embedding_missing_is_silent_noop(self, adapter: SQLiteLanceVectorAdapter):
+        """IGR-226: cross-namespace / missing-entity update is a silent no-op.
+
+        Raising would leak the existence of the row across namespaces (the
+        old behaviour was an existence oracle). The IDOR family preserves
+        ``no-op on cross-namespace`` for every write/update path.
+        """
+        # No exception, no side effects — the LanceDB table is empty,
+        # so a subsequent search returns nothing rather than the bogus row.
+        await adapter.update_entity_embedding(uuid4(), _unit(8, 0), "m", namespace_id=uuid4())
 
     async def test_update_entity_embeddings_batch(self, adapter: SQLiteLanceVectorAdapter, graph):
         ns = uuid4()
