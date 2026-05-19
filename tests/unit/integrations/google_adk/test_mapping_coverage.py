@@ -428,6 +428,7 @@ def test_chunk_to_memory_entry_text_only() -> None:
     chunk = _mk_chunk(content="hello world", custom=custom)
     entry = chunk_to_memory_entry(
         chunk,
+        custom_metadata=custom,
         memory_entry_cls=FakeMemoryEntry,
         content_cls=FakeContent,
         part_cls=FakePart,
@@ -449,6 +450,7 @@ def test_chunk_to_memory_entry_decodes_function_call_part_from_json_string() -> 
     chunk = _mk_chunk(content="tool call: lookup", custom=custom)
     entry = chunk_to_memory_entry(
         chunk,
+        custom_metadata=custom,
         memory_entry_cls=FakeMemoryEntry,
         content_cls=FakeContent,
         part_cls=FakePart,
@@ -473,6 +475,7 @@ def test_chunk_to_memory_entry_decodes_already_decoded_parts() -> None:
     chunk = _mk_chunk(content="payload", custom=custom)
     entry = chunk_to_memory_entry(
         chunk,
+        custom_metadata=custom,
         memory_entry_cls=FakeMemoryEntry,
         content_cls=FakeContent,
         part_cls=FakePart,
@@ -492,6 +495,7 @@ def test_chunk_to_memory_entry_swallows_corrupt_json_string() -> None:
     chunk = _mk_chunk(content="hello", custom=custom)
     entry = chunk_to_memory_entry(
         chunk,
+        custom_metadata=custom,
         memory_entry_cls=FakeMemoryEntry,
         content_cls=FakeContent,
         part_cls=FakePart,
@@ -516,6 +520,7 @@ def test_chunk_to_memory_entry_filters_internal_metadata_from_custom() -> None:
     chunk = _mk_chunk(content="text", custom=custom)
     entry = chunk_to_memory_entry(
         chunk,
+        custom_metadata=custom,
         memory_entry_cls=FakeMemoryEntry,
         content_cls=FakeContent,
         part_cls=FakePart,
@@ -539,6 +544,7 @@ def test_chunk_to_memory_entry_skips_unknown_part_entries() -> None:
     chunk = _mk_chunk(content="text", custom=custom)
     entry = chunk_to_memory_entry(
         chunk,
+        custom_metadata=custom,
         memory_entry_cls=FakeMemoryEntry,
         content_cls=FakeContent,
         part_cls=FakePart,
@@ -555,6 +561,7 @@ def test_chunk_to_memory_entry_with_empty_content() -> None:
     chunk = _mk_chunk(content="", custom=custom)
     entry = chunk_to_memory_entry(
         chunk,
+        custom_metadata=custom,
         memory_entry_cls=FakeMemoryEntry,
         content_cls=FakeContent,
         part_cls=FakePart,
@@ -580,6 +587,7 @@ def test_chunk_to_memory_entry_swallows_part_construction_errors() -> None:
     chunk = _mk_chunk(content="hi", custom=custom)
     entry = chunk_to_memory_entry(
         chunk,
+        custom_metadata=custom,
         memory_entry_cls=FakeMemoryEntry,
         content_cls=FakeContent,
         part_cls=_RaisingPart,
