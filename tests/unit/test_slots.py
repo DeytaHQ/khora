@@ -117,9 +117,10 @@ def _minimal_kwargs(cls):
         return {
             "query": "",
             "namespace_id": ns,
+            "documents": [],
             "chunks": [],
             "entities": [],
-            "context_text": "",
+            "relationships": [],
         }
     if name == "Stats":
         return {

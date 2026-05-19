@@ -14,13 +14,46 @@ Uses mocked storage backends so no live databases are needed.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 
-from khora.core.models import Chunk, Document, Entity, Relationship
+from khora.core.models import (
+    Chunk,
+    Document,
+    Entity,
+    RecallChunk,
+    RecallEntity,
+    Relationship,
+)
 from khora.khora import BatchResult, Khora, RecallResult, RememberResult
+
+
+def _rc(content: str, score: float) -> RecallChunk:
+    return RecallChunk(
+        id=uuid4(),
+        document_id=uuid4(),
+        content=content,
+        score=score,
+        created_at=datetime.now(UTC),
+    )
+
+
+def _re(name: str, score: float) -> RecallEntity:
+    return RecallEntity(
+        id=uuid4(),
+        name=name,
+        entity_type="PERSON",
+        description="",
+        score=score,
+        attributes={},
+        mention_count=0,
+        source_document_ids=[],
+        source_chunk_ids=[],
+    )
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -497,9 +530,10 @@ class TestIncrementalIngestion:
         mock_recall = RecallResult(
             query="Alice Acme Corp",
             namespace_id=NAMESPACE_ID,
-            chunks=[("Alice Johnson is a senior engineer at Acme Corp.", 0.95)],
-            entities=[("alice johnson", 0.9)],
-            context_text="Alice Johnson is a senior engineer at Acme Corp.",
+            documents=[],
+            chunks=[_rc("Alice Johnson is a senior engineer at Acme Corp.", 0.95)],
+            entities=[_re("alice johnson", 0.9)],
+            relationships=[],
         )
         engine.recall = AsyncMock(return_value=mock_recall)
 
@@ -521,7 +555,7 @@ class TestIncrementalIngestion:
             # Recall
             recall_result = await kb.recall("Alice Acme Corp", namespace=NAMESPACE_ID)
             assert len(recall_result.chunks) == 1
-            assert "Alice" in recall_result.context_text
+            assert "Alice" in recall_result.chunks[0].content
 
     async def test_incremental_remember_batch_then_recall(self) -> None:
         """Full flow: remember_batch twice, then recall finds all content."""
@@ -546,25 +580,21 @@ class TestIncrementalIngestion:
         mock_recall = RecallResult(
             query="Acme Corp employees",
             namespace_id=NAMESPACE_ID,
+            documents=[],
             chunks=[
-                ("Alice Johnson is a senior engineer at Acme Corp.", 0.95),
-                ("Bob Smith manages the platform team at Acme Corp.", 0.90),
-                ("Charlie Brown joined Acme Corp as a data scientist.", 0.85),
-                ("Dave Wilson is a product manager at Acme Corp.", 0.80),
+                _rc("Alice Johnson is a senior engineer at Acme Corp.", 0.95),
+                _rc("Bob Smith manages the platform team at Acme Corp.", 0.90),
+                _rc("Charlie Brown joined Acme Corp as a data scientist.", 0.85),
+                _rc("Dave Wilson is a product manager at Acme Corp.", 0.80),
             ],
             entities=[
-                ("alice johnson", 0.9),
-                ("bob smith", 0.85),
-                ("charlie brown", 0.8),
-                ("dave wilson", 0.75),
-                ("acme corp", 0.95),
+                _re("alice johnson", 0.9),
+                _re("bob smith", 0.85),
+                _re("charlie brown", 0.8),
+                _re("dave wilson", 0.75),
+                _re("acme corp", 0.95),
             ],
-            context_text=(
-                "Alice Johnson is a senior engineer at Acme Corp. "
-                "Bob Smith manages the platform team. "
-                "Charlie Brown joined as data scientist. "
-                "Dave Wilson is a product manager."
-            ),
+            relationships=[],
         )
         engine.recall = AsyncMock(return_value=mock_recall)
 
@@ -598,7 +628,7 @@ class TestIncrementalIngestion:
             assert len(result.entities) == 5  # All entities including Acme Corp
 
             # Verify content from batch 1 is present
-            chunk_texts = [c[0] for c in result.chunks]
+            chunk_texts = [c.content for c in result.chunks]
             assert any("Alice" in t for t in chunk_texts), "Batch 1 Alice not found in recall"
             assert any("Bob" in t for t in chunk_texts), "Batch 1 Bob not found in recall"
 
@@ -776,26 +806,23 @@ class TestIncrementalIngestion:
         mock_recall = RecallResult(
             query="Acme Corp team",
             namespace_id=NAMESPACE_ID,
+            documents=[],
             chunks=[
-                ("Alice Johnson is a senior engineer at Acme Corp.", 0.95),
-                ("Bob Smith manages the platform team at Acme Corp.", 0.90),
-                ("Charlie Brown joined Acme Corp as a data scientist.", 0.85),
-                ("Dave Wilson is a product manager at Acme Corp.", 0.80),
-                ("Eve Martinez is a designer at Acme Corp.", 0.75),
+                _rc("Alice Johnson is a senior engineer at Acme Corp.", 0.95),
+                _rc("Bob Smith manages the platform team at Acme Corp.", 0.90),
+                _rc("Charlie Brown joined Acme Corp as a data scientist.", 0.85),
+                _rc("Dave Wilson is a product manager at Acme Corp.", 0.80),
+                _rc("Eve Martinez is a designer at Acme Corp.", 0.75),
             ],
             entities=[
-                ("alice johnson", 0.9),
-                ("bob smith", 0.85),
-                ("charlie brown", 0.8),
-                ("dave wilson", 0.75),
-                ("eve martinez", 0.7),
-                ("acme corp", 0.95),
+                _re("alice johnson", 0.9),
+                _re("bob smith", 0.85),
+                _re("charlie brown", 0.8),
+                _re("dave wilson", 0.75),
+                _re("eve martinez", 0.7),
+                _re("acme corp", 0.95),
             ],
-            context_text=(
-                "Alice Johnson is a senior engineer. Bob Smith manages the platform team. "
-                "Charlie Brown is a data scientist. Dave Wilson is a product manager. "
-                "Eve Martinez is a designer. All at Acme Corp."
-            ),
+            relationships=[],
         )
         engine.recall = AsyncMock(return_value=mock_recall)
 
@@ -834,7 +861,7 @@ class TestIncrementalIngestion:
 
             result = await kb.recall("Acme Corp team", namespace=NAMESPACE_ID)
             assert len(result.chunks) == 5
-            chunk_texts = [c[0] for c in result.chunks]
+            chunk_texts = [c.content for c in result.chunks]
             assert any("Alice" in t for t in chunk_texts), "Batch 1 content missing"
             assert any("Charlie" in t for t in chunk_texts), "Batch 2 content missing"
             assert any("Eve" in t for t in chunk_texts), "Batch 3 content missing"

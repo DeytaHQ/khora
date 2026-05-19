@@ -120,11 +120,10 @@ async def test_recall_returns_chunks_after_remember_surrealdb_memory(
             f"(chunks_created={rem.chunks_created}, namespace={ns.namespace_id}) — "
             f"issue #716 regression"
         )
-        # Sanity: returned chunk must be from the same namespace we wrote into.
-        for chunk, _score in recalled.chunks:
-            assert chunk.namespace_id == ns.namespace_id, (
-                f"[{engine}] recalled chunk has namespace_id={chunk.namespace_id} but expected {ns.namespace_id}"
-            )
+        # Sanity: result must be from the same namespace we wrote into.
+        assert recalled.namespace_id == ns.namespace_id, (
+            f"[{engine}] recalled result has namespace_id={recalled.namespace_id} but expected {ns.namespace_id}"
+        )
 
 
 async def test_recall_namespace_isolation_surrealdb_memory(
@@ -160,7 +159,7 @@ async def test_recall_namespace_isolation_surrealdb_memory(
         result_b = await kb.recall("payments service", namespace=ns_b)
 
         # ns_a returns its own chunk; ns_b's irrelevant doc must not leak in.
-        a_contents = " ".join(c.content for c, _ in result_a.chunks)
-        b_contents = " ".join(c.content for c, _ in result_b.chunks)
+        a_contents = " ".join(c.content for c in result_a.chunks)
+        b_contents = " ".join(c.content for c in result_b.chunks)
         assert "payments" in a_contents.lower(), "ns_a should match its own document"
         assert "payments" not in b_contents.lower(), f"ns_b leaked content from ns_a: {b_contents!r}"

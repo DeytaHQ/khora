@@ -158,5 +158,5 @@ async def test_memory_hooks_persist_tool_results(monkeypatch):
 
         # The hook should have written one document; recall it back.
         recall = await kb.recall("forty-two", namespace=ns_id, limit=5)
-        contents = [chunk.content for chunk, _ in recall.chunks]
+        contents = [chunk.content for chunk in recall.chunks]
         assert any("forty-two" in c for c in contents), f"hook write not recalled: {contents}"

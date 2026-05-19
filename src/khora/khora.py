@@ -286,31 +286,16 @@ class _ProcessorItem:
     batch_reg: _BatchRegistration | None  # None for orphaned docs
 
 
-@dataclass(slots=True, frozen=True)
-class RecallResult:
-    """Result of a recall operation.
-
-    Attributes:
-        query: The original query string.
-        namespace_id: Namespace the recall was executed against.
-        chunks: Scored chunk tuples ``(Chunk, score)``.
-        entities: Scored entity tuples ``(Entity, score)``.
-        context_text: Pre-formatted text for LLM context.  When relationships
-            are present, includes a ``--- Relationships ---`` section.
-        metadata: Engine-specific metadata dict.
-        relationships: Scored relationship tuples ``(Relationship, score)``.
-            Populated only by the VectorCypher engine; empty list for other
-            engines.
-    """
-
-    query: str
-    namespace_id: UUID
-    chunks: list[tuple[Chunk, float]]
-    entities: list[tuple[Entity, float]]
-    context_text: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-    relationships: list[tuple[Relationship, float]] = field(default_factory=list)
-    llm_usage: list[LLMUsage] = field(default_factory=list)
+# Imported below the LLMUsage definition (line ~118) to break the cycle:
+# khora.core.models.recall imports LLMUsage from khora.khora. Re-exported
+# here so external code can keep using ``from khora.khora import RecallResult``.
+from khora.core.models.recall import (  # noqa: E402, I001, F401
+    DocumentProjection,
+    RecallChunk,
+    RecallEntity,
+    RecallRelationship,
+    RecallResult,
+)
 
 
 # Shared-instance machinery for `Khora.shared()` (#619).
@@ -1710,26 +1695,18 @@ class Khora:
                     raw=raw,
                     temporal_filter=temporal_filter,
                 )
-                if include_sources:
-                    await self._populate_sources(result.chunks, result.entities, result.relationships)
+                # Source attribution lives on engine-produced
+                # ``RecallResult.documents``; ``_populate_sources`` is no
+                # longer reachable from the recall path (projections are
+                # frozen and lack the mutation targets it expected).
+                # ``include_sources`` is still accepted for API stability.
+                del include_sources
 
                 # Emit RECALL_RESULTS_READY after engine returns, before packaging.
                 try:
-                    if result.chunks:
-                        first_chunk = result.chunks[0]
-                        _top_score = (
-                            first_chunk[1] if isinstance(first_chunk, tuple) else getattr(first_chunk, "score", None)
-                        )
-                    else:
-                        _top_score = None
-                    _entity_ids = [
-                        str(e[0].id if isinstance(e, tuple) else e.id)
-                        for e in (result.entities[:20] if result.entities else [])
-                    ]
-                    _chunk_ids = [
-                        str(c[0].id if isinstance(c, tuple) else c.id)
-                        for c in (result.chunks[:20] if result.chunks else [])
-                    ]
+                    _top_score = result.chunks[0].score if result.chunks else None
+                    _entity_ids = [str(e.id) for e in result.entities[:20]]
+                    _chunk_ids = [str(c.id) for c in result.chunks[:20]]
                     await self._dispatch_hook(
                         MemoryEvent(
                             namespace_id=namespace_id,
@@ -1742,14 +1719,14 @@ class Khora:
                                 "top_score": _top_score,
                                 "entity_ids": _entity_ids,
                                 "chunk_ids": _chunk_ids,
-                                "abstention_signals": (result.metadata or {}).get("abstention_signals"),
+                                "abstention_signals": (result.engine_info or {}).get("abstention_signals"),
                             },
                         )
                     )
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.warning("Hook dispatch failed for {}: {}", EventType.RECALL_RESULTS_READY.value, exc)
 
-                packaged = replace(result, llm_usage=collect_usage())
+                packaged = replace(result, usage=collect_usage())
 
                 # Emit RECALL_COMPLETED with end-to-end timing.
                 try:
@@ -1763,7 +1740,7 @@ class Khora:
                                 "query": query,
                                 "latency_ms": (_time.perf_counter() - _t0) * 1000.0,
                                 "result_count": len(packaged.chunks) if packaged.chunks else 0,
-                                "llm_usage": (packaged.metadata or {}).get("llm_usage"),
+                                "llm_usage": (packaged.engine_info or {}).get("llm_usage"),
                             },
                         )
                     )

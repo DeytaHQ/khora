@@ -27,12 +27,13 @@ from khora.integrations.openai_agents._mapping import (
 )
 
 
-def _make_chunk(custom: dict[str, Any]) -> Any:
-    """Return a minimal khora Chunk carrying ``custom`` metadata."""
-    from khora.core.models.document import Chunk
+def _make_chunk(custom: dict[str, Any]) -> dict[str, Any]:
+    """Return the document-level metadata dict the mapping helpers consume.
 
-    doc_id = uuid4()
-    return Chunk(content=custom.get("oai_item_text", ""), document_id=doc_id, metadata=dict(custom))
+    ``chunk_to_item`` / ``chunk_seq`` now take a plain dict (joined via
+    ``DocumentProjection.metadata``) rather than the chunk object itself.
+    """
+    return dict(custom)
 
 
 # ---------------------------------------------------------------------------

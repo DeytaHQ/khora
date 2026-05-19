@@ -251,10 +251,10 @@ async def test_vc_remember_recall_roundtrip(kb: Khora, namespace_id: UUID) -> No
 
     result = await kb.recall("Python conference Berlin", namespace=namespace_id, limit=10)
 
-    assert result.metadata.get("engine") == "vectorcypher"
+    assert result.engine_info.get("engine") == "vectorcypher"
     assert len(result.chunks) >= 1, "expected at least one chunk back"
     # The most-relevant ingested text must be visible in the LLM context.
-    assert "Python conference" in result.context_text
+    assert any("Python conference" in c.content for c in result.chunks)
 
 
 async def test_vc_namespace_isolation(kb: Khora) -> None:
@@ -268,8 +268,8 @@ async def test_vc_namespace_isolation(kb: Khora) -> None:
     result_a = await kb.recall("animals", namespace=ns_a, limit=10)
     result_b = await kb.recall("animals", namespace=ns_b, limit=10)
 
-    a_text = " ".join(c.content for c, _ in result_a.chunks)
-    b_text = " ".join(c.content for c, _ in result_b.chunks)
+    a_text = " ".join(c.content for c in result_a.chunks)
+    b_text = " ".join(c.content for c in result_b.chunks)
 
     assert "kangaroos" in a_text
     assert "penguins" not in a_text, "namespace_b leaked into namespace_a"
@@ -350,7 +350,7 @@ async def test_vc_two_hop_traversal(kb: Khora, namespace_id: UUID) -> None:
         graph_depth=2,
     )
 
-    text_blob = result.context_text + " ".join(c.content for c, _ in result.chunks)
+    text_blob = " ".join(c.content for c in result.chunks)
     # The 2-hop reachable concept ("graph databases" via Bob→Carol) must
     # surface in the recall result. If this fails the CTE traversal is
     # not crossing 2 hops.
@@ -403,7 +403,7 @@ async def test_vc_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
         start_time=seven_days_ago,
     )
 
-    returned_doc_ids = {c.document_id for c, _ in result.chunks}
+    returned_doc_ids = {c.document_id for c in result.chunks}
     assert r_old.document_id not in returned_doc_ids, f"old document leaked through temporal filter: {returned_doc_ids}"
 
 
@@ -413,7 +413,7 @@ async def test_vc_recall_metadata_keys(kb: Khora, namespace_id: UUID) -> None:
 
     result = await kb.recall("apples", namespace=namespace_id, limit=5)
 
-    md = result.metadata
+    md = result.engine_info
     # Engine identifier is the only key VC promises across every code
     # path; routing/timing keys depend on the router being enabled. We
     # assert the floor.
@@ -443,7 +443,7 @@ async def test_vc_recall_empty_namespace(kb: Khora) -> None:
     ns = (await kb.create_namespace()).namespace_id
     result = await kb.recall("anything", namespace=ns, limit=5)
     assert result.chunks == []
-    assert result.metadata.get("engine") == "vectorcypher"
+    assert result.engine_info.get("engine") == "vectorcypher"
 
 
 async def test_vc_recall_handles_punctuated_query(kb: Khora, namespace_id: UUID) -> None:
@@ -579,5 +579,5 @@ async def test_vc_prefer_current_via_cte(kb: Khora, namespace_id: UUID) -> None:
         prefer_current=True,
     )
 
-    text_blob = result.context_text.lower() + " ".join(c.content for c, _ in result.chunks).lower()
+    text_blob = " ".join(c.content for c in result.chunks).lower()
     assert "polonium" not in text_blob, "expired edge leaked through prefer_current=True (R2 fix not in main)"

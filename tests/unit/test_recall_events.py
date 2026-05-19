@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from khora.core.models import Chunk, Entity
+from khora.core.models import Chunk, Entity, RecallChunk, RecallEntity
 from khora.core.models.event import EventType, MemoryEvent
 from khora.khora import RecallResult
 
@@ -34,10 +34,34 @@ def _make_result(ns_id) -> RecallResult:
     return RecallResult(
         query="search query",
         namespace_id=ns_id,
-        chunks=[(chunk, 0.87)],
-        entities=[(entity, 0.75)],
-        context_text="found content",
-        metadata={"abstention_signals": {"should_abstain": False}, "llm_usage": {"total_tokens": 42}},
+        documents=[],
+        chunks=[
+            RecallChunk(
+                id=chunk.id,
+                document_id=chunk.document_id,
+                content=chunk.content,
+                score=0.87,
+                created_at=chunk.created_at,
+            )
+        ],
+        entities=[
+            RecallEntity(
+                id=entity.id,
+                name=entity.name,
+                entity_type=entity.entity_type,
+                description="",
+                score=0.75,
+                attributes={},
+                mention_count=0,
+                source_document_ids=[],
+                source_chunk_ids=[],
+            )
+        ],
+        relationships=[],
+        engine_info={
+            "abstention_signals": {"should_abstain": False},
+            "llm_usage": {"total_tokens": 42},
+        },
     )
 
 
@@ -119,9 +143,9 @@ async def test_recall_results_ready_payload() -> None:
     assert ev.data["result_count"] == 1
     assert ev.data["top_score"] == 0.87
     assert len(ev.data["chunk_ids"]) == 1
-    assert ev.data["chunk_ids"][0] == str(stub.chunks[0][0].id)
+    assert ev.data["chunk_ids"][0] == str(stub.chunks[0].id)
     assert len(ev.data["entity_ids"]) == 1
-    assert ev.data["entity_ids"][0] == str(stub.entities[0][0].id)
+    assert ev.data["entity_ids"][0] == str(stub.entities[0].id)
     assert ev.data["abstention_signals"] == {"should_abstain": False}
 
 

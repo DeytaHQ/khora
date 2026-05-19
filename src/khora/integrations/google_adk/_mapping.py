@@ -31,11 +31,8 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid5
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from khora.core.models.document import Chunk
 
 # Stable UUID5 root for ADK namespaces. Versioned so a future scheme change
 # can rotate without colliding with shipped data.
@@ -259,19 +256,24 @@ def event_to_remember_kwargs(
 
 
 def chunk_to_memory_entry(
-    chunk: Chunk,
+    chunk: Any,
+    *,
+    custom_metadata: dict[str, Any],
     memory_entry_cls: type,
     content_cls: type,
     part_cls: type,
 ) -> Any:
-    """Rebuild a ``MemoryEntry`` from a khora ``Chunk``.
+    """Rebuild a ``MemoryEntry`` from a recall chunk.
 
     The ADK classes (``MemoryEntry``, ``Content``, ``Part``) are passed
     as runtime arguments so this module never imports ``google.adk``
     / ``google.genai`` at top level.
 
     Args:
-        chunk: A ``khora.core.models.document.Chunk``.
+        chunk: A ``khora.core.models.recall.RecallChunk`` (or any object
+            with a ``.content`` attribute).
+        custom_metadata: Document-level custom metadata joined from
+            ``RecallResult.documents`` via ``chunk.document_id``.
         memory_entry_cls: ``google.adk.memory.MemoryEntry``.
         content_cls: ``google.genai.types.Content``.
         part_cls: ``google.genai.types.Part``.
@@ -279,7 +281,7 @@ def chunk_to_memory_entry(
     Returns:
         A populated ``MemoryEntry``.
     """
-    custom = chunk.metadata or {}
+    custom = custom_metadata or {}
     text = chunk.content or ""
 
     parts: list[Any] = []

@@ -1267,7 +1267,7 @@ class TestVectorCypherEngineRecall:
         assert result.query == "test query"
         assert result.namespace_id == namespace_id
         assert len(result.chunks) == 2
-        assert result.metadata["engine"] == "vectorcypher"
+        assert result.engine_info["engine"] == "vectorcypher"
 
     @pytest.mark.asyncio
     async def test_recall_filters_duplicates(self, connected_engine: VectorCypherEngine) -> None:

@@ -20,11 +20,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from uuid import UUID
+
     from llama_index.core.llms import ChatMessage
     from llama_index.core.schema import NodeWithScore
 
-    from khora.core.models.document import Chunk
-    from khora.core.models.entity import Entity
+    from khora.core.models.recall import RecallChunk, RecallEntity
 
 
 # Metadata key the adapter stamps on every document it writes via
@@ -58,12 +59,13 @@ def message_to_text(message: ChatMessage) -> str:
 
 
 def chunk_to_node_with_score(
-    chunk: Chunk,
-    score: float,
+    chunk: RecallChunk,
     *,
+    namespace_id: UUID,
+    document_metadata: dict[str, Any],
     abstention_signals: dict[str, Any] | None = None,
 ) -> NodeWithScore:
-    """Convert a scored khora ``Chunk`` to a LlamaIndex ``NodeWithScore``.
+    """Convert a recall chunk to a LlamaIndex ``NodeWithScore``.
 
     The ``TextNode.metadata`` carries the chunk's source document ID and
     any custom metadata the document was stored with, plus a flag that
@@ -72,9 +74,12 @@ def chunk_to_node_with_score(
     acceptance criteria).
 
     Args:
-        chunk: A khora ``Chunk`` returned from ``Khora.recall``.
-        score: The retrieval score paired with ``chunk`` by khora.
-        abstention_signals: Optional ``RecallResult.metadata["abstention_signals"]``
+        chunk: A ``RecallChunk`` from ``RecallResult.chunks``.
+        namespace_id: ``RecallResult.namespace_id`` for the surrounding
+            result. The projection no longer carries it per-chunk.
+        document_metadata: Joined ``DocumentProjection.metadata`` for
+            ``chunk.document_id`` (caller builds the doc-id lookup).
+        abstention_signals: Optional ``RecallResult.engine_info["abstention_signals"]``
             dict — if present, ``khora_should_abstain`` is propagated to
             every node so consumers can short-circuit answer generation.
 
@@ -83,17 +88,16 @@ def chunk_to_node_with_score(
     """
     from llama_index.core.schema import NodeWithScore, TextNode  # noqa: PLC0415
 
-    custom = chunk.metadata or {}
     metadata: dict[str, Any] = {
         "document_id": str(chunk.document_id),
         "chunk_id": str(chunk.id),
-        "namespace_id": str(chunk.namespace_id),
+        "namespace_id": str(namespace_id),
         "khora_kind": "chunk",
     }
     # Forward the user's own custom metadata. We intentionally don't
     # strip ``llamaindex_*`` keys — if the chunk was written by the
     # adapter, surfacing them back is harmless and helps debugging.
-    metadata.update(custom)
+    metadata.update(document_metadata or {})
     if abstention_signals is not None:
         metadata["khora_should_abstain"] = bool(abstention_signals.get("should_abstain", False))
 
@@ -102,21 +106,22 @@ def chunk_to_node_with_score(
         text=chunk.content,
         metadata=metadata,
     )
-    return NodeWithScore(node=node, score=float(score))
+    return NodeWithScore(node=node, score=float(chunk.score))
 
 
 def entity_to_node_with_score(
-    entity: Entity,
-    score: float,
+    entity: RecallEntity,
     *,
+    namespace_id: UUID,
     abstention_signals: dict[str, Any] | None = None,
 ) -> NodeWithScore:
-    """Convert a scored khora ``Entity`` to a LlamaIndex ``NodeWithScore``.
+    """Convert a recall entity to a LlamaIndex ``NodeWithScore``.
 
     Entity nodes carry a short summary as their text payload (``"<name>
     (<type>): <description>"``) so a downstream LLM can use them in the
     same context window as chunk text. Identity round-trips through the
-    metadata.
+    metadata. ``namespace_id`` comes from the surrounding ``RecallResult``
+    (the projection no longer carries it per-entity).
     """
     from llama_index.core.schema import NodeWithScore, TextNode  # noqa: PLC0415
 
@@ -131,7 +136,7 @@ def entity_to_node_with_score(
         "entity_id": str(entity.id),
         "entity_name": entity.name,
         "entity_type": entity.entity_type,
-        "namespace_id": str(entity.namespace_id),
+        "namespace_id": str(namespace_id),
         "khora_kind": "entity",
     }
     if abstention_signals is not None:
@@ -142,7 +147,7 @@ def entity_to_node_with_score(
         text=text,
         metadata=metadata,
     )
-    return NodeWithScore(node=node, score=float(score))
+    return NodeWithScore(node=node, score=float(entity.score))
 
 
 def chat_message_metadata(

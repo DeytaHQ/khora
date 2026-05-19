@@ -102,7 +102,7 @@ class ChatEngine:
 
         # Build chunk provenance map from recall metadata
         chunk_provenance_map: dict[str, str] = {}
-        search_methods = recall_result.metadata.get("search_methods", {})
+        search_methods = recall_result.engine_info.get("search_methods", {})
         chunk_overlap = search_methods.get("chunk_overlap", {})
         for method_key, method_data in chunk_overlap.items():
             # method_key is like "vector_only", "graph_only", "vector_and_graph"
@@ -110,7 +110,7 @@ class ChatEngine:
             for chunk_id in method_data.get("ids", []):
                 chunk_provenance_map[chunk_id] = method_label
 
-        for chunk, score in recall_result.chunks[:5]:
+        for chunk in recall_result.chunks[:5]:
             source = "unknown"
             if chunk.document_id:
                 doc_id_str = str(chunk.document_id)
@@ -133,7 +133,7 @@ class ChatEngine:
             result_entry: dict[str, Any] = {
                 "content": chunk.content,
                 "source": source,
-                "score": score,
+                "score": chunk.score,
             }
             if source_method:
                 result_entry["found_via"] = source_method
@@ -143,7 +143,7 @@ class ChatEngine:
         # Build entity context from recall entities (top 10 with descriptions)
         entity_context: list[dict[str, Any]] = []
         if recall_result.entities:
-            for entity, score in recall_result.entities[:10]:
+            for entity in recall_result.entities[:10]:
                 if not entity.description:
                     continue
                 entry: dict[str, Any] = {

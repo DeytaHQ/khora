@@ -46,9 +46,12 @@ def _make_mock_kb() -> MagicMock:
     mock_chunk = MagicMock()
     mock_chunk.content = "relevant document content"
     mock_chunk.document_id = uuid4()
+    mock_chunk.score = 0.95
 
     mock_recall = MagicMock()
-    mock_recall.chunks = [(mock_chunk, 0.95)]
+    mock_recall.chunks = [mock_chunk]
+    mock_recall.entities = []
+    mock_recall.engine_info = {}
     kb.recall = AsyncMock(return_value=mock_recall)
 
     # get_document returns a doc with metadata

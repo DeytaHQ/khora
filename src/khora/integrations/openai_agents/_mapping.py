@@ -29,11 +29,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid5
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from khora.core.models.document import Chunk
 
 # Stable UUID5 root for openai-agents session ids. Versioned so a future
 # scheme change can rotate without colliding with shipped data.
@@ -192,16 +189,19 @@ def item_to_remember_kwargs(
     }
 
 
-def chunk_to_item(chunk: Chunk) -> Any | None:
-    """Recover the original ``TResponseInputItem`` from a stored chunk.
+def chunk_to_item(document_metadata: dict[str, Any]) -> Any | None:
+    """Recover the original ``TResponseInputItem`` from stored document metadata.
 
-    Returns ``None`` if the chunk wasn't written by this adapter (no
-    ``oai_item`` key in ``metadata``) or if the stored JSON has
-    been corrupted. The SDK silently skips invalid items in its reference
-    ``SQLiteSession`` and we mirror that behaviour.
+    Returns ``None`` if the document wasn't written by this adapter (no
+    ``oai_item`` key) or if the stored JSON has been corrupted. The SDK
+    silently skips invalid items in its reference ``SQLiteSession`` and
+    we mirror that behaviour.
+
+    Callers pass the document-level metadata dict (joined via
+    ``DocumentProjection.metadata`` for recall, or read directly from the
+    ORM ``Document.metadata`` for storage walks).
     """
-    custom = chunk.metadata or {}
-    raw = custom.get(KEY_ITEM_JSON)
+    raw = (document_metadata or {}).get(KEY_ITEM_JSON)
     if raw is None:
         return None
     if isinstance(raw, str):
@@ -213,10 +213,13 @@ def chunk_to_item(chunk: Chunk) -> Any | None:
     return raw
 
 
-def chunk_seq(chunk: Chunk) -> int | None:
-    """Return the monotonic in-session sequence number stamped at write."""
-    custom = chunk.metadata or {}
-    seq = custom.get(KEY_SEQ)
+def chunk_seq(document_metadata: dict[str, Any]) -> int | None:
+    """Return the monotonic in-session sequence number stamped at write.
+
+    Reads from the document-level metadata dict — same source as
+    :func:`chunk_to_item`.
+    """
+    seq = (document_metadata or {}).get(KEY_SEQ)
     if isinstance(seq, int):
         return seq
     if isinstance(seq, str) and seq.isdigit():

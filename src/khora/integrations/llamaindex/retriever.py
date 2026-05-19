@@ -161,7 +161,7 @@ class KhoraRetriever:
         """Async retrieve — the only supported entry point.
 
         Delegates to ``Khora.recall`` and converts the resulting
-        ``(Chunk, score)`` / ``(Entity, score)`` tuples into LlamaIndex
+        ``RecallChunk`` / ``RecallEntity`` projections into LlamaIndex
         ``NodeWithScore`` objects via the mapping helpers.
         """
         # ``recall`` accepts a ``limit`` for chunks; we always pass our
@@ -175,24 +175,31 @@ class KhoraRetriever:
         result = await self.kb.recall(query_bundle.query_str, **kwargs)
 
         signals = None
-        if result.metadata:
-            signals = result.metadata.get("abstention_signals")
+        if result.engine_info:
+            signals = result.engine_info.get("abstention_signals")
+
+        # Build the doc-id → metadata lookup once; chunks reference docs
+        # by id and the projection no longer carries per-chunk metadata.
+        docs_by_id = {doc.id: doc for doc in result.documents}
 
         nodes: list[NodeWithScore] = []
-        for chunk, score in result.chunks:
+        for chunk in result.chunks:
+            doc = docs_by_id.get(chunk.document_id)
+            doc_metadata = dict(doc.metadata) if doc and doc.metadata else {}
             nodes.append(
                 chunk_to_node_with_score(
                     chunk,
-                    score,
+                    namespace_id=result.namespace_id,
+                    document_metadata=doc_metadata,
                     abstention_signals=signals,
                 )
             )
         if self._include_entities:
-            for entity, score in result.entities:
+            for entity in result.entities:
                 nodes.append(
                     entity_to_node_with_score(
                         entity,
-                        score,
+                        namespace_id=result.namespace_id,
                         abstention_signals=signals,
                     )
                 )

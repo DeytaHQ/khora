@@ -276,11 +276,11 @@ class TestRecall:
         result = await eng.recall("hello world", ns, limit=3)
 
         assert len(result.chunks) == 1
-        returned_chunk, score = result.chunks[0]
+        returned_chunk = result.chunks[0]
         assert returned_chunk.content == "hello"
-        assert score == 0.9
-        assert "hello" in result.context_text
-        assert result.metadata["backend"] == "pgvector"
+        assert returned_chunk.score == 0.9
+        assert "hello" in returned_chunk.content
+        assert result.engine_info["backend"] == "pgvector"
         eng._temporal_store.search.assert_awaited_once()
         # default mode HYBRID → hybrid_alpha 0.7
         _, kwargs = eng._temporal_store.search.call_args

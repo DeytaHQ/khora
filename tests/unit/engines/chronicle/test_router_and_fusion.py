@@ -169,10 +169,10 @@ class TestRouterChannelGating:
         # and entity were skipped, and that semantic at least ran).
         assert len(coord.search_similar_chunks_calls) >= 1
         # Routing complexity surfaced in metadata for telemetry.
-        assert result.metadata["routing"] == "simple"
+        assert result.engine_info["routing"] == "simple"
         # Channel counters reflect skipped channels.
-        assert result.metadata["channels"]["bm25"] == 0
-        assert result.metadata["channels"]["entity"] == 0
+        assert result.engine_info["channels"]["bm25"] == 0
+        assert result.engine_info["channels"]["entity"] == 0
 
     @pytest.mark.asyncio
     async def test_moderate_runs_all_four_channels(self) -> None:
@@ -192,7 +192,7 @@ class TestRouterChannelGating:
         assert len(coord.search_similar_chunks_calls) >= 1
         assert len(coord.search_fulltext_chunks_calls) == 1
         assert len(coord.search_similar_entities_calls) == 1
-        assert result.metadata["routing"] == "moderate"
+        assert result.engine_info["routing"] == "moderate"
 
     @pytest.mark.asyncio
     async def test_complex_runs_all_four_channels(self) -> None:
@@ -212,7 +212,7 @@ class TestRouterChannelGating:
         assert len(coord.search_similar_chunks_calls) >= 1
         assert len(coord.search_fulltext_chunks_calls) == 1
         assert len(coord.search_similar_entities_calls) == 1
-        assert result.metadata["routing"] == "complex"
+        assert result.engine_info["routing"] == "complex"
 
     @pytest.mark.asyncio
     async def test_router_disabled_runs_all_channels(self) -> None:
@@ -239,7 +239,7 @@ class TestRouterChannelGating:
         assert len(coord.search_similar_chunks_calls) >= 1
         assert len(coord.search_fulltext_chunks_calls) == 1
         assert len(coord.search_similar_entities_calls) == 1
-        assert result.metadata["routing"] == "disabled"
+        assert result.engine_info["routing"] == "disabled"
 
     @pytest.mark.asyncio
     async def test_router_error_falls_back_to_all_channels(self) -> None:
@@ -260,7 +260,7 @@ class TestRouterChannelGating:
         assert len(coord.search_similar_chunks_calls) >= 1
         assert len(coord.search_fulltext_chunks_calls) == 1
         assert len(coord.search_similar_entities_calls) == 1
-        assert result.metadata["routing"] == "fallback"
+        assert result.engine_info["routing"] == "fallback"
 
     @pytest.mark.asyncio
     async def test_entity_anchored_runs_all_channels_and_boosts_entity_weight(self) -> None:
@@ -297,7 +297,7 @@ class TestRouterChannelGating:
         # All channels still run.
         assert len(coord.search_fulltext_chunks_calls) == 1
         # Routing surfaced.
-        assert result.metadata["routing"] == "entity_anchored"
+        assert result.engine_info["routing"] == "entity_anchored"
         # Entity weight doubled vs. the default 0.85.
         assert captured_weights.get("entity") == pytest.approx(0.85 * 2.0)
         # Other weights untouched.
@@ -335,7 +335,7 @@ class TestRouterChannelGating:
         )
 
         # Routing escalated to MODERATE → BM25 and entity channels both ran.
-        assert result.metadata["routing"] == "moderate"
+        assert result.engine_info["routing"] == "moderate"
         assert len(coord.search_fulltext_chunks_calls) == 1
         assert len(coord.search_similar_entities_calls) == 1
 
@@ -419,7 +419,7 @@ class TestBackwardCompat:
         # Top chunks come back ranked.
         assert len(result.chunks) == 3
         # Result preserves chunk identity from semantic channel.
-        returned_ids = {c.id for c, _ in result.chunks}
+        returned_ids = {c.id for c in result.chunks}
         assert returned_ids == {c.id for c, _ in chunks}
 
     @pytest.mark.asyncio
@@ -443,4 +443,4 @@ class TestBackwardCompat:
 
         # Same top chunk in both routing modes when the channel returning it
         # (semantic) runs in both. (BM25 + entity have no extra results to add.)
-        assert simple_result.chunks[0][0].id == moderate_result.chunks[0][0].id == shared.id
+        assert simple_result.chunks[0].id == moderate_result.chunks[0].id == shared.id

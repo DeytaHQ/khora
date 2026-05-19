@@ -250,7 +250,7 @@ async def test_chronicle_remember_recall_roundtrip(kb: Khora, namespace_id: UUID
 
     result = await kb.recall("Nobel Prize Physics", namespace=namespace_id, limit=3)
     assert result.chunks, "expected at least one chunk back"
-    text_blob = " ".join(c.content for c, _ in result.chunks).lower()
+    text_blob = " ".join(c.content for c in result.chunks).lower()
     assert "nobel" in text_blob
 
 
@@ -383,8 +383,8 @@ async def test_chronicle_namespace_isolation(kb: Khora) -> None:
     r1 = await kb.recall("Curie", namespace=ns1, limit=5)
     r2 = await kb.recall("Einstein", namespace=ns2, limit=5)
 
-    text1 = " ".join(c.content for c, _ in r1.chunks).lower()
-    text2 = " ".join(c.content for c, _ in r2.chunks).lower()
+    text1 = " ".join(c.content for c in r1.chunks).lower()
+    text2 = " ".join(c.content for c in r2.chunks).lower()
     assert "einstein" not in text1, "ns1 results leaked from ns2"
     assert "curie" not in text2, "ns2 results leaked from ns1"
 

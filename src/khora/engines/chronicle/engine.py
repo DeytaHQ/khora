@@ -36,6 +36,11 @@ from loguru import logger
 
 from khora.config import KhoraConfig, LiteLLMConfig
 from khora.core.models import Chunk, Document, Entity, MemoryNamespace
+from khora.core.models.recall import (
+    DocumentProjection,
+    RecallChunk,
+    RecallEntity,
+)
 from khora.engines._storage_config import build_storage_config
 from khora.engines.chronicle.compression import (
     FactExtractor,
@@ -1510,10 +1515,6 @@ class ChronicleEngine:
         )
         timings["entity_collect_ms"] = (time.perf_counter() - start) * 1000
 
-        # ── Build context text ───────────────────────────────────────────
-        context_parts = [chunk.content for chunk, _score in chunks_with_scores]
-        context_text = "\n\n---\n\n".join(context_parts[:limit])
-
         # ── Abstention signals ───────────────────────────────
         # Passive metadata for downstream consumers (LLM answer-generation)
         # to decide whether to refuse vs answer.  Does NOT alter retrieval.
@@ -1529,13 +1530,61 @@ class ChronicleEngine:
             f"in {timings['total_ms']:.1f}ms"
         )
 
+        recall_chunks = [
+            RecallChunk(
+                id=chunk.id,
+                document_id=chunk.document_id,
+                content=chunk.content,
+                score=score,
+                created_at=chunk.created_at,
+                occurred_at=chunk.source_timestamp,
+                chunker_info=chunk.chunker_info or {},
+            )
+            for chunk, score in chunks_with_scores
+        ]
+
+        recall_entities = [
+            RecallEntity(
+                id=entity.id,
+                name=entity.name,
+                entity_type=entity.entity_type,
+                description=entity.description or "",
+                score=score,
+                attributes=dict(entity.attributes or {}),
+                mention_count=entity.mention_count or 0,
+                source_document_ids=list(entity.source_document_ids),
+                source_chunk_ids=list(entity.source_chunk_ids),
+            )
+            for entity, score in entity_hits
+        ]
+
+        # Document stubs — fuller projections land with the recall-method rewrite.
+        seen_doc_ids: set[UUID] = set()
+        documents: list[DocumentProjection] = []
+        for chunk, _ in chunks_with_scores:
+            if chunk.document_id in seen_doc_ids:
+                continue
+            seen_doc_ids.add(chunk.document_id)
+            src = chunk.source_document
+            documents.append(
+                DocumentProjection(
+                    id=chunk.document_id,
+                    created_at=chunk.created_at,
+                    source_type=(src.source_type if src and src.source_type else "library"),
+                    title=(src.title if src and src.title else None),
+                    source=(src.source if src and src.source else None),
+                    source_timestamp=(src.source_timestamp if src else None),
+                    metadata=dict(chunk.metadata or {}),
+                )
+            )
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
-            chunks=chunks_with_scores,
-            entities=entity_hits,
-            context_text=context_text,
-            metadata={
+            documents=documents,
+            chunks=recall_chunks,
+            entities=recall_entities,
+            relationships=[],
+            engine_info={
                 "engine": "chronicle",
                 "channels": {
                     "semantic": len(semantic_results),

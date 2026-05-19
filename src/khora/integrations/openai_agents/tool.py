@@ -91,8 +91,8 @@ def khora_recall_tool(
         if not result.chunks:
             return "no relevant memories found"
         lines: list[str] = []
-        for idx, (chunk, score) in enumerate(result.chunks, start=1):
-            lines.append(f"[{idx}] score={score:.3f} :: {chunk.content}")
+        for idx, chunk in enumerate(result.chunks, start=1):
+            lines.append(f"[{idx}] score={chunk.score:.3f} :: {chunk.content}")
         return "\n".join(lines)
 
     _recall_impl.__name__ = name

@@ -36,13 +36,18 @@ from khora.core.models import (
     MemoryNamespace,
     Relationship,
 )
+from khora.core.models.recall import (
+    DocumentProjection,
+    RecallChunk,
+    RecallEntity,
+    RecallRelationship,
+)
 from khora.engines._storage_config import build_storage_config
 from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
 from khora.engines.skeleton.skeleton import SkeletonIndexer
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
-from khora.query.engine import format_entity_section, format_relationship_section
 from khora.storage import StorageConfig, create_storage_coordinator
 from khora.telemetry import trace, trace_span
 
@@ -1828,21 +1833,6 @@ class VectorCypherEngine:
         # Validate and filter retrieval results
         validated_chunks = self._validate_recall_results(result.chunks, query)
 
-        # Build context text from validated chunks
-        context_parts = []
-        for chunk, score in validated_chunks:
-            context_parts.append(chunk.content)
-
-        context_text = "\n\n---\n\n".join(context_parts[:limit])
-
-        entity_section = format_entity_section(result.entities)
-        if entity_section:
-            context_text = context_text + entity_section if context_text else entity_section
-
-        relationship_section = format_relationship_section(result.relationships)
-        if relationship_section:
-            context_text = context_text + relationship_section if context_text else relationship_section
-
         # Compute retrieval confidence signals for abstention calibration
         scores = [s for _, s in validated_chunks]
         if len(scores) >= 2:
@@ -1858,14 +1848,89 @@ class VectorCypherEngine:
             score_variance = 0.0
             top_score_gap = 0.0
 
+        recall_chunks = [
+            RecallChunk(
+                id=chunk.id,
+                document_id=chunk.document_id,
+                content=chunk.content,
+                score=score,
+                created_at=chunk.created_at,
+                occurred_at=chunk.source_timestamp,
+                chunker_info=chunk.chunker_info or {},
+            )
+            for chunk, score in validated_chunks
+        ]
+
+        recall_entities = [
+            RecallEntity(
+                id=entity.id,
+                name=entity.name,
+                entity_type=entity.entity_type,
+                description=entity.description or "",
+                score=score,
+                attributes=dict(entity.attributes or {}),
+                mention_count=entity.mention_count or 0,
+                source_document_ids=list(entity.source_document_ids) or list((entity.source_documents or {}).keys()),
+                source_chunk_ids=list(entity.source_chunk_ids),
+            )
+            for entity, score in result.entities
+        ]
+
+        recall_relationships = [
+            RecallRelationship(
+                id=rel.id,
+                source_entity_id=rel.source_entity_id,
+                target_entity_id=rel.target_entity_id,
+                relationship_type=rel.relationship_type,
+                description=rel.description or "",
+                score=score,
+                valid_from=rel.valid_from,
+                valid_until=rel.valid_until,
+                source_document_ids=list(rel.source_document_ids),
+            )
+            for rel, score in result.relationships
+        ]
+
+        # Document stubs — fuller projections land with the recall-method rewrite.
+        seen_doc_ids: set[UUID] = set()
+        documents: list[DocumentProjection] = []
+        for chunk, _ in validated_chunks:
+            if chunk.document_id in seen_doc_ids:
+                continue
+            seen_doc_ids.add(chunk.document_id)
+            src = chunk.source_document
+            documents.append(
+                DocumentProjection(
+                    id=chunk.document_id,
+                    created_at=chunk.created_at,
+                    source_type=(src.source_type if src and src.source_type else "library"),
+                    title=(src.title if src and src.title else None),
+                    source=(src.source if src and src.source else None),
+                    source_timestamp=(src.source_timestamp if src else None),
+                    metadata=dict(chunk.metadata or {}),
+                )
+            )
+        for re_ in recall_entities:
+            for did in re_.source_document_ids:
+                if did in seen_doc_ids:
+                    continue
+                seen_doc_ids.add(did)
+                documents.append(DocumentProjection(id=did, created_at=datetime.now(UTC), source_type="library"))
+        for rr in recall_relationships:
+            for did in rr.source_document_ids:
+                if did in seen_doc_ids:
+                    continue
+                seen_doc_ids.add(did)
+                documents.append(DocumentProjection(id=did, created_at=datetime.now(UTC), source_type="library"))
+
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
-            chunks=validated_chunks,
-            entities=result.entities,
-            context_text=context_text,
-            relationships=result.relationships,
-            metadata={
+            documents=documents,
+            chunks=recall_chunks,
+            entities=recall_entities,
+            relationships=recall_relationships,
+            engine_info={
                 "engine": "vectorcypher",
                 "routing": result.routing_decision.complexity.value,
                 "use_graph": result.routing_decision.use_graph,

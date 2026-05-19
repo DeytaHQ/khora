@@ -79,10 +79,38 @@ def _make_chunk(
     document_id: UUID | None = None,
     custom: dict[str, Any] | None = None,
 ) -> Any:
+    """Build a storage-layer ``Chunk`` (used by ``get_chunks_by_document`` callers)."""
     from khora.core.models.document import Chunk
 
     doc_id = document_id or uuid4()
     return Chunk(content=content, document_id=doc_id, metadata=dict(custom or {}))
+
+
+def _make_recall_chunk(
+    *,
+    content: str,
+    document_id: UUID | None = None,
+    score: float = 0.9,
+    custom: dict[str, Any] | None = None,
+) -> tuple[Any, Any]:
+    """Return (RecallChunk, DocumentProjection) wired together for recall-path fixtures.
+
+    The doc-level custom metadata sent in ``custom`` is attached to the
+    DocumentProjection — that's where the adapter joins it from now.
+    """
+    from khora.core.models import DocumentProjection, RecallChunk
+
+    doc_id = document_id or uuid4()
+    now = datetime.now(UTC)
+    chunk = RecallChunk(
+        id=uuid4(),
+        document_id=doc_id,
+        content=content,
+        score=score,
+        created_at=now,
+    )
+    doc = DocumentProjection(id=doc_id, created_at=now, metadata=dict(custom or {}))
+    return chunk, doc
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +220,8 @@ def test_save_records_record_id_to_document_id_mapping() -> None:
 def test_search_discards_pre_computed_embedding_and_uses_stashed_text() -> None:
     kb = _make_kb()
     ns = uuid4()
-    chunk = _make_chunk(content="found it", custom={"crewai_scope": "/"})
-    kb.recall.return_value = _RecallResultStub(chunks=[(chunk, 0.9)])
+    chunk, doc = _make_recall_chunk(content="found it", score=0.9, custom={"crewai_scope": "/"})
+    kb.recall.return_value = _RecallResultStub(chunks=[chunk], documents=[doc])
 
     backend = _make_backend(kb, namespace_id=ns)
     _stash_query_text("what did we decide?")
@@ -216,9 +244,9 @@ def test_search_discards_pre_computed_embedding_and_uses_stashed_text() -> None:
 
 def test_search_post_filters_by_scope_prefix() -> None:
     kb = _make_kb()
-    in_scope = _make_chunk(content="in", custom={"crewai_scope": "/team/eng"})
-    out_scope = _make_chunk(content="out", custom={"crewai_scope": "/team/sales"})
-    kb.recall.return_value = _RecallResultStub(chunks=[(in_scope, 0.9), (out_scope, 0.8)])
+    in_scope, in_doc = _make_recall_chunk(content="in", score=0.9, custom={"crewai_scope": "/team/eng"})
+    out_scope, out_doc = _make_recall_chunk(content="out", score=0.8, custom={"crewai_scope": "/team/sales"})
+    kb.recall.return_value = _RecallResultStub(chunks=[in_scope, out_scope], documents=[in_doc, out_doc])
     backend = _make_backend(kb)
     _stash_query_text("eng")
 
@@ -230,9 +258,9 @@ def test_search_post_filters_by_scope_prefix() -> None:
 
 def test_search_post_filters_by_categories() -> None:
     kb = _make_kb()
-    a = _make_chunk(content="a", custom={"crewai_categories": ["onboarding"]})
-    b = _make_chunk(content="b", custom={"crewai_categories": ["billing"]})
-    kb.recall.return_value = _RecallResultStub(chunks=[(a, 0.9), (b, 0.7)])
+    a, a_doc = _make_recall_chunk(content="a", score=0.9, custom={"crewai_categories": ["onboarding"]})
+    b, b_doc = _make_recall_chunk(content="b", score=0.7, custom={"crewai_categories": ["billing"]})
+    kb.recall.return_value = _RecallResultStub(chunks=[a, b], documents=[a_doc, b_doc])
     backend = _make_backend(kb)
     _stash_query_text("q")
 
@@ -243,8 +271,8 @@ def test_search_post_filters_by_categories() -> None:
 
 def test_search_returns_tuples_of_record_and_score_in_crewai_shape() -> None:
     kb = _make_kb()
-    chunk = _make_chunk(content="x")
-    kb.recall.return_value = _RecallResultStub(chunks=[(chunk, 0.42)])
+    chunk, doc = _make_recall_chunk(content="x", score=0.42)
+    kb.recall.return_value = _RecallResultStub(chunks=[chunk], documents=[doc])
     backend = _make_backend(kb)
     _stash_query_text("q")
 
@@ -431,9 +459,10 @@ class _RememberResultStub:
 
 @dataclass
 class _RecallResultStub:
-    chunks: list[tuple[Any, float]]
+    chunks: list[Any]
     query: str = ""
     namespace_id: UUID = field(default_factory=uuid4)
+    documents: list[Any] = field(default_factory=list)
     entities: list[Any] = field(default_factory=list)
-    context_text: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
+    relationships: list[Any] = field(default_factory=list)
+    engine_info: dict[str, Any] = field(default_factory=dict)

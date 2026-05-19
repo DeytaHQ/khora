@@ -98,11 +98,12 @@ class TestResultLLMUsageField:
         r = RecallResult(
             query="test",
             namespace_id=uuid4(),
+            documents=[],
             chunks=[],
             entities=[],
-            context_text="",
+            relationships=[],
         )
-        assert r.llm_usage == []
+        assert r.usage == []
 
     def test_remember_result_with_usage(self) -> None:
         usage = [
