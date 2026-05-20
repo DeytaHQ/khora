@@ -138,7 +138,7 @@ nlp = ["spacy>=3.8.0"]
 # LOCKSTEP: this pin must match rust/khora-accel/Cargo.toml's version exactly.
 # Bump both in the same PR. See CLAUDE.md → Version Bumps.
 rust = [
-    "khora-accel==0.16.0",
+    "khora-accel==0.16.1",
 ]
 # SurrealDB unified backend (graph + vector + relational in one DB)
 surrealdb = ["surrealdb>=2.0.0,<3.0"]
