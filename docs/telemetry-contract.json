@@ -937,6 +937,18 @@
       "_comment": "Issue #737. NO namespace_id label — cardinality rule. NO rel_type label (raw type strings are unbounded)."
     },
     {
+      "name": "khora.neo4j.entity.source_id_truncated",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "description": "Provenance entries (source_document_ids / source_chunk_ids) dropped during an entity MERGE because the (existing + incoming) union exceeded the configured cap. Counter value is the number of entries dropped, not rows affected. Raise the corresponding KHORA_STORAGE__GRAPH__ENTITY_SOURCE_*_MAX knob to retain deeper provenance. Issue #777.",
+      "labels": [
+        {"name": "field", "values": ["source_document_ids", "source_chunk_ids"], "_comment": "Which provenance list overflowed the cap."},
+        {"name": "kind", "values": ["batch"], "_comment": "Entity upsert is batch-only; no single-entity merge path exists."}
+      ],
+      "_comment": "Issue #777. NO namespace_id label — cardinality rule. NO entity_type label (free-form strings are unbounded)."
+    },
+    {
       "name": "khora.chronicle.abstention_signal",
       "type": "counter",
       "stability": "public",
