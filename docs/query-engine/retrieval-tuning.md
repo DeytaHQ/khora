@@ -4,7 +4,7 @@ This document explains changes made to Khora's retrieval pipeline in response to
 
 ## Background: What the Benchmarks Showed
 
-We ran the `retrieval_basic` benchmark (120 documents, 55 queries across 3 difficulty levels) against four systems. Khora had a serious problem: **25.5% of queries returned zero results**. Not low-quality results — literally nothing.
+We ran the `retrieval_basic` benchmark (120 documents, 55 queries across 3 difficulty levels) against four systems. Khora had a serious problem: **25.5% of queries returned zero results**. Not low-quality results - literally nothing.
 
 The strangest finding was that Khora performed *worst on the easiest queries*. Simple factual lookups like "wrought-iron tower built for the 1889 World's Fair in Paris" (expecting the Eiffel Tower document) returned nothing, while complex multi-concept queries like "quantum mechanical effects near black hole event horizons" returned perfect results.
 
@@ -18,7 +18,7 @@ The zero-result failures weren't caused by a single bug. Three independent issue
 
 The most impactful issue. When you called `kb.recall("some query")`, the default `min_similarity` was `0.5`. This value propagated down to pgvector as a hard `WHERE similarity >= 0.5` filter at the database level. Any chunk with cosine similarity below 0.5 was silently discarded before Khora even had a chance to rank it.
 
-For a descriptive query like "wrought-iron tower built for the 1889 World's Fair in Paris", the embedding similarity to a document about the Eiffel Tower might be 0.35–0.49. That's clearly relevant — a human would call it a match — but the threshold threw it away.
+For a descriptive query like "wrought-iron tower built for the 1889 World's Fair in Paris", the embedding similarity to a document about the Eiffel Tower might be 0.35–0.49. That's clearly relevant - a human would call it a match - but the threshold threw it away.
 
 The threshold chain was:
 
@@ -30,7 +30,7 @@ Khora.recall(min_similarity=0.5)        # caller-facing default
 
 When using `Khora.recall()` without arguments, the `0.5` default overrode the `QueryConfig` default of `0.3`, making things even worse.
 
-For comparison: Cognee applies no threshold at all — it returns whatever pgvector finds, ranked by distance, and lets the caller decide what's "good enough."
+For comparison: Cognee applies no threshold at all - it returns whatever pgvector finds, ranked by distance, and lets the caller decide what's "good enough."
 
 ### Problem 2: No Keyword Search in HYBRID Mode
 
@@ -62,7 +62,7 @@ For paraphrased queries, entity linking often found nothing (no exact or fuzzy m
 
 The `Khora.recall()` default `min_similarity` changed from `0.5` to `0.0`. The `QueryConfig` defaults for `min_chunk_similarity` and `min_entity_similarity` changed from `0.3` to `0.05`.
 
-Setting `min_similarity=0.0` at the `Khora` level means: don't filter at the database level, let the ranking pipeline (RRF fusion, reranking) decide what's relevant. The small `0.05` default in `QueryConfig` is a noise floor — it filters out truly random matches without discarding anything a human might consider relevant.
+Setting `min_similarity=0.0` at the `Khora` level means: don't filter at the database level, let the ranking pipeline (RRF fusion, reranking) decide what's relevant. The small `0.05` default in `QueryConfig` is a noise floor - it filters out truly random matches without discarding anything a human might consider relevant.
 
 If you have a use case where you want strict filtering (e.g., only returning very confident matches), you can still pass `min_similarity=0.7` explicitly. The change only affects the default behavior.
 
@@ -92,10 +92,10 @@ File changed: `query/engine.py`
 
 After the fusion step, if no chunks were found, the engine now retries with relaxed parameters:
 
-1. **Vector search with `min_similarity=0.0`** — in case the configured threshold filtered out borderline results
-2. **Keyword/full-text search** — if it wasn't already part of the search (e.g., `VECTOR` or `GRAPH` mode)
+1. **Vector search with `min_similarity=0.0`** - in case the configured threshold filtered out borderline results
+2. **Keyword/full-text search** - if it wasn't already part of the search (e.g., `VECTOR` or `GRAPH` mode)
 
-Fallback results go through the same RRF fusion, so they're properly ranked. This is a safety net, not the primary path — with the lowered thresholds, most queries should find results on the first pass.
+Fallback results go through the same RRF fusion, so they're properly ranked. This is a safety net, not the primary path - with the lowered thresholds, most queries should find results on the first pass.
 
 The fallback only fires when the initial search returns literally nothing. It doesn't activate for low-quality results or few results.
 
@@ -115,7 +115,7 @@ The fuzzy matching threshold dropped from 0.8 to 0.6, and the embedding similari
 
 The previous 0.8 fuzzy threshold required near-exact string matches (e.g., "Einstein" would match "Einstien" but not "Albert Einstein"). At 0.6, more reasonable variations get through to the linking step, where further disambiguation happens.
 
-The 0.7 embedding threshold for entity linking was stricter than the chunk similarity threshold, which made no sense — if you're willing to consider a chunk at 0.3 similarity, you should be willing to consider an entity match at 0.4.
+The 0.7 embedding threshold for entity linking was stricter than the chunk similarity threshold, which made no sense - if you're willing to consider a chunk at 0.3 similarity, you should be willing to consider an entity match at 0.4.
 
 Files changed:
 - `query/engine.py`: `QueryConfig` defaults
@@ -133,11 +133,11 @@ File changed: `query/engine.py` (in `_graph_search()`)
 
 The old approach was: filter aggressively at each stage, trusting that only high-similarity results are relevant. This works when queries closely match document content (exact entity names, similar vocabulary), but fails for paraphrased or descriptive queries.
 
-The new approach is: cast a wide net at the retrieval stage, and rely on the ranking pipeline (RRF fusion, source priority boosting, neural reranking) to surface the best results. This matches what Cognee and Graphiti do — they retrieve broadly and rank carefully.
+The new approach is: cast a wide net at the retrieval stage, and rely on the ranking pipeline (RRF fusion, source priority boosting, neural reranking) to surface the best results. This matches what Cognee and Graphiti do - they retrieve broadly and rank carefully.
 
 The ranking pipeline is Khora's strength. Query understanding adjusts fusion weights per query. Entity linking boosts chunks connected to recognized entities. Cross-encoder reranking considers query-document pairs holistically. All of these work *better* when they have more candidates to work with. A 0.35-similarity chunk that's the right answer is better than zero results.
 
-There's a trade-off: lower thresholds mean more candidates pass through the pipeline, which adds some latency. In practice, pgvector returns results in distance order, so you're adding a few more low-scoring candidates to the tail — the fusion step is O(n) and fast. The reranking skip for small result sets also helps offset this.
+There's a trade-off: lower thresholds mean more candidates pass through the pipeline, which adds some latency. In practice, pgvector returns results in distance order, so you're adding a few more low-scoring candidates to the tail - the fusion step is O(n) and fast. The reranking skip for small result sets also helps offset this.
 
 ## Configuration Reference
 
@@ -221,9 +221,9 @@ config = RetrieverConfig(
 
 | Weight | Effect |
 |--------|--------|
-| 0.0 | Disabled — pure RRF ranking |
-| 0.1 | Default — gentle confounder demotion |
-| 0.3+ | Aggressive — may over-penalize informal text |
+| 0.0 | Disabled - pure RRF ranking |
+| 0.1 | Default - gentle confounder demotion |
+| 0.3+ | Aggressive - may over-penalize informal text |
 
 Coherence scoring complements, but does not replace, MMR diversity selection. MMR removes same-document dominance; coherence scoring removes incoherent text. Both can be enabled simultaneously (the default).
 
@@ -240,7 +240,7 @@ These changes should eliminate the zero-result problem and significantly improve
 - Latency: some improvement from reranking skip, but the main latency contributors (query understanding, reranking) are unchanged
 
 Further improvements to consider:
-- **HyDE (Hypothetical Document Embeddings)**: Generates a hypothetical document for the query to improve embedding similarity for descriptive queries. Mode is controlled by `KHORA_QUERY_ENABLE_HYDE` taking `auto` (default), `always`, or `never` (booleans `True`/`False` are still accepted and normalize to `always`/`never`). In `auto` mode HyDE fires when the query understanding layer flags the query as complex or temporal. Since v0.12.0, RECENCY / STATE_QUERY / CHANGE queries get a time-anchored hypothetical that injects today's ISO date — see [Temporal queries](temporal-queries.md#temporal-anchored-hyde).
-- **HyDE-Cypher (v0.12.0, opt-in)**: For *structured* RECENCY queries (e.g. "latest action items", "who works for Acme", "Phoenix and security recently"), khora can ask an LLM to pick a parameterized Cypher template and execute it against the graph backend as an additional retrieval channel. Three templates ship: `recent_by_type`, `entity_relationships`, `cooccurrence`. Slot values are validated against `ExpertiseConfig` whitelists and bound via Neo4j parameters — slot strings never reach the Cypher source. Enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`; cap result-set size with `KHORA_QUERY_HYDE_CYPHER_LIMIT` (default 20). **Default OFF — flip after an A/B run on a hand-curated structured-query set.**
-- **Cross-encoder date-prefix experiment (v0.12.0, opt-in)**: `CrossEncoderReranker(include_date_prefix=True)` prepends `[YYYY-MM-DD] ` to each candidate's content before scoring. Off-the-shelf rerankers tokenize ISO dates fine and the extra ~12 tokens per candidate are negligible vs. the model's forward pass. Source-priority: `metadata.custom.occurred_at` → `metadata.custom.sent_at` → `metadata.created_at`. **Default OFF — A/B required before flipping.**
-- **SearchMode.ALL as default**: Now that keyword search runs in HYBRID, the distinction between HYBRID and ALL is smaller — HYBRID is effectively ALL.
+- **HyDE (Hypothetical Document Embeddings)**: Generates a hypothetical document for the query to improve embedding similarity for descriptive queries. Mode is controlled by `KHORA_QUERY_ENABLE_HYDE` taking `auto` (default), `always`, or `never` (booleans `True`/`False` are still accepted and normalize to `always`/`never`). In `auto` mode HyDE fires when the query understanding layer flags the query as complex or temporal. Since v0.12.0, RECENCY / STATE_QUERY / CHANGE queries get a time-anchored hypothetical that injects today's ISO date - see [Temporal queries](temporal-queries.md#temporal-anchored-hyde).
+- **HyDE-Cypher (v0.12.0, opt-in)**: For *structured* RECENCY queries (e.g. "latest action items", "who works for Acme", "Phoenix and security recently"), khora can ask an LLM to pick a parameterized Cypher template and execute it against the graph backend as an additional retrieval channel. Three templates ship: `recent_by_type`, `entity_relationships`, `cooccurrence`. Slot values are validated against `ExpertiseConfig` whitelists and bound via Neo4j parameters - slot strings never reach the Cypher source. Enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`; cap result-set size with `KHORA_QUERY_HYDE_CYPHER_LIMIT` (default 20). **Default OFF - flip after an A/B run on a hand-curated structured-query set.**
+- **Cross-encoder date-prefix experiment (v0.12.0, opt-in)**: `CrossEncoderReranker(include_date_prefix=True)` prepends `[YYYY-MM-DD] ` to each candidate's content before scoring. Off-the-shelf rerankers tokenize ISO dates fine and the extra ~12 tokens per candidate are negligible vs. the model's forward pass. Source-priority: `metadata.custom.occurred_at` → `metadata.custom.sent_at` → `metadata.created_at`. **Default OFF - A/B required before flipping.**
+- **SearchMode.ALL as default**: Now that keyword search runs in HYBRID, the distinction between HYBRID and ALL is smaller - HYBRID is effectively ALL.

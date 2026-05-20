@@ -1,6 +1,6 @@
 # OpenAI Agents SDK integration
 
-> **Stability warning.** The upstream `openai-agents` SDK is pre-1.0 — 17
+> **Stability warning.** The upstream `openai-agents` SDK is pre-1.0 - 17
 > releases in the 7 months leading up to `v0.17`. The adapter pins
 > tightly (`openai-agents>=0.17,<0.18`) and is tagged
 > **experimental**: expect monthly rework as upstream's session /
@@ -16,7 +16,7 @@ a caller mixes and matches against the OpenAI Agents SDK:
 | `khora_recall_tool`  | `agents.FunctionTool` factory   | You want an `Agent` to call khora at run-time to surface relevant past memories.             |
 | `KhoraMemoryHooks`   | `RunHooks`-shaped class         | You want tool outputs auto-written to khora (and optionally to recall context on agent start). |
 
-The three are designed to compose — a typical setup wires all of them
+The three are designed to compose - a typical setup wires all of them
 into one `Agent` / `Runner` call.
 
 ## Install
@@ -35,13 +35,13 @@ returns it without explicit registration.
 
 | arg            | default              | notes                                                                                  |
 | -------------- | -------------------- | -------------------------------------------------------------------------------------- |
-| `kb`           | —                    | A connected `Khora` instance. Adapter does NOT own the lifecycle.                      |
-| `namespace`    | —                    | Stable khora namespace UUID. Every read/write is scoped to it.                         |
-| `session_id`   | —                    | The SDK session id string. Maps to a deterministic khora `session_id` via UUID5.       |
+| `kb`           | -                    | A connected `Khora` instance. Adapter does NOT own the lifecycle.                      |
+| `namespace`    | -                    | Stable khora namespace UUID. Every read/write is scoped to it.                         |
+| `session_id`   | -                    | The SDK session id string. Maps to a deterministic khora `session_id` via UUID5.       |
 | `app_id`       | `"openai_agents"`    | Free-form app identifier stamped into stored metadata.                                  |
 
 `KhoraSession` is a runtime `SessionABC` (verified via `isinstance` in
-tests) — catches SDK rename drift on construction rather than at the
+tests) - catches SDK rename drift on construction rather than at the
 next `Runner.run`.
 
 ### `khora_recall_tool`
@@ -60,21 +60,21 @@ khora_recall_tool(
 
 Returns a `FunctionTool` whose only LLM-visible argument is `query:
 str`. The bound khora instance, namespace, and recall thresholds are
-captured by closure — the LLM cannot rewrite them. Drop straight into
+captured by closure - the LLM cannot rewrite them. Drop straight into
 `Agent(tools=[tool])`.
 
 ### `KhoraMemoryHooks`
 
 | arg                   | default              | notes                                                                                   |
 | --------------------- | -------------------- | --------------------------------------------------------------------------------------- |
-| `kb`                  | —                    | A connected `Khora` instance.                                                            |
-| `namespace`           | —                    | khora namespace UUID.                                                                    |
+| `kb`                  | -                    | A connected `Khora` instance.                                                            |
+| `namespace`           | -                    | khora namespace UUID.                                                                    |
 | `app_id`              | `"openai_agents"`    | Free-form app identifier.                                                                |
 | `record_tool_results` | `True`               | Persist every successful tool result via `Khora.remember`.                              |
 | `recall_on_start`     | `False`              | When `True`, log top-K khora hits on `on_agent_start`.                                   |
 | `recall_top_k`        | `3`                  | `limit` passed to `Khora.recall` on agent start.                                         |
 
-`KhoraMemoryHooks` is plain — `Runner` duck-types hook callbacks so the
+`KhoraMemoryHooks` is plain - `Runner` duck-types hook callbacks so the
 class is accepted without `isinstance`. Use `hooks.as_runhooks()` if a
 static checker insists on a `RunHooks` subclass.
 
@@ -84,7 +84,7 @@ static checker insists on a `RunHooks` subclass.
 | ------------------------------------------------ | ---------------------------------------------------------------- |
 | `Session.session_id` (string)                    | `Document.metadata["oai_session_id"]` + UUID5 `session_id` |
 | One `TResponseInputItem`                         | One `Document`. Verbatim JSON stored in `metadata["oai_item"]`. |
-| Monotonic write order                            | `metadata["oai_seq"]` (0, 1, 2, ...) — ordering key on read-back. |
+| Monotonic write order                            | `metadata["oai_seq"]` (0, 1, 2, ...) - ordering key on read-back. |
 | `function_tool` call output                      | (Via `KhoraMemoryHooks.on_tool_end`) one `Document` tagged with `oai_tool_name`. |
 
 Documents stamped by this adapter use the prefix `oai:` on their
@@ -93,7 +93,7 @@ namespace are silently skipped on read-back.
 
 ### `TResponseInputItem` serialisation
 
-The verbatim JSON of every item is preserved — non-text items
+The verbatim JSON of every item is preserved - non-text items
 (function calls, function responses, refusals, reasoning items, …)
 round-trip exactly. The adapter never tries to "interpret" SDK union
 variants beyond projecting a human-readable text body onto
@@ -112,24 +112,24 @@ document so `get_items` never needs to peek at chunks.
 
 The block below is byte-identical to
 [`examples/integrations/openai_agents/example.py`](../../examples/integrations/openai_agents/example.py)
-— CI fails if they diverge.
+- CI fails if they diverge.
 
 ```python title="example.py"
-"""OpenAI Agents SDK + khora example — session memory via ``KhoraSession``.
+"""OpenAI Agents SDK + khora example - session memory via ``KhoraSession``.
 
 Runs without Postgres, Neo4j, or an API key. The mock LLM patches
 ``litellm.acompletion`` / ``litellm.aembedding`` so the example is
 hermetic. The khora fixture spins up an in-memory ``sqlite_lance``
 backend in a tmp dir.
 
-The example does NOT spin up a real ``agents.Runner`` — that would
+The example does NOT spin up a real ``agents.Runner`` - that would
 require a live LLM. Instead it exercises the three khora primitives the
 adapter exposes directly: ``KhoraSession`` (SessionABC contract),
 ``khora_recall_tool`` (FunctionTool factory), and ``KhoraMemoryHooks``
 (RunHooks-shaped). Each is what an ``Agent`` would call into.
 
 Kept deliberately small (single ``add_items`` write) so it finishes
-well under the 30s CI smoke budget — every khora write triggers a full
+well under the 30s CI smoke budget - every khora write triggers a full
 extraction pipeline that retries 3x on the mock LLM's non-JSON output.
 """
 
@@ -160,7 +160,7 @@ async def main() -> None:
         namespace = await kb.create_namespace()
         ns_id = namespace.namespace_id
 
-        # 1) Session — one turn is enough to demonstrate the SessionABC
+        # 1) Session - one turn is enough to demonstrate the SessionABC
         #    contract. Every khora write runs full extraction, so we keep
         #    the example light to fit the 30s CI smoke budget.
         session = KhoraSession(kb=kb, namespace=ns_id, session_id="example-conv-1")
@@ -168,12 +168,12 @@ async def main() -> None:
         items = await session.get_items()
         print(f"Session has {len(items)} item(s); latest: {items[-1]['content']!r}")
 
-        # 2) Recall tool — closes over (kb, namespace, top_k). Construction
+        # 2) Recall tool - closes over (kb, namespace, top_k). Construction
         #    is pure Python; no LLM I/O. An Agent would invoke it later.
         tool = khora_recall_tool(kb=kb, namespace=ns_id, top_k=3)
         print(f"Built recall tool: name={tool.name!r}")
 
-        # 3) Memory hooks — construct only. ``on_tool_end`` would normally
+        # 3) Memory hooks - construct only. ``on_tool_end`` would normally
         #    fire from inside ``Runner.run(...)`` and persist the tool
         #    output. We skip the live call here to keep the example fast.
         hooks = KhoraMemoryHooks(kb=kb, namespace=ns_id, app_id="example")
@@ -195,13 +195,13 @@ The block above is enforced byte-identical against
   (#618) flags breakage.
 - **`khora_recall_tool` argument set.** v1 exposes one arg (`query`).
   Adding filters (date range, tool-name filter) is a clean addition
-  — gate them behind explicit factory kwargs so the LLM-visible
+  - gate them behind explicit factory kwargs so the LLM-visible
   schema stays minimal.
 - **`KhoraMemoryHooks.on_agent_start` recall surfacing.** Default
   behaviour logs hits; downstream callers will usually want to feed
   them into `agent.instructions` or a system message. Subclass and
   override.
-- **`run_compaction`** (`OpenAIResponsesCompactionAwareSession`) —
+- **`run_compaction`** (`OpenAIResponsesCompactionAwareSession`) -
   intentionally NOT implemented in v1. Add when a real caller needs
   it; the SDK's protocol-on-top-of-protocol surface is still in flux.
 

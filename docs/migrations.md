@@ -1,6 +1,6 @@
 # Migrations
 
-Khora ships its own Alembic migrations bundled inside the package at `src/khora/db/migrations/`. This applies to **PostgreSQL-backed** deployments only — SurrealDB uses a declarative schema (`DEFINE … IF NOT EXISTS`) that is applied automatically on `connect()`.
+Khora ships its own Alembic migrations bundled inside the package at `src/khora/db/migrations/`. This applies to **PostgreSQL-backed** deployments only - SurrealDB uses a declarative schema (`DEFINE … IF NOT EXISTS`) that is applied automatically on `connect()`.
 
 ## Who runs migrations?
 
@@ -13,7 +13,7 @@ async with Khora(run_migrations=True) as kb:
     ...
 ```
 
-Khora takes a PostgreSQL advisory lock (ID `6001515088189075507`, 60 s timeout), runs any pending migrations, and releases the lock. Safe under concurrent startup — only one process runs the migrations at a time, the others wait and then no-op.
+Khora takes a PostgreSQL advisory lock (ID `6001515088189075507`, 60 s timeout), runs any pending migrations, and releases the lock. Safe under concurrent startup - only one process runs the migrations at a time, the others wait and then no-op.
 
 ### 2. Run them out-of-band
 
@@ -54,7 +54,7 @@ result = await run_migrations(database_url)
 # MigrationResult(success=True, skipped=True, current_revision="ab1c2d3e…")
 ```
 
-This is signalled internally by a `_DatabaseAheadError` from `env.py` to `session.py` — library code does not need to handle it explicitly. The takeaway: **do not pin different services to different Khora major versions that share a PostgreSQL database**. Use the same major across services; the skip-ahead is a safety net, not a coordination tool.
+This is signalled internally by a `_DatabaseAheadError` from `env.py` to `session.py` - library code does not need to handle it explicitly. The takeaway: **do not pin different services to different Khora major versions that share a PostgreSQL database**. Use the same major across services; the skip-ahead is a safety net, not a coordination tool.
 
 ## Fresh-database behaviour
 
@@ -62,34 +62,34 @@ On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrati
 
 ## What about `create_tables()`?
 
-Removed — it bypassed Alembic and left the version table in an inconsistent state. If you find old docs or sample code referencing `create_tables()`, replace it with `run_migrations()` or `Khora(run_migrations=True)`.
+Removed - it bypassed Alembic and left the version table in an inconsistent state. If you find old docs or sample code referencing `create_tables()`, replace it with `run_migrations()` or `Khora(run_migrations=True)`.
 
 ## Dialect-conditional migrations
 
-A few migrations execute only on PostgreSQL — they use Postgres-specific features that have no SQLite analogue. The migration scripts gate on `op.get_bind().dialect.name == "postgresql"` and skip silently on `sqlite_lance` so the embedded test stack runs the same chain without errors.
+A few migrations execute only on PostgreSQL - they use Postgres-specific features that have no SQLite analogue. The migration scripts gate on `op.get_bind().dialect.name == "postgresql"` and skip silently on `sqlite_lance` so the embedded test stack runs the same chain without errors.
 
 Current dialect-gated migrations:
 
-- **`029_chunks_created_at_brin` (v0.12.0)** — BRIN index on `chunks.created_at` (`pages_per_range = 32`), built with `CREATE INDEX CONCURRENTLY` inside an Alembic autocommit block so online traffic is not blocked. BRIN indexes are tiny (KB-sized) and well-suited to time-correlated columns like `created_at`; they don't compete with HNSW vector indexes or the existing B-trees on chunks. The index helps long-range archive / export queries (months of data) that today sequential-scan the table. No effect on point queries or HNSW similarity search. SQLite-backed embedded stacks skip this migration entirely — see Issue #593 for the rationale.
-- **`030_session_id_columns`** — adds a nullable `session_id UUID` column to `documents`, `chunks`, `memory_events`, `chronicle_events`, and `memory_facts`. Runs on both PostgreSQL and SQLite (the column itself is portable). Existing rows naturally carry `NULL`; adapters that don't track sessions can keep ignoring the field. Companion to migration 031.
-- **`031_session_id_indexes`** — Postgres-only. Adds two partial B-tree indexes on `(namespace_id, session_id) WHERE session_id IS NOT NULL` for `chunks` and `documents`, and a BRIN index on `chunks (session_id, created_at)` (`pages_per_range = 32`). All created with `CREATE INDEX CONCURRENTLY` inside an autocommit block. The partial indexes cover session-scoped recall (`WHERE namespace_id = ? AND session_id = ?`); the BRIN accelerates time-bounded session replay and `gc.expire_sessions(before=…)`. SQLite-backed embedded stacks skip silently — point lookups on `chunks` are fine at SQLite scale and `CREATE INDEX CONCURRENTLY` is Postgres-specific. See Issue #620.
+- **`029_chunks_created_at_brin` (v0.12.0)** - BRIN index on `chunks.created_at` (`pages_per_range = 32`), built with `CREATE INDEX CONCURRENTLY` inside an Alembic autocommit block so online traffic is not blocked. BRIN indexes are tiny (KB-sized) and well-suited to time-correlated columns like `created_at`; they don't compete with HNSW vector indexes or the existing B-trees on chunks. The index helps long-range archive / export queries (months of data) that today sequential-scan the table. No effect on point queries or HNSW similarity search. SQLite-backed embedded stacks skip this migration entirely - see Issue #593 for the rationale.
+- **`030_session_id_columns`** - adds a nullable `session_id UUID` column to `documents`, `chunks`, `memory_events`, `chronicle_events`, and `memory_facts`. Runs on both PostgreSQL and SQLite (the column itself is portable). Existing rows naturally carry `NULL`; adapters that don't track sessions can keep ignoring the field. Companion to migration 031.
+- **`031_session_id_indexes`** - Postgres-only. Adds two partial B-tree indexes on `(namespace_id, session_id) WHERE session_id IS NOT NULL` for `chunks` and `documents`, and a BRIN index on `chunks (session_id, created_at)` (`pages_per_range = 32`). All created with `CREATE INDEX CONCURRENTLY` inside an autocommit block. The partial indexes cover session-scoped recall (`WHERE namespace_id = ? AND session_id = ?`); the BRIN accelerates time-bounded session replay and `gc.expire_sessions(before=…)`. SQLite-backed embedded stacks skip silently - point lookups on `chunks` are fine at SQLite scale and `CREATE INDEX CONCURRENTLY` is Postgres-specific. See Issue #620.
 
 ## SurrealDB
 
 SurrealDB doesn't use Alembic. The schema is defined with idempotent `DEFINE … IF NOT EXISTS` statements that execute on `SurrealDBBackend.connect()`. There's no migration flag; the schema is always current. See [architecture/storage-backends.md](architecture/storage-backends.md#surrealdb) for the schema layout.
 
-In v0.16.0 the SurrealDB schema gained `DEFINE FIELD rel_id ON relates_to TYPE string` plus a `UNIQUE INDEX` on it, as part of the `table:⟨$var⟩` interpolation repair (PR #770 / issue #750) — see the v0.16.0 entry in [CHANGELOG.md](../CHANGELOG.md) for the full surface. The schema is reapplied automatically on `connect()`; no action is required on existing SurrealDB stores.
+In v0.16.0 the SurrealDB schema gained `DEFINE FIELD rel_id ON relates_to TYPE string` plus a `UNIQUE INDEX` on it, as part of the `table:⟨$var⟩` interpolation repair (PR #770 / issue #750) - see the v0.16.0 entry in [CHANGELOG.md](../CHANGELOG.md) for the full surface. The schema is reapplied automatically on `connect()`; no action is required on existing SurrealDB stores.
 
-## v0.16.0 — API migration: namespace kwarg required everywhere
+## v0.16.0 - API migration: namespace kwarg required everywhere
 
-v0.16.0 closed out the cross-namespace IDOR family (PRs #761 / #765 / #766 / #769). This is an API migration, not a schema migration — no Alembic revisions are involved — but downstream code that pokes at the storage substrate needs to be updated. See the [Security exception entry in consumers.md](consumers.md#versioning-policy) for the policy rationale.
+v0.16.0 closed out the cross-namespace IDOR family (PRs #761 / #765 / #766 / #769). This is an API migration, not a schema migration - no Alembic revisions are involved - but downstream code that pokes at the storage substrate needs to be updated. See the [Security exception entry in consumers.md](consumers.md#versioning-policy) for the policy rationale.
 
 ### What changed
 
 Every read, exists-check, and mutation on every storage backend (`RelationalBackend`, `VectorBackend`, `GraphBackend`, `EventStore`) now requires `*, namespace_id: UUID` (kwarg-only) and filters at the SQL / Cypher / SurrealQL layer.
 
 - **Top-level facade**: `Khora.get_document(doc_id, *, namespace=…)` requires the `namespace=` kwarg. Cross-tenant lookups by id return `None`.
-- **Coordinator getters** (`StorageCoordinator.{relational,vector,graph,event_store}`) are now `NamespaceRequiredProxy` instances. Reading them emits one `DeprecationWarning` per role per process; calling a method on the proxy with no `namespace_id=` raises `TypeError`. Public attributes are removed in **v0.17** — internal canonical references use `self._{relational,vector,graph,event_store}` instead.
+- **Coordinator getters** (`StorageCoordinator.{relational,vector,graph,event_store}`) are now `NamespaceRequiredProxy` instances. Reading them emits one `DeprecationWarning` per role per process; calling a method on the proxy with no `namespace_id=` raises `TypeError`. Public attributes are removed in **v0.17** - internal canonical references use `self._{relational,vector,graph,event_store}` instead.
 - **Backend methods tightened**:
   - *Reads*: `RelationalBackend.get_document` / `get_documents_batch` / `get_document_sources_batch` / `get_document_projections_batch` / `get_document_by_external_id` / `get_documents_by_external_ids`; `VectorBackend.entity_exists` plus pgvector-specific `get_entity` / `get_entities_batch`; `GraphBackend.get_entity` / `get_entities_batch` / `get_relationship` / `get_episode` / `get_entity_relationships` / `get_neighborhood` / `get_neighborhoods_batch` / `find_paths` / `get_temporal_neighbors`; `EventStore.get_events_for_resource` / `get_latest_event`.
   - *Writes*: `RelationalBackend.delete_document`; `VectorBackend.delete_chunks_by_document` / `update_entity` / `update_entity_embedding` / `update_entity_embeddings_batch` / `delete_entities_batch` / `delete_relationships_batch` / `supersede_fact`; `GraphBackend.update_entity` / `delete_entity` / `delete_relationship` / `delete_entities_batch` / `delete_relationships_batch` / Neo4j-specific `retire_orphaned_relationships_batch` / `remap_source_document_ids_batch`.
@@ -112,4 +112,4 @@ ent = await kb.storage.get_entity(entity_id, namespace_id=ns_id)  # via coordina
 await kb.storage.delete_document(doc_id, namespace_id=ns_id)      # coordinator method
 ```
 
-Code paths that already routed through the `Khora` facade and the documented public surface (`khora-cli`, `khora-explorer`) are unaffected — none touch `kb.storage.{relational,vector,graph,event_store}` directly. Code paths that reach into `kb.storage.<role>` will see the `DeprecationWarning` in v0.16.x and the `AttributeError` in v0.17.
+Code paths that already routed through the `Khora` facade and the documented public surface (`khora-cli`, `khora-explorer`) are unaffected - none touch `kb.storage.{relational,vector,graph,event_store}` directly. Code paths that reach into `kb.storage.<role>` will see the `DeprecationWarning` in v0.16.x and the `AttributeError` in v0.17.

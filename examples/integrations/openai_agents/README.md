@@ -12,7 +12,7 @@ The example runs with no infrastructure and no API keys:
   and `litellm.aembedding` with deterministic stubs.
 
 It deliberately exercises only the construction surface of the recall
-tool and hooks (no `Runner.run` is invoked) — that would require a live
+tool and hooks (no `Runner.run` is invoked) - that would require a live
 LLM. Session writes are kept to one item so the example finishes well
 under the 30s CI smoke budget.
 
@@ -33,6 +33,6 @@ Built memory hooks: app_id='example'
 
 ## See also
 
-- `docs/integrations/openai_agents.md` — the quickstart byte-identical
+- `docs/integrations/openai_agents.md` - the quickstart byte-identical
   to this directory's `example.py` (CI enforces drift).
-- `src/khora/integrations/openai_agents/` — adapter source.
+- `src/khora/integrations/openai_agents/` - adapter source.

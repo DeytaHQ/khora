@@ -25,7 +25,7 @@ Pulls `crewai>=1.10,<2.0` plus a stable khora.
 
 The block below is byte-identical to
 [`examples/integrations/crewai/example.py`](../../examples/integrations/crewai/example.py)
-— CI fails if they diverge.
+- CI fails if they diverge.
 
 ```python title="example.py"
 """Smoke example for the khora CrewAI adapter.
@@ -76,8 +76,8 @@ if __name__ == "__main__":
 ## Public surface
 
 - `KhoraMemory(kb, namespace, *, user_id, app_id="crewai", scope_root="/", **memory_kwargs)`
-  — factory returning a `crewai.Memory` wired against khora.
-- `KhoraStorageBackend` — the duck-typed `crewai.memory.storage.backend.StorageBackend`
+  - factory returning a `crewai.Memory` wired against khora.
+- `KhoraStorageBackend` - the duck-typed `crewai.memory.storage.backend.StorageBackend`
   implementation. Exposed for advanced users who want to construct the
   CrewAI `Memory` themselves.
 
@@ -100,7 +100,7 @@ this:
 
 Filtering on `scope_prefix` / `categories` / `metadata_filter` in
 `search` and `list_records` is performed **post-recall** against
-`Document.metadata` — khora has no per-document scope or
+`Document.metadata` - khora has no per-document scope or
 category columns to push the filter down into. For typical CrewAI
 working-set sizes (hundreds to low thousands of records per
 namespace), the post-filter is fast enough. Deployments with deep
@@ -125,7 +125,7 @@ class of data-leak bugs that's hard to detect after the fact.
 ### Pre-computed embeddings are ignored
 
 CrewAI's `Memory.recall` computes a query embedding via its own
-embedder, then calls `StorageBackend.search(query_embedding, …)` —
+embedder, then calls `StorageBackend.search(query_embedding, …)` -
 passing only the vector, not the source text. The adapter
 **discards** that embedding and threads the original query text into
 khora's `recall()` via a stashing embedder installed at factory
@@ -149,7 +149,7 @@ skips its own analysis on most queries, leaving HyDE to khora alone.
 CrewAI's `Memory.remember` runs its own LLM-driven scope / categories
 / importance analysis before calling `StorageBackend.save([record])`.
 The adapter forwards those fields directly via
-`Document.metadata` — `kb.remember` is called with
+`Document.metadata` - `kb.remember` is called with
 `entity_types=[]` and `relationship_types=[]` so khora does **not**
 trigger a second extraction LLM call.
 
@@ -158,10 +158,10 @@ anyway, construct `KhoraStorageBackend` directly and pass non-empty
 `entity_types` / `relationship_types` via the `extraction_params` on
 your `Khora()` config.
 
-### Sync entry point only — no async loops above the adapter
+### Sync entry point only - no async loops above the adapter
 
 `KhoraStorageBackend` is a sync class. Every async call into khora is
 dispatched through `khora.integrations._sync.run_sync`, which refuses
 to run from inside an existing asyncio loop (deadlock surface). Do not
 call `KhoraMemory(...)` or any of its methods from inside an `async
-def` — call it from a sync entry point or a worker thread.
+def` - call it from a sync entry point or a worker thread.

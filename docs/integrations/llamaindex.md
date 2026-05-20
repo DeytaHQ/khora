@@ -3,12 +3,12 @@
 `khora.integrations.llamaindex` wires khora behind three LlamaIndex
 surfaces in one extra:
 
-- `KhoraRetriever` — `BaseRetriever` for any `QueryEngine` / agent that
-  takes a retriever. **Async-only** — see "Sync is not implemented"
+- `KhoraRetriever` - `BaseRetriever` for any `QueryEngine` / agent that
+  takes a retriever. **Async-only** - see "Sync is not implemented"
   below.
-- `KhoraMemoryBlock` — `BaseMemoryBlock[str]` factory for long-term
+- `KhoraMemoryBlock` - `BaseMemoryBlock[str]` factory for long-term
   semantic memory inside `llama_index.core.memory.Memory`.
-- `KhoraChatStore` — **deprecated** legacy `BaseChatStore` for
+- `KhoraChatStore` - **deprecated** legacy `BaseChatStore` for
   `ChatMemoryBuffer` users. New code should use `KhoraMemoryBlock`.
 
 ## Install
@@ -32,7 +32,7 @@ registration.
 ## Quickstart
 
 ```python title="example.py"
-"""LlamaIndex + khora example — async retrieval via ``KhoraRetriever``.
+"""LlamaIndex + khora example - async retrieval via ``KhoraRetriever``.
 
 Runs without Postgres, Neo4j, or an API key. The mock LLM patches
 ``litellm.acompletion`` / ``litellm.aembedding`` so the example is
@@ -101,8 +101,8 @@ The block above is enforced byte-identical against
 
 | arg | default | notes |
 | --- | --- | --- |
-| `kb` | — | A connected `Khora` instance. Adapter does NOT own the lifecycle. |
-| `namespace_id` | — | Required khora namespace UUID this retriever reads from. |
+| `kb` | - | A connected `Khora` instance. Adapter does NOT own the lifecycle. |
+| `namespace_id` | - | Required khora namespace UUID this retriever reads from. |
 | `similarity_top_k` | `10` | Max chunks (and optionally entities) returned per `aretrieve` call. |
 | `include_entities` | `False` | When `True`, entity hits are returned alongside chunk hits as additional `NodeWithScore`s. Default off per issue #627 acceptance criteria. |
 | `recall_kwargs` | `None` | Optional dict of extra kwargs forwarded to `Khora.recall` (e.g. `{"mode": SearchMode.HYBRID, "min_similarity": 0.2}`). |
@@ -115,7 +115,7 @@ Each returned `NodeWithScore`'s `node.metadata` carries:
 | `chunk_id` / `entity_id` | Source object's khora UUID. |
 | `document_id` | Parent document UUID (chunk nodes only). |
 | `namespace_id` | Khora namespace this node came from. |
-| `khora_should_abstain` | Boolean — `True` when khora's chronicle abstention signals say the recall is low-confidence. Surfaced on **every** returned node so a downstream postprocessor / response synthesizer can short-circuit answer generation. |
+| `khora_should_abstain` | Boolean - `True` when khora's chronicle abstention signals say the recall is low-confidence. Surfaced on **every** returned node so a downstream postprocessor / response synthesizer can short-circuit answer generation. |
 
 ### Sync is not implemented
 
@@ -123,7 +123,7 @@ Each returned `NodeWithScore`'s `node.metadata` carries:
 specific to this adapter: khora's recall is async-native and the
 deadlock surface for bridging it through a thread inside a running event
 loop dominates the failure modes for this kind of plumbing. The fix is
-straightforward — every LlamaIndex `QueryEngine` exposes
+straightforward - every LlamaIndex `QueryEngine` exposes
 `aquery(...) / aretrieve(...)`. Use those.
 
 If you genuinely need a sync path (e.g. a notebook outside any event
@@ -134,7 +134,7 @@ import asyncio
 nodes = asyncio.run(retriever.aretrieve("query"))
 ```
 
-We deliberately do not ship a `nest_asyncio` workaround — that's a
+We deliberately do not ship a `nest_asyncio` workaround - that's a
 hidden reentrancy bomb under any real agent loop.
 
 ## `KhoraMemoryBlock`
@@ -152,7 +152,7 @@ block = KhoraMemoryBlock(
     name="khora_long_term",
     priority=1,
     similarity_top_k=5,
-    session_id=session_uuid,  # optional — enables Khora.forget_session() cleanup
+    session_id=session_uuid,  # optional - enables Khora.forget_session() cleanup
 )
 
 memory = Memory.from_defaults(
@@ -171,13 +171,13 @@ Semantics:
   per message (skipping empty ones). The returned `document_id` is
   stamped onto `message.additional_kwargs["khora_event_id"]` so callers
   can round-trip a delete handle.
-- `atruncate(content, tokens_to_truncate)` returns `None` — khora is
+- `atruncate(content, tokens_to_truncate)` returns `None` - khora is
   the persistent store, so dropping the in-flight payload loses nothing.
 
 | arg | default | notes |
 | --- | --- | --- |
-| `kb` | — | A connected `Khora` instance. |
-| `namespace_id` | — | Required khora namespace UUID. |
+| `kb` | - | A connected `Khora` instance. |
+| `namespace_id` | - | Required khora namespace UUID. |
 | `name` | `"khora_memory"` | LlamaIndex memory block name. |
 | `description` | `None` | Optional human-readable description. |
 | `priority` | `1` | LlamaIndex truncation priority (lower = kept longer). |
@@ -185,7 +185,7 @@ Semantics:
 | `session_id` | `None` | Optional khora session UUID stamped on every `remember`. Enables `Khora.forget_session(...)` cleanup. |
 | `skill_name` | `"general_entities"` | khora extraction skill name. |
 | `entity_types` | `None` (→ `[]`) | Extraction whitelist. Empty disables extraction entirely (cheap chat-history writes). |
-| `relationship_types` | `None` (→ `[]`) | Same — empty disables. |
+| `relationship_types` | `None` (→ `[]`) | Same - empty disables. |
 
 ## `KhoraChatStore` (deprecated)
 
@@ -207,7 +207,7 @@ memory = ChatMemoryBuffer.from_defaults(
 
 All seven `BaseChatStore` abstract sync methods are implemented and
 bridged through `khora.integrations._sync.run_sync` (which **rejects
-calls made from inside a running event loop** — see "Sync is not
+calls made from inside a running event loop** - see "Sync is not
 implemented" above for the same reasoning).
 
 `get_keys()` and the per-key list-by-index operations scan documents in
@@ -219,11 +219,11 @@ namespace should partition by `namespace_id` instead.
 
 ## Limits and future work
 
-- Filter pushdown to SQL for `KhoraChatStore.get_messages` — the current
+- Filter pushdown to SQL for `KhoraChatStore.get_messages` - the current
   O(N_docs) scan is acceptable for bounded chat workloads but not for
   hot multi-tenant deployments.
 - No support for image / audio / tool-call blocks inside `ChatMessage`
-  — only the rendered text is persisted (via `ChatMessage.content`).
+  - only the rendered text is persisted (via `ChatMessage.content`).
   The original `additional_kwargs` round-trips so the consumer can
   reconstruct non-text payloads from its own side channel.
 - `KhoraRetriever` returns chunks and (optionally) entities; it does

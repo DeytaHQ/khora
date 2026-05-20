@@ -13,7 +13,7 @@ from khora import (
     RememberResult,
     RecallResult,
     BatchResult,
-    BatchHandle,        # submit_batch() return value — has .wait() and .id
+    BatchHandle,        # submit_batch() return value - has .wait() and .id
     DocumentResult,     # per-document callback payload from submit_batch
     Stats,
     LLMUsage,
@@ -52,7 +52,7 @@ Khora(
 - Pass a PostgreSQL URL, a SurrealDB URL (`memory://`, `surrealkv://…`, `ws://…`), or a full `KhoraConfig`.
 - Pass nothing to read from `KHORA_DATABASE_URL` / `KHORA_NEO4J_URL`.
 - `run_migrations=True` runs Alembic under an advisory lock on connect. See [migrations.md](migrations.md).
-- Credential fields on `KhoraConfig` (DSNs, passwords, API keys) are `pydantic.SecretStr` — `repr()` and `model_dump()` render `'**********'`. Code that reads the cleartext must call `.get_secret_value()`. See the [Secrets section of configuration.md](configuration.md#secretstr-typed-credential-fields).
+- Credential fields on `KhoraConfig` (DSNs, passwords, API keys) are `pydantic.SecretStr` - `repr()` and `model_dump()` render `'**********'`. Code that reads the cleartext must call `.get_secret_value()`. See the [Secrets section of configuration.md](configuration.md#secretstr-typed-credential-fields).
 
 ### Connection
 
@@ -79,7 +79,7 @@ ns = await kb.get_namespace_by_stable_id(namespace_id: str | UUID) # stable-ID l
 
 `create_namespace` is keyword-only; there is no positional name argument. The optional `config_overrides` dict layers per-namespace settings on top of the global `KhoraConfig`.
 
-Namespaces are the sole tenancy boundary. Use `ns.namespace_id` (the stable public ID) everywhere below — not the row-level `ns.id`. See [architecture/multi-tenancy.md](architecture/multi-tenancy.md).
+Namespaces are the sole tenancy boundary. Use `ns.namespace_id` (the stable public ID) everywhere below - not the row-level `ns.id`. See [architecture/multi-tenancy.md](architecture/multi-tenancy.md).
 
 ### `remember`
 
@@ -134,7 +134,7 @@ result: BatchResult = await kb.remember_batch(
 )
 ```
 
-Concurrent ingestion with per-document deduplication and optional expansion. Each dict in `documents` accepts the same per-document fields as `remember()` — including `source_type`, `source_name`, `source_url` at the top level of the doc dict (siblings of `content`, `title`, `source`, `external_id`). **Per-doc dict values override the top-level kwargs** for that document; absent keys fall back to the kwarg, which itself defaults to `source_type="library"` / `source_name=None` / `source_url=None`.
+Concurrent ingestion with per-document deduplication and optional expansion. Each dict in `documents` accepts the same per-document fields as `remember()` - including `source_type`, `source_name`, `source_url` at the top level of the doc dict (siblings of `content`, `title`, `source`, `external_id`). **Per-doc dict values override the top-level kwargs** for that document; absent keys fall back to the kwarg, which itself defaults to `source_type="library"` / `source_name=None` / `source_url=None`.
 
 ### `submit_batch`
 
@@ -160,7 +160,7 @@ handle: BatchHandle = await kb.submit_batch(
 )
 ```
 
-Deferred sibling of `remember_batch()`: persists every document as `PENDING` and returns a `BatchHandle` immediately; processing continues in the background and fires `on_result` per document as it completes. Accepts the same provenance kwargs and per-doc dict shape as `remember_batch()` — per-doc dict values override the top-level kwargs. See [`BatchHandle`](#batchhandle) below for the wait/identity surface.
+Deferred sibling of `remember_batch()`: persists every document as `PENDING` and returns a `BatchHandle` immediately; processing continues in the background and fires `on_result` per document as it completes. Accepts the same provenance kwargs and per-doc dict shape as `remember_batch()` - per-doc dict values override the top-level kwargs. See [`BatchHandle`](#batchhandle) below for the wait/identity surface.
 
 ### `recall`
 
@@ -179,10 +179,10 @@ result: RecallResult = await kb.recall(
 )
 ```
 
-- `mode` — one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, or `ALL`.
-- `agentic=True` — multi-step exploration with follow-up queries.
-- `raw=True` — skips query understanding, reranking, HyDE, and entity linking (useful for benchmarks).
-- `start_time` / `end_time` — explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required.
+- `mode` - one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, or `ALL`.
+- `agentic=True` - multi-step exploration with follow-up queries.
+- `raw=True` - skips query understanding, reranking, HyDE, and entity linking (useful for benchmarks).
+- `start_time` / `end_time` - explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required.
 
 ### `context_text`
 
@@ -226,7 +226,7 @@ expired_count: int = await gc.expire_sessions(
 )
 ```
 
-Background-coroutine-friendly TTL cleanup. Calls `forget_session()` for each `session_id` whose newest document predates `before` (using `COALESCE(source_timestamp, created_at)` as the comparison time). **Opt-in** — Khora does not run a scheduler. Adapters / downstream services call this from their own background loop. Pass `namespace_id` for tenant-scoped sweeps; omit to scan every active namespace.
+Background-coroutine-friendly TTL cleanup. Calls `forget_session()` for each `session_id` whose newest document predates `before` (using `COALESCE(source_timestamp, created_at)` as the comparison time). **Opt-in** - Khora does not run a scheduler. Adapters / downstream services call this from their own background loop. Pass `namespace_id` for tenant-scoped sweeps; omit to scan every active namespace.
 
 ### `list_entities` / `find_related_entities`
 
@@ -236,15 +236,15 @@ Convenience accessors over the underlying engine's graph-view API. Signatures ar
 
 ```python
 entity = await kb.get_entity(entity_id, namespace=ns.namespace_id)
-# Entity | None  — returns None for cross-namespace lookups.
+# Entity | None  - returns None for cross-namespace lookups.
 
 document = await kb.get_document(document_id, namespace=ns.namespace_id)
-# Document | None — namespace kwarg required since v0.16.0.
+# Document | None - namespace kwarg required since v0.16.0.
 ```
 
-`namespace` is **required** (accepts `str | UUID`, mirrors `list_entities` / `find_related_entities`). The facade fetches the row and verifies its `namespace_id` matches — cross-namespace ids resolve to `None` rather than the foreign entity. Calling without `namespace=` raises `TypeError`.
+`namespace` is **required** (accepts `str | UUID`, mirrors `list_entities` / `find_related_entities`). The facade fetches the row and verifies its `namespace_id` matches - cross-namespace ids resolve to `None` rather than the foreign entity. Calling without `namespace=` raises `TypeError`.
 
-This shape applies to the whole `kb.storage` getter surface — namespace is the trust boundary, never derivable from the id alone:
+This shape applies to the whole `kb.storage` getter surface - namespace is the trust boundary, never derivable from the id alone:
 
 | Method | Required keyword |
 |---|---|
@@ -252,12 +252,12 @@ This shape applies to the whole `kb.storage` getter surface — namespace is the
 | `kb.storage.get_relationship(relationship_id, *, namespace_id)` | `namespace_id: UUID` |
 | `kb.storage.get_episode(episode_id, *, namespace_id)` | `namespace_id: UUID` |
 | `kb.storage.get_chunk(chunk_id, *, namespace_id)` | `namespace_id: UUID` |
-| `kb.storage.get_chunks_batch(chunk_ids, *, namespace_id)` | `namespace_id: UUID` — cross-namespace ids silently dropped from the returned dict |
-| `kb.storage.get_chunks_by_document(document_id, *, namespace_id)` | `namespace_id: UUID` — returns `[]` if the document doesn't belong to the namespace |
+| `kb.storage.get_chunks_batch(chunk_ids, *, namespace_id)` | `namespace_id: UUID` - cross-namespace ids silently dropped from the returned dict |
+| `kb.storage.get_chunks_by_document(document_id, *, namespace_id)` | `namespace_id: UUID` - returns `[]` if the document doesn't belong to the namespace |
 
-**v0.16.0 expanded the contract to every backend method** (PRs #761 / #765 / #766 / #769). Every read, exists-check, and mutation on `RelationalBackend` / `VectorBackend` / `GraphBackend` / `EventStore` now requires `*, namespace_id: UUID` (kwarg-only) and filters at the SQL / Cypher / SurrealQL layer — not post-fetch. Cross-namespace reads return `None` / `{}` / `[]`; cross-namespace writes silently no-op (raising would expose row existence). The full list of tightened methods is in [migrations.md](migrations.md#v0160--api-migration-namespace-kwarg-required-everywhere).
+**v0.16.0 expanded the contract to every backend method** (PRs #761 / #765 / #766 / #769). Every read, exists-check, and mutation on `RelationalBackend` / `VectorBackend` / `GraphBackend` / `EventStore` now requires `*, namespace_id: UUID` (kwarg-only) and filters at the SQL / Cypher / SurrealQL layer - not post-fetch. Cross-namespace reads return `None` / `{}` / `[]`; cross-namespace writes silently no-op (raising would expose row existence). The full list of tightened methods is in [migrations.md](migrations.md#v0160--api-migration-namespace-kwarg-required-everywhere).
 
-> **Deprecation (v0.16.0 → v0.17).** `StorageCoordinator.{relational,vector,graph,event_store}` are now `NamespaceRequiredProxy` wrappers. Accessing them emits one `DeprecationWarning` per role per process; calling a method without `namespace_id=` raises `TypeError`. Public attributes are removed in v0.17 — call coordinator-level methods (`kb.storage.<method>`) instead.
+> **Deprecation (v0.16.0 → v0.17).** `StorageCoordinator.{relational,vector,graph,event_store}` are now `NamespaceRequiredProxy` wrappers. Accessing them emits one `DeprecationWarning` per role per process; calling a method without `namespace_id=` raises `TypeError`. Public attributes are removed in v0.17 - call coordinator-level methods (`kb.storage.<method>`) instead.
 
 ### `stats`
 
@@ -293,7 +293,7 @@ All result types are frozen slotted dataclasses.
 
 ### `BatchHandle`
 
-Returned by `kb.submit_batch(...)` (the async-staging path that returns immediately and processes via a background worker). Use `await handle.wait()` to block until all documents finish. `submit_batch` also accepts an optional `session_id: UUID | None = None` kwarg that is stamped onto every staged document (per-document `metadata["session_id"]` wins if both are set) — see #620 and the [`session_id` column](migrations.md) for retention/forget semantics.
+Returned by `kb.submit_batch(...)` (the async-staging path that returns immediately and processes via a background worker). Use `await handle.wait()` to block until all documents finish. `submit_batch` also accepts an optional `session_id: UUID | None = None` kwarg that is stamped onto every staged document (per-document `metadata["session_id"]` wins if both are set) - see #620 and the [`session_id` column](migrations.md) for retention/forget semantics.
 
 | Field / method | Type | Description |
 |---|---|---|
@@ -338,7 +338,7 @@ JSON-serializable response projection. Lives at `khora.core.models.recall.Recall
 |---|---|---|
 | `id` | `UUID` | Document id. |
 | `created_at` | `datetime` | Document creation timestamp. |
-| `source_type` | `str` | Category; defaults to `"library"` for direct library calls. Free-form — Khora does not validate or enumerate. |
+| `source_type` | `str` | Category; defaults to `"library"` for direct library calls. Free-form - Khora does not validate or enumerate. |
 | `title` | `str \| None` | Optional title. |
 | `external_id` | `str \| None` | Caller-supplied opaque identifier. |
 | `source` | `str \| None` | Optional connector URI. |
@@ -421,7 +421,7 @@ Engines are discovered through the `khora.engines` registry. The default is `vec
 from khora import create_engine, list_engines, register_engine
 
 list_engines()                                              # ['skeleton', 'vectorcypher', 'chronicle']
-engine = create_engine("chronicle", ...)                    # low-level — prefer Khora(engine="chronicle")
+engine = create_engine("chronicle", ...)                    # low-level - prefer Khora(engine="chronicle")
 register_engine("my_engine", "my.module", "MyEngineClass")  # lazy: module path + class name
 ```
 
@@ -469,8 +469,8 @@ from khora.query import hyde_cypher                     # parameterized graph qu
 from khora.diagnostics import compute_graph_stats, GraphStats  # PPR decision-gate reporter
 ```
 
-- `khora.query.hyde_cypher` — `select_template()`, `generate_cypher()`, `validate_selection()`, `TEMPLATES`, `HyDECypherTemplate`, `HyDECypherSelection`, `HyDECypherValidationError`. Default OFF; enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`. See [query-engine/retrieval-tuning.md](query-engine/retrieval-tuning.md).
-- `khora.diagnostics.graph_density` — one-shot reporter for the PPR audit (Issue #598). Operator script: `scripts/audit_graph_density.py`. This module is intentionally **not stable public API** — it may be renamed or removed without a major-version bump.
+- `khora.query.hyde_cypher` - `select_template()`, `generate_cypher()`, `validate_selection()`, `TEMPLATES`, `HyDECypherTemplate`, `HyDECypherSelection`, `HyDECypherValidationError`. Default OFF; enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`. See [query-engine/retrieval-tuning.md](query-engine/retrieval-tuning.md).
+- `khora.diagnostics.graph_density` - one-shot reporter for the PPR audit (Issue #598). Operator script: `scripts/audit_graph_density.py`. This module is intentionally **not stable public API** - it may be renamed or removed without a major-version bump.
 
 ## Errors
 

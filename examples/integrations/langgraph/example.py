@@ -1,4 +1,4 @@
-"""LangGraph + khora example — long-term memory via ``KhoraStore``.
+"""LangGraph + khora example - long-term memory via ``KhoraStore``.
 
 Runs without Postgres, Neo4j, or an API key. The mock LLM patches
 ``litellm.acompletion`` / ``litellm.aembedding`` so the example is

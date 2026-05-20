@@ -1,6 +1,6 @@
 # Performance Optimization
 
-After profiling the query pipeline, the main bottlenecks turned out to be **sequential database operations**, not LLM calls. The query understanding system already uses a single comprehensive LLM call — but several sequential `await` loops were causing 5–15 second delays that batch operations reduced to milliseconds.
+After profiling the query pipeline, the main bottlenecks turned out to be **sequential database operations**, not LLM calls. The query understanding system already uses a single comprehensive LLM call - but several sequential `await` loops were causing 5–15 second delays that batch operations reduced to milliseconds.
 
 **Overall impact**: 40–60% reduction in query latency for typical searches.
 
@@ -136,7 +136,7 @@ New batch methods on `StorageCoordinator`:
 | `get_documents_batch(ids, *, namespace_id)` | Fetch multiple documents in one SQL query |
 | `get_neighborhoods_batch(ids, *, namespace_id, depth)` | Fetch multiple graph neighborhoods |
 
-These use `WHERE id IN (...) AND namespace_id = $ns` clauses (PostgreSQL) and analogous filters in Cypher (Neo4j) to avoid N+1 query patterns. The `namespace_id` filter is applied at the query layer, so rows belonging to other namespaces are dropped at the database before the result reaches Python — see [Multi-Tenancy](multi-tenancy.md) for the contract.
+These use `WHERE id IN (...) AND namespace_id = $ns` clauses (PostgreSQL) and analogous filters in Cypher (Neo4j) to avoid N+1 query patterns. The `namespace_id` filter is applied at the query layer, so rows belonging to other namespaces are dropped at the database before the result reaches Python - see [Multi-Tenancy](multi-tenancy.md) for the contract.
 
 ### Query Result Caching
 
@@ -315,7 +315,7 @@ Beyond entity resolution, the ingestion pipeline itself had several sequential b
 
 ### Parallel Embed + Extract
 
-Embedding and extraction both depend only on chunks (step 1 output) — neither needs the other's result. They now run concurrently via `asyncio.gather`:
+Embedding and extraction both depend only on chunks (step 1 output) - neither needs the other's result. They now run concurrently via `asyncio.gather`:
 
 ```python
 # Before: embed first, then extract (~25-35s total)
@@ -340,7 +340,7 @@ Before: batch1 → batch2 → batch3  (15-25s sequential)
 After:  batch1 ↕ batch2 ↕ batch3  (3-5s concurrent)
 ```
 
-This is the single highest-impact change — 3-5x faster extraction for multi-chunk documents.
+This is the single highest-impact change - 3-5x faster extraction for multi-chunk documents.
 
 ### Concurrent Embedding Sub-Batches
 
@@ -364,7 +364,7 @@ The PostgreSQL entity upsert changed from N individual INSERT statements in a si
 
 ### `remember_batch` Through `ingest_documents`
 
-`Khora.remember_batch()` now delegates to `ingest_documents` instead of calling `remember()` N times. This enables the shared `EntityIndex` for cross-document entity deduplication, smart mode resolution, and parallel document processing — all of which were previously only available through the direct pipeline API.
+`Khora.remember_batch()` now delegates to `ingest_documents` instead of calling `remember()` N times. This enables the shared `EntityIndex` for cross-document entity deduplication, smart mode resolution, and parallel document processing - all of which were previously only available through the direct pipeline API.
 
 ### Impact
 
@@ -414,7 +414,7 @@ The entity write path used a plain semaphore (concurrency 12) to limit concurren
 
 ### The Solution: `_EntityKeyGate`
 
-`_EntityKeyGate` replaces the entity write semaphore with key-aware coordination. It tracks in-flight entity keys — `(namespace_id, name, entity_type)`, the same triple used in the Cypher `MERGE` clause — and only serializes batches whose keys overlap. Non-overlapping batches still proceed concurrently up to `entity_write_concurrency` (default 12).
+`_EntityKeyGate` replaces the entity write semaphore with key-aware coordination. It tracks in-flight entity keys - `(namespace_id, name, entity_type)`, the same triple used in the Cypher `MERGE` clause - and only serializes batches whose keys overlap. Non-overlapping batches still proceed concurrently up to `entity_write_concurrency` (default 12).
 
 ```python
 async with self._entity_key_gate.acquire(entities):
@@ -428,11 +428,11 @@ async with self._entity_key_gate.acquire(entities):
 | Non-overlapping batches | Concurrent (up to 12) | Concurrent (up to 12) |
 | Overlapping batches | Concurrent → lock contention → ~1 s retry backoff | Serialized at gate → zero retries |
 | 500 entities, 10% overlap | ~45 s (retries dominate) | ~18 s |
-| 500 entities, 0% overlap | ~18 s | ~18 s (same — no contention) |
+| 500 entities, 0% overlap | ~18 s | ~18 s (same - no contention) |
 
 ### Relationship Writes
 
-Relationship writes still use a plain semaphore (8 concurrent). Since relationships use `CREATE` (not `MERGE`), there is no lock contention between concurrent transactions — each relationship is a new edge, so no two transactions compete for the same lock.
+Relationship writes still use a plain semaphore (8 concurrent). Since relationships use `CREATE` (not `MERGE`), there is no lock contention between concurrent transactions - each relationship is a new edge, so no two transactions compete for the same lock.
 
 ## Phase 10: VectorCypher Temporal Accuracy
 
@@ -444,7 +444,7 @@ pgvector's HNSW index uses a default `ef_search` of 40, which trades recall for 
 SET LOCAL hnsw.ef_search = 200;
 ```
 
-`SET LOCAL` scopes the change to the current transaction — it does not affect other connections or the server-wide default. Higher `ef_search` explores more candidates during the HNSW graph traversal, improving recall at the cost of marginally higher latency (typically <5 ms for typical index sizes). This is a pure accuracy win with negligible performance cost.
+`SET LOCAL` scopes the change to the current transaction - it does not affect other connections or the server-wide default. Higher `ef_search` explores more candidates during the HNSW graph traversal, improving recall at the cost of marginally higher latency (typically <5 ms for typical index sizes). This is a pure accuracy win with negligible performance cost.
 
 ### Entity Sort Before Upsert (Deadlock Prevention)
 
@@ -455,14 +455,14 @@ Concurrent batch entity upserts to PostgreSQL could deadlock when two transactio
 sorted_entities = sorted(entities, key=lambda e: (e.name, e.entity_type))
 ```
 
-This is a classic deadlock prevention technique: when all transactions acquire row-level locks in the same order, circular wait conditions become impossible. This complements Phase 9's `_EntityKeyGate` — the gate serializes *overlapping batches* (preventing Neo4j lock contention between transactions), while sorting prevents deadlocks *within individual batches* (preventing PostgreSQL row-lock ordering conflicts). Together, both backends now handle concurrent entity writes without retries.
+This is a classic deadlock prevention technique: when all transactions acquire row-level locks in the same order, circular wait conditions become impossible. This complements Phase 9's `_EntityKeyGate` - the gate serializes *overlapping batches* (preventing Neo4j lock contention between transactions), while sorting prevents deadlocks *within individual batches* (preventing PostgreSQL row-lock ordering conflicts). Together, both backends now handle concurrent entity writes without retries.
 
 ### Relative Recency Scoring
 
 Recency decay previously used `datetime.now()` (wall-clock time) as the reference point. This had two problems:
 
-1. **Non-deterministic** — the same query run seconds apart could produce different scores
-2. **Clock-dependent** — scoring behaved differently across timezones or clock-skewed environments
+1. **Non-deterministic** - the same query run seconds apart could produce different scores
+2. **Clock-dependent** - scoring behaved differently across timezones or clock-skewed environments
 
 The recency calculation now uses `max(occurred_at)` from the result set as the reference timestamp:
 
@@ -476,7 +476,7 @@ max_occurred = max(doc.occurred_at for doc in results)
 age_days = (max_occurred - doc.occurred_at).total_seconds() / 86400
 ```
 
-This eliminates wall-clock dependency — historical and benchmark data produces meaningful recency discrimination regardless of when the query executes. The most recent document in the result set always gets the highest recency score (age = 0), and older documents are scored relative to it. For live systems, behavior is equivalent since `max(occurred_at) ≈ now`.
+This eliminates wall-clock dependency - historical and benchmark data produces meaningful recency discrimination regardless of when the query executes. The most recent document in the result set always gets the highest recency score (age = 0), and older documents are scored relative to it. For live systems, behavior is equivalent since `max(occurred_at) ≈ now`.
 
 ## Phase 11: Staged Batch Pipeline
 
@@ -494,7 +494,7 @@ After (staged batch):
 ```
 
 Benefits:
-- Better LLM API utilization — larger concurrent batches
+- Better LLM API utilization - larger concurrent batches
 - Batch database writes instead of per-document writes
 - Embedding sub-batches are larger and more efficient
 - Cross-document entity deduplication runs on the full set
@@ -503,15 +503,15 @@ Benefits:
 
 The LiteLLM embedder now performs token-aware truncation before sending texts to the embedding API. Previously, texts exceeding the model's token limit would fail or be silently truncated by the API (losing the end of the text). Now:
 
-1. **Token counting** — Uses `tiktoken` (when available) or a character-based heuristic
-2. **Smart truncation** — Truncates at sentence boundaries when possible, falling back to word boundaries
-3. **Model-aware limits** — Respects per-model token limits (e.g., 8191 for `text-embedding-3-small`)
+1. **Token counting** - Uses `tiktoken` (when available) or a character-based heuristic
+2. **Smart truncation** - Truncates at sentence boundaries when possible, falling back to word boundaries
+3. **Model-aware limits** - Respects per-model token limits (e.g., 8191 for `text-embedding-3-small`)
 
 This eliminates API errors from oversized inputs and ensures truncation preserves semantic coherence.
 
 ## Phase 13: HNSW Index Deferral for Bulk Loads
 
-When `bulk_mode=True`, HNSW vector indexes are deferred until after the bulk load completes. HNSW indexes are expensive to maintain during writes — each insertion updates the graph structure. Deferring the index and building it once is significantly faster for bulk operations.
+When `bulk_mode=True`, HNSW vector indexes are deferred until after the bulk load completes. HNSW indexes are expensive to maintain during writes - each insertion updates the graph structure. Deferring the index and building it once is significantly faster for bulk operations.
 
 ```python
 from khora.storage.optimize import ensure_hnsw_indexes
@@ -536,9 +536,9 @@ When processing hundreds of documents with the same extraction configuration, th
 
 Several blocking synchronous calls were identified and fixed in the async pipeline:
 
-- **Chunking** — spaCy sentence splitting now runs in `asyncio.to_thread()`
-- **Checksum computation** — SHA-256 for large documents offloaded to thread pool
-- **JSON parsing** — Large extraction results offloaded for documents exceeding 100KB
+- **Chunking** - spaCy sentence splitting now runs in `asyncio.to_thread()`
+- **Checksum computation** - SHA-256 for large documents offloaded to thread pool
+- **JSON parsing** - Large extraction results offloaded for documents exceeding 100KB
 
 These fixes are particularly impactful when running many documents concurrently, as a single blocking call stalls all concurrent tasks sharing the event loop.
 

@@ -173,7 +173,7 @@ When processing hundreds of documents with the same extraction configuration, th
 
 ## Entity Types
 
-Entity types must be provided by the caller — Khora does not define defaults.
+Entity types must be provided by the caller - Khora does not define defaults.
 Pass `entity_types` and `relationship_types` explicitly to `remember()` / `remember_batch()`.
 
 Custom types can be specified via expertise configuration.
@@ -328,7 +328,7 @@ This means extraction time scales with the single slowest batch, not the sum of 
 
 ### Two-Pass Relationship Extraction
 
-The extractor automatically runs a second-pass relationship extraction when `num_relationships < num_entities - 1`, using `RELATIONSHIP_EXTRACTION_PROMPT`. This targets sparse graphs where entities were extracted but relationships between them were missed. The second pass is automatic and not configurable — it triggers whenever the entity-to-relationship ratio suggests missing connections.
+The extractor automatically runs a second-pass relationship extraction when `num_relationships < num_entities - 1`, using `RELATIONSHIP_EXTRACTION_PROMPT`. This targets sparse graphs where entities were extracted but relationships between them were missed. The second pass is automatic and not configurable - it triggers whenever the entity-to-relationship ratio suggests missing connections.
 
 ## JSON Parsing
 

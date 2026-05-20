@@ -32,7 +32,7 @@ At its heart, Khora combines three different ways of storing and finding informa
     +---------------+ +-------------+ |  what        |
                                       +--------------+
 
-    Alternative: SurrealDB (unified backend — all three roles in one DB)
+    Alternative: SurrealDB (unified backend - all three roles in one DB)
 ```
 
 **PostgreSQL** is your source of truth - it stores the actual documents, tracks who owns what, and keeps an immutable log of everything that happens.
@@ -179,11 +179,11 @@ This component orchestrates the multi-source search pipeline shown above. It run
 
 The extraction orchestrator. Lives at `src/khora/pipelines/flows/ingest.py`.
 
-A native async Python pipeline that manages the ingestion workflow — chunking documents, generating embeddings, extracting entities. It uses a staged batch architecture where all documents flow through each stage together, with `asyncio.gather` for parallel embed+extract and batch database writes for storage.
+A native async Python pipeline that manages the ingestion workflow - chunking documents, generating embeddings, extracting entities. It uses a staged batch architecture where all documents flow through each stage together, with `asyncio.gather` for parallel embed+extract and batch database writes for storage.
 
 ## Multi-Tenancy: Who Owns What
 
-Khora isolates data through **namespaces** — the sole unit of isolation. There is no organization or workspace hierarchy within khora; higher-level grouping is the consuming service's responsibility.
+Khora isolates data through **namespaces** - the sole unit of isolation. There is no organization or workspace hierarchy within khora; higher-level grouping is the consuming service's responsibility.
 
 ```text
 Namespace A  (your data lives here)
@@ -191,11 +191,11 @@ Namespace B  (another dataset)
 Namespace A' (version 2 of A, for zero-downtime rebuilds)
 ```
 
-**Namespaces** hold actual data and can be versioned — create a new version, populate it, then swap it in atomically.
+**Namespaces** hold actual data and can be versioned - create a new version, populate it, then swap it in atomically.
 
 Each namespace has two IDs:
-- **`namespace_id`** — Stable across all versions. Use this in your application.
-- **`id`** — Row-level, changes per version. Used internally for FK references.
+- **`namespace_id`** - Stable across all versions. Use this in your application.
+- **`id`** - Row-level, changes per version. Used internally for FK references.
 
 Public API methods accept `namespace_id` and resolve to the active version's `id` automatically via `resolve_namespace()`. You can also look up a namespace by its stable ID:
 
@@ -230,15 +230,15 @@ unconditionally. Where they go is determined by which
 `TracerProvider` / `MeterProvider` is installed in the process. Khora
 ships three export paths:
 
-- `pip install khora[otel]` — vanilla OTel SDK + OTLP/HTTP exporter.
+- `pip install khora[otel]` - vanilla OTel SDK + OTLP/HTTP exporter.
   Honors the standard `OTEL_*` env vars.
-- `pip install khora[logfire]` — [Logfire](https://logfire.pydantic.dev)
+- `pip install khora[logfire]` - [Logfire](https://logfire.pydantic.dev)
   auto-bootstrap.
-- No extra installed — the OTel API returns a `NonRecordingSpan` and
+- No extra installed - the OTel API returns a `NonRecordingSpan` and
   the cost is near zero.
 
 Khora **never** sets `service.name` and **never** installs a provider
-at import time — those concerns belong to the host application.
+at import time - those concerns belong to the host application.
 Khora identifies itself via the OTel instrumentation scope
 (`scope.name = "khora"`, `scope.version = importlib.metadata.version("khora")`).
 
@@ -250,9 +250,9 @@ gate enforced by `tests/unit/telemetry/test_contract.py`.
 
 Two helper APIs are available for new instrumentation:
 
-- **`@trace` decorator** — automatic span creation per function;
+- **`@trace` decorator** - automatic span creation per function;
   auto-captures arguments as span attributes.
-- **`trace_span()` context manager** — for complex methods needing
+- **`trace_span()` context manager** - for complex methods needing
   mid-function attributes.
 
 ```python

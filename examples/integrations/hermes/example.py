@@ -1,11 +1,11 @@
-"""Hermes + khora example — long-term memory via ``KhoraMemoryProvider``.
+"""Hermes + khora example - long-term memory via ``KhoraMemoryProvider``.
 
 Runs without Postgres, Neo4j, ``hermes-agent``, or an API key. The mock
 LLM patches ``litellm.acompletion`` / ``litellm.aembedding`` so the
 example is hermetic. The khora fixture spins up an in-memory
 ``sqlite_lance`` backend in a tmp dir.
 
-The example does NOT spin up a real Hermes runtime — that would pull in
+The example does NOT spin up a real Hermes runtime - that would pull in
 ``hermes-agent`` (and its ``requests==2.33.0`` pin which clashes with
 khora's CVE-2026-25645 floor). Instead we stand up a minimal stand-in
 for Hermes's ``MemoryProvider`` ABC so ``KhoraMemoryProvider`` builds
@@ -17,7 +17,7 @@ Lifecycle exercised: ``initialize`` → ``queue_prefetch`` → ``sync_turn``
 ``handle_tool_call("memory_search")`` (blocking dispatch, real result)
 → ``on_pre_compress`` → ``on_session_end`` (drain) → ``shutdown``.
 
-Kept light (3 turns) to fit the 30s CI smoke budget — every
+Kept light (3 turns) to fit the 30s CI smoke budget - every
 ``sync_turn`` triggers a full extraction pipeline that retries 3× on
 the mock LLM's non-JSON output.
 """
@@ -64,7 +64,7 @@ async def main() -> None:
     install_mock_llm()
 
     async with embedded_khora() as kb:
-        # 1) Build the provider. ``kb`` is REQUIRED — no Khora.shared()
+        # 1) Build the provider. ``kb`` is REQUIRED - no Khora.shared()
         #    fallback in the factory; the example plugin dir is the
         #    only place that defaults to it.
         provider = KhoraMemoryProvider(kb=kb, drain_timeout_s=20.0)
@@ -86,22 +86,22 @@ async def main() -> None:
         provider.queue_prefetch("What did Alice say about Phoenix?")
 
         # 4) Persist three conversation turns. ``sync_turn`` returns
-        #    immediately — the runtime owns the actual kb.remember call
+        #    immediately - the runtime owns the actual kb.remember call
         #    and writes serialise in submission order (FIFO worker).
         provider.sync_turn(
             "Alice picked PostgreSQL for the Phoenix database.",
-            "Got it — PostgreSQL for Phoenix.",
+            "Got it - PostgreSQL for Phoenix.",
         )
         provider.sync_turn(
             "Bob said the release window is March 2026.",
-            "Noted — Phoenix launches in March 2026.",
+            "Noted - Phoenix launches in March 2026.",
         )
         provider.sync_turn(
             "Alice mentioned the team grew to 12 engineers.",
             "Acknowledged: team size is 12.",
         )
 
-        # 5) prefetch() is the LLM hot path — bounded by
+        # 5) prefetch() is the LLM hot path - bounded by
         #    prefetch_timeout_s (default 0.8s). With writes still
         #    in-flight it returns the abstention payload rather than
         #    blocking the model. This is by design: better an empty
@@ -110,7 +110,7 @@ async def main() -> None:
         print("--- prefetch (hot path, writes still queued) ---")
         print(cold.strip())
 
-        # 6) Tool dispatch is the blocking path — the LLM is already
+        # 6) Tool dispatch is the blocking path - the LLM is already
         #    waiting on a tool result so we serve real data. The
         #    runtime FIFO ensures the writes drain before recall runs.
         result = provider.handle_tool_call(
@@ -125,7 +125,7 @@ async def main() -> None:
         #    pairs the caller surfaces.
         provider.on_pre_compress(
             messages=[
-                {"role": "user", "content": "One more thing — Carol joined the Phoenix team."},
+                {"role": "user", "content": "One more thing - Carol joined the Phoenix team."},
                 {"role": "assistant", "content": "Carol joined Phoenix. Team is now 13."},
             ]
         )
@@ -135,7 +135,7 @@ async def main() -> None:
         #    don't race ``kb.disconnect()``.
         provider.on_session_end(messages=[])
 
-        # 9) Tear down the runtime. Idempotent — safe even if
+        # 9) Tear down the runtime. Idempotent - safe even if
         #    on_session_end already shut things down internally.
         provider.shutdown()
 

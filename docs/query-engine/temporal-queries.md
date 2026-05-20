@@ -4,7 +4,7 @@ Time matters. "What did we discuss last week?" is different from "What have we e
 
 ## How It Works
 
-The VectorCypher engine uses a **three-tier cascade** to detect temporal intent in natural language queries and adapt retrieval behavior accordingly. You don't need to specify temporal parameters manually — the engine classifies your query and tunes recency weighting, sort order, and decay rate automatically.
+The VectorCypher engine uses a **three-tier cascade** to detect temporal intent in natural language queries and adapt retrieval behavior accordingly. You don't need to specify temporal parameters manually - the engine classifies your query and tunes recency weighting, sort order, and decay rate automatically.
 
 ```
 "What instrument does the user currently play?"
@@ -17,7 +17,7 @@ The VectorCypher engine uses a **three-tier cascade** to detect temporal intent 
   → Detected: AGGREGATE (recency_weight=0.0, no temporal sort)
 ```
 
-If you need explicit date-range filtering, you can still pass a `TemporalFilter` object — this acts as a manual override and skips automatic detection.
+If you need explicit date-range filtering, you can still pass a `TemporalFilter` object - this acts as a manual override and skips automatic detection.
 
 ## Automatic Temporal Detection
 
@@ -31,7 +31,7 @@ Every query is classified into one of seven categories, each driving different r
 | `EXPLICIT` | Parseable dates | "Before April 2024" | 0.3 | No | Generates a `TemporalFilter` for date-range pushdown |
 | `STATE_QUERY` | Current state | "What does Alice currently do?" | 0.5 | Yes (DESC) | High recency, favors newest facts |
 | `ORDINAL` | Ordering / sequence | "Which event happened first?" | 0.1 | Yes (DESC) | Low recency, preserves chronological order |
-| `AGGREGATE` | Totals / counts | "How many jobs in total?" | 0.0 | No | No recency — needs broad recall |
+| `AGGREGATE` | Totals / counts | "How many jobs in total?" | 0.0 | No | No recency - needs broad recall |
 | `RECENCY` | Latest results | "Most recent update" | 0.5 | Yes (DESC) | Short decay window (7 days) |
 | `CHANGE` | Temporal evolution | "Did they switch jobs?" | 0.3 | Yes (DESC) | Moderate recency for tracking changes |
 
@@ -76,11 +76,11 @@ class TemporalSignal:
 The engine's `recall()` method runs detection automatically when no explicit `TemporalFilter` is provided:
 
 ```python
-# Automatic — the engine classifies the query and adapts retrieval
+# Automatic - the engine classifies the query and adapts retrieval
 results = await kb.recall("What instrument does Alice currently play?", namespace=ns_id)
 # → STATE_QUERY: recency_weight=0.5, temporal_sort=True
 
-# Explicit override — skips automatic detection
+# Explicit override - skips automatic detection
 results = await kb.recall(
     "product updates",
     namespace=ns_id,
@@ -113,24 +113,24 @@ Each temporal category maps to specific retrieval parameters:
 
 | Category | Recency Weight | Decay Override | Effect |
 |-----------|---------------|----------------|--------|
-| `NONE` | 0.2 | — | Subtle recency preference |
-| `EXPLICIT` | 0.3 | — | Moderate, combined with date-range filter |
-| `STATE_QUERY` | 0.5 | — | Strong recency, most recent fact wins |
-| `ORDINAL` | 0.1 | — | Weak recency, preserves chronological order |
-| `AGGREGATE` | 0.0 | — | No recency at all — pure relevance |
+| `NONE` | 0.2 | - | Subtle recency preference |
+| `EXPLICIT` | 0.3 | - | Moderate, combined with date-range filter |
+| `STATE_QUERY` | 0.5 | - | Strong recency, most recent fact wins |
+| `ORDINAL` | 0.1 | - | Weak recency, preserves chronological order |
+| `AGGREGATE` | 0.0 | - | No recency at all - pure relevance |
 | `RECENCY` | 0.5 | 7 days | Strong recency, sharp 7-day decay |
-| `CHANGE` | 0.3 | — | Moderate recency for evolution tracking |
+| `CHANGE` | 0.3 | - | Moderate recency for evolution tracking |
 
 ### Temporal-anchored HyDE
 
-When HyDE is enabled (`enable_hyde` set to `auto` or `always`) and the query's `TemporalCategory` is **RECENCY**, **STATE_QUERY**, or **CHANGE**, `HyDEExpander` selects a **time-anchored** system prompt that produces a hypothetical written as if authored today, mentioning specific dates, weekdays, or relative-time markers (`"yesterday"`, `"this week"`, `"on 2026-05-14"`). The hypothetical's surface tokens then dominate cosine similarity to chunks that carry the same tokens — Slack/email headers, calendar invites, anything with a wall-clock stamp.
+When HyDE is enabled (`enable_hyde` set to `auto` or `always`) and the query's `TemporalCategory` is **RECENCY**, **STATE_QUERY**, or **CHANGE**, `HyDEExpander` selects a **time-anchored** system prompt that produces a hypothetical written as if authored today, mentioning specific dates, weekdays, or relative-time markers (`"yesterday"`, `"this week"`, `"on 2026-05-14"`). The hypothetical's surface tokens then dominate cosine similarity to chunks that carry the same tokens - Slack/email headers, calendar invites, anything with a wall-clock stamp.
 
 | Category | HyDE prompt |
 |----------|-------------|
 | `RECENCY`, `STATE_QUERY`, `CHANGE` | Time-anchored: injects today's ISO date, asks for specific dates / weekdays / relative markers |
 | `NONE`, `EXPLICIT`, `ORDINAL`, `AGGREGATE` | Generic: time-blind, factual passage |
 
-Cost: zero additional LLM calls — only the system prompt changes. Category detection is sub-millisecond (Rust Aho-Corasick), so the auto-detection path adds no measurable overhead. Available since v0.12.0 (Issue #592, Phase D1).
+Cost: zero additional LLM calls - only the system prompt changes. Category detection is sub-millisecond (Rust Aho-Corasick), so the auto-detection path adds no measurable overhead. Available since v0.12.0 (Issue #592, Phase D1).
 
 ### Manual Recency Bias
 
@@ -148,10 +148,10 @@ results = await kb.recall(
 | Value | Effect |
 |-------|--------|
 | `0.0` | No recency preference |
-| `0.1` | Subtle — barely noticeable |
-| `0.3` | Moderate — recent content noticeably higher |
-| `0.5` | Strong — recent content significantly favored |
-| `1.0` | Very strong — recent content dominates |
+| `0.1` | Subtle - barely noticeable |
+| `0.3` | Moderate - recent content noticeably higher |
+| `0.5` | Strong - recent content significantly favored |
+| `1.0` | Very strong - recent content dominates |
 
 ## Temporal Filters
 
@@ -208,7 +208,7 @@ filter = TemporalFilter(
 
 ### Entity Validity Filters
 
-Entities can have validity periods — "Alice was CEO from 2020–2023". Two special operators handle this:
+Entities can have validity periods - "Alice was CEO from 2020–2023". Two special operators handle this:
 
 ```python
 # DURING: Find entities that were active throughout a period
@@ -262,11 +262,11 @@ document = Document(
 This means if you ingest a year's worth of Slack messages today, "last week" will correctly return messages from last week, not messages you happened to ingest today.
 
 Timestamp priority (first available wins):
-1. `sent_at` — Message sent time
-2. `created_at` — Creation time
-3. `timestamp` — Generic timestamp
-4. `date` — Date field
-5. `occurred_at` — Event time
+1. `sent_at` - Message sent time
+2. `created_at` - Creation time
+3. `timestamp` - Generic timestamp
+4. `date` - Date field
+5. `occurred_at` - Event time
 6. Current time (fallback)
 
 ## Usage Examples
@@ -394,7 +394,7 @@ Entities with validity periods use similar logic on `valid_from` and `valid_unti
 
 ## Combining with Event Sourcing
 
-For true time travel — reconstructing the state of the knowledge graph at a past point — use the event store:
+For true time travel - reconstructing the state of the knowledge graph at a past point - use the event store:
 
 ```python
 # What entities existed on January 1st?
@@ -412,7 +412,7 @@ See [Event Sourcing](../architecture/event-sourcing.md) for details.
 
 ## What's Next?
 
-- **[Query Understanding](query-understanding.md)** — How time expressions are extracted
-- **[Search Modes](search-modes.md)** — Combining temporal with different search types
-- **[Event Sourcing](../architecture/event-sourcing.md)** — Full historical state
-- **[Temporal Model](../engines/temporal-model.md)** — Bi-temporal edge model and time hierarchy
+- **[Query Understanding](query-understanding.md)** - How time expressions are extracted
+- **[Search Modes](search-modes.md)** - Combining temporal with different search types
+- **[Event Sourcing](../architecture/event-sourcing.md)** - Full historical state
+- **[Temporal Model](../engines/temporal-model.md)** - Bi-temporal edge model and time hierarchy

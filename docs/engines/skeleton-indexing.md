@@ -369,7 +369,7 @@ def search_by_keywords(
 
 ## Rust Acceleration
 
-The CPU-intensive operations in skeleton indexing — keyword extraction, chunk edge building, and PageRank — are Rust-accelerated via `khora-accel` when available. This provides significant speedups for large corpora while falling back transparently to pure Python. See [Rust Acceleration](../architecture/rust-acceleration.md) for details.
+The CPU-intensive operations in skeleton indexing - keyword extraction, chunk edge building, and PageRank - are Rust-accelerated via `khora-accel` when available. This provides significant speedups for large corpora while falling back transparently to pure Python. See [Rust Acceleration](../architecture/rust-acceleration.md) for details.
 
 ## Implementation Details
 

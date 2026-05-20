@@ -18,12 +18,12 @@ NumPy cannot help for string-heavy operations.
 
 **PyO3** provides the bridge:
 
-- **Zero-copy NumPy access** — `PyReadonlyArray1` / `PyReadonlyArray2`
+- **Zero-copy NumPy access** - `PyReadonlyArray1` / `PyReadonlyArray2`
   borrow the underlying numpy buffer without copying data across the
   FFI boundary.
-- **GIL release** — `py.allow_threads(|| { ... })` frees the GIL so
+- **GIL release** - `py.allow_threads(|| { ... })` frees the GIL so
   Python async tasks and other threads continue while Rust computes.
-- **Rayon parallelism** — `.into_par_iter()` and `.par_iter()` provide
+- **Rayon parallelism** - `.into_par_iter()` and `.par_iter()` provide
   work-stealing thread-pool parallelism across all available CPU cores.
 
 ## Architecture
@@ -35,13 +35,13 @@ available tier is selected automatically at import time.
 
 ```text
 ┌─────────────────────────────────────────────────────┐
-│  Tier 0: Rust (khora-accel via PyO3)  — fastest     │
+│  Tier 0: Rust (khora-accel via PyO3)  - fastest     │
 │  ● rayon parallelism, GIL release, zero-copy numpy  │
 ├─────────────────────────────────────────────────────┤
-│  Tier 1: NumPy / RapidFuzz  — good, widely avail.   │
+│  Tier 1: NumPy / RapidFuzz  - good, widely avail.   │
 │  ● vectorized numpy ops, C-backed rapidfuzz         │
 ├─────────────────────────────────────────────────────┤
-│  Tier 2: Pure Python  — always works, slowest       │
+│  Tier 2: Pure Python  - always works, slowest       │
 │  ● stdlib only: math, difflib, re                   │
 └─────────────────────────────────────────────────────┘
 ```
@@ -49,7 +49,7 @@ available tier is selected automatically at import time.
 All three tiers are centralised in a single file:
 
 ```text
-src/khora/_accel.py          # Python facade — no scattered imports
+src/khora/_accel.py          # Python facade - no scattered imports
 ```
 
 Callers import from `khora._accel` and get the fastest available backend
@@ -75,7 +75,7 @@ Backend availability is logged at import time via the `_HAS_RUST`,
 
 ## Module Reference (13 Modules, 40+ Exported Functions)
 
-### `cosine.rs` — Vector Similarity (5 functions)
+### `cosine.rs` - Vector Similarity (5 functions)
 
 Provides single-pair, batch (1-to-N), all-pairs cosine similarity,
 batch dot product, and embedding normalization.
@@ -89,21 +89,21 @@ batch dot product, and embedding normalization.
 | `normalize_embeddings_batch` | `(py, embeddings: PyReadonlyArray2<f32>) -> Vec<Vec<f32>>` | L2-normalize a batch of embedding vectors. Each row is divided by its L2 norm. Zero-norm vectors are returned unchanged. |
 
 **Rust techniques:**
-- **NumPy zero-copy** — `PyReadonlyArray1` / `PyReadonlyArray2` borrow numpy buffers directly; owned copies are made only to release the GIL.
-- **GIL release** — `py.allow_threads(|| { ... })` for batch and pairwise ops.
-- **Rayon parallel** — `(0..n).into_par_iter()` distributes row-level work across the thread pool for batch operations; `flat_map` parallelises the outer loop for pairwise.
-- **Pre-computed norms** — Query norm and per-row norms computed once, avoiding redundant sqrt calls.
+- **NumPy zero-copy** - `PyReadonlyArray1` / `PyReadonlyArray2` borrow numpy buffers directly; owned copies are made only to release the GIL.
+- **GIL release** - `py.allow_threads(|| { ... })` for batch and pairwise ops.
+- **Rayon parallel** - `(0..n).into_par_iter()` distributes row-level work across the thread pool for batch operations; `flat_map` parallelises the outer loop for pairwise.
+- **Pre-computed norms** - Query norm and per-row norms computed once, avoiding redundant sqrt calls.
 
 **Python consumers:**
-- `khora.extraction.expansion.entity_index` — `batch_dot_product` for entity embedding similarity (pre-normalized vectors)
-- `khora.extraction.expansion.cross_tool_unifier` — `cosine_similarity` for entity deduplication
-- `khora._accel.pairwise_cosine_above_threshold` — used by entity resolution pipelines
-- `khora.query.engine` — `batch_dot_product` for graph result filtering
-- `khora.extraction.embedders.litellm` — embeddings are L2-normalized at ingest time, enabling dot product scoring everywhere
+- `khora.extraction.expansion.entity_index` - `batch_dot_product` for entity embedding similarity (pre-normalized vectors)
+- `khora.extraction.expansion.cross_tool_unifier` - `cosine_similarity` for entity deduplication
+- `khora._accel.pairwise_cosine_above_threshold` - used by entity resolution pipelines
+- `khora.query.engine` - `batch_dot_product` for graph result filtering
+- `khora.extraction.embedders.litellm` - embeddings are L2-normalized at ingest time, enabling dot product scoring everywhere
 
 ---
 
-### `mmr.rs` — MMR Diversity Selection (1 function)
+### `mmr.rs` - MMR Diversity Selection (1 function)
 
 Greedy Maximal Marginal Relevance for diversity-aware result selection.
 
@@ -112,22 +112,22 @@ Greedy Maximal Marginal Relevance for diversity-aware result selection.
 | `mmr_diversity_select` | `(py, embeddings: PyReadonlyArray2<f32>, scores: Vec<f32>, lambda_param: f32, k: usize) -> Vec<usize>` | Greedy MMR selection: iteratively picks the candidate maximizing `lambda * relevance - (1 - lambda) * max_similarity_to_selected`. Returns indices in selection order. |
 
 **Algorithm:**
-- **Incremental max-similarity tracking** — maintains a running `max_sim[i]` for each unselected candidate, updated as new items are selected. Complexity is O(k*n) instead of O(k*n*k).
-- **Cache-friendly layout** — embeddings stored in a flat contiguous buffer for vectorized access.
-- **Safe iterator dot product** — inner `dot_f32` function uses `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`, a safe iterator chain that the compiler auto-vectorizes on x86-64 with SSE/AVX. Replaced a previous `unsafe get_unchecked` implementation to eliminate undefined-behavior risk while preserving equivalent codegen.
+- **Incremental max-similarity tracking** - maintains a running `max_sim[i]` for each unselected candidate, updated as new items are selected. Complexity is O(k*n) instead of O(k*n*k).
+- **Cache-friendly layout** - embeddings stored in a flat contiguous buffer for vectorized access.
+- **Safe iterator dot product** - inner `dot_f32` function uses `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`, a safe iterator chain that the compiler auto-vectorizes on x86-64 with SSE/AVX. Replaced a previous `unsafe get_unchecked` implementation to eliminate undefined-behavior risk while preserving equivalent codegen.
 
 **Rust techniques:**
-- **GIL release** — `py.allow_threads(|| { ... })` during the entire selection loop.
-- **NumPy zero-copy** — `PyReadonlyArray2` borrows the embedding matrix; owned copy made once before GIL release.
-- **Early exit** — returns immediately if k >= n or no candidates available.
+- **GIL release** - `py.allow_threads(|| { ... })` during the entire selection loop.
+- **NumPy zero-copy** - `PyReadonlyArray2` borrows the embedding matrix; owned copy made once before GIL release.
+- **Early exit** - returns immediately if k >= n or no candidates available.
 
 **Python consumers:**
-- `khora._accel.mmr_diversity_select` — primary entry point with 3-tier fallback (Rust > NumPy > pure Python)
-- `khora.query.engine._mmr_diversity_select` — wired into Stage 5 of the query pipeline when `enable_diversity=True`
+- `khora._accel.mmr_diversity_select` - primary entry point with 3-tier fallback (Rust > NumPy > pure Python)
+- `khora.query.engine._mmr_diversity_select` - wired into Stage 5 of the query pipeline when `enable_diversity=True`
 
 ---
 
-### `temporal.rs` — Temporal Filtering & Detection (5 functions)
+### `temporal.rs` - Temporal Filtering & Detection (5 functions)
 
 Batch datetime comparison, recency scoring, and temporal query detection.
 
@@ -140,21 +140,21 @@ Batch datetime comparison, recency scoring, and temporal query detection.
 | `detect_temporal_category_with_confidence` | `(query: &str) -> (u8, f64, Vec<String>)` | Like `detect_temporal_category` but also returns the confidence score and the list of matched temporal keyword patterns. |
 
 **Rust techniques:**
-- **Rayon parallel** — `batch_temporal_filter` and `batch_recency_scores` use `par_iter()` for large input batches.
-- **GIL release** — `py.allow_threads(|| { ... })` during batch computation.
-- **No datetime parsing** — timestamps arrive as pre-computed Unix epoch floats, avoiding chrono/datetime overhead.
-- **Aho-Corasick automaton** — `detect_temporal_category` uses a `LazyLock<(AhoCorasick, Vec<u8>)>` compiled from ~200 categorised patterns with `ascii_case_insensitive` matching. Single-pass multi-pattern search replaces sequential substring checks.
-- **LazyLock regex** — `detect_temporal_keywords` compiles its regex once via `LazyLock<Regex>` and reuses it across all calls.
+- **Rayon parallel** - `batch_temporal_filter` and `batch_recency_scores` use `par_iter()` for large input batches.
+- **GIL release** - `py.allow_threads(|| { ... })` during batch computation.
+- **No datetime parsing** - timestamps arrive as pre-computed Unix epoch floats, avoiding chrono/datetime overhead.
+- **Aho-Corasick automaton** - `detect_temporal_category` uses a `LazyLock<(AhoCorasick, Vec<u8>)>` compiled from ~200 categorised patterns with `ascii_case_insensitive` matching. Single-pass multi-pattern search replaces sequential substring checks.
+- **LazyLock regex** - `detect_temporal_keywords` compiles its regex once via `LazyLock<Regex>` and reuses it across all calls.
 
 **Python consumers:**
-- `khora._accel.batch_temporal_filter` — used by temporal query pipeline
-- `khora._accel.batch_recency_scores` — used for recency-biased ranking
-- `khora._accel.detect_temporal_category` — used by temporal query classification to route queries to the appropriate temporal handling strategy
-- `khora._accel.detect_temporal_keywords` — fast pre-filter to check if a query has any temporal intent before full classification
+- `khora._accel.batch_temporal_filter` - used by temporal query pipeline
+- `khora._accel.batch_recency_scores` - used for recency-biased ranking
+- `khora._accel.detect_temporal_category` - used by temporal query classification to route queries to the appropriate temporal handling strategy
+- `khora._accel.detect_temporal_keywords` - fast pre-filter to check if a query has any temporal intent before full classification
 
 ---
 
-### `string_sim.rs` — String Similarity (6 functions)
+### `string_sim.rs` - String Similarity (6 functions)
 
 Levenshtein and sequence-match similarity with batch variants.
 
@@ -168,20 +168,20 @@ Levenshtein and sequence-match similarity with batch variants.
 | `normalize_entity_names_batch` | `(py, names: Vec<String>) -> Vec<String>` | Batch normalize entity names with GIL release. |
 
 **Rust techniques:**
-- **strsim crate** — Provides optimised `normalized_levenshtein` and `jaro_winkler` implementations in pure Rust.
-- **Conditional Rayon batch** — batch functions use `par_iter()` when `candidates.len() >= 512`; smaller batches use sequential iteration to avoid thread-pool overhead that dominates at small scale.
-- **GIL release** — `py.allow_threads(|| { ... })` for both batch functions.
-- **Early exit** — Short-circuit returns for equal strings (→ 1.0) and empty strings (→ 0.0).
+- **strsim crate** - Provides optimised `normalized_levenshtein` and `jaro_winkler` implementations in pure Rust.
+- **Conditional Rayon batch** - batch functions use `par_iter()` when `candidates.len() >= 512`; smaller batches use sequential iteration to avoid thread-pool overhead that dominates at small scale.
+- **GIL release** - `py.allow_threads(|| { ... })` for both batch functions.
+- **Early exit** - Short-circuit returns for equal strings (→ 1.0) and empty strings (→ 0.0).
 
 **Python consumers:**
-- `khora.extraction.entity_resolution` — `levenshtein_similarity`, `sequence_match_ratio` for entity matching
-- `khora.extraction.expansion.entity_index` — `levenshtein_similarity` for fuzzy name matching
-- `khora.extraction.expansion.cross_tool_unifier` — `levenshtein_similarity` for cross-tool entity dedup
-- `khora.query.linking` — `sequence_match_ratio` for query-entity linking
+- `khora.extraction.entity_resolution` - `levenshtein_similarity`, `sequence_match_ratio` for entity matching
+- `khora.extraction.expansion.entity_index` - `levenshtein_similarity` for fuzzy name matching
+- `khora.extraction.expansion.cross_tool_unifier` - `levenshtein_similarity` for cross-tool entity dedup
+- `khora.query.linking` - `sequence_match_ratio` for query-entity linking
 
 ---
 
-### `bm25.rs` — BM25 Full-Text Index (1 class, 5 methods)
+### `bm25.rs` - BM25 Full-Text Index (1 class, 5 methods)
 
 A complete BM25 ranking index as a `#[pyclass]`, mirroring the Python
 `BM25Index` in `khora.query.keyword`.
@@ -197,47 +197,47 @@ A complete BM25 ranking index as a `#[pyclass]`, mirroring the Python
 | `search` | `(py, query: &str, limit=10, min_score=0.0) -> Vec<(String, f32)>` | Search the index. Returns `(doc_id, score)` pairs sorted descending. Releases GIL during scoring phase. |
 
 **Internal architecture:**
-- **Inverted index** — `HashMap<u32, Vec<u32>>` maps token indices to posting lists of document indices.
-- **Token interning** — Bidirectional `token_to_idx` / index lookup avoids repeated string comparisons during scoring.
-- **Suffix stemming** — `basic_stem()` strips common English suffixes (`-ing`, `-ed`, `-tion`, `-ness`, `-ment`, `-able`, `-ible`, `-ful`, `-less`, `-ly`, `-er`, `-est`, `-es`, `-s`) when `use_stemming=true`, requiring the stem to be at least 3 characters.
-- **Stopword removal** — 90+ English stopwords compiled into a `hashbrown::HashSet` via `LazyLock` for zero-allocation lookups.
-- **IDF formula** — `ln((N - df + 0.5) / (df + 0.5) + 1.0)` (standard BM25 IDF).
-- **GIL release** — The `search()` method releases the GIL during the candidate scoring loop via `py.allow_threads()`.
-- **Candidate pruning** — Only documents containing at least one query term (via inverted index lookup) are scored, avoiding full-corpus scans.
+- **Inverted index** - `HashMap<u32, Vec<u32>>` maps token indices to posting lists of document indices.
+- **Token interning** - Bidirectional `token_to_idx` / index lookup avoids repeated string comparisons during scoring.
+- **Suffix stemming** - `basic_stem()` strips common English suffixes (`-ing`, `-ed`, `-tion`, `-ness`, `-ment`, `-able`, `-ible`, `-ful`, `-less`, `-ly`, `-er`, `-est`, `-es`, `-s`) when `use_stemming=true`, requiring the stem to be at least 3 characters.
+- **Stopword removal** - 90+ English stopwords compiled into a `hashbrown::HashSet` via `LazyLock` for zero-allocation lookups.
+- **IDF formula** - `ln((N - df + 0.5) / (df + 0.5) + 1.0)` (standard BM25 IDF).
+- **GIL release** - The `search()` method releases the GIL during the candidate scoring loop via `py.allow_threads()`.
+- **Candidate pruning** - Only documents containing at least one query term (via inverted index lookup) are scored, avoiding full-corpus scans.
 
 **Rust techniques:**
-- **hashbrown** — `HashMap` and `HashSet` from hashbrown for faster hashing than std.
-- **LazyLock** — Static regex and stopword set initialised once, shared across all calls.
-- **Token indexing** — Strings are interned to `u32` indices for cache-friendly scoring.
+- **hashbrown** - `HashMap` and `HashSet` from hashbrown for faster hashing than std.
+- **LazyLock** - Static regex and stopword set initialised once, shared across all calls.
+- **Token indexing** - Strings are interned to `u32` indices for cache-friendly scoring.
 
 **Python consumers:**
 - Exported as `RustBM25Index` via `_accel.py`. Not yet wired into the query module (the Python-side `BM25Index` in `khora.query.keyword` remains the active implementation). Available for opt-in use.
 
 ---
 
-### `pagerank.rs` — Graph PageRank + Personalized PageRank (2 functions)
+### `pagerank.rs` - Graph PageRank + Personalized PageRank (2 functions)
 
 Weighted PageRank for skeleton indexing (where ~10% of chunks are identified as "core" for LLM extraction) and **Personalized PageRank (PPR)** for query-time graph scoring.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `pagerank` | `(py, n: usize, edges: Vec<(usize, usize, f64)>, damping: f64, max_iter: usize, tol: f64, personalization: Option<Vec<f64>>) -> Vec<f64>` | Compute PageRank on a weighted directed graph. When `personalization` is `None` or L1-normalizes to uniform, this is standard PageRank. When set, this is PPR: `r = (1 - d) * p + d * Mᵀ r`. The vector is validated: negatives clipped to 0, length-mismatch falls back to uniform, all-zero falls back to uniform — never raises. |
+| `pagerank` | `(py, n: usize, edges: Vec<(usize, usize, f64)>, damping: f64, max_iter: usize, tol: f64, personalization: Option<Vec<f64>>) -> Vec<f64>` | Compute PageRank on a weighted directed graph. When `personalization` is `None` or L1-normalizes to uniform, this is standard PageRank. When set, this is PPR: `r = (1 - d) * p + d * Mᵀ r`. The vector is validated: negatives clipped to 0, length-mismatch falls back to uniform, all-zero falls back to uniform - never raises. |
 | `build_chunk_edges` | `(py, n_chunks: usize, keyword_chunk_ids: Vec<Vec<usize>>, idf_scores: Vec<f64>) -> Vec<(usize, usize, f64)>` | Build chunk-to-chunk co-occurrence graph. For each keyword, creates bidirectional edges among all chunks sharing that keyword, weighted by IDF score. |
 
 **Rust techniques:**
-- **GIL release** — Both functions run their entire computation inside `py.allow_threads()`.
-- **Adjacency list** — `Vec<Vec<(usize, f64)>>` for incoming edges, `Vec<f64>` for out-degree — cache-friendly iteration.
-- **Convergence check** — Absolute diff sum checked each iteration for early termination.
+- **GIL release** - Both functions run their entire computation inside `py.allow_threads()`.
+- **Adjacency list** - `Vec<Vec<(usize, f64)>>` for incoming edges, `Vec<f64>` for out-degree - cache-friendly iteration.
+- **Convergence check** - Absolute diff sum checked each iteration for early termination.
 
 **Python consumers:**
-- `khora._accel.pagerank` — called by the skeleton engine's `_calculate_pagerank` (uniform init, document-time)
-- `khora._accel.build_chunk_edges` — called by the skeleton engine's `_build_chunk_edges`
+- `khora._accel.pagerank` - called by the skeleton engine's `_calculate_pagerank` (uniform init, document-time)
+- `khora._accel.build_chunk_edges` - called by the skeleton engine's `_build_chunk_edges`
 
-The `personalization` parameter (added in v0.12.0, Issue #597) is the enabler for the HippoRAG-2 query-time graph scoring tracked in Issue #542 — seeding PPR from query entities can produce sharper passage scores than BFS + RRF on dense graphs. The actual VectorCypher swap from BFS+RRF → PPR remains gated on the graph-density audit (`scripts/audit_graph_density.py`, Issue #598) and is not enabled by default; until the audit confirms the lift, callers passing `personalization=None` (every existing call site) get identical behaviour to pre-v0.12.0.
+The `personalization` parameter (added in v0.12.0, Issue #597) is the enabler for the HippoRAG-2 query-time graph scoring tracked in Issue #542 - seeding PPR from query entities can produce sharper passage scores than BFS + RRF on dense graphs. The actual VectorCypher swap from BFS+RRF → PPR remains gated on the graph-density audit (`scripts/audit_graph_density.py`, Issue #598) and is not enabled by default; until the audit confirms the lift, callers passing `personalization=None` (every existing call site) get identical behaviour to pre-v0.12.0.
 
 ---
 
-### `rrf.rs` — Reciprocal Rank Fusion (8 functions)
+### `rrf.rs` - Reciprocal Rank Fusion (8 functions)
 
 RRF scoring, score normalisation, and fusion diagnostics for result fusion.
 
@@ -253,18 +253,18 @@ RRF scoring, score normalisation, and fusion diagnostics for result fusion.
 | `score_entropy` | `(scores: Vec<f64>) -> f64` | Compute Shannon entropy of a score distribution. Used for fusion quality assessment. |
 
 **Rust techniques:**
-- **hashbrown::HashMap** — Fast hash accumulation of scores across ranked lists.
-- **OrderedFloat** — `ordered_float::OrderedFloat` wraps `f64` for total ordering, enabling safe `sort_by` without `unwrap_or` on `partial_cmp`.
-- **No GIL release** — These are fast enough that GIL overhead would dominate; runs with GIL held.
+- **hashbrown::HashMap** - Fast hash accumulation of scores across ranked lists.
+- **OrderedFloat** - `ordered_float::OrderedFloat` wraps `f64` for total ordering, enabling safe `sort_by` without `unwrap_or` on `partial_cmp`.
+- **No GIL release** - These are fast enough that GIL overhead would dominate; runs with GIL held.
 
 **Python consumers:**
-- `khora._accel.reciprocal_rank_fusion` — low-level string-ID RRF (the higher-level `khora.engines.vectorcypher.fusion` wraps this with `FusedResult` metadata tracking)
-- `khora._accel.weighted_rrf` — used by VectorCypher retriever for weighted fusion
-- `khora._accel.normalize_scores` — general-purpose score normalisation
+- `khora._accel.reciprocal_rank_fusion` - low-level string-ID RRF (the higher-level `khora.engines.vectorcypher.fusion` wraps this with `FusedResult` metadata tracking)
+- `khora._accel.weighted_rrf` - used by VectorCypher retriever for weighted fusion
+- `khora._accel.normalize_scores` - general-purpose score normalisation
 
 ---
 
-### `dedup.rs` — Chunk Deduplication (1 function)
+### `dedup.rs` - Chunk Deduplication (1 function)
 
 MinHash-based near-duplicate text chunk detection. Detects near-duplicate chunks BEFORE they are sent to LLM extraction, reducing unnecessary LLM calls.
 
@@ -273,22 +273,22 @@ MinHash-based near-duplicate text chunk detection. Detects near-duplicate chunks
 | `deduplicate_chunks` | `(py, chunks: Vec<String>, threshold: f64 = 0.85, num_perm: usize = 64) -> Vec<(usize, Option<usize>)>` | Deduplicate text chunks using MinHash + LSH. Returns `(chunk_index, duplicate_of_index)` pairs. `None` for duplicate_of_index means the chunk is unique (canonical). |
 
 **Algorithm:**
-1. **MinHash signatures** — Compute MinHash over word 3-grams for each chunk. Each permutation (seeded hash function) takes the minimum hash value.
-2. **LSH banding** — Split signatures into bands and hash each band into buckets. Chunks sharing a bucket are candidate duplicates.
-3. **Verification** — For candidate pairs, verify with exact MinHash similarity against the threshold.
-4. **Marking** — Later chunks are marked as duplicates of earlier (canonical) chunks.
+1. **MinHash signatures** - Compute MinHash over word 3-grams for each chunk. Each permutation (seeded hash function) takes the minimum hash value.
+2. **LSH banding** - Split signatures into bands and hash each band into buckets. Chunks sharing a bucket are candidate duplicates.
+3. **Verification** - For candidate pairs, verify with exact MinHash similarity against the threshold.
+4. **Marking** - Later chunks are marked as duplicates of earlier (canonical) chunks.
 
 **Rust techniques:**
-- **GIL release** — `py.detach()` releases the GIL for the entire computation.
-- **hashbrown::HashMap** — Fast bucket accumulation for LSH banding.
-- **Optimal banding** — Automatically computes the number of bands to match the desired similarity threshold.
+- **GIL release** - `py.detach()` releases the GIL for the entire computation.
+- **hashbrown::HashMap** - Fast bucket accumulation for LSH banding.
+- **Optimal banding** - Automatically computes the number of bands to match the desired similarity threshold.
 
 **Python consumers:**
-- `khora._accel.deduplicate_chunks` — used by ingestion pipeline to skip redundant LLM extraction calls
+- `khora._accel.deduplicate_chunks` - used by ingestion pipeline to skip redundant LLM extraction calls
 
 ---
 
-### `community.rs` — Community Detection (1 function)
+### `community.rs` - Community Detection (1 function)
 
 Louvain-style modularity optimization for detecting entity communities in the knowledge graph.
 
@@ -302,15 +302,15 @@ Louvain-style modularity optimization for detecting entity communities in the kn
 - Stops when no node changes community or max_iter passes complete.
 
 **Rust techniques:**
-- **GIL release** — `py.allow_threads()` during optimization.
-- **hashbrown::HashMap** — Fast community membership tracking.
+- **GIL release** - `py.allow_threads()` during optimization.
+- **hashbrown::HashMap** - Fast community membership tracking.
 
 **Python consumers:**
-- `khora._accel.detect_communities` — community detection for knowledge graph analysis
+- `khora._accel.detect_communities` - community detection for knowledge graph analysis
 
 ---
 
-### `entity_resolution.rs` — Entity Resolution (2 functions)
+### `entity_resolution.rs` - Entity Resolution (2 functions)
 
 Batch entity matching with a 3-stage cascade.
 
@@ -320,24 +320,24 @@ Batch entity matching with a 3-stage cascade.
 | `resolve_entities_enhanced` | Enhanced version with additional matching capabilities | Extended matching with configurable strategies beyond the base 3-stage cascade. |
 
 **3-stage matching pipeline:**
-1. **Exact match** — `HashMap<String, usize>` lookup of lowercased existing names → O(1) per new name, score `1.0`, type `"exact"`
-2. **Alias match** — `HashMap<String, usize>` lookup of lowercased aliases → O(1) per alias, score `1.0`, type `"alias"`
-3. **Fuzzy match** — `strsim::normalized_levenshtein` against all existing names, best score above threshold → type `"fuzzy"`
+1. **Exact match** - `HashMap<String, usize>` lookup of lowercased existing names → O(1) per new name, score `1.0`, type `"exact"`
+2. **Alias match** - `HashMap<String, usize>` lookup of lowercased aliases → O(1) per alias, score `1.0`, type `"alias"`
+3. **Fuzzy match** - `strsim::normalized_levenshtein` against all existing names, best score above threshold → type `"fuzzy"`
 
 **Rust techniques:**
-- **HashMap O(1) lookups** — Exact and alias stages build `HashMap<String, usize>` indexes from the existing names/aliases during pre-processing, replacing the previous O(n) linear scans. This reduces stages 1 and 2 from O(new × existing) to O(new + existing).
-- **Pre-lowercasing** — All existing names and aliases are lowercased once before the hot loop, outside `allow_threads`.
-- **Rayon parallel** — `new_names.par_iter().map(...)` parallelises resolution across all new names.
-- **Rayon threshold** — Parallelism is only engaged when `new_names.len() >= 512`; smaller batches use sequential iteration to avoid thread-pool overhead.
-- **GIL release** — `py.allow_threads()` wraps the entire parallel resolution.
-- **Early exit** — Each name short-circuits at the first matching stage.
+- **HashMap O(1) lookups** - Exact and alias stages build `HashMap<String, usize>` indexes from the existing names/aliases during pre-processing, replacing the previous O(n) linear scans. This reduces stages 1 and 2 from O(new × existing) to O(new + existing).
+- **Pre-lowercasing** - All existing names and aliases are lowercased once before the hot loop, outside `allow_threads`.
+- **Rayon parallel** - `new_names.par_iter().map(...)` parallelises resolution across all new names.
+- **Rayon threshold** - Parallelism is only engaged when `new_names.len() >= 512`; smaller batches use sequential iteration to avoid thread-pool overhead.
+- **GIL release** - `py.allow_threads()` wraps the entire parallel resolution.
+- **Early exit** - Each name short-circuits at the first matching stage.
 
 **Python consumers:**
-- `khora._accel.resolve_entities_batch` — used by entity resolution pipelines for bulk entity deduplication
+- `khora._accel.resolve_entities_batch` - used by entity resolution pipelines for bulk entity deduplication
 
 ---
 
-### `keyword_extract.rs` — Keyword Extraction (2 functions)
+### `keyword_extract.rs` - Keyword Extraction (2 functions)
 
 Mirrors the `_extract_keywords` method in `SkeletonIndexer`.
 
@@ -347,18 +347,18 @@ Mirrors the `_extract_keywords` method in `SkeletonIndexer`.
 | `extract_keywords_batch` | `(py, contents: Vec<String>) -> Vec<Vec<String>>` | Batch extraction using rayon parallelism. Releases the GIL. |
 
 **Rust techniques:**
-- **LazyLock statics** — Compiled regex (`KEYWORD_RE`) and stopword set (`SKELETON_STOPWORDS`) are initialised once via `LazyLock` and shared across all invocations.
-- **hashbrown::HashSet** — Fast deduplication of keywords with insertion-order preserved via separate `Vec`.
-- **Rayon parallel** — `contents.par_iter().map(...)` in batch mode.
-- **GIL release** — `py.allow_threads()` for batch extraction.
+- **LazyLock statics** - Compiled regex (`KEYWORD_RE`) and stopword set (`SKELETON_STOPWORDS`) are initialised once via `LazyLock` and shared across all invocations.
+- **hashbrown::HashSet** - Fast deduplication of keywords with insertion-order preserved via separate `Vec`.
+- **Rayon parallel** - `contents.par_iter().map(...)` in batch mode.
+- **GIL release** - `py.allow_threads()` for batch extraction.
 
 **Python consumers:**
-- `khora._accel.extract_keywords` — used by skeleton indexing for per-chunk keyword extraction
-- `khora._accel.extract_keywords_batch` — bulk extraction during batch ingestion
+- `khora._accel.extract_keywords` - used by skeleton indexing for per-chunk keyword extraction
+- `khora._accel.extract_keywords_batch` - bulk extraction during batch ingestion
 
 ---
 
-### `utils.rs` — Shared Utilities (1 function)
+### `utils.rs` - Shared Utilities (1 function)
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
@@ -385,14 +385,14 @@ khora_accel.configure_thread_pool(mode="ingest")  # num_cpus * 3/4
 khora_accel.configure_thread_pool(num_threads=8)
 ```
 
-Must be called before any parallel work is spawned. Rayon only allows one global pool per process — subsequent calls log a warning.
+Must be called before any parallel work is spawned. Rayon only allows one global pool per process - subsequent calls log a warning.
 
 ## Installation & Building
 
 ### Requirements
 
 - **Rust** >= 1.75 (edition 2021)
-- **maturin** — PyO3 build tool
+- **maturin** - PyO3 build tool
 - **Python** >= 3.10 with NumPy
 
 ### Build from Source
@@ -441,14 +441,14 @@ pip install khora-accel
 
 ### When It Matters
 
-- **Large-scale ingestion** (>1,000 documents) — Entity resolution and
+- **Large-scale ingestion** (>1,000 documents) - Entity resolution and
   pairwise cosine dominate; Rust's rayon parallelism provides near-linear
   scaling across cores.
-- **Skeleton indexing** — PageRank and keyword extraction run on every
+- **Skeleton indexing** - PageRank and keyword extraction run on every
   ingestion batch; Rust acceleration reduces per-batch overhead.
-- **Real-time query** — BM25 search and RRF fusion benefit from lower
+- **Real-time query** - BM25 search and RRF fusion benefit from lower
   per-query latency at scale (>10,000 indexed documents).
-- **Small workloads** (<100 documents) — The Python/NumPy tiers are
+- **Small workloads** (<100 documents) - The Python/NumPy tiers are
   generally sufficient; Rust overhead is negligible but not necessary.
 
 ### Benchmark Infrastructure
@@ -475,15 +475,15 @@ All dependencies are declared in `rust/khora-accel/Cargo.toml`:
 | Crate | Version | Purpose |
 |-------|---------|---------|
 | **pyo3** | 0.28 | Python ↔ Rust FFI, `#[pyfunction]`/`#[pyclass]` macros, `extension-module` feature for building as a Python extension |
-| **numpy** | 0.28 | Zero-copy access to NumPy arrays via `PyReadonlyArray1`/`PyReadonlyArray2` — avoids copying embedding matrices across FFI |
+| **numpy** | 0.28 | Zero-copy access to NumPy arrays via `PyReadonlyArray1`/`PyReadonlyArray2` - avoids copying embedding matrices across FFI |
 | **ndarray** | 0.17 | N-dimensional array type used internally with numpy crate for row/column access (`Array2`, `ArrayView`) |
 | **rayon** | 1.10 | Work-stealing thread-pool parallelism: `par_iter()`, `into_par_iter()`, `flat_map()` for batch operations |
-| **strsim** | 0.11 | String similarity algorithms: `normalized_levenshtein`, `jaro_winkler` — pure Rust, no C dependencies |
+| **strsim** | 0.11 | String similarity algorithms: `normalized_levenshtein`, `jaro_winkler` - pure Rust, no C dependencies |
 | **regex** | 1.10 | Compiled regular expressions for tokenisation in BM25 and keyword extraction |
-| **aho-corasick** | 1.1 | Multi-pattern string matching automaton for `detect_temporal_category` — single-pass search over ~200 categorised patterns |
-| **hashbrown** | 0.16 | High-performance `HashMap`/`HashSet` (Swiss Table algorithm) — faster than std for the access patterns here |
+| **aho-corasick** | 1.1 | Multi-pattern string matching automaton for `detect_temporal_category` - single-pass search over ~200 categorised patterns |
+| **hashbrown** | 0.16 | High-performance `HashMap`/`HashSet` (Swiss Table algorithm) - faster than std for the access patterns here |
 | **ordered-float** | 5.0 | `OrderedFloat<f64>` wrapper providing total ordering for floats, used in RRF result sorting |
-| **num_cpus** | — | CPU count detection for thread pool auto-configuration |
+| **num_cpus** | - | CPU count detection for thread pool auto-configuration |
 
 **Dev dependencies:**
 

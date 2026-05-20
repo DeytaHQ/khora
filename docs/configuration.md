@@ -41,9 +41,9 @@ Programmatic values take priority over environment variables.
 
 | Extra | Purpose | Pulls in |
 |---|---|---|
-| *(default)* | Core: PostgreSQL + pgvector + Neo4j driver + litellm | — |
+| *(default)* | Core: PostgreSQL + pgvector + Neo4j driver + litellm | - |
 | `surrealdb` | **[experimental]** Unified SurrealDB backend (embedded or remote). SDK on alpha track; KNN unreliable in embedded mode | `surrealdb>=2.0.0a1` |
-| `embedded` | Alias for `surrealdb` (zero-infrastructure path) — **experimental** | `surrealdb>=2.0.0a1` |
+| `embedded` | Alias for `surrealdb` (zero-infrastructure path) - **experimental** | `surrealdb>=2.0.0a1` |
 | `memgraph` | Memgraph via Bolt | `neo4j>=6.1.0` |
 | `neptune` | AWS Neptune via Bolt | `neo4j>=6.1.0` |
 | `neptune-iam` | Neptune with IAM SigV4 | `neo4j>=6.1.0`, `boto3` |
@@ -57,9 +57,9 @@ Programmatic values take priority over environment variables.
 | `nlp` | spaCy-based sentence splitting | `spacy>=3.8` |
 | `otel` | OpenTelemetry SDK + OTLP/HTTP exporter (vendor-neutral) | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` |
 | `otel-grpc` | `khora[otel]` + OTLP/gRPC transport | adds `opentelemetry-exporter-otlp-proto-grpc` |
-| `logfire` | Logfire — managed OTel backend with auto-bootstrap | `logfire>=4.0` |
+| `logfire` | Logfire - managed OTel backend with auto-bootstrap | `logfire>=4.0` |
 | `rust` | Rust acceleration (`khora-accel`) | `khora-accel>=0.1.0` |
-| `all-backends` | Everything graph-and-vector (no observability/nlp/rust) | — |
+| `all-backends` | Everything graph-and-vector (no observability/nlp/rust) | - |
 
 Combine extras as needed: `pip install 'khora[surrealdb,otel]'`. See
 [observability.md](observability.md) for the full env-var contract,
@@ -71,9 +71,9 @@ go.
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
-| `KHORA_DATABASE_URL` | str | — | PostgreSQL URL (shortcut for `storage.postgresql_url`). |
-| `KHORA_NEO4J_URL` | str | — | Neo4j URL (shortcut for `storage.graph.url`). |
-| `KHORA_LLM_EXTRACTION_MODEL` | str | — | Override extraction model (shortcut for `llm.extraction_model`). |
+| `KHORA_DATABASE_URL` | str | - | PostgreSQL URL (shortcut for `storage.postgresql_url`). |
+| `KHORA_NEO4J_URL` | str | - | Neo4j URL (shortcut for `storage.graph.url`). |
+| `KHORA_LLM_EXTRACTION_MODEL` | str | - | Override extraction model (shortcut for `llm.extraction_model`). |
 | `KHORA_DEBUG` | bool | `false` | Enable debug-level logging. |
 | `KHORA_ENVIRONMENT` | str | `development` | `development`, `staging`, or `production`. |
 | `KHORA_AUTH_ENABLED` | bool | `true` | Disable for local experimentation. |
@@ -86,7 +86,7 @@ Prefix: `KHORA_STORAGE_`. See [architecture/storage-backends.md](architecture/st
 | Variable | Default | Description |
 |---|---|---|
 | `KHORA_STORAGE_BACKEND` | `postgres` | `postgres` (PostgreSQL + pgvector + external graph DB), `surrealdb` (unified), or `sqlite_lance` (SQLite + LanceDB embedded). |
-| `KHORA_STORAGE_POSTGRESQL_URL` | — | PostgreSQL connection URL. |
+| `KHORA_STORAGE_POSTGRESQL_URL` | - | PostgreSQL connection URL. |
 | `KHORA_STORAGE_POSTGRESQL_POOL_SIZE` | `50` | asyncpg pool size. |
 | `KHORA_STORAGE_POSTGRESQL_MAX_OVERFLOW` | `30` | Max overflow connections. |
 | `KHORA_STORAGE_POSTGRESQL_POOL_PRE_PING` | `false` | Validate connections before checkout (adds latency, prevents stale-connection errors). |
@@ -101,7 +101,7 @@ Graph and vector backends nest under `storage.graph` and `storage.vector`. The f
 
 With any OTel backend installed (`[otel]` or `[logfire]`), the Neo4j
 backend emits OTel metrics automatically (counter, histogram, observable
-gauges — see [observability.md](observability.md)). For high-frequency
+gauges - see [observability.md](observability.md)). For high-frequency
 sub-minute sampling enable:
 
 ```bash
@@ -114,7 +114,7 @@ KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS=500    # clamped to [50, 60000]
 `Relationship.source_document_ids` and `Relationship.source_chunk_ids`
 are append-bounded on every `MERGE` to prevent unbounded growth on
 hot edges. Defaults (100 / 250) preserve pre-#737 behavior; deep-provenance
-workloads — many documents contributing to the same edge — should raise the
+workloads - many documents contributing to the same edge - should raise the
 relevant knob and watch the `khora.neo4j.relationship.source_id_truncated`
 counter (labels: `field`, `kind`):
 
@@ -132,7 +132,7 @@ affected, and configured limit. Issue #737.
 
 The Chronicle engine can run on either PostgreSQL + pgvector (default) or
 SQLite + LanceDB. The LanceDB path is composed from the existing
-`sqlite_lance` storage backend — chunk metadata and FTS5 live in SQLite,
+`sqlite_lance` storage backend - chunk metadata and FTS5 live in SQLite,
 embeddings live in a sibling LanceDB directory. Pick it via the constructor:
 
 ```python
@@ -148,7 +148,7 @@ engine = ChronicleEngine(
 await engine.connect()  # runs Alembic migrations against the SQLite file
 ```
 
-Or set it globally via the storage backend selector — Chronicle will
+Or set it globally via the storage backend selector - Chronicle will
 inherit the choice when no `storage_backend` argument is passed:
 
 ```bash
@@ -158,7 +158,7 @@ KHORA_STORAGE_SQLITE_LANCE__EMBEDDING_DIMENSION=1536
 ```
 
 Install with `pip install 'khora[sqlite-lance]'` (pulls in `aiosqlite` and
-`lancedb`). The pgvector path is unchanged for existing deployments —
+`lancedb`). The pgvector path is unchanged for existing deployments -
 omit `storage_backend` to get the original behavior.
 
 ## Embedded backends (experimental)
@@ -167,7 +167,7 @@ The embedded paths (`sqlite_lance` and `surrealdb`) are marked **experimental**.
 
 ### SQLite + LanceDB (recommended embedded stack)
 
-Documented scale ceiling — performance and recall degrade noticeably above these thresholds:
+Documented scale ceiling - performance and recall degrade noticeably above these thresholds:
 
 - **~1M chunks** (LanceDB IVF-PQ training time + write serialisation start to dominate)
 - **~100k entities** (recursive-CTE traversal cost on hub nodes)
@@ -176,9 +176,9 @@ Documented scale ceiling — performance and recall degrade noticeably above the
 
 Known gaps and warts:
 
-- **Partial atomicity in `coordinator.transaction()`** — only the SQL session is enrolled; LanceDB writes happen post-commit with compensating-delete-on-failure. A crash between SQLite commit and Lance write can leave orphaned vectors or missing embeddings; reconciliation runs on the next ingest.
+- **Partial atomicity in `coordinator.transaction()`** - only the SQL session is enrolled; LanceDB writes happen post-commit with compensating-delete-on-failure. A crash between SQLite commit and Lance write can leave orphaned vectors or missing embeddings; reconciliation runs on the next ingest.
 - **Point-in-time queries are not supported** on the embedded stack. The CTE port does not expose the equivalent of pgvector's PIT semantics.
-- **FTS5 covers chunks only** — entity-anchored recall falls back to `LIKE` / JSON-equality. Recommend the PostgreSQL stack for entity-heavy corpora.
+- **FTS5 covers chunks only** - entity-anchored recall falls back to `LIKE` / JSON-equality. Recommend the PostgreSQL stack for entity-heavy corpora.
 - **Install footprint** is ~130–180 MB unpacked (pyarrow + lancedb native + Arrow C++ runtime). "Embedded" means "no server", not "no native deps".
 - **IVF-PQ retraining** is automatic when the corpus grows past `retrain_factor × (rows at last training)`. Tune via `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` (see below).
 
@@ -199,14 +199,14 @@ Vector index tuning fields on the `sqlite_lance` storage config:
 
 The SurrealDB backend is feature-complete (relational + vector + graph + KV in a single store) but is **experimental**:
 
-- Python SDK is pinned to `>=2.0.0a1` — alpha track for SurrealDB 3.x compatibility.
+- Python SDK is pinned to `>=2.0.0a1` - alpha track for SurrealDB 3.x compatibility.
 - KNN expression `<|K|>` is unreliable in embedded mode; the backend falls back to brute-force cosine + HNSW.
 - Concurrent upserts require the `_SurrealDBEntityKeyGate` to serialise on `(namespace_id, name, entity_type)` keys.
-- BSL-1.1 license — review for downstream packaging concerns before adopting.
+- BSL-1.1 license - review for downstream packaging concerns before adopting.
 
-Connection schemes: `memory://` (in-process), `surrealkv://...` (embedded file), `ws://...` (remote). Note: `Khora("memory://")` does **not** route to SurrealDB today — the positional argument is treated as the PostgreSQL `database_url`. Set `KHORA_STORAGE_BACKEND=surrealdb` and the relevant `KHORA_STORAGE_SURREALDB_*` settings explicitly.
+Connection schemes: `memory://` (in-process), `surrealkv://...` (embedded file), `ws://...` (remote). Note: `Khora("memory://")` does **not** route to SurrealDB today - the positional argument is treated as the PostgreSQL `database_url`. Set `KHORA_STORAGE_BACKEND=surrealdb` and the relevant `KHORA_STORAGE_SURREALDB_*` settings explicitly.
 
-Remote (`ws://`) mode supports atomic multi-statement transactions via `conn.transaction()` since v0.12.0. Embedded (`surrealkv://`) and memory (`memory://`) modes are per-statement atomic only — `transaction()` is a no-op there, and multi-statement atomicity is approximated by `execute_batch()` (joins statements with `;`). See [architecture/storage-backends.md](architecture/storage-backends.md#surrealdb) for the capability matrix.
+Remote (`ws://`) mode supports atomic multi-statement transactions via `conn.transaction()` since v0.12.0. Embedded (`surrealkv://`) and memory (`memory://`) modes are per-statement atomic only - `transaction()` is a no-op there, and multi-statement atomicity is approximated by `execute_batch()` (joins statements with `;`). See [architecture/storage-backends.md](architecture/storage-backends.md#surrealdb) for the capability matrix.
 
 ## LLM
 
@@ -223,7 +223,7 @@ Prefix: `KHORA_LLM_`. LiteLLM handles the provider dispatch.
 | `KHORA_LLM_MAX_CONCURRENT_LLM_CALLS` | `10` | Cap on concurrent in-flight LLM requests. |
 | `KHORA_LLM_EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model. |
 | `KHORA_LLM_EMBEDDING_DIMENSION` | `1536` | Must match your DB schema. |
-| `KHORA_LLM_EXTRACTION_MODEL` | — | Override extraction model (falls back to `model`). Haiku / Gemini Flash work well here. |
+| `KHORA_LLM_EXTRACTION_MODEL` | - | Override extraction model (falls back to `model`). Haiku / Gemini Flash work well here. |
 
 ## Pipeline (extraction)
 
@@ -259,7 +259,7 @@ Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retr
 | `KHORA_QUERY_KEYWORD_WEIGHT` | `0.2` | Fusion weight. |
 | `KHORA_QUERY_APPLY_RECENCY_BIAS` | `false` | Bias scoring towards newer documents. |
 | `KHORA_QUERY_RECENCY_WEIGHT` | `0.2` | How strong the recency bias is. |
-| `KHORA_QUERY_ENABLE_HYDE` | `auto` | HyDE query expansion: `auto` / `always` / `never` (legacy booleans normalize to `always` / `never`). RECENCY / STATE_QUERY / CHANGE queries automatically get a time-anchored prompt — see [temporal-queries.md](query-engine/temporal-queries.md#temporal-anchored-hyde). |
+| `KHORA_QUERY_ENABLE_HYDE` | `auto` | HyDE query expansion: `auto` / `always` / `never` (legacy booleans normalize to `always` / `never`). RECENCY / STATE_QUERY / CHANGE queries automatically get a time-anchored prompt - see [temporal-queries.md](query-engine/temporal-queries.md#temporal-anchored-hyde). |
 | `KHORA_QUERY_HYDE_NUM_HYPOTHETICALS` | `1` | Number of hypothetical documents to generate (1–5). |
 | `KHORA_QUERY_ENABLE_HYDE_CYPHER` | `false` | **v0.12.0, opt-in.** Run LLM-picked parameterized Cypher templates as an extra retrieval channel for structured RECENCY queries. See [retrieval-tuning.md](query-engine/retrieval-tuning.md). |
 | `KHORA_QUERY_HYDE_CYPHER_LIMIT` | `20` | Max entities returned per HyDE-Cypher template execution. |
@@ -279,7 +279,7 @@ Prefix: `KHORA_TENANCY_`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `KHORA_TELEMETRY_DATABASE_URL` | — | PostgreSQL URL for the telemetry collector. If unset, the no-op collector is used (zero cost). |
+| `KHORA_TELEMETRY_DATABASE_URL` | - | PostgreSQL URL for the telemetry collector. If unset, the no-op collector is used (zero cost). |
 | `KHORA_TELEMETRY_SERVICE_NAME` | `khora` | Service tag attached to events. |
 
 The `@trace` decorator and `trace_span()` context manager in
@@ -291,15 +291,15 @@ the OTLP env-var contract.
 
 ## Logging
 
-Khora uses loguru. Call `khora.logging_config.setup_logging()` once per process (or configure your own sinks with `enqueue=True`). See the Logging section of [CLAUDE.md](../CLAUDE.md) for the full rationale — short version: default loguru sinks are synchronous and will block an asyncio event loop on every `logger.*` call.
+Khora uses loguru. Call `khora.logging_config.setup_logging()` once per process (or configure your own sinks with `enqueue=True`). See the Logging section of [CLAUDE.md](../CLAUDE.md) for the full rationale - short version: default loguru sinks are synchronous and will block an asyncio event loop on every `logger.*` call.
 
 | Variable | Default | Description |
 |---|---|---|
-| `KHORA_NEO4J_LOG_LEVEL` | — | Neo4j driver log level (`DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`, case-insensitive). Unset = no-op. See `examples/neo4j_debug_logging.py`. |
+| `KHORA_NEO4J_LOG_LEVEL` | - | Neo4j driver log level (`DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`, case-insensitive). Unset = no-op. See `examples/neo4j_debug_logging.py`. |
 
 ## Secrets
 
-API keys (OpenAI, Anthropic, etc.) are read from the environment variable named by `KHORA_LLM_API_KEY_ENV` (default `OPENAI_API_KEY`). Khora never reads credentials from disk. Rotate at the environment level — no restart is required beyond whatever your process manager provides.
+API keys (OpenAI, Anthropic, etc.) are read from the environment variable named by `KHORA_LLM_API_KEY_ENV` (default `OPENAI_API_KEY`). Khora never reads credentials from disk. Rotate at the environment level - no restart is required beyond whatever your process manager provides.
 
 ### SecretStr-typed credential fields
 
@@ -327,7 +327,7 @@ dsn = cfg.storage.postgresql_url.get_secret_value()   # cleartext, for engine in
 ## Lockfile policy
 
 khora's `pyproject.toml` includes
-`[tool.uv] exclude-newer = "7 days"` — a relative, evaluated-on-every-sync
+`[tool.uv] exclude-newer = "7 days"` - a relative, evaluated-on-every-sync
 guard against pulling brand-new upstream releases that haven't had
 time to stabilise. Security-critical packages opt out via
 `exclude-newer-package` (currently only `urllib3` for CVE-2026-44431 /

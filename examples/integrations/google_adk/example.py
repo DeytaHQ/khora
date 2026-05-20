@@ -1,4 +1,4 @@
-"""Google ADK + khora example — long-term memory via ``KhoraMemoryService``.
+"""Google ADK + khora example - long-term memory via ``KhoraMemoryService``.
 
 Runs without Postgres, Neo4j, or an API key. The mock LLM patches
 ``litellm.acompletion`` / ``litellm.aembedding`` so the example is
@@ -54,7 +54,7 @@ async def main() -> None:
         memory = KhoraMemoryService(kb=kb)
 
         # Build a session with a couple of conversational turns. In a real
-        # ADK app this Session is produced by SessionService — here we
+        # ADK app this Session is produced by SessionService - here we
         # synthesise it so the example stays self-contained.
         now = time.time()
         session = Session(

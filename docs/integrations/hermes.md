@@ -9,7 +9,7 @@
 
 `khora.integrations.hermes` plugs khora into Hermes as a long-term
 memory plane. Hermes owns the agent loop, the model call, the tool
-router, and the context-compression policy; khora owns the storage —
+router, and the context-compression policy; khora owns the storage -
 vector recall, entity graph, temporal-aware retrieval, abstention
 signals.
 
@@ -79,7 +79,7 @@ provider = KhoraMemoryProvider(kb=kb)
 ```
 
 `kb` is REQUIRED. The factory does not silently call `Khora.shared()`
-— adapter lifecycle is the caller's problem. The example plugin is
+- adapter lifecycle is the caller's problem. The example plugin is
 the only place `Khora.shared()` is wired in.
 
 ## Namespace mapping
@@ -96,7 +96,7 @@ def derive_namespace_uuid(agent_identity: str, session_id: str) -> UUID:
     return uuid5(UUID_NAMESPACE_HERMES, f"hermes:{agent_identity}:{session_id}")
 ```
 
-`agent_identity` is the tenancy key — different agents stay isolated
+`agent_identity` is the tenancy key - different agents stay isolated
 even when they share a `session_id`. The session id is the
 conversation scope; switching sessions for the same agent (via
 `on_session_switch`) re-binds the provider to a fresh namespace.
@@ -123,16 +123,16 @@ session) onto khora's async write path. The substrate lives in
   `(namespace_id, session_id, bounded_text_hash(query))` absorbs the
   "prefetch on every turn" pattern without firing N concurrent
   recalls for the same question. The cache slot is populated with
-  the in-flight `Future` _before_ the worker submits — readers
+  the in-flight `Future` _before_ the worker submits - readers
   arriving mid-flight wait on the same Future instead of racing.
 - **Shed-oldest** when the queue is at `queue_max_size`. The oldest
   pending Future is cancelled and `khora.hermes.queue.shed_total` is
-  incremented. WARN log fires at most once per 10 seconds — sustained
+  incremented. WARN log fires at most once per 10 seconds - sustained
   shedding indicates ingest throughput cannot keep up.
 - **Bounded error ring** (16 entries, each truncated to 200 chars).
   `failure_rate_pct()` powers the WARN at `on_session_end` when the
   ratio exceeds `failure_threshold_pct`. The ring is the operator's
-  forensic surface — no raw exception text on spans (cardinality
+  forensic surface - no raw exception text on spans (cardinality
   rule).
 - **Cache coherency on failure**: if a recall Future raises, the
   cache slot is dropped so the next caller retries instead of pinning
@@ -153,7 +153,7 @@ Honest caveats:
   `<memory-context>` block rather than blocking the turn. Better an
   empty context than a stalled agent.
 - **Fork safety is a follow-up** (#790). Don't `os.fork()` after
-  constructing a provider — the executor and bridge loop don't survive.
+  constructing a provider - the executor and bridge loop don't survive.
 
 ## Tool calls
 
@@ -162,8 +162,8 @@ Two LLM-callable tools. Hermes registers both via
 
 | Tool | When the LLM picks it | Returns |
 |---|---|---|
-| `memory_search` | "What did Alice say about Phoenix?" — pure semantic recall. | Top-K chunks + entity hits formatted as a `<memory-context>` block. |
-| `memory_recall` | "What did we discuss last week?" — same plus `before` / `after` ISO 8601 bounds. | Same shape, filtered by the time window. |
+| `memory_search` | "What did Alice say about Phoenix?" - pure semantic recall. | Top-K chunks + entity hits formatted as a `<memory-context>` block. |
+| `memory_recall` | "What did we discuss last week?" - same plus `before` / `after` ISO 8601 bounds. | Same shape, filtered by the time window. |
 
 Both tools accept `query` (required, non-empty), `top_k` (default 10,
 hard cap 50), and `min_similarity` (default 0.1, range [0.0, 1.0]).
@@ -172,10 +172,10 @@ raises a `ValueError` back to the model.
 
 The returned `<memory-context>` block lists up to five chunks ranked
 by score, each prefixed with `[score: X.XX, YYYY-MM-DD]` and capped
-at 500 characters. Empty result → `"No prior memories found."` —
+at 500 characters. Empty result → `"No prior memories found."` -
 the explicit abstention payload, so the model knows not to confabulate.
 
-Tool dispatch is the blocking path (via `runtime.dispatch_sync`) —
+Tool dispatch is the blocking path (via `runtime.dispatch_sync`) -
 the LLM is already waiting on a tool result, so we serve real data
 even if it means waiting on the FIFO queue.
 
@@ -185,7 +185,7 @@ All constructor kwargs on `KhoraMemoryProvider`:
 
 | arg | default | notes |
 |---|---|---|
-| `kb` | — | REQUIRED. A connected `Khora` instance. |
+| `kb` | - | REQUIRED. A connected `Khora` instance. |
 | `runtime` | `None` | Inject a custom `_KhoraRuntime` (tests only). |
 | `prefetch_timeout_s` | `0.8` | Upper bound on `prefetch()`. On timeout, returns the abstention payload. Raise for slow backends; lower if your agent's turn budget is tight. |
 | `prefetch_cache_ttl_s` | `30.0` | Lifetime of a cached recall. Raise when the same question repeats often; lower when freshness matters more than dedup. |
@@ -209,7 +209,7 @@ All under the public stability tag in `docs/telemetry-contract.json`:
 
 **Cardinality rule** (CLAUDE.md): no `namespace_id` label on any
 metric. Free-text values (queries, content) appear only as
-`bounded_text_hash` span attributes — never as labels, never raw.
+`bounded_text_hash` span attributes - never as labels, never raw.
 
 Dashboards / alerting hooks live alongside the rest of the khora
 telemetry surface; the same OTel exporter chain picks these up
@@ -219,17 +219,17 @@ without extra wiring.
 
 The block below is byte-identical to
 [`examples/integrations/hermes/example.py`](../../examples/integrations/hermes/example.py)
-— CI fails if they diverge.
+- CI fails if they diverge.
 
 ```python title="example.py"
-"""Hermes + khora example — long-term memory via ``KhoraMemoryProvider``.
+"""Hermes + khora example - long-term memory via ``KhoraMemoryProvider``.
 
 Runs without Postgres, Neo4j, ``hermes-agent``, or an API key. The mock
 LLM patches ``litellm.acompletion`` / ``litellm.aembedding`` so the
 example is hermetic. The khora fixture spins up an in-memory
 ``sqlite_lance`` backend in a tmp dir.
 
-The example does NOT spin up a real Hermes runtime — that would pull in
+The example does NOT spin up a real Hermes runtime - that would pull in
 ``hermes-agent`` (and its ``requests==2.33.0`` pin which clashes with
 khora's CVE-2026-25645 floor). Instead we stand up a minimal stand-in
 for Hermes's ``MemoryProvider`` ABC so ``KhoraMemoryProvider`` builds
@@ -241,7 +241,7 @@ Lifecycle exercised: ``initialize`` → ``queue_prefetch`` → ``sync_turn``
 ``handle_tool_call("memory_search")`` (blocking dispatch, real result)
 → ``on_pre_compress`` → ``on_session_end`` (drain) → ``shutdown``.
 
-Kept light (3 turns) to fit the 30s CI smoke budget — every
+Kept light (3 turns) to fit the 30s CI smoke budget - every
 ``sync_turn`` triggers a full extraction pipeline that retries 3× on
 the mock LLM's non-JSON output.
 """
@@ -288,7 +288,7 @@ async def main() -> None:
     install_mock_llm()
 
     async with embedded_khora() as kb:
-        # 1) Build the provider. ``kb`` is REQUIRED — no Khora.shared()
+        # 1) Build the provider. ``kb`` is REQUIRED - no Khora.shared()
         #    fallback in the factory; the example plugin dir is the
         #    only place that defaults to it.
         provider = KhoraMemoryProvider(kb=kb, drain_timeout_s=20.0)
@@ -310,22 +310,22 @@ async def main() -> None:
         provider.queue_prefetch("What did Alice say about Phoenix?")
 
         # 4) Persist three conversation turns. ``sync_turn`` returns
-        #    immediately — the runtime owns the actual kb.remember call
+        #    immediately - the runtime owns the actual kb.remember call
         #    and writes serialise in submission order (FIFO worker).
         provider.sync_turn(
             "Alice picked PostgreSQL for the Phoenix database.",
-            "Got it — PostgreSQL for Phoenix.",
+            "Got it - PostgreSQL for Phoenix.",
         )
         provider.sync_turn(
             "Bob said the release window is March 2026.",
-            "Noted — Phoenix launches in March 2026.",
+            "Noted - Phoenix launches in March 2026.",
         )
         provider.sync_turn(
             "Alice mentioned the team grew to 12 engineers.",
             "Acknowledged: team size is 12.",
         )
 
-        # 5) prefetch() is the LLM hot path — bounded by
+        # 5) prefetch() is the LLM hot path - bounded by
         #    prefetch_timeout_s (default 0.8s). With writes still
         #    in-flight it returns the abstention payload rather than
         #    blocking the model. This is by design: better an empty
@@ -334,7 +334,7 @@ async def main() -> None:
         print("--- prefetch (hot path, writes still queued) ---")
         print(cold.strip())
 
-        # 6) Tool dispatch is the blocking path — the LLM is already
+        # 6) Tool dispatch is the blocking path - the LLM is already
         #    waiting on a tool result so we serve real data. The
         #    runtime FIFO ensures the writes drain before recall runs.
         result = provider.handle_tool_call(
@@ -349,7 +349,7 @@ async def main() -> None:
         #    pairs the caller surfaces.
         provider.on_pre_compress(
             messages=[
-                {"role": "user", "content": "One more thing — Carol joined the Phoenix team."},
+                {"role": "user", "content": "One more thing - Carol joined the Phoenix team."},
                 {"role": "assistant", "content": "Carol joined Phoenix. Team is now 13."},
             ]
         )
@@ -359,7 +359,7 @@ async def main() -> None:
         #    don't race ``kb.disconnect()``.
         provider.on_session_end(messages=[])
 
-        # 9) Tear down the runtime. Idempotent — safe even if
+        # 9) Tear down the runtime. Idempotent - safe even if
         #    on_session_end already shut things down internally.
         provider.shutdown()
 
@@ -376,7 +376,7 @@ The block above is enforced byte-identical against
 
 Tagged **experimental**. The Hermes `MemoryProvider` ABC is still
 pre-1.0; we expect rework per upstream minor. The adapter pin is
-`hermes-agent>=0.13,<0.14` — one minor wide. Bump in a deliberate PR
+`hermes-agent>=0.13,<0.14` - one minor wide. Bump in a deliberate PR
 per upstream minor; the nightly skew job flags breakage against the
 latest tagged minor.
 
@@ -392,7 +392,7 @@ adapter requires no API change to track it.
   `hermes-agent` themselves and accept the lower `requests` version
   in their resolver, or fork the upstream pin.
 - **Fork safety (#790).** Constructing a provider before `os.fork()`
-  is unsupported — the FIFO executor and the `run_sync` bridge loop
+  is unsupported - the FIFO executor and the `run_sync` bridge loop
   don't survive the fork. Build providers in worker processes after
   the fork.
 - **Plugin discovery is filesystem-based.** Hermes scans

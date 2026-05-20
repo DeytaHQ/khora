@@ -16,8 +16,8 @@ user sees the same memory.
 
 ## Scope (v0.13)
 
-- `KhoraStore` — semantic long-term memory store. **Shipped.**
-- `KhoraCheckpointer` — **NOT shipped**. LangGraph's
+- `KhoraStore` - semantic long-term memory store. **Shipped.**
+- `KhoraCheckpointer` - **NOT shipped**. LangGraph's
   `PostgresSaver` (in `langgraph-postgres`) already covers the
   opaque-blob checkpoint surface and khora offers no differentiator
   there. Revisit only if a single-DB-dependency story matters to a
@@ -37,15 +37,15 @@ without any explicit registration.
 
 | arg | default | notes |
 | --- | --- | --- |
-| `kb` | — | A connected `Khora` instance. Adapter does NOT own the lifecycle. |
-| `user_id` | — | Required, ≥ 8 chars, not in `{"", "default", "anon", "anonymous", "user", "test"}`. Disaster-mode prevention per #618. |
+| `kb` | - | A connected `Khora` instance. Adapter does NOT own the lifecycle. |
+| `user_id` | - | Required, ≥ 8 chars, not in `{"", "default", "anon", "anonymous", "user", "test"}`. Disaster-mode prevention per #618. |
 | `namespace_root` | `"user_id"` | Bucket key under which this app's LangGraph namespaces live. |
 | `app_id` | `"langgraph"` | Free-form app identifier stamped into stored metadata. |
 | `namespace_sep` | `"/"` | Single-character separator used to flatten tuple namespaces. Must not appear in any tuple segment. |
-| `index_config` | `None` | Optional LangGraph `IndexConfig`. Only `dims` is consulted — must match khora's embedder dim or construction raises. |
+| `index_config` | `None` | Optional LangGraph `IndexConfig`. Only `dims` is consulted - must match khora's embedder dim or construction raises. |
 | `skill_name` | `"general_entities"` | khora extraction skill name forwarded to `remember`. |
 | `entity_types` | `[]` | Extraction whitelist. Empty list disables extraction (pure KV blob mode). |
-| `relationship_types` | `[]` | Same — empty disables. |
+| `relationship_types` | `[]` | Same - empty disables. |
 
 ## Method semantics
 
@@ -66,7 +66,7 @@ methods. From a notebook or sync script, use the sync ones.
   scan. `filter` is applied client-side (exact match only in v1).
 - `adelete` → `Khora.forget`. Missing keys are a silent no-op,
   matching `InMemoryStore` semantics.
-- `alist_namespaces` — list documents in the bound khora namespace and
+- `alist_namespaces` - list documents in the bound khora namespace and
   aggregate distinct `lg_namespace` tuples. **O(N_documents)** scan;
   acceptable for bounded LangGraph workloads. Track a dedicated
   table at >= O(10⁴) docs.
@@ -74,17 +74,17 @@ methods. From a notebook or sync script, use the sync ones.
 
 ### Ignored kwargs
 
-- `ttl` (per-item) — khora has no per-item TTL. The adapter accepts it
+- `ttl` (per-item) - khora has no per-item TTL. The adapter accepts it
   to satisfy the interface and emits one `RuntimeWarning` per
   `KhoraStore` instance. Use `Khora.forget_session` for bulk cleanup.
-- `index=False` — khora always embeds. The adapter accepts the kwarg
+- `index=False` - khora always embeds. The adapter accepts the kwarg
   and emits one `RuntimeWarning` per `KhoraStore` instance; items
   remain retrievable.
 
 ## Quickstart
 
 ```python title="example.py"
-"""LangGraph + khora example — long-term memory via ``KhoraStore``.
+"""LangGraph + khora example - long-term memory via ``KhoraStore``.
 
 Runs without Postgres, Neo4j, or an API key. The mock LLM patches
 ``litellm.acompletion`` / ``litellm.aembedding`` so the example is
@@ -151,10 +151,10 @@ The block above is enforced byte-identical against
 
 ## Limits and future work
 
-- Filter operators (`$gt`, `$lt`, ...) — v1 supports exact match only.
+- Filter operators (`$gt`, `$lt`, ...) - v1 supports exact match only.
   Operator support is a clean addition behind a feature flag.
-- `alist_namespaces` SQL pushdown — the current O(N) scan is fine for
+- `alist_namespaces` SQL pushdown - the current O(N) scan is fine for
   typical workloads but not for hot multi-tenant deployments. A
   `SELECT DISTINCT metadata->'lg_namespace'` helper on the storage
   layer would fix it.
-- Checkpointer — explicit non-goal (see "Scope" above).
+- Checkpointer - explicit non-goal (see "Scope" above).

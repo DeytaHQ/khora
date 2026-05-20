@@ -266,7 +266,7 @@ cfg = KhoraConfig(
     ),
 )
 
-# Split credentials (URL and password managed separately — e.g. password
+# Split credentials (URL and password managed separately - e.g. password
 # sourced from a secrets manager, URL from service discovery)
 cfg = KhoraConfig(
     database_url="postgresql://user:pass@localhost:5432/khora",
@@ -291,7 +291,7 @@ Why? Different query patterns:
 - **Neo4j**: "Who works with Einstein?" → Graph traversal
 - **pgvector**: "Find entities similar to this description" → Embedding similarity
 
-When you create an entity, the `StorageCoordinator` stores it in both places. For updates and batch upserts, writes to graph and vector backends run in parallel via `asyncio.gather` — since neither backend depends on the other's result. Both calls carry the caller's `namespace_id` so the underlying SQL / Cypher filters the row at the query layer:
+When you create an entity, the `StorageCoordinator` stores it in both places. For updates and batch upserts, writes to graph and vector backends run in parallel via `asyncio.gather` - since neither backend depends on the other's result. Both calls carry the caller's `namespace_id` so the underlying SQL / Cypher filters the row at the query layer:
 
 ```python
 async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
@@ -331,7 +331,7 @@ results = await coordinator.search_similar_chunks(
     limit=10,
 )
 
-# Get entity neighborhood — namespace_id is required, kwarg-only
+# Get entity neighborhood - namespace_id is required, kwarg-only
 neighborhood = await coordinator.get_neighborhood(
     entity_id,
     namespace_id=namespace_id,
@@ -343,16 +343,16 @@ await coordinator.disconnect()
 
 ### Namespace-scoped reads and writes (v0.16.0)
 
-Every read, exists-check, and mutation method on each storage backend Protocol takes `*, namespace_id: UUID` as a required keyword-only parameter and filters at the SQL / Cypher / SurrealQL layer. The namespace is **never** post-checked against a returned row — when an id belongs to a different namespace, the backend returns `None` / an empty result / `False` straight from the query. The full surface tightened in PRs #761, #765, #766, #769:
+Every read, exists-check, and mutation method on each storage backend Protocol takes `*, namespace_id: UUID` as a required keyword-only parameter and filters at the SQL / Cypher / SurrealQL layer. The namespace is **never** post-checked against a returned row - when an id belongs to a different namespace, the backend returns `None` / an empty result / `False` straight from the query. The full surface tightened in PRs #761, #765, #766, #769:
 
-- **Reads** — `get_document(_s_batch)`, `get_document_sources_batch`, `get_document_projections_batch`, `get_document_by_external_id`, `get_documents_by_external_ids`, `get_chunk(_s_batch)`, `get_chunks_by_document`, `entity_exists`, vector `get_entity` / `get_entities_batch`, graph `get_entity(_ies_batch)`, `get_relationship`, `get_episode`, `get_entity_relationships`, `get_neighborhood(_s_batch)`, `find_paths`, `get_temporal_neighbors`, event store `get_events_for_resource`, `get_latest_event`.
-- **Writes** — `delete_document`, `delete_chunks_by_document`, `update_entity`, `update_entity_embedding(_s_batch)`, `delete_entities_batch`, `delete_relationships_batch`, `supersede_fact`, `delete_entity`, `delete_relationship`. Neo4j additionally hardens `retire_orphaned_relationships_batch` and `remap_source_document_ids_batch` against cross-namespace effect.
+- **Reads** - `get_document(_s_batch)`, `get_document_sources_batch`, `get_document_projections_batch`, `get_document_by_external_id`, `get_documents_by_external_ids`, `get_chunk(_s_batch)`, `get_chunks_by_document`, `entity_exists`, vector `get_entity` / `get_entities_batch`, graph `get_entity(_ies_batch)`, `get_relationship`, `get_episode`, `get_entity_relationships`, `get_neighborhood(_s_batch)`, `find_paths`, `get_temporal_neighbors`, event store `get_events_for_resource`, `get_latest_event`.
+- **Writes** - `delete_document`, `delete_chunks_by_document`, `update_entity`, `update_entity_embedding(_s_batch)`, `delete_entities_batch`, `delete_relationships_batch`, `supersede_fact`, `delete_entity`, `delete_relationship`. Neo4j additionally hardens `retire_orphaned_relationships_batch` and `remap_source_document_ids_batch` against cross-namespace effect.
 
 The coordinator's public `coordinator.{relational,vector,graph,event_store}` attributes are now wrapped in a `NamespaceRequiredProxy` (see `src/khora/storage/_namespace_proxy.py`) that:
 
-1. Emits one `DeprecationWarning` per role per process on first access — direct backend access is deprecated; use the coordinator's facade methods.
+1. Emits one `DeprecationWarning` per role per process on first access - direct backend access is deprecated; use the coordinator's facade methods.
 2. Refuses to dispatch any of the namespace-scoped read methods listed above unless the caller passes `namespace_id=…` (raises `TypeError`).
-3. Does not forward access to underscore-prefixed attributes — backend internals such as `_engine`, `_handle`, `_conn`, `_session_factory` are only reachable via the private `coord._{role}` accessors used by coordinator internals.
+3. Does not forward access to underscore-prefixed attributes - backend internals such as `_engine`, `_handle`, `_conn`, `_session_factory` are only reachable via the private `coord._{role}` accessors used by coordinator internals.
 
 The public `coordinator.{relational,vector,graph,event_store}` attributes are scheduled for removal in v0.17. Internal coordinator code uses `self._{role}` directly.
 
@@ -373,7 +373,7 @@ print(f"Overall: {'healthy' if health.is_healthy else 'degraded'}")
 
 ## Shared Connection Pools
 
-When multiple backends point at the same database — the common case where PostgreSQL, pgvector, and the event store all share one URL — `StorageFactory` avoids creating redundant connection pools.
+When multiple backends point at the same database - the common case where PostgreSQL, pgvector, and the event store all share one URL - `StorageFactory` avoids creating redundant connection pools.
 
 `StorageFactory.get_or_create_engine()` normalizes the database URL (stripping query parameters and trailing slashes) and caches `AsyncEngine` instances by the normalized key. The first backend to request an engine for a given URL creates it; subsequent backends receive the same engine instance.
 
@@ -389,7 +389,7 @@ event_engine = factory.get_or_create_engine(config.postgresql_url)
 assert pg_engine is vec_engine is event_engine  # True
 ```
 
-This reduces the total number of database connections from 3× pool size to 1× pool size. Backends that share an engine skip `dispose()` on disconnect to avoid pulling the pool out from under siblings — only the last backend to disconnect disposes the engine.
+This reduces the total number of database connections from 3× pool size to 1× pool size. Backends that share an engine skip `dispose()` on disconnect to avoid pulling the pool out from under siblings - only the last backend to disconnect disposes the engine.
 
 ## Transactions
 
@@ -415,8 +415,8 @@ async with coordinator.transaction() as txn:
 ```
 
 The `TransactionContext` returned by `transaction()` exposes:
-- `txn.session` — the active `AsyncSession` to pass to backend write methods
-- `txn.savepoint()` — create a nested savepoint for partial rollback
+- `txn.session` - the active `AsyncSession` to pass to backend write methods
+- `txn.savepoint()` - create a nested savepoint for partial rollback
 
 Backend write methods accept an optional `session` parameter. When provided, they join the existing transaction instead of creating their own.
 
@@ -444,11 +444,11 @@ ON CREATE SET n.id = e.id, n.description = e.description, ...
 ON MATCH SET n.description = e.description, n.updated_at = e.updated_at, ...
 ```
 
-**Concurrent batch coordination**: Non-overlapping entity batches run concurrently (up to `entity_write_concurrency`, default 12), but batches that share entity keys are automatically serialized by `_EntityKeyGate` to avoid Neo4j lock contention. A key is the `(namespace_id, name, entity_type)` triple — the same triple used in the `MERGE` clause. This means two batches touching completely different entities proceed in parallel, while two batches that both contain "Microsoft/ORGANIZATION" are queued so only one MERGE transaction runs at a time for that key.
+**Concurrent batch coordination**: Non-overlapping entity batches run concurrently (up to `entity_write_concurrency`, default 12), but batches that share entity keys are automatically serialized by `_EntityKeyGate` to avoid Neo4j lock contention. A key is the `(namespace_id, name, entity_type)` triple - the same triple used in the `MERGE` clause. This means two batches touching completely different entities proceed in parallel, while two batches that both contain "Microsoft/ORGANIZATION" are queued so only one MERGE transaction runs at a time for that key.
 
 **How `_EntityKeyGate` works**: The gate maintains a `dict[tuple, asyncio.Lock]` mapping entity keys to locks. Before a batch write, the coordinator extracts all entity keys from the batch, acquires the lock for each key (in sorted order to prevent deadlocks), and releases them after the write completes. Locks for keys that are no longer in use are pruned periodically to prevent unbounded memory growth.
 
-**PostgreSQL implementation** uses a single multi-row `INSERT ... ON CONFLICT DO UPDATE` — all entities in one SQL statement rather than individual inserts.
+**PostgreSQL implementation** uses a single multi-row `INSERT ... ON CONFLICT DO UPDATE` - all entities in one SQL statement rather than individual inserts.
 
 ### Relationship Batch Create
 
@@ -517,7 +517,7 @@ class GraphBackendProtocol(Protocol):
 
 This means you can swap pgvector for SurrealDB, or Neo4j for Memgraph, without changing the rest of the system. The protocols define the contract; implementations fulfill it.
 
-Backend internals — connection handles, session factories, raw drivers — are reachable only through underscore-prefixed names (`_engine`, `_handle`, `_conn`, `_session_factory`); the deprecation proxy on `StorageCoordinator` does not forward them to external callers.
+Backend internals - connection handles, session factories, raw drivers - are reachable only through underscore-prefixed names (`_engine`, `_handle`, `_conn`, `_session_factory`); the deprecation proxy on `StorageCoordinator` does not forward them to external callers.
 
 ## Alternative Graph Backends
 
@@ -561,7 +561,7 @@ export KHORA_STORAGE_GRAPH_URL="bolt://your-cluster.neptune.amazonaws.com:8182"
 
 ## PostgreSQL AGE
 
-Apache AGE adds Cypher query support to PostgreSQL via an extension. Khora's AGE backend runs Cypher-in-SQL, sharing the same connection pool as the relational backend — no separate graph server required.
+Apache AGE adds Cypher query support to PostgreSQL via an extension. Khora's AGE backend runs Cypher-in-SQL, sharing the same connection pool as the relational backend - no separate graph server required.
 
 ```bash
 pip install khora[age]
@@ -574,11 +574,11 @@ export KHORA_STORAGE_GRAPH_AGE_GRAPH_NAME=khora  # default: khora
 
 **When to use:** When you want graph queries without adding another database to your stack. AGE runs inside PostgreSQL, so there is no extra infrastructure to manage.
 
-**UUID interpolation hardening (v0.16.0).** AGE's `cypher()` SQL function rejects `$param` placeholders, so UUIDs are interpolated directly into the Cypher source. `AgeBackend._uuid_lit(value)` routes every UUID interpolation site (in `storage/backends/age.py`) through `UUID(...)` validation before string conversion. This is type-safe today — every caller passes `uuid.UUID` — and injection-resistant against future duck-typed callers that might pass a `str`. Invalid UUIDs fail fast at the boundary with a `ValueError`, never reaching the graph store.
+**UUID interpolation hardening (v0.16.0).** AGE's `cypher()` SQL function rejects `$param` placeholders, so UUIDs are interpolated directly into the Cypher source. `AgeBackend._uuid_lit(value)` routes every UUID interpolation site (in `storage/backends/age.py`) through `UUID(...)` validation before string conversion. This is type-safe today - every caller passes `uuid.UUID` - and injection-resistant against future duck-typed callers that might pass a `str`. Invalid UUIDs fail fast at the boundary with a `ValueError`, never reaching the graph store.
 
 ## SurrealDB: The Unified Backend
 
-SurrealDB is an alternative that serves as **all three backends** — relational, vector, and graph — in a single database. This simplifies deployment dramatically: one database instead of PostgreSQL + pgvector + Neo4j.
+SurrealDB is an alternative that serves as **all three backends** - relational, vector, and graph - in a single database. This simplifies deployment dramatically: one database instead of PostgreSQL + pgvector + Neo4j.
 
 ### What It Provides
 
@@ -639,7 +639,7 @@ DEFINE INDEX IF NOT EXISTS idx_relates_to_rel_id ON relates_to FIELDS rel_id UNI
 
 ### `table:⟨$var⟩` interpolation bug fix (v0.16.0, PR #770)
 
-SurrealDB does not substitute parameters inside the RecordID-literal shorthand `table:⟨$var⟩` — the `$var` reaches the engine as a literal string. 19 sites across `storage/backends/surrealdb/{graph,vector}.py` were silently broken before v0.16.0: `graph.get_relationship`, `vector.get_chunk`, and `vector.get_chunks_by_document` always returned `None` / empty, and every relationship row stored by `RELATE` had corrupted `in` / `out` endpoints with a `rel_id` of `None` (the `SCHEMAFULL` table dropped the writes without raising). The fix is two-fold:
+SurrealDB does not substitute parameters inside the RecordID-literal shorthand `table:⟨$var⟩` - the `$var` reaches the engine as a literal string. 19 sites across `storage/backends/surrealdb/{graph,vector}.py` were silently broken before v0.16.0: `graph.get_relationship`, `vector.get_chunk`, and `vector.get_chunks_by_document` always returned `None` / empty, and every relationship row stored by `RELATE` had corrupted `in` / `out` endpoints with a `rel_id` of `None` (the `SCHEMAFULL` table dropped the writes without raising). The fix is two-fold:
 
 - Bind via the `_rid()` parameter helper (in `surrealdb/_helpers.py`), which constructs a real `RecordID` object Surreal honours as a parameter.
 - Use `(type::thing($var))` in `FOR` loops where a parameter-substituted record-id is needed inside SurrealQL.
@@ -655,8 +655,8 @@ SurrealDB supports SurrealQL-level transactions (`BEGIN` / `COMMIT` / `CANCEL`) 
 | Method / property | Remote (`ws://`) | Embedded / memory |
 |---|---|---|
 | `supports_transactions` (property) | `True` | `False` |
-| `async with conn.transaction():` | Wraps body in `BEGIN TRANSACTION` / `COMMIT TRANSACTION`. On exception, issues `CANCEL TRANSACTION` and re-raises. If `CANCEL` itself fails the original exception is preserved. | No-op context manager — body runs as ordinary per-statement-atomic writes. |
-| `await conn.execute_batch([(sql, bindings), ...])` | Same semantics as embedded — concatenates with `;` and runs as one round-trip; for true atomicity prefer `transaction()`. | Multiple statements in one round-trip. Parameter-name collisions across statements raise rather than silently overwrite. |
+| `async with conn.transaction():` | Wraps body in `BEGIN TRANSACTION` / `COMMIT TRANSACTION`. On exception, issues `CANCEL TRANSACTION` and re-raises. If `CANCEL` itself fails the original exception is preserved. | No-op context manager - body runs as ordinary per-statement-atomic writes. |
+| `await conn.execute_batch([(sql, bindings), ...])` | Same semantics as embedded - concatenates with `;` and runs as one round-trip; for true atomicity prefer `transaction()`. | Multiple statements in one round-trip. Parameter-name collisions across statements raise rather than silently overwrite. |
 
 Example:
 
@@ -668,16 +668,16 @@ async with conn.transaction():
 # Embedded/memory: each statement runs as its own surrealkv tx (existing contract preserved).
 ```
 
-The coordinator's `StorageCoordinator.transaction()` remains session-shaped (SQLAlchemy `AsyncSession`) and does not yet route to SurrealDB transactions — that integration is a follow-up. For atomic SurrealDB-only multi-statement operations on remote stacks today, use the `conn.transaction()` primitive directly.
+The coordinator's `StorageCoordinator.transaction()` remains session-shaped (SQLAlchemy `AsyncSession`) and does not yet route to SurrealDB transactions - that integration is a follow-up. For atomic SurrealDB-only multi-statement operations on remote stacks today, use the `conn.transaction()` primitive directly.
 
 ### When to Use SurrealDB
 
 | Scenario | Recommendation |
 |----------|---------------|
-| Simplest deployment | SurrealDB — one database to manage |
-| Maximum performance | PostgreSQL + pgvector + Neo4j — each optimized for its role |
-| Development/testing | SurrealDB — easy setup, no multi-DB coordination |
-| Production at scale | PostgreSQL + Neo4j — mature, battle-tested |
+| Simplest deployment | SurrealDB - one database to manage |
+| Maximum performance | PostgreSQL + pgvector + Neo4j - each optimized for its role |
+| Development/testing | SurrealDB - easy setup, no multi-DB coordination |
+| Production at scale | PostgreSQL + Neo4j - mature, battle-tested |
 
 ## Alternative Vector Backends
 

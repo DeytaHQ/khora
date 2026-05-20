@@ -1,7 +1,7 @@
 # Security Policy
 
 khora is a Python library for agentic memory. It runs as part of the host
-application's process — there is no server, no listening socket, no
+application's process - there is no server, no listening socket, no
 multi-tenant boundary inside khora itself. The threat model is **library
 embedded in a trusted host**: secrets, network calls, and database
 credentials all live in the host's environment.
@@ -44,14 +44,14 @@ In scope, with priority:
   pickle output).
 - **Unauthenticated SQL/Cypher/SurrealQL injection.** Any code path
   where caller-supplied data lands unsanitized inside a SQL,
-  Cypher, or SurrealQL fragment — even when the surrounding test
+  Cypher, or SurrealQL fragment - even when the surrounding test
   context "trusts" the caller.
 - **Path traversal.** Caller-supplied paths that resolve outside the
   intended directory (file sink for dream-phase reports, on-disk
   Lance store paths, embedded SQLite database paths).
 - **Deserialization of attacker-controlled bytes** with side effects
   beyond returning a parsed dataclass.
-- **Cross-tenant data leakage** in a single-process khora instance —
+- **Cross-tenant data leakage** in a single-process khora instance -
   any path where data ingested under namespace A surfaces in a recall
   under namespace B, given correct caller code.
 - **Vulnerabilities in vendored or pinned dependencies** that khora's
@@ -101,7 +101,7 @@ Production-supported configurations:
 - **PostgreSQL + pgvector + Neo4j** (the default VectorCypher engine).
 - **PostgreSQL + pgvector** (the Chronicle engine, graph-less).
 
-Experimental configurations — fixes are best-effort, security severity
+Experimental configurations - fixes are best-effort, security severity
 is judged in context:
 
 - `khora[sqlite-lance]` (embedded).
@@ -127,7 +127,7 @@ and may publish a security advisory before the full patch ships.
 
 ## What khora already does
 
-These are existing controls in the repository — pointers for
+These are existing controls in the repository - pointers for
 researchers and integrators evaluating khora.
 
 - **Credential fields are `pydantic.SecretStr`.** Database URLs,
@@ -139,7 +139,7 @@ researchers and integrators evaluating khora.
   never carry raw user content as an attribute. See
   [`docs/telemetry-contract.md`](docs/telemetry-contract.md).
 - **Cardinality rule** prevents `namespace_id` from becoming a metric
-  label — metric series stay bounded even with millions of tenants.
+  label - metric series stay bounded even with millions of tenants.
 - **Pre-commit secret-typing check** (`.semgrep.yml`) flags
   `str`-typed fields in Pydantic models / dataclasses that look like
   secrets, so a casual rename can't accidentally widen the secret
@@ -159,7 +159,7 @@ researchers and integrators evaluating khora.
 ## Acknowledgements
 
 We credit researchers in the security advisory associated with each
-fix (with your name, alias, or anonymous — your choice). We do not
+fix (with your name, alias, or anonymous - your choice). We do not
 operate a paid bug-bounty program.
 
 ## Versioning of this policy
@@ -167,4 +167,4 @@ operate a paid bug-bounty program.
 This file is checked into the repository. If you spot something
 out-of-date (a project URL change, a contact path that no longer
 works, a supported-version row that hasn't been updated for a
-release), open a regular issue — that part is not sensitive.
+release), open a regular issue - that part is not sensitive.
