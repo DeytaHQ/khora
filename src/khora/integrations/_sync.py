@@ -19,6 +19,7 @@ not for end users. Adapters call ``run_sync(self.kb.recall(...))``.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from collections.abc import Coroutine
 from typing import Any
@@ -28,6 +29,35 @@ from typing import Any
 _loop_lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 _loop_thread: threading.Thread | None = None
+
+
+def _reset_after_fork() -> None:
+    """Discard the parent's bridge state in a forked child (#790).
+
+    After ``os.fork()``, only the calling thread survives in the child.
+    The parent's daemon thread that runs ``_loop`` no longer exists, but
+    ``_loop`` itself still points to the parent's now-orphan loop object
+    (and ``_loop.is_closed()`` returns ``False`` because the loop was
+    never closed - it just lost its runner). If we didn't clear these
+    refs, ``_ensure_loop()`` would return the dead loop and the next
+    ``run_coroutine_threadsafe(...)`` would hang forever.
+
+    Also recreate ``_loop_lock``: a ``threading.Lock`` held by a
+    non-main thread at fork time is in an undefined state in the child,
+    and the parent thread that owned it does not exist to release it.
+
+    Registered via ``os.register_at_fork(after_in_child=...)``. Any
+    post-fork ``run_sync(...)`` call from the child transparently spins
+    up a fresh daemon loop via ``_ensure_loop()``.
+    """
+    global _loop, _loop_lock, _loop_thread
+    _loop = None
+    _loop_thread = None
+    _loop_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):  # POSIX-only; Windows is a no-op.
+    os.register_at_fork(after_in_child=_reset_after_fork)
 
 
 def _ensure_loop() -> asyncio.AbstractEventLoop:
