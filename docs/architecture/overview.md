@@ -6,7 +6,7 @@ Khora is a **Khora** - a system that remembers everything you tell it and helps 
 
 At its heart, Khora combines three different ways of storing and finding information:
 
-```
+```text
                               You
                                |
                                v
@@ -49,7 +49,7 @@ At its heart, Khora combines three different ways of storing and finding informa
 
 When you call `remember()`, your content goes through a pipeline that extracts meaning:
 
-```
+```text
 Your Content
      |
      v
@@ -94,7 +94,7 @@ The key insight: content is stored *multiple times in different forms*. The orig
 
 When you call `recall()`, Khora searches all three backends in parallel and combines the results:
 
-```
+```text
 Your Question
      |
      v
@@ -185,7 +185,7 @@ A native async Python pipeline that manages the ingestion workflow — chunking 
 
 Khora isolates data through **namespaces** — the sole unit of isolation. There is no organization or workspace hierarchy within khora; higher-level grouping is the consuming service's responsibility.
 
-```
+```text
 Namespace A  (your data lives here)
 Namespace B  (another dataset)
 Namespace A' (version 2 of A, for zero-downtime rebuilds)
@@ -270,7 +270,7 @@ contract, precedence rules, vendor recipes, and troubleshooting.
 
 Settings flow from general to specific:
 
-```
+```text
 Environment Variables (KHORA_DATABASE_URL, etc.)
           |
           v
@@ -292,9 +292,13 @@ Each storage backend implements a protocol (interface). This means you could swa
 ```python
 class GraphBackendProtocol(Protocol):
     async def create_entity(self, entity: Entity) -> None: ...
-    async def get_entity(self, id: UUID) -> Entity | None: ...
-    async def find_related(self, entity_id: UUID, ...) -> list[Entity]: ...
+    async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None: ...
+    async def get_neighborhood(
+        self, entity_id: UUID, *, namespace_id: UUID, depth: int = 1,
+    ) -> dict[str, Any]: ...
 ```
+
+Since v0.16.0, every read / exists / mutation method on a storage backend takes `*, namespace_id: UUID` as a required keyword-only parameter and filters at the SQL / Cypher / SurrealQL layer. See [Multi-Tenancy](multi-tenancy.md) for the structural invariant and [Storage Backends](storage-backends.md) for the full surface.
 
 ## What's Next?
 

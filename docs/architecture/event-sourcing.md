@@ -6,7 +6,7 @@ Every change to Khora is recorded. When you create a document, merge an entity, 
 
 Instead of just storing the current state, we store every change that led to that state:
 
-```
+```text
 Traditional Database:
 +------------------+
 | Document: "abc"  |  <- Only current state

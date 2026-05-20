@@ -6,7 +6,7 @@ Khora's data models represent the things you care about: documents you've stored
 
 Everything in Khora fits into one of three layers:
 
-```
+```text
 +-----------------------------------------------------------+
 |                      TENANCY LAYER                        |
 |                                                           |
@@ -203,7 +203,7 @@ Episodes connect multiple entities to a point (or span) in time.
 
 One crucial feature: everything tracks where it came from.
 
-```
+```text
 Document "Meeting Notes"
      |
      +-- Chunk #1 ----+
@@ -261,7 +261,7 @@ MemoryEvent(
 
 ## Model Relationships Summary
 
-```
+```text
 Namespace
     |
     |-- has many --> Document
@@ -298,18 +298,21 @@ await storage.create_document(doc)
 ### Querying
 
 ```python
-# Get a document
-doc = await storage.get_document(doc_id)
+# Get a document. `namespace_id` is required and kwarg-only — the lookup
+# returns None if the id belongs to a different namespace (v0.16.0).
+doc = await storage.get_document(doc_id, namespace_id=namespace_id)
 
-# Find entities by type
+# Find entities by type (list-style scan; namespace_id is positional).
 entities = await storage.list_entities(
     namespace_id,
     entity_type="PERSON",
-    limit=50
+    limit=50,
 )
 
-# Get relationships for an entity
-relationships = await storage.get_entity_relationships(entity_id)
+# Get relationships for an entity, scoped to the caller's namespace.
+relationships = await storage.get_entity_relationships(
+    entity_id, namespace_id=namespace_id,
+)
 ```
 
 ### Timestamps

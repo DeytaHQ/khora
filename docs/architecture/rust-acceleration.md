@@ -33,7 +33,7 @@ NumPy cannot help for string-heavy operations.
 Every accelerated operation has three implementation tiers.  The fastest
 available tier is selected automatically at import time.
 
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │  Tier 0: Rust (khora-accel via PyO3)  — fastest     │
 │  ● rayon parallelism, GIL release, zero-copy numpy  │
@@ -48,7 +48,7 @@ available tier is selected automatically at import time.
 
 All three tiers are centralised in a single file:
 
-```
+```text
 src/khora/_accel.py          # Python facade — no scattered imports
 ```
 

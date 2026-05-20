@@ -345,25 +345,24 @@ This enables:
 from khora import Khora
 
 async with Khora() as kb:
-    # List all entities
-    entities = await kb.list_entities()
+    # `namespace` is required — there is no default namespace.
+    entities = await kb.list_entities(namespace=namespace_id)
 
     # Filter by type
-    people = await kb.list_entities(entity_type="PERSON")
+    people = await kb.list_entities(namespace=namespace_id, entity_type="PERSON")
 
-    # List in specific namespace
-    entities = await kb.list_entities(
-        namespace=namespace_id,
-        limit=100,
-    )
+    # Larger result page
+    entities = await kb.list_entities(namespace=namespace_id, limit=100)
 ```
 
 ### Finding Related Entities
 
 ```python
-# Get entities related to a specific entity
+# Get entities related to a specific entity. `namespace` is required —
+# the traversal is scoped to the caller's namespace.
 related = await kb.find_related_entities(
     entity_id,
+    namespace=namespace_id,
     max_depth=2,      # Traverse up to 2 hops
     limit=20,
 )
@@ -375,9 +374,11 @@ for entity, score in related:
 ### Graph Traversal
 
 ```python
-# Get entity neighborhood (graph context)
+# Get entity neighborhood (graph context). namespace_id is required and
+# kwarg-only (v0.16.0) — the traversal does not cross into other namespaces.
 neighborhood = await kb.storage.get_neighborhood(
     entity_id,
+    namespace_id=namespace_id,
     depth=2,
     relationship_types=["WORKS_FOR", "MANAGES"],
     limit=50,
