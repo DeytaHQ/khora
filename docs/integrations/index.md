@@ -19,6 +19,7 @@ downstream tooling can discover what is installed.
 | [Google ADK](google_adk.md) | `pip install khora[google-adk]` | `KhoraMemoryService` - `BaseMemoryService` drop-in for ADK `Runner`. |
 | [OpenAI Agents SDK](openai_agents.md) | `pip install khora[openai-agents]` | `KhoraSession` (`SessionABC`), `khora_recall_tool`, `KhoraMemoryHooks` - compose for session memory, recall-as-tool, and auto-persist. |
 | [LlamaIndex](llamaindex.md) | `pip install khora[llamaindex]` | `KhoraRetriever` (async `BaseRetriever`), `KhoraMemoryBlock`, and the deprecated `KhoraChatStore`. |
+| [Hermes](hermes.md) | `pip install hermes-agent` (see note) | `KhoraMemoryProvider` - `MemoryProvider` plugin for the Hermes agent loop. |
 
 All five adapters share the same khora primitives - `Khora.remember`,
 `Khora.recall`, `Khora.forget`, and `Khora.submit_batch` - so a single
@@ -49,15 +50,24 @@ have no transitive conflicts and install cleanly alongside either
 combo. If you need both crewai and google-adk in the same process,
 use two separate virtual environments.
 
+### Hermes does not have a `[hermes]` extra
+
+`hermes-agent==0.13.0` exact-pins `requests==2.33.0`, which clashes
+with khora's `requests>=2.33.1` floor (CVE-2026-25645). The
+`[hermes]` extra was dropped during Wave C of the integration work.
+Install `hermes-agent` yourself; the adapter still resolves at
+runtime when both packages are importable. See
+[docs/integrations/hermes.md](hermes.md) for the full posture.
+
 ## Stability
 
 The OpenAI Agents adapter is tagged **experimental** while upstream
 remains pre-1.0 (17 releases in 7 months leading up to `v0.17`). The
-CrewAI, LangGraph, Google ADK, and LlamaIndex adapters are tagged
-experimental for now and will be promoted to stable once a full khora
-minor ships without a breaking change to the adapter surface. See
-each adapter's page for its specific framework version pin and
-upstream compatibility notes.
+CrewAI, LangGraph, Google ADK, LlamaIndex, and Hermes adapters are
+tagged experimental for now and will be promoted to stable once a
+full khora minor ships without a breaking change to the adapter
+surface. See each adapter's page for its specific framework version
+pin and upstream compatibility notes.
 
 ## Writing your own adapter
 

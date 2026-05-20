@@ -2,7 +2,7 @@
 
 Smoke example for `khora.integrations.crewai`. Constructs a
 `crewai.Memory` backed by an in-memory sqlite_lance khora, saves two
-records, and runs a recall — no external services or API keys required.
+records, and runs a recall - no external services or API keys required.
 
 Run it with:
 

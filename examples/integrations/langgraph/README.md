@@ -27,6 +27,6 @@ Namespaces in store: [('memories',)]
 
 ## See also
 
-- `docs/integrations/langgraph.md` — the quickstart byte-identical to
+- `docs/integrations/langgraph.md` - the quickstart byte-identical to
   this directory's `example.py` (CI enforces drift).
-- `src/khora/integrations/langgraph/` — adapter source.
+- `src/khora/integrations/langgraph/` - adapter source.

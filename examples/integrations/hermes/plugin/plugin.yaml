@@ -1,0 +1,13 @@
+name: khora
+version: 0.1.0
+description: Long-term memory backed by Khora (https://github.com/DeytaHQ/khora)
+hooks:
+  - initialize
+  - prefetch
+  - queue_prefetch
+  - sync_turn
+  - on_pre_compress
+  - on_session_end
+  - shutdown
+  - get_tool_schemas
+  - handle_tool_call

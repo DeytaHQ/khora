@@ -330,9 +330,12 @@ class VectorCypherRetriever:
             config: Retriever configuration
             router_config: Router configuration (optional, for LLM routing etc.)
             storage: Storage coordinator for entity vector search via pgvector.
-                When ``storage.graph`` is a ``Neo4jBackend``, its ``_session``
+                When ``storage._graph`` is a ``Neo4jBackend``, its ``_session``
                 helper is forwarded to ``DualNodeManager`` so pool metrics
                 observe every Neo4j session opened through this retriever.
+                ``_graph`` (not the public ``graph`` proxy) is used because
+                the ``NamespaceRequiredProxy`` refuses dunder/private attribute
+                lookups — see ``khora.storage._namespace_proxy``.
             neo4j_query_timeout: Optional per-transaction timeout in seconds
                 forwarded to the underlying ``DualNodeManager`` to bound
                 ``get_entity_neighborhoods``. ``None`` disables the timeout.
@@ -359,7 +362,10 @@ class VectorCypherRetriever:
         self._router = QueryComplexityRouter(router_config)
         # Forward Neo4jBackend when available so pool metrics observe
         # all traversals driven from the retriever (see DualNodeManager).
-        pool_backend = getattr(storage, "graph", None) if storage else None
+        # Bypass the NamespaceRequiredProxy on ``storage.graph`` by reading
+        # ``_graph`` directly — the proxy refuses underscore-prefixed lookups
+        # (DualNodeManager._session would hit AttributeError('_session')).
+        pool_backend = getattr(storage, "_graph", None) if storage else None
         self._dual_nodes = (
             DualNodeManager(
                 neo4j_driver,

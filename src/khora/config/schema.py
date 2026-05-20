@@ -186,6 +186,32 @@ class Neo4jConfig(BaseModel):
             "Set via env: KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_CHUNK_IDS_MAX=1000."
         ),
     )
+    entity_source_document_ids_max: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "Max provenance ``source_document_ids`` retained on an entity after "
+            "MERGE. When (existing + incoming) exceeds this cap the most-recent "
+            "tail is kept and the over-limit entries are dropped — a warning is "
+            "logged and ``khora.neo4j.entity.source_id_truncated`` is incremented "
+            "with field=source_document_ids. Default 100 preserves pre-#777 "
+            "behavior; deep-provenance workloads should raise it. "
+            "Set via env: KHORA_STORAGE__GRAPH__ENTITY_SOURCE_DOCUMENT_IDS_MAX=500."
+        ),
+    )
+    entity_source_chunk_ids_max: int = Field(
+        default=250,
+        ge=1,
+        description=(
+            "Max provenance ``source_chunk_ids`` retained on an entity after "
+            "MERGE. When (existing + incoming) exceeds this cap the most-recent "
+            "tail is kept and the over-limit entries are dropped — a warning is "
+            "logged and ``khora.neo4j.entity.source_id_truncated`` is incremented "
+            "with field=source_chunk_ids. Default 250 preserves pre-#777 behavior; "
+            "deep-provenance workloads should raise it. "
+            "Set via env: KHORA_STORAGE__GRAPH__ENTITY_SOURCE_CHUNK_IDS_MAX=1000."
+        ),
+    )
 
 
 class MemgraphConfig(BaseModel):

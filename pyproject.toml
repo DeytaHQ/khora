@@ -53,6 +53,7 @@ langgraph = "khora.integrations.langgraph:KhoraStore"
 google_adk = "khora.integrations.google_adk:KhoraMemoryService"
 openai_agents = "khora.integrations.openai_agents:KhoraSession"
 llamaindex = "khora.integrations.llamaindex:KhoraRetriever"
+hermes = "khora.integrations.hermes:KhoraMemoryProvider"
 
 [project.urls]
 Homepage = "https://github.com/DeytaHQ/khora"
@@ -70,7 +71,7 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-xdist>=3.8.0",
     "coverage>=7.13.5",
-    "ruff>=0.15.12",
+    "ruff~=0.15.12",
     "prek>=0.3.13",
     "ty>=0.0.34",
     "hypothesis>=6.152.4",
@@ -171,6 +172,16 @@ openai-agents = ["openai-agents>=0.17,<0.18"]
 # bumps before (BaseMemoryBlock 0.11 → 0.12 → 0.14, BaseMemory.put →
 # aput). Quarterly maintenance reserved for the next minor bump.
 llamaindex = ["llama-index-core>=0.14,<0.15"]
+# Hermes memory provider — see docs/integrations/hermes.md.
+#
+# Intentionally NOT declared as a runtime extra: hermes-agent==0.13.0
+# exact-pins requests==2.33.0, which conflicts with khora's CVE-2026-25645
+# constraint (``constraint-dependencies = ["requests>=2.33.1"]``).
+# Users opt in manually with ``pip install hermes-agent`` alongside khora;
+# the adapter still resolves at import time via the
+# ``[project.entry-points."khora.integrations"]`` declaration above.
+# Revisit when hermes-agent loosens its requests pin — tracked in a
+# follow-up issue noted in CHANGELOG.
 
 [build-system]
 requires = ["hatchling", "hatch-vcs", "hatch-fancy-pypi-readme"]
@@ -349,7 +360,7 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
-    "ruff>=0.15.12",
+    "ruff~=0.15.12",
     "ty>=0.0.34",
     "rapidfuzz>=3.14.3",  # For ty type checking of optional accel module
     "spacy>=3.8.11",

@@ -11,13 +11,13 @@ conflicts = [[
 ]]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-05-13T14:08:12.582437Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-urllib3 = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-litellm = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
-idna = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
+urllib3 = { timestamp = "2026-05-20T14:08:12.582445Z", span = "PT0S" }
+litellm = { timestamp = "2026-05-20T14:08:12.582451Z", span = "PT0S" }
+idna = { timestamp = "2026-05-20T14:08:12.582452Z", span = "PT0S" }
 
 [manifest]
 constraints = [
@@ -2558,7 +2558,7 @@ requires-dist = [
     { name = "python-docx", marker = "extra == 'binary-readers'", specifier = ">=1.2.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rapidfuzz", marker = "extra == 'accel'", specifier = ">=3.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.12" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "~=0.15.12" },
     { name = "sentence-transformers", specifier = ">=5.4.1" },
     { name = "sentence-transformers", marker = "extra == 'reranking'", specifier = ">=5.4.1" },
     { name = "spacy", marker = "extra == 'nlp'", specifier = ">=3.8.0" },
@@ -2588,7 +2588,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "rapidfuzz", specifier = ">=3.14.3" },
-    { name = "ruff", specifier = ">=0.15.12" },
+    { name = "ruff", specifier = "~=0.15.12" },
     { name = "spacy", specifier = ">=3.8.11" },
     { name = "ty", specifier = ">=0.0.34" },
 ]
