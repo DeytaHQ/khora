@@ -1090,15 +1090,6 @@ class Khora:
             # without needing a dedicated kwarg on every engine's remember().
             if session_id is not None:
                 metadata = {**(metadata or {}), "session_id": str(session_id)}
-            # Stamp the explicit source_timestamp kwarg into the metadata dict
-            # under the canonical ``source_timestamp`` key so downstream code
-            # (ingest pipeline, engines that read metadata) sees the
-            # caller-provided value verbatim. Kwarg-wins-over-metadata-fallback
-            # semantics: existing ``sent_at`` / ``occurred_at`` / ``created_at``
-            # keys are not touched, so the metadata-derived fallback (see
-            # ``_extract_source_timestamp``) is preserved when the kwarg is None.
-            if source_timestamp is not None:
-                metadata = {**(metadata or {}), "source_timestamp": source_timestamp}
             with trace_span("khora.remember", namespace_id=str(namespace_id), content_length=len(content)):
                 # NOTE: expertise and extraction_config_hash are always forwarded,
                 # even when None. Custom engines registered via register_engine()
