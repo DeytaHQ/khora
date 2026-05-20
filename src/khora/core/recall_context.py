@@ -1,23 +1,23 @@
-"""Public ``context_text`` helper — render a ``RecallResult`` as an LLM context string.
+"""Canonical ``context_text`` rendering for :class:`RecallResult`.
 
-The output format mirrors the legacy ``RecallResult.context_text`` field byte-for-byte:
+This module owns the byte-stable text representation that callers (LLMs,
+prompt templates, snapshot tests) consume:
 
 - Chunks are grouped by document title (``DocumentProjection.title``) and
-  joined with ``\\n\\n---\\n\\n`` separators; titled groups are prefixed with
-  ``--- From: <title> ---``.
+  joined with ``\\n\\n---\\n\\n`` separators; titled groups are prefixed
+  with ``--- From: <title> ---``.
 - An entities section (``--- Entities ---``) is appended when the result
   carries entities, deduplicated by entity id.
 - A relationships section (``--- Relationships ---``) is appended when the
   result carries relationships, deduplicated by
   ``(source_entity_id, target_entity_id, relationship_type)``.
 
-The implementation lifts the canonical contract from
-``khora.query.engine.format_entity_section`` / ``format_relationship_section`` /
-``QueryResult.get_context_text`` and adapts it to the typed
-``RecallResult`` / ``RecallChunk`` / ``RecallEntity`` / ``RecallRelationship``
-projections. Endpoint names for relationships are resolved from
-``RecallResult.entities`` by id (falling back to ``str(uuid)`` when the
-referenced entity is absent from the result), matching the legacy fallback.
+Endpoint names for relationships are resolved from ``RecallResult.entities``
+by id, falling back to ``str(uuid)`` when the referenced entity is absent
+from the result.
+
+Public surface (``__all__``): :func:`context_text`, :func:`format_entity_section`,
+:func:`format_relationship_section`.
 """
 
 from __future__ import annotations
@@ -27,13 +27,21 @@ from uuid import UUID
 
 if TYPE_CHECKING:
     from khora.core.models.recall import (
+        DocumentProjection,
+        RecallChunk,
         RecallEntity,
         RecallRelationship,
         RecallResult,
     )
 
 
-def _format_entity_section(entities: list[RecallEntity]) -> str:
+def format_entity_section(entities: list[RecallEntity]) -> str:
+    """Render the ``--- Entities ---`` section for a list of recall entities.
+
+    Returns an empty string when ``entities`` is empty. Deduplicates by
+    entity id. Lines have the form ``- <name> (<type>): <description>``
+    when a description is present, otherwise ``- <name> (<type>)``.
+    """
     if not entities:
         return ""
     seen: set[UUID] = set()
@@ -51,10 +59,18 @@ def _format_entity_section(entities: list[RecallEntity]) -> str:
     return "\n\n--- Entities ---\n\n" + "\n".join(lines)
 
 
-def _format_relationship_section(
+def format_relationship_section(
     relationships: list[RecallRelationship],
     entity_names: dict[UUID, str],
 ) -> str:
+    """Render the ``--- Relationships ---`` section for recall relationships.
+
+    Returns an empty string when ``relationships`` is empty. Deduplicates by
+    ``(source_entity_id, target_entity_id, relationship_type)``. Endpoint
+    names are resolved via ``entity_names`` (typically built from
+    ``RecallResult.entities``), falling back to ``str(uuid)`` for endpoints
+    that are not present in the lookup.
+    """
     if not relationships:
         return ""
     seen: set[tuple[UUID, UUID, str]] = set()
@@ -75,6 +91,32 @@ def _format_relationship_section(
     return "\n\n--- Relationships ---\n\n" + "\n".join(lines)
 
 
+def _group_chunks_by_title(
+    chunks: list[RecallChunk],
+    documents: list[DocumentProjection],
+    max_chunks: int,
+) -> str:
+    """Group the first ``max_chunks`` chunks by document title and render them.
+
+    Titled groups become ``--- From: <title> ---`` sections joined by
+    ``\\n\\n---\\n\\n``; untitled chunks are concatenated without a header.
+    """
+    titles_by_doc: dict[UUID, str] = {doc.id: (doc.title or "") for doc in documents}
+
+    groups: dict[str, list[str]] = {}
+    for chunk in chunks[:max_chunks]:
+        title = titles_by_doc.get(chunk.document_id, "")
+        groups.setdefault(title, []).append(chunk.content)
+
+    sections: list[str] = []
+    for title, contents in groups.items():
+        if title:
+            sections.append(f"--- From: {title} ---\n" + "\n\n".join(contents))
+        else:
+            sections.extend(contents)
+    return "\n\n---\n\n".join(sections)
+
+
 def context_text(result: RecallResult, *, max_chunks: int = 5) -> str:
     """Render a :class:`RecallResult` as a flat text context string for an LLM.
 
@@ -89,31 +131,18 @@ def context_text(result: RecallResult, *, max_chunks: int = 5) -> str:
         The concatenated context string. Empty string when there are no
         chunks, entities, or relationships to render.
     """
-    titles_by_doc: dict[UUID, str] = {doc.id: (doc.title or "") for doc in result.documents}
+    text = _group_chunks_by_title(list(result.chunks), list(result.documents), max_chunks)
 
-    groups: dict[str, list[str]] = {}
-    for chunk in result.chunks[:max_chunks]:
-        title = titles_by_doc.get(chunk.document_id, "")
-        groups.setdefault(title, []).append(chunk.content)
-
-    sections: list[str] = []
-    for title, contents in groups.items():
-        if title:
-            sections.append(f"--- From: {title} ---\n" + "\n\n".join(contents))
-        else:
-            sections.extend(contents)
-    text = "\n\n---\n\n".join(sections)
-
-    entity_section = _format_entity_section(list(result.entities))
+    entity_section = format_entity_section(list(result.entities))
     if entity_section:
         text = text + entity_section if text else entity_section
 
     entity_names: dict[UUID, str] = {e.id: e.name for e in result.entities}
-    relationship_section = _format_relationship_section(list(result.relationships), entity_names)
+    relationship_section = format_relationship_section(list(result.relationships), entity_names)
     if relationship_section:
         text = text + relationship_section if text else relationship_section
 
     return text
 
 
-__all__ = ["context_text"]
+__all__ = ["context_text", "format_entity_section", "format_relationship_section"]

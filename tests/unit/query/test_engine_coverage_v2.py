@@ -12,8 +12,7 @@ high-level method coverage targeting:
   * ``_multi_stage_search`` directly (no chunks short-circuit branch)
   * ``temporal_query``
   * ``QueryConfig.from_settings``
-  * ``QueryResult.get_context_text`` / ``get_full_metadata``
-  * ``_extract_chunk_title`` extra branches
+  * ``QueryResult.get_full_metadata``
   * ``SearchMethodContribution.compute_overlaps`` / ``to_dict``
   * ``GraphTraversalInfo.to_dict`` / ``TemporalInfo.to_dict``
   * ``SearchMethodStats.to_dict``
@@ -213,32 +212,6 @@ class TestTemporalInfo:
 
 
 class TestQueryResultHelpers:
-    def test_get_context_text_groups_by_title(self) -> None:
-        c1 = _make_chunk(content="hello", custom={"title": "Doc A"})
-        c2 = _make_chunk(content="world", custom={"title": "Doc A"})
-        c3 = _make_chunk(content="other", custom={})
-        result = QueryResult(chunks=[(c1, 0.5), (c2, 0.4), (c3, 0.3)])
-        text = result.get_context_text(max_chunks=3)
-        assert "--- From: Doc A ---" in text
-        assert "hello" in text
-        assert "world" in text
-        assert "other" in text
-
-    def test_get_context_text_includes_entity_section(self) -> None:
-        c = _make_chunk(content="hello")
-        e = Entity(name="Alice", entity_type="PERSON", description="founder")
-        result = QueryResult(chunks=[(c, 0.5)], entities=[(e, 0.9)])
-        text = result.get_context_text()
-        assert "--- Entities ---" in text
-        assert "Alice (PERSON): founder" in text
-
-    def test_get_context_text_no_chunks_only_entities(self) -> None:
-        e = Entity(name="Alice", entity_type="PERSON")
-        result = QueryResult(chunks=[], entities=[(e, 0.9)])
-        text = result.get_context_text()
-        # Section header still appears
-        assert "Alice (PERSON)" in text
-
     def test_top_chunks_and_entities(self) -> None:
         c = _make_chunk()
         e = Entity(name="A", entity_type="PERSON")

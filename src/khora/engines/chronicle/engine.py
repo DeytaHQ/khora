@@ -280,10 +280,10 @@ def _apply_version_scoring(
       - The query contains temporal/state intent keywords
       - At least one chunk carries ``version`` metadata
 
-    Chunks are grouped by entity (first ``entity_refs`` entry, falling back
-    to document title stored in ``chunk.metadata``).  Within each
-    group the maximum version is identified, and older versions receive a
-    soft penalty::
+    Chunks are grouped by entity (first ``entity_refs`` entry in
+    ``chunk.metadata``, falling back to ``chunk.document_id``). Within
+    each group the maximum version is identified, and older versions
+    receive a soft penalty::
 
         score *= (version / max_version) ** 0.5
 

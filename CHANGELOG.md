@@ -18,6 +18,15 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
   conversion; no direct joblib pickle loading). The allowlist will
   shrink as upstream fixes ship. Tracked in #778 — revisit weekly.
 
+### Changed
+
+- Internal: consolidated `context_text` formatters into a single canonical implementation in `khora.core.recall_context`. The public helper `khora.context_text(result)` behaviour is unchanged (byte-identical to prior output, verified by golden-string tests).
+
+### Removed
+
+- `khora.query.engine.QueryResult.get_context_text` — use the public `khora.context_text(result)` helper instead (same output).
+- `khora.query.engine.format_entity_section` and `format_relationship_section` — moved to `khora.core.recall_context`.
+
 ### Fixed
 
 - **Relationship-type sanitisation now consistent across every graph backend** (#749). Pre-#749 the Cypher backends (Neo4j, Memgraph, Neptune, AGE, sqlite_lance) UPPER_SNAKE_CASEd `Relationship.relationship_type` while SurrealDB stored the raw string verbatim — feeding `"lives in"` to both adapters then reading back via `get_entity_relationships` returned `"LIVES_IN"` from sqlite_lance and `"lives in"` from SurrealDB. Same input, semantically different output, broke any cross-backend filter or replay code. Every backend now funnels `relationship_type` through the shared `sanitize_cypher_label` helper at write time and mirrors the sanitised form back onto the caller's `Relationship` object so the in-memory model matches what is persisted. AGE additionally moves from its bespoke case-preserving regex to the shared helper, so AGE-stored edge labels join the rest of the family in UPPER_SNAKE_CASE (the previous AGE regex also had a latent crash on empty input — `[r:]` is invalid Cypher — now handled via the shared `RELATES_TO` fallback). `_sanitize_neo4j_label` is preserved as an internal alias for `sanitize_cypher_label` so the coordinator and vectorcypher engine keep their existing imports. Behaviour change is bug-fix-only: existing internal extraction pipelines already emit canonical labels (`KNOWS`, `WORKS_FOR`, …); free-form labels coming back from LLM JSON outputs (`"lives in"`, `"reports-to"`) are now uniformly normalised.

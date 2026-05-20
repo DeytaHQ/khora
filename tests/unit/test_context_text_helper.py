@@ -4,21 +4,18 @@ Verifies the typed ``RecallResult`` rendering contract — chunk grouping
 by document title, entities section, relationships section with name
 resolution, dedup behavior, and ``max_chunks`` slicing.
 
-A separate test asserts byte-equivalence with the legacy
-``QueryResult.get_context_text`` / ``format_entity_section`` /
-``format_relationship_section`` pipeline on a populated mirror result.
+A separate test asserts byte-identical output against captured baseline
+strings to lock the rendered format.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from khora import context_text
-from khora.core.models.document import Chunk
-from khora.core.models.entity import Entity, Relationship
 from khora.core.models.recall import (
     DocumentProjection,
     RecallChunk,
@@ -26,11 +23,24 @@ from khora.core.models.recall import (
     RecallRelationship,
     RecallResult,
 )
-from khora.query.engine import (
-    QueryResult,
-    format_entity_section,
-    format_relationship_section,
+
+# Captured baseline strings for the byte-equivalence scenarios. The
+# helper's output for these fixtures is deterministic (no UUIDs leak
+# into the rendered string) so the goldens stay reproducible across
+# runs.
+GOLDEN_FULL_PAYLOAD_CONTEXT_TEXT = (
+    "--- From: Founding Story ---\n"
+    "Alice founded Acme Corp."
+    "\n\n--- Entities ---\n\n"
+    "- Alice (PERSON): Founder\n"
+    "- Acme Corp (ORGANIZATION): A company"
+    "\n\n--- Relationships ---\n\n"
+    "- Alice --FOUNDED--> Acme Corp: Founded the company"
 )
+
+GOLDEN_CHUNKS_ONLY_UNTITLED_CONTEXT_TEXT = "alpha text\n\n---\n\nbeta text"
+
+GOLDEN_ENTITIES_ONLY_CONTEXT_TEXT = "\n\n--- Entities ---\n\n- Solo (CONCEPT): The only one"
 
 
 def _mk_doc(*, doc_id=None, title=None) -> DocumentProjection:
@@ -310,49 +320,28 @@ class TestContextTextHelper:
 
 @pytest.mark.unit
 class TestContextTextByteEquivalenceWithLegacy:
-    """The public helper output matches the legacy QueryResult.get_context_text byte-for-byte.
+    """The public helper output is byte-identical to a captured baseline.
 
-    Constructed by building a populated typed RecallResult and a mirror
-    legacy QueryResult with identical field values, then comparing the
-    rendered strings.
+    The baseline strings at module level lock the rendered format. Each
+    scenario builds a typed ``RecallResult`` whose only non-deterministic
+    inputs (UUIDs) are explicitly seeded so the rendered output stays
+    reproducible.
     """
 
     def test_byte_equivalent_full_payload(self) -> None:
-        ns_id = uuid4()
-        doc_id = uuid4()
-        alice_id = uuid4()
-        acme_id = uuid4()
+        ns_id = UUID("00000000-0000-0000-0000-000000000001")
+        doc_id = UUID("00000000-0000-0000-0000-000000000002")
+        chunk_id = UUID("00000000-0000-0000-0000-000000000003")
+        alice_id = UUID("00000000-0000-0000-0000-000000000004")
+        acme_id = UUID("00000000-0000-0000-0000-000000000005")
+        rel_id = UUID("00000000-0000-0000-0000-000000000006")
 
-        # Mirror Chunk (legacy) and RecallChunk (typed) with the same content.
-        legacy_chunk = Chunk(
-            id=uuid4(),
-            namespace_id=ns_id,
+        typed_chunk = RecallChunk(
+            id=chunk_id,
             document_id=doc_id,
             content="Alice founded Acme Corp.",
-            metadata={"title": "Founding Story"},
-        )
-        typed_chunk = RecallChunk(
-            id=legacy_chunk.id,
-            document_id=doc_id,
-            content=legacy_chunk.content,
             score=0.9,
             created_at=datetime.now(UTC),
-        )
-
-        # Mirror entities.
-        legacy_alice = Entity(
-            id=alice_id,
-            namespace_id=ns_id,
-            name="Alice",
-            entity_type="PERSON",
-            description="Founder",
-        )
-        legacy_acme = Entity(
-            id=acme_id,
-            namespace_id=ns_id,
-            name="Acme Corp",
-            entity_type="ORGANIZATION",
-            description="A company",
         )
         typed_alice = RecallEntity(
             id=alice_id,
@@ -376,20 +365,8 @@ class TestContextTextByteEquivalenceWithLegacy:
             source_document_ids=[],
             source_chunk_ids=[],
         )
-
-        # Mirror relationship — legacy carries denormalized names, typed
-        # carries only ids and relies on entity name lookup.
-        legacy_rel = Relationship(
-            namespace_id=ns_id,
-            source_entity_id=alice_id,
-            target_entity_id=acme_id,
-            relationship_type="FOUNDED",
-            description="Founded the company",
-            source_entity_name="Alice",
-            target_entity_name="Acme Corp",
-        )
         typed_rel = RecallRelationship(
-            id=legacy_rel.id,
+            id=rel_id,
             source_entity_id=alice_id,
             target_entity_id=acme_id,
             relationship_type="FOUNDED",
@@ -399,18 +376,6 @@ class TestContextTextByteEquivalenceWithLegacy:
             valid_until=None,
             source_document_ids=[],
         )
-
-        # --- Legacy render ---
-        legacy_qr = QueryResult(
-            chunks=[(legacy_chunk, 0.9)],
-            entities=[(legacy_alice, 0.85), (legacy_acme, 0.7)],
-        )
-        legacy_text = legacy_qr.get_context_text(max_chunks=5)
-        legacy_text += format_relationship_section([(legacy_rel, 0.9)])
-
-        # The legacy QueryResult.get_context_text reads chunk.metadata["title"];
-        # the typed helper reads DocumentProjection.title. Mirror the title
-        # via the DocumentProjection so the renderings match byte-for-byte.
         doc = DocumentProjection(
             id=doc_id,
             created_at=datetime.now(UTC),
@@ -425,46 +390,28 @@ class TestContextTextByteEquivalenceWithLegacy:
             relationships=[typed_rel],
         )
 
-        new_text = context_text(result, max_chunks=5)
-
-        assert new_text == legacy_text
+        assert context_text(result, max_chunks=5) == GOLDEN_FULL_PAYLOAD_CONTEXT_TEXT
 
     def test_byte_equivalent_chunks_only_untitled(self) -> None:
-        ns_id = uuid4()
-        doc_id = uuid4()
-
-        legacy_chunk_a = Chunk(
-            id=uuid4(),
-            namespace_id=ns_id,
-            document_id=doc_id,
-            content="alpha text",
-        )
-        legacy_chunk_b = Chunk(
-            id=uuid4(),
-            namespace_id=ns_id,
-            document_id=doc_id,
-            content="beta text",
-        )
+        ns_id = UUID("00000000-0000-0000-0000-000000000001")
+        doc_id = UUID("00000000-0000-0000-0000-000000000002")
+        chunk_a_id = UUID("00000000-0000-0000-0000-000000000003")
+        chunk_b_id = UUID("00000000-0000-0000-0000-000000000004")
 
         typed_chunk_a = RecallChunk(
-            id=legacy_chunk_a.id,
+            id=chunk_a_id,
             document_id=doc_id,
             content="alpha text",
             score=0.9,
             created_at=datetime.now(UTC),
         )
         typed_chunk_b = RecallChunk(
-            id=legacy_chunk_b.id,
+            id=chunk_b_id,
             document_id=doc_id,
             content="beta text",
             score=0.8,
             created_at=datetime.now(UTC),
         )
-
-        legacy_qr = QueryResult(
-            chunks=[(legacy_chunk_a, 0.9), (legacy_chunk_b, 0.8)],
-        )
-        legacy_text = legacy_qr.get_context_text(max_chunks=5)
 
         doc = DocumentProjection(
             id=doc_id,
@@ -480,18 +427,11 @@ class TestContextTextByteEquivalenceWithLegacy:
             relationships=[],
         )
 
-        assert context_text(result, max_chunks=5) == legacy_text
+        assert context_text(result, max_chunks=5) == GOLDEN_CHUNKS_ONLY_UNTITLED_CONTEXT_TEXT
 
     def test_byte_equivalent_entities_only(self) -> None:
-        ns_id = uuid4()
-        eid = uuid4()
-        legacy_entity = Entity(
-            id=eid,
-            namespace_id=ns_id,
-            name="Solo",
-            entity_type="CONCEPT",
-            description="The only one",
-        )
+        ns_id = UUID("00000000-0000-0000-0000-000000000001")
+        eid = UUID("00000000-0000-0000-0000-000000000002")
         typed_entity = RecallEntity(
             id=eid,
             name="Solo",
@@ -504,7 +444,6 @@ class TestContextTextByteEquivalenceWithLegacy:
             source_chunk_ids=[],
         )
 
-        legacy_text = format_entity_section([(legacy_entity, 0.5)])
         result = RecallResult(
             query="q",
             namespace_id=ns_id,
@@ -513,4 +452,4 @@ class TestContextTextByteEquivalenceWithLegacy:
             entities=[typed_entity],
             relationships=[],
         )
-        assert context_text(result) == legacy_text
+        assert context_text(result) == GOLDEN_ENTITIES_ONLY_CONTEXT_TEXT
