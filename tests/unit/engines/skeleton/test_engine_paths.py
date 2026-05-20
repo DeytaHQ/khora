@@ -353,7 +353,7 @@ class TestForget:
         eng = _connected()
         wrong_ns = uuid4()
         doc_id = uuid4()
-        # IGR-221: storage.get_document now filters by namespace at the SQL
+        # Security: storage.get_document now filters by namespace at the SQL
         # layer; a cross-namespace lookup just returns None.
         eng._storage.get_document = AsyncMock(return_value=None)
         result = await eng.forget(doc_id, wrong_ns)
@@ -363,7 +363,7 @@ class TestForget:
 
     @pytest.mark.asyncio
     async def test_forget_uses_namespace_from_document_when_kwarg_none(self) -> None:
-        # IGR-221: previously forget() would look up the document with a
+        # Security: previously forget() would look up the document with a
         # `namespace_id IS NULL` probe and then trust the doc's namespace.
         # That is an IDOR vector — anyone with a doc_id could delete any
         # document. Forget now bails immediately when namespace_id is None.

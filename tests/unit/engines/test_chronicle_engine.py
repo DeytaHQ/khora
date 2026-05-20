@@ -207,7 +207,7 @@ class TestChronicleEngineForget:
         """When the caller-supplied namespace does not match the document's,
         forget short-circuits to False BEFORE the cascade runs.
 
-        IGR-221: namespace mismatch is now enforced at the SQL layer —
+        Security: namespace mismatch is now enforced at the SQL layer —
         ``storage.get_document(doc_id, namespace_id=wrong_ns)`` just returns
         ``None`` and the engine bails."""
         doc_id = uuid4()

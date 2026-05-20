@@ -342,7 +342,7 @@ class SurrealDBRelationalAdapter:
         Returns ``None`` if the document does not exist OR belongs to a
         different namespace.  ``RecordID`` lookup is not namespace-scoped on
         its own, so we filter explicitly on the document's ``namespace_id``
-        column to prevent cross-tenant IDOR (IGR-221).
+        column to prevent cross-tenant IDOR (IDOR family).
         """
         rid = _record_id("document", document_id)
         row = await self._conn.query_one(
@@ -439,7 +439,7 @@ class SurrealDBRelationalAdapter:
         return document
 
     async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete a document, scoped to ``namespace_id`` (IGR-226).
+        """Delete a document, scoped to ``namespace_id`` (IDOR family).
 
         Returns ``False`` if the document does not exist OR belongs to a
         different namespace.  ``RecordID`` deletion alone is not namespace-
@@ -545,7 +545,7 @@ class SurrealDBRelationalAdapter:
         """Fetch multiple documents in a single query, scoped to ``namespace_id``.
 
         Documents belonging to a different namespace are silently dropped
-        from the result to prevent cross-tenant IDOR (IGR-221).
+        from the result to prevent cross-tenant IDOR (IDOR family).
         """
         if not document_ids:
             return {}
@@ -582,7 +582,7 @@ class SurrealDBRelationalAdapter:
         scoped to ``namespace_id``.
 
         Documents belonging to a different namespace are silently dropped
-        from the result to prevent cross-tenant IDOR (IGR-221).
+        from the result to prevent cross-tenant IDOR (IDOR family).
         """
         if not document_ids:
             return {}
@@ -614,7 +614,7 @@ class SurrealDBRelationalAdapter:
         """Fetch full DocumentProjection rows for recall responses.
 
         Filters by ``namespace_id`` at the SurrealQL layer; cross-namespace
-        ids are silently dropped (IGR-225 close-out).
+        ids are silently dropped (security close-out).
         """
         if not document_ids:
             return {}
@@ -874,7 +874,7 @@ class SurrealDBRelationalAdapter:
     async def supersede_fact(self, fact_id: UUID, superseded_by: UUID, *, namespace_id: UUID) -> None:
         """Mark a fact inactive and link it to its replacement.
 
-        Scoped to ``namespace_id`` (IGR-226) — no-op when the fact belongs
+        Scoped to ``namespace_id`` (IDOR family) — no-op when the fact belongs
         to a different namespace.
         """
         await self._conn.execute(

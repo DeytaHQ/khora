@@ -20,7 +20,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 ### Added
 
 - **`khora.context_text(result)` helper** (PR #762). The legacy `RecallResult.context_text` attribute was removed in v0.15.3 along with the broader typed-projection refactor; this public function returns the formatted context string for adapters that need one without forcing them to roll the join logic themselves. Re-exported from the top-level `khora` namespace.
-- **`ChunkResult` self-identification** (PR #759). Chunkers now stamp `ChunkResult.metadata["chunker_strategy"]` on every emitted chunk; downstream consumers can route on strategy identity rather than infer from chunker config. Replaces the stale `context_text` references at the chunker boundary.
+- **`ChunkResult` self-identification** (PR #759). Chunkers now stamp `ChunkResult.metadata["chunker"]` on every emitted chunk (values: `"fixed"`, `"recursive"`, `"semantic"`, `"conversation"`); downstream consumers can route on strategy identity rather than infer from chunker config. The same field is propagated to `RecallChunk.chunker_info["chunker"]` on recall. Replaces the stale `context_text` references at the chunker boundary.
 
 ## [0.15.3] — Typed recall projection; supersedes broken 0.15.2
 

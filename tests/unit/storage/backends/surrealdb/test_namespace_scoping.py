@@ -1,4 +1,4 @@
-"""Namespace-scoping tests for SurrealDB backend read methods (IGR-221 / IGR-223).
+"""Namespace-scoping tests for SurrealDB backend read methods (the IDOR family / the IDOR family).
 
 These tests assert that read methods filter at the SurrealQL layer on
 ``namespace_id`` (or the equivalent ``namespace`` record link) and that

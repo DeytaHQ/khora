@@ -2,16 +2,16 @@
 
 ``StorageCoordinator.{graph,vector,relational,event_store}`` used to expose
 the raw backend object — any callsite with a ``Khora`` handle could bypass
-the coordinator's namespace-enforcement layer (IGR-212/213/214). This
+the coordinator's namespace-enforcement layer (the IDOR family/213/214). This
 module's ``NamespaceRequiredProxy`` wraps each backend so that:
 
 1. First attribute access (per role, per process) emits a
    ``DeprecationWarning`` pointing callers at the coordinator facade.
-2. Read methods tightened by IGR-221/IGR-223 (``get_document``,
+2. Read methods tightened by the IDOR family/the IDOR family (``get_document``,
    ``get_entity``, ``get_neighborhood``, …) refuse to dispatch without an
    explicit ``namespace_id=`` kwarg, even though the underlying signature
    already requires it. The proxy gives a clearer error message and a
-   stable enforcement seam for future write-method hardening (IGR-226).
+   stable enforcement seam for future write-method hardening (IDOR family).
 
 Internal coordinator code uses ``self._{graph,vector,relational,event_store}``
 directly and never goes through this proxy — only external callers do.
@@ -23,8 +23,8 @@ import functools
 import warnings
 from typing import Any
 
-# Read methods tightened by IGR-221 (RelationalBackend, VectorBackend) and
-# IGR-223 (GraphBackend). Calls to these via the proxy must include
+# Read methods tightened by the IDOR family (RelationalBackend, VectorBackend) and
+# the IDOR family (GraphBackend). Calls to these via the proxy must include
 # ``namespace_id=`` or the proxy raises ``TypeError`` before dispatching.
 _NS_REQUIRED_METHODS: dict[str, frozenset[str]] = {
     "graph": frozenset(

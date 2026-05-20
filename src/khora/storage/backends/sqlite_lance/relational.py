@@ -395,7 +395,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
 
         Returns ``None`` if the document does not exist OR belongs to a
         different namespace. Prevents cross-tenant document access by id
-        (IDOR — IGR-221).
+        (IDOR).
         """
         async with self._get_session() as session:
             result = await session.execute(
@@ -470,7 +470,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
         return document
 
     async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete a document, scoped to ``namespace_id`` (IGR-226).
+        """Delete a document, scoped to ``namespace_id`` (IDOR family).
 
         Uses a core ``DELETE`` rather than ORM cascade because the
         ORM ``ChunkModel`` has Postgres-only columns (pgvector
@@ -554,7 +554,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
         """Fetch multiple documents in a single query, scoped to ``namespace_id``.
 
         Documents belonging to any other namespace are silently dropped
-        from the result to prevent cross-tenant IDOR (IGR-221).
+        from the result to prevent cross-tenant IDOR (IDOR family).
         """
         if not document_ids:
             return {}
@@ -606,7 +606,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
         scoped to ``namespace_id``.
 
         Documents in other namespaces are silently dropped from the
-        result (IGR-221).
+        result (IDOR family).
         """
         if not document_ids:
             return {}
@@ -910,7 +910,7 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
     async def supersede_fact(self, fact_id: UUID, superseded_by: UUID, *, namespace_id: UUID) -> None:
         """Mark a fact inactive and link it to its replacement.
 
-        Scoped to ``namespace_id`` (IGR-226) — no-op when the fact belongs
+        Scoped to ``namespace_id`` (IDOR family) — no-op when the fact belongs
         to a different namespace.
         """
         t = _memory_facts_sqlite

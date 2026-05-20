@@ -380,7 +380,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
 
         Returns ``None`` if the document does not exist OR belongs to a
         different namespace. Prevents cross-tenant document access by id
-        (IDOR — IGR-221).
+        (IDOR).
         """
         async with self._get_session() as session:
             result = await session.execute(
@@ -462,7 +462,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Delete a document, scoped to ``namespace_id``.
 
         Returns ``False`` if the document does not exist OR belongs to a
-        different namespace (cross-namespace IDOR — IGR-226).
+        different namespace (cross-namespace IDOR).
         """
         async with self._get_session() as session:
             result = await session.execute(
@@ -547,7 +547,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         """Fetch multiple documents in a single query, scoped to ``namespace_id``.
 
         Documents belonging to any other namespace are silently dropped
-        from the result to prevent cross-tenant IDOR (IGR-221).
+        from the result to prevent cross-tenant IDOR (IDOR family).
 
         Args:
             document_ids: List of document IDs to fetch
@@ -631,7 +631,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
 
         Uses a column-limited SELECT to avoid reading content, processing
         stats, and other heavy/mutable columns. Documents in other
-        namespaces are silently dropped from the result (IGR-221).
+        namespaces are silently dropped from the result (IDOR family).
 
         Args:
             document_ids: List of document IDs to fetch
@@ -682,7 +682,7 @@ class PostgreSQLBackend(AsyncSessionMixin):
         Wider SELECT than ``get_document_sources_batch`` — also pulls
         ``external_id``, ``source_name``, ``source_url``, ``content_type``,
         and ``metadata``. Filters by ``namespace_id`` at the query layer;
-        cross-namespace ids are silently dropped (IGR-225 close-out).
+        cross-namespace ids are silently dropped (security close-out).
         """
         if not document_ids:
             return {}

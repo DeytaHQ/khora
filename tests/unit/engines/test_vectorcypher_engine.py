@@ -1362,7 +1362,7 @@ class TestVectorCypherEngineForget:
     async def test_forget_namespace_mismatch(self, connected_engine: VectorCypherEngine) -> None:
         """Test forget returns False when namespace doesn't match.
 
-        IGR-221: namespace mismatch is now enforced at the SQL layer —
+        Security: namespace mismatch is now enforced at the SQL layer —
         ``storage.get_document(doc_id, namespace_id=wrong_ns)`` returns
         ``None`` and the engine bails before any cascade work."""
         doc_id = uuid4()
@@ -1377,7 +1377,7 @@ class TestVectorCypherEngineForget:
 
     @pytest.mark.asyncio
     async def test_forget_without_namespace(self, connected_engine: VectorCypherEngine) -> None:
-        """IGR-221: forget bails immediately when namespace_id is None.
+        """Security: forget bails immediately when namespace_id is None.
 
         Previously the engine looked up the document by id alone (an IDOR
         vector) and trusted the document's own namespace. The new contract

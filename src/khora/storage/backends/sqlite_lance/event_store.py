@@ -182,7 +182,7 @@ class SQLiteLanceEventStoreAdapter:
         """Return all events for a specific resource, newest first.
 
         Scoped to ``namespace_id`` so cross-tenant audit-log access is
-        impossible (IGR-221 / IGR-223 family). Returns an empty list when
+        impossible (the IDOR family / the IDOR family family). Returns an empty list when
         the resource belongs to a different namespace.
         """
         sql = (
@@ -208,7 +208,7 @@ class SQLiteLanceEventStoreAdapter:
         """Return the most recent event for the given resource, or None.
 
         Scoped to ``namespace_id`` so cross-tenant audit-log access is
-        impossible (IGR-221 / IGR-223 family). Returns ``None`` when the
+        impossible (the IDOR family / the IDOR family family). Returns ``None`` when the
         resource belongs to a different namespace.
         """
         sql = (

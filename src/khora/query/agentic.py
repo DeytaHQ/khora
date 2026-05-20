@@ -640,7 +640,7 @@ class AgenticSearchAgent:
         Args:
             chunks: List of (chunk, score) tuples
             namespace_id: Caller's namespace; cross-tenant document rows are
-                dropped at the storage layer (IDOR — IGR-221).
+                dropped at the storage layer (IDOR).
 
         Returns:
             Dictionary mapping chunk ID to source string

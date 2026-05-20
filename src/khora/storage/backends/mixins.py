@@ -172,7 +172,7 @@ class GraphBackendBase:
     async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Entity]:
         """Default N+1 implementation — subclasses should override for efficiency.
 
-        Scoped to ``namespace_id`` to prevent cross-tenant IDOR (IGR-223).
+        Scoped to ``namespace_id`` to prevent cross-tenant IDOR (IDOR family).
         """
         if not entity_ids:
             return {}
@@ -195,7 +195,7 @@ class GraphBackendBase:
         """Default N+1 implementation — subclasses should override for efficiency.
 
         Traversal is scoped to ``namespace_id`` so it never visits a node in
-        a different namespace (IGR-223).
+        a different namespace (IDOR family).
         """
         if not entity_ids:
             return {}

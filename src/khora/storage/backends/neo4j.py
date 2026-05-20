@@ -1128,7 +1128,7 @@ class Neo4jBackend(GraphBackendBase):
         return entity
 
     async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
-        """Get an entity by ID, scoped to ``namespace_id`` (IGR-223)."""
+        """Get an entity by ID, scoped to ``namespace_id`` (IDOR family)."""
 
         async with self._session() as session:
             result = await session.run(
@@ -1164,7 +1164,7 @@ class Neo4jBackend(GraphBackendBase):
         """Fetch multiple entities in a single query, scoped to ``namespace_id``.
 
         Entities belonging to any other namespace are silently dropped from
-        the result to prevent cross-tenant IDOR (IGR-223).
+        the result to prevent cross-tenant IDOR (IDOR family).
 
         Args:
             entity_ids: List of entity IDs to fetch
@@ -1193,7 +1193,7 @@ class Neo4jBackend(GraphBackendBase):
             return {UUID(r["e"]["id"]): self._record_to_entity(r["e"]) for r in records}
 
     async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
-        """Update an entity, scoped to ``namespace_id`` (IGR-226).
+        """Update an entity, scoped to ``namespace_id`` (IDOR family).
 
         The ``namespace_id`` kwarg is defense-in-depth — asserted equal to
         ``entity.namespace_id`` before the MATCH filter is applied.
@@ -1229,7 +1229,7 @@ class Neo4jBackend(GraphBackendBase):
         return entity
 
     async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete an entity and its relationships, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete an entity and its relationships, scoped to ``namespace_id`` (IDOR family)."""
 
         async def _delete(tx: AsyncManagedTransaction) -> int:
             result = await tx.run(
@@ -2085,7 +2085,7 @@ RETURN count(r) AS updated
         return relationship
 
     async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
-        """Get a relationship by ID, scoped to ``namespace_id`` (IGR-223).
+        """Get a relationship by ID, scoped to ``namespace_id`` (IDOR family).
 
         Source and target nodes must both belong to ``namespace_id`` so the
         result never leaks edges that cross into another namespace.
@@ -2111,7 +2111,7 @@ RETURN count(r) AS updated
             return None
 
     async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete a relationship, scoped to ``namespace_id`` (IDOR family)."""
 
         async def _delete(tx: AsyncManagedTransaction) -> int:
             result = await tx.run(
@@ -2149,7 +2149,7 @@ RETURN count(r) AS updated
     ) -> int:
         """Soft-retire orphaned relationships by stamping valid_until in-place.
 
-        Scoped to ``namespace_id`` (IGR-226): only edges owned by the caller's
+        Scoped to ``namespace_id`` (IDOR family): only edges owned by the caller's
         namespace are touched. Only mutates relationships whose sole source
         was the replaced document (size(source_document_ids) = 1).
         Multi-sourced relationships are left untouched for separate survivor
@@ -2209,7 +2209,7 @@ RETURN count(r) AS updated
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
-        """Get relationships for an entity, scoped to ``namespace_id`` (IGR-223).
+        """Get relationships for an entity, scoped to ``namespace_id`` (IDOR family).
 
         Both endpoint nodes are constrained to ``namespace_id`` so edges that
         cross into other namespaces never surface.
@@ -2364,7 +2364,7 @@ RETURN count(r) AS updated
         return episode
 
     async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
-        """Get an episode by ID, scoped to ``namespace_id`` (IGR-223)."""
+        """Get an episode by ID, scoped to ``namespace_id`` (IDOR family)."""
 
         async with self._session() as session:
             result = await session.run(
@@ -2451,7 +2451,7 @@ RETURN count(r) AS updated
             rel_filter = ":" + "|".join(_sanitize_neo4j_label(rt) for rt in relationship_types)
 
         # All nodes on the path — endpoints AND intermediates — must share
-        # $namespace_id so the traversal never crosses tenants (IGR-223).
+        # $namespace_id so the traversal never crosses tenants (IDOR family).
         query = f"""
         MATCH path = shortestPath(
             (source:Entity {{id: $source_id, namespace_id: $namespace_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id, namespace_id: $namespace_id}})
@@ -2500,7 +2500,7 @@ RETURN count(r) AS updated
         """Get the neighborhood of an entity up to a certain depth, scoped to
         ``namespace_id``.
 
-        The traversal MUST NOT cross into other namespaces (IGR-223). Because
+        The traversal MUST NOT cross into other namespaces (IDOR family). Because
         APOC's ``subgraphAll`` does not let us constrain expanded nodes by
         property — relationshipFilter cannot filter destination labels by
         namespace — we use vanilla Cypher with the namespace predicate baked
@@ -2588,7 +2588,7 @@ RETURN count(r) AS updated
 
         Seed entities and every node reached during traversal are constrained
         to ``namespace_id`` so the result never crosses into another
-        namespace (IGR-223).
+        namespace (IDOR family).
 
         Args:
             entity_ids: List of entity IDs
@@ -2888,7 +2888,7 @@ RETURN count(r) AS updated
     ) -> None:
         """Remap source_document_ids for entities and relationships after dedup.
 
-        Scoped to ``namespace_id`` (IGR-226): only nodes/edges owned by the
+        Scoped to ``namespace_id`` (IDOR family): only nodes/edges owned by the
         caller's namespace are remapped. Idempotent on repeated application
         against the same ``(old_doc_id, new_doc_id)`` pair: if
         ``new_doc_id`` is already present in the array, the append is
@@ -2948,7 +2948,7 @@ RETURN count(r) AS updated
         *,
         namespace_id: UUID,
     ) -> int:
-        """Hard-delete entities by id, scoped to ``namespace_id`` (IGR-226).
+        """Hard-delete entities by id, scoped to ``namespace_id`` (IDOR family).
 
         Used by the forget cascade to remove orphan entities (those whose
         only ``source_document_ids`` value is the document being forgotten).
@@ -2979,7 +2979,7 @@ RETURN count(r) AS updated
             return await session.execute_write(_delete)
 
     async def delete_relationships_batch(self, relationship_ids: list[UUID], *, namespace_id: UUID) -> int:
-        """Hard-delete relationships by their ``id`` property, scoped to ``namespace_id`` (IGR-226).
+        """Hard-delete relationships by their ``id`` property, scoped to ``namespace_id`` (IDOR family).
 
         Sibling to :meth:`delete_entities_batch` for the relationship side
         of the forget cascade. Matches edges across any direction since

@@ -750,7 +750,7 @@ class TestNeo4jBackendGetEntityRelationships:
         await backend.get_entity_relationships(uuid4(), namespace_id=uuid4(), direction="incoming")
 
         query = session.run.call_args.args[0]
-        # IGR-223: both endpoints now carry the namespace_id label filter.
+        # Security: both endpoints now carry the namespace_id label filter.
         assert "(other:Entity {namespace_id: $namespace_id})-[r]->(e:Entity {namespace_id: $namespace_id})" in query
         # Negative check: outgoing arrow must not be present.
         assert "(e:Entity {namespace_id: $namespace_id})-[r]->(other" not in query
@@ -769,7 +769,7 @@ class TestNeo4jBackendGetEntityRelationships:
         await backend.get_entity_relationships(uuid4(), namespace_id=uuid4(), direction="both")
 
         query = session.run.call_args.args[0]
-        # IGR-223: both endpoints now carry the namespace_id label filter.
+        # Security: both endpoints now carry the namespace_id label filter.
         assert "(e:Entity {namespace_id: $namespace_id})-[r]-(other:Entity {namespace_id: $namespace_id})" in query
         # Negative checks: neither arrow form should appear for "both".
         assert "(e:Entity {namespace_id: $namespace_id})-[r]->(other" not in query

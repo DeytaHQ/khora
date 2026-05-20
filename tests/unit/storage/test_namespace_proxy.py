@@ -47,7 +47,7 @@ class TestProxyEnforcesNamespaceId:
 
     @pytest.mark.asyncio
     async def test_write_method_passes_through_without_namespace_id(self) -> None:
-        """Write methods aren't in the enforcement set — IGR-226 will tighten them."""
+        """Write methods aren't in the enforcement set will tighten them."""
         backend = MagicMock()
         backend.upsert_entity = AsyncMock(return_value="ok")
         proxy = NamespaceRequiredProxy(backend, "graph")

@@ -284,7 +284,7 @@ class SQLiteLanceVectorAdapter:
         namespace_id: UUID,
         session: AsyncSession | None = None,
     ) -> int:
-        """Delete chunks by document, scoped to ``namespace_id`` (IGR-226).
+        """Delete chunks by document, scoped to ``namespace_id`` (IDOR family).
 
         The ``session`` parameter is part of the protocol contract but the
         SQLite+LanceDB backend never participates in a SQLAlchemy session —
@@ -406,7 +406,7 @@ class SQLiteLanceVectorAdapter:
         # backend's column-precedence rule (PR #470). Half-open
         # interval ``>= start AND < end`` to match the Chronicle pushdown
         # contract.
-        # Defense-in-depth (IGR-226): also enforce namespace_id on the SQLite
+        # Defense-in-depth (IDOR family): also enforce namespace_id on the SQLite
         # side rather than trusting LanceDB's filter alone. If LanceDB's
         # where-clause regressed, the SQLite filter would still keep cross-
         # namespace rows out of the result.
@@ -504,7 +504,7 @@ class SQLiteLanceVectorAdapter:
 
         See :meth:`create_entity` — SQLite entity metadata belongs to
         the graph adapter. The ``namespace_id`` kwarg is defense-in-depth
-        (IGR-226) — asserted equal to ``entity.namespace_id``.
+        (IDOR family) — asserted equal to ``entity.namespace_id``.
         """
         if entity.namespace_id != namespace_id:
             raise ValueError(
@@ -518,7 +518,7 @@ class SQLiteLanceVectorAdapter:
 
         Returns ``False`` if the entity does not exist OR belongs to a
         different namespace. Prevents cross-tenant entity-existence
-        enumeration (IDOR — IGR-221).
+        enumeration (IDOR).
         """
         cur = await self._sqlite.execute(
             "SELECT 1 FROM entities WHERE id = ? AND namespace_id = ?",
@@ -538,7 +538,7 @@ class SQLiteLanceVectorAdapter:
         """Update an entity's embedding in LanceDB, scoped to ``namespace_id``.
 
         No-op when the entity does not exist in the given namespace
-        (cross-namespace IDOR — IGR-226).
+        (cross-namespace IDOR).
         """
         # Verify the entity exists in this namespace before writing LanceDB.
         cur = await self._sqlite.execute(
@@ -562,7 +562,7 @@ class SQLiteLanceVectorAdapter:
 
         # Fetch namespace_ids from SQLite — restricted to ``namespace_id``
         # so ids outside the caller's namespace are silently dropped
-        # (cross-namespace IDOR — IGR-226). The ``embedding_model`` is not
+        # (cross-namespace IDOR). The ``embedding_model`` is not
         # persisted in LanceDB (it's a SQLite column on ``entities``,
         # managed by the graph adapter / ORM).
         ids_text = [uuid_to_text(u) for u, _, _ in updates]

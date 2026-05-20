@@ -1,11 +1,11 @@
-"""Signature gate for the cross-namespace IDOR invariant (IGR-225 / IGR-226).
+"""Signature gate for the cross-namespace IDOR invariant (the IDOR family / the IDOR family).
 
-The IDOR family (IGR-212/213/214 → IGR-221/223/224 → IGR-226) keeps
+The IDOR family (the IDOR family/213/214 → the IDOR family/223/224 → the IDOR family) keeps
 recurring because no test asserts the invariant directly. This module
 enforces it structurally: for every concrete backend implementation,
 every read, existence, write or delete method must declare
-``namespace_id`` as a parameter (keyword-only after IGR-221/IGR-223 for
-reads and IGR-226 for writes/deletes).
+``namespace_id`` as a parameter (keyword-only after the IDOR family/the IDOR family for
+reads and the IDOR family for writes/deletes).
 
 If a new backend method is added without ``namespace_id``, this test fails
 at collection time with the offending class / method named, so the
@@ -13,7 +13,7 @@ regression is impossible to land without a security-review prompt.
 
 The behavioural gate (wrong-namespace returns empty) is covered by
 per-backend ``test_namespace_scoped_reads.py`` modules under
-``tests/unit/storage/backends/`` for the IGR-221/223 surface; once the
+``tests/unit/storage/backends/`` for the the IDOR family/223 surface; once the
 behavioural matrix runs across the integration backends the per-backend
 modules can be replaced by a parametrized matrix fixture here.
 """
@@ -79,8 +79,8 @@ _EVENT_STORE_BACKENDS = [
 # takes an identifier-typed positional argument must declare ``namespace_id``.
 # ---------------------------------------------------------------------------
 
-# Methods that read or test the existence of a row by ID (IGR-221/223),
-# plus methods that mutate or delete a row by ID (IGR-226). Includes
+# Methods that read or test the existence of a row by ID (the IDOR family/223),
+# plus methods that mutate or delete a row by ID (IDOR family). Includes
 # traversal methods that walk the graph from a seed entity ID.
 _READ_METHOD_PATTERN = re.compile(
     r"^("
@@ -90,7 +90,7 @@ _READ_METHOD_PATTERN = re.compile(
     r"|find_paths"
     r"|get_neighborhood"
     r"|get_neighborhoods_batch"
-    # Write / delete surface (IGR-226):
+    # Write / delete surface (IDOR family):
     r"|delete_\w+"
     r"|update_entity(_\w+)?"
     r"|supersede_\w+"
@@ -218,7 +218,7 @@ def test_all_read_methods_declare_namespace_id(backend: tuple[type, type]) -> No
         if "namespace_id" not in sig.parameters:
             offenders.append(f"{cls.__name__}.{name}{sig}")
     assert not offenders, (
-        "Read methods missing ``namespace_id`` parameter (cross-namespace IDOR — IGR-222 family):\n"
+        "Read methods missing ``namespace_id`` parameter (cross-namespace IDOR family):\n"
         + "\n".join(f"  - {o}" for o in offenders)
         + "\n\nFix: add ``*, namespace_id: UUID`` (kwarg-only, required) to the signature "
         "and filter at the query layer. If the method is genuinely not namespace-scoped, "
@@ -234,7 +234,7 @@ def test_namespace_id_is_keyword_only(backend: tuple[type, type]) -> None:
 
     Positional ``namespace_id`` lets callers accidentally pass a row id in
     that slot. Kwarg-only forces an explicit ``namespace_id=…`` at every
-    call site, which is what the IGR-221/IGR-223 migration enforced across
+    call site, which is what the the IDOR family/the IDOR family migration enforced across
     24 in-tree caller sites.
     """
     cls, _protocol = backend
