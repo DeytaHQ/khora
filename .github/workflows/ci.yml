@@ -135,8 +135,53 @@ jobs:
       - name: Dependency vulnerability scan (pip-audit)
         run: |
           uv export --no-dev --no-hashes > /tmp/pip-audit-requirements.txt
+          # Allowlist for upstream CVEs with no fix version available. Each entry
+          # must explain why khora's usage does not reach the vulnerable code.
+          # Revisit weekly — tracking issue: #778.
           uvx pip-audit -r /tmp/pip-audit-requirements.txt --progress-spinner off \
-            --ignore-vuln GHSA-xqmj-j6mv-4862  # litellm SSTI in /prompts/test — proxy-only, not exploitable via SDK
+            --ignore-vuln GHSA-xqmj-j6mv-4862 \
+            --ignore-vuln PYSEC-2024-277 \
+            --ignore-vuln PYSEC-2025-211 \
+            --ignore-vuln PYSEC-2025-212 \
+            --ignore-vuln PYSEC-2025-213 \
+            --ignore-vuln PYSEC-2025-214 \
+            --ignore-vuln PYSEC-2025-215 \
+            --ignore-vuln PYSEC-2025-216 \
+            --ignore-vuln PYSEC-2025-217 \
+            --ignore-vuln PYSEC-2025-218 \
+            --ignore-vuln PYSEC-2025-189 \
+            --ignore-vuln PYSEC-2025-190 \
+            --ignore-vuln PYSEC-2025-191 \
+            --ignore-vuln PYSEC-2025-192 \
+            --ignore-vuln PYSEC-2025-193 \
+            --ignore-vuln PYSEC-2025-194 \
+            --ignore-vuln PYSEC-2025-195 \
+            --ignore-vuln PYSEC-2025-196 \
+            --ignore-vuln PYSEC-2025-197 \
+            --ignore-vuln PYSEC-2025-210 \
+            --ignore-vuln PYSEC-2026-139
+          # Justifications (each --ignore-vuln above corresponds to one line here):
+          #   GHSA-xqmj-j6mv-4862   litellm SSTI in /prompts/test — proxy-only, not exploitable via SDK.
+          #   PYSEC-2024-277        joblib NumpyArrayWrapper deserialization — disputed by maintainer; khora never imports joblib (transitive dep only, no untrusted .joblib files loaded).
+          #   PYSEC-2025-211        transformers Perceiver checkpoint RCE — khora never instantiates Perceiver; CrossEncoder loads vetted reranker model IDs only.
+          #   PYSEC-2025-212        transformers Transformer-XL checkpoint RCE — khora never loads Transformer-XL; reranker model IDs are hard-coded vetted IDs.
+          #   PYSEC-2025-213        transformers megatron_gpt2 checkpoint RCE — khora never loads megatron_gpt2; reranker model IDs are hard-coded vetted IDs.
+          #   PYSEC-2025-214        transformers SEW convert_config RCE — khora never runs checkpoint conversion; only from_pretrained on vetted IDs (via sentence-transformers).
+          #   PYSEC-2025-215        transformers SEW-D convert_config RCE — khora never runs checkpoint conversion.
+          #   PYSEC-2025-216        transformers HuBERT convert_config RCE — khora never runs checkpoint conversion.
+          #   PYSEC-2025-217        transformers X-CLIP checkpoint conversion RCE — khora never loads X-CLIP or runs checkpoint conversion.
+          #   PYSEC-2025-218        transformers GLM4 checkpoint deserialization RCE — khora never loads GLM4; reranker model IDs are hard-coded vetted IDs.
+          #   PYSEC-2025-189        torch.ops.profiler memory corruption — khora never uses torch.profiler or the tuple-handler path; library-only, no profiling entry points.
+          #   PYSEC-2025-190        torch nnq_Sigmoid quantized-init flaw — local-only attack; khora never uses torch quantization (nnq_*).
+          #   PYSEC-2025-191        torch.mkldnn_max_pool2d DoS — local-only, disputed by maintainer; khora never calls mkldnn ops directly.
+          #   PYSEC-2025-192        torch.nn.utils.rnn.pad_packed_sequence corruption — local-only; khora never uses RNN packing utilities.
+          #   PYSEC-2025-193        torch.nn.utils.rnn.unpack_sequence corruption — local-only; khora never uses RNN packing utilities.
+          #   PYSEC-2025-194        torch.jit.script memory corruption — local-only; khora never uses TorchScript / torch.jit.
+          #   PYSEC-2025-195        torch.lstm_cell memory corruption — local-only; khora never calls torch.lstm_cell directly.
+          #   PYSEC-2025-196        torch.jit.jit_module_from_flatbuffer corruption — local-only; khora never loads flatbuffer JIT modules.
+          #   PYSEC-2025-197        torch CUDA caching_allocator_delete corruption — local-only, CUDA-only; khora reranker runs on CPU by default and never calls caching_allocator_delete.
+          #   PYSEC-2025-210        torch.profiler PythonTracer hang/DoS — khora never uses torch.profiler.
+          #   PYSEC-2026-139        torch pt2 Load Handler deserialization — khora never loads .pt2 archives; CrossEncoder loads safetensors via huggingface_hub from vetted IDs.
         continue-on-error: false
 
   # ============================================================================
