@@ -375,6 +375,8 @@ class Neo4jBackend(GraphBackendBase):
         relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
         pool_sampler_enabled: bool = False,
         pool_sampler_interval_ms: int = 500,
+        relationship_source_document_ids_max: int = 100,
+        relationship_source_chunk_ids_max: int = 250,
     ) -> None:
         """Initialize the Neo4j backend.
 
@@ -397,6 +399,17 @@ class Neo4jBackend(GraphBackendBase):
                 ``khora.neo4j.pool.sampled.*`` histograms. Zero cost when False.
             pool_sampler_interval_ms: Sampler interval in milliseconds. Clamped to
                 [50, 60000]. Only relevant when ``pool_sampler_enabled`` is True.
+            relationship_source_document_ids_max: Cap on retained
+                ``source_document_ids`` per relationship after MERGE. When the
+                (existing + incoming) union exceeds this cap the most-recent
+                tail is kept; over-limit entries are dropped, a warning is
+                logged, and ``khora.neo4j.relationship.source_id_truncated`` is
+                incremented (label ``field=source_document_ids``). Default 100
+                preserves pre-#737 behavior.
+            relationship_source_chunk_ids_max: Cap on retained
+                ``source_chunk_ids`` per relationship after MERGE. Same
+                semantics as ``relationship_source_document_ids_max``; counter
+                label ``field=source_chunk_ids``. Default 250.
         """
         self._url = url
         self._user = user
@@ -427,6 +440,8 @@ class Neo4jBackend(GraphBackendBase):
         self._sampler_task: asyncio.Task[None] | None = None
         self._sampler_warned = False
         self._sampler_finalizer: _weakref.finalize | None = None
+        self._relationship_source_document_ids_max = relationship_source_document_ids_max
+        self._relationship_source_chunk_ids_max = relationship_source_chunk_ids_max
         self._init_metrics()
 
     def _init_metrics(self) -> None:
@@ -480,6 +495,52 @@ class Neo4jBackend(GraphBackendBase):
             "khora.neo4j.pool.sampled.utilization",
             description="Neo4j pool utilization (0.0-1.0), high-frequency sample.",
         )
+        # Provenance-list truncation counter (#737). Incremented whenever a
+        # relationship MERGE's (existing + incoming) union exceeds the
+        # configured cap and entries are dropped. Two labels:
+        #   field   — "source_document_ids" | "source_chunk_ids"
+        #   kind    — "batch" | "single"  (which write path observed the drop)
+        # Counter value is the number of entries dropped (not rows affected),
+        # so dashboards can show "provenance entries lost / hour".
+        self._source_id_truncated_counter = metric_counter(
+            "khora.neo4j.relationship.source_id_truncated",
+            description=(
+                "Relationship MERGE provenance entries dropped due to "
+                "source_document_ids / source_chunk_ids cap (#737)."
+            ),
+        )
+
+    def _record_truncation(
+        self,
+        *,
+        field: str,
+        kind: str,
+        dropped: int,
+        rows_affected: int,
+        limit: int,
+        rel_type: str | None = None,
+    ) -> None:
+        """Log + emit metric when MERGE-time provenance truncation drops entries.
+
+        ``dropped`` is the total number of entries lost (summed across rows
+        in a batch). ``rows_affected`` is the number of relationship rows
+        whose union exceeded ``limit``. Skips emission when ``dropped == 0``.
+        """
+        if dropped <= 0:
+            return
+        self._source_id_truncated_counter.add(dropped, attributes={"field": field, "kind": kind})
+        logger.warning(
+            "Relationship provenance truncated: dropped {dropped} {field} entries "
+            "across {rows} relationship(s){rel_type_suffix} (limit={limit}). "
+            "Raise KHORA_STORAGE__GRAPH__RELATIONSHIP_{field_upper}_MAX to retain "
+            "deeper provenance.",
+            dropped=dropped,
+            field=field,
+            rows=rows_affected,
+            rel_type_suffix=f", rel_type={rel_type}" if rel_type else "",
+            limit=limit,
+            field_upper=field.upper(),
+        )
 
     @classmethod
     def from_config(cls, config: Any) -> Neo4jBackend:
@@ -514,6 +575,8 @@ class Neo4jBackend(GraphBackendBase):
             ),
             pool_sampler_enabled=getattr(config, "pool_sampler_enabled", False),
             pool_sampler_interval_ms=getattr(config, "pool_sampler_interval_ms", 500),
+            relationship_source_document_ids_max=getattr(config, "relationship_source_document_ids_max", 100),
+            relationship_source_chunk_ids_max=getattr(config, "relationship_source_chunk_ids_max", 250),
         )
 
     @classmethod
@@ -571,6 +634,11 @@ class Neo4jBackend(GraphBackendBase):
         instance._sampler_task = None
         instance._sampler_warned = False
         instance._sampler_finalizer = None
+        # Relationship provenance caps (#737) — defaults mirror the public
+        # constructor; callers building backends via from_driver typically
+        # set these on the instance directly post-construction.
+        instance._relationship_source_document_ids_max = 100
+        instance._relationship_source_chunk_ids_max = 250
         instance._init_metrics()
         return instance
 
@@ -1735,8 +1803,9 @@ RETURN count(e) AS updated
 
         Sibling to :meth:`reset_entity_source_chunk_ids_batch` for the
         relationship side of the replace lifecycle. Same
-        ``(old + new)[-250..]`` append issue at ``create_relationships_batch``'s
-        ``ON MATCH`` clause (see ``neo4j.py`` relationship MERGE).
+        ``(old + new)[-relationship_source_chunk_ids_max..]`` append issue at
+        ``create_relationships_batch``'s ``ON MATCH`` clause (see ``neo4j.py``
+        relationship MERGE; cap configurable since #737).
 
         Matching is by entity name+type (not entity UUID) so survivor
         relationships whose endpoints are survivor entities still resolve
@@ -1847,13 +1916,29 @@ RETURN count(r) AS updated
             )
             _type_t0 = _time.perf_counter()
             type_total = 0
+            src_doc_max = self._relationship_source_document_ids_max
+            src_chunk_max = self._relationship_source_chunk_ids_max
             for start in range(0, len(sorted_rels), batch_size):
                 batch = sorted_rels[start : start + batch_size]
                 rows = [_relationship_to_cypher_params(r) for r in batch]
+                # OPTIONAL MATCH captures the pre-MERGE relationship (if any)
+                # so we can compute the pre-truncation union size and report
+                # exactly how many entries the slice dropped (#737). Adds one
+                # index lookup per row; negligible vs the MERGE itself.
                 query = f"""
                 UNWIND $rows AS row
                 MATCH (source:Entity {{id: row.source_id}})
                 MATCH (target:Entity {{id: row.target_id}})
+                OPTIONAL MATCH (source)-[pre_r:{rel_type} {{namespace_id: row.namespace_id}}]->(target)
+                WITH row, source, target,
+                     CASE WHEN pre_r IS NULL
+                          THEN 0
+                          ELSE size(coalesce(pre_r.source_document_ids, []) + row.source_document_ids)
+                     END AS pre_union_doc_size,
+                     CASE WHEN pre_r IS NULL
+                          THEN 0
+                          ELSE size(coalesce(pre_r.source_chunk_ids, []) + row.source_chunk_ids)
+                     END AS pre_union_chunk_size
                 MERGE (source)-[r:{rel_type} {{namespace_id: row.namespace_id}}]->(target)
                 ON CREATE SET
                     r.id = row.id,
@@ -1871,21 +1956,56 @@ RETURN count(r) AS updated
                 ON MATCH SET
                     r.description = CASE WHEN size(row.description) > size(coalesce(r.description, ''))
                         THEN row.description ELSE r.description END,
-                    r.source_document_ids = (r.source_document_ids + row.source_document_ids)[-100..],
-                    r.source_chunk_ids = (r.source_chunk_ids + row.source_chunk_ids)[-250..],
+                    r.source_document_ids = (r.source_document_ids + row.source_document_ids)[-$src_doc_max..],
+                    r.source_chunk_ids = (r.source_chunk_ids + row.source_chunk_ids)[-$src_chunk_max..],
                     r.confidence = CASE WHEN row.confidence > r.confidence THEN row.confidence ELSE r.confidence END,
                     r.weight = CASE WHEN row.weight > r.weight THEN row.weight ELSE r.weight END,
                     r.updated_at = row.updated_at
-                RETURN count(r) AS created
+                RETURN
+                    count(r) AS created,
+                    sum(CASE WHEN pre_union_doc_size > $src_doc_max THEN pre_union_doc_size - $src_doc_max ELSE 0 END) AS doc_dropped,
+                    sum(CASE WHEN pre_union_chunk_size > $src_chunk_max THEN pre_union_chunk_size - $src_chunk_max ELSE 0 END) AS chunk_dropped,
+                    sum(CASE WHEN pre_union_doc_size > $src_doc_max THEN 1 ELSE 0 END) AS doc_rows,
+                    sum(CASE WHEN pre_union_chunk_size > $src_chunk_max THEN 1 ELSE 0 END) AS chunk_rows
                 """
 
-                async def _tx(tx: AsyncManagedTransaction) -> int:
-                    result = await tx.run(query, rows=rows)
+                async def _tx(tx: AsyncManagedTransaction) -> dict[str, int]:
+                    result = await tx.run(
+                        query,
+                        rows=rows,
+                        src_doc_max=src_doc_max,
+                        src_chunk_max=src_chunk_max,
+                    )
                     record = await result.single()
-                    return record["created"] if record else 0
+                    if not record:
+                        return {"created": 0, "doc_dropped": 0, "chunk_dropped": 0, "doc_rows": 0, "chunk_rows": 0}
+                    return {
+                        "created": record["created"] or 0,
+                        "doc_dropped": record["doc_dropped"] or 0,
+                        "chunk_dropped": record["chunk_dropped"] or 0,
+                        "doc_rows": record["doc_rows"] or 0,
+                        "chunk_rows": record["chunk_rows"] or 0,
+                    }
 
                 async with self._session() as session:
-                    type_total += await session.execute_write(_tx)
+                    tx_result = await session.execute_write(_tx)
+                type_total += tx_result["created"]
+                self._record_truncation(
+                    field="source_document_ids",
+                    kind="batch",
+                    dropped=tx_result["doc_dropped"],
+                    rows_affected=tx_result["doc_rows"],
+                    limit=src_doc_max,
+                    rel_type=rel_type,
+                )
+                self._record_truncation(
+                    field="source_chunk_ids",
+                    kind="batch",
+                    dropped=tx_result["chunk_dropped"],
+                    rows_affected=tx_result["chunk_rows"],
+                    limit=src_chunk_max,
+                    rel_type=rel_type,
+                )
             _per_type_ms[rel_type] = (_time.perf_counter() - _type_t0) * 1000
             return type_total
 
@@ -2069,12 +2189,29 @@ RETURN count(r) AS updated
         rel_type = sanitize_cypher_label(relationship.relationship_type)
         relationship.relationship_type = rel_type
         params = _relationship_to_cypher_params(relationship)
+        params["src_doc_max"] = self._relationship_source_document_ids_max
+        params["src_chunk_max"] = self._relationship_source_chunk_ids_max
 
-        async def _create(tx: AsyncManagedTransaction) -> None:
-            # Use dynamic relationship type with MERGE to prevent duplicates
+        async def _create(tx: AsyncManagedTransaction) -> dict[str, int]:
+            # Use dynamic relationship type with MERGE to prevent duplicates.
+            # OPTIONAL MATCH captures pre-MERGE state so we can compute exact
+            # truncation drop counts (#737). Note the de-duped union used here
+            # (and in the original Cypher) differs from the batch path's
+            # straight concatenation; both are clipped against the configured
+            # tail length.
             query = f"""
             MATCH (source:Entity {{id: $source_id}})
             MATCH (target:Entity {{id: $target_id}})
+            OPTIONAL MATCH (source)-[pre_r:{rel_type} {{namespace_id: $namespace_id}}]->(target)
+            WITH source, target,
+                 CASE WHEN pre_r IS NULL
+                      THEN 0
+                      ELSE size(coalesce(pre_r.source_document_ids, []) + [x IN $source_document_ids WHERE NOT x IN coalesce(pre_r.source_document_ids, [])])
+                 END AS pre_union_doc_size,
+                 CASE WHEN pre_r IS NULL
+                      THEN 0
+                      ELSE size(coalesce(pre_r.source_chunk_ids, []) + [x IN $source_chunk_ids WHERE NOT x IN coalesce(pre_r.source_chunk_ids, [])])
+                 END AS pre_union_chunk_size
             MERGE (source)-[r:{rel_type} {{namespace_id: $namespace_id}}]->(target)
             ON CREATE SET
                 r.id = $id,
@@ -2092,16 +2229,42 @@ RETURN count(r) AS updated
             ON MATCH SET
                 r.description = CASE WHEN size($description) > size(coalesce(r.description, ''))
                     THEN $description ELSE r.description END,
-                r.source_document_ids = (r.source_document_ids + [x IN $source_document_ids WHERE NOT x IN r.source_document_ids])[-100..],
-                r.source_chunk_ids = (r.source_chunk_ids + [x IN $source_chunk_ids WHERE NOT x IN r.source_chunk_ids])[-250..],
+                r.source_document_ids = (r.source_document_ids + [x IN $source_document_ids WHERE NOT x IN r.source_document_ids])[-$src_doc_max..],
+                r.source_chunk_ids = (r.source_chunk_ids + [x IN $source_chunk_ids WHERE NOT x IN r.source_chunk_ids])[-$src_chunk_max..],
                 r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
                 r.weight = CASE WHEN $weight > r.weight THEN $weight ELSE r.weight END,
                 r.updated_at = $updated_at
+            RETURN
+                CASE WHEN pre_union_doc_size > $src_doc_max THEN pre_union_doc_size - $src_doc_max ELSE 0 END AS doc_dropped,
+                CASE WHEN pre_union_chunk_size > $src_chunk_max THEN pre_union_chunk_size - $src_chunk_max ELSE 0 END AS chunk_dropped
             """
-            await tx.run(query, **params)
+            result = await tx.run(query, **params)
+            record = await result.single()
+            if not record:
+                return {"doc_dropped": 0, "chunk_dropped": 0}
+            return {
+                "doc_dropped": record["doc_dropped"] or 0,
+                "chunk_dropped": record["chunk_dropped"] or 0,
+            }
 
         async with self._session() as session:
-            await session.execute_write(_create)
+            tx_result = await session.execute_write(_create)
+        self._record_truncation(
+            field="source_document_ids",
+            kind="single",
+            dropped=tx_result["doc_dropped"],
+            rows_affected=1 if tx_result["doc_dropped"] else 0,
+            limit=self._relationship_source_document_ids_max,
+            rel_type=rel_type,
+        )
+        self._record_truncation(
+            field="source_chunk_ids",
+            kind="single",
+            dropped=tx_result["chunk_dropped"],
+            rows_affected=1 if tx_result["chunk_dropped"] else 0,
+            limit=self._relationship_source_chunk_ids_max,
+            rel_type=rel_type,
+        )
 
         return relationship
 
