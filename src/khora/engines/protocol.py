@@ -284,7 +284,7 @@ class MemoryEngineProtocol(Protocol):
         Args:
             document_id: Document UUID
             namespace_id: Caller's namespace; out-of-namespace rows return ``None``
-                (IDOR — IGR-221).
+                (IDOR).
 
         Returns:
             Document or None if not found (or not in this namespace)

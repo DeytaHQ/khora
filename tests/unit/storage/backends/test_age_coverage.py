@@ -19,7 +19,7 @@ import pytest
 from khora.core.models import Entity, Episode, Relationship
 from khora.storage.backends.age import AGEBackend
 
-# IGR-221/223: read-side methods now require a kwarg-only ``namespace_id`` so
+# the IDOR family/223: read-side methods now require a kwarg-only ``namespace_id`` so
 # the backend can scope every match to the caller's tenant.  Tests use this
 # fixed UUID rather than a fresh ``uuid4()`` per call so assertions against the
 # generated Cypher can pin the embedded literal.
@@ -467,7 +467,7 @@ async def test_delete_relationship_false_when_no_rows() -> None:
 @pytest.mark.parametrize(
     "direction,expected_fragment",
     [
-        # IGR-223: patterns now embed ``{namespace_id: '<uuid>'}`` on every
+        # Security: patterns now embed ``{namespace_id: '<uuid>'}`` on every
         # node, so the bare ``(e)-[r`` form no longer appears.  Each fragment
         # below is the smallest substring unique to the chosen direction.
         ("outgoing", "]->(other:Entity"),

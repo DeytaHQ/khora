@@ -218,7 +218,7 @@ class StorageCoordinator:
         if self._hook_dispatcher is not None and self._hook_dispatcher.subscription_count > 0:
             await self._hook_dispatcher.dispatch(event)
 
-    # IGR-224: tuple of public attr names that proxy through __setattr__.
+    # Security: tuple of public attr names that proxy through __setattr__.
     # Listed at class level so __setattr__ doesn't pay dict-lookup per call.
     _PROXIED_ROLES: tuple[str, ...] = ("relational", "vector", "graph", "event_store")
 
@@ -469,7 +469,7 @@ class StorageCoordinator:
         Returns ``None`` if the document does not exist OR belongs to a
         different namespace. The ``namespace_id`` filter is applied at the
         backend's SQL layer to prevent cross-tenant document access by id
-        (IDOR — IGR-221).
+        (IDOR).
         """
         if not self._relational:
             raise RuntimeError("Relational backend not configured")
@@ -498,7 +498,7 @@ class StorageCoordinator:
         return await self._relational.update_document(document)
 
     async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete a document and its chunks, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete a document and its chunks, scoped to ``namespace_id`` (IDOR family)."""
         if not self._relational:
             raise RuntimeError("Relational backend not configured")
 
@@ -1014,7 +1014,7 @@ class StorageCoordinator:
         backend's underlying ``get_entity`` only filters by ID.
         """
         if self._graph:
-            # Backend now filters at the Cypher/SQL layer (IGR-223). Keep the
+            # Backend now filters at the Cypher/SQL layer (IDOR family). Keep the
             # post-fetch check as defense-in-depth in case a backend's filter
             # ever regresses.
             entity = await self._graph.get_entity(entity_id, namespace_id=namespace_id)
@@ -1032,7 +1032,7 @@ class StorageCoordinator:
     async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
         """Update an entity in both graph and vector stores (parallel).
 
-        Scoped to ``namespace_id`` (IGR-226). When a unified backend is
+        Scoped to ``namespace_id`` (IDOR family). When a unified backend is
         detected, the vector write is skipped.
         """
         if self._graph and self._vector:
@@ -1050,7 +1050,7 @@ class StorageCoordinator:
         return entity
 
     async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete an entity, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete an entity, scoped to ``namespace_id`` (IDOR family)."""
         if self._graph:
             return await self._graph.delete_entity(entity_id, namespace_id=namespace_id)
         return False
@@ -1085,7 +1085,7 @@ class StorageCoordinator:
         *,
         namespace_id: UUID,
     ) -> None:
-        """Update the embedding for an entity, scoped to ``namespace_id`` (IGR-226)."""
+        """Update the embedding for an entity, scoped to ``namespace_id`` (IDOR family)."""
         if self._vector:
             await self._vector.update_entity_embedding(entity_id, embedding, model, namespace_id=namespace_id)
 
@@ -1095,7 +1095,7 @@ class StorageCoordinator:
         *,
         namespace_id: UUID,
     ) -> int:
-        """Update embeddings for multiple entities in a single transaction, scoped to ``namespace_id`` (IGR-226)."""
+        """Update embeddings for multiple entities in a single transaction, scoped to ``namespace_id`` (IDOR family)."""
         if self._vector and hasattr(self._vector, "update_entity_embeddings_batch"):
             return await self._vector.update_entity_embeddings_batch(updates, namespace_id=namespace_id)
         # Fallback to individual updates (sequential)
@@ -1243,7 +1243,7 @@ class StorageCoordinator:
         return None
 
     async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete a relationship, scoped to ``namespace_id`` (IDOR family)."""
         if self._graph:
             return await self._graph.delete_relationship(relationship_id, namespace_id=namespace_id)
         return False
@@ -1261,7 +1261,7 @@ class StorageCoordinator:
 
         Returns an empty list if the entity does not belong to the caller's
         namespace. Edges that cross into other namespaces are excluded
-        (IGR-223).
+        (IDOR family).
         """
         if self._graph:
             return await self._graph.get_entity_relationships(
@@ -1371,7 +1371,7 @@ class StorageCoordinator:
 
         Returns ``{"entities": [], "relationships": []}`` if the seed entity
         belongs to a different namespace. Traversal never crosses namespace
-        boundaries (IGR-223).
+        boundaries (IDOR family).
         """
         if self._graph:
             return await self._graph.get_neighborhood(
@@ -1391,7 +1391,7 @@ class StorageCoordinator:
         """Fetch multiple entities in a single query, scoped to ``namespace_id``.
 
         Entities belonging to any other namespace are silently dropped from
-        the result (IGR-223).
+        the result (IDOR family).
 
         Args:
             entity_ids: List of entity IDs to fetch
@@ -1428,7 +1428,7 @@ class StorageCoordinator:
         """Fetch multiple documents in a single query, scoped to ``namespace_id``.
 
         Documents belonging to any other namespace are silently dropped from
-        the result (IGR-221).
+        the result (IDOR family).
 
         Args:
             document_ids: List of document IDs to fetch
@@ -1450,7 +1450,7 @@ class StorageCoordinator:
         scoped to ``namespace_id``.
 
         Documents in other namespaces are silently dropped from the result
-        (IGR-221).
+        (IDOR family).
 
         Args:
             document_ids: List of document IDs to fetch
@@ -1476,7 +1476,7 @@ class StorageCoordinator:
         Args:
             document_ids: List of document IDs to fetch
             namespace_id: Namespace scope — cross-namespace ids are
-                silently dropped from the result (IGR-225 close-out).
+                silently dropped from the result (security close-out).
 
         Returns:
             Dictionary mapping document ID to DocumentProjection
@@ -1655,7 +1655,7 @@ class StorageCoordinator:
         )
 
     async def supersede_fact(self, fact_id: UUID, superseded_by: UUID, *, namespace_id: UUID) -> None:
-        """Mark a fact inactive and record the replacement fact ID, scoped to ``namespace_id`` (IGR-226)."""
+        """Mark a fact inactive and record the replacement fact ID, scoped to ``namespace_id`` (IDOR family)."""
         await self._chronicle_backend("supersede_fact").supersede_fact(
             fact_id, superseded_by, namespace_id=namespace_id
         )

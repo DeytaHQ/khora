@@ -441,7 +441,7 @@ class PgVectorBackend(AsyncSessionMixin):
         When *session* is provided the caller owns the transaction —
         no commit is issued.  When ``None``, a private session is used
         and committed automatically. The ``namespace_id`` filter prevents
-        cross-tenant deletion by document id (IGR-226).
+        cross-tenant deletion by document id (IDOR family).
         """
         if session is not None:
             result = await session.execute(
@@ -466,7 +466,7 @@ class PgVectorBackend(AsyncSessionMixin):
 
         Used by the forget cascade to remove orphan entities from pgvector
         after the graph backend has dropped them. The ``namespace_id``
-        filter prevents cross-tenant deletion by id (IGR-226).
+        filter prevents cross-tenant deletion by id (IDOR family).
         """
         if not entity_ids:
             return 0
@@ -487,7 +487,7 @@ class PgVectorBackend(AsyncSessionMixin):
         actively written by pgvector today (edges live in the graph
         backend) but the table exists and is kept consistent for any
         downstream reader or future migration. The ``namespace_id``
-        filter prevents cross-tenant deletion by id (IGR-226).
+        filter prevents cross-tenant deletion by id (IDOR family).
         """
         if not relationship_ids:
             return 0
@@ -783,7 +783,7 @@ class PgVectorBackend(AsyncSessionMixin):
 
         Uses upsert to handle race conditions and entities created before
         dual-storage was implemented. The ``namespace_id`` kwarg is
-        defense-in-depth (IGR-226) — asserted equal to ``entity.namespace_id``.
+        defense-in-depth (IDOR family) — asserted equal to ``entity.namespace_id``.
         """
         if entity.namespace_id != namespace_id:
             raise ValueError(
@@ -855,7 +855,7 @@ class PgVectorBackend(AsyncSessionMixin):
 
         Returns ``None`` if the entity does not exist OR belongs to a
         different namespace. Prevents cross-tenant entity access by id
-        (IDOR — IGR-223).
+        (IDOR).
         """
         async with self._get_session() as session:
             result = await session.execute(
@@ -876,7 +876,7 @@ class PgVectorBackend(AsyncSessionMixin):
         backend) so the entity co-occurrence channel can resolve entities.
 
         Entities belonging to any other namespace are silently dropped from
-        the result to prevent cross-tenant IDOR (IGR-223).
+        the result to prevent cross-tenant IDOR (IDOR family).
         """
         if not entity_ids:
             return {}
@@ -921,7 +921,7 @@ class PgVectorBackend(AsyncSessionMixin):
 
         Returns ``False`` if the entity does not exist OR belongs to a
         different namespace. Prevents cross-tenant entity-existence
-        enumeration (IDOR — IGR-221).
+        enumeration (IDOR).
         """
         async with self._get_session() as session:
             result = await session.execute(
@@ -1081,7 +1081,7 @@ class PgVectorBackend(AsyncSessionMixin):
         """Update the embedding for an entity, scoped to ``namespace_id``.
 
         Updates are skipped silently when the entity belongs to a different
-        namespace (cross-namespace IDOR — IGR-226).
+        namespace (cross-namespace IDOR).
         """
         async with self._get_session() as session:
             await session.execute(
@@ -1109,7 +1109,7 @@ class PgVectorBackend(AsyncSessionMixin):
         Uses executemany semantics to send all updates in a single round-trip
         instead of N individual UPDATE statements. Updates are restricted to
         ``namespace_id``; ids in other namespaces are silently skipped
-        (IGR-226).
+        (IDOR family).
 
         Args:
             updates: List of (entity_id, embedding, model) tuples
@@ -1427,7 +1427,7 @@ class PgVectorBackend(AsyncSessionMixin):
         """Mark a fact inactive and link it to its replacement.
 
         Scoped to ``namespace_id`` — no-op when the fact belongs to a
-        different namespace (cross-namespace IDOR — IGR-226).
+        different namespace (cross-namespace IDOR).
         """
         async with self._get_session() as session:
             await session.execute(

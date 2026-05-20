@@ -247,7 +247,7 @@ class MemgraphBackend(GraphBackendBase):
         return entity
 
     async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
-        """Get an entity by ID, scoped to ``namespace_id`` (IGR-223)."""
+        """Get an entity by ID, scoped to ``namespace_id`` (IDOR family)."""
         driver = self._get_driver()
 
         async with driver.session() as session:
@@ -281,7 +281,7 @@ class MemgraphBackend(GraphBackendBase):
             return None
 
     async def get_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> dict[UUID, Entity]:
-        """Fetch multiple entities scoped to ``namespace_id`` (IGR-223).
+        """Fetch multiple entities scoped to ``namespace_id`` (IDOR family).
 
         Entities in any other namespace are silently dropped from the result.
         """
@@ -307,7 +307,7 @@ class MemgraphBackend(GraphBackendBase):
             }
 
     async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
-        """Update an entity, scoped to ``namespace_id`` (IGR-226).
+        """Update an entity, scoped to ``namespace_id`` (IDOR family).
 
         The ``namespace_id`` kwarg is defense-in-depth — asserted equal to
         ``entity.namespace_id`` before the MATCH filter is applied.
@@ -354,7 +354,7 @@ class MemgraphBackend(GraphBackendBase):
         return entity
 
     async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete an entity and its relationships, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete an entity and its relationships, scoped to ``namespace_id`` (IDOR family)."""
         driver = self._get_driver()
 
         async with driver.session() as session:
@@ -463,7 +463,7 @@ class MemgraphBackend(GraphBackendBase):
         return relationship
 
     async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
-        """Get a relationship by ID, scoped to ``namespace_id`` (IGR-223)."""
+        """Get a relationship by ID, scoped to ``namespace_id`` (IDOR family)."""
         driver = self._get_driver()
 
         async with driver.session() as session:
@@ -486,7 +486,7 @@ class MemgraphBackend(GraphBackendBase):
             return None
 
     async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete a relationship, scoped to ``namespace_id`` (IDOR family)."""
         driver = self._get_driver()
 
         async with driver.session() as session:
@@ -511,7 +511,7 @@ class MemgraphBackend(GraphBackendBase):
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
-        """Get relationships for an entity, scoped to ``namespace_id`` (IGR-223).
+        """Get relationships for an entity, scoped to ``namespace_id`` (IDOR family).
 
         Both endpoint nodes are constrained to ``namespace_id`` so cross-tenant
         edges don't surface.
@@ -637,7 +637,7 @@ class MemgraphBackend(GraphBackendBase):
         return episode
 
     async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
-        """Get an episode by ID, scoped to ``namespace_id`` (IGR-223)."""
+        """Get an episode by ID, scoped to ``namespace_id`` (IDOR family)."""
         driver = self._get_driver()
 
         async with driver.session() as session:
@@ -705,7 +705,7 @@ class MemgraphBackend(GraphBackendBase):
 
         # Memgraph supports BFS shortest path. All nodes — endpoints and
         # intermediates — must share ``namespace_id`` so the traversal never
-        # crosses tenants (IGR-223).
+        # crosses tenants (IDOR family).
         query = f"""
         MATCH path = (source:Entity {{id: $source_id, namespace_id: $namespace_id}})-[r{rel_filter}*1..{max_depth}]-(target:Entity {{id: $target_id, namespace_id: $namespace_id}})
         WHERE ALL(n IN nodes(path) WHERE n.namespace_id = $namespace_id)
@@ -745,7 +745,7 @@ class MemgraphBackend(GraphBackendBase):
         relationship_types: list[str] | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """Get the neighborhood of an entity, scoped to ``namespace_id`` (IGR-223).
+        """Get the neighborhood of an entity, scoped to ``namespace_id`` (IDOR family).
 
         Seed and every node reached during traversal are constrained to
         ``namespace_id`` so the result never crosses into another namespace.

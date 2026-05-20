@@ -437,7 +437,7 @@ class VectorCypherEngine:
             neo4j_database = self._config.get_neo4j_database() or "neo4j"
             if self._storage._graph is not None:
                 # Route through the public attr so __setattr__ rewraps the
-                # proxy alongside the private ref (IGR-224).
+                # proxy alongside the private ref (IDOR family).
                 self._storage.graph = Neo4jBackend.from_driver(  # type: ignore[assignment]
                     self._neo4j_driver,
                     database=neo4j_database,
@@ -1957,7 +1957,7 @@ class VectorCypherEngine:
         temporal_store = self._get_temporal_store()
         dual_nodes = self._get_dual_nodes()
 
-        # namespace_id is required for IDOR-safe lookup (IGR-221). Callers
+        # namespace_id is required for IDOR-safe lookup (IDOR family). Callers
         # going through Khora.forget always resolve it before calling here;
         # bail loudly rather than allow a cross-tenant id probe.
         if namespace_id is None:
@@ -3139,7 +3139,7 @@ class VectorCypherEngine:
     # =========================================================================
 
     async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
-        """Get a document by ID, scoped to ``namespace_id`` (IGR-221)."""
+        """Get a document by ID, scoped to ``namespace_id`` (IDOR family)."""
         return await self._get_storage().get_document(document_id, namespace_id=namespace_id)
 
     async def list_documents(

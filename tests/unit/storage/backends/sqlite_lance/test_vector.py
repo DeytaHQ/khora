@@ -410,7 +410,7 @@ class TestEntities:
         assert await adapter.entity_exists(uuid4(), namespace_id=ns) is False
 
     async def test_entity_exists_requires_namespace_kwarg(self, adapter: SQLiteLanceVectorAdapter, graph):
-        """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+        """IDOR — Security: missing ``namespace_id`` must raise TypeError."""
         ns = uuid4()
         e = _make_entity(ns, embedding=_unit(8, 0))
         await graph.create_entity(e)
@@ -419,7 +419,7 @@ class TestEntities:
             await adapter.entity_exists(e.id)  # type: ignore[call-arg]
 
     async def test_entity_exists_wrong_namespace_returns_false(self, adapter: SQLiteLanceVectorAdapter, graph):
-        """Cross-namespace probes return ``False`` (IGR-221)."""
+        """Cross-namespace probes return ``False`` (IDOR family)."""
         ns = uuid4()
         e = _make_entity(ns, embedding=_unit(8, 0))
         await graph.create_entity(e)
@@ -456,7 +456,7 @@ class TestEntities:
         assert math.isclose(results[0][1], 1.0, abs_tol=1e-3)
 
     async def test_update_entity_embedding_missing_is_silent_noop(self, adapter: SQLiteLanceVectorAdapter):
-        """IGR-226: cross-namespace / missing-entity update is a silent no-op.
+        """Security: cross-namespace / missing-entity update is a silent no-op.
 
         Raising would leak the existence of the row across namespaces (the
         old behaviour was an existence oracle). The IDOR family preserves

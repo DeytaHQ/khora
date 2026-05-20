@@ -445,7 +445,7 @@ async def test_get_document_returns_domain_model() -> None:
 
 @pytest.mark.unit
 async def test_get_document_requires_namespace_kwarg() -> None:
-    """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+    """IDOR — Security: missing ``namespace_id`` must raise TypeError."""
     b = PostgreSQLBackend.__new__(PostgreSQLBackend)
     with pytest.raises(TypeError):
         await b.get_document(uuid4())  # type: ignore[call-arg]
@@ -571,7 +571,7 @@ async def test_get_documents_batch_returns_keyed_dict() -> None:
 
 @pytest.mark.unit
 async def test_get_documents_batch_requires_namespace_kwarg() -> None:
-    """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+    """IDOR — Security: missing ``namespace_id`` must raise TypeError."""
     b = PostgreSQLBackend.__new__(PostgreSQLBackend)
     with pytest.raises(TypeError):
         await b.get_documents_batch([uuid4()])  # type: ignore[call-arg]
@@ -676,7 +676,7 @@ async def test_get_document_sources_batch_returns_keyed_dict() -> None:
 
 @pytest.mark.unit
 async def test_get_document_sources_batch_requires_namespace_kwarg() -> None:
-    """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+    """IDOR — Security: missing ``namespace_id`` must raise TypeError."""
     b = PostgreSQLBackend.__new__(PostgreSQLBackend)
     with pytest.raises(TypeError):
         await b.get_document_sources_batch([uuid4()])  # type: ignore[call-arg]

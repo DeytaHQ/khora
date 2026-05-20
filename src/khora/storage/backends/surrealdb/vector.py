@@ -224,7 +224,7 @@ class SurrealDBVectorAdapter:
         return [self._row_to_chunk(r) for r in rows]
 
     async def delete_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> int:
-        """Delete all chunks for a document, scoped to ``namespace_id`` (IGR-226).
+        """Delete all chunks for a document, scoped to ``namespace_id`` (IDOR family).
 
         Returns the count deleted. Chunks in other namespaces are silently
         skipped, preventing cross-tenant deletion by document id.
@@ -431,7 +431,7 @@ class SurrealDBVectorAdapter:
         await self._conn.execute(sql, _entity_to_bindings(entity))
 
     async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> None:
-        """Update an existing entity record, scoped to ``namespace_id`` (IGR-226).
+        """Update an existing entity record, scoped to ``namespace_id`` (IDOR family).
 
         The ``namespace_id`` kwarg is defense-in-depth \u2014 asserted equal to
         ``entity.namespace_id`` before the UPDATE filter is applied.
@@ -471,7 +471,7 @@ class SurrealDBVectorAdapter:
 
         Returns ``False`` if the entity does not exist OR belongs to a
         different namespace, preventing cross-tenant entity-existence
-        enumeration (IDOR \u2014 IGR-221 / IGR-223).
+        enumeration (IDOR \u2014 the IDOR family / the IDOR family).
         """
         sql = (
             "SELECT count() AS cnt FROM entity "
@@ -496,7 +496,7 @@ class SurrealDBVectorAdapter:
         *,
         namespace_id: UUID,
     ) -> None:
-        """Set the embedding vector on a single entity, scoped to ``namespace_id`` (IGR-226)."""
+        """Set the embedding vector on a single entity, scoped to ``namespace_id`` (IDOR family)."""
         sql = (
             "UPDATE $rid SET "
             "embedding = $embedding, "
@@ -522,7 +522,7 @@ class SurrealDBVectorAdapter:
         *,
         namespace_id: UUID,
     ) -> int:
-        """Batch-update entity embeddings, scoped to ``namespace_id`` (IGR-226).
+        """Batch-update entity embeddings, scoped to ``namespace_id`` (IDOR family).
 
         Uses a SurrealQL ``FOR`` loop to apply all updates in a single
         round-trip. Ids outside the caller's namespace are silently filtered
@@ -728,7 +728,7 @@ class SurrealDBVectorAdapter:
         Returns ``None`` if the entity does not exist OR belongs to a
         different namespace.  Previously this method silently accepted a
         ``namespace_id`` kwarg and ignored it — that was an IDOR bug
-        (IGR-221 / IGR-223).  ``namespace_id`` is now required and used
+        (the IDOR family / the IDOR family).  ``namespace_id`` is now required and used
         to filter at the SurrealQL layer.
         """
         sql = (

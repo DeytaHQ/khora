@@ -21,7 +21,7 @@ from khora.config.schema import NeptuneConfig
 from khora.core.models import Entity, Episode, Relationship
 from khora.storage.backends.neptune import NeptuneBackend
 
-# IGR-221/223: read-side methods now require a kwarg-only ``namespace_id`` so
+# the IDOR family/223: read-side methods now require a kwarg-only ``namespace_id`` so
 # the backend can scope every Cypher MATCH to the caller's tenant.  Tests use
 # this fixed UUID across the file so assertions against the generated query
 # parameters can pin the value.
@@ -674,7 +674,7 @@ async def test_delete_relationship_false_when_missing() -> None:
 @pytest.mark.parametrize(
     "direction,expected_fragment",
     [
-        # IGR-223: each pattern node carries ``{namespace_id: $namespace_id}``
+        # Security: each pattern node carries ``{namespace_id: $namespace_id}``
         # so the legacy ``(e)-[r`` form no longer appears.  Pin on the direction
         # arrow instead.
         ("outgoing", "]->(other:Entity"),

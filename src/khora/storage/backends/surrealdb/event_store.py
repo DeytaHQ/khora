@@ -253,8 +253,8 @@ class SurrealDBEventStoreAdapter:
         """Get all events for a specific resource, scoped to ``namespace_id``.
 
         Returns an empty list if the resource belongs to a different
-        namespace.  Prevents cross-tenant audit-log leakage (IGR-221 /
-        IGR-223 family).
+        namespace.  Prevents cross-tenant audit-log leakage (the IDOR family /
+        the IDOR family family).
         """
         rows = await self._conn.query(
             f"SELECT * FROM {_TABLE} "  # noqa: S608
@@ -281,7 +281,7 @@ class SurrealDBEventStoreAdapter:
         """Get the latest event for a resource, scoped to ``namespace_id``.
 
         Returns ``None`` if the resource belongs to a different namespace.
-        Prevents cross-tenant audit-log leakage (IGR-221 / IGR-223 family).
+        Prevents cross-tenant audit-log leakage (the IDOR family / the IDOR family family).
         """
         row = await self._conn.query_one(
             f"SELECT * FROM {_TABLE} "  # noqa: S608

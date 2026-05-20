@@ -48,7 +48,7 @@ async def hydrate_doc_titles(
     Mutates ``candidates`` in place; safe to call when ``storage`` is ``None``
     or the document-id extractor yields ``None`` for every item.
     The ``namespace_id`` kwarg prevents cross-tenant document-title leakage
-    via the source-attribution path (IGR-221).
+    via the source-attribution path (IDOR family).
     """
     if storage is None or not candidates:
         return

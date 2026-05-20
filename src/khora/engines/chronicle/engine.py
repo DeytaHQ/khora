@@ -2213,7 +2213,7 @@ class ChronicleEngine:
         """Remove a memory from the engine."""
         storage = self._get_storage()
 
-        # namespace_id is required for IDOR-safe lookup (IGR-221). Callers
+        # namespace_id is required for IDOR-safe lookup (IDOR family). Callers
         # going through Khora.forget always resolve it before calling here;
         # bail loudly rather than allow a cross-tenant id probe.
         if namespace_id is None:
@@ -2528,7 +2528,7 @@ class ChronicleEngine:
     # =========================================================================
 
     async def get_document(self, document_id: UUID, *, namespace_id: UUID) -> Document | None:
-        """Get a document by ID, scoped to ``namespace_id`` (IGR-221)."""
+        """Get a document by ID, scoped to ``namespace_id`` (IDOR family)."""
         return await self._get_storage().get_document(document_id, namespace_id=namespace_id)
 
     async def list_documents(

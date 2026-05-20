@@ -188,7 +188,7 @@ async def test_create_and_get_document(adapter, namespace):
 
 
 async def test_get_document_requires_namespace_kwarg(adapter, namespace):
-    """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+    """IDOR — Security: missing ``namespace_id`` must raise TypeError."""
     doc = _make_document(namespace.id)
     await adapter.create_document(doc)
     with pytest.raises(TypeError):
@@ -297,7 +297,7 @@ async def test_get_documents_batch_requires_namespace_kwarg(adapter, namespace):
 
 
 async def test_get_documents_batch_wrong_namespace_drops_rows(adapter, namespace):
-    """Documents in other namespaces are silently dropped (IGR-221)."""
+    """Documents in other namespaces are silently dropped (IDOR family)."""
     d = _make_document(namespace.id, checksum="leak")
     await adapter.create_document(d)
     other_ns = uuid4()
@@ -388,7 +388,7 @@ async def test_get_document_projections_batch_empty_input(adapter):
 
 
 async def test_get_document_sources_batch_requires_namespace_kwarg(adapter, namespace):
-    """IGR-221: namespace_id is a required kwarg-only parameter."""
+    """Security: namespace_id is a required kwarg-only parameter."""
     doc = _make_document(namespace.id, title="X")
     await adapter.create_document(doc)
     with pytest.raises(TypeError):
@@ -396,7 +396,7 @@ async def test_get_document_sources_batch_requires_namespace_kwarg(adapter, name
 
 
 async def test_get_document_sources_batch_wrong_namespace_drops_rows(adapter, namespace):
-    """IGR-221: cross-namespace fetch returns no rows."""
+    """Security: cross-namespace fetch returns no rows."""
     doc = _make_document(namespace.id, title="X")
     await adapter.create_document(doc)
     other_ns = uuid4()

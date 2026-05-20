@@ -292,7 +292,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         return entity
 
     async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
-        """Get an entity by ID, scoped to ``namespace_id`` (IGR-223)."""
+        """Get an entity by ID, scoped to ``namespace_id`` (IDOR family)."""
         sql = (
             f"SELECT {_ENTITY_COLUMNS} FROM entities "  # noqa: S608
             "WHERE id = ? AND namespace_id = ? LIMIT 1"
@@ -311,7 +311,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         return _row_to_entity(row) if row else None
 
     async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
-        """Update an entity, scoped to ``namespace_id`` (IGR-226).
+        """Update an entity, scoped to ``namespace_id`` (IDOR family).
 
         The ``namespace_id`` kwarg is defense-in-depth — asserted equal to
         ``entity.namespace_id`` before the WHERE clause filters by both id
@@ -327,7 +327,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         return entity
 
     async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete an entity and its relationships, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete an entity and its relationships, scoped to ``namespace_id`` (IDOR family)."""
         eid = uuid_to_text(entity_id)
         ns_text = uuid_to_text(namespace_id)
         # Delete edges first so the operation succeeds regardless of whether
@@ -477,7 +477,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         return relationship
 
     async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
-        """Get a relationship by ID, scoped to ``namespace_id`` (IGR-223)."""
+        """Get a relationship by ID, scoped to ``namespace_id`` (IDOR family)."""
         sql = (
             f"SELECT {_RELATIONSHIP_COLUMNS} FROM relationships "  # noqa: S608
             "WHERE id = ? AND namespace_id = ? LIMIT 1"
@@ -487,7 +487,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         return _row_to_relationship(row) if row else None
 
     async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete a relationship, scoped to ``namespace_id`` (IDOR family)."""
         async with self._conn.execute(
             "DELETE FROM relationships WHERE id = ? AND namespace_id = ?",
             (uuid_to_text(relationship_id), uuid_to_text(namespace_id)),
@@ -505,7 +505,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
-        """Get relationships for an entity, scoped to ``namespace_id`` (IGR-223).
+        """Get relationships for an entity, scoped to ``namespace_id`` (IDOR family).
 
         ``relationships.namespace_id`` is filtered directly. Since edges in
         this schema are owned by a single namespace, this excludes any cross-
@@ -736,7 +736,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         now: datetime | None = None,
     ) -> dict[str, Any]:
         """Get the outbound+inbound neighborhood of an entity up to ``depth``,
-        scoped to ``namespace_id`` (IGR-223).
+        scoped to ``namespace_id`` (IDOR family).
 
         Uses a single recursive CTE that expands both directions. Every hop
         is constrained to ``namespace_id`` so the traversal never crosses
@@ -769,7 +769,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         now: datetime | None = None,
     ) -> dict[UUID, dict[str, Any]]:
         """Batch neighborhood expansion using a single recursive CTE,
-        scoped to ``namespace_id`` (IGR-223).
+        scoped to ``namespace_id`` (IDOR family).
 
         Overrides :meth:`GraphBackendBase.get_neighborhoods_batch` to
         avoid the default N+1 loop.  All entity seeds are expanded in
@@ -996,7 +996,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
         return episode
 
     async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
-        """Get an episode by ID, scoped to ``namespace_id`` (IGR-223)."""
+        """Get an episode by ID, scoped to ``namespace_id`` (IDOR family)."""
         sql = (
             "SELECT id, namespace_id, name, description, occurred_at, duration_seconds, "
             "entity_ids, source_document_ids, source_chunk_ids, embedding_model, "

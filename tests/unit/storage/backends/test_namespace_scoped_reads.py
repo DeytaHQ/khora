@@ -1,4 +1,4 @@
-"""IDOR guard: ``namespace_id``-tightened GraphBackend reads (IGR-223).
+"""IDOR guard: ``namespace_id``-tightened GraphBackend reads (IDOR family).
 
 Each graph-backend read method now requires ``namespace_id`` and filters at
 the query layer. These tests use mock drivers / SQL captures and verify two
@@ -293,7 +293,7 @@ class TestNeptuneNamespaceFilter:
 
 @pytest.mark.unit
 class TestAGENamespaceFilter:
-    """AGE's Cypher is f-string-interpolated today (IGR-226 will migrate to
+    """AGE's Cypher is f-string-interpolated today (the IDOR family will migrate to
     bind parameters). The namespace_id is a type-safe UUID at the call site,
     so all we need to verify is that the rendered Cypher text *contains*
     the caller's namespace.

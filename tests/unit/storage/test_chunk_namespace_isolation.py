@@ -1,4 +1,4 @@
-"""Namespace-isolation regression tests for storage chunk getters (IGR-214).
+"""Namespace-isolation regression tests for storage chunk getters (IDOR family).
 
 Three storage-facade methods previously accepted only a chunk/document id
 and did not filter by namespace in their SQL, leaking chunks across

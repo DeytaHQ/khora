@@ -916,7 +916,7 @@ class SQLiteVectorBackend:
         return [self._row_to_chunk(r) for r in rows]
 
     async def delete_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> int:
-        # Remove from FTS first — scoped to namespace_id (IGR-226).
+        # Remove from FTS first — scoped to namespace_id (IDOR family).
         cursor = await self._conn.execute(
             "SELECT id FROM chunks WHERE document_id = ? AND namespace_id = ?",
             (str(document_id), str(namespace_id)),

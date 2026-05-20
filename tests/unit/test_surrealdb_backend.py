@@ -2530,7 +2530,7 @@ class TestSurrealDBGraphAdapterTraversal:
         ]
 
         conn = _make_mock_conn()
-        # IGR-223: get_neighborhood now verifies the seed entity belongs to
+        # Security: get_neighborhood now verifies the seed entity belongs to
         # ``namespace_id`` (via get_entity → query_one) before traversing.
         conn.query_one = AsyncMock(return_value=_graph_entity_row(entity_id, ns_id, name="Seed"))
         conn.query = AsyncMock(return_value=neighborhood_data)
@@ -3424,7 +3424,7 @@ class TestSurrealDBInjectionPrevention:
         entity_id = uuid4()
         ns_id = uuid4()
 
-        # IGR-223: get_neighborhood now verifies the seed entity belongs to
+        # Security: get_neighborhood now verifies the seed entity belongs to
         # ``namespace_id`` (via get_entity → query_one) before traversing.
         conn = _make_mock_conn(
             query=[],

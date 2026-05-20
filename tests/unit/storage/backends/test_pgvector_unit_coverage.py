@@ -391,7 +391,7 @@ class TestSessionBackedReads:
 
     @pytest.mark.asyncio
     async def test_entity_exists_requires_namespace_kwarg(self) -> None:
-        """IDOR — IGR-221: missing ``namespace_id`` must raise TypeError."""
+        """IDOR — Security: missing ``namespace_id`` must raise TypeError."""
         b = _backend_with_session(AsyncMock())
         with pytest.raises(TypeError):
             await b.entity_exists(uuid4())  # type: ignore[call-arg]

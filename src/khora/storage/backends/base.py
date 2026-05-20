@@ -128,7 +128,7 @@ class RelationalBackendProtocol(Protocol):
         Returns ``None`` if the document does not exist OR belongs to a
         different namespace — the caller's namespace is the authority.
         The ``namespace_id`` filter prevents cross-tenant document access
-        by id (IDOR — IGR-221).
+        by id (IDOR).
         """
         ...
 
@@ -240,7 +240,7 @@ class RelationalBackendProtocol(Protocol):
         """Fetch multiple documents in a single query, scoped to ``namespace_id``.
 
         Documents belonging to any other namespace are silently dropped
-        from the result to prevent cross-tenant IDOR (IGR-221).
+        from the result to prevent cross-tenant IDOR (IDOR family).
 
         Returns dictionary mapping document ID to Document object.
         """
@@ -254,7 +254,7 @@ class RelationalBackendProtocol(Protocol):
 
         Returns a column-limited projection (no content, processing stats,
         or mutable state) for display and linking purposes. Documents in
-        other namespaces are silently dropped from the result (IGR-221).
+        other namespaces are silently dropped from the result (IDOR family).
 
         Args:
             document_ids: List of document IDs to fetch
@@ -286,7 +286,7 @@ class RelationalBackendProtocol(Protocol):
         Args:
             document_ids: List of document IDs to fetch
             namespace_id: Namespace scope — rows from other namespaces are
-                filtered at the query layer (IGR-225 close-out).
+                filtered at the query layer (security close-out).
 
         Returns:
             Dictionary mapping document ID to DocumentProjection
@@ -433,7 +433,7 @@ class VectorBackendProtocol(Protocol):
 
         Returns ``False`` if the entity does not exist OR belongs to a
         different namespace. The ``namespace_id`` filter prevents
-        cross-tenant entity-existence enumeration (IDOR — IGR-221).
+        cross-tenant entity-existence enumeration (IDOR).
         """
         ...
 
@@ -546,7 +546,7 @@ class GraphBackendProtocol(Protocol):
 
         Returns ``None`` if the entity does not exist OR belongs to a
         different namespace. Prevents cross-tenant entity access by id
-        (IDOR — IGR-223).
+        (IDOR).
         """
         ...
 
@@ -597,7 +597,7 @@ class GraphBackendProtocol(Protocol):
 
         Returns ``None`` if the relationship does not exist OR belongs to
         a different namespace. Prevents cross-tenant relationship access
-        by id (IDOR — IGR-223).
+        by id (IDOR).
         """
         ...
 
@@ -625,7 +625,7 @@ class GraphBackendProtocol(Protocol):
         Returns an empty list if the entity does not belong to the
         caller's namespace. Edges that cross into other namespaces are
         excluded from the result. Prevents cross-tenant subgraph leakage
-        (IGR-223).
+        (IDOR family).
         """
         ...
 
@@ -653,7 +653,7 @@ class GraphBackendProtocol(Protocol):
 
         Returns ``None`` if the episode does not exist OR belongs to a
         different namespace. Prevents cross-tenant episode access by id
-        (IDOR — IGR-223).
+        (IDOR).
         """
         ...
 
@@ -699,7 +699,7 @@ class GraphBackendProtocol(Protocol):
         The seed entity is verified to belong to ``namespace_id``; the
         traversal MUST NOT cross into other namespaces. Returns an empty
         structure when the seed is in a different namespace. Prevents
-        cross-tenant subgraph leakage (IGR-223).
+        cross-tenant subgraph leakage (IDOR family).
         """
         ...
 
@@ -721,7 +721,7 @@ class GraphBackendProtocol(Protocol):
         """Fetch multiple entities in a single query, scoped to ``namespace_id``.
 
         Entities belonging to any other namespace are silently dropped
-        from the result to prevent cross-tenant IDOR (IGR-223).
+        from the result to prevent cross-tenant IDOR (IDOR family).
 
         Returns dictionary mapping entity ID to Entity object.
         """
@@ -740,7 +740,7 @@ class GraphBackendProtocol(Protocol):
 
         Seed entities outside ``namespace_id`` are silently dropped; the
         traversal MUST NOT cross into other namespaces. Prevents
-        cross-tenant subgraph leakage (IGR-223).
+        cross-tenant subgraph leakage (IDOR family).
 
         Returns dictionary mapping entity ID to neighborhood data.
         """
@@ -839,8 +839,8 @@ class EventStoreProtocol(Protocol):
         """Get all events for a specific resource, scoped to ``namespace_id``.
 
         Returns an empty list if the resource belongs to a different
-        namespace. Prevents cross-tenant audit-log leakage (IGR-221 /
-        IGR-223 family).
+        namespace. Prevents cross-tenant audit-log leakage (the IDOR family /
+        the IDOR family family).
         """
         ...
 
@@ -855,7 +855,7 @@ class EventStoreProtocol(Protocol):
         """Get the latest event for a resource, scoped to ``namespace_id``.
 
         Returns ``None`` if the resource belongs to a different namespace.
-        Prevents cross-tenant audit-log leakage (IGR-221 / IGR-223 family).
+        Prevents cross-tenant audit-log leakage (the IDOR family / the IDOR family family).
         """
         ...
 

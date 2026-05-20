@@ -290,7 +290,7 @@ class SurrealDBGraphAdapter:
         Returns ``None`` if the entity does not exist OR belongs to a
         different namespace.  ``RecordID`` lookup is not namespace-scoped
         on its own, so we filter explicitly on the entity's ``namespace``
-        record link to prevent cross-tenant IDOR (IGR-223).
+        record link to prevent cross-tenant IDOR (IDOR family).
         """
         sql = (
             "SELECT * FROM entity WHERE id = $rid AND (namespace = $ns_rid OR namespace.namespace_id = $ns_str) LIMIT 1"
@@ -318,7 +318,7 @@ class SurrealDBGraphAdapter:
 
     @trace("khora.surrealdb.graph.update_entity", include={"entity"})
     async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
-        """Update an entity, scoped to ``namespace_id`` (IGR-226).
+        """Update an entity, scoped to ``namespace_id`` (IDOR family).
 
         The ``namespace_id`` kwarg is defense-in-depth \u2014 asserted equal to
         ``entity.namespace_id`` before the UPDATE filter is applied.
@@ -355,7 +355,7 @@ class SurrealDBGraphAdapter:
 
     @trace("khora.surrealdb.graph.delete_entity", include={"entity_id"})
     async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete an entity and its relationships, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete an entity and its relationships, scoped to ``namespace_id`` (IDOR family)."""
         eid = _rid("entity", entity_id)
         ns_rid = _rid("memory_namespace", namespace_id)
         ns_str = str(namespace_id)
@@ -407,7 +407,7 @@ class SurrealDBGraphAdapter:
         """Fetch multiple entities in a single query, scoped to ``namespace_id``.
 
         Entities belonging to a different namespace are silently dropped
-        from the result to prevent cross-tenant IDOR (IGR-223).
+        from the result to prevent cross-tenant IDOR (IDOR family).
         """
         if not entity_ids:
             return {}
@@ -615,7 +615,7 @@ class SurrealDBGraphAdapter:
 
         Returns ``None`` if the relationship does not exist OR belongs to
         a different namespace.  Prevents cross-tenant relationship access
-        by id (IDOR — IGR-223).
+        by id (IDOR).
         """
         sql = "SELECT * FROM relates_to WHERE rel_id = $rel_id AND namespace_id = $ns LIMIT 1"
         row = await self._conn.query_one(
@@ -628,7 +628,7 @@ class SurrealDBGraphAdapter:
 
     @trace("khora.surrealdb.graph.delete_relationship", include={"relationship_id"})
     async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete a relationship, scoped to ``namespace_id`` (IDOR family)."""
         # DELETE ... RETURN BEFORE returns deleted rows (empty if nothing matched)
         deleted = await self._conn.query(
             "DELETE FROM relates_to WHERE rel_id = $rel_id AND namespace_id = $ns RETURN BEFORE",
@@ -655,7 +655,7 @@ class SurrealDBGraphAdapter:
         Filters at the SurrealQL layer on the relationship's own
         ``namespace_id`` column — edges that cross into another namespace
         do not surface even if the seed entity is shared.  Prevents
-        cross-tenant subgraph leakage (IGR-223).
+        cross-tenant subgraph leakage (IDOR family).
         """
         eid = _rid("entity", entity_id)
         bindings: dict[str, Any] = {
@@ -832,7 +832,7 @@ class SurrealDBGraphAdapter:
 
         Returns ``None`` if the episode does not exist OR belongs to a
         different namespace.  Prevents cross-tenant episode access by id
-        (IDOR \u2014 IGR-223).
+        (IDOR \u2014 the IDOR family).
         """
         sql = (
             "SELECT * FROM episode "
@@ -978,7 +978,7 @@ class SurrealDBGraphAdapter:
         empty ``{"entities": [], "relationships": []}`` is returned.  Every
         edge and node visited during traversal is filtered on
         ``namespace_id`` so the result never crosses tenants
-        (IGR-223).
+        (IDOR family).
         """
         # Gate the traversal on the seed entity belonging to the caller's
         # namespace.  Without this, a leaked entity_id from another tenant
@@ -1107,7 +1107,7 @@ class SurrealDBGraphAdapter:
         seed-set is intersected with the namespace via the same WHERE
         predicate used by :meth:`get_entity`).  Every hop is filtered on
         ``namespace_id`` so the traversal cannot leak into another
-        tenant's subgraph (IGR-223).
+        tenant's subgraph (IDOR family).
         """
         if not entity_ids:
             return {}

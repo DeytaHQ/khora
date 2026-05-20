@@ -306,7 +306,7 @@ class AGEBackend(GraphBackendBase):
         injection-resistant if a caller is ever duck-typed to a ``str``) and
         normalises the form so any junk like surrounding quotes / spaces
         fails fast at the boundary rather than reaching the graph store
-        (IGR-226).
+        (IDOR family).
         """
         if isinstance(value, UUID):
             return str(value)
@@ -460,7 +460,7 @@ class AGEBackend(GraphBackendBase):
 
     @trace("khora.age.get_entity")
     async def get_entity(self, entity_id: UUID, *, namespace_id: UUID) -> Entity | None:
-        """Get an entity by ID, scoped to ``namespace_id`` (IGR-223 / IGR-226).
+        """Get an entity by ID, scoped to ``namespace_id`` (the IDOR family / the IDOR family).
 
         AGE Cypher is f-string-interpolated (the ``cypher()`` SQL function
         rejects ``$param`` placeholders). UUID values are routed through
@@ -503,7 +503,7 @@ class AGEBackend(GraphBackendBase):
 
     @trace("khora.age.update_entity")
     async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
-        """Update an entity, scoped to ``namespace_id`` (IGR-226)."""
+        """Update an entity, scoped to ``namespace_id`` (IDOR family)."""
         if entity.namespace_id != namespace_id:
             raise ValueError(
                 f"entity.namespace_id ({entity.namespace_id}) does not match namespace_id kwarg ({namespace_id})"
@@ -537,7 +537,7 @@ class AGEBackend(GraphBackendBase):
 
     @trace("khora.age.delete_entity")
     async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete an entity and its relationships, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete an entity and its relationships, scoped to ``namespace_id`` (IDOR family)."""
         eid_lit = self._uuid_lit(entity_id)
         ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
@@ -652,7 +652,7 @@ class AGEBackend(GraphBackendBase):
 
     @trace("khora.age.get_relationship")
     async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
-        """Get a relationship by ID, scoped to ``namespace_id`` (IGR-223).
+        """Get a relationship by ID, scoped to ``namespace_id`` (IDOR family).
 
         Both endpoint nodes are constrained to ``namespace_id`` so cross-tenant
         edges never surface.
@@ -689,7 +689,7 @@ class AGEBackend(GraphBackendBase):
 
     @trace("khora.age.delete_relationship")
     async def delete_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete a relationship, scoped to ``namespace_id`` (IGR-226)."""
+        """Delete a relationship, scoped to ``namespace_id`` (IDOR family)."""
         rid_lit = self._uuid_lit(relationship_id)
         ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
@@ -716,7 +716,7 @@ class AGEBackend(GraphBackendBase):
         relationship_types: list[str] | None = None,
         limit: int = 100,
     ) -> list[Relationship]:
-        """Get relationships for an entity, scoped to ``namespace_id`` (IGR-223).
+        """Get relationships for an entity, scoped to ``namespace_id`` (IDOR family).
 
         Both endpoint nodes are constrained to ``namespace_id`` so edges
         crossing into other namespaces don't surface.
@@ -860,7 +860,7 @@ class AGEBackend(GraphBackendBase):
 
     @trace("khora.age.get_episode")
     async def get_episode(self, episode_id: UUID, *, namespace_id: UUID) -> Episode | None:
-        """Get an episode by ID, scoped to ``namespace_id`` (IGR-223)."""
+        """Get an episode by ID, scoped to ``namespace_id`` (IDOR family)."""
         ep_id_lit = self._uuid_lit(episode_id)
         ns_lit_val = self._uuid_lit(namespace_id)
         cypher = f"""
@@ -929,7 +929,7 @@ class AGEBackend(GraphBackendBase):
             rel_filter = ":" + "|".join(sanitized)
 
         # Every node on the path — endpoints AND intermediates — must share
-        # ``namespace_id`` so the traversal never crosses tenants (IGR-223).
+        # ``namespace_id`` so the traversal never crosses tenants (IDOR family).
         src_lit = self._uuid_lit(source_entity_id)
         tgt_lit = self._uuid_lit(target_entity_id)
         ns_lit_val = self._uuid_lit(namespace_id)
@@ -975,7 +975,7 @@ class AGEBackend(GraphBackendBase):
 
         Seed and every node reached during traversal are constrained to
         ``namespace_id`` so the result never crosses into another namespace
-        (IGR-223).
+        (IDOR family).
         """
         rel_filter = ""
         if relationship_types:
