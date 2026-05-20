@@ -1,22 +1,33 @@
 # Khora Development Infrastructure
 #
-# Provides PostgreSQL (with pgvector) and Neo4j for local development.
+# Provides PostgreSQL (with pgvector), Neo4j, and Weaviate for local development.
 # Use khora as a Python library after starting these databases.
 #
 # Usage:
-#   docker compose up -d              # Start databases
-#   docker compose down               # Stop databases
-#   docker compose down -v            # Stop and remove data
-#   docker compose logs -f postgres   # Follow postgres logs
+#   docker compose up -d                       # Start defaults (postgres + neo4j)
+#   docker compose up -d postgres              # Start only postgres
+#   docker compose up -d weaviate              # Start only weaviate (opt-in profile)
+#   docker compose --profile weaviate up -d    # Start postgres + neo4j + weaviate
+#   docker compose down                        # Stop all
+#   docker compose down -v                     # Stop and remove data
+#   docker compose logs -f postgres            # Follow postgres logs
 #
 # Connection strings for .env:
 #   KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5434/khora
 #   KHORA_NEO4J_URL=bolt://neo4j:pleaseletmein@localhost:7688
+#   KHORA_WEAVIATE_URL=http://localhost:8090
 #
 # Ports are intentionally non-standard to avoid conflicts with other projects:
-#   PostgreSQL: 5434 (not 5432/5433)
-#   Neo4j HTTP: 7475 (not 7474)
-#   Neo4j Bolt: 7688 (not 7687)
+#   PostgreSQL:     5434  (not 5432/5433)
+#   Neo4j HTTP:     7475  (not 7474)
+#   Neo4j Bolt:     7688  (not 7687)
+#   Weaviate HTTP:  8090  (not 8080 — too commonly taken)
+#   Weaviate gRPC: 50061  (not 50051)
+#
+# Weaviate is opt-in via the `weaviate` profile so it does not autostart
+# with the default `docker compose up -d`. Either run `docker compose up -d
+# weaviate` directly, or include the `--profile weaviate` flag to bring up
+# the full stack.
 
 services:
   # ============================================================================
@@ -70,6 +81,50 @@ services:
     networks:
       - khora-network
 
+  # ============================================================================
+  # Weaviate Vector Database (opt-in via `weaviate` profile)
+  # ============================================================================
+  # khora supplies its own embeddings, so DEFAULT_VECTORIZER_MODULE=none and
+  # ENABLE_MODULES is empty — no plugin downloads, fast startup.
+  # Anonymous access is on for local dev only; production deployments should
+  # set AUTHENTICATION_APIKEY_ENABLED=true + AUTHENTICATION_APIKEY_ALLOWED_KEYS.
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.28.4
+    container_name: khora-weaviate
+    profiles:
+      - weaviate
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --scheme
+      - http
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: /var/lib/weaviate
+      DEFAULT_VECTORIZER_MODULE: none
+      ENABLE_MODULES: ""
+      CLUSTER_HOSTNAME: node1
+      DISABLE_TELEMETRY: "true"
+    ports:
+      - "${WEAVIATE_HTTP_PORT:-8090}:8080"
+      - "${WEAVIATE_GRPC_PORT:-50061}:50051"
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q --spider http://localhost:8080/v1/.well-known/ready || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - khora-network
+
 volumes:
   postgres_data:
     name: khora_postgres_data
@@ -77,6 +132,8 @@ volumes:
     name: khora_neo4j_data
   neo4j_logs:
     name: khora_neo4j_logs
+  weaviate_data:
+    name: khora_weaviate_data
 
 networks:
   khora-network:
