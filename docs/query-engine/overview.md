@@ -236,12 +236,13 @@ QueryResult(
 )
 ```
 
-<!-- TODO(docs-v0.16.0): The query engine layer (HybridQueryEngine) still uses
-the tuple-shaped QueryResult above. Engine-level `kb.recall()` returns the
-typed RecallResult — see [VectorCypher Engine](../engines/vectorcypher-engine.md#recallresult-context).
-RecallResult.documents[] is always populated as of v0.16.0 (#761); the old
-RecallResult.context_text attribute was removed in v0.15.3 — use the public
-`khora.context_text(result)` helper to render a context string. -->
+> **Two retrieval surfaces, two result shapes.** Khora exposes two independent retrieval paths and they intentionally use different result types:
+>
+> - **`Khora.recall()`** — the top-level public API. Returns a typed `RecallResult` from `khora.core.models.recall` (re-exported as `from khora import RecallResult`) with `chunks: list[RecallChunk]`, `entities: list[RecallEntity]`, `relationships: list[RecallRelationship]`, and a producer-enforced `documents: list[DocumentProjection]` invariant — every chunk's `document_id` and every entity / relationship `source_document_ids` entry is guaranteed to appear in `documents[]`. Use `khora.context_text(result)` to render a formatted context string. The old `RecallResult.context_text` attribute was removed in v0.15.3.
+>
+> - **`HybridQueryEngine.query()`** (this doc) — the in-package retrieval surface used by `khora.query.agentic.AgenticSearchAgent`. Returns the tuple-shaped `QueryResult` shown above. Carries richer per-method telemetry (`search_contributions`, `graph_info`, `temporal_info`) that doesn't fit the recall projection. Not consumed by `Khora.recall()` or by any of the typed engines (vectorcypher / chronicle / skeleton).
+>
+> The two paths do not intersect. If you're a library consumer, use `Khora.recall()`. The `HybridQueryEngine` surface is internal-shape and may change between minor releases.
 
 
 ## Using the Query Engine
