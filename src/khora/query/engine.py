@@ -42,7 +42,7 @@ _TEMPORAL_PATTERN = re.compile(
 if TYPE_CHECKING:
     from khora.acl import ACLContext
     from khora.config.llm import LiteLLMConfig
-    from khora.core.models import Chunk, Entity, Relationship
+    from khora.core.models import Chunk, Entity
     from khora.extraction.embedders import Embedder
     from khora.storage import StorageCoordinator
 
@@ -240,64 +240,6 @@ class TemporalInfo:
         }
 
 
-def format_entity_section(entities: list[tuple[Entity, float]]) -> str:
-    """Format entities into a text section for context_text.
-
-    Returns an empty string if no entities, otherwise returns a section like:
-        \\n\\n--- Entities ---\\n\\n- Name (TYPE): description
-    Deduplicates by entity ID (falls back to name+type when ID is None).
-    """
-    if not entities:
-        return ""
-    seen: set[Any] = set()
-    lines: list[str] = []
-    for entity, _ in entities:
-        dedup_key = entity.id if entity.id is not None else (entity.name, entity.entity_type)
-        if dedup_key in seen:
-            continue
-        seen.add(dedup_key)
-        if entity.description:
-            lines.append(f"- {entity.name} ({entity.entity_type}): {entity.description}")
-        else:
-            lines.append(f"- {entity.name} ({entity.entity_type})")
-    if not lines:
-        return ""
-    return "\n\n--- Entities ---\n\n" + "\n".join(lines)
-
-
-def format_relationship_section(
-    relationships: list[tuple[Relationship, float]],
-) -> str:
-    """Format relationships into a text section for context_text.
-
-    Returns an empty string if no relationships, otherwise returns a section like:
-        \\n\\n--- Relationships ---\\n\\n- Alice --FOUNDED--> Acme Corp: description
-    Deduplicates by (source_entity_id, target_entity_id, relationship_type) tuple
-    to handle cases where Neo4j IDs are null and replaced with generated UUIDs.
-
-    Relies on denormalized ``source_entity_name`` / ``target_entity_name``
-    fields populated at retrieval time.
-    """
-    if not relationships:
-        return ""
-    seen: set[Any] = set()
-    lines: list[str] = []
-    for rel, _ in relationships:
-        dedup_key = (rel.source_entity_id, rel.target_entity_id, rel.relationship_type)
-        if dedup_key in seen:
-            continue
-        seen.add(dedup_key)
-        source_name = rel.source_entity_name or str(rel.source_entity_id)
-        target_name = rel.target_entity_name or str(rel.target_entity_id)
-        line = f"- {source_name} --{rel.relationship_type}--> {target_name}"
-        if rel.description:
-            line += f": {rel.description}"
-        lines.append(line)
-    if not lines:
-        return ""
-    return "\n\n--- Relationships ---\n\n" + "\n".join(lines)
-
-
 @dataclass
 class QueryResult:
     """Result from a query with enhanced metadata."""
@@ -321,39 +263,6 @@ class QueryResult:
     def top_entities(self) -> list[Entity]:
         """Get top entities without scores."""
         return [entity for entity, _ in self.entities]
-
-    def get_context_text(self, max_chunks: int = 5) -> str:
-        """Get concatenated text from top chunks for LLM context.
-
-        Groups chunks by document title/source for better readability.
-        Appends entity information when entities are present.
-        """
-        # Group chunks by title
-        groups: dict[str, list[str]] = {}
-        for chunk, score in self.chunks[:max_chunks]:
-            title = self._extract_chunk_title(chunk)
-            groups.setdefault(title, []).append(chunk.content)
-
-        sections = []
-        for title, contents in groups.items():
-            if title:
-                sections.append(f"--- From: {title} ---\n" + "\n\n".join(contents))
-            else:
-                sections.extend(contents)
-        text = "\n\n---\n\n".join(sections)
-
-        entity_section = format_entity_section(self.entities)
-        if entity_section:
-            text = text + entity_section if text else entity_section
-        return text
-
-    @staticmethod
-    def _extract_chunk_title(chunk: Any) -> str:
-        """Extract title from chunk metadata."""
-        meta = getattr(chunk, "metadata", None)
-        if isinstance(meta, dict):
-            return meta.get("title", "") or ""
-        return ""
 
     def get_full_metadata(self) -> dict[str, Any]:
         """Get complete metadata including search method contributions."""

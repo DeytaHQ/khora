@@ -1628,9 +1628,9 @@ class Khora:
 
         Returns:
             RecallResult with matched memories.  When using the VectorCypher
-            engine, ``relationships`` contains scored relationship tuples
-            that callers can render via the ``format_relationship_section``
-            helper alongside chunk content.
+            engine, ``relationships`` contains scored relationship projections.
+            Use ``khora.context_text(result)`` to render chunks, entities, and
+            relationships as a formatted LLM context string.
 
         Raises:
             ValueError: If both ``start_time`` and ``end_time`` are provided

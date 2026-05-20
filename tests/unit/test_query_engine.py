@@ -308,32 +308,6 @@ class TestQueryResult:
         result = QueryResult(entities=[(entity1, 0.8)])
         assert result.top_entities == [entity1]
 
-    def test_get_context_text(self) -> None:
-        """get_context_text concatenates chunk content."""
-        chunk1 = MagicMock()
-        chunk1.content = "first chunk"
-        chunk2 = MagicMock()
-        chunk2.content = "second chunk"
-        result = QueryResult(chunks=[(chunk1, 0.9), (chunk2, 0.5)])
-        text = result.get_context_text(max_chunks=2)
-        assert "first chunk" in text
-        assert "second chunk" in text
-        assert "---" in text
-
-    def test_get_context_text_max_chunks(self) -> None:
-        """get_context_text respects max_chunks limit."""
-        chunks = [(MagicMock(content=f"chunk{i}"), 0.5) for i in range(5)]
-        result = QueryResult(chunks=chunks)
-        text = result.get_context_text(max_chunks=2)
-        assert "chunk0" in text
-        assert "chunk1" in text
-        assert "chunk4" not in text
-
-    def test_get_context_text_empty(self) -> None:
-        """get_context_text returns empty string for no chunks."""
-        result = QueryResult()
-        assert result.get_context_text() == ""
-
     def test_get_full_metadata(self) -> None:
         """get_full_metadata includes search contributions."""
         result = QueryResult(

@@ -8,14 +8,60 @@ these alongside ``chunk.content`` to build an LLM context string.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
 
-from khora.core.models.document import Chunk
-from khora.core.models.entity import Entity, Relationship
-from khora.khora import RecallResult
-from khora.query.engine import format_entity_section, format_relationship_section
+from khora.core.models.recall import (
+    RecallChunk,
+    RecallEntity,
+    RecallRelationship,
+    RecallResult,
+)
+from khora.core.recall_context import format_entity_section, format_relationship_section
+
+
+def _mk_entity(
+    *,
+    name: str,
+    entity_type: str = "CONCEPT",
+    description: str = "",
+    entity_id=None,
+    score: float = 0.9,
+) -> RecallEntity:
+    return RecallEntity(
+        id=entity_id or uuid4(),
+        name=name,
+        entity_type=entity_type,
+        description=description,
+        score=score,
+        attributes={},
+        mention_count=1,
+        source_document_ids=[],
+        source_chunk_ids=[],
+    )
+
+
+def _mk_rel(
+    *,
+    source_id,
+    target_id,
+    relationship_type: str,
+    description: str = "",
+    score: float = 0.9,
+) -> RecallRelationship:
+    return RecallRelationship(
+        id=uuid4(),
+        source_entity_id=source_id,
+        target_entity_id=target_id,
+        relationship_type=relationship_type,
+        description=description,
+        score=score,
+        valid_from=None,
+        valid_until=None,
+        source_document_ids=[],
+    )
 
 
 @pytest.mark.unit
@@ -24,22 +70,14 @@ class TestGetContextTextIncludesEntities:
 
     def test_chunks_and_entities(self) -> None:
         """When both chunks and entities are present, context_text has both."""
-        ns_id = uuid4()
-        chunk = Chunk(
-            namespace_id=ns_id,
-            document_id=uuid4(),
-            content="First paragraph.",
-        )
-        entity = Entity(
-            id=uuid4(),
-            namespace_id=ns_id,
+        entity = _mk_entity(
             name="TestEntity",
             entity_type="CONCEPT",
             description="A test entity",
         )
 
-        entity_section = format_entity_section([(entity, 0.85)])
-        context_text = chunk.content + entity_section
+        entity_section = format_entity_section([entity])
+        context_text = "First paragraph." + entity_section
 
         assert "First paragraph." in context_text
         assert "TestEntity" in context_text
@@ -49,16 +87,13 @@ class TestGetContextTextIncludesEntities:
 
     def test_entity_with_empty_description(self) -> None:
         """Entity with no description still renders correctly."""
-        ns_id = uuid4()
-        entity = Entity(
-            id=uuid4(),
-            namespace_id=ns_id,
+        entity = _mk_entity(
             name="NoDescEntity",
             entity_type="PERSON",
             description="",
         )
 
-        section = format_entity_section([(entity, 0.5)])
+        section = format_entity_section([entity])
 
         assert "NoDescEntity" in section
         assert "PERSON" in section
@@ -70,31 +105,26 @@ class TestGetContextTextIncludesEntities:
 
     def test_entities_only_no_chunks(self) -> None:
         """When there are entities but no chunks, entities still appear."""
-        ns_id = uuid4()
-        entity = Entity(
-            id=uuid4(),
-            namespace_id=ns_id,
+        entity = _mk_entity(
             name="OnlyEntity",
             entity_type="EVENT",
             description="Solo entity",
         )
-        section = format_entity_section([(entity, 0.9)])
+        section = format_entity_section([entity])
         assert "OnlyEntity" in section
 
     def test_duplicate_entities_deduplicated(self) -> None:
         """Same entity ID appearing twice should be deduplicated."""
-        ns_id = uuid4()
         entity_id = uuid4()
-        entity = Entity(
-            id=entity_id,
-            namespace_id=ns_id,
+        entity = _mk_entity(
+            entity_id=entity_id,
             name="DupEntity",
             entity_type="CONCEPT",
             description="Duplicated",
         )
 
-        # Pass same entity twice with different scores
-        section = format_entity_section([(entity, 0.9), (entity, 0.7)])
+        # Pass same entity twice
+        section = format_entity_section([entity, entity])
         # Count occurrences of the entity name
         assert section.count("DupEntity") == 1
 
@@ -104,29 +134,23 @@ class TestContextTextEntityRegressions:
     """Regression tests for entity display edge cases."""
 
     def test_dedup_different_objects_same_id(self) -> None:
-        """Two Entity objects with the same ID (different Python objects)
+        """Two RecallEntity objects with the same ID (different Python objects)
         should be deduplicated."""
-        ns_id = uuid4()
         eid = uuid4()
-        e1 = Entity(id=eid, namespace_id=ns_id, name="Entity1", entity_type="CONCEPT", description="First")
-        e2 = Entity(id=eid, namespace_id=ns_id, name="Entity1", entity_type="CONCEPT", description="Second")
+        e1 = _mk_entity(entity_id=eid, name="Entity1", entity_type="CONCEPT", description="First")
+        e2 = _mk_entity(entity_id=eid, name="Entity1", entity_type="CONCEPT", description="Second")
 
-        section = format_entity_section([(e1, 0.9), (e2, 0.7)])
+        section = format_entity_section([e1, e2])
         assert section.count("Entity1") == 1
 
     def test_many_entities_no_truncation(self) -> None:
         """All entities should appear even if there are many."""
-        ns_id = uuid4()
         entities = [
-            (
-                Entity(
-                    id=uuid4(),
-                    namespace_id=ns_id,
-                    name=f"Entity{i}",
-                    entity_type="CONCEPT",
-                    description=f"Description {i}",
-                ),
-                0.9 - i * 0.01,
+            _mk_entity(
+                name=f"Entity{i}",
+                entity_type="CONCEPT",
+                description=f"Description {i}",
+                score=0.9 - i * 0.01,
             )
             for i in range(20)
         ]
@@ -138,31 +162,25 @@ class TestContextTextEntityRegressions:
 
     def test_entity_special_characters(self) -> None:
         """Entities with special characters render correctly."""
-        ns_id = uuid4()
-        entity = Entity(
-            id=uuid4(),
-            namespace_id=ns_id,
+        entity = _mk_entity(
             name='Entity "With Quotes" & <Brackets>',
             entity_type="CONCEPT",
             description="Has special chars: <>&\"'",
         )
 
-        section = format_entity_section([(entity, 0.8)])
+        section = format_entity_section([entity])
 
         assert 'Entity "With Quotes" & <Brackets>' in section
 
     def test_format_entity_section_helper_directly(self) -> None:
         """Test the format_entity_section helper function directly."""
-        ns_id = uuid4()
-        entity = Entity(
-            id=uuid4(),
-            namespace_id=ns_id,
+        entity = _mk_entity(
             name="DirectTest",
             entity_type="PERSON",
             description="Direct test entity",
         )
 
-        result = format_entity_section([(entity, 0.85)])
+        result = format_entity_section([entity])
 
         assert "--- Entities ---" in result
         assert "DirectTest" in result
@@ -171,23 +189,10 @@ class TestContextTextEntityRegressions:
 
     def test_chunk_format_unchanged_with_entities(self) -> None:
         """Adding entities doesn't change how chunks are formatted."""
-        ns_id = uuid4()
+        entity = _mk_entity(name="TestEntity", entity_type="CONCEPT", description="Test")
 
-        chunk1 = Chunk(
-            namespace_id=ns_id,
-            document_id=uuid4(),
-            content="First paragraph.",
-        )
-        entity = Entity(
-            id=uuid4(),
-            namespace_id=ns_id,
-            name="TestEntity",
-            entity_type="CONCEPT",
-            description="Test",
-        )
-
-        entity_section = format_entity_section([(entity, 0.85)])
-        context_text = chunk1.content + entity_section
+        entity_section = format_entity_section([entity])
+        context_text = "First paragraph." + entity_section
 
         # Chunks should be before entities
         assert "First paragraph." in context_text.split("--- Entities ---")[0]
@@ -201,36 +206,38 @@ class TestRelationshipFormatting:
 
     def test_format_relationship_section_basic(self) -> None:
         """Arrow format with description: '- Alice --FOUNDED--> Acme Corp: Founded the company'."""
-        ns_id = uuid4()
-        rel = Relationship(
-            namespace_id=ns_id,
-            source_entity_id=uuid4(),
-            target_entity_id=uuid4(),
+        alice_id = uuid4()
+        acme_id = uuid4()
+        rel = _mk_rel(
+            source_id=alice_id,
+            target_id=acme_id,
             relationship_type="FOUNDED",
             description="Founded the company",
-            source_entity_name="Alice",
-            target_entity_name="Acme Corp",
         )
 
-        section = format_relationship_section([(rel, 0.9)])
+        section = format_relationship_section(
+            [rel],
+            {alice_id: "Alice", acme_id: "Acme Corp"},
+        )
 
         assert section.startswith("\n\n--- Relationships ---\n\n")
         assert "- Alice --FOUNDED--> Acme Corp: Founded the company" in section
 
     def test_format_relationship_section_no_description(self) -> None:
         """No trailing colon when description is empty."""
-        ns_id = uuid4()
-        rel = Relationship(
-            namespace_id=ns_id,
-            source_entity_id=uuid4(),
-            target_entity_id=uuid4(),
+        alice_id = uuid4()
+        acme_id = uuid4()
+        rel = _mk_rel(
+            source_id=alice_id,
+            target_id=acme_id,
             relationship_type="WORKS_AT",
             description="",
-            source_entity_name="Alice",
-            target_entity_name="Acme Corp",
         )
 
-        section = format_relationship_section([(rel, 0.8)])
+        section = format_relationship_section(
+            [rel],
+            {alice_id: "Alice", acme_id: "Acme Corp"},
+        )
 
         assert "- Alice --WORKS_AT--> Acme Corp" in section
         # No trailing colon
@@ -238,101 +245,88 @@ class TestRelationshipFormatting:
 
     def test_format_relationship_section_empty(self) -> None:
         """Returns empty string for empty list."""
-        assert format_relationship_section([]) == ""
+        assert format_relationship_section([], {}) == ""
 
     def test_format_relationship_section_dedup(self) -> None:
         """Duplicate IDs collapsed (same relationship twice should appear once)."""
-        ns_id = uuid4()
-        rel_id = uuid4()
-        rel = Relationship(
-            id=rel_id,
-            namespace_id=ns_id,
-            source_entity_id=uuid4(),
-            target_entity_id=uuid4(),
+        alice_id = uuid4()
+        acme_id = uuid4()
+        rel = _mk_rel(
+            source_id=alice_id,
+            target_id=acme_id,
             relationship_type="FOUNDED",
             description="Founded it",
-            source_entity_name="Alice",
-            target_entity_name="Acme Corp",
         )
 
-        section = format_relationship_section([(rel, 0.9), (rel, 0.5)])
+        section = format_relationship_section(
+            [rel, rel],
+            {alice_id: "Alice", acme_id: "Acme Corp"},
+        )
 
         rel_lines = [line.strip() for line in section.strip().splitlines() if line.strip().startswith("- ")]
         assert len(rel_lines) == 1
 
     def test_format_relationship_section_uuid_fallback(self) -> None:
         """UUID fallback when entity names are empty."""
-        ns_id = uuid4()
         alice_id = uuid4()
         acme_id = uuid4()
-        rel = Relationship(
-            namespace_id=ns_id,
-            source_entity_id=alice_id,
-            target_entity_id=acme_id,
+        rel = _mk_rel(
+            source_id=alice_id,
+            target_id=acme_id,
             relationship_type="KNOWS",
             description="",
         )
 
-        # No names set -> both fall back to str(UUID)
-        section_no_names = format_relationship_section([(rel, 0.7)])
+        # Empty lookup -> both fall back to str(UUID)
+        section_no_names = format_relationship_section([rel], {})
         assert str(alice_id) in section_no_names
         assert str(acme_id) in section_no_names
 
     def test_format_relationship_section_partial_names(self) -> None:
         """Partial names: set source but not target -> target falls back to UUID."""
-        ns_id = uuid4()
+        alice_id = uuid4()
         acme_id = uuid4()
-        rel = Relationship(
-            namespace_id=ns_id,
-            source_entity_id=uuid4(),
-            target_entity_id=acme_id,
+        rel = _mk_rel(
+            source_id=alice_id,
+            target_id=acme_id,
             relationship_type="KNOWS",
             description="",
-            source_entity_name="Alice",
         )
 
-        section = format_relationship_section([(rel, 0.7)])
+        section = format_relationship_section([rel], {alice_id: "Alice"})
         assert "Alice" in section
         assert str(acme_id) in section
 
     def test_context_text_with_entities_and_relationships(self) -> None:
         """Full context_text has chunk content + Entities + Relationships sections."""
-        ns_id = uuid4()
         alice_id = uuid4()
         acme_id = uuid4()
 
-        chunk = Chunk(
-            namespace_id=ns_id,
-            document_id=uuid4(),
-            content="Alice founded Acme Corp.",
-        )
-        entity_alice = Entity(
-            id=alice_id,
-            namespace_id=ns_id,
+        entity_alice = _mk_entity(
+            entity_id=alice_id,
             name="Alice",
             entity_type="PERSON",
             description="Founder",
         )
-        entity_acme = Entity(
-            id=acme_id,
-            namespace_id=ns_id,
+        entity_acme = _mk_entity(
+            entity_id=acme_id,
             name="Acme Corp",
             entity_type="ORGANIZATION",
             description="A company",
         )
-        rel = Relationship(
-            namespace_id=ns_id,
-            source_entity_id=alice_id,
-            target_entity_id=acme_id,
+        rel = _mk_rel(
+            source_id=alice_id,
+            target_id=acme_id,
             relationship_type="FOUNDED",
             description="Founded the company",
-            source_entity_name="Alice",
-            target_entity_name="Acme Corp",
         )
 
-        text = chunk.content
-        text += format_entity_section([(entity_alice, 0.85), (entity_acme, 0.7)])
-        text += format_relationship_section([(rel, 0.9)])
+        text = "Alice founded Acme Corp."
+        text += format_entity_section([entity_alice, entity_acme])
+        text += format_relationship_section(
+            [rel],
+            {alice_id: "Alice", acme_id: "Acme Corp"},
+        )
 
         assert "Alice founded Acme Corp." in text
         assert "--- Entities ---" in text
@@ -349,20 +343,21 @@ class TestRelationshipFormatting:
 
     def test_context_text_relationships_only(self) -> None:
         """Relationships without entities still works."""
-        ns_id = uuid4()
-        rel = Relationship(
-            namespace_id=ns_id,
-            source_entity_id=uuid4(),
-            target_entity_id=uuid4(),
+        alice_id = uuid4()
+        acme_id = uuid4()
+        rel = _mk_rel(
+            source_id=alice_id,
+            target_id=acme_id,
             relationship_type="WORKS_AT",
             description="Employee",
-            source_entity_name="Alice",
-            target_entity_name="Acme Corp",
         )
 
         # No entities, just relationships
         text = format_entity_section([])
-        text += format_relationship_section([(rel, 0.8)])
+        text += format_relationship_section(
+            [rel],
+            {alice_id: "Alice", acme_id: "Acme Corp"},
+        )
 
         assert "--- Entities ---" not in text
         assert "--- Relationships ---" in text
@@ -370,27 +365,21 @@ class TestRelationshipFormatting:
 
     def test_backward_compat_no_relationships(self) -> None:
         """RecallResult without relationships kwarg works (default empty list)."""
-        from khora.core.models import RecallChunk
-
         ns_id = uuid4()
-        chunk = Chunk(
-            namespace_id=ns_id,
-            document_id=uuid4(),
-            content="Some content.",
-        )
+        chunk_id = uuid4()
+        doc_id = uuid4()
 
-        # Construct without passing relationships — should default to []
         result = RecallResult(
             query="test query",
             namespace_id=ns_id,
             documents=[],
             chunks=[
                 RecallChunk(
-                    id=chunk.id,
-                    document_id=chunk.document_id,
-                    content=chunk.content,
+                    id=chunk_id,
+                    document_id=doc_id,
+                    content="Some content.",
                     score=0.9,
-                    created_at=chunk.created_at,
+                    created_at=datetime.now(UTC),
                 )
             ],
             entities=[],
