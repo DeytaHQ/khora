@@ -215,10 +215,10 @@ The Rust implementation uses `hashbrown::HashMap` for fast score accumulation an
 
 The VectorCypher engine can adaptively adjust fusion weights based on query characteristics. The temporal detection signal and query complexity classification influence the vector/graph weight ratios:
 
-- **Temporal queries** — Higher recency weight, temporal sort enabled in Neo4j
-- **Simple queries** — Vector-heavy weights (0.8/0.2)
-- **Complex queries** — Graph-heavy weights (0.4/0.6)
-- **Aggregate queries** — No recency bias, pure relevance scoring
+- **Temporal queries** - Higher recency weight, temporal sort enabled in Neo4j
+- **Simple queries** - Vector-heavy weights (0.8/0.2)
+- **Complex queries** - Graph-heavy weights (0.4/0.6)
+- **Aggregate queries** - No recency bias, pure relevance scoring
 
 ## Implementation Details
 
@@ -278,7 +278,7 @@ Research has shown RRF performs comparably to learned fusion methods while being
 
 ## Coherence Scoring (v0.3.5)
 
-After RRF fusion, the VectorCypher retriever applies a lightweight coherence signal to penalize word-shuffled confounders — documents that share the same vocabulary as a relevant chunk but in a nonsensical order. This avoids the cost of an LLM reranking call for obvious confounders.
+After RRF fusion, the VectorCypher retriever applies a lightweight coherence signal to penalize word-shuffled confounders - documents that share the same vocabulary as a relevant chunk but in a nonsensical order. This avoids the cost of an LLM reranking call for obvious confounders.
 
 ### How It Works
 
@@ -292,7 +292,7 @@ After RRF fusion, the VectorCypher retriever applies a lightweight coherence sig
 final_score = (1 - coherence_weight) * rrf_score + coherence_weight * coherence_score
 ```
 
-The default `coherence_weight=0.1` applies a gentle adjustment — enough to demote obvious confounders without overriding the RRF ranking for legitimate results.
+The default `coherence_weight=0.1` applies a gentle adjustment - enough to demote obvious confounders without overriding the RRF ranking for legitimate results.
 
 ### Configuration
 

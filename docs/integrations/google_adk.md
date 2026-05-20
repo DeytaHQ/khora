@@ -26,10 +26,10 @@ without a shared registry.
 
 ## Scope (v0.14)
 
-- `KhoraMemoryService` — long-term memory service implementing
+- `KhoraMemoryService` - long-term memory service implementing
   `add_session_to_memory`, `add_events_to_memory`, and
   `search_memory`. **Shipped.**
-- `KhoraSessionService` — **NOT shipped.** ADK ships
+- `KhoraSessionService` - **NOT shipped.** ADK ships
   `InMemorySessionService` + `DatabaseSessionService` (SQLAlchemy)
   for short-term turn state. khora offers no differentiator there.
   Revisit only if a single-DB story for sessions + memory becomes a
@@ -49,27 +49,27 @@ it without explicit registration.
 
 | arg | default | notes |
 | --- | --- | --- |
-| `kb` | — | A connected `Khora` instance. The service does NOT own its lifecycle. |
-| `app_id` | `"google_adk"` | Free-form identifier stamped into stored metadata for audit / debugging. Distinct from the per-call `app_name` ADK passes — that one is part of the namespace key. |
+| `kb` | - | A connected `Khora` instance. The service does NOT own its lifecycle. |
+| `app_id` | `"google_adk"` | Free-form identifier stamped into stored metadata for audit / debugging. Distinct from the per-call `app_name` ADK passes - that one is part of the namespace key. |
 | `recall_limit` | `10` | Default `limit` forwarded to `Khora.recall`. |
 | `min_similarity` | `0.0` | Default similarity floor forwarded to `Khora.recall`. |
 
 ## Method semantics
 
-All methods are async — ADK invokes them from its own event loop, so
+All methods are async - ADK invokes them from its own event loop, so
 no sync bridging is involved.
 
-- `add_session_to_memory(session)` — ingests every event in
+- `add_session_to_memory(session)` - ingests every event in
   `session.events` as a separate khora document. Events with no usable
   content (no text parts AND no non-text parts) are skipped, matching
   `InMemoryMemoryService`. Re-ingesting the same session is safe:
   deduplication keys off `event.id` via `Document.external_id`.
 - `add_events_to_memory(*, app_name, user_id, events, session_id, custom_metadata)`
-  — incremental delta of events for an existing namespace. Same
+  - incremental delta of events for an existing namespace. Same
   deduplication contract as `add_session_to_memory`.
   `custom_metadata` is merged into every event's
   `Document.metadata`.
-- `search_memory(*, app_name, user_id, query)` — `Khora.recall`
+- `search_memory(*, app_name, user_id, query)` - `Khora.recall`
   against the resolved namespace. Returns `SearchMemoryResponse` with
   one `MemoryEntry` per matched event (chunks belonging to the same
   event are coalesced). Returns an empty response when the namespace
@@ -86,7 +86,7 @@ conversation atomically.
 
 `function_call`, `function_response`, and `inline_data` parts are
 JSON-encoded into `Document.metadata["adk_parts"]`. The bytes
-of `inline_data` are dropped (mime type + sha1 prefix kept) — they
+of `inline_data` are dropped (mime type + sha1 prefix kept) - they
 would bloat the document store without being useful for vector recall.
 A short placeholder is rendered as the document content for events
 that carry only tool calls so they remain retrievable by name.
@@ -94,7 +94,7 @@ that carry only tool calls so they remain retrievable by name.
 ## Quickstart
 
 ```python title="example.py"
-"""Google ADK + khora example — long-term memory via ``KhoraMemoryService``.
+"""Google ADK + khora example - long-term memory via ``KhoraMemoryService``.
 
 Runs without Postgres, Neo4j, or an API key. The mock LLM patches
 ``litellm.acompletion`` / ``litellm.aembedding`` so the example is
@@ -150,7 +150,7 @@ async def main() -> None:
         memory = KhoraMemoryService(kb=kb)
 
         # Build a session with a couple of conversational turns. In a real
-        # ADK app this Session is produced by SessionService — here we
+        # ADK app this Session is produced by SessionService - here we
         # synthesise it so the example stays self-contained.
         now = time.time()
         session = Session(
@@ -187,14 +187,14 @@ The block above is enforced byte-identical against
 
 ## Limits and future work
 
-- Filter / metadata pushdown — `search_memory` runs khora's standard
+- Filter / metadata pushdown - `search_memory` runs khora's standard
   hybrid recall; ADK's contract doesn't surface a filter parameter
   yet. When it does, we'll forward `app_name` / `user_id` / `tags`
   to the SQL layer instead of relying on the namespace partition.
-- Session service — explicit non-goal for v0.14 (see "Scope" above).
+- Session service - explicit non-goal for v0.14 (see "Scope" above).
 - `inline_data` bytes are dropped on ingest. Multi-modal long-term
   memory needs a dedicated blob-store hookup before the bytes can be
   preserved without ballooning the document table.
-- Aligning with ADK 2.x — the adapter is pinned `<2.0` until the
+- Aligning with ADK 2.x - the adapter is pinned `<2.0` until the
   beta's `BaseMemoryService` shape stabilises. Track upstream changes
   via the nightly-skew CI job (#618).

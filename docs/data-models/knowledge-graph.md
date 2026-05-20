@@ -56,14 +56,14 @@ class Entity:
 
 ### Entity Types
 
-Entity types are plain strings. Callers define their own ontology — Khora does not prescribe a fixed set. Common examples:
+Entity types are plain strings. Callers define their own ontology - Khora does not prescribe a fixed set. Common examples:
 
-- `"PERSON"` — Individual people
-- `"ORGANIZATION"` — Companies, institutions
-- `"LOCATION"` — Places, addresses
-- `"CONCEPT"` — Abstract ideas, theories
-- `"EVENT"` — Occurrences, incidents
-- `"TECHNOLOGY"` — Tools, platforms, languages
+- `"PERSON"` - Individual people
+- `"ORGANIZATION"` - Companies, institutions
+- `"LOCATION"` - Places, addresses
+- `"CONCEPT"` - Abstract ideas, theories
+- `"EVENT"` - Occurrences, incidents
+- `"TECHNOLOGY"` - Tools, platforms, languages
 
 ### Entity Attributes
 
@@ -203,12 +203,12 @@ class Relationship:
 
 Relationship types are plain strings. Callers define their own ontology. Common examples:
 
-- `"WORKS_FOR"`, `"MANAGES"`, `"REPORTS_TO"` — Organizational
-- `"KNOWS"`, `"COLLABORATES_WITH"` — Social
-- `"PART_OF"`, `"CONTAINS"` — Composition
-- `"LOCATED_IN"` — Location
-- `"DEPENDS_ON"`, `"IMPLEMENTS"` — Technical
-- `"RELATES_TO"`, `"ASSOCIATED_WITH"` — Generic
+- `"WORKS_FOR"`, `"MANAGES"`, `"REPORTS_TO"` - Organizational
+- `"KNOWS"`, `"COLLABORATES_WITH"` - Social
+- `"PART_OF"`, `"CONTAINS"` - Composition
+- `"LOCATED_IN"` - Location
+- `"DEPENDS_ON"`, `"IMPLEMENTS"` - Technical
+- `"RELATES_TO"`, `"ASSOCIATED_WITH"` - Generic
 
 ### Relationship Properties
 
@@ -345,7 +345,7 @@ This enables:
 from khora import Khora
 
 async with Khora() as kb:
-    # `namespace` is required — there is no default namespace.
+    # `namespace` is required - there is no default namespace.
     entities = await kb.list_entities(namespace=namespace_id)
 
     # Filter by type
@@ -358,7 +358,7 @@ async with Khora() as kb:
 ### Finding Related Entities
 
 ```python
-# Get entities related to a specific entity. `namespace` is required —
+# Get entities related to a specific entity. `namespace` is required -
 # the traversal is scoped to the caller's namespace.
 related = await kb.find_related_entities(
     entity_id,
@@ -375,7 +375,7 @@ for entity, score in related:
 
 ```python
 # Get entity neighborhood (graph context). namespace_id is required and
-# kwarg-only (v0.16.0) — the traversal does not cross into other namespaces.
+# kwarg-only (v0.16.0) - the traversal does not cross into other namespaces.
 neighborhood = await kb.storage.get_neighborhood(
     entity_id,
     namespace_id=namespace_id,

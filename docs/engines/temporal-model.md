@@ -107,7 +107,7 @@ edges = await storage.get_valid_at(
 
 ### Exclusive Relationships
 
-Some relationships are mutually exclusive—a person can only have one at a time:
+Some relationships are mutually exclusive-a person can only have one at a time:
 
 ```python
 EXCLUSIVE_RELATIONSHIP_TYPES = {

@@ -15,8 +15,8 @@ Everything in Khora fits into one of three layers:
 |   Namespace A' (version 2 of A, for zero-downtime swaps)  |
 |                                                           |
 |   Each namespace has two IDs:                             |
-|     namespace_id — stable across versions                 |
-|     id — row-level, changes per version                   |
+|     namespace_id - stable across versions                 |
+|     id - row-level, changes per version                   |
 +-----------------------------------------------------------+
                             |
                             v
@@ -298,7 +298,7 @@ await storage.create_document(doc)
 ### Querying
 
 ```python
-# Get a document. `namespace_id` is required and kwarg-only — the lookup
+# Get a document. `namespace_id` is required and kwarg-only - the lookup
 # returns None if the id belongs to a different namespace (v0.16.0).
 doc = await storage.get_document(doc_id, namespace_id=namespace_id)
 

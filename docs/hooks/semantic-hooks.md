@@ -1,6 +1,6 @@
 # Semantic Hooks
 
-Semantic hooks let you subscribe to events during document ingestion and recall and receive callbacks when the events — or the entities, relationships, and chunks they carry — match your criteria. Use them to build real-time notifications, dashboards, or downstream processing pipelines.
+Semantic hooks let you subscribe to events during document ingestion and recall and receive callbacks when the events - or the entities, relationships, and chunks they carry - match your criteria. Use them to build real-time notifications, dashboards, or downstream processing pipelines.
 
 ## Quick Example
 
@@ -15,7 +15,7 @@ async with Khora() as kb:
 
     kb.subscribe("entity.created", on_entity)
 
-    # Type pre-filter — Level 0
+    # Type pre-filter - Level 0
     filter = SemanticFilter(
         name="competitor_mentions",
         description="Any mention of a competitor company",
@@ -33,7 +33,7 @@ async with Khora() as kb:
 
 ## 3-Level Filter Cascade
 
-Hooks use a cost-efficient cascade — each level is only evaluated if the previous level passes:
+Hooks use a cost-efficient cascade - each level is only evaluated if the previous level passes:
 
 | Level | Method | Cost | Purpose |
 |-------|--------|------|---------|
@@ -83,10 +83,10 @@ SemanticFilter(
 
 **Top-level operators**:
 
-- `match["$or"] = [<pattern1>, <pattern2>, ...]` — disjunction across whole patterns
+- `match["$or"] = [<pattern1>, <pattern2>, ...]` - disjunction across whole patterns
 - Other top-level keys combine with implicit AND
 
-**Important**: nested keys via dot-notation are intentionally **not** supported — pre-flatten any nested data you want to match into `event.data` before dispatch.
+**Important**: nested keys via dot-notation are intentionally **not** supported - pre-flatten any nested data you want to match into `event.data` before dispatch.
 
 ### Level 1: Embedding pre-screen
 
@@ -102,9 +102,9 @@ SemanticFilter(
 
 ### Level 2: LLM evaluation
 
-> **Default OFF.** Level 2 is gated by `KHORA_HOOKS_LLM_EVALUATION_ENABLED=true`. **It costs real money** — every filter with `examples` evaluated against every passing event makes a nano-LLM call (rate-limited and budgeted; see [Cost Controls](#cost-controls)). Audit your filter set and confirm the per-hour budget before flipping it on in production.
+> **Default OFF.** Level 2 is gated by `KHORA_HOOKS_LLM_EVALUATION_ENABLED=true`. **It costs real money** - every filter with `examples` evaluated against every passing event makes a nano-LLM call (rate-limited and budgeted; see [Cost Controls](#cost-controls)). Audit your filter set and confirm the per-hour budget before flipping it on in production.
 
-Level 2 **only fires when the filter supplies `examples`** — without them the LLM has no calibration and produces noise, so the dispatcher silently skips Level 2 (Level 1 result is final). To enable the LLM tier on a filter:
+Level 2 **only fires when the filter supplies `examples`** - without them the LLM has no calibration and produces noise, so the dispatcher silently skips Level 2 (Level 1 result is final). To enable the LLM tier on a filter:
 
 ```python
 SemanticFilter(
@@ -124,7 +124,7 @@ SemanticFilter(
 
 ## Event Types
 
-Subscribe to any of these event types. Names are stable strings — the `EventType` enum in `khora.core.models.event` is canonical:
+Subscribe to any of these event types. Names are stable strings - the `EventType` enum in `khora.core.models.event` is canonical:
 
 | Event | Fires When | Carries |
 |-------|------------|---------|
@@ -133,18 +133,18 @@ Subscribe to any of these event types. Names are stable strings — the `EventTy
 | `entity.merged` | Two entities collapsed by cross-tool unification | Surviving entity + `merged_from_ids` |
 | `entity.deleted` | Entity removed | `entity_id`, `namespace_id` |
 | `relationship.created` | New relationship extracted | `source_entity_id`, `target_entity_id`, `relationship_type`, `confidence` |
-| `relationship.updated` / `relationship.deleted` | Relationship mutation/removal | — |
+| `relationship.updated` / `relationship.deleted` | Relationship mutation/removal | - |
 | `chunk.created` | Chunk stored | `chunk_id`, `document_id`, content metadata |
 | `chunk.embedded` | Chunk embedding generated | `embedding`, `embedding_model` |
 | `chunk.entities_resolved` | All entity events for one chunk have been dispatched | `chunk_id`, `document_id`, `entity_ids` (capped at 50, sorted by entity id; `truncated: True` when capped), `entity_names_by_type`, `entity_count`, `occurred_at` |
-| `document.created` / `document.updated` / `document.deleted` | Document lifecycle | — |
+| `document.created` / `document.updated` / `document.deleted` | Document lifecycle | - |
 | `document.processed` / `document.failed` | Document finished or errored mid-pipeline | `status`, optional `error` |
-| `episode.created` / `episode.updated` / `episode.deleted` | Episode lifecycle | — |
-| `namespace.created` / `namespace.updated` / `namespace.deleted` | Namespace lifecycle | — |
-| `sync.started` / `sync.completed` / `sync.failed` / `sync.checkpoint` | Connector sync lifecycle (Phase B) | — |
+| `episode.created` / `episode.updated` / `episode.deleted` | Episode lifecycle | - |
+| `namespace.created` / `namespace.updated` / `namespace.deleted` | Namespace lifecycle | - |
+| `sync.started` / `sync.completed` / `sync.failed` / `sync.checkpoint` | Connector sync lifecycle (Phase B) | - |
 | `recall.requested` / `recall.results_ready` / `recall.completed` | Recall pipeline (query-side hooks) | `query`, result counts |
 
-`chunk.entities_resolved` is the event to subscribe to for **co-occurrence filtering** — see [Co-occurrence example](#co-occurrence-filtering) below.
+`chunk.entities_resolved` is the event to subscribe to for **co-occurrence filtering** - see [Co-occurrence example](#co-occurrence-filtering) below.
 
 ## Cost Controls
 
@@ -152,20 +152,20 @@ Level 2 (LLM) evaluations cost money. khora ships three layers of cost control, 
 
 ### 1. Default-OFF gate
 
-`KHORA_HOOKS_LLM_EVALUATION_ENABLED=false` (default). When false, Level 1 is final — even for filters that supply `examples`.
+`KHORA_HOOKS_LLM_EVALUATION_ENABLED=false` (default). When false, Level 1 is final - even for filters that supply `examples`.
 
 ### 2. Token budgets
 
 Two independent rolling-hour budgets enforce caps on Level 2 token spend:
 
-- **Per-namespace cap** (`llm_max_tokens_per_namespace_per_hour`, default `10000`) — global ceiling per namespace.
-- **Per-subscription cap** (`llm_max_tokens_per_subscription_per_hour`, default `0` = disabled) — a single noisy filter can no longer drain its namespace's hourly allowance. Recommended setting: `namespace_cap / expected_subscription_count`.
+- **Per-namespace cap** (`llm_max_tokens_per_namespace_per_hour`, default `10000`) - global ceiling per namespace.
+- **Per-subscription cap** (`llm_max_tokens_per_subscription_per_hour`, default `0` = disabled) - a single noisy filter can no longer drain its namespace's hourly allowance. Recommended setting: `namespace_cap / expected_subscription_count`.
 
 When **either** cap is exceeded, the affected batch **fails open** (returns `True` so the Level 1 match is preserved) and emits `khora.hooks.llm.throttled_total`. A warn-once log fires per window so operators see the breach.
 
 ### 3. Decision cache + intra-batch coalescing
 
-- **Cross-batch cache** keyed on `(filter_id, bounded_text_hash(event_summary))` — `event_summary` is `entity_type | name | description`, truncated and SHA1-hashed so no raw text escapes the dispatcher. Subsequent events that hash to the same key short-circuit the LLM. Cache uses TTL + LRU eviction; configurable via `llm_cache_size` (default `2048`, `0` disables) and `llm_cache_ttl_seconds` (default `3600`, `0` = no expiry).
+- **Cross-batch cache** keyed on `(filter_id, bounded_text_hash(event_summary))` - `event_summary` is `entity_type | name | description`, truncated and SHA1-hashed so no raw text escapes the dispatcher. Subsequent events that hash to the same key short-circuit the LLM. Cache uses TTL + LRU eviction; configurable via `llm_cache_size` (default `2048`, `0` disables) and `llm_cache_ttl_seconds` (default `3600`, `0` = no expiry).
 - **Intra-batch coalescing**: within a single LLM batch (default flush window `100ms`, batch size `10`), the evaluator deduplicates pending pairs by `event_summary_hash` before building the prompt. **A burst of 50 identical events → 1 LLM call** (first batch) → all remaining events hit cache. Without the cache primed, a batch of 10 identical events spends 1 prompt slot, not 10, and the result fans out to all 10 awaiting futures.
 
 The two layers compose: cross-batch cache covers bursts that span flush windows; intra-batch coalescing covers a single flush window's duplicates.
@@ -213,7 +213,7 @@ Access the underlying `HookDispatcher` for advanced usage (e.g., `kb.hooks.clear
 
 ## Co-occurrence filtering
 
-The Level 0 `match` DSL operates on a single event's `event.data` payload, so it cannot express "alert when X and Y appear in the same chunk" with the per-entity `entity.created` event — each `entity.created` carries one entity at a time. Subscribe to **`chunk.entities_resolved`** instead: that event fires once per chunk after every entity from that chunk has been resolved, carrying the full set under `event.data["entity_ids"]` and `event.data["entity_names_by_type"]`.
+The Level 0 `match` DSL operates on a single event's `event.data` payload, so it cannot express "alert when X and Y appear in the same chunk" with the per-entity `entity.created` event - each `entity.created` carries one entity at a time. Subscribe to **`chunk.entities_resolved`** instead: that event fires once per chunk after every entity from that chunk has been resolved, carrying the full set under `event.data["entity_ids"]` and `event.data["entity_names_by_type"]`.
 
 Because the `match` DSL deliberately does **not** support nested dot-notation (see [Structural matching](#level-0-structural-matching-match-dsl)), co-occurrence checks that need to look into the `entity_names_by_type` dict run as a custom callback rather than a `match` pattern:
 
@@ -228,10 +228,10 @@ async def flag_acme_security_cooccurrence(event):
 kb.subscribe("chunk.entities_resolved", flag_acme_security_cooccurrence)
 ```
 
-For simpler "any entity of type X appears in a chunk that also has entity name Y" checks, you can still narrow with a `match` pattern on a flat field — e.g. matching on `entity_count` or `chunk_id` — and do the type-set check inside the callback. The dispatcher only delivers events that pass the `match` cascade, so the callback runs against a pre-filtered stream.
+For simpler "any entity of type X appears in a chunk that also has entity name Y" checks, you can still narrow with a `match` pattern on a flat field - e.g. matching on `entity_count` or `chunk_id` - and do the type-set check inside the callback. The dispatcher only delivers events that pass the `match` cascade, so the callback runs against a pre-filtered stream.
 
 ## Related Documentation
 
-- [Extraction Pipeline](../extraction/ingestion-pipeline.md) — where hooks fire during ingestion
-- [Event Sourcing](../architecture/event-sourcing.md) — the event model hooks build on
-- [Telemetry contract](../telemetry-contract.json) — the canonical list of `khora.hooks.*` metric names (`evaluations_total`, `tokens_total`, `throttled_total`, `cache_hits_total`, `cache_misses_total`)
+- [Extraction Pipeline](../extraction/ingestion-pipeline.md) - where hooks fire during ingestion
+- [Event Sourcing](../architecture/event-sourcing.md) - the event model hooks build on
+- [Telemetry contract](../telemetry-contract.json) - the canonical list of `khora.hooks.*` metric names (`evaluations_total`, `tokens_total`, `throttled_total`, `cache_hits_total`, `cache_misses_total`)

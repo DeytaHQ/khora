@@ -2,7 +2,7 @@
 
 > **Status:** The `TenancyMode` enum exists in the codebase but is **not wired at runtime**. Currently only namespace-level row filtering is active.
 
-Khora isolates data through **namespaces**. Every document, chunk, entity, and relationship belongs to exactly one namespace. This is the sole unit of isolation — there is no organization or workspace hierarchy within khora. Higher-level grouping (organizations, teams, etc.) is the responsibility of the consuming service.
+Khora isolates data through **namespaces**. Every document, chunk, entity, and relationship belongs to exactly one namespace. This is the sole unit of isolation - there is no organization or workspace hierarchy within khora. Higher-level grouping (organizations, teams, etc.) is the responsibility of the consuming service.
 
 ## Namespaces: Where Data Lives
 
@@ -25,7 +25,7 @@ async with Khora() as kb:
     )
 ```
 
-The `namespace` parameter is **required** — there is no default namespace. Omitting it raises a `ValueError`.
+The `namespace` parameter is **required** - there is no default namespace. Omitting it raises a `ValueError`.
 
 This isolation is enforced at the database level:
 
@@ -41,7 +41,7 @@ You can't accidentally see another namespace's data.
 
 ## Protocol-level isolation contract (v0.16.0)
 
-Namespace scoping is part of the storage Protocol contract itself. Every read, exists-check, AND mutation method on every backend (`RelationalBackend`, `VectorBackend`, `GraphBackend`, `EventStore`) declares `*, namespace_id: UUID` as a required keyword-only parameter and filters at the **query layer** (SQL `WHERE`, Cypher `MATCH (... {namespace_id: $ns})`, SurrealQL filter) — the namespace check happens in the database, never as a Python comparison after the row has already been fetched.
+Namespace scoping is part of the storage Protocol contract itself. Every read, exists-check, AND mutation method on every backend (`RelationalBackend`, `VectorBackend`, `GraphBackend`, `EventStore`) declares `*, namespace_id: UUID` as a required keyword-only parameter and filters at the **query layer** (SQL `WHERE`, Cypher `MATCH (... {namespace_id: $ns})`, SurrealQL filter) - the namespace check happens in the database, never as a Python comparison after the row has already been fetched.
 
 Looking up a row whose id belongs to a different namespace returns `None` / `False` / an empty list / dict straight from the query. The caller's `namespace_id` is the authority; the row's stored `namespace_id` only matters as the value the filter matches against.
 
@@ -58,7 +58,7 @@ neighbourhood = await coordinator.get_neighborhood(
 # outside `caller_ns`, the result is the empty neighbourhood.
 
 ok = await coordinator.delete_document(document_id, namespace_id=caller_ns)
-# `ok` is False when the id is in a different namespace — delete is a no-op.
+# `ok` is False when the id is in a different namespace - delete is a no-op.
 ```
 
 The surface that received this treatment in PRs #761 / #765 / #766 / #769 covers:
@@ -73,7 +73,7 @@ The invariant is enforced statically. `tests/security/test_cross_namespace_idor_
 1. The signature includes `namespace_id`.
 2. `namespace_id` is keyword-only (kind `KEYWORD_ONLY` or `VAR_KEYWORD`).
 
-A new backend method without `namespace_id=` fails CI at test collection — the regression cannot land without a security review. Genuine namespace-resolver helpers (e.g. `get_namespace_by_name`) are explicitly allow-listed in `_EXEMPT_METHODS` with a one-line justification.
+A new backend method without `namespace_id=` fails CI at test collection - the regression cannot land without a security review. Genuine namespace-resolver helpers (e.g. `get_namespace_by_name`) are explicitly allow-listed in `_EXEMPT_METHODS` with a one-line justification.
 
 ### Coordinator facade is the supported API
 
@@ -81,9 +81,9 @@ A new backend method without `namespace_id=` fails CI at test collection — the
 
 1. Emits a one-shot `DeprecationWarning` per role per process.
 2. Refuses the namespace-scoped read methods unless `namespace_id=` is passed (raises `TypeError`).
-3. Does not forward access to underscore-prefixed attributes — backend internals such as `_engine`, `_handle`, `_conn`, `_session_factory` are reachable only via the private `coord._{role}` accessors used by coordinator internals.
+3. Does not forward access to underscore-prefixed attributes - backend internals such as `_engine`, `_handle`, `_conn`, `_session_factory` are reachable only via the private `coord._{role}` accessors used by coordinator internals.
 
-The public attributes are scheduled for removal in v0.17 — call the coordinator's facade methods (`coordinator.get_document(...)`, `coordinator.get_entity(...)`, `coordinator.get_neighborhood(...)`) instead.
+The public attributes are scheduled for removal in v0.17 - call the coordinator's facade methods (`coordinator.get_document(...)`, `coordinator.get_entity(...)`, `coordinator.get_neighborhood(...)`) instead.
 
 ## Creating Namespaces
 
@@ -107,10 +107,10 @@ Each namespace has two IDs:
 
 | ID | Purpose | Changes? |
 |----|---------|----------|
-| **`namespace_id`** | Stable identifier across all versions | Never — use this in your application |
+| **`namespace_id`** | Stable identifier across all versions | Never - use this in your application |
 | **`id`** | Row-level UUID | Changes per version (v1, v2, etc.) |
 
-Public API methods accept `namespace_id` and resolve to the active version's `id` automatically. Resolution via `resolve_namespace()` is idempotent — it accepts either ID type. This adds one indexed lookup per API call (sub-ms).
+Public API methods accept `namespace_id` and resolve to the active version's `id` automatically. Resolution via `resolve_namespace()` is idempotent - it accepts either ID type. This adds one indexed lookup per API call (sub-ms).
 
 Child table foreign keys (documents, chunks, entities) reference `id`, not `namespace_id`.
 

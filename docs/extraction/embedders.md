@@ -209,7 +209,7 @@ results = await storage.search_similar_chunks(
 The embedder automatically truncates texts that exceed the model's token limit before sending them to the API:
 
 ```python
-# Handled automatically — no configuration needed
+# Handled automatically - no configuration needed
 embedding = await embedder.embed(very_long_text)
 # Text is truncated at sentence boundaries if too long
 ```

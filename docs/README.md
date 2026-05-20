@@ -4,68 +4,68 @@ Khora is a knowledge memory library. This directory contains everything beyond t
 
 ## Getting started
 
-- [Configuration](configuration.md) — `KHORA_*` environment variables, `KhoraConfig`, installation extras.
-- [API reference](api-reference.md) — public `Khora` methods and result types.
-- [Observability](observability.md) — OTel spans/metrics, `[otel]` and `[logfire]` paths, `configure_telemetry()`.
-- [Migrations](migrations.md) — Alembic workflow for library users (PostgreSQL backends only).
-- [Consumers](consumers.md) — how downstream packages (e.g. khora-cli, khora-explorer) use khora.
+- [Configuration](configuration.md) - `KHORA_*` environment variables, `KhoraConfig`, installation extras.
+- [API reference](api-reference.md) - public `Khora` methods and result types.
+- [Observability](observability.md) - OTel spans/metrics, `[otel]` and `[logfire]` paths, `configure_telemetry()`.
+- [Migrations](migrations.md) - Alembic workflow for library users (PostgreSQL backends only).
+- [Consumers](consumers.md) - how downstream packages (e.g. khora-cli, khora-explorer) use khora.
 
 ## Architecture
 
-- [Overview](architecture/overview.md) — the three-backend model (PostgreSQL, pgvector, graph DB) and data flow.
-- [Storage backends](architecture/storage-backends.md) — PostgreSQL, pgvector, Neo4j, SurrealDB, AGE, Memgraph, Neptune.
-- [Multi-tenancy](architecture/multi-tenancy.md) — namespaces, isolation modes.
-- [Event sourcing](architecture/event-sourcing.md) — the immutable audit log.
-- [Rust acceleration](architecture/rust-acceleration.md) — optional `khora-accel` extensions.
-- [Performance optimization](architecture/performance-optimization.md) — pool sizing, ef_search, batch strategies.
+- [Overview](architecture/overview.md) - the three-backend model (PostgreSQL, pgvector, graph DB) and data flow.
+- [Storage backends](architecture/storage-backends.md) - PostgreSQL, pgvector, Neo4j, SurrealDB, AGE, Memgraph, Neptune.
+- [Multi-tenancy](architecture/multi-tenancy.md) - namespaces, isolation modes.
+- [Event sourcing](architecture/event-sourcing.md) - the immutable audit log.
+- [Rust acceleration](architecture/rust-acceleration.md) - optional `khora-accel` extensions.
+- [Performance optimization](architecture/performance-optimization.md) - pool sizing, ef_search, batch strategies.
 
 ## Engines
 
 Pluggable retrieval strategies that implement `MemoryEngineProtocol`.
 
-- [Engine comparison](engines/engine-comparison.md) — pick the right engine.
-- [VectorCypher](engines/vectorcypher-engine.md) — default, hybrid vector + Cypher + BM25.
-- [Skeleton](engines/skeleton-engine.md) — lightweight, no graph DB required.
-- [Skeleton indexing](engines/skeleton-indexing.md) — how Skeleton indexes content.
-- [Chronicle](engines/chronicle-engine.md) — temporal-semantic memory.
-- [Temporal model](engines/temporal-model.md) — time-as-first-class-citizen mechanics.
-- [Hybrid search](engines/hybrid-search.md) — the shared hybrid retrieval primitive.
+- [Engine comparison](engines/engine-comparison.md) - pick the right engine.
+- [VectorCypher](engines/vectorcypher-engine.md) - default, hybrid vector + Cypher + BM25.
+- [Skeleton](engines/skeleton-engine.md) - lightweight, no graph DB required.
+- [Skeleton indexing](engines/skeleton-indexing.md) - how Skeleton indexes content.
+- [Chronicle](engines/chronicle-engine.md) - temporal-semantic memory.
+- [Temporal model](engines/temporal-model.md) - time-as-first-class-citizen mechanics.
+- [Hybrid search](engines/hybrid-search.md) - the shared hybrid retrieval primitive.
 
 ## Extraction
 
 3-phase ingestion pipeline: stage → enrich → expand.
 
-- [Overview](extraction/overview.md) — the big picture.
-- [Ingestion pipeline](extraction/ingestion-pipeline.md) — flow, concurrency, failure handling.
-- [Chunkers](extraction/chunkers.md) — fixed / semantic / recursive strategies.
-- [Conversation chunking](extraction/conversation-chunking.md) — message-aware grouping.
-- [Embedders](extraction/embedders.md) — vector generation via LiteLLM.
-- [Extractors](extraction/extractors.md) — entity and relationship extraction.
-- [Expertise system](extraction/expertise-system.md) — `ExpertiseConfig` for domain-specific extraction.
-- [Semantic expansion](extraction/semantic-expansion.md) — entity unification and relationship inference.
+- [Overview](extraction/overview.md) - the big picture.
+- [Ingestion pipeline](extraction/ingestion-pipeline.md) - flow, concurrency, failure handling.
+- [Chunkers](extraction/chunkers.md) - fixed / semantic / recursive strategies.
+- [Conversation chunking](extraction/conversation-chunking.md) - message-aware grouping.
+- [Embedders](extraction/embedders.md) - vector generation via LiteLLM.
+- [Extractors](extraction/extractors.md) - entity and relationship extraction.
+- [Expertise system](extraction/expertise-system.md) - `ExpertiseConfig` for domain-specific extraction.
+- [Semantic expansion](extraction/semantic-expansion.md) - entity unification and relationship inference.
 
 ## Query engine
 
-- [Overview](query-engine/overview.md) — how `recall()` routes through the engine.
-- [Search modes](query-engine/search-modes.md) — `vector`, `graph`, `hybrid`, `all`.
-- [Fusion](query-engine/fusion.md) — Reciprocal Rank Fusion and weighting.
-- [Query understanding](query-engine/query-understanding.md) — HyDE, intent detection.
-- [Agentic search](query-engine/agentic-search.md) — multi-step retrieval.
-- [Temporal queries](query-engine/temporal-queries.md) — relative-date SQL pushdown.
-- [Retrieval tuning](query-engine/retrieval-tuning.md) — practical knobs.
+- [Overview](query-engine/overview.md) - how `recall()` routes through the engine.
+- [Search modes](query-engine/search-modes.md) - `vector`, `graph`, `hybrid`, `all`.
+- [Fusion](query-engine/fusion.md) - Reciprocal Rank Fusion and weighting.
+- [Query understanding](query-engine/query-understanding.md) - HyDE, intent detection.
+- [Agentic search](query-engine/agentic-search.md) - multi-step retrieval.
+- [Temporal queries](query-engine/temporal-queries.md) - relative-date SQL pushdown.
+- [Retrieval tuning](query-engine/retrieval-tuning.md) - practical knobs.
 
 ## Data models
 
-- [Overview](data-models/overview.md) — documents, chunks, entities, events.
+- [Overview](data-models/overview.md) - documents, chunks, entities, events.
 - [Documents and chunks](data-models/documents-chunks.md).
-- [Knowledge graph](data-models/knowledge-graph.md) — entities and relationships.
-- [Events](data-models/events.md) — the append-only event log.
+- [Knowledge graph](data-models/knowledge-graph.md) - entities and relationships.
+- [Events](data-models/events.md) - the append-only event log.
 
 ## Hooks
 
-- [Semantic hooks](hooks/semantic-hooks.md) — subscribe to extraction events with 3-level semantic filtering.
+- [Semantic hooks](hooks/semantic-hooks.md) - subscribe to extraction events with 3-level semantic filtering.
 
 ## Process
 
-- [Release process](RELEASE.md) — how versions are tagged and published.
-- [Roadmap](roadmap.md) — what's next.
+- [Release process](RELEASE.md) - how versions are tagged and published.
+- [Roadmap](roadmap.md) - what's next.

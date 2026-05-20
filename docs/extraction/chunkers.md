@@ -128,14 +128,14 @@ Chunk 1: "Sentence three. Sentence four. Sentence five."
 
 #### spaCy-Enhanced Sentence Splitting
 
-The semantic chunker can optionally use spaCy's `sentencizer` component for more accurate sentence boundary detection. The sentencizer is a rule-based component that ships with spaCy core — no separate model download needed.
+The semantic chunker can optionally use spaCy's `sentencizer` component for more accurate sentence boundary detection. The sentencizer is a rule-based component that ships with spaCy core - no separate model download needed.
 
 ```bash
 # Install the optional NLP extra
 pip install khora[nlp]
 ```
 
-When spaCy is installed, the semantic chunker uses it automatically — no code changes needed. If spaCy is not installed, the chunker falls back to its regex-based splitter transparently. The `_HAS_SPACY` flag in the chunker module controls this behavior.
+When spaCy is installed, the semantic chunker uses it automatically - no code changes needed. If spaCy is not installed, the chunker falls back to its regex-based splitter transparently. The `_HAS_SPACY` flag in the chunker module controls this behavior.
 
 ### Recursive Chunker
 
@@ -214,9 +214,9 @@ chunks = chunker.chunk_messages(messages)
 
 **How it works:**
 
-1. **Thread grouping** — messages sharing a `thread_ts` are kept together
-2. **Temporal windowing** — top-level messages split on time gaps (default: 15 min)
-3. **Size enforcement** — groups exceeding `max_group_size` are split; tiny groups merge with neighbours
+1. **Thread grouping** - messages sharing a `thread_ts` are kept together
+2. **Temporal windowing** - top-level messages split on time gaps (default: 15 min)
+3. **Size enforcement** - groups exceeding `max_group_size` are split; tiny groups merge with neighbours
 
 **Best for:**
 - Slack messages and threads
@@ -336,9 +336,9 @@ All chunkers automatically filter out empty or near-empty chunks before returnin
 
 **How it works:**
 
-- `MIN_CHUNK_CHARS = 10` — Chunks shorter than 10 characters (after stripping) are discarded
-- `filter_empty_chunks()` — Base class method called by all chunkers before returning
-- `.strip()` on tokenizer decode — `FixedChunker` and `SemanticChunker._fixed_split()` strip whitespace from decoded token sequences
+- `MIN_CHUNK_CHARS = 10` - Chunks shorter than 10 characters (after stripping) are discarded
+- `filter_empty_chunks()` - Base class method called by all chunkers before returning
+- `.strip()` on tokenizer decode - `FixedChunker` and `SemanticChunker._fixed_split()` strip whitespace from decoded token sequences
 
 ```python
 # In Chunker base class (extraction/chunkers/base.py)

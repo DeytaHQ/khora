@@ -4,11 +4,11 @@
 
 Tags follow semantic versioning: `v{major}.{minor}.{patch}` (e.g., `v0.10.2`).
 
-The `v` prefix is required — it triggers the publish workflow.
+The `v` prefix is required - it triggers the publish workflow.
 
 ## Versioning
 
-`khora` and `khora-accel` are released at **identical versions**, always. This is enforced mechanically at release time — see "Version lockstep" below.
+`khora` and `khora-accel` are released at **identical versions**, always. This is enforced mechanically at release time - see "Version lockstep" below.
 
 | Package | How version is set |
 |---------|-------------------|
@@ -28,11 +28,11 @@ Both packages publish to **public PyPI** under the **Deyta** organization:
 
 Install: `pip install khora` (or `uv pip install khora`).
 
-`khora-accel` ships as an **sdist only** (no platform wheels) — installers compile the Rust extension at install time via maturin's PEP 517 backend. **Requires a Rust toolchain** (`rustup` with stable `cargo` on PATH) on the install host.
+`khora-accel` ships as an **sdist only** (no platform wheels) - installers compile the Rust extension at install time via maturin's PEP 517 backend. **Requires a Rust toolchain** (`rustup` with stable `cargo` on PATH) on the install host.
 
 ## Authentication
 
-PyPI Trusted Publishing via GitHub OIDC — no API tokens, no secrets in the repo. Each publish job runs under the `pypi` GitHub deployment environment, which is bound to the trusted-publisher configuration on pypi.org for both projects.
+PyPI Trusted Publishing via GitHub OIDC - no API tokens, no secrets in the repo. Each publish job runs under the `pypi` GitHub deployment environment, which is bound to the trusted-publisher configuration on pypi.org for both projects.
 
 ## Releasing
 
@@ -46,7 +46,7 @@ PyPI Trusted Publishing via GitHub OIDC — no API tokens, no secrets in the rep
 
    | Step | Package | What it does |
    |------|---------|-------------|
-   | `verify-ci-green` | — | Confirms ci.yml passed for the tagged SHA |
+   | `verify-ci-green` | - | Confirms ci.yml passed for the tagged SHA |
    | `publish-accel` | `khora-accel` | `maturin sdist` → publish to PyPI |
    | `publish-khora` | `khora` | Pins `khora-accel == ${tag}` in pyproject.toml, then `python -m build` (wheel + sdist) → publish to PyPI |
 

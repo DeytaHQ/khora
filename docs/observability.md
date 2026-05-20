@@ -1,8 +1,8 @@
 # Observability
 
 Khora emits OpenTelemetry spans and metrics through the OTel API.
-Where they go — a collector, a vendor (Honeycomb, Datadog, New Relic,
-Dynatrace), local Jaeger/Tempo, or nowhere — is determined by which
+Where they go - a collector, a vendor (Honeycomb, Datadog, New Relic,
+Dynatrace), local Jaeger/Tempo, or nowhere - is determined by which
 `TracerProvider` / `MeterProvider` is installed in the process.
 Khora doesn't install one at import time.
 
@@ -13,9 +13,9 @@ Install paths:
 | `pip install khora` | OTel API only (small wheel) | Spans/metrics are silent no-ops. |
 | `pip install khora[otel]` | OTel SDK + OTLP/HTTP exporter | Vanilla OTel. Honors `OTEL_*` env vars. |
 | `pip install khora[otel-grpc]` | `khora[otel]` + OTLP/gRPC exporter | Use when your collector wants gRPC. |
-| `pip install khora[logfire]` | [Logfire](https://logfire.pydantic.dev) — auto-bootstrap | One-call setup, vendor-managed backend. |
+| `pip install khora[logfire]` | [Logfire](https://logfire.pydantic.dev) - auto-bootstrap | One-call setup, vendor-managed backend. |
 
-You can combine `khora[otel]` and `khora[logfire]` — the precedence rules
+You can combine `khora[otel]` and `khora[logfire]` - the precedence rules
 below decide which wins.
 
 ## Quick start: OTel Collector → Jaeger
@@ -44,7 +44,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Open Jaeger → search service `my-app` — every `khora.recall`,
+Open Jaeger → search service `my-app` - every `khora.recall`,
 `khora.remember`, `khora.vectorcypher.*` span appears under the
 `khora` instrumentation scope.
 
@@ -60,7 +60,7 @@ import logfire
 from khora import Khora
 
 logfire.configure(service_name="my-app")    # installs the TracerProvider
-# khora picks up the provider automatically — no configure_telemetry() needed.
+# khora picks up the provider automatically - no configure_telemetry() needed.
 ```
 
 ## Configuration via environment
@@ -68,7 +68,7 @@ logfire.configure(service_name="my-app")    # installs the TracerProvider
 khora respects the standard
 [OTel SDK environment variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/).
 The SDK auto-reads most of them; khora reads a few directly. Operators
-control everything via these variables — there is no `KHORA_OTEL_*`
+control everything via these variables - there is no `KHORA_OTEL_*`
 shadow.
 
 | Variable | Honored by | Notes |
@@ -86,13 +86,13 @@ shadow.
 
 Per-signal overrides (`OTEL_EXPORTER_OTLP_TRACES_*`,
 `OTEL_EXPORTER_OTLP_METRICS_*`) take precedence over the generic
-variables — useful when traces go to vendor A and metrics to vendor B.
+variables - useful when traces go to vendor A and metrics to vendor B.
 
 ## Programmatic configuration
 
 Hosts that bootstrap their own `TracerProvider` (e.g. an app that wires
 OTel for Django, FastAPI, etc. before importing khora) don't need to
-call `configure_telemetry()` — khora detects the non-default global
+call `configure_telemetry()` - khora detects the non-default global
 provider and emits through it.
 
 For scripts, notebooks, or services that want khora to drive the
@@ -126,7 +126,7 @@ keys in `resource_attributes=` are dropped with a warning.
 
 khora identifies itself via the **instrumentation scope**:
 `scope.name = "khora"`, `scope.version = importlib.metadata.version("khora")`.
-That's the right slot for "which library produced this span" — your
+That's the right slot for "which library produced this span" - your
 dashboards can filter on `instrumentation_scope.name = khora` without
 colliding with the operator's `service.name`.
 
@@ -134,19 +134,19 @@ colliding with the operator's `service.name`.
 
 `configure_telemetry()` walks this list and stops at the first match:
 
-1. `backend="none"` — explicit no-op.
-2. `OTEL_SDK_DISABLED=true` (env) — no-op.
-3. Caller-supplied `tracer_provider=` / `meter_provider=` — install as
+1. `backend="none"` - explicit no-op.
+2. `OTEL_SDK_DISABLED=true` (env) - no-op.
+3. Caller-supplied `tracer_provider=` / `meter_provider=` - install as
    global only if no real provider exists yet.
-4. A non-default global `TracerProvider` is already installed — defer
+4. A non-default global `TracerProvider` is already installed - defer
    to it. (This is the "host app already configured OTel" path; same
    path applies if `logfire.configure()` already ran.)
 5. `backend="logfire"` or (`backend="auto"` and `LOGFIRE_TOKEN` or
-   `LOGFIRE_SEND_TO_LOGFIRE` env is set and `logfire` is importable) —
+   `LOGFIRE_SEND_TO_LOGFIRE` env is set and `logfire` is importable) -
    call `logfire.configure()`.
 6. `backend="otel"` or (`backend="auto"` and any `OTEL_*` env var is
-   set) — bootstrap a vanilla OTel SDK with OTLP exporters.
-7. Otherwise — no-op.
+   set) - bootstrap a vanilla OTel SDK with OTLP exporters.
+7. Otherwise - no-op.
 
 `configure_telemetry()` is idempotent. The first call's decision sticks
 for the rest of the process.
@@ -157,7 +157,7 @@ The complete contract lives at
 [`docs/telemetry-contract.json`](telemetry-contract.json) (with explainer
 at [`telemetry-contract.md`](telemetry-contract.md)). Items tagged
 `stability: public` are part of khora's API surface and follow standard
-semver — breaking changes require a major version bump. CI enforces
+semver - breaking changes require a major version bump. CI enforces
 drift via `tests/unit/telemetry/test_contract.py`.
 
 Highlights:
@@ -173,7 +173,7 @@ Highlights:
   `khora.neo4j.pool.{acquire_duration,timeout,connections.*,utilization}`,
   `khora.chronicle.abstention_signal`, `khora.log.queue.depth`.
 - **Khora-contributed resource attribute**:
-  `khora.telemetry.contract.version` — bumped alongside contract changes
+  `khora.telemetry.contract.version` - bumped alongside contract changes
   so dashboards can filter by schema version independently of khora's
   package version.
 
@@ -186,26 +186,26 @@ Phase A wires three internal metrics and one internal span for the
 synthetic RECENCY/CHANGE date-floor and the parallel recency channel.
 Helpers live in `khora.telemetry.temporal_metrics`:
 
-- `khora.query.temporal.floor_applied_total` (counter) — labels:
+- `khora.query.temporal.floor_applied_total` (counter) - labels:
   `category` (TemporalCategory), `vetoed` (`true`/`false`).
-- `khora.query.temporal.recency_channel_fired_total` (counter) —
+- `khora.query.temporal.recency_channel_fired_total` (counter) -
   labels: `category`.
-- `khora.recall.recency.query_to_top1_age_days` (histogram, days) —
+- `khora.recall.recency.query_to_top1_age_days` (histogram, days) -
   log-bucketed at `[0, 1, 7, 30, 90, 365, 3650]`, no labels.
-- `khora.vectorcypher.recency_floor_synthesis` (span) — wraps the
+- `khora.vectorcypher.recency_floor_synthesis` (span) - wraps the
   synthetic-filter decision. Attributes:
   `synthetic_temporal_filter_applied`, `anti_recency_veto`,
   `temporal_floor_days`, `recency_channel_fired`,
   `recency_reference_mode`.
 
 `namespace_id` is intentionally **not** a label on any of these
-metrics — see the cardinality rule in `telemetry-contract.md`.
+metrics - see the cardinality rule in `telemetry-contract.md`.
 
 ## Sampling and cost control
 
 The OTel SDK handles sampling transparently. Set
 `OTEL_TRACES_SAMPLER=parentbased_traceidratio` and
-`OTEL_TRACES_SAMPLER_ARG=0.1` to ship 10% of traces — khora needs no
+`OTEL_TRACES_SAMPLER_ARG=0.1` to ship 10% of traces - khora needs no
 code change. For high-volume operations, gate expensive attribute
 computation on `span.is_recording()`:
 
@@ -266,7 +266,7 @@ Open `http://localhost:16686` to browse spans.
 No migration needed. `pip install khora[logfire]` keeps working. If
 your app calls `logfire.configure()`, khora detects the resulting
 `TracerProvider` and emits through it. You can install both extras
-side-by-side — when `LOGFIRE_TOKEN` is set, the logfire path wins;
+side-by-side - when `LOGFIRE_TOKEN` is set, the logfire path wins;
 otherwise vanilla OTel takes over.
 
 The one-line rename: `install_neo4j_logfire_handler` is now
@@ -278,7 +278,7 @@ khora 0.10.x and will be removed in 0.12.
 
 "I see no spans":
 
-1. Run `khora.telemetry.diagnostics()` — prints the active provider
+1. Run `khora.telemetry.diagnostics()` - prints the active provider
    class, whether khora bootstrapped it, the endpoint, and the
    resource attributes. The output is the first thing to share when
    filing a bug.
@@ -292,7 +292,7 @@ khora 0.10.x and will be removed in 0.12.
 
 "Spans appear but `service.name` is wrong":
 
-This is correctly your host application's concern — khora never sets
+This is correctly your host application's concern - khora never sets
 it. Either set `OTEL_SERVICE_NAME` or include `service.name` in your
 own Resource when you bootstrap OTel manually.
 

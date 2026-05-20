@@ -2,7 +2,7 @@
 
 The Chronicle engine is Khora's memory engine designed for **temporal and conversational memory**. It targets high scores on benchmarks like LongMemEval, LoCoMo, and BEAM by combining semantic search with temporal reasoning.
 
-Unlike VectorCypher, Chronicle requires **no graph database** — it runs on PostgreSQL + pgvector only, with an optional embedded LanceDB store for zero-infrastructure deployments.
+Unlike VectorCypher, Chronicle requires **no graph database** - it runs on PostgreSQL + pgvector only, with an optional embedded LanceDB store for zero-infrastructure deployments.
 
 ## When to Use Chronicle
 
@@ -40,9 +40,9 @@ Default half-life: 168 hours (7 days). A memory retains 50% strength after one w
 
 Chronicle extracts structured **SVO tuples** (subject-verb-object) from content with triple timestamps:
 
-- **observation_date** — when the content was ingested
-- **referenced_date** — when the event actually occurred
-- **relative_offset** — temporal distance (e.g., "last week", "in March")
+- **observation_date** - when the content was ingested
+- **referenced_date** - when the event actually occurred
+- **relative_offset** - temporal distance (e.g., "last week", "in March")
 
 This enables precise temporal queries that distinguish between "when was this stored" and "when did this happen."
 
@@ -52,7 +52,7 @@ For long-running conversations, Chronicle compresses older memories to manage to
 
 1. Extract atomic **Elementary Discourse Units** (facts) from content
 2. Detect contradictions via `FactOperation`: ADD, UPDATE, DELETE, NOOP
-3. Merge and compress — achieves 3-6x token reduction while preserving key facts
+3. Merge and compress - achieves 3-6x token reduction while preserving key facts
 
 ### LanceDB Embedded Store
 
@@ -62,7 +62,7 @@ For zero-infrastructure deployments, Chronicle can use LanceDB as an embedded ve
 pip install khora[lancedb]
 ```
 
-LanceDB stores vectors in local files with HNSW indexing — no database server required.
+LanceDB stores vectors in local files with HNSW indexing - no database server required.
 
 ## Usage
 
@@ -94,7 +94,7 @@ async def main():
             metadata={"occurred_at": "2026-03-22T14:00:00Z"},
         )
 
-        # Temporal query — Chronicle uses recency to find the latest stance
+        # Temporal query - Chronicle uses recency to find the latest stance
         result = await kb.recall(
             "What is Alice's current position on release cadence?",
             namespace=ns.namespace_id,
@@ -117,7 +117,7 @@ async with Khora("memory://", engine="chronicle") as kb:
 ### Recall response shape
 
 Since v0.16.0 (#761), `result.documents` is always populated for every
-document referenced by a chunk in the result — Chronicle relies on the
+document referenced by a chunk in the result - Chronicle relies on the
 namespace-scoped coordinator facade to batch-fetch documents, never on
 the legacy public sub-backend attrs. The `RecallResult.context_text`
 attribute is gone; render a context string with the public
@@ -152,6 +152,6 @@ Chronicle respects standard `KHORA_QUERY_*` env vars, plus these are particularl
 
 ## Related Documentation
 
-- [Engine Comparison](engine-comparison.md) — side-by-side feature matrix
-- [Temporal Queries](../query-engine/temporal-queries.md) — time filtering and recency
-- [Hybrid Search](hybrid-search.md) — RRF fusion details
+- [Engine Comparison](engine-comparison.md) - side-by-side feature matrix
+- [Temporal Queries](../query-engine/temporal-queries.md) - time filtering and recency
+- [Hybrid Search](hybrid-search.md) - RRF fusion details

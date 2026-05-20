@@ -6,7 +6,7 @@ Khora is a library. Its stable public API is consumed by several first-party pac
 
 ### khora-cli
 
-khora-cli (to be released soon) — extract and search CLI.
+khora-cli (to be released soon) - extract and search CLI.
 
 ```bash
 uv pip install khora-cli
@@ -29,7 +29,7 @@ from khora.logging_config import setup_logging
 
 ### khora-explorer
 
-khora-explorer (to be released soon) — ontology construction, validation, and preview.
+khora-explorer (to be released soon) - ontology construction, validation, and preview.
 
 ```bash
 uv pip install khora-explorer
@@ -71,7 +71,7 @@ The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseC
 
 Two public API surfaces are pinned as stable.
 
-### Memory-lake surface — `from khora import …`
+### Memory-lake surface - `from khora import …`
 
 | Category | Symbols |
 | --- | --- |
@@ -86,7 +86,7 @@ Two public API surfaces are pinned as stable.
 
 Canonical machine-readable contract: `__all__` in `src/khora/__init__.py`.
 
-### Extraction-skill surface — `from khora.extraction.skills import …`
+### Extraction-skill surface - `from khora.extraction.skills import …`
 
 | Category | Symbols |
 | --- | --- |
@@ -94,7 +94,7 @@ Canonical machine-readable contract: `__all__` in `src/khora/__init__.py`.
 | Tuning | `ConfidenceConfig`, `ExpansionConfig` |
 | Cross-tool reconciliation | `CorrelationRule`, `InferenceRule`, `InferenceCondition` (supporting type used as `InferenceRule.when`) |
 | Chronicle extraction toggles | `EventExtractionConfig`, `FactExtractionConfig` |
-| Legacy back-compat exports | `ConfidenceLevel` (enum), `ExtractionSkill` (legacy class) — listed in `__all__` and importable for existing consumers, but not extended; new code should not rely on them |
+| Legacy back-compat exports | `ConfidenceLevel` (enum), `ExtractionSkill` (legacy class) - listed in `__all__` and importable for existing consumers, but not extended; new code should not rely on them |
 
 Canonical machine-readable contract: `__all__` in `src/khora/extraction/skills/base.py`.
 
@@ -104,15 +104,15 @@ Canonical machine-readable contract: `__all__` in `src/khora/extraction/skills/b
 - **Breaking changes** require a major version bump: renaming or removing a field/method, changing a type, changing a default in a way that alters observable behaviour, removing a class. Breaking changes coordinate with the published consumer packages (khora-cli, khora-explorer).
 - **Security exception.** Breaking changes that close a confidentiality or integrity vulnerability may land in a patch release without a major bump. The patch CHANGELOG entry calls out the affected signatures under `### Changed (breaking)` and the corresponding security finding under `### Security`. Coordinated consumer-package updates still apply; the carve-out only covers the timing of the bump, not the disclosure. Examples:
   - **v0.15.1** promoted `kb.get_entity` and the `kb.storage` getters (`get_entity` / `get_relationship` / `get_episode` / `get_chunk` / `get_chunks_batch` / `get_chunks_by_document`) to require a `namespace` / `namespace_id` keyword argument.
-  - **v0.16.0** (PRs #761 / #765 / #766 / #769) closed out the rest of the cross-namespace IDOR family. Every read, exists-check, and mutation on every storage backend (`RelationalBackend`, `VectorBackend`, `GraphBackend`, `EventStore`) now requires `*, namespace_id: UUID` (kwarg-only) and filters at the SQL / Cypher / SurrealQL layer rather than post-fetch. `Khora.get_document(doc_id, *, namespace=…)` requires the namespace kwarg. `StorageCoordinator.{relational,vector,graph,event_store}` is wrapped in a `NamespaceRequiredProxy` that emits one `DeprecationWarning` per role per process on first access; the public attributes are kept as a deprecation surface and will be removed in v0.17 — internal canonical references are `self._{relational,vector,graph,event_store}`. A signature-level regression gate (`tests/security/test_cross_namespace_idor_signatures.py`) blocks future drift at test-collection time.
+  - **v0.16.0** (PRs #761 / #765 / #766 / #769) closed out the rest of the cross-namespace IDOR family. Every read, exists-check, and mutation on every storage backend (`RelationalBackend`, `VectorBackend`, `GraphBackend`, `EventStore`) now requires `*, namespace_id: UUID` (kwarg-only) and filters at the SQL / Cypher / SurrealQL layer rather than post-fetch. `Khora.get_document(doc_id, *, namespace=…)` requires the namespace kwarg. `StorageCoordinator.{relational,vector,graph,event_store}` is wrapped in a `NamespaceRequiredProxy` that emits one `DeprecationWarning` per role per process on first access; the public attributes are kept as a deprecation surface and will be removed in v0.17 - internal canonical references are `self._{relational,vector,graph,event_store}`. A signature-level regression gate (`tests/security/test_cross_namespace_idor_signatures.py`) blocks future drift at test-collection time.
 - `from_dict` for extraction-skill dataclasses preserves backward compatibility with historical YAML/JSON payloads for at least one major version after schema evolution.
 
 ### What's NOT pinned
 
 - Anything not listed in either `__all__`.
-- Internal models exported from `khora.core.models` — `Document`, `Chunk`, `Entity`, `Episode`, `Relationship`, `MemoryEvent`. Their shapes are dictated by storage schemas and may evolve; consumers that persist these objects should copy them into their own types.
+- Internal models exported from `khora.core.models` - `Document`, `Chunk`, `Entity`, `Episode`, `Relationship`, `MemoryEvent`. Their shapes are dictated by storage schemas and may evolve; consumers that persist these objects should copy them into their own types.
 - The `khora.chat` module aside from `ChatResponse`. The rest (`ChatEngine`, `ChatMessage`, `ConversationHistory`, `HistoryManager`, `PersonaConfig`, `load_persona_config`, `PromptGenerator`) is evolving; breaking changes are announced in CHANGELOG `### Deprecated` one minor release before removal.
-- The `khora.storage.StorageCoordinator` surface exposed via the `Khora.storage` property. The property exists; its API is not pinned. **Note (v0.16.0):** `StorageCoordinator.{relational,vector,graph,event_store}` are now `NamespaceRequiredProxy` wrappers — they emit a `DeprecationWarning` on first access per role per process and refuse dispatch on read methods missing `namespace_id=`. The public attributes are removed in v0.17. Downstream code that needs the unwrapped backends should call coordinator-level methods (all of which take `namespace_id=` as a kwarg-only argument) instead.
+- The `khora.storage.StorageCoordinator` surface exposed via the `Khora.storage` property. The property exists; its API is not pinned. **Note (v0.16.0):** `StorageCoordinator.{relational,vector,graph,event_store}` are now `NamespaceRequiredProxy` wrappers - they emit a `DeprecationWarning` on first access per role per process and refuse dispatch on read methods missing `namespace_id=`. The public attributes are removed in v0.17. Downstream code that needs the unwrapped backends should call coordinator-level methods (all of which take `namespace_id=` as a kwarg-only argument) instead.
 - Anything whose name starts with an underscore.
 
 For full method signatures and dataclass field lists, read the symbols directly (`help(Khora)`, the source on GitHub, or your IDE's type-stub navigation).
@@ -121,10 +121,10 @@ For full method signatures and dataclass field lists, read the symbols directly 
 
 For a new downstream consumer:
 
-1. `pip install khora[<backend-of-choice>]` — pick the backend matrix that matches your infra (`postgres`-default for PG, `surrealdb` for zero-infra, `all-backends` if unsure).
-2. Either call `khora.logging_config.setup_logging()` once per process, or configure your own loguru sinks with `enqueue=True`. The default loguru sink blocks the event loop in async code — see [configuration.md](configuration.md#logging).
-3. Run migrations (for PostgreSQL) — pass `run_migrations=True` to `Khora` or invoke `alembic upgrade head` out-of-band. See [migrations.md](migrations.md).
+1. `pip install khora[<backend-of-choice>]` - pick the backend matrix that matches your infra (`postgres`-default for PG, `surrealdb` for zero-infra, `all-backends` if unsure).
+2. Either call `khora.logging_config.setup_logging()` once per process, or configure your own loguru sinks with `enqueue=True`. The default loguru sink blocks the event loop in async code - see [configuration.md](configuration.md#logging).
+3. Run migrations (for PostgreSQL) - pass `run_migrations=True` to `Khora` or invoke `alembic upgrade head` out-of-band. See [migrations.md](migrations.md).
 4. Import only from the symbols listed in [api-reference.md](api-reference.md) unless you are willing to follow khora's internal churn.
 5. Pin Khora by major version. Minor-version upgrades are safe; majors may require coordinated releases.
-6. **Reading credentials back out of `KhoraConfig`?** Credential fields are `pydantic.SecretStr` — call `.get_secret_value()` for the cleartext. `str(cfg.storage.postgresql_url)` returns `'**********'` by design. See [configuration.md](configuration.md#secretstr-typed-credential-fields).
+6. **Reading credentials back out of `KhoraConfig`?** Credential fields are `pydantic.SecretStr` - call `.get_secret_value()` for the cleartext. `str(cfg.storage.postgresql_url)` returns `'**********'` by design. See [configuration.md](configuration.md#secretstr-typed-credential-fields).
 7. **Need spans/metrics?** Install `khora[otel]` and call `khora.telemetry.configure_telemetry()` at process startup, or rely on env-based auto-bootstrap. See [observability.md](observability.md) for the precedence rules and vendor recipes.

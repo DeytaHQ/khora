@@ -103,7 +103,7 @@ class Chunk:
 
     # Free-form metadata propagated from the parent document
     metadata: dict[str, Any] = field(default_factory=dict)
-    # Chunker output (strategy, overlap, etc.) — distinct from metadata
+    # Chunker output (strategy, overlap, etc.) - distinct from metadata
     chunker_info: dict[str, Any] = field(default_factory=dict)
 
     # Embedding
@@ -210,7 +210,7 @@ async with Khora() as kb:
 ### Retrieving Documents
 
 ```python
-# Get document by ID. `namespace_id` is required and kwarg-only —
+# Get document by ID. `namespace_id` is required and kwarg-only -
 # returns None if the document is not in this namespace (v0.16.0).
 doc = await kb.storage.get_document(document_id, namespace_id=namespace_id)
 print(f"Status: {doc.status}")

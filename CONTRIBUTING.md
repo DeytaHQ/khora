@@ -1,7 +1,7 @@
 # Contributing to Khora
 
 Thanks for your interest in contributing. Khora is an open-source knowledge
-memory library — knowledge graphs + vector search + PostgreSQL (with an
+memory library - knowledge graphs + vector search + PostgreSQL (with an
 optional SQLite + LanceDB embedded path).
 
 ## Local setup
@@ -29,7 +29,7 @@ For tighter feedback loops, pick a subset:
 | Command | What it runs | Needs Docker? |
 | --- | --- | --- |
 | `make test-unit` | `tests/unit/` in parallel (`-n auto`) | No |
-| `make test-embedded` | Tests marked `embedded` — the SQLite+LanceDB stack | No |
+| `make test-embedded` | Tests marked `embedded` - the SQLite+LanceDB stack | No |
 | `make test-integration` | `tests/integration/` against Postgres+Neo4j | Yes (`make dev` first) |
 | `make test-soak` | Long-running soak/burn-in tests (`-m soak`) | No |
 
@@ -40,9 +40,9 @@ stops them.
 
 Two gates run in CI:
 
-1. **Aggregate gate** — `--cov-fail-under=53` in `pyproject.toml`. Protects
+1. **Aggregate gate** - `--cov-fail-under=53` in `pyproject.toml`. Protects
    the global percentage; tripped by broad regressions.
-2. **Per-path floors** — `scripts/check_coverage_floors.py`. Reads
+2. **Per-path floors** - `scripts/check_coverage_floors.py`. Reads
    `coverage.json` and enforces a per-file minimum for the hot paths the
    project has invested in (currently the embedded SQLite+LanceDB stack,
    FTS5 escaping, the chronicle engine, and the `_accel` module).
@@ -75,7 +75,7 @@ locally before each commit. The same checks run again in CI.
 1. Find or open an issue at
    https://github.com/DeytaHQ/khora/issues (`gh issue list` from the CLI).
 2. Branch off `main`. Use `<initials>/<short-desc>` as the branch name.
-3. Make focused commits — explain *why* in the message, not just *what*.
+3. Make focused commits - explain *why* in the message, not just *what*.
 4. Run `make format && make test` before pushing.
 5. Open a PR against `main`. Reference the issue with `Fixes #<n>` in the
    body so the issue auto-closes on merge.

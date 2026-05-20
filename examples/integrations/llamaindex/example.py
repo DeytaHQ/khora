@@ -1,4 +1,4 @@
-"""LlamaIndex + khora example — async retrieval via ``KhoraRetriever``.
+"""LlamaIndex + khora example - async retrieval via ``KhoraRetriever``.
 
 Runs without Postgres, Neo4j, or an API key. The mock LLM patches
 ``litellm.acompletion`` / ``litellm.aembedding`` so the example is

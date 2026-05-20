@@ -22,7 +22,7 @@ Choose Skeleton Construction instead when:
 - **No Neo4j available**: VectorCypher requires Neo4j
 - **Simple infrastructure preferred**: Skeleton works with PostgreSQL only
 
-For graphrag-equivalent comprehensive extraction (100% of chunks), pass `engine_kwargs={"skeleton_core_ratio": 1.0}` — VectorCypher's KET-RAG selectivity defaults to the top 70% of chunks but accepts a 1.0 override that matches the legacy GraphRAG engine's extraction quality at the same LLM cost.
+For graphrag-equivalent comprehensive extraction (100% of chunks), pass `engine_kwargs={"skeleton_core_ratio": 1.0}` - VectorCypher's KET-RAG selectivity defaults to the top 70% of chunks but accepts a 1.0 override that matches the legacy GraphRAG engine's extraction quality at the same LLM cost.
 
 ## Architecture Overview
 
@@ -112,10 +112,10 @@ async with Khora("postgresql://...", engine="vectorcypher") as kb:
 ### RecallResult Context
 
 `recall()` returns `RecallResult` objects whose typed projections expose:
-- **`chunks`** — Matching text passages as `RecallChunk` entries (`chunk.content`)
-- **`entities`** — Entities mentioned in matching chunks
-- **`relationships`** — Connections between entities in the result set
-- **`documents`** — Full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship (always populated as of v0.16.0; see [Source Document Population](#source-document-population))
+- **`chunks`** - Matching text passages as `RecallChunk` entries (`chunk.content`)
+- **`entities`** - Entities mentioned in matching chunks
+- **`relationships`** - Connections between entities in the result set
+- **`documents`** - Full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship (always populated as of v0.16.0; see [Source Document Population](#source-document-population))
 
 The legacy `RecallResult.context_text` attribute was removed in v0.15.3.
 Callers that need a flat context string for an LLM render one with the
@@ -130,7 +130,7 @@ prompt_context = context_text(result, max_chunks=5)
 
 ### Source Document Population
 
-`recall()` always returns a `RecallResult` whose `documents` list holds full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship in the result — this is a producer-enforced invariant (see #761 / v0.16.0). Khora batch-fetches `DocumentSource` metadata after the engine returns (chunked at 1,000 IDs) and replaces the engine's lightweight stubs in place. The engine itself uses the namespace-scoped coordinator facade for that lookup, so cross-namespace ids never leak through.
+`recall()` always returns a `RecallResult` whose `documents` list holds full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship in the result - this is a producer-enforced invariant (see #761 / v0.16.0). Khora batch-fetches `DocumentSource` metadata after the engine returns (chunked at 1,000 IDs) and replaces the engine's lightweight stubs in place. The engine itself uses the namespace-scoped coordinator facade for that lookup, so cross-namespace ids never leak through.
 
 ```python
 result = await kb.recall("query", namespace=ns_id)
@@ -139,7 +139,7 @@ for chunk in result.chunks:
     print(docs_by_id[chunk.document_id].title)
 ```
 
-Entity-read methods (`get_entity()`, `list_entities()`, `find_related_entities()`, `search_entities()`) still accept `include_sources: bool = False` to opt-in to per-entity `source_documents` population. All four require `namespace_id=` (kwarg-only) on every call — the v0.16.0 IDOR close-out (#769) enforces this at the Protocol level on every storage backend.
+Entity-read methods (`get_entity()`, `list_entities()`, `find_related_entities()`, `search_entities()`) still accept `include_sources: bool = False` to opt-in to per-entity `source_documents` population. All four require `namespace_id=` (kwarg-only) on every call - the v0.16.0 IDOR close-out (#769) enforces this at the Protocol level on every storage backend.
 
 ### VectorCypherRetriever (`src/khora/engines/vectorcypher/retriever.py`)
 
@@ -264,8 +264,8 @@ The `temporal_sort` parameter controls Cypher ordering:
 
 | `temporal_sort` | Cypher `ORDER BY` | When Used |
 |-----------------|-------------------|-----------|
-| `False` (default) | `total_mentions DESC` | Non-temporal queries — rank by relevance |
-| `True` | `c.occurred_at DESC, total_mentions DESC` | Temporal queries — most recent chunks first, tiebreak by relevance |
+| `False` (default) | `total_mentions DESC` | Non-temporal queries - rank by relevance |
+| `True` | `c.occurred_at DESC, total_mentions DESC` | Temporal queries - most recent chunks first, tiebreak by relevance |
 
 Neo4j already has an index on `Chunk.occurred_at`, so the temporal sort adds negligible overhead.
 
@@ -374,19 +374,19 @@ The detector classifies the query, and the resulting `TemporalSignal.category` m
 
 | Category | `recency_weight` | `temporal_sort` | `decay_days_override` | Example Query |
 |----------|------------------|-----------------|-----------------------|---------------|
-| `NONE` | 0.2 | No | — | "What is the capital of France?" |
-| `EXPLICIT` | 0.3 | No | — | "What happened before April 2024?" |
-| `STATE_QUERY` | 0.5 | Yes | — | "What instrument is she currently playing?" |
-| `ORDINAL` | 0.1 | Yes | — | "Which event happened first?" |
-| `AGGREGATE` | 0.0 | No | — | "How many projects in total?" |
+| `NONE` | 0.2 | No | - | "What is the capital of France?" |
+| `EXPLICIT` | 0.3 | No | - | "What happened before April 2024?" |
+| `STATE_QUERY` | 0.5 | Yes | - | "What instrument is she currently playing?" |
+| `ORDINAL` | 0.1 | Yes | - | "Which event happened first?" |
+| `AGGREGATE` | 0.0 | No | - | "How many projects in total?" |
 | `RECENCY` | 0.5 | Yes | 7 | "What's the most recent update?" |
-| `CHANGE` | 0.3 | Yes | — | "Does she still work at Google?" |
+| `CHANGE` | 0.3 | Yes | - | "Does she still work at Google?" |
 
 ### Effect on the Retrieval Pipeline
 
-- **`recency_weight`** — Passed to `apply_recency_boost()` after RRF fusion. Higher values amplify the temporal signal; `0.0` (AGGREGATE) disables recency entirely.
-- **`temporal_sort`** — When `True`, `DualNodeManager.get_chunks_by_entities()` uses `ORDER BY c.occurred_at DESC, total_mentions DESC` in its Cypher query, surfacing the most recent chunks first.
-- **`decay_days_override`** — Overrides the default `recency_decay_days` (30) for categories like RECENCY where a tighter window (7 days) is more appropriate.
+- **`recency_weight`** - Passed to `apply_recency_boost()` after RRF fusion. Higher values amplify the temporal signal; `0.0` (AGGREGATE) disables recency entirely.
+- **`temporal_sort`** - When `True`, `DualNodeManager.get_chunks_by_entities()` uses `ORDER BY c.occurred_at DESC, total_mentions DESC` in its Cypher query, surfacing the most recent chunks first.
+- **`decay_days_override`** - Overrides the default `recency_decay_days` (30) for categories like RECENCY where a tighter window (7 days) is more appropriate.
 
 ### Simple Path Recency
 
@@ -394,7 +394,7 @@ The SIMPLE retrieval path (vector-only, no graph traversal) now also applies rec
 
 ### Relative Recency Reference
 
-`_calculate_recency_scores()` uses `max(occurred_at)` from the result set as the reference point instead of `datetime.now(UTC)`. This means benchmark data or historical data produces meaningful recency discrimination regardless of when the query is executed — a result from "2 days before the newest result" always gets the same score, whether the data is from 2024 or 2026.
+`_calculate_recency_scores()` uses `max(occurred_at)` from the result set as the reference point instead of `datetime.now(UTC)`. This means benchmark data or historical data produces meaningful recency discrimination regardless of when the query is executed - a result from "2 days before the newest result" always gets the same score, whether the data is from 2024 or 2026.
 
 ## Configuration
 
@@ -600,7 +600,7 @@ This prevents two failure modes: (1) candidate explosion when many entities each
 
 ## Score Normalization
 
-The fusion function `weighted_rrf_normalized` normalizes vector and graph scores to [0, 1] via min-max normalization before computing Reciprocal Rank Fusion. This matters when the two sources produce scores on very different scales — for example, cosine similarity scores in [0.3, 0.9] vs graph proximity scores in [0.01, 0.5]. Without normalization, the source with larger absolute scores dominates the fusion.
+The fusion function `weighted_rrf_normalized` normalizes vector and graph scores to [0, 1] via min-max normalization before computing Reciprocal Rank Fusion. This matters when the two sources produce scores on very different scales - for example, cosine similarity scores in [0.3, 0.9] vs graph proximity scores in [0.01, 0.5]. Without normalization, the source with larger absolute scores dominates the fusion.
 
 Both the SIMPLE and COMPLEX retrieval paths normalize final scores to [0,1] using min-max normalization. Previously, only the COMPLEX path applied normalization; SIMPLE path scores could exceed 1.0 when vector and graph contributions were summed.
 
@@ -619,7 +619,7 @@ Migration 005 adds three PostgreSQL indexes that improve query-time performance:
 | `ix_khora_chunks_ns_occurred` | B-tree (composite) | `(namespace_id, occurred_at)` | Temporal filtering within a namespace |
 | `ix_khora_chunks_embedding_hnsw` | HNSW | `khora_chunks.embedding` | Vector similarity with `ef_construction=128` (up from 64) |
 
-The HNSW index rebuild with higher `ef_construction` improves recall at index-build time — more candidates are considered during graph construction, producing a higher-quality approximate nearest neighbor index. Query-time `ef_search` can be tuned separately via PostgreSQL's `SET hnsw.ef_search = N`.
+The HNSW index rebuild with higher `ef_construction` improves recall at index-build time - more candidates are considered during graph construction, producing a higher-quality approximate nearest neighbor index. Query-time `ef_search` can be tuned separately via PostgreSQL's `SET hnsw.ef_search = N`.
 
 Run the migration with:
 

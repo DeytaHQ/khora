@@ -14,9 +14,9 @@ Production-readiness is **per (engine × stack)**, not per engine. The same engi
 | Chronicle     | n/a (graph not required)       | **Production-ready**             | Experimental                | Experimental               |
 | Skeleton      | n/a (graph not required)       | Available                        | Experimental     | Experimental               |
 
-- **Production-ready** — qualified for production deployment in v0.9.0; covered by integration and e2e tests; documented gotchas have known mitigations.
-- **Available** — supported, exercised in tests, but not stamped production-ready. Equivalent retrieval semantics; less load-tested.
-- **Experimental** — feature-complete enough for demos, evaluation, and tests on small corpora. Not a deployment story. See the [embedded backend caveats](../configuration.md#embedded-backends-experimental) for the full list of gaps.
+- **Production-ready** - qualified for production deployment in v0.9.0; covered by integration and e2e tests; documented gotchas have known mitigations.
+- **Available** - supported, exercised in tests, but not stamped production-ready. Equivalent retrieval semantics; less load-tested.
+- **Experimental** - feature-complete enough for demos, evaluation, and tests on small corpora. Not a deployment story. See the [embedded backend caveats](../configuration.md#embedded-backends-experimental) for the full list of gaps.
 
 The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. SurrealDB is experimental on multiple fronts (Python SDK on alpha track, KNN unreliable in embedded mode).
 
@@ -72,7 +72,7 @@ async with Khora(db_url, engine="skeleton") as kb:
 ```
 
 **Chronicle:**
-- Full extraction on every document — runs the same shared ingest pipeline VectorCypher uses, no skeleton selectivity.
+- Full extraction on every document - runs the same shared ingest pipeline VectorCypher uses, no skeleton selectivity.
 - Extracts SVO events (subject-verb-object tuples) in addition to entities/relationships.
 - Stores in PostgreSQL only; no graph backend involvement.
 
@@ -189,21 +189,21 @@ For 1000 documents averaging 5KB each:
 ### Replacing GraphRAG (removed in 0.10.1)
 
 ```python
-# Before (graphrag — no longer available)
+# Before (graphrag - no longer available)
 async with Khora(db_url, engine="graphrag") as kb:
     await kb.remember(content, namespace=ns_id)
 
-# After — drop-in: vectorcypher with full extraction
+# After - drop-in: vectorcypher with full extraction
 async with Khora(db_url, engine="vectorcypher",
                  engine_kwargs={"skeleton_core_ratio": 1.0}) as kb:
     await kb.remember(content, namespace=ns_id)
 
-# Or accept default selective extraction (recommended — 30% cheaper):
+# Or accept default selective extraction (recommended - 30% cheaper):
 async with Khora(db_url, engine="vectorcypher") as kb:
     await kb.remember(content, namespace=ns_id)
 ```
 
-Existing graphrag-ingested data remains queryable via `vectorcypher` against the same database — the table shapes are identical.
+Existing graphrag-ingested data remains queryable via `vectorcypher` against the same database - the table shapes are identical.
 
 ### Between VectorCypher and Skeleton Construction
 
@@ -242,9 +242,9 @@ async def hybrid_query(query: str, ns_id):
 
 ## Related Documentation
 
-- [VectorCypher Engine](vectorcypher-engine.md) — default, hybrid retrieval.
-- [Skeleton Construction Engine](skeleton-engine.md) — temporal-first, no graph DB.
-- [Chronicle Engine](chronicle-engine.md) — conversational + temporal.
-- [Temporal Model](temporal-model.md) — bi-temporal design details.
-- [Hybrid Search](hybrid-search.md) — vector + BM25 fusion primitive.
-- [References](../REFERENCES.md) — research papers and inspirations.
+- [VectorCypher Engine](vectorcypher-engine.md) - default, hybrid retrieval.
+- [Skeleton Construction Engine](skeleton-engine.md) - temporal-first, no graph DB.
+- [Chronicle Engine](chronicle-engine.md) - conversational + temporal.
+- [Temporal Model](temporal-model.md) - bi-temporal design details.
+- [Hybrid Search](hybrid-search.md) - vector + BM25 fusion primitive.
+- [References](../REFERENCES.md) - research papers and inspirations.

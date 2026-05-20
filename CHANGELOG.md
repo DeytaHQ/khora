@@ -6,51 +6,51 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
-## [0.16.1] — Bug-fix sweep + CI security allowlist
+## [0.16.1] - Bug-fix sweep + CI security allowlist
 
 This is a bug-fix release on top of v0.16.0. No new breaking changes; one new config knob (Neo4j source-id truncation caps); one new kwarg (`Khora.remember(..., source_timestamp=…)`); two formatters promoted to the `khora.core.recall_context` public surface. Several CHANGELOG entries below reconstruct work that landed since v0.16.0 but lost its `[Unreleased]` notes to squash-merge collisions.
 
 ### Added
 
 - **Explicit `source_timestamp` kwarg on `Khora.remember()`, `Khora.remember_batch()`, and `Khora.submit_batch()`** (PR #779). Callers can now pass `source_timestamp: datetime | None` directly instead of relying on the metadata-derived fallback. Per-doc dict key (`source_timestamp`) on `remember_batch` / `submit_batch` overrides the top-level kwarg for that document, mirroring the existing `source_type` / `source_name` / `source_url` pattern. When the kwarg is provided it wins over the metadata-based fallback (`sent_at` / `occurred_at` / `created_at` / …); when omitted, the existing fallback in `_extract_source_timestamp` is preserved unchanged.
-- **Configurable Neo4j relationship-provenance caps with observability** (PR #775, closes #737). `Neo4jConfig.relationship_source_document_ids_max` (default 100, env `KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX`) and `Neo4jConfig.relationship_source_chunk_ids_max` (default 250, env `KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_CHUNK_IDS_MAX`) replace the hard-coded `[-100..]` / `[-250..]` Cypher slices on `Relationship.source_document_ids` / `Relationship.source_chunk_ids`. Defaults preserve pre-#737 behavior; deep-provenance workloads can raise either knob. New public telemetry counter `khora.neo4j.relationship.source_id_truncated{field, kind}` increments by the number of entries dropped whenever (existing + incoming) exceeds the cap. The OPTIONAL MATCH that captures the pre-MERGE union size adds one indexed lookup per row on `create_relationships_batch` and `create_relationship`; cost is negligible against the MERGE itself. Same shape exists on the entity-side `upsert_entities_batch` at `neo4j.py:1343-1344` — tracked separately in #777.
+- **Configurable Neo4j relationship-provenance caps with observability** (PR #775, closes #737). `Neo4jConfig.relationship_source_document_ids_max` (default 100, env `KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX`) and `Neo4jConfig.relationship_source_chunk_ids_max` (default 250, env `KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_CHUNK_IDS_MAX`) replace the hard-coded `[-100..]` / `[-250..]` Cypher slices on `Relationship.source_document_ids` / `Relationship.source_chunk_ids`. Defaults preserve pre-#737 behavior; deep-provenance workloads can raise either knob. New public telemetry counter `khora.neo4j.relationship.source_id_truncated{field, kind}` increments by the number of entries dropped whenever (existing + incoming) exceeds the cap. The OPTIONAL MATCH that captures the pre-MERGE union size adds one indexed lookup per row on `create_relationships_batch` and `create_relationship`; cost is negligible against the MERGE itself. Same shape exists on the entity-side `upsert_entities_batch` at `neo4j.py:1343-1344` - tracked separately in #777.
 
 ### Changed
 
-- **Neo4j relationship-provenance truncation is no longer silent** (PR #775, closes #737). Both `Neo4jBackend.create_relationships_batch` and `create_relationship` now emit a `logger.warning(...)` on every truncation event with the field name, dropped-entry count, rows affected, configured limit, and the relationship type — alongside the counter above. Prior to this change, over-cap entries were dropped with no log line and no metric, masking provenance loss until operators manually queried `size(r.source_document_ids)` on suspect rows. Only the Neo4j backend was affected — Memgraph / AGE / Neptune / SurrealDB / sqlite_lance use `CREATE` rather than `MERGE`-with-tail-slice and have no equivalent silent path.
+- **Neo4j relationship-provenance truncation is no longer silent** (PR #775, closes #737). Both `Neo4jBackend.create_relationships_batch` and `create_relationship` now emit a `logger.warning(...)` on every truncation event with the field name, dropped-entry count, rows affected, configured limit, and the relationship type - alongside the counter above. Prior to this change, over-cap entries were dropped with no log line and no metric, masking provenance loss until operators manually queried `size(r.source_document_ids)` on suspect rows. Only the Neo4j backend was affected - Memgraph / AGE / Neptune / SurrealDB / sqlite_lance use `CREATE` rather than `MERGE`-with-tail-slice and have no equivalent silent path.
 - **`context_text` formatters consolidated to `khora.core.recall_context`** (PR #780). `format_entity_section` and `format_relationship_section` are now public on `khora.core.recall_context` (added to its `__all__`). The chunk-grouping block of `context_text(result)` is extracted into a module-private `_group_chunks_by_title(chunks, documents, max_chunks)` helper. Output of `khora.context_text(result)` is byte-identical to prior behavior (golden-string tests verify).
 
 ### Fixed
 
 - **`Neo4jBackend._record_to_relationship` resilient to edges missing `id` / `namespace_id`** (PR #767, closes #763). The mapper hard-subscripted `rel["id"]` / `rel["namespace_id"]` while every other field used `rel.get(...)` with a default. A single relationship whose property map lacked either key raised `KeyError`, which propagated out of the comprehension and broke entire neighbourhood / relationship-batch reads. Now every field is read with a safe default; rows with no recoverable id are dropped with a debug-level log line.
-- **Relationship-type sanitization now consistent across every graph backend** (PR #774, closes #749). Pre-#749 the Cypher backends (Neo4j, Memgraph, Neptune, AGE, sqlite_lance) UPPER_SNAKE_CASEd `Relationship.relationship_type` while SurrealDB stored the raw string verbatim — feeding `"lives in"` to both adapters then reading back via `get_entity_relationships` returned `"LIVES_IN"` from sqlite_lance and `"lives in"` from SurrealDB. Same input, semantically different output, broke any cross-backend filter or replay code. Every backend now funnels `relationship_type` through the shared `sanitize_cypher_label` helper at write time and mirrors the sanitized form back onto the caller's `Relationship` object so the in-memory model matches what is persisted. AGE additionally moves from its bespoke case-preserving regex to the shared helper (the previous AGE regex also had a latent crash on empty input — `[r:]` is invalid Cypher — now handled via the shared `RELATES_TO` fallback). `_sanitize_neo4j_label` is preserved as an internal alias for `sanitize_cypher_label` so the coordinator and vectorcypher engine keep their existing imports.
+- **Relationship-type sanitization now consistent across every graph backend** (PR #774, closes #749). Pre-#749 the Cypher backends (Neo4j, Memgraph, Neptune, AGE, sqlite_lance) UPPER_SNAKE_CASEd `Relationship.relationship_type` while SurrealDB stored the raw string verbatim - feeding `"lives in"` to both adapters then reading back via `get_entity_relationships` returned `"LIVES_IN"` from sqlite_lance and `"lives in"` from SurrealDB. Same input, semantically different output, broke any cross-backend filter or replay code. Every backend now funnels `relationship_type` through the shared `sanitize_cypher_label` helper at write time and mirrors the sanitized form back onto the caller's `Relationship` object so the in-memory model matches what is persisted. AGE additionally moves from its bespoke case-preserving regex to the shared helper (the previous AGE regex also had a latent crash on empty input - `[r:]` is invalid Cypher - now handled via the shared `RELATES_TO` fallback). `_sanitize_neo4j_label` is preserved as an internal alias for `sanitize_cypher_label` so the coordinator and vectorcypher engine keep their existing imports.
 - **v0.16.0 CHANGELOG cosmetic corrections** (PRs #773 + this release):
   - The v0.16.0 `### Added` entry for `ChunkResult` self-identification originally referenced `ChunkResult.metadata["chunker_strategy"]`. The actual key every chunker stamps is `"chunker"` (with values `"fixed"` / `"recursive"` / `"semantic"` / `"conversation"`); the same key propagates to `RecallChunk.chunker_info["chunker"]` on recall (PR #773).
-  - The v0.16.0 `### Fixed` entry on `Khora.recall().documents[]` implied the `Khora._upgrade_recall_documents` pass was closing a tuple→typed gap. It isn't — the architect's investigation while removing the docs-TODO confirmed `_upgrade_recall_documents` is a separate enrichment step (batched `DocumentProjection` source-metadata lookup + reverse-index of chunk→entity edges) operating on already-typed engine output. `documents[]` is producer-enforced by every engine (vectorcypher / chronicle / skeleton) before the upgrade pass runs.
+  - The v0.16.0 `### Fixed` entry on `Khora.recall().documents[]` implied the `Khora._upgrade_recall_documents` pass was closing a tuple→typed gap. It isn't - the architect's investigation while removing the docs-TODO confirmed `_upgrade_recall_documents` is a separate enrichment step (batched `DocumentProjection` source-metadata lookup + reverse-index of chunk→entity edges) operating on already-typed engine output. `documents[]` is producer-enforced by every engine (vectorcypher / chronicle / skeleton) before the upgrade pass runs.
 
 ### Security
 
-- **CI security allowlist for 20 unfixable upstream CVEs** (PR #781, tracked in #778). pip-audit surfaced 20 vulnerabilities in pinned ML dependencies (joblib 1.5.3, transformers 5.8.0, torch 2.11.0) with no upstream fix versions. PyPI confirms no patches: joblib 1.5.3 is the latest; transformers 5.8.1 is a Deepseek-V4 integration patch with no security mentions; torch 2.12.0's "Security" section is a single bullet on GitHub Actions SHA pinning. Each CVE is now explicitly allowlisted in `.github/workflows/ci.yml` with a per-CVE justification of why khora's usage doesn't reach the vulnerable surface. khora's only direct ML usage is `sentence_transformers.CrossEncoder(model_name)` in `khora.query.reranking` against vetted reranker model IDs — `torch` / `transformers` / `joblib` are never imported directly by khora source. The vulnerable codepaths (checkpoint deserialization for Perceiver / Transformer-XL / megatron_gpt2 / X-CLIP / GLM4 / SEW / HuBERT, plus `torch.jit` / `torch.profiler` / quantization / RNN packing / CUDA caching-allocator / `.pt2` archives / `joblib.numpy_pickle`) are not reachable through khora's public API. The allowlist will shrink as upstream fixes ship; #778 tracks the weekly-revisit operating procedure.
+- **CI security allowlist for 20 unfixable upstream CVEs** (PR #781, tracked in #778). pip-audit surfaced 20 vulnerabilities in pinned ML dependencies (joblib 1.5.3, transformers 5.8.0, torch 2.11.0) with no upstream fix versions. PyPI confirms no patches: joblib 1.5.3 is the latest; transformers 5.8.1 is a Deepseek-V4 integration patch with no security mentions; torch 2.12.0's "Security" section is a single bullet on GitHub Actions SHA pinning. Each CVE is now explicitly allowlisted in `.github/workflows/ci.yml` with a per-CVE justification of why khora's usage doesn't reach the vulnerable surface. khora's only direct ML usage is `sentence_transformers.CrossEncoder(model_name)` in `khora.query.reranking` against vetted reranker model IDs - `torch` / `transformers` / `joblib` are never imported directly by khora source. The vulnerable codepaths (checkpoint deserialization for Perceiver / Transformer-XL / megatron_gpt2 / X-CLIP / GLM4 / SEW / HuBERT, plus `torch.jit` / `torch.profiler` / quantization / RNN packing / CUDA caching-allocator / `.pt2` archives / `joblib.numpy_pickle`) are not reachable through khora's public API. The allowlist will shrink as upstream fixes ship; #778 tracks the weekly-revisit operating procedure.
 
 ### Removed
 
-- `khora.query.engine.QueryResult.get_context_text` — use the public `khora.context_text(result)` helper instead (same output) (PR #780).
-- `khora.query.engine.format_entity_section` and `format_relationship_section` — moved to `khora.core.recall_context` (PR #780).
+- `khora.query.engine.QueryResult.get_context_text` - use the public `khora.context_text(result)` helper instead (same output) (PR #780).
+- `khora.query.engine.format_entity_section` and `format_relationship_section` - moved to `khora.core.recall_context` (PR #780).
 
 ### Chores
 
-- **Source-tree scrub of internal ticket IDs** (PR #773). Removed every `IGR-*` reference from `src/` and `tests/` docstrings, comments, and test fixtures (212 substitutions across 43 files). `IGR-NNN:` comment prefixes → `Security:`; ` — IGR-NNN` trailing tags dropped; `(IGR-NNN)` standalone → `(IDOR family)`. Mirrors the prior PR-body and CHANGELOG scrubs; preserves all surrounding security context while removing internal-tracker IDs that were never meant for the public source surface.
-- **Documentation: HybridQueryEngine layering reframe** (PR #776). `docs/query-engine/overview.md` previously carried a TODO claiming `HybridQueryEngine.query()` and `Khora.recall()` were divergent shapes of the same retrieval path. They aren't — `Khora.recall()` goes through the typed engines (vectorcypher / chronicle / skeleton) that build `RecallResult` directly, while `HybridQueryEngine.query()` is consumed only by `khora.query.agentic.AgenticSearchAgent`. The doc now documents both as independent retrieval surfaces with intentionally different result shapes (richer per-method telemetry on the agentic path vs. typed projection on the public-API path).
+- **Source-tree scrub of internal ticket IDs** (PR #773). Removed every `IGR-*` reference from `src/` and `tests/` docstrings, comments, and test fixtures (212 substitutions across 43 files). `IGR-NNN:` comment prefixes → `Security:`; ` - IGR-NNN` trailing tags dropped; `(IGR-NNN)` standalone → `(IDOR family)`. Mirrors the prior PR-body and CHANGELOG scrubs; preserves all surrounding security context while removing internal-tracker IDs that were never meant for the public source surface.
+- **Documentation: HybridQueryEngine layering reframe** (PR #776). `docs/query-engine/overview.md` previously carried a TODO claiming `HybridQueryEngine.query()` and `Khora.recall()` were divergent shapes of the same retrieval path. They aren't - `Khora.recall()` goes through the typed engines (vectorcypher / chronicle / skeleton) that build `RecallResult` directly, while `HybridQueryEngine.query()` is consumed only by `khora.query.agentic.AgenticSearchAgent`. The doc now documents both as independent retrieval surfaces with intentionally different result shapes (richer per-method telemetry on the agentic path vs. typed projection on the public-API path).
 
-## [0.16.0] — Cross-namespace IDOR family close-out + SurrealDB interpolation repair
+## [0.16.0] - Cross-namespace IDOR family close-out + SurrealDB interpolation repair
 
 ### Security
 
-- **Cross-namespace IDOR family — full close-out across reads, writes, and the coordinator surface** (PRs #761 / #765 / #766 / #769). Earlier facade-only fixes in PRs #721 / #722 hardened three coordinator methods by post-fetch namespace comparison. The vulnerability surface was actually much wider: every `StorageCoordinator.{graph,vector,relational,event_store}` sub-backend (public dataclass fields) exposed un-namespaced `get_*` / `entity_exists` / traversal / write / delete methods that operated across tenants given just an id. The `GraphBackendProtocol` and `RelationalBackendProtocol` themselves declared read- and write-by-id methods without a `namespace_id` argument — every backend implementation correctly mirrored the Protocol, so the bug was uniform across surrealdb / pgvector / postgresql / sqlite_lance / neo4j / age / memgraph / neptune. **Tightened the Protocol contracts** in `src/khora/storage/backends/base.py`: every read, exists-check, and mutation method now requires `*, namespace_id: UUID` (kwarg-only). Every backend implementation filters at the SQL / Cypher / SurrealQL layer — not post-fetch (post-fetch leaks timing as an existence oracle and still touches foreign rows in the DB). Cross-namespace reads return `None` / `{}` / `[]`; cross-namespace writes silently no-op (raising would expose row existence). Graph traversal (`get_neighborhood*`, `find_paths`) filters at every hop so a traversal seeded inside namespace A cannot visit a node in namespace B. **Methods tightened (reads):** `RelationalBackend.get_document` / `get_documents_batch` / `get_document_sources_batch` / `get_document_projections_batch` / `get_document_by_external_id` / `get_documents_by_external_ids`; `VectorBackend.entity_exists` plus pgvector-specific `get_entity` / `get_entities_batch`; `GraphBackend.get_entity` / `get_entities_batch` / `get_relationship` / `get_episode` / `get_entity_relationships` / `get_neighborhood` / `get_neighborhoods_batch` / `find_paths` / `get_temporal_neighbors`; `EventStore.get_events_for_resource` / `get_latest_event`; plus the `SurrealDB.vector.get_entity` silent-accept bug (kwarg present, docstring admitted it was ignored, SQL didn't filter — now actually filters). **Methods tightened (writes):** `RelationalBackend.delete_document`; `VectorBackend.delete_chunks_by_document` / `update_entity` / `update_entity_embedding` / `update_entity_embeddings_batch` / `delete_entities_batch` / `delete_relationships_batch` / `supersede_fact`; `GraphBackend.update_entity` / `delete_entity` / `delete_relationship` / `delete_entities_batch` / `delete_relationships_batch` / `retire_orphaned_relationships_batch` (Neo4j) / `remap_source_document_ids_batch` (Neo4j). **Coordinator privatized:** `StorageCoordinator.{relational,vector,graph,event_store}` are now wrapped in a `NamespaceRequiredProxy` that emits a `DeprecationWarning` on first access per role per process and refuses dispatch on read methods missing `namespace_id=` — public attribute kept as a deprecation surface, removed in v0.17. **AGE Cypher hardening:** every UUID f-string interpolation in `storage/backends/age.py` (entities, relationships, episodes, traversal seeds, attribute search) routes through a validated `_uuid_lit(...)` helper. Type-safe today (UUIDs only), injection-resistant if a duck-typed caller appears. **sqlite_lance defense-in-depth:** `vector.search_similar` SQLite re-fetch now filters by `namespace_id` in the SQL `WHERE` clause; no longer trusts LanceDB's filter alone. **Regression gate:** `tests/security/test_cross_namespace_idor_signatures.py` walks every concrete backend, enumerates every `get_*` / `entity_exists` / `find_paths` / `get_neighborhood*` / `delete_*` / `update_entity*` / `supersede_*` method with a required id-typed parameter, and asserts `*, namespace_id: UUID` is in the signature kwarg-only. Fails at collection time on any backend method that violates the contract. **Breaking:** `Khora.get_document(doc_id, *, namespace=…)` now requires the namespace kwarg; the same applies to every coordinator/backend method listed above. Per `docs/consumers.md` §"Security exception", this carve-out is sanctioned for the minor bump. `kb.storage` and the documented public surface (khora-cli, khora-explorer) are unaffected — none touch `kb.storage.{graph,vector,relational,event_store}` directly.
+- **Cross-namespace IDOR family - full close-out across reads, writes, and the coordinator surface** (PRs #761 / #765 / #766 / #769). Earlier facade-only fixes in PRs #721 / #722 hardened three coordinator methods by post-fetch namespace comparison. The vulnerability surface was actually much wider: every `StorageCoordinator.{graph,vector,relational,event_store}` sub-backend (public dataclass fields) exposed un-namespaced `get_*` / `entity_exists` / traversal / write / delete methods that operated across tenants given just an id. The `GraphBackendProtocol` and `RelationalBackendProtocol` themselves declared read- and write-by-id methods without a `namespace_id` argument - every backend implementation correctly mirrored the Protocol, so the bug was uniform across surrealdb / pgvector / postgresql / sqlite_lance / neo4j / age / memgraph / neptune. **Tightened the Protocol contracts** in `src/khora/storage/backends/base.py`: every read, exists-check, and mutation method now requires `*, namespace_id: UUID` (kwarg-only). Every backend implementation filters at the SQL / Cypher / SurrealQL layer - not post-fetch (post-fetch leaks timing as an existence oracle and still touches foreign rows in the DB). Cross-namespace reads return `None` / `{}` / `[]`; cross-namespace writes silently no-op (raising would expose row existence). Graph traversal (`get_neighborhood*`, `find_paths`) filters at every hop so a traversal seeded inside namespace A cannot visit a node in namespace B. **Methods tightened (reads):** `RelationalBackend.get_document` / `get_documents_batch` / `get_document_sources_batch` / `get_document_projections_batch` / `get_document_by_external_id` / `get_documents_by_external_ids`; `VectorBackend.entity_exists` plus pgvector-specific `get_entity` / `get_entities_batch`; `GraphBackend.get_entity` / `get_entities_batch` / `get_relationship` / `get_episode` / `get_entity_relationships` / `get_neighborhood` / `get_neighborhoods_batch` / `find_paths` / `get_temporal_neighbors`; `EventStore.get_events_for_resource` / `get_latest_event`; plus the `SurrealDB.vector.get_entity` silent-accept bug (kwarg present, docstring admitted it was ignored, SQL didn't filter - now actually filters). **Methods tightened (writes):** `RelationalBackend.delete_document`; `VectorBackend.delete_chunks_by_document` / `update_entity` / `update_entity_embedding` / `update_entity_embeddings_batch` / `delete_entities_batch` / `delete_relationships_batch` / `supersede_fact`; `GraphBackend.update_entity` / `delete_entity` / `delete_relationship` / `delete_entities_batch` / `delete_relationships_batch` / `retire_orphaned_relationships_batch` (Neo4j) / `remap_source_document_ids_batch` (Neo4j). **Coordinator privatized:** `StorageCoordinator.{relational,vector,graph,event_store}` are now wrapped in a `NamespaceRequiredProxy` that emits a `DeprecationWarning` on first access per role per process and refuses dispatch on read methods missing `namespace_id=` - public attribute kept as a deprecation surface, removed in v0.17. **AGE Cypher hardening:** every UUID f-string interpolation in `storage/backends/age.py` (entities, relationships, episodes, traversal seeds, attribute search) routes through a validated `_uuid_lit(...)` helper. Type-safe today (UUIDs only), injection-resistant if a duck-typed caller appears. **sqlite_lance defense-in-depth:** `vector.search_similar` SQLite re-fetch now filters by `namespace_id` in the SQL `WHERE` clause; no longer trusts LanceDB's filter alone. **Regression gate:** `tests/security/test_cross_namespace_idor_signatures.py` walks every concrete backend, enumerates every `get_*` / `entity_exists` / `find_paths` / `get_neighborhood*` / `delete_*` / `update_entity*` / `supersede_*` method with a required id-typed parameter, and asserts `*, namespace_id: UUID` is in the signature kwarg-only. Fails at collection time on any backend method that violates the contract. **Breaking:** `Khora.get_document(doc_id, *, namespace=…)` now requires the namespace kwarg; the same applies to every coordinator/backend method listed above. Per `docs/consumers.md` §"Security exception", this carve-out is sanctioned for the minor bump. `kb.storage` and the documented public surface (khora-cli, khora-explorer) are unaffected - none touch `kb.storage.{graph,vector,relational,event_store}` directly.
 
 ### Fixed
 
-- **SurrealDB `table:⟨$var⟩` interpolation across read/write paths** (PR #770, issue #750). SurrealDB does **not** substitute parameters inside the `table:⟨$var⟩` RecordID-literal shorthand — the `$var` is parsed as a literal string. 19 sites in `src/khora/storage/backends/surrealdb/{graph,vector}.py` used this pattern, silently corrupting reads and writes. The visible symptom was three get-by-id methods (`graph.get_relationship`, `vector.get_chunk`, `vector.get_chunks_by_document`) returning `None` / `[]` for inputs that demonstrably existed in storage. The audit surfaced a wider blast radius: every relationship row created via `create_relationships_batch` had bogus `in` / `out` endpoints (stored as the literal string `entity:⟨$rel.source_rid⟩` instead of a real entity RecordID) and `rel_id = None` (silently dropped by `SCHEMAFULL` because the schema didn't declare the field). Every `table:⟨$var⟩` interpolation now binds via either (a) parameter binding via `_rid("table", uuid)` for single-record queries or (b) `(type::thing($var))` with a full `_rid()` RecordID object for loop-body cases (`FOR $x IN $xs`). Schema gains `DEFINE FIELD rel_id ON relates_to TYPE string` plus a `UNIQUE` index. New `tests/integration/storage/backends/surrealdb/test_get_by_id_roundtrip.py` covers every fixed get-by-id method against in-memory SurrealDB.
+- **SurrealDB `table:⟨$var⟩` interpolation across read/write paths** (PR #770, issue #750). SurrealDB does **not** substitute parameters inside the `table:⟨$var⟩` RecordID-literal shorthand - the `$var` is parsed as a literal string. 19 sites in `src/khora/storage/backends/surrealdb/{graph,vector}.py` used this pattern, silently corrupting reads and writes. The visible symptom was three get-by-id methods (`graph.get_relationship`, `vector.get_chunk`, `vector.get_chunks_by_document`) returning `None` / `[]` for inputs that demonstrably existed in storage. The audit surfaced a wider blast radius: every relationship row created via `create_relationships_batch` had bogus `in` / `out` endpoints (stored as the literal string `entity:⟨$rel.source_rid⟩` instead of a real entity RecordID) and `rel_id = None` (silently dropped by `SCHEMAFULL` because the schema didn't declare the field). Every `table:⟨$var⟩` interpolation now binds via either (a) parameter binding via `_rid("table", uuid)` for single-record queries or (b) `(type::thing($var))` with a full `_rid()` RecordID object for loop-body cases (`FOR $x IN $xs`). Schema gains `DEFINE FIELD rel_id ON relates_to TYPE string` plus a `UNIQUE` index. New `tests/integration/storage/backends/surrealdb/test_get_by_id_roundtrip.py` covers every fixed get-by-id method against in-memory SurrealDB.
 - **`Khora.recall()` always populates `RecallResult.documents[]`** (PR #760). Every `chunks[i].document_id` and every id in `entities[i].source_document_ids` / `relationships[i].source_document_ids` is guaranteed to appear in `documents[]` (producer-enforced invariant). Engines emit deduplicated `DocumentProjection` rows for every referenced document; the top-level `Khora._upgrade_recall_documents` pass batches the lookup through `storage.get_document_projections_batch`.
 
 ### Added
@@ -58,23 +58,23 @@ This is a bug-fix release on top of v0.16.0. No new breaking changes; one new co
 - **`khora.context_text(result)` helper** (PR #762). The legacy `RecallResult.context_text` attribute was removed in v0.15.3 along with the broader typed-projection refactor; this public function returns the formatted context string for adapters that need one without forcing them to roll the join logic themselves. Re-exported from the top-level `khora` namespace.
 - **`ChunkResult` self-identification** (PR #759). Chunkers now stamp `ChunkResult.metadata["chunker"]` on every emitted chunk (values: `"fixed"`, `"recursive"`, `"semantic"`, `"conversation"`); downstream consumers can route on strategy identity rather than infer from chunker config. The same field is propagated to `RecallChunk.chunker_info["chunker"]` on recall. Replaces the stale `context_text` references at the chunker boundary.
 
-## [0.15.3] — Typed recall projection; supersedes broken 0.15.2
+## [0.15.3] - Typed recall projection; supersedes broken 0.15.2
 
 Supersedes 0.15.2, which shipped a `khora-accel==0.15.1` pin in the `[rust]` extra pointing at a never-published accel version, breaking `pip install khora[rust]==0.15.2`. v0.15.3 restores lockstep with the matching `khora-accel==0.15.3` pin.
 
 ### Changed
 
-- **`Khora.recall()` returns a typed projection — BREAKING.** `RecallResult` is rewritten as a JSON-serializable response projection at `khora.core.models.recall` (re-exported from `khora`). Migration:
+- **`Khora.recall()` returns a typed projection - BREAKING.** `RecallResult` is rewritten as a JSON-serializable response projection at `khora.core.models.recall` (re-exported from `khora`). Migration:
   - `result.chunks: list[tuple[Chunk, float]]` → `list[RecallChunk]`. Read `chunk.score` / `chunk.content` / `chunk.id` directly; the per-chunk tuple is gone.
   - `result.entities: list[tuple[Entity, float]]` → `list[RecallEntity]`. Read `entity.score` / `entity.source_document_ids` / `entity.source_chunk_ids`. The new projection no longer carries the full `Entity` ORM object.
   - `result.relationships: list[tuple[Relationship, float]]` → `list[RecallRelationship]`. Same shape change. Always present (possibly empty) on every engine; previously populated only by VectorCypher.
   - **Renames:** `result.metadata` → `result.engine_info`; `result.llm_usage` → `result.usage`.
-  - **Removed:** `result.context_text` is gone from the public surface — adapters that need a context string build it locally from `result.chunks[i].content`. A `khora.context_text(result)` helper will return in a follow-up.
-  - **New top-level field:** `result.documents: list[DocumentProjection]` — deduplicated source documents referenced by any chunk/entity/relationship. Every `chunks[i].document_id` and every id in `entities[i].source_document_ids` / `relationships[i].source_document_ids` is guaranteed to appear in `documents[]` (producer-enforced invariant).
+  - **Removed:** `result.context_text` is gone from the public surface - adapters that need a context string build it locally from `result.chunks[i].content`. A `khora.context_text(result)` helper will return in a follow-up.
+  - **New top-level field:** `result.documents: list[DocumentProjection]` - deduplicated source documents referenced by any chunk/entity/relationship. Every `chunks[i].document_id` and every id in `entities[i].source_document_ids` / `relationships[i].source_document_ids` is guaranteed to appear in `documents[]` (producer-enforced invariant).
   - **New mandatory engine telemetry key:** every engine emits `engine_info["engine"] = "<strategy-name>"` (`vectorcypher` / `chronicle` / `skeleton`) so consumers can route on producer identity.
-  - **`Khora.recall(..., include_sources=True)`** is now a documented no-op kept for API stability — the prior implementation mutated `Chunk.source_document` / `Entity.source_documents` in place, which is incompatible with frozen projections. Full source population returns with the recall-method rewrite.
+  - **`Khora.recall(..., include_sources=True)`** is now a documented no-op kept for API stability - the prior implementation mutated `Chunk.source_document` / `Entity.source_documents` in place, which is incompatible with frozen projections. Full source population returns with the recall-method rewrite.
   - **New public exports** from `khora` and `khora.core.models`: `DocumentProjection`, `RecallChunk`, `RecallEntity`, `RecallRelationship` (alongside the rewritten `RecallResult`).
-  - **Downstream consumers** (`khora-cli`, `khora-explorer`) must be updated in lockstep — `__all__` in `khora/__init__.py` and `khora/core/models/__init__.py` is the machine-readable contract.
+  - **Downstream consumers** (`khora-cli`, `khora-explorer`) must be updated in lockstep - `__all__` in `khora/__init__.py` and `khora/core/models/__init__.py` is the machine-readable contract.
 - **Coverage floor lifted 72% → 77%** ([#695](https://github.com/DeytaHQ/khora/issues/695) step 3+). ~500 new unit tests across 9 modules with the largest remaining gaps. Unit-only coverage rose from 73.15% to **76.87%**; combined unit+integration on CI projected ≥78%. Per-module before → after: `query/engine.py` 52→84%, `query/router.py` 52→96%, `query/reranking.py` 12→96%, `engines/vectorcypher/engine.py` 50→83%, `engines/vectorcypher/retriever.py` 71→85%, `engines/skeleton/engine.py` 49→63%, `engines/skeleton/backends/pgvector.py` 18→72%, `storage/backends/pgvector.py` (unit-only) 39→67%, `storage/backends/neo4j.py` (unit-only) 15→46%. Next ladder step is 80%.
 - **Coverage floor lifted 65% → 72%** ([#695](https://github.com/DeytaHQ/khora/issues/695) step 2). `--cov-fail-under` raised in `pyproject.toml`, `Makefile`, and `.github/workflows/ci.yml`. Backed by 500+ new unit tests across 15 previously under-covered modules (query/{normalization,agentic,understanding,hyde,linking,temporal_detection}, storage/{optimize,expertise_store,event_store}, storage/backends/postgresql, pipelines/tasks/extract, pipelines/flows/ingest, extraction/{entity_resolution,expansion/rule_engine,extractors/llm}, integrations/crewai/storage). Unit-only coverage rose from ~68% to **73.15%**; combined unit+integration projected at ~75%. Next ladder steps remain at 75% / 80% / 85% per the issue plan.
 
@@ -82,20 +82,20 @@ Supersedes 0.15.2, which shipped a `khora-accel==0.15.1` pin in the `[rust]` ext
 
 - **`pip install khora[rust]==0.15.2` failed to resolve.** The published 0.15.2 wheel hard-required `khora-accel==0.15.1`, but accel `0.15.1` was never published to PyPI (the lockstep `pyproject.toml` pin was not bumped in the 0.15.2 release commit). v0.15.3 ships matching `khora==0.15.3` + `khora-accel==0.15.3`. Yank 0.15.2 on PyPI.
 - Stale results from `Khora.recall()` after `remember`/`forget`. The in-process query result cache in the vectorcypher retriever held results for up to 5 minutes without invalidation on writes.
-- **vectorcypher entity-chunk fetch crashed on SurrealDB-only deployments** ([#754](https://github.com/DeytaHQ/khora/issues/754)). `VectorCypherRetriever._fetch_chunks_from_entities` falls back to the unified `self._storage` backend when no graph (`_dual_nodes`) is wired — the case for `backend=surrealdb` with the vectorcypher engine. The fallback built each `chunk_record` dict without a `document_id` key, but the downstream result-building loop unconditionally did `UUID(record["document_id"])`, producing an unhandled `KeyError` whenever any entity had source chunks. The fallback's `try/except` only wrapped the storage calls, not the consumer loop, so the error propagated upward and crashed recall calls routed through the entity-anchored channel. Now stamps `document_id` from the `Chunk.document_id` field returned by `storage.get_chunks_batch`. Regression covered in `tests/unit/engines/vectorcypher/test_fetch_chunks_surrealdb_fallback.py`.
-- **Entity-upsert advisory lock collided at ~65K namespaces** ([#738](https://github.com/DeytaHQ/khora/issues/738)). `_namespace_lock_key` folded the 128-bit `namespace_id` UUID down to a single signed `int4` via 4-way XOR, used as `key2` in `pg_advisory_xact_lock(KHOR, key2)`. Deployments with more than ~65K distinct namespaces (per-user / per-agent patterns under `khora.integrations.openai_agents`, `google_adk`, `crewai`, `langgraph`) hit birthday-paradox collisions — empirically observed at 120K in the issue's repro. Two namespaces sharing a folded key would serialize their entity upserts behind each other, producing tail-latency spikes on a random subset of namespaces. No data loss — the lock auto-released on commit and `_retry_on_deadlock` covered the contention. Replaced with `_namespace_lock_keys(...)` which fills both 32-bit slots of Postgres's two-int advisory-lock form from the full 128 bits of the UUID, giving ~2^64 effective lock-id entropy (birthday-safe at billions of namespaces). **Operators:** the legacy `0x4B484F52` ("KHOR") `classid` is no longer set on these locks — update any `pg_locks` dashboards that filter on it.
-- **`PgVectorBackend.upsert_entities_batch` reported `is_new=True` for every upsert** ([#719](https://github.com/DeytaHQ/khora/issues/719)), even when the row already existed in the namespace. The implementation hardcoded `[(entity, True) for entity in sorted_entities]` despite the "`is_new` is approximate" docstring claim — the pgvector half of a postgres+neo4j dual-write disagreed with the Neo4j half's `MERGE` semantics, silently inflating any coordinator / telemetry counter keyed on `is_new=True`. The `ON CONFLICT DO UPDATE` statement now adds `RETURNING (xmax = 0) AS is_new` and maps results back to inputs by `(name, entity_type)`; `xmax = 0` is the canonical Postgres marker for "freshly inserted" vs "matched + updated" in an upsert. Verified end-to-end against real Postgres in `tests/integration/test_pgvector_upsert_is_new.py`.
+- **vectorcypher entity-chunk fetch crashed on SurrealDB-only deployments** ([#754](https://github.com/DeytaHQ/khora/issues/754)). `VectorCypherRetriever._fetch_chunks_from_entities` falls back to the unified `self._storage` backend when no graph (`_dual_nodes`) is wired - the case for `backend=surrealdb` with the vectorcypher engine. The fallback built each `chunk_record` dict without a `document_id` key, but the downstream result-building loop unconditionally did `UUID(record["document_id"])`, producing an unhandled `KeyError` whenever any entity had source chunks. The fallback's `try/except` only wrapped the storage calls, not the consumer loop, so the error propagated upward and crashed recall calls routed through the entity-anchored channel. Now stamps `document_id` from the `Chunk.document_id` field returned by `storage.get_chunks_batch`. Regression covered in `tests/unit/engines/vectorcypher/test_fetch_chunks_surrealdb_fallback.py`.
+- **Entity-upsert advisory lock collided at ~65K namespaces** ([#738](https://github.com/DeytaHQ/khora/issues/738)). `_namespace_lock_key` folded the 128-bit `namespace_id` UUID down to a single signed `int4` via 4-way XOR, used as `key2` in `pg_advisory_xact_lock(KHOR, key2)`. Deployments with more than ~65K distinct namespaces (per-user / per-agent patterns under `khora.integrations.openai_agents`, `google_adk`, `crewai`, `langgraph`) hit birthday-paradox collisions - empirically observed at 120K in the issue's repro. Two namespaces sharing a folded key would serialize their entity upserts behind each other, producing tail-latency spikes on a random subset of namespaces. No data loss - the lock auto-released on commit and `_retry_on_deadlock` covered the contention. Replaced with `_namespace_lock_keys(...)` which fills both 32-bit slots of Postgres's two-int advisory-lock form from the full 128 bits of the UUID, giving ~2^64 effective lock-id entropy (birthday-safe at billions of namespaces). **Operators:** the legacy `0x4B484F52` ("KHOR") `classid` is no longer set on these locks - update any `pg_locks` dashboards that filter on it.
+- **`PgVectorBackend.upsert_entities_batch` reported `is_new=True` for every upsert** ([#719](https://github.com/DeytaHQ/khora/issues/719)), even when the row already existed in the namespace. The implementation hardcoded `[(entity, True) for entity in sorted_entities]` despite the "`is_new` is approximate" docstring claim - the pgvector half of a postgres+neo4j dual-write disagreed with the Neo4j half's `MERGE` semantics, silently inflating any coordinator / telemetry counter keyed on `is_new=True`. The `ON CONFLICT DO UPDATE` statement now adds `RETURNING (xmax = 0) AS is_new` and maps results back to inputs by `(name, entity_type)`; `xmax = 0` is the canonical Postgres marker for "freshly inserted" vs "matched + updated" in an upsert. Verified end-to-end against real Postgres in `tests/integration/test_pgvector_upsert_is_new.py`.
 
 ### Removed
 
 - `RetrieverConfig.query_cache_ttl_seconds` and `RetrieverConfig.query_cache_max_size` (also removed from `VectorCypherEngineConfig`). **Breaking:** passing these kwargs now raises `TypeError`. Drop them from your config.
 
-## [0.15.1] — Security patch release
+## [0.15.1] - Security patch release
 
 ### Security
 
 - **Cypher / SQL injection via `Entity.attributes` / `Entity.metadata` (and the equivalent `Relationship` and `Episode` fields) on the AGE graph backend.** A document submitted through `Khora.remember` whose extracted entity attributes or metadata contained a single quote was JSON-serialised unescaped into the AGE Cypher template, letting the payload close the Cypher string literal and execute Cypher of the attacker's choice. Because AGE wrapped Cypher inside a PostgreSQL `$$ … $$` dollar-quoted string, a payload containing `$$` further escalated to SQL injection on the host. Fixed by:
-  1. New `AGEBackend._serialize_dict_literal()` helper that JSON-encodes and then runs the result through the existing `_escape` (single quotes, backslashes, control characters). Applied at every Cypher-template site that interpolates a dict (entity create / update, relationship create, episode create — 7 call sites total).
+  1. New `AGEBackend._serialize_dict_literal()` helper that JSON-encodes and then runs the result through the existing `_escape` (single quotes, backslashes, control characters). Applied at every Cypher-template site that interpolates a dict (entity create / update, relationship create, episode create - 7 call sites total).
   2. `AGEBackend._cypher()` now wraps the inner Cypher in a uniquely-tagged dollar-quote `$khora_age$ … $khora_age$`, defanging the `$$`-breakout escalation. Inputs containing the literal tag are refused with a `ValueError` as defense in depth.
 
   Reachable from any caller that can submit a document to `remember()` in a deployment where `backend=age` is configured; the attacker-controlled value reaches the AGE template through the LLM extractor's `attributes` / `metadata` output.
@@ -106,35 +106,35 @@ Supersedes 0.15.2, which shipped a `khora-accel==0.15.1` pin in the `[rust]` ext
 
 ### Changed (breaking)
 
-- **`khora.Khora.get_entity(entity_id)` now requires `namespace=...`.** Resolution mirrors `list_entities` / `find_related_entities` — accepts `str | UUID`. Calling without it raises `TypeError`. Downstream consumers (`khora-cli`, `khora-explorer`) must be updated in lockstep.
+- **`khora.Khora.get_entity(entity_id)` now requires `namespace=...`.** Resolution mirrors `list_entities` / `find_related_entities` - accepts `str | UUID`. Calling without it raises `TypeError`. Downstream consumers (`khora-cli`, `khora-explorer`) must be updated in lockstep.
 - **`StorageCoordinator.get_entity(entity_id)` / `get_relationship(relationship_id)` / `get_episode(episode_id)` now require keyword-only `namespace_id: UUID`.** Calls without it raise `TypeError`.
 - **`MemoryEngineProtocol.get_entity` and its three implementations (`VectorCypherEngine`, `ChronicleEngine`, `SkeletonEngine`) gained a required `namespace_id` kwarg.**
 - **`StorageCoordinator.get_chunk(chunk_id)` / `get_chunks_batch(chunk_ids)` / `get_chunks_by_document(document_id)` now require keyword-only `namespace_id: UUID`.** Same shape on the four vector-backend implementations (pgvector, sqlite, sqlite+lance, surrealdb). Calls without it raise `TypeError`; cross-namespace ids in `get_chunks_batch` are silently dropped from the returned dict; `get_chunks_by_document` returns `[]` if the document doesn't belong to the namespace.
 
-## [0.15.0] — Dream-phase Phase 2 + Phase 4, PPR retrieval, kuzu removed
+## [0.15.0] - Dream-phase Phase 2 + Phase 4, PPR retrieval, kuzu removed
 
-Minor release. Lands Phase 2 (planner ops) and Phase 4 (apply mode) of the [Dream Phase umbrella (#649)](https://github.com/DeytaHQ/khora/issues/649) — `Khora.dream(namespace, mode="apply")` is now end-to-end functional with bi-temporal soft-delete, per-op transactions, and snapshotted undo records. Also: Personalized PageRank retrieval for VectorCypher (#542), the kuzu backend is removed, and the README + dream-phase docs are rewritten.
+Minor release. Lands Phase 2 (planner ops) and Phase 4 (apply mode) of the [Dream Phase umbrella (#649)](https://github.com/DeytaHQ/khora/issues/649) - `Khora.dream(namespace, mode="apply")` is now end-to-end functional with bi-temporal soft-delete, per-op transactions, and snapshotted undo records. Also: Personalized PageRank retrieval for VectorCypher (#542), the kuzu backend is removed, and the README + dream-phase docs are rewritten.
 
 ### Added
 
-- **Dream phase Phase 2 — five planner operations.** Each emits a `DreamOp` describing what `apply` mode would do; dry-run is free of side effects.
-  - `vectorcypher_dedupe_entities` ([#658](https://github.com/DeytaHQ/khora/issues/658) → [PR #691](https://github.com/DeytaHQ/khora/pull/691)) — cross-batch entity resolution against the full namespace, per-type cosine thresholds (default 0.90; tighter than the online 0.85), skip-collision reporting.
-  - `vectorcypher_centroid_recompute` ([#660](https://github.com/DeytaHQ/khora/issues/660) → [PR #690](https://github.com/DeytaHQ/khora/pull/690)) — three-decision planner (`centroid` / `re_embed` / `skip_multimodal`) for post-merge canonical embeddings.
-  - `vectorcypher_source_chunk_ids_gc` ([#662](https://github.com/DeytaHQ/khora/issues/662) → [PR #689](https://github.com/DeytaHQ/khora/pull/689)) — plans per-entity rewrites that drop dead chunk UUIDs from `Entity.source_chunk_ids`.
-  - `chronicle_fact_compaction` ([#664](https://github.com/DeytaHQ/khora/issues/664) → [PR #688](https://github.com/DeytaHQ/khora/pull/688)) — plans hard-deletes of tombstoned `memory_facts` rows past `fact_compaction_retention_days`.
-  - `chronicle_event_clustering` ([#665](https://github.com/DeytaHQ/khora/issues/665) → [PR #692](https://github.com/DeytaHQ/khora/pull/692)) — clusters near-duplicate `chronicle_events` within a sliding `referenced_date` window.
-- **Dream phase Phase 4 — apply mode** ([#667](https://github.com/DeytaHQ/khora/issues/667) / [#668](https://github.com/DeytaHQ/khora/issues/668) / [#669](https://github.com/DeytaHQ/khora/issues/669) → PRs [#698](https://github.com/DeytaHQ/khora/pull/698) / [#699](https://github.com/DeytaHQ/khora/pull/699) / [#700](https://github.com/DeytaHQ/khora/pull/700) / [#701](https://github.com/DeytaHQ/khora/pull/701)). `Khora.dream(ns, mode="apply")` now executes the plan. The orchestrator's `_apply_phase` calls per-op apply handlers under per-op transactions, persists `UndoRecord.before` snapshots to `undo.json` (schema `dream-undo/1`) **before** any mutation, and updates the `khora_dream_runs.last_committed_op_seq` checkpoint between ops. Five guardrails protect the path:
-  - **Hard 7-day retention floor** on `fact_compaction_retention_days` — config validator rejects sub-floor values; the apply handler re-checks defense-in-depth.
-  - **`KHORA_DREAM_DISABLE_APPLY` env-var kill-switch** — `mode="apply"` raises `DreamApplyDisabled` immediately without touching the DB.
-  - **`chunk_id` runtime assertion** — any `UndoRecord.before` payload carrying a top-level `"chunk_id"` key aborts the run with `DreamForbiddenOpError`. The "never mutate `chronicle_events.chunk_id`" architectural promise is now a runtime guarantee.
-  - **Snapshot-before-mutate** for `fact_compaction` — the only hard-delete op. `SELECT *` per target row runs before any `DELETE`; mid-snapshot failure rolls back with zero rows touched. TDD-pinned by `test_snapshot_captured_before_delete_executes`.
-  - **Advisory lock held through apply** — the per-namespace `pg_advisory_xact_lock` covers planning *and* application. Concurrent dream runs against the same namespace fast-fail with `DreamLockUnavailable`.
-- **Migration 034 — `chronicle_events` bi-temporal columns** ([PR #701](https://github.com/DeytaHQ/khora/pull/701)). Adds `invalidated_at`, `invalidated_by`, and `merged_into_event_id` (self-FK, `ON DELETE SET NULL` on Postgres) to `chronicle_events`. Postgres-only partial composite index `ix_chronicle_events_live` over `(namespace_id, referenced_date) WHERE invalidated_at IS NULL`. Required substrate for `apply_chronicle_event_clustering`.
+- **Dream phase Phase 2 - five planner operations.** Each emits a `DreamOp` describing what `apply` mode would do; dry-run is free of side effects.
+  - `vectorcypher_dedupe_entities` ([#658](https://github.com/DeytaHQ/khora/issues/658) → [PR #691](https://github.com/DeytaHQ/khora/pull/691)) - cross-batch entity resolution against the full namespace, per-type cosine thresholds (default 0.90; tighter than the online 0.85), skip-collision reporting.
+  - `vectorcypher_centroid_recompute` ([#660](https://github.com/DeytaHQ/khora/issues/660) → [PR #690](https://github.com/DeytaHQ/khora/pull/690)) - three-decision planner (`centroid` / `re_embed` / `skip_multimodal`) for post-merge canonical embeddings.
+  - `vectorcypher_source_chunk_ids_gc` ([#662](https://github.com/DeytaHQ/khora/issues/662) → [PR #689](https://github.com/DeytaHQ/khora/pull/689)) - plans per-entity rewrites that drop dead chunk UUIDs from `Entity.source_chunk_ids`.
+  - `chronicle_fact_compaction` ([#664](https://github.com/DeytaHQ/khora/issues/664) → [PR #688](https://github.com/DeytaHQ/khora/pull/688)) - plans hard-deletes of tombstoned `memory_facts` rows past `fact_compaction_retention_days`.
+  - `chronicle_event_clustering` ([#665](https://github.com/DeytaHQ/khora/issues/665) → [PR #692](https://github.com/DeytaHQ/khora/pull/692)) - clusters near-duplicate `chronicle_events` within a sliding `referenced_date` window.
+- **Dream phase Phase 4 - apply mode** ([#667](https://github.com/DeytaHQ/khora/issues/667) / [#668](https://github.com/DeytaHQ/khora/issues/668) / [#669](https://github.com/DeytaHQ/khora/issues/669) → PRs [#698](https://github.com/DeytaHQ/khora/pull/698) / [#699](https://github.com/DeytaHQ/khora/pull/699) / [#700](https://github.com/DeytaHQ/khora/pull/700) / [#701](https://github.com/DeytaHQ/khora/pull/701)). `Khora.dream(ns, mode="apply")` now executes the plan. The orchestrator's `_apply_phase` calls per-op apply handlers under per-op transactions, persists `UndoRecord.before` snapshots to `undo.json` (schema `dream-undo/1`) **before** any mutation, and updates the `khora_dream_runs.last_committed_op_seq` checkpoint between ops. Five guardrails protect the path:
+  - **Hard 7-day retention floor** on `fact_compaction_retention_days` - config validator rejects sub-floor values; the apply handler re-checks defense-in-depth.
+  - **`KHORA_DREAM_DISABLE_APPLY` env-var kill-switch** - `mode="apply"` raises `DreamApplyDisabled` immediately without touching the DB.
+  - **`chunk_id` runtime assertion** - any `UndoRecord.before` payload carrying a top-level `"chunk_id"` key aborts the run with `DreamForbiddenOpError`. The "never mutate `chronicle_events.chunk_id`" architectural promise is now a runtime guarantee.
+  - **Snapshot-before-mutate** for `fact_compaction` - the only hard-delete op. `SELECT *` per target row runs before any `DELETE`; mid-snapshot failure rolls back with zero rows touched. TDD-pinned by `test_snapshot_captured_before_delete_executes`.
+  - **Advisory lock held through apply** - the per-namespace `pg_advisory_xact_lock` covers planning *and* application. Concurrent dream runs against the same namespace fast-fail with `DreamLockUnavailable`.
+- **Migration 034 - `chronicle_events` bi-temporal columns** ([PR #701](https://github.com/DeytaHQ/khora/pull/701)). Adds `invalidated_at`, `invalidated_by`, and `merged_into_event_id` (self-FK, `ON DELETE SET NULL` on Postgres) to `chronicle_events`. Postgres-only partial composite index `ix_chronicle_events_live` over `(namespace_id, referenced_date) WHERE invalidated_at IS NULL`. Required substrate for `apply_chronicle_event_clustering`.
 - **Personalized PageRank retrieval for VectorCypher** ([#542](https://github.com/DeytaHQ/khora/issues/542) → [PR #693](https://github.com/DeytaHQ/khora/pull/693)). Opt-in via `KHORA_QUERY_ENABLE_PPR_RETRIEVAL=true` (default off). Wired into the retriever as a separate channel; degrades to vector-only on empty entry entities / empty graph / no seed overlap. Tuning knobs in `KhoraConfig.query`.
 - **Public surface additions.**
-  - `UndoRecord(op_id, op_type, before, applied_at)` — returned by every apply handler; persisted into `undo.json`.
-  - `DreamApplyDisabled` exception — raised by the env-var kill-switch.
-  - `OpSummary` — the shape of items in `DreamResult.ops` (aggregate counters per op kind).
+  - `UndoRecord(op_id, op_type, before, applied_at)` - returned by every apply handler; persisted into `undo.json`.
+  - `DreamApplyDisabled` exception - raised by the env-var kill-switch.
+  - `OpSummary` - the shape of items in `DreamResult.ops` (aggregate counters per op kind).
 - **Apply functions** registered in `khora.dream.engines.registry._APPLY_HANDLER_NAMES`: `apply_vectorcypher_dedupe_entities`, `apply_vectorcypher_centroid_recompute`, `apply_vectorcypher_source_chunk_ids_gc`, `apply_chronicle_fact_compaction`, `apply_chronicle_event_clustering`. All honor the caller-owned-transaction contract (no commit, no log, no telemetry from the handler).
 - **`SECURITY.md`** ([PR #707](https://github.com/DeytaHQ/khora/pull/707)). Project security policy: scope (credential leakage, SQL/Cypher injection, path traversal, cross-tenant leakage), reporting routes (GitHub Private Vulnerability Reporting first, `security@deytahq.com` fallback), supported-versions policy (latest minor + n-1), response targets (ack 2 BD, triage 5 BD, fix 30 days high/critical or 90 days medium/low), and a "What khora already does" section listing existing controls (`SecretStr` on credentials, `bounded_text_hash` on telemetry, namespace-cardinality rule, secret-typing semgrep, pip-audit in CI, parameterized SQL/Cypher, bi-temporal soft-delete).
 - **Test coverage** for Phase 4 surfaces: 37 apply-handler tests across 5 modules (chronicle + vectorcypher), 14 orchestrator-apply tests (covering kill-switch, retention floor, chunk_id assertion, resume-from semantics, undo.json incremental write + fsync), plus 5 integration tests for migration 034 (Postgres-gated).
@@ -143,45 +143,45 @@ Minor release. Lands Phase 2 (planner ops) and Phase 4 (apply mode) of the [Drea
 
 - **README rewritten as an evaluation-flow entry point** ([PR #708](https://github.com/DeytaHQ/khora/pull/708) + follow-ups [#709](https://github.com/DeytaHQ/khora/pull/709) / [#710](https://github.com/DeytaHQ/khora/pull/710)). New "Why khora?" section names the four problems pure vector search doesn't solve (ingest depth, recall complexity, drift, observability). New "Engines" section gives VectorCypher and Chronicle full descriptions with when-to-pick guidance; Skeleton is explicitly marked experimental. Inline 3-engine comparison table so the choice is visible without a docs hop.
 - **`docs/dream-phase.md` rewritten** ([PR #697](https://github.com/DeytaHQ/khora/pull/697) + cleanup [PR #702](https://github.com/DeytaHQ/khora/pull/702)). Adds Phase 2 + Phase 4 operations alongside Phase 1 audits, full apply-mode contract, "Apply functions" API reference section, "Research & Prior Art" section with paper citations (McClelland 1995 on CLS, Schaul 2016 on prioritized experience replay, Kreps 2011 on Kafka log compaction, MemGPT / GraphRAG / Self-RAG with arXiv IDs, Köpcke & Rahm 2010 on entity resolution, Snodgrass 1999 on bi-temporal modeling), and an explicit "LLM usage" section calling out that dream phase makes **zero LLM calls** in v0.15.
-- **CI coverage floor 30% → 65%** ([PR #696](https://github.com/DeytaHQ/khora/pull/696)). Matches actual main coverage (65.88% at the time of the bump) — the floor was previously misleading. Roadmap to 85% tracked under [#695](https://github.com/DeytaHQ/khora/issues/695) as staged PRs.
+- **CI coverage floor 30% → 65%** ([PR #696](https://github.com/DeytaHQ/khora/pull/696)). Matches actual main coverage (65.88% at the time of the bump) - the floor was previously misleading. Roadmap to 85% tracked under [#695](https://github.com/DeytaHQ/khora/issues/695) as staged PRs.
 - **Coverage push: +~980 statements across three modules** ([PR #703](https://github.com/DeytaHQ/khora/pull/703) `pipelines/flows/ingest.py` 18% → 63%, [PR #704](https://github.com/DeytaHQ/khora/pull/704) `query/engine.py` 47% → 72%, [PR #705](https://github.com/DeytaHQ/khora/pull/705) `engines/vectorcypher/retriever.py` 48% → 69%). Step 2 of the #695 ladder.
 - **codecov.yml gradient** `30...85` → `65...85`. Badge now renders neutral-to-green starting at the actual floor instead of red.
-- **Default file-sink base directory documented.** With `report_file_sink_enabled=True`, reports land under `<system temp dir>/khora-dream-reports`. On Linux that's `/tmp/...`, which is wiped on reboot — documented with operator guidance to set a persistent path.
-- **`codecov.yml` ignores `examples/**`** ([PR #694](https://github.com/DeytaHQ/khora/pull/694)). Pre-emptive — the adapter examples are smoke-tested but not coverage-measured.
-- **Loosened the planner-`mode="apply"` contradiction.** v0.14 planners raised `NotImplementedError` on `mode="apply"`; the orchestrator now routes apply through dedicated `apply_<op>` functions instead. Direct callers of `plan_<op>(..., mode="apply")` still hit the raise — that path is reserved for testing. Tracked for follow-up cleanup.
+- **Default file-sink base directory documented.** With `report_file_sink_enabled=True`, reports land under `<system temp dir>/khora-dream-reports`. On Linux that's `/tmp/...`, which is wiped on reboot - documented with operator guidance to set a persistent path.
+- **`codecov.yml` ignores `examples/**`** ([PR #694](https://github.com/DeytaHQ/khora/pull/694)). Pre-emptive - the adapter examples are smoke-tested but not coverage-measured.
+- **Loosened the planner-`mode="apply"` contradiction.** v0.14 planners raised `NotImplementedError` on `mode="apply"`; the orchestrator now routes apply through dedicated `apply_<op>` functions instead. Direct callers of `plan_<op>(..., mode="apply")` still hit the raise - that path is reserved for testing. Tracked for follow-up cleanup.
 
 ### Removed
 
-- **kuzu backend** ([PR #706](https://github.com/DeytaHQ/khora/pull/706)). Deprecated in v0.9.0 with a v0.10.0 removal target that never landed. The upstream Kùzu project has been archived since the October 2025 acquisition — the dependency is dead code. The `kuzu` extra (`pip install khora[kuzu]`) is gone; the `graph-all` and `all-backends` extras no longer pull in the kuzu wheel; the `KuzuBackend` / `KuzuConfig` symbols are removed from `khora.storage.backends` and `khora.config.schema`; 909 LOC of unmaintained backend code deleted. Migration path: `pip install khora[sqlite-lance]` for embedded, `pip install khora[neo4j]` for graph DB.
+- **kuzu backend** ([PR #706](https://github.com/DeytaHQ/khora/pull/706)). Deprecated in v0.9.0 with a v0.10.0 removal target that never landed. The upstream Kùzu project has been archived since the October 2025 acquisition - the dependency is dead code. The `kuzu` extra (`pip install khora[kuzu]`) is gone; the `graph-all` and `all-backends` extras no longer pull in the kuzu wheel; the `KuzuBackend` / `KuzuConfig` symbols are removed from `khora.storage.backends` and `khora.config.schema`; 909 LOC of unmaintained backend code deleted. Migration path: `pip install khora[sqlite-lance]` for embedded, `pip install khora[neo4j]` for graph DB.
 
-## [0.14.0] — Dream-phase audit foundation
+## [0.14.0] - Dream-phase audit foundation
 
-Minor release. Lands Phase 0 (foundation), Phase 1 (read-only audit operations), and Phase 3 (Rust acceleration) of the [Dream Phase umbrella (#649)](https://github.com/DeytaHQ/khora/issues/649). `Khora.dream(namespace, mode="dry-run")` is live end-to-end: operators can plan a consolidation pass over their graph, see exactly what every audit op would surface (drift thresholds, tombstone ratios, schema mismatches, orphan candidates, dead chunk references), and have those decisions emitted through three independently-togglable sinks (file, semantic-event, telemetry collector). No mutation operations ship in v0.14.0 — Phase 2 (mutation-planning ops, dry-run only) and Phase 4 (apply mode) land in a follow-up release. Audit-only is the deliberate "validate demand before committing engineering" gate.
+Minor release. Lands Phase 0 (foundation), Phase 1 (read-only audit operations), and Phase 3 (Rust acceleration) of the [Dream Phase umbrella (#649)](https://github.com/DeytaHQ/khora/issues/649). `Khora.dream(namespace, mode="dry-run")` is live end-to-end: operators can plan a consolidation pass over their graph, see exactly what every audit op would surface (drift thresholds, tombstone ratios, schema mismatches, orphan candidates, dead chunk references), and have those decisions emitted through three independently-togglable sinks (file, semantic-event, telemetry collector). No mutation operations ship in v0.14.0 - Phase 2 (mutation-planning ops, dry-run only) and Phase 4 (apply mode) land in a follow-up release. Audit-only is the deliberate "validate demand before committing engineering" gate.
 
 ### Added
 
-#### Phase 0 — Foundation
+#### Phase 0 - Foundation
 
 - **`khora.dream` module scaffolding + `DreamConfig` ([#650](https://github.com/DeytaHQ/khora/issues/650) → PR #675).** New top-level `khora.dream` subpackage with `DreamConfig` (Pydantic settings, env-var prefix `KHORA_DREAM_*`, master switch defaults to `False`), `DreamResult`, `DreamRunInfo`, `DreamMode`, `DreamScope`, `OpKind`, and internal `DreamOp` / `DreamPlan` / `DreamReport` dataclasses. `Khora.dream()` / `Khora.dream_status()` / `Khora.dream_history()` stubbed on the public `Khora` class. Stability: top-level surface is **public** (`khora.__all__`); op-kind values and sub-dataclasses are **internal** and may evolve through Phase 1 / 2 without a major bump.
 - **Migration 032 `khora_dream_runs` ([#651](https://github.com/DeytaHQ/khora/issues/651) → PR #676).** Postgres-only checkpoint table for crash-resume semantics. Records `run_id`, `namespace_id`, `mode`, `state` (init/planning/applying/completed/cancelled/crashed), `plan_hash`, `last_committed_op_seq`, `heartbeat_at`, `report_path`, and error JSONB. Indexed `(namespace_id, started_at DESC)` for `Khora.dream_history()`. Dialect-gated; sqlite_lance fixture path mirrors checkpoint state via the file sink instead.
 - **Migration 033 bi-temporal columns ([#653](https://github.com/DeytaHQ/khora/issues/653) → PR #674).** Adds `valid_to`, `invalidated_at`, `invalidated_by` (UUID) to both `relationships` and `memory_facts`. Backfill is null (= "still valid"). Postgres-only partial composite indexes `ix_relationships_live` / `ix_memory_facts_live` accelerate the live-fact retrieval path. Soft-delete substrate for the Phase 4 apply-mode rollout; coexists with the legacy `memory_facts.is_active` flag.
-- **Advisory lock + `DreamCapable` Protocol ([#656](https://github.com/DeytaHQ/khora/issues/656) → PR #677).** `acquire_namespace_dream_lock(session, namespace_id, timeout_seconds=60)` async context manager using `pg_advisory_xact_lock` with namespace-derived lock IDs (blake2b, domain-separated from the migration lock). Embedded fallback uses an in-process `asyncio.Lock` (cross-process safety not promised on sqlite_lance). `DreamCapable` Protocol (`plan_dream` + `apply_dream` + `dream_capabilities` property, `runtime_checkable`) — engines opt in by implementing it; the orchestrator runtime-checks before scheduling.
-- **Three reporting sinks + `EventType.DREAM_*` family + telemetry contract ([#666](https://github.com/DeytaHQ/khora/issues/666) → PR #678).** File sink writes `{base_dir}/{namespace_id}/{date}/{run_id}.{summary.md,events.jsonl,manifest.json,undo.json}`. Event sink bridges into the existing `HookDispatcher` with six new `EventType.DREAM_*` values (`DREAM_RUN_STARTED`, `DREAM_PHASE_STARTED`, `DREAM_OP_DECIDED`, `DREAM_PHASE_COMPLETED`, `DREAM_RUN_COMPLETED`, `DREAM_RUN_FAILED`) — reuses `SemanticFilter` cascade with two new low-cost level-0 filter fields. Collector sink emits OTel spans + metrics declared in `docs/telemetry-contract.json` (4 public top-level spans, 4 internal inner spans, 7 public metrics — none labelled by `namespace_id` per the cardinality rule). Free-text span attributes go through `khora.telemetry.bounded_text_hash`. `redact_text` config knob (`"none"|"summary"|"all"`, default `"summary"`).
+- **Advisory lock + `DreamCapable` Protocol ([#656](https://github.com/DeytaHQ/khora/issues/656) → PR #677).** `acquire_namespace_dream_lock(session, namespace_id, timeout_seconds=60)` async context manager using `pg_advisory_xact_lock` with namespace-derived lock IDs (blake2b, domain-separated from the migration lock). Embedded fallback uses an in-process `asyncio.Lock` (cross-process safety not promised on sqlite_lance). `DreamCapable` Protocol (`plan_dream` + `apply_dream` + `dream_capabilities` property, `runtime_checkable`) - engines opt in by implementing it; the orchestrator runtime-checks before scheduling.
+- **Three reporting sinks + `EventType.DREAM_*` family + telemetry contract ([#666](https://github.com/DeytaHQ/khora/issues/666) → PR #678).** File sink writes `{base_dir}/{namespace_id}/{date}/{run_id}.{summary.md,events.jsonl,manifest.json,undo.json}`. Event sink bridges into the existing `HookDispatcher` with six new `EventType.DREAM_*` values (`DREAM_RUN_STARTED`, `DREAM_PHASE_STARTED`, `DREAM_OP_DECIDED`, `DREAM_PHASE_COMPLETED`, `DREAM_RUN_COMPLETED`, `DREAM_RUN_FAILED`) - reuses `SemanticFilter` cascade with two new low-cost level-0 filter fields. Collector sink emits OTel spans + metrics declared in `docs/telemetry-contract.json` (4 public top-level spans, 4 internal inner spans, 7 public metrics - none labelled by `namespace_id` per the cardinality rule). Free-text span attributes go through `khora.telemetry.bounded_text_hash`. `redact_text` config knob (`"none"|"summary"|"all"`, default `"summary"`).
 - **Orchestrator state machine + `Khora.dream()` wiring ([#661](https://github.com/DeytaHQ/khora/issues/661) → PR #684).** `DreamOrchestrator` implements INIT → PLAN → REPORT (dry-run) / APPLY → FINALIZE. Acquires the per-namespace advisory lock; calls into the registered engine plugin's `plan_dream()`; fans out `DreamOp` results through the three sinks; persists checkpoint state to `khora_dream_runs` for crash-resume; cancels between ops (never mid-op); enforces the safety floor (no Document delete, no UNIQUE-invariant break, no read-only namespace). `Khora.dream(ns, mode="dry-run")` is now reachable; `Khora.dream_status(run_id)` and `Khora.dream_history(ns, limit=...)` round-trip against `khora_dream_runs`.
 
-#### Phase 1 — Read-only audit operations
+#### Phase 1 - Read-only audit operations
 
 All five ops are pure-SELECT / pure-observation. Zero LLM calls, zero mutations, zero risk to production graphs. Each returns a `DreamOp` with `decision="audit_complete"` (or `"insufficient_data"` / `"empty_namespace"`) and a structured `outputs` dict; the orchestrator routes those through the three sinks.
 
-- **Chronicle abstention-threshold drift report ([#652](https://github.com/DeytaHQ/khora/issues/652) → PR #681).** Reads the OpenTelemetry histogram of `combined_score` / `top_score` values emitted by chronicle's existing `_compute_abstention_signals` (plus a bounded in-process ring buffer for the no-logfire path) and recommends — never applies — a threshold recalibration: e.g. "p90 `top_score` is 0.18 but `abstention_min_top_score` is 0.3 — most recalls fire `top_score_low` even on good answers; consider lowering to 0.15". Refuses below `abstention_drift_min_samples` (default 1000) with `decision="insufficient_data"`.
+- **Chronicle abstention-threshold drift report ([#652](https://github.com/DeytaHQ/khora/issues/652) → PR #681).** Reads the OpenTelemetry histogram of `combined_score` / `top_score` values emitted by chronicle's existing `_compute_abstention_signals` (plus a bounded in-process ring buffer for the no-logfire path) and recommends - never applies - a threshold recalibration: e.g. "p90 `top_score` is 0.18 but `abstention_min_top_score` is 0.3 - most recalls fire `top_score_low` even on good answers; consider lowering to 0.15". Refuses below `abstention_drift_min_samples` (default 1000) with `decision="insufficient_data"`.
 - **Chronicle `memory_facts` tombstone audit ([#654](https://github.com/DeytaHQ/khora/issues/654) → PR #683).** Counts active / inactive (legacy `is_active`) / invalidated (`invalidated_at IS NOT NULL`) rows. Reports `tombstone_ratio`, oldest-tombstone age, p50/p90 age of inactive facts, and top-K offenders by age. Recommends a retention threshold; the Phase 2 compaction op (#664) is the actual reclaimer.
-- **VectorCypher schema-drift report against `ExpertiseConfig` ([#655](https://github.com/DeytaHQ/khora/issues/655) → PR #679).** Diffs the multiset of observed `entity_type` / `relationship_type` strings against the active `ExpertiseConfig`, with four buckets: types in data but not in config, types in config but unused, frequency-delta >50% since previous run, and the relationship-type variant of each. Never auto-normalizes — `ExpertiseConfig` is declarative user intent; normalization is operator policy (deferred to Phase 5).
+- **VectorCypher schema-drift report against `ExpertiseConfig` ([#655](https://github.com/DeytaHQ/khora/issues/655) → PR #679).** Diffs the multiset of observed `entity_type` / `relationship_type` strings against the active `ExpertiseConfig`, with four buckets: types in data but not in config, types in config but unused, frequency-delta >50% since previous run, and the relationship-type variant of each. Never auto-normalizes - `ExpertiseConfig` is declarative user intent; normalization is operator policy (deferred to Phase 5).
 - **VectorCypher PageRank-based orphan-entity report ([#657](https://github.com/DeytaHQ/khora/issues/657) → PR #682).** Builds the namespace's entity-relationship graph, down-weights `ASSOCIATED_WITH` co-occurrence edges to 0.2 so they don't dominate, runs the existing `_accel.pagerank` Rust kernel, and flags entities matching all of: PR score in the bottom 5th percentile AND `mention_count <= 1` AND no recent recall hits. Returns `archive_candidate=true` flags; the operator decides what to do next.
 - **VectorCypher `source_chunk_ids` array-length audit ([#659](https://github.com/DeytaHQ/khora/issues/659) → PR #680).** Joins entities × chunks (Postgres `unnest`; SQLite Python-side) to count dead chunk-UUID references per entity, then reports the array-length distribution (p50/p90/p99) and top-K offenders. Surfaces the GC candidates for the Phase 2 source-chunk-ids GC op (#662).
 
-#### Phase 3 — Rust acceleration
+#### Phase 3 - Rust acceleration
 
-- **`khora._accel.block_and_score_pairs` ([#663](https://github.com/DeytaHQ/khora/issues/663) → PR #685).** New Rust kernel in `khora-accel` for pairwise cosine similarity with optional token-prefix name blocking. Powers the Phase 2 cross-batch entity-resolution op (#658) at namespace scale: at N≈100k entities, naive pairwise is ~5×10⁹ cross-products (~30s wall); token-blocking cuts the candidate set ~10× on realistic name distributions. **Benchmark: 6.4× speedup** vs `pairwise_cosine_above_threshold` at N=10k, D=128, threshold=0.85 (72.9 ms vs 463.9 ms). Falls back to pure-Python when the `khora[rust]` extra isn't installed. Same module pattern as the existing `cosine.rs` kernels — rayon-parallel, GIL released via `py.detach()`.
+- **`khora._accel.block_and_score_pairs` ([#663](https://github.com/DeytaHQ/khora/issues/663) → PR #685).** New Rust kernel in `khora-accel` for pairwise cosine similarity with optional token-prefix name blocking. Powers the Phase 2 cross-batch entity-resolution op (#658) at namespace scale: at N≈100k entities, naive pairwise is ~5×10⁹ cross-products (~30s wall); token-blocking cuts the candidate set ~10× on realistic name distributions. **Benchmark: 6.4× speedup** vs `pairwise_cosine_above_threshold` at N=10k, D=128, threshold=0.85 (72.9 ms vs 463.9 ms). Falls back to pure-Python when the `khora[rust]` extra isn't installed. Same module pattern as the existing `cosine.rs` kernels - rayon-parallel, GIL released via `py.detach()`.
 
 ### Changed
 
@@ -190,20 +190,20 @@ All five ops are pure-SELECT / pure-observation. Zero LLM calls, zero mutations,
 
 ### Not yet shipped (planned for follow-up releases)
 
-- **Phase 2 — mutation-planning ops (dry-run only).** Cross-batch entity resolution, centroid recompute, source_chunk_ids GC, chronicle fact compaction, chronicle event clustering. All five will land in a follow-up release; their tickets are written (#658, #660, #662, #664, #665) and link the umbrella.
-- **Phase 4 — apply mode.** Flips Phase 2 ops to actually mutate state. Requires the audit-only release to bake first; the kill criterion is whether operators actually invoke `kb.dream()` in production within ~30 days.
-- **Phase 5 — advanced operations.** Community detection + summaries (opt-in, LLM-heavy), edge pruning by weight × recency, contradiction detection, schema-drift normalization (operator-supplied mapping).
+- **Phase 2 - mutation-planning ops (dry-run only).** Cross-batch entity resolution, centroid recompute, source_chunk_ids GC, chronicle fact compaction, chronicle event clustering. All five will land in a follow-up release; their tickets are written (#658, #660, #662, #664, #665) and link the umbrella.
+- **Phase 4 - apply mode.** Flips Phase 2 ops to actually mutate state. Requires the audit-only release to bake first; the kill criterion is whether operators actually invoke `kb.dream()` in production within ~30 days.
+- **Phase 5 - advanced operations.** Community detection + summaries (opt-in, LLM-heavy), edge pruning by weight × recency, contradiction detection, schema-drift normalization (operator-supplied mapping).
 
-## [0.13.0] — Agentic framework adapters; session_id first-class; SurrealDB 2.0 stable
+## [0.13.0] - Agentic framework adapters; session_id first-class; SurrealDB 2.0 stable
 
 Minor release. Five new opt-in adapters for agentic frameworks (CrewAI, LangGraph, Google ADK, OpenAI Agents SDK, LlamaIndex), a new `session_id` first-class column with cascade-delete and TTL helpers, and the SurrealDB 2.0 stable pin. No public API removals.
 
 ### Added
 
-- **`khora.integrations` adapter foundation ([#619](https://github.com/DeytaHQ/khora/issues/619) → PR #631).** New subpackage exposing three runtime-checkable Protocols (`MemoryAdapter`, `RetrieverAdapter`, marker `KhoraIntegration`), an entry-point registry (group `khora.integrations`, with `register()` test escape hatch), the `_sync.run_sync` cross-thread bridge, and a config-hash-keyed `Khora.shared()` process-wide singleton. Adapter submodules MUST NOT import their framework at top level — enforced by `tools/check_optional_imports.py` (AST lint).
+- **`khora.integrations` adapter foundation ([#619](https://github.com/DeytaHQ/khora/issues/619) → PR #631).** New subpackage exposing three runtime-checkable Protocols (`MemoryAdapter`, `RetrieverAdapter`, marker `KhoraIntegration`), an entry-point registry (group `khora.integrations`, with `register()` test escape hatch), the `_sync.run_sync` cross-thread bridge, and a config-hash-keyed `Khora.shared()` process-wide singleton. Adapter submodules MUST NOT import their framework at top level - enforced by `tools/check_optional_imports.py` (AST lint).
 - **CrewAI adapter ([#623](https://github.com/DeytaHQ/khora/issues/623) → PR #633).** `khora.integrations.crewai.KhoraMemory` is a drop-in `StorageBackend` for CrewAI's unified `Memory`. Install with `pip install khora[crewai]`. Tz-naive recency math (`_strip_tz`) keeps CrewAI's `datetime.now() - record.created_at` happy against khora's tz-aware UTC timestamps.
 - **LangGraph adapter ([#624](https://github.com/DeytaHQ/khora/issues/624) → PR #634).** `khora.integrations.langgraph.KhoraStore` implements `BaseStore` for semantic long-term memory inside `StateGraph` runners. Install with `pip install khora[langgraph]`.
-- **Google ADK adapter ([#626](https://github.com/DeytaHQ/khora/issues/626) → PR #642).** `khora.integrations.google_adk.KhoraMemoryService` implements `BaseMemoryService` (`add_session_to_memory` + `search_memory`). Namespace is UUID5 of `adk:{app_name}:{user_id}`; `Session.id` round-trips via `session_id`. Memory only — no `KhoraSessionService` in v1 (ADK's `DatabaseSessionService` already covers turn state). Install with `pip install khora[google-adk]`.
+- **Google ADK adapter ([#626](https://github.com/DeytaHQ/khora/issues/626) → PR #642).** `khora.integrations.google_adk.KhoraMemoryService` implements `BaseMemoryService` (`add_session_to_memory` + `search_memory`). Namespace is UUID5 of `adk:{app_name}:{user_id}`; `Session.id` round-trips via `session_id`. Memory only - no `KhoraSessionService` in v1 (ADK's `DatabaseSessionService` already covers turn state). Install with `pip install khora[google-adk]`.
 - **OpenAI Agents SDK adapter ([#625](https://github.com/DeytaHQ/khora/issues/625) → PR #643).** `khora.integrations.openai_agents.KhoraSession` implements `agents.memory.session.SessionABC`; `khora_recall_tool()` is a `FunctionTool` factory; `KhoraMemoryHooks` is a `RunHooks`-shaped auto-persist callback. Items round-trip via `Document.metadata.custom["oai_item"]` (verbatim JSON); ordering via `oai_seq`. Pinned tight (`openai-agents>=0.17,<0.18`). Install with `pip install khora[openai-agents]`.
 - **LlamaIndex adapter ([#627](https://github.com/DeytaHQ/khora/issues/627) → PR #644).** `khora.integrations.llamaindex.KhoraRetriever` is an async-only `BaseRetriever`; `KhoraMemoryBlock` is a `BaseMemoryBlock` factory for long-term memory; `KhoraChatStore` is a deprecated `BaseChatStore` shim for legacy `ChatMemoryBuffer` users (emits `DeprecationWarning`). Pin is narrow (`llama-index-core>=0.14,<0.15`). Install with `pip install khora[llamaindex]`.
 - **`session_id` is a first-class column ([#620](https://github.com/DeytaHQ/khora/issues/620) → PR #632).** Migration 030 adds nullable `session_id UUID` to `documents`, `chunks`, `memory_events`, `chronicle_events`, and `memory_facts`. Migration 031 adds Postgres-only partial composite indexes `ix_chunks_ns_session` / `ix_documents_ns_session (namespace_id, session_id) WHERE session_id IS NOT NULL` plus a BRIN `ix_chunks_session_created_brin (session_id, created_at)` for time-bounded session replay. New public API: `Khora.remember(..., session_id=…)`, `Khora.submit_batch(..., session_id=…)`, `Khora.forget_session(ns, sid)` cascade-delete, and the opt-in `khora.gc.expire_sessions(before=…)` TTL helper.
@@ -230,46 +230,46 @@ Minor release. Five new opt-in adapters for agentic frameworks (CrewAI, LangGrap
 
 - Nothing public removed. Existing extras and APIs continue to work; this release is additive.
 
-## [0.12.1] — Chunk source_timestamp propagation
+## [0.12.1] - Chunk source_timestamp propagation
 
 Patch release. Single bug fix.
 
 ### Fixed
 
-- **Chunk `source_timestamp` is no longer lost during ingest ([#615](https://github.com/DeytaHQ/khora/issues/615) → PR #616).** `chunk_document()` built `Chunk` objects with only `created_at` set, never `source_timestamp`. The ingest pipeline already parses doc-level `source_timestamp` from connector metadata (`occurred_at` / `sent_at` / etc.) and stamps it on `Document`, but the field never reached the chunks — so every recall on every (engine × backend) cell returned `chunk.source_timestamp=None`. This silently broke date-bounded recalls: the query layer's temporal scoring fell back to `chunk.created_at` (ingest time), so "last week" queries surfaced older historical rows that happened to be ingested recently. Fix is a one-line propagation in `pipelines/tasks/chunk.py` — upstream of every storage adapter, so it lights up all six (engine × backend) cells. Two regression tests cover propagation when the document has a `source_timestamp` and `None`-preservation when it doesn't (no invented timestamps).
+- **Chunk `source_timestamp` is no longer lost during ingest ([#615](https://github.com/DeytaHQ/khora/issues/615) → PR #616).** `chunk_document()` built `Chunk` objects with only `created_at` set, never `source_timestamp`. The ingest pipeline already parses doc-level `source_timestamp` from connector metadata (`occurred_at` / `sent_at` / etc.) and stamps it on `Document`, but the field never reached the chunks - so every recall on every (engine × backend) cell returned `chunk.source_timestamp=None`. This silently broke date-bounded recalls: the query layer's temporal scoring fell back to `chunk.created_at` (ingest time), so "last week" queries surfaced older historical rows that happened to be ingested recently. Fix is a one-line propagation in `pipelines/tasks/chunk.py` - upstream of every storage adapter, so it lights up all six (engine × backend) cells. Two regression tests cover propagation when the document has a `source_timestamp` and `None`-preservation when it doesn't (no invented timestamps).
 
-## [0.12.0] — Temporal Phase D: HyDE + reranker + BRIN; hooks LLM cost controls; PPR enabler; SurrealDB remote transactions
+## [0.12.0] - Temporal Phase D: HyDE + reranker + BRIN; hooks LLM cost controls; PPR enabler; SurrealDB remote transactions
 
-Minor release. Substantial additive surface — five new feature-flagged retrieval channels and one new Python subpackage — plus two correctness bug fixes that change scoring/behaviour on graph-only and graph-less stacks. No public API removals; the `enable_hyde` flag accepts a new string shape (`auto`/`always`/`never`) but the legacy boolean form normalizes transparently.
+Minor release. Substantial additive surface - five new feature-flagged retrieval channels and one new Python subpackage - plus two correctness bug fixes that change scoring/behaviour on graph-only and graph-less stacks. No public API removals; the `enable_hyde` flag accepts a new string shape (`auto`/`always`/`never`) but the legacy boolean form normalizes transparently.
 
 ### Fixed
 
-- **`unify_entities` no longer crashes on graph-less stacks ([#587](https://github.com/DeytaHQ/khora/issues/587) → PR #588).** `expansion.py:load_entities` / `load_relationships` were calling `storage.graph.get_entities_by_namespace` and `storage.relational.get_entities_by_namespace` — methods that exist on **no** backend. Every call into the expansion pipeline (chronicle, vectorcypher, skeleton; PG-only and PG+Neo4j and sqlite+lancedb) crashed with `AttributeError`. Routed through `StorageCoordinator.list_entities` / `list_relationships` instead, and extended the coordinator to fall back to the vector backend when no graph backend is configured. `PgvectorBackend` gains `list_entities` / `list_relationships` so chronicle+PG-only stacks now serve the entity table without a Neo4j requirement.
-- **`find_related_entities` score decay restored on graph-only backends ([#581](https://github.com/DeytaHQ/khora/issues/581) → PR #589).** VectorCypher's `find_related_entities` applies `score = 1 / (1 + distance)` on the Neo4j (dual-nodes) path, but the graph-only path (sqlite_lance, surrealdb) hard-coded `1.0` because `get_neighborhood` did not expose per-entity distance. The engine now BFS-walks the returned relationships as an undirected adjacency to recover min hop-distance and applies the same decay; results are sorted descending. No backend protocol changes — works across `sqlite_lance` and `surrealdb` without further adapter work.
+- **`unify_entities` no longer crashes on graph-less stacks ([#587](https://github.com/DeytaHQ/khora/issues/587) → PR #588).** `expansion.py:load_entities` / `load_relationships` were calling `storage.graph.get_entities_by_namespace` and `storage.relational.get_entities_by_namespace` - methods that exist on **no** backend. Every call into the expansion pipeline (chronicle, vectorcypher, skeleton; PG-only and PG+Neo4j and sqlite+lancedb) crashed with `AttributeError`. Routed through `StorageCoordinator.list_entities` / `list_relationships` instead, and extended the coordinator to fall back to the vector backend when no graph backend is configured. `PgvectorBackend` gains `list_entities` / `list_relationships` so chronicle+PG-only stacks now serve the entity table without a Neo4j requirement.
+- **`find_related_entities` score decay restored on graph-only backends ([#581](https://github.com/DeytaHQ/khora/issues/581) → PR #589).** VectorCypher's `find_related_entities` applies `score = 1 / (1 + distance)` on the Neo4j (dual-nodes) path, but the graph-only path (sqlite_lance, surrealdb) hard-coded `1.0` because `get_neighborhood` did not expose per-entity distance. The engine now BFS-walks the returned relationships as an undirected adjacency to recover min hop-distance and applies the same decay; results are sorted descending. No backend protocol changes - works across `sqlite_lance` and `surrealdb` without further adapter work.
 - **Release pipeline no longer races the merge-commit CI ([#554](https://github.com/DeytaHQ/khora/issues/554) → PR #591).** Tag pushes that land within ~30s of the bump-PR merge raced the merge commit's `ci.yml` run; `verify-ci-green` read the runs index, found no successful run yet, and failed. We worked around this manually on v0.10.6 / v0.11.0 / v0.11.1 via `workflow_dispatch`. Replaced the one-shot check with a bounded 10-minute poll that classifies the latest run into `success` / `failed` / `running` and sleeps on `running`. Window tunable via the `VERIFY_CI_GREEN_TIMEOUT_SECONDS` repo variable.
 
 ### Added
 
 - **Temporal-anchored HyDE for RECENCY queries ([#592](https://github.com/DeytaHQ/khora/issues/592) → PR #602, Phase D1).** When HyDE fires on a query the temporal detector classifies as `RECENCY` / `STATE_QUERY` / `CHANGE`, `HyDEExpander` selects a system prompt that anchors the hypothetical to today's ISO date with explicit dates / weekdays / relative-time markers. Other categories keep the generic time-blind prompt. Zero additional LLM calls; only the prompt string changes. Category detection runs in Rust Aho-Corasick (sub-ms). See [`docs/query-engine/temporal-queries.md`](docs/query-engine/temporal-queries.md#temporal-anchored-hyde).
-- **HyDE-Cypher templated graph queries ([#595](https://github.com/DeytaHQ/khora/issues/595) → PR #610, Phase D2, opt-in).** New module `khora.query.hyde_cypher` with three parameterized Cypher templates (`recent_by_type`, `entity_relationships`, `cooccurrence`). An LLM picks a template and fills slots; slot values are bound via Neo4j `$placeholder` parameters (never string-interpolated) and validated against `ExpertiseConfig` whitelists. Failures (timeout, hallucinated id, validation error) degrade to text-HyDE — never crashes the query. Enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`. **Default OFF** pending an A/B on a hand-curated structured-query set.
-- **BRIN index on `chunks.created_at` ([#593](https://github.com/DeytaHQ/khora/issues/593) → PR #603, Phase D4).** New migration `029_chunks_created_at_brin` adds `CREATE INDEX CONCURRENTLY` (in an autocommit block) on the time-correlated `created_at` column, `pages_per_range = 32`. KB-sized footprint that doesn't compete with HNSW or B-trees; helps long-range archive / export scans. Postgres-only — SQLite-backed sqlite_lance stacks skip the migration silently via a dialect gate.
+- **HyDE-Cypher templated graph queries ([#595](https://github.com/DeytaHQ/khora/issues/595) → PR #610, Phase D2, opt-in).** New module `khora.query.hyde_cypher` with three parameterized Cypher templates (`recent_by_type`, `entity_relationships`, `cooccurrence`). An LLM picks a template and fills slots; slot values are bound via Neo4j `$placeholder` parameters (never string-interpolated) and validated against `ExpertiseConfig` whitelists. Failures (timeout, hallucinated id, validation error) degrade to text-HyDE - never crashes the query. Enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`. **Default OFF** pending an A/B on a hand-curated structured-query set.
+- **BRIN index on `chunks.created_at` ([#593](https://github.com/DeytaHQ/khora/issues/593) → PR #603, Phase D4).** New migration `029_chunks_created_at_brin` adds `CREATE INDEX CONCURRENTLY` (in an autocommit block) on the time-correlated `created_at` column, `pages_per_range = 32`. KB-sized footprint that doesn't compete with HNSW or B-trees; helps long-range archive / export scans. Postgres-only - SQLite-backed sqlite_lance stacks skip the migration silently via a dialect gate.
 - **Cross-encoder reranker date-prefix experiment ([#594](https://github.com/DeytaHQ/khora/issues/594) → PR #609, Phase D5, opt-in).** `CrossEncoderReranker(include_date_prefix=True)` prepends `[YYYY-MM-DD] ` to each candidate's content. Source priority: `metadata.custom.occurred_at` → `metadata.custom.sent_at` → `metadata.created_at`. `create_reranker` cache key now includes the flag so the two variants coexist without a 500ms model reload. **Default OFF** pending A/B.
-- **PPR enabler: `pagerank(personalization=...)` ([#597](https://github.com/DeytaHQ/khora/issues/597) → PR #604).** Both the Rust impl (`rust/khora-accel/src/pagerank.rs`) and the Python fallback (`khora._accel.pagerank`) accept an optional L1-normalizable personalization vector. PPR formula: `r = (1 - d) * p + d * Mᵀ r`. When `personalization` is `None` or uniform-equivalent, this reduces to standard PageRank — every existing call site continues to receive identical scores. Validation: negatives clipped to 0, length mismatch falls back to uniform, all-zero falls back to uniform. The Python wrapper only forwards the new kwarg when set so older `khora-accel` wheels keep working until rebuilt. **Enabler only** — the BFS+RRF → PPR swap in VectorCypher is still gated on the graph-density audit (#598).
+- **PPR enabler: `pagerank(personalization=...)` ([#597](https://github.com/DeytaHQ/khora/issues/597) → PR #604).** Both the Rust impl (`rust/khora-accel/src/pagerank.rs`) and the Python fallback (`khora._accel.pagerank`) accept an optional L1-normalizable personalization vector. PPR formula: `r = (1 - d) * p + d * Mᵀ r`. When `personalization` is `None` or uniform-equivalent, this reduces to standard PageRank - every existing call site continues to receive identical scores. Validation: negatives clipped to 0, length mismatch falls back to uniform, all-zero falls back to uniform. The Python wrapper only forwards the new kwarg when set so older `khora-accel` wheels keep working until rebuilt. **Enabler only** - the BFS+RRF → PPR swap in VectorCypher is still gated on the graph-density audit (#598).
 - **PPR graph-density audit reporter ([#598](https://github.com/DeytaHQ/khora/issues/598) → PR #605).** New `khora.diagnostics.graph_density.compute_graph_stats()` returns per-namespace `|V|`, `|E|`, mean + median degree, connected-component count, largest-CC fraction, mean degree restricted to the largest CC, plus a `meets_ppr_threshold` flag applying the #598 decision rule (≥3 connected components OR mean degree ≥5 in the largest CC). Operator script: `scripts/audit_graph_density.py` emits CSV or JSON plus a stderr verdict. **`khora.diagnostics` is explicitly NOT stable public API** and may be renamed without a major-version bump.
-- **Hooks Level 2 LLM cache + per-subscription budget ([#601](https://github.com/DeytaHQ/khora/issues/601) → PR #607).** Cross-batch decision cache keyed on `(filter_id, bounded_text_hash(event_summary))` — repeat bulk-upsert events that share `name`/`type`/`description` short-circuit the LLM. TTL + LRU eviction, configurable via `KHORA_HOOKS_LLM_CACHE_SIZE` (default `2048`) and `KHORA_HOOKS_LLM_CACHE_TTL_SECONDS` (default `3600`). Per-subscription rolling-hour token budget alongside the namespace cap so a single noisy filter cannot drain its namespace allowance: `KHORA_HOOKS_LLM_MAX_TOKENS_PER_SUBSCRIPTION_PER_HOUR` (default `0` = disabled). New telemetry metrics `khora.hooks.llm.cache_hits_total` (label `category={match,no_match}`) and `khora.hooks.llm.cache_misses_total`.
+- **Hooks Level 2 LLM cache + per-subscription budget ([#601](https://github.com/DeytaHQ/khora/issues/601) → PR #607).** Cross-batch decision cache keyed on `(filter_id, bounded_text_hash(event_summary))` - repeat bulk-upsert events that share `name`/`type`/`description` short-circuit the LLM. TTL + LRU eviction, configurable via `KHORA_HOOKS_LLM_CACHE_SIZE` (default `2048`) and `KHORA_HOOKS_LLM_CACHE_TTL_SECONDS` (default `3600`). Per-subscription rolling-hour token budget alongside the namespace cap so a single noisy filter cannot drain its namespace allowance: `KHORA_HOOKS_LLM_MAX_TOKENS_PER_SUBSCRIPTION_PER_HOUR` (default `0` = disabled). New telemetry metrics `khora.hooks.llm.cache_hits_total` (label `category={match,no_match}`) and `khora.hooks.llm.cache_misses_total`.
 - **Hooks Level 2 intra-batch event-summary coalescing ([#608](https://github.com/DeytaHQ/khora/issues/608) → PR #611).** Within a single LLM batch, `_evaluate_bucket` now deduplicates pending pairs by `event_summary_hash` before building the prompt and fans the decision out to every awaiting future. Combined with the #607 cross-batch cache, a burst of 50 identical events spends exactly **1 LLM call** even on a cold cache (the original acceptance bar was ≤2). When events differ this is a no-op.
-- **SurrealDB remote-mode transactions ([#541](https://github.com/DeytaHQ/khora/issues/541) → PR #612).** New `SurrealDBConnection.transaction()` async context manager wraps the body in `BEGIN TRANSACTION` / `COMMIT TRANSACTION` on remote (`ws://`) mode, with `CANCEL TRANSACTION` on exception (original error preserved if `CANCEL` itself fails). Embedded (`surrealkv://`) and memory (`memory://`) modes are no-ops — surrealkv raises on `BEGIN`, so the existing per-statement-atomicity contract is preserved. Companion `execute_batch([(sql, bindings), ...])` joins statements with `;` for an embedded-mode batched alternative; rejects parameter-name collisions across statements. New `supports_transactions` property surfaces the per-mode capability without reading internal state.
+- **SurrealDB remote-mode transactions ([#541](https://github.com/DeytaHQ/khora/issues/541) → PR #612).** New `SurrealDBConnection.transaction()` async context manager wraps the body in `BEGIN TRANSACTION` / `COMMIT TRANSACTION` on remote (`ws://`) mode, with `CANCEL TRANSACTION` on exception (original error preserved if `CANCEL` itself fails). Embedded (`surrealkv://`) and memory (`memory://`) modes are no-ops - surrealkv raises on `BEGIN`, so the existing per-statement-atomicity contract is preserved. Companion `execute_batch([(sql, bindings), ...])` joins statements with `;` for an embedded-mode batched alternative; rejects parameter-name collisions across statements. New `supports_transactions` property surfaces the per-mode capability without reading internal state.
 
 ### Changed
 
-- **`enable_hyde` flag value shape.** `KHORA_QUERY_ENABLE_HYDE` now accepts string values `auto` (default), `always`, or `never`. Legacy booleans (`True` / `False`) are still accepted and normalize to `always` / `never` respectively — no breaking change at the API boundary, but operators reading the config docs in v0.11.x and earlier will see a different field shape now.
-- **Pre-v0.12.0 documentation pass (PR #613).** Top-level README quickstart fixed (the v0.11.x example called `kb.create_namespace("demo")` which is a `TypeError` — `create_namespace` is keyword-only). Hooks doc rewritten to cover Phase 2 + v0.12.0 surface: EventBridge `match` DSL, `CHUNK_ENTITIES_RESOLVED`, default-OFF Level 2 cost warning, per-namespace + per-subscription budgets, cache + intra-batch coalescing, co-occurrence example. Fixed three wrong default values in `docs/hooks/semantic-hooks.md` (`gpt-4o-mini` → `gpt-4.1-nano`, `0.7` similarity → `0.5`). `docs/api-reference.md` `create_namespace` and `register_engine` signatures corrected; `BatchHandle` / `DocumentResult` added; new "Advanced (opt-in, v0.12.0)" section. CLAUDE.md gotchas extended with bullets for dialect-gated migrations, SurrealDB transactions, graph-less-stack entity listing, temporal HyDE, HyDE-Cypher, reranker date-prefix, hooks Level 2 cost controls, and the `khora.diagnostics` non-stability disclaimer.
+- **`enable_hyde` flag value shape.** `KHORA_QUERY_ENABLE_HYDE` now accepts string values `auto` (default), `always`, or `never`. Legacy booleans (`True` / `False`) are still accepted and normalize to `always` / `never` respectively - no breaking change at the API boundary, but operators reading the config docs in v0.11.x and earlier will see a different field shape now.
+- **Pre-v0.12.0 documentation pass (PR #613).** Top-level README quickstart fixed (the v0.11.x example called `kb.create_namespace("demo")` which is a `TypeError` - `create_namespace` is keyword-only). Hooks doc rewritten to cover Phase 2 + v0.12.0 surface: EventBridge `match` DSL, `CHUNK_ENTITIES_RESOLVED`, default-OFF Level 2 cost warning, per-namespace + per-subscription budgets, cache + intra-batch coalescing, co-occurrence example. Fixed three wrong default values in `docs/hooks/semantic-hooks.md` (`gpt-4o-mini` → `gpt-4.1-nano`, `0.7` similarity → `0.5`). `docs/api-reference.md` `create_namespace` and `register_engine` signatures corrected; `BatchHandle` / `DocumentResult` added; new "Advanced (opt-in, v0.12.0)" section. CLAUDE.md gotchas extended with bullets for dialect-gated migrations, SurrealDB transactions, graph-less-stack entity listing, temporal HyDE, HyDE-Cypher, reranker date-prefix, hooks Level 2 cost controls, and the `khora.diagnostics` non-stability disclaimer.
 
 ### Removed
 
 Nothing. Every v0.11.x symbol still exists with the same signature.
 
-## [0.11.1] — Semantic hooks Phase 1: bugfixes + opt-in Level 2 LLM evaluator
+## [0.11.1] - Semantic hooks Phase 1: bugfixes + opt-in Level 2 LLM evaluator
 
 Patch release covering [#576](https://github.com/DeytaHQ/khora/issues/576)
 (PR #577). Closes the trust gap between docs and code in
@@ -301,7 +301,7 @@ true; no public API removals.
 - **`EventType.ENTITY_MERGED` was defined but never dispatched.** The
   cross-tool unifier merged entities silently. Now emits
   `entity.merged` with `{merged_from, surviving_id, source_tools,
-  strategy, namespace_id}` — the dedup signal corporate-data
+  strategy, namespace_id}` - the dedup signal corporate-data
   customers care most about.
 
 ### Added
@@ -310,13 +310,13 @@ true; no public API removals.
   events** fired from `Khora.recall()`. Shared `recall_id` (UUID)
   across the three events so subscribers can correlate. Payload caps
   (top 20 entity/chunk IDs) bound event size. Hook dispatch wrapped
-  in try/except — failures never break `recall()`.
+  in try/except - failures never break `recall()`.
 - **Optional Level 2 LLM filter evaluator** (`khora.hooks.llm_evaluator.LLMFilterEvaluator`).
   Default OFF (`KHORA_HOOKS_LLM_EVALUATION_ENABLED=false`).
   Micro-batched (10 pairs / 100 ms window), JSON-schema output via
   `khora.config.llm.acompletion` with `_telemetry_op="hooks.filter_eval"`,
   per-namespace token-budget cap (default 10k tokens/hour ≈ 100
-  evaluations — deliberately conservative; operator tunes up).
+  evaluations - deliberately conservative; operator tunes up).
   Fail-open on LLM errors / budget breach. Only runs for filters
   that set `examples=[...]`.
 - **New telemetry contract entries**: `khora.hooks.llm.evaluations_total`
@@ -330,14 +330,14 @@ true; no public API removals.
   The `Any` placeholder dated to a circular-import worry; lazy
   module-level import resolves it cleanly. Operators can now read
   `cfg.hooks.enabled`, `cfg.hooks.callback_timeout_seconds`, etc.
-  Type-narrowing, not breaking — anyone reading `cfg.hooks` and
+  Type-narrowing, not breaking - anyone reading `cfg.hooks` and
   getting `None` today now gets a populated config.
 - **`CrossToolUnifier.unify()` is now async.** Required to dispatch
   the new `ENTITY_MERGED` event. Both production call sites
   (`SemanticExpander.expand`, `pipelines/flows/expansion.unify_entities`)
   updated; the 5 existing unifier tests converted to async.
 
-## [0.11.0] — Temporal retrieval overhaul: scoring fixes + ingestion contract + entity-anchored fast path
+## [0.11.0] - Temporal retrieval overhaul: scoring fixes + ingestion contract + entity-anchored fast path
 
 Three-phase rework of khora's temporal retrieval, addressing the production
 complaint that queries like *"what are the latest action items from recent
@@ -346,30 +346,30 @@ calendar, Salesforce). All new behavior is **feature-flagged off by
 default**; operators opt in per-namespace via `KHORA_QUERY_TEMPORAL_*` env
 vars. Existing consumers see no behavior change unless they enable flags.
 
-Closes [#567](https://github.com/DeytaHQ/khora/issues/567) (Phase A — scoring),
-[#568](https://github.com/DeytaHQ/khora/issues/568) (Phase B — ingestion),
-[#569](https://github.com/DeytaHQ/khora/issues/569) (Phase C — entity-anchored).
+Closes [#567](https://github.com/DeytaHQ/khora/issues/567) (Phase A - scoring),
+[#568](https://github.com/DeytaHQ/khora/issues/568) (Phase B - ingestion),
+[#569](https://github.com/DeytaHQ/khora/issues/569) (Phase C - entity-anchored).
 
 ### Added
 
 - **Phase A: scoring & retrieval (#567 / PR #571).**
-  - `_calculate_recency_scores(reference_mode="wall_clock" | "relative")` — wall-clock
+  - `_calculate_recency_scores(reference_mode="wall_clock" | "relative")` - wall-clock
     is production-correct (was a relative max-in-set heuristic). `KHORA_BENCH_MODE=true`
     forces `relative` for benchmark replay.
   - Synthetic date floor for RECENCY/CHANGE queries with no parseable date
     (e.g., bare "latest", "recent"). Defaults: RECENCY=30d, CHANGE=60d.
-  - `ANTI_RECENCY_TOKENS` veto list — historical / counterfactual queries
+  - `ANTI_RECENCY_TOKENS` veto list - historical / counterfactual queries
     ("ever", "history of", "would have", "if we had", "back when", "at one
     point", etc.) suppress the synthesized floor.
-  - **LLM disambiguation tier** — when Aho-Corasick fires RECENCY/CHANGE
+  - **LLM disambiguation tier** - when Aho-Corasick fires RECENCY/CHANGE
     AND the query contains an ambiguity-trigger token (`would`, `could`,
     `if `, `previously`, etc.), a short LLM call classifies the query as
     RECENT / HISTORICAL / COUNTERFACTUAL / NEUTRAL. Floor vetoed for
     non-RECENT outputs. Per-query cache; bounded cost.
-  - Parallel "recency channel" — pure `ORDER BY occurred_at DESC LIMIT N`
+  - Parallel "recency channel" - pure `ORDER BY occurred_at DESC LIMIT N`
     SQL fused via RRF pool augmentation. Cosine relevance floor (0.40
     default) gates which fresh-but-irrelevant chunks can enter.
-  - Per-source decay dict — Slack 3d / email 7d / calendar 14d / Salesforce
+  - Per-source decay dict - Slack 3d / email 7d / calendar 14d / Salesforce
     180d / `_default` 14d. Looked up via `chunk.metadata.custom["source_system"]`.
   - pgvector `hnsw.iterative_scan = strict_order` capability-probed and
     enabled when a temporal filter is set (avoids HNSW recall collapse
@@ -379,27 +379,27 @@ Closes [#567](https://github.com/DeytaHQ/khora/issues/567) (Phase A — scoring)
   - Seven new `QuerySettings.temporal_*` knobs gating each behavior.
 
 - **Phase B: ingestion contract (#568 / PR #573).**
-  - `khora.pipelines.ConnectorMetadata` — public `TypedDict(total=False)`
+  - `khora.pipelines.ConnectorMetadata` - public `TypedDict(total=False)`
     documenting the canonical metadata-field surface for connector authors.
-  - `khora.pipelines.SourceSystem` — `Literal["slack","email","calendar","salesforce","jira","linear","manual"]`.
-  - `khora.pipelines.validate_connector_metadata(metadata, source_type) -> list[str]` —
+  - `khora.pipelines.SourceSystem` - `Literal["slack","email","calendar","salesforce","jira","linear","manual"]`.
+  - `khora.pipelines.validate_connector_metadata(metadata, source_type) -> list[str]` -
     advisory warnings; connector CI runs it pre-ingest.
-  - `khora.pipelines.CANONICAL_TIMESTAMP_FIELDS` — tuple matching the extractor priority.
+  - `khora.pipelines.CANONICAL_TIMESTAMP_FIELDS` - tuple matching the extractor priority.
   - Source-type-aware timestamp priority: `source_type in {calendar,meeting,event}`
     now prefers `occurred_at` over `sent_at`.
   - New span attribute `chunk.occurred_at.source = "metadata" | "ingest_fallback"`
     on chunk construction. Operators can detect silent connector breakage.
-  - New metric `khora.ingest.source_timestamp.fallback_count` — counter,
+  - New metric `khora.ingest.source_timestamp.fallback_count` - counter,
     bounded `source_type` label. Throttled WARN log when a canonical-source
     connector misses the timestamp.
   - `docs/extraction/ingestion-pipeline.md` § "Canonical metadata fields
-    per source" — full mapping table per source system.
+    per source" - full mapping table per source system.
 
 - **Phase C: entity-anchored fast path (#569 / PR #574).**
   - New `QueryComplexity.TYPED_ENTITY_RECENT` routes queries matching
     `(latest|most recent|newest|recent) (action items|decisions|blockers|risks|...)`
     through a single Cypher fast path.
-  - New retriever method `_typed_entity_recent_retrieve()` — single
+  - New retriever method `_typed_entity_recent_retrieve()` - single
     `MATCH ... MENTIONED_IN ... max(c.occurred_at) ORDER BY DESC` query
     with status filter for ACTION_ITEM / COMMITMENT / OPEN_QUESTION
     (excludes done / cancelled / completed / closed). Graceful fallback
@@ -409,7 +409,7 @@ Closes [#567](https://github.com/DeytaHQ/khora/issues/567) (Phase A — scoring)
     (decided_on, rationale), **BLOCKER** (blocking_for, severity), **RISK**
     (likelihood, impact). High-precision prompt with anti-fabrication
     guardrails.
-  - Composite index migration `028_typed_entity_recency_index` —
+  - Composite index migration `028_typed_entity_recency_index` -
     `(namespace_id, entity_type, created_at DESC)` on `entities`. Plus
     matching Neo4j `entity_type_recency` index.
   - Measurement scaffold for action-item extraction precision/recall
@@ -465,16 +465,16 @@ Devil's-Advocate review predictions all came true and were addressed:
 - Wall-clock switch tanking benchmark replay (#3) → `KHORA_BENCH_MODE` gate.
 - Bare-stopword false positives (#2) → narrowed `ANTI_RECENCY_TOKENS`.
 
-## [0.10.8] — OTel-first telemetry, vanilla OpenTelemetry SDK extras, observability docs
+## [0.10.8] - OTel-first telemetry, vanilla OpenTelemetry SDK extras, observability docs
 
-Closes [#564](https://github.com/DeytaHQ/khora/issues/564) — make khora's
+Closes [#564](https://github.com/DeytaHQ/khora/issues/564) - make khora's
 observability stack vendor-neutral. Logfire moves from "the only path"
 to "one of several supported backends." Backward-compatible for
 existing `khora[logfire]` users.
 
 ### Added
 
-- **`pip install khora[otel]`** — pulls `opentelemetry-sdk` +
+- **`pip install khora[otel]`** - pulls `opentelemetry-sdk` +
   `opentelemetry-exporter-otlp-proto-http`. Honors the standard
   `OTEL_*` env vars (`OTEL_EXPORTER_OTLP_ENDPOINT`,
   `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_HEADERS`,
@@ -482,34 +482,34 @@ existing `khora[logfire]` users.
   `OTEL_TRACES_SAMPLER`, etc.). Ships spans/metrics to any
   OTLP-compatible collector or vendor (Tempo, Jaeger, Honeycomb,
   Datadog, New Relic, Dynatrace).
-- **`pip install khora[otel-grpc]`** — composes `khora[otel]` with
+- **`pip install khora[otel-grpc]`** - composes `khora[otel]` with
   the gRPC OTLP exporter for sites that prefer Bolt-style transport.
-- **`khora.telemetry.configure_telemetry()`** — single in-code entry
+- **`khora.telemetry.configure_telemetry()`** - single in-code entry
   point with precedence: caller-supplied providers → existing host
   provider → `LOGFIRE_TOKEN` env → `OTEL_*` env → no-op. Idempotent;
   returns a `TelemetryHandle` for inspection and explicit shutdown.
-- **`khora.telemetry.diagnostics()`** — prints active provider class,
+- **`khora.telemetry.diagnostics()`** - prints active provider class,
   endpoint, contract version, and the OTel env. Run this first when
   spans appear to be missing.
-- **`khora.telemetry.shutdown_telemetry_providers()`** — force-flush
+- **`khora.telemetry.shutdown_telemetry_providers()`** - force-flush
   and shutdown only the providers khora installed; host-owned
   providers are left untouched.
-- **Resource attribute `khora.telemetry.contract.version`** — exported
+- **Resource attribute `khora.telemetry.contract.version`** - exported
   alongside SDK defaults so dashboards can filter by telemetry-schema
   version independently of the package version.
-- **`docs/observability.md`** — single canonical observability page.
+- **`docs/observability.md`** - single canonical observability page.
   Covers install paths, env-var contract, programmatic config,
   precedence, sampling/cost guidance, vendor recipes (Honeycomb,
   Grafana Cloud, Datadog, local Jaeger), and the "I see no spans"
   troubleshooting checklist.
-- **`tests/unit/telemetry/test_otel_parity.py`** — vanilla-OTel parity
+- **`tests/unit/telemetry/test_otel_parity.py`** - vanilla-OTel parity
   gate. Runs against `InMemorySpanExporter` + `InMemoryMetricReader`
   with no logfire path and asserts every public span/metric is emitted
   through the OTel API.
-- **`scripts/bench_telemetry_overhead.py`** — regression gate for the
+- **`scripts/bench_telemetry_overhead.py`** - regression gate for the
   no-provider trace/decorator hot path; current baseline ~3 µs/call,
   budget 5 µs/call.
-- **`tests/integration/test_otel_smoke.py`** — binds an in-process
+- **`tests/integration/test_otel_smoke.py`** - binds an in-process
   OTLP/HTTP listener, runs `configure_telemetry()`, and asserts spans
   actually leave the process. Complements the unit-level parity gate.
 
@@ -528,7 +528,7 @@ existing `khora[logfire]` users.
 - **`@trace` decorator** no longer short-circuits on missing logfire.
   Spans always open; the OTel API's `NonRecordingSpan` keeps the
   no-provider path effectively free (~3 µs/call vs. 0.4 µs for a noop
-  context manager — measured, well under any meaningful threshold).
+  context manager - measured, well under any meaningful threshold).
 - **`docs/architecture/overview.md` "Observability" section** rewritten
   as vendor-neutral OTel-first. Points at `docs/observability.md`
   instead of inlining Logfire-specific guidance.
@@ -550,16 +550,16 @@ existing `khora[logfire]` users.
 
 ### Removed
 
-- **`src/khora/telemetry/logfire_integration.py`** — replaced by
+- **`src/khora/telemetry/logfire_integration.py`** - replaced by
   `_otel.py` (tracer/meter + `trace_span` + `install_neo4j_log_bridge`),
   `_attrs.py` (`bounded_text_hash`), and `bootstrap.py`
   (`configure_telemetry` and friends). All call sites updated.
 - **The `Span` / `LogfireSpan` / `NoOpSpan` ABC hierarchy.** Callers
   now use `opentelemetry.trace.Span` directly. The migration is
-  source-compatible — the `.set_attribute` / `.set_attributes` shape
+  source-compatible - the `.set_attribute` / `.set_attributes` shape
   is identical.
 - **"SurrealDB Phase 1" status note** in
-  `docs/architecture/storage-backends.md` — the backend has been
+  `docs/architecture/storage-backends.md` - the backend has been
   feature-complete since the 2026-03-25 audit.
 - **Last user-facing `kuzu` mention** in
   `docs/engines/engine-comparison.md`. The `kuzu` extra still ships
@@ -567,7 +567,7 @@ existing `khora[logfire]` users.
 
 ### Deprecated
 
-- **`khora.telemetry.install_neo4j_logfire_handler`** — renamed to
+- **`khora.telemetry.install_neo4j_logfire_handler`** - renamed to
   `install_neo4j_log_bridge` (now picks the OTel logs SDK handler
   when logfire is absent). The old name is kept as a
   `DeprecationWarning`-emitting alias for one minor release; will be
@@ -581,51 +581,51 @@ existing `khora[logfire]` users.
   `metric_gauge_callback` callable from any code path without an
   availability check.
 
-## [0.10.7] — PyPI README rewriting, SecretStr config fields, release-pipeline fixes
+## [0.10.7] - PyPI README rewriting, SecretStr config fields, release-pipeline fixes
 
 ### Changed
 
-- **Credential and DSN config fields re-typed as `pydantic.SecretStr`** (#553). Affects `KhoraConfig.storage.*` connection URLs/passwords (Postgres, Neo4j, Memgraph, Neptune, AGE, SurrealDB graph/relational/vector/event-store) and the telemetry collector DSN. Each backend's engine/driver factory unwraps the secret exactly once at the driver edge via the new `khora.config._secrets._secret_value()` helper. Config dumps and log lines now render these fields as `'**********'`; values written to fields still accept `str` for back-compat, but reads return `SecretStr` — callers that previously did `str(cfg.storage.neo4j.password)` and expected the cleartext now need `.get_secret_value()`. Pre-1.0 patch; flagging it explicitly here so downstream consumers can audit.
+- **Credential and DSN config fields re-typed as `pydantic.SecretStr`** (#553). Affects `KhoraConfig.storage.*` connection URLs/passwords (Postgres, Neo4j, Memgraph, Neptune, AGE, SurrealDB graph/relational/vector/event-store) and the telemetry collector DSN. Each backend's engine/driver factory unwraps the secret exactly once at the driver edge via the new `khora.config._secrets._secret_value()` helper. Config dumps and log lines now render these fields as `'**********'`; values written to fields still accept `str` for back-compat, but reads return `SecretStr` - callers that previously did `str(cfg.storage.neo4j.password)` and expected the cleartext now need `.get_secret_value()`. Pre-1.0 patch; flagging it explicitly here so downstream consumers can audit.
 - **README rendering on PyPI** (#556). The on-disk README keeps relative links (`docs/configuration.md`) for GitHub readers; `hatch-fancy-pypi-readme` substitution rewrites them to `https://github.com/DeytaHQ/khora/blob/main/...` at wheel/sdist build time so PyPI's project page renders working links. Also adds `[project.urls]` for the PyPI sidebar (Documentation, Source, Issues, Changelog, Releases).
 
 ### Fixed
 
-- **`release.yml` smoke-install** (#552). The smoke-install step installed `khora[sqlite-lance]==${VERSION}` and then asserted `pip show khora-accel`, which always failed because `[sqlite-lance]` doesn't pull khora-accel — that's the `[rust]` extra. Tripped the gate on every release since the assertion landed; v0.10.6 had its `github-release` job skipped because of it (workaround: manual `gh release create`). Now installs `khora[sqlite-lance,rust]` so both wheels are verified together.
+- **`release.yml` smoke-install** (#552). The smoke-install step installed `khora[sqlite-lance]==${VERSION}` and then asserted `pip show khora-accel`, which always failed because `[sqlite-lance]` doesn't pull khora-accel - that's the `[rust]` extra. Tripped the gate on every release since the assertion landed; v0.10.6 had its `github-release` job skipped because of it (workaround: manual `gh release create`). Now installs `khora[sqlite-lance,rust]` so both wheels are verified together.
 
 ### OSS prep
 
-- **`CLAUDE.md` scrub** (#555) — final pass for OSS readiness.
+- **`CLAUDE.md` scrub** (#555) - final pass for OSS readiness.
 
-## [0.10.6] — Test-infra expansion, dependency staging window, docs cleanup
+## [0.10.6] - Test-infra expansion, dependency staging window, docs cleanup
 
 ### Added
 
-- **Embedded test footprint** (PR-A / #536) — matrix tests for the SQLite+LanceDB stack covering VectorCypher, Skeleton, and Chronicle.
-- **Embedded backend hardening** (PR-B / #537) — typed `EmbeddingError` validation in `khora.storage.backends.sqlite_lance.vector` so malformed inputs surface at the boundary instead of failing deep inside LanceDB.
-- **Property-based tests** (PR-C / #538) — Hypothesis tests pinning Chronicle abstention `combined_score`, FTS5 escape parseability, MMR λ-direction (khora's λ=1 ⇒ pure relevance convention), and SQLite FTS5 `bm25()` sign handling.
-- **Test infrastructure** (PR-D / #540) — `embedded` pytest marker, `scripts/check_coverage_floors.py` per-path coverage gate wired into CI, `make test-embedded` / `make test-soak` targets, and a top-level `CONTRIBUTING.md`.
-- **Codecov split flags** (#539) — unit and integration uploads land separately so PRs that only touch unit-tested paths still get a Codecov diff comment. `codecov.yml` carries auto-target project status with sensible thresholds.
-- **`uv exclude-newer = "7 days"` policy** (#548) — `uv lock` ignores PyPI releases uploaded within the last 7 days, re-evaluated every sync. `exclude-newer-package = { urllib3 = "0 days" }` lets same-week CVE fixes through; pattern reusable for future security-critical updates.
+- **Embedded test footprint** (PR-A / #536) - matrix tests for the SQLite+LanceDB stack covering VectorCypher, Skeleton, and Chronicle.
+- **Embedded backend hardening** (PR-B / #537) - typed `EmbeddingError` validation in `khora.storage.backends.sqlite_lance.vector` so malformed inputs surface at the boundary instead of failing deep inside LanceDB.
+- **Property-based tests** (PR-C / #538) - Hypothesis tests pinning Chronicle abstention `combined_score`, FTS5 escape parseability, MMR λ-direction (khora's λ=1 ⇒ pure relevance convention), and SQLite FTS5 `bm25()` sign handling.
+- **Test infrastructure** (PR-D / #540) - `embedded` pytest marker, `scripts/check_coverage_floors.py` per-path coverage gate wired into CI, `make test-embedded` / `make test-soak` targets, and a top-level `CONTRIBUTING.md`.
+- **Codecov split flags** (#539) - unit and integration uploads land separately so PRs that only touch unit-tested paths still get a Codecov diff comment. `codecov.yml` carries auto-target project status with sensible thresholds.
+- **`uv exclude-newer = "7 days"` policy** (#548) - `uv lock` ignores PyPI releases uploaded within the last 7 days, re-evaluated every sync. `exclude-newer-package = { urllib3 = "0 days" }` lets same-week CVE fixes through; pattern reusable for future security-critical updates.
 
 ### Changed
 
-- **Docs cleanup** — README, `docs/configuration.md`, `docs/README.md`, and `docs/architecture/{overview,storage-backends}.md` no longer reference the deprecated `kuzu` extra (#550). README sibling-package list trimmed; `khora-service` linked to its GitHub repo (#531). README description language: "library, not an application; tooling lives in sibling packages."
-- **Docstring scrub** (#547) — `LiteLLMConfig.max_total_connections` description now uses vendor-neutral phrasing ("typical high-throughput ingestion concurrency"). Internal-service name removed from public API surface.
-- **Release pipeline** (#532) — `release.yml` auto-creates GitHub releases on tag push with auto-generated notes from merged PRs.
+- **Docs cleanup** - README, `docs/configuration.md`, `docs/README.md`, and `docs/architecture/{overview,storage-backends}.md` no longer reference the deprecated `kuzu` extra (#550). README sibling-package list trimmed; `khora-service` linked to its GitHub repo (#531). README description language: "library, not an application; tooling lives in sibling packages."
+- **Docstring scrub** (#547) - `LiteLLMConfig.max_total_connections` description now uses vendor-neutral phrasing ("typical high-throughput ingestion concurrency"). Internal-service name removed from public API surface.
+- **Release pipeline** (#532) - `release.yml` auto-creates GitHub releases on tag push with auto-generated notes from merged PRs.
 
 ### Fixed
 
-- **`find_related_entities` fallback** (#535) — VectorCypher's graph-only fallback called a non-existent backend method on `sqlite_lance` / `surrealdb`. Falls back gracefully now.
+- **`find_related_entities` fallback** (#535) - VectorCypher's graph-only fallback called a non-existent backend method on `sqlite_lance` / `surrealdb`. Falls back gracefully now.
 
 ### Removed
 
-- **Memory Lake branding residue** (#534) — final pass on examples, tests, and inline strings. No public API changes.
+- **Memory Lake branding residue** (#534) - final pass on examples, tests, and inline strings. No public API changes.
 
 ### Infrastructure
 
 - **kuzu still ships as an optional extra**, but is no longer advertised in user-facing docs (the upstream repository was archived after Apple's acquisition in October 2025).
 
-## [0.10.5] — FTS5 escape, Chronicle sqlite_lance persistence, loguru placeholders
+## [0.10.5] - FTS5 escape, Chronicle sqlite_lance persistence, loguru placeholders
 
 ### Fixed
 
@@ -642,10 +642,10 @@ existing `khora[logfire]` users.
 
 - All khora work tracked in **GitHub Issues**, not Linear (`CLAUDE.md` inlines a short GitHub workflow).
 - Public-surface docs (`CLAUDE.md`, `README.md`, `docs/consumers.md`) no longer reference internal Deyta projects.
-- PyPI long description: "Knowledge memory library for long-horizon AI agents — hybrid retrieval over documents, embeddings, and graph relationships."
+- PyPI long description: "Knowledge memory library for long-horizon AI agents - hybrid retrieval over documents, embeddings, and graph relationships."
 - Sibling packages on PyPI: `khora-cli`, `khora-explorer`, `khora-service` (coming soon).
 
-## [0.10.4] — First clean PyPI release after the migration
+## [0.10.4] - First clean PyPI release after the migration
 
 ### Fixed
 
@@ -656,7 +656,7 @@ existing `khora[logfire]` users.
 - First post-migration release where **both** `khora` and `khora-accel` wheels published cleanly to PyPI at the same version with the lockstep contract verified end-to-end (wheel METADATA contains `Requires-Dist: khora-accel==0.10.4`).
 - Updated `CLAUDE.md` → Version Bumps to require updating all three files (`Cargo.toml`, `Cargo.lock`, `pyproject.toml` pin) in the same PR.
 
-## [0.10.3] — Partial release (khora-accel only)
+## [0.10.3] - Partial release (khora-accel only)
 
 ### Fixed
 
@@ -666,11 +666,11 @@ existing `khora[logfire]` users.
 
 - `khora-accel 0.10.3` published to PyPI; `khora 0.10.3` was **not** published (the lockstep-sed bug fixed in 0.10.4 produced `0.10.4.dev0` for khora). Use 0.10.4+ for the matched-pair install.
 
-## [0.10.2] — Publishing migrated to PyPI
+## [0.10.2] - Publishing migrated to PyPI
 
 ### Changed
 
-- **Publishing target**: moved from AWS CodeArtifact to **public PyPI** under the Deyta organization (PR #524). Uses PyPI Trusted Publishing via GitHub OIDC — no API tokens, no AWS, no secrets in the repo. `pypa/gh-action-pypi-publish@release/v1` with an environment-bound trusted publisher per project.
+- **Publishing target**: moved from AWS CodeArtifact to **public PyPI** under the Deyta organization (PR #524). Uses PyPI Trusted Publishing via GitHub OIDC - no API tokens, no AWS, no secrets in the repo. `pypa/gh-action-pypi-publish@release/v1` with an environment-bound trusted publisher per project.
 - **khora-accel** now ships as an **sdist only** (no platform-wheel matrix). Users compile the Rust extension at install time via maturin's PEP 517 backend; requires a Rust toolchain (`rustup`) on the install host.
 - **Version lockstep**: khora and khora-accel are always released at identical versions. The published khora wheel pins `khora-accel == X.Y.Z` exact.
 - **Publish order**: serialized `publish-accel → publish-khora` so khora's wheel can only land on PyPI if accel is already resolvable.
@@ -680,9 +680,9 @@ existing `khora[logfire]` users.
 
 - `khora-accel 0.10.2` published to PyPI; `khora 0.10.2` was **not** published (the `fetch-tags` bug fixed in 0.10.3 produced `0.10.3.dev0` for khora). Use 0.10.4+ for the matched-pair install.
 
-## [0.10.1] — Remove `graphrag` engine
+## [0.10.1] - Remove `graphrag` engine
 
-### Removed — BREAKING
+### Removed - BREAKING
 
 - **`graphrag` engine.** `engine="graphrag"` no longer accepted by `Khora(...)` or
   `create_engine(...)`; raises `ValueError: Unknown engine: graphrag` on 0.10.1+.
@@ -721,9 +721,9 @@ The engine had no external dependencies and only one internal consumer
 (`genesis`, which has migrated in lockstep). The breaking-change cost of a
 deprecation shim was higher than the breaking-change cost of a hard removal.
 
-## [0.10.0] — Rename `MemoryLake` → `Khora`, drop "Memory Lake" branding
+## [0.10.0] - Rename `MemoryLake` → `Khora`, drop "Memory Lake" branding
 
-### Changed — BREAKING
+### Changed - BREAKING
 
 - **`MemoryLake` → `Khora`.** The top-level facade class is now `Khora`.
   Import path: `from khora import Khora` (was `from khora import MemoryLake`).
@@ -747,11 +747,11 @@ deprecation shim was higher than the breaking-change cost of a hard removal.
 ### Unchanged (deliberately)
 
 - `khora.memory.*` metric names (`khora.memory.recall.duration`,
-  `khora.memory.ingest.duration`) — generic concept of memory storage,
+  `khora.memory.ingest.duration`) - generic concept of memory storage,
   not the retired brand. Operator dashboards keep working.
 - `khora_alembic_version` table name and advisory lock id
-  `6001515088189075507` — schema continuity.
-- SurrealDB `memory_namespace` table name — unrelated to the brand.
+  `6001515088189075507` - schema continuity.
+- SurrealDB `memory_namespace` table name - unrelated to the brand.
 - `KHORA_` env-var prefix.
 
 ### Migration
@@ -766,22 +766,22 @@ deprecation shim was higher than the breaking-change cost of a hard removal.
 ```
 
 
-## [Unreleased] — Recall API time bounds honored
+## [Unreleased] - Recall API time bounds honored
 
-### Fixed — API-supplied `temporal_filter` no longer dropped
+### Fixed - API-supplied `temporal_filter` no longer dropped
 
 Callers passing an explicit `temporal_filter` to `MemoryLake.recall()` had their bounds silently bypassed in two places:
 
 * **vectorcypher**: when `temporal_filter` was provided, the auto-detection branch (which also synthesizes the `TemporalSignal` consumed by the retriever's skip-fallback / version-filter / recency-weighting logic) was skipped entirely. The retriever then saw `temporal_signal=None` and applied none of the temporal-aware behavior the caller had asked for, including the sparse-results fallback that re-runs the search without the time bound.
-* **graphrag**: same shape — the auto-detect block was guarded by `temporal_filter is None`, so the resulting `RecallResult.metadata` was missing `temporal_category` / `temporal_confidence` for API-bounded queries.
+* **graphrag**: same shape - the auto-detect block was guarded by `temporal_filter is None`, so the resulting `RecallResult.metadata` was missing `temporal_category` / `temporal_confidence` for API-bounded queries.
 
-Both engines now synthesize an `EXPLICIT`-category `TemporalSignal` with `confidence=1.0` and `source="api"` when `temporal_filter` is supplied, so downstream behavior is consistent regardless of whether the bounds came from the caller or were detected from the query string. The new `source="api"` value joins the existing `"dictionary"` / `"semantic"` / `"none"` set on the `temporal_detect` span — telemetry contract unchanged (span attributes are not enumerated). graphrag's `apply_recency_bias` remains untouched on the API path: `EXPLICIT` does not match the `RECENCY`/`STATE_QUERY` guard, preserving existing behavior for API callers.
+Both engines now synthesize an `EXPLICIT`-category `TemporalSignal` with `confidence=1.0` and `source="api"` when `temporal_filter` is supplied, so downstream behavior is consistent regardless of whether the bounds came from the caller or were detected from the query string. The new `source="api"` value joins the existing `"dictionary"` / `"semantic"` / `"none"` set on the `temporal_detect` span - telemetry contract unchanged (span attributes are not enumerated). graphrag's `apply_recency_bias` remains untouched on the API path: `EXPLICIT` does not match the `RECENCY`/`STATE_QUERY` guard, preserving existing behavior for API callers.
 
 ---
 
-## [Unreleased] — Connector throughput restoration
+## [Unreleased] - Connector throughput restoration
 
-### Performance — restore pre-0.9.0 LiteLLM throughput
+### Performance - restore pre-0.9.0 LiteLLM throughput
 
 The shared aiohttp session introduced in v0.9.0 was created with hard-coded `TCPConnector(limit=20, limit_per_host=10)`. `limit_per_host=10` silently throttled all OpenAI / Anthropic / etc. requests to 10 in flight per host, regardless of caller-configured concurrency. Downstream services (e.g. Genesis with `max_concurrent_llm_calls=200`) regressed ~5–20× on wall-time after upgrading to 0.9.x because the shared session became the dominant ceiling on parallel LLM/embedding calls.
 
@@ -795,30 +795,30 @@ The connector is now configurable through `LiteLLMConfig` and `LLMSettings`:
 
 Defaults restore pre-0.9.0 throughput: total cap is generous, no per-host throttle. Fields are read by `_init_shared_session` from a cache populated by `configure_litellm` (first-call-wins; subsequent calls with non-matching connector settings log a warning and are ignored).
 
-**Migration call-out** — anyone who relied on the v0.9.0 connector throttle as a budget brake or rate-limit circuit-breaker should set `max_connections_per_host` explicitly in YAML / env (`KHORA_LLM_MAX_CONNECTIONS_PER_HOST`). On Anthropic Claude tier 1 in particular, an unlimited per-host connector combined with extraction loops can produce 429 storms that the previous 10-cap masked. Pick a value that matches your provider tier rather than relying on the connector for backpressure.
+**Migration call-out** - anyone who relied on the v0.9.0 connector throttle as a budget brake or rate-limit circuit-breaker should set `max_connections_per_host` explicitly in YAML / env (`KHORA_LLM_MAX_CONNECTIONS_PER_HOST`). On Anthropic Claude tier 1 in particular, an unlimited per-host connector combined with extraction loops can produce 429 storms that the previous 10-cap masked. Pick a value that matches your provider tier rather than relying on the connector for backpressure.
 
 ### Out of scope (related but tracked separately)
 
-* `_bisect_and_extract` issues up to 2N LLM calls when truncation is detected — amplifies any concurrency change downstream. Not touched here.
+* `_bisect_and_extract` issues up to 2N LLM calls when truncation is detected - amplifies any concurrency change downstream. Not touched here.
 * unified pending processor spawns 20 background workers on every `MemoryLake.connect()` even for engines that never call `submit_batch`. Idle but not free. Not touched here.
 
 ---
 
-## [Unreleased] — Telemetry Public Surface, OSS Observability Contract
+## [Unreleased] - Telemetry Public Surface, OSS Observability Contract
 
 Telemetry workstream (PRs #504–#509) shipped after the v0.9.1 tag. It hardens cardinality safety, codifies the public observability surface as a JSON contract enforced by a CI drift gate, fixes a silent regression that had been zeroing out `storage_events.namespace_id` since February 2026, and broadens metric coverage. The OSS implication: public telemetry names are now API and break the same way any other public symbol does.
 
 ### Added
 
 - **Public observability contract.** `docs/telemetry-contract.json` lists every public export in `khora.telemetry.__all__` (19 names), every `LLMEvent` / `StorageEvent` / `PipelineEvent` field, all 22 collector-recorded pipeline stages, all 58 `trace_span(...)` call sites (22 public, 36 internal), and all 21 metrics (16 public, 5 internal). `docs/telemetry-contract.md` is the human-facing explainer. `tests/unit/telemetry/test_contract.py` (10-test drift gate) walks the codebase via ripgrep and fails CI on any undeclared instrumentation. (#505)
-- **`khora.telemetry.bounded_text_hash`.** Helper that turns free-text span attributes (raw query, document content, chunk text) into a SHA1[:8] hash — caps cardinality and removes the privacy hazard of raw text on spans. Now used at the four query / extraction sites that previously emitted raw text. (#504)
+- **`khora.telemetry.bounded_text_hash`.** Helper that turns free-text span attributes (raw query, document content, chunk text) into a SHA1[:8] hash - caps cardinality and removes the privacy hazard of raw text on spans. Now used at the four query / extraction sites that previously emitted raw text. (#504)
 - **Chronicle abstention metrics.** `khora.chronicle.abstention_signal` (counter, public) and `khora.chronicle.abstention_combined_score` (histogram, public) aggregate the four boolean abstention signals + combined score that `RecallResult.metadata["abstention_signals"]` exposes per call, so abstention rate and confidence distribution can be tracked at fleet scale instead of only inspected per-request. (#507)
-- **Aggregate operator metrics.** `khora.memory.recall.duration` (histogram, public, seconds), `khora.memory.ingest.duration` (histogram, public, seconds), `khora.llm.tokens` (counter, public), `khora.llm.cost_usd` (counter, public), `khora.log.queue.depth` (gauge, public, proxy via handler-error count — loguru 0.7.3 does not expose `qsize()`). (#509)
+- **Aggregate operator metrics.** `khora.memory.recall.duration` (histogram, public, seconds), `khora.memory.ingest.duration` (histogram, public, seconds), `khora.llm.tokens` (counter, public), `khora.llm.cost_usd` (counter, public), `khora.log.queue.depth` (gauge, public, proxy via handler-error count - loguru 0.7.3 does not expose `qsize()`). (#509)
 - **Six additional LLM call sites instrumented.** HyDE, listwise rerank, fact extraction, fact reconciliation, event extraction now record `LLMEvent` rows; chat was already wired. Two patterns coexist (`_telemetry_op="..."` through `khora.config.llm.acompletion` vs. inline `record_llm_call` after direct litellm calls); both are documented in `CLAUDE.md`. (#508)
 
 ### Fixed
 
-- **`storage_events.namespace_id` 100% NULL since Feb 2026.** Restored namespace propagation through the storage telemetry path. The break had survived multiple releases because no operator dashboard was reading the column — surfaced during the Phase-0 audit. (#506)
+- **`storage_events.namespace_id` 100% NULL since Feb 2026.** Restored namespace propagation through the storage telemetry path. The break had survived multiple releases because no operator dashboard was reading the column - surfaced during the Phase-0 audit. (#506)
 
 ### OSS implication
 
@@ -828,7 +828,7 @@ Telemetry workstream (PRs #504–#509) shipped after the v0.9.1 tag. It hardens 
 
 ---
 
-## [0.9.0] — 2026-05-02 — Embedded Backend Realignment, Production-Readiness Scoping
+## [0.9.0] - 2026-05-02 - Embedded Backend Realignment, Production-Readiness Scoping
 
 ### Embedded backend overhaul
 
@@ -836,11 +836,11 @@ The v0.9.0 embedded path lands as a complete-but-experimental SQLite + LanceDB s
 
 **Production-readiness scoping (per stack, not per engine).** Stamping is now per `(engine × storage stack)`:
 
-- **VectorCypher** — production-ready on **PostgreSQL + pgvector + Neo4j** only.
-- **Chronicle** — production-ready on **PostgreSQL + pgvector** (no graph DB required).
-- **GraphRAG** and **Skeleton** — available; same PG-based stacks.
-- **SQLite + LanceDB** for any engine — **experimental**. Documented scale ceiling: ~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3.
-- **SurrealDB** for any engine — **experimental**. Python SDK on alpha track (`>=2.0.0a1`); KNN unreliable in embedded mode (brute-force cosine + HNSW fallback).
+- **VectorCypher** - production-ready on **PostgreSQL + pgvector + Neo4j** only.
+- **Chronicle** - production-ready on **PostgreSQL + pgvector** (no graph DB required).
+- **GraphRAG** and **Skeleton** - available; same PG-based stacks.
+- **SQLite + LanceDB** for any engine - **experimental**. Documented scale ceiling: ~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3.
+- **SurrealDB** for any engine - **experimental**. Python SDK on alpha track (`>=2.0.0a1`); KNN unreliable in embedded mode (brute-force cosine + HNSW fallback).
 
 See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md#production-readiness-by-stack-v090) for the full matrix.
 
@@ -848,13 +848,13 @@ See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md#produc
 
 - (#482): VectorCypher wired to the `sqlite_lance` backend.
 - (#481): Skeleton wired to the `sqlite_lance` backend with a temporal-store adapter.
-- GraphRAG embedded path pushes the temporal filter into the LanceDB WHERE — was previously post-hoc and xfail-pinned.
+- GraphRAG embedded path pushes the temporal filter into the LanceDB WHERE - was previously post-hoc and xfail-pinned.
 - (#486): Temporal filter pushed into SQLite-side WHERE in the GraphRAG embedded chunk fetch path.
 - VectorCypher honours `metadata['occurred_at']` on the embedded path (parity with `remember_batch`).
 
 ### Embedded retrieval correctness
 
-- Chronicle channels (BM25 / semantic / temporal / entity) now share the same `created_after`/`created_before` bounds — fixes channel divergence that broke RRF fusion.
+- Chronicle channels (BM25 / semantic / temporal / entity) now share the same `created_after`/`created_before` bounds - fixes channel divergence that broke RRF fusion.
 - Recursive-CTE graph traversal switched from node-visited to edge-visited tracking (mirrors Neo4j `MATCH [*1..N]`).
 - `valid_until > now` filter inlined into both anchor and recursive arms of the CTE.
 - Skeleton tag-cast and `occurred_at` parsing fixes (`Skeleton.remember()` parity with `remember_batch()`).
@@ -863,13 +863,13 @@ See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md#produc
 
 ### Embedded warts (documented, not fixed)
 
-- **Partial atomicity in `coordinator.transaction()`** on embedded — only the SQL session is enrolled; LanceDB writes happen post-commit with compensating deletes.
+- **Partial atomicity in `coordinator.transaction()`** on embedded - only the SQL session is enrolled; LanceDB writes happen post-commit with compensating deletes.
 - **Point-in-time queries** are not supported on the embedded stack. The CTE port does not implement PIT semantics. Tracked.
-- **FTS5 on chunks only** — entity-anchored recall falls back to `LIKE` / JSON-equality on embedded. Use the PostgreSQL stack for entity-heavy corpora.
+- **FTS5 on chunks only** - entity-anchored recall falls back to `LIKE` / JSON-equality on embedded. Use the PostgreSQL stack for entity-heavy corpora.
 
 ### Deprecated
 
-- **Kuzu graph backend** (`khora[kuzu]`) — deprecated in 0.9.0, scheduled for removal in 0.10. Kuzu was acquired by Apple in October 2025 and the upstream repository is archived. Migrate to SQLite + LanceDB (embedded) or PostgreSQL + Neo4j (production).
+- **Kuzu graph backend** (`khora[kuzu]`) - deprecated in 0.9.0, scheduled for removal in 0.10. Kuzu was acquired by Apple in October 2025 and the upstream repository is archived. Migrate to SQLite + LanceDB (embedded) or PostgreSQL + Neo4j (production).
 
 ### v0.10 roadmap
 
@@ -877,21 +877,21 @@ Two deferred decisions for v0.10 address the embedded warts:
 
 - **sqlite-vec** as a candidate to collapse the SQLite + LanceDB dual-store into a single in-SQLite-transaction vector store (eliminates partial atomicity, drops install footprint from ~150 MB to ~5 MB).
 - **`pgserver` (embedded Postgres)** as a candidate for true production-parity embedded mode (HNSW recall, real ACID, zero schema fork).
-- **Default embedded URI routing** — currently `MemoryLake("memory://")` treats the URL as the PostgreSQL `database_url`; SurrealDB owns the `memory://` scheme internally. Routing a top-level `memory://` URI to the recommended embedded stack is a v0.10 code change.
-- **`lance-graph` integration** is explicitly **deferred to v0.10** — no second 0.x Rust crate enters a "production-ready" path in v0.9.0.
+- **Default embedded URI routing** - currently `MemoryLake("memory://")` treats the URL as the PostgreSQL `database_url`; SurrealDB owns the `memory://` scheme internally. Routing a top-level `memory://` URI to the recommended embedded stack is a v0.10 code change.
+- **`lance-graph` integration** is explicitly **deferred to v0.10** - no second 0.x Rust crate enters a "production-ready" path in v0.9.0.
 
 ---
 
-## [Unreleased] — Graph Backends, Temporal Precision, Discovery Agent Overhaul
+## [Unreleased] - Graph Backends, Temporal Precision, Discovery Agent Overhaul
 
 ### Added
 - Codified the khora public API surface consumed by downstream packages (genesis, khora-benchmarks, khora-explorer, khora-cli).
 
 ### Removed
-- `khora` console script and CLI subcommands (`extract`, `search`) — moved to khora-cli. Install with `uv pip install khora-cli` and run `uv run khora-cli extract` / `uv run khora-cli search`.
+- `khora` console script and CLI subcommands (`extract`, `search`) - moved to khora-cli. Install with `uv pip install khora-cli` and run `uv run khora-cli extract` / `uv run khora-cli search`.
 - `khora ontology` CLI subcommands (moved to khora-explorer)
 - `khora.discovery` package (moved to khora-explorer)
-- `khora.cli` package (entire subtree — `extract`, `search`, `_common`)
+- `khora.cli` package (entire subtree - `extract`, `search`, `_common`)
 - `click` and `rich` dropped from core dependencies (only the CLI used them)
 
 ### Changed
@@ -933,12 +933,12 @@ Two deferred decisions for v0.10 address the embedded warts:
 - KhoraError exception hierarchy with domain-specific exceptions (#282)
 
 ### Performance
-- Cross-encoder model caching — avoid reloading per query (#270, #340)
+- Cross-encoder model caching - avoid reloading per query (#270, #340)
 - asyncio.to_thread for reranker inference (#317)
 - Column projection excludes embeddings from search results (#317)
 - ef_search at connection level (#317)
 - Parallel Chronicle channels (#301)
-- CI parallel jobs — 50% faster feedback (#335)
+- CI parallel jobs - 50% faster feedback (#335)
 
 ### Configuration
 - Default engine changed from graphrag to vectorcypher
@@ -962,7 +962,7 @@ Two deferred decisions for v0.10 address the embedded warts:
 
 ---
 
-## [0.7.0] — 2026-04-02 — Chronicle Engine, Semantic Hooks, Retrieval Quality
+## [0.7.0] - 2026-04-02 - Chronicle Engine, Semantic Hooks, Retrieval Quality
 
 ### Chronicle engine (new)
 
@@ -971,9 +971,9 @@ Two deferred decisions for v0.10 address the embedded warts:
 - Ebbinghaus forgetting curve for temporal decay scoring
 - Event decomposition into SVO tuples with triple timestamps (observation, referenced, relative)
 - Progressive memory compression with contradiction detection (ADD/UPDATE/DELETE/NOOP)
-- LanceDB embedded vector store option — file-backed, no server (`pip install khora[lancedb]`)
+- LanceDB embedded vector store option - file-backed, no server (`pip install khora[lancedb]`)
 - Rust-accelerated temporal scoring via khora-accel
-- No graph database required — PostgreSQL + pgvector only
+- No graph database required - PostgreSQL + pgvector only
 
 ### Semantic hooks
 
@@ -982,7 +982,7 @@ Two deferred decisions for v0.10 address the embedded warts:
 - `HookDispatcher` with async concurrent dispatch and failure isolation
 - Binary-quantized embedding cache for sub-microsecond pre-screening (Hamming distance)
 - Configurable via `KHORA_HOOKS_ENABLED`, `KHORA_HOOKS_FILTER_MODEL` env vars
-- Wired into ingestion pipeline — fires during entity/relationship extraction
+- Wired into ingestion pipeline - fires during entity/relationship extraction
 
 ### Retrieval quality
 
@@ -1001,7 +1001,7 @@ Two deferred decisions for v0.10 address the embedded warts:
 
 ### Bug fixes
 
-- Fix `run_migrations()` on fresh PostgreSQL database — use `information_schema.tables` (#201)
+- Fix `run_migrations()` on fresh PostgreSQL database - use `information_schema.tables` (#201)
 - Reduce extraction batch size from 10 to 5 and make configurable (#195)
 - Move per-document extraction log lines from INFO to DEBUG (#196)
 
@@ -1011,7 +1011,7 @@ Two deferred decisions for v0.10 address the embedded warts:
 
 ---
 
-## [0.6.0] — 2026-03-28 — SurrealDB Optimization, Ontology CLI, Discovery Agent
+## [0.6.0] - 2026-03-28 - SurrealDB Optimization, Ontology CLI, Discovery Agent
 
 ### SurrealDB backend hardening
 
@@ -1035,9 +1035,9 @@ Two deferred decisions for v0.10 address the embedded warts:
 
 ### Ontology CLI (`khora ontology`)
 
-- `khora ontology construct --source <path>` — AI-powered ontology construction from data (#138, #140, #141)
-- `khora ontology validate <file>` — schema + reference integrity validation (#138)
-- `khora ontology preview <file>` — Rich table + tree display (#138)
+- `khora ontology construct --source <path>` - AI-powered ontology construction from data (#138, #140, #141)
+- `khora ontology validate <file>` - schema + reference integrity validation (#138)
+- `khora ontology preview <file>` - Rich table + tree display (#138)
 - `OntologyLLM` wrapper with token/cost tracking and `--budget` USD cap (#138)
 - Stratified multi-source data sampling (sqrt-weighted allocation) (#140)
 - Domain detection, entity/relationship/rule inference via LLM (#140)
@@ -1091,7 +1091,7 @@ Two deferred decisions for v0.10 address the embedded warts:
 
 ---
 
-## [0.5.5] — 2026-03-26 — Ontology CLI & SurrealDB Hardening
+## [0.5.5] - 2026-03-26 - Ontology CLI & SurrealDB Hardening
 
 First release with the ontology construction CLI and comprehensive SurrealDB
 optimization audit. Includes the entity key gate, SDK upgrade to 2.0.0a1,
@@ -1100,7 +1100,7 @@ breakdown (0.5.5 was the last tagged release before the 0.6.0 cycle).
 
 ---
 
-## [0.5.4] — 2026-03-25 — Test Audit & CI Fixes
+## [0.5.4] - 2026-03-25 - Test Audit & CI Fixes
 
 - Replace `__slots__` implementation-detail tests with behavioral checks (#128)
 - Fix publish-accel uv cache failure (#129)
@@ -1108,20 +1108,20 @@ breakdown (0.5.5 was the last tagged release before the 0.6.0 cycle).
 
 ---
 
-## [0.5.3] — 2026-03-24 — macOS Build Fix
+## [0.5.3] - 2026-03-24 - macOS Build Fix
 
 - Remove x86_64-apple-darwin from macOS build matrix (#125)
 
 ---
 
-## [0.5.2] — 2026-03-24 — Release Pipeline Consolidation
+## [0.5.2] - 2026-03-24 - Release Pipeline Consolidation
 
 - Consolidate khora and khora-accel into single release pipeline (#124)
 - Fix accel build matrix and sccache configuration (#124)
 
 ---
 
-## [0.5.1] — 2026-03-24 — First Tagged Release
+## [0.5.1] - 2026-03-24 - First Tagged Release
 
 First release with git-tag-based versioning via `hatch-vcs`. Includes all
 features from 0.4.0 and 0.5.0 internal versions.
@@ -1133,7 +1133,7 @@ features from 0.4.0 and 0.5.0 internal versions.
 
 ---
 
-## [0.5.0] — SurrealDB Unified Backend & Engine Modernization
+## [0.5.0] - SurrealDB Unified Backend & Engine Modernization
 
 ### SurrealDB unified backend (Phase 1–4)
 
@@ -1168,7 +1168,7 @@ features from 0.4.0 and 0.5.0 internal versions.
 
 ### Migrations & deprecations
 
-- Deprecate `create_tables()`/`init_db()` — use `run_migrations()` (#98)
+- Deprecate `create_tables()`/`init_db()` - use `run_migrations()` (#98)
 - Migration drift CI test (`test_migration_drift.py`)
 - `khora_alembic_version` dedicated version table
 - Advisory lock for concurrent migration safety
@@ -1182,13 +1182,13 @@ features from 0.4.0 and 0.5.0 internal versions.
 
 ---
 
-## [0.4.0] — Logfire Telemetry, Namespace Versioning, Alembic Overhaul
+## [0.4.0] - Logfire Telemetry, Namespace Versioning, Alembic Overhaul
 
 ### Logfire / OTEL integration
 
 - Optional `logfire` integration for distributed tracing (#32)
 - `trace_span()` context manager and `@trace` decorator
-- `_HAS_LOGFIRE` feature flag — zero-cost no-op when absent
+- `_HAS_LOGFIRE` feature flag - zero-cost no-op when absent
 - Consumers import from `khora.telemetry`, not `logfire_integration`
 
 ### Namespace versioning
@@ -1210,7 +1210,7 @@ features from 0.4.0 and 0.5.0 internal versions.
 
 ### FastAPI removal
 
-- Remove FastAPI dependency — Khora is a library, not a web app (#35)
+- Remove FastAPI dependency - Khora is a library, not a web app (#35)
 
 ### Other
 
@@ -1221,7 +1221,7 @@ features from 0.4.0 and 0.5.0 internal versions.
 
 ---
 
-## [0.3.10] — Chunker Safety & Rust Performance
+## [0.3.10] - Chunker Safety & Rust Performance
 
 ### Empty chunk filtering
 
@@ -1256,13 +1256,13 @@ iteration to avoid thread-pool overhead that dominated at small scale.
 
 ---
 
-## [0.3.9] — Key-Aware Neo4j Write Coordination
+## [0.3.9] - Key-Aware Neo4j Write Coordination
 
 ### Why: overlapping MERGE batches caused Neo4j lock contention
 
 The entity write path used a plain semaphore (concurrency 12) to limit concurrent
 Neo4j transactions. This prevented connection exhaustion but allowed overlapping
-`MERGE` transactions — two batches touching the same entity key would run
+`MERGE` transactions - two batches touching the same entity key would run
 concurrently, causing Neo4j to detect lock contention, abort one transaction, and
 retry with ~1 s exponential backoff. Under heavy ingestion this cascaded into
 minutes of wasted retries.
@@ -1270,7 +1270,7 @@ minutes of wasted retries.
 ### `_EntityKeyGate` replaces entity write semaphore
 
 New `_EntityKeyGate` class (`storage/backends/neo4j.py`) tracks in-flight entity
-keys — `(namespace_id, name, entity_type)`, the same triple used in the Cypher
+keys - `(namespace_id, name, entity_type)`, the same triple used in the Cypher
 `MERGE` clause. Non-overlapping batches proceed concurrently (up to
 `entity_write_concurrency`, default 12). Overlapping batches are automatically
 serialized at the gate, eliminating Neo4j-side retries entirely.
@@ -1287,7 +1287,7 @@ transactions don't contend.
 
 ---
 
-## [0.3.8] — Temporal Search Improvements
+## [0.3.8] - Temporal Search Improvements
 
 ### Why: temporal queries silently degraded to generic search
 
@@ -1296,7 +1296,7 @@ When the LLM timed out (2s budget), the heuristic fallback detected temporal
 was applied. "What happened last week?" returned the same results as "What
 happened?". Additionally, temporal filtering happened post-retrieval in Stage 3
 (Python-side soft scoring on 200 candidates) instead of as SQL WHERE clauses in
-Stage 1, wasting retrieval budget. Chunks also lacked source timestamps — a
+Stage 1, wasting retrieval budget. Chunks also lacked source timestamps - a
 Slack message sent Jan 15 but ingested Jan 20 appeared as a Jan 20 event.
 
 ### Two-tier temporal resolver
@@ -1347,11 +1347,11 @@ New fields in `QuerySettings`: `enable_temporal_resolver` (default `True`),
 
 ### Migrations
 
-- `009_temporal_search_indexes` — temporal indexes, `source_timestamp` columns
+- `009_temporal_search_indexes` - temporal indexes, `source_timestamp` columns
 
 ---
 
-## [0.3.7] — Stability Fixes
+## [0.3.7] - Stability Fixes
 
 ### Fixed
 
@@ -1366,7 +1366,7 @@ New fields in `QuerySettings`: `enable_temporal_resolver` (default `True`),
 
 ---
 
-## [0.3.6] — VectorCypher Entity Search Fix
+## [0.3.6] - VectorCypher Entity Search Fix
 
 ### Fixed
 
@@ -1375,7 +1375,7 @@ New fields in `QuerySettings`: `enable_temporal_resolver` (default `True`),
 
 ---
 
-## [0.3.5] — Phase 3 Benchmark Optimizations
+## [0.3.5] - Phase 3 Benchmark Optimizations
 
 ### Temporal retrieval
 
@@ -1411,15 +1411,15 @@ New fields in `QuerySettings`: `enable_temporal_resolver` (default `True`),
 
 ---
 
-## [0.3.4] — ty Type Checker Clean
+## [0.3.4] - ty Type Checker Clean
 
-- Resolve all remaining `ty` diagnostics — `ty check src/` now passes with
+- Resolve all remaining `ty` diagnostics - `ty check src/` now passes with
   zero warnings.
 - Version bump 0.3.3 → 0.3.4.
 
 ---
 
-## [0.3.3] — Neo4j Deadlock Fixes
+## [0.3.3] - Neo4j Deadlock Fixes
 
 - Shared semaphore for Neo4j relationship writes to prevent deadlocks during
   concurrent batch ingestion.
@@ -1429,7 +1429,7 @@ New fields in `QuerySettings`: `enable_temporal_resolver` (default `True`),
 
 ---
 
-## [0.3.2] — Phase 2 Benchmark Optimizations
+## [0.3.2] - Phase 2 Benchmark Optimizations
 
 - Restore parallel Neo4j writes and reduce relationship volume.
 - Add co-occurrence edges, lazy entity expansion, skeleton skip, and
@@ -1439,12 +1439,12 @@ New fields in `QuerySettings`: `enable_temporal_resolver` (default `True`),
 
 ---
 
-## [0.3.1] — Benchmark-Driven Optimizations
+## [0.3.1] - Benchmark-Driven Optimizations
 
 ### Why: restoring incremental MRR and improving retrieval quality
 
 Benchmark run `2f7d4b0b` revealed that incremental ingestion (add
-documents in multiple batches) produced an MRR of 0.0 — newly ingested
+documents in multiple batches) produced an MRR of 0.0 - newly ingested
 content was effectively invisible to queries. Root cause analysis by a
 6-specialist agent team identified compounding bugs in entity ID
 mapping, BM25 cache invalidation, and a config mismatch that disabled
@@ -1586,20 +1586,20 @@ MERGE, BM25 cache invalidation, and full remember→recall flows.
 
 ### Migrations
 
-- `007_hnsw_parameter_tuning` — HNSW m=24, ef_construction=128
-- `008_entity_dedup_and_indexes` — Entity dedup + unique constraint,
+- `007_hnsw_parameter_tuning` - HNSW m=24, ef_construction=128
+- `008_entity_dedup_and_indexes` - Entity dedup + unique constraint,
   khora_chunks composite index, entity temporal partial indexes
 
 ---
 
-## [0.3.0] — Engineering Improvements
+## [0.3.0] - Engineering Improvements
 
 ### Why: removing accidental complexity
 
 Global state in database session management, UUID string wrapping across
 52 ORM columns, redundant connection pools for backends sharing the same
 database URL, and stale deprecated APIs that no longer matched the
-codebase — none of these served users, and all of them created friction
+codebase - none of these served users, and all of them created friction
 for contributors. This release removes the accidental complexity so the
 next round of features lands on cleaner ground.
 
@@ -1607,7 +1607,7 @@ next round of features lands on cleaner ground.
 
 All 52 UUID columns in `db/models.py` now declare `as_uuid=True`,
 mapping to native Python `uuid.UUID` objects. This is a Python-side-only
-change — the PostgreSQL column type remains `UUID`. The practical effect
+change - the PostgreSQL column type remains `UUID`. The practical effect
 is that code no longer needs `str()` wrapping when building ORM models
 or `UUID()` parsing when reading them. Graph backends (Neo4j, Kuzu,
 Memgraph) still convert at the boundary because they don't support
@@ -1640,31 +1640,31 @@ to join the active transaction.
 
 ### Deprecated API cleanup
 
-- `lake.storage` — promoted to stable public API (used by `genesis` and
+- `lake.storage` - promoted to stable public API (used by `genesis` and
   `khora-benchmarks`). The deprecation warning has been removed.
-- `lake.query_engine` — removed. Use `lake.recall(raw=True)` for
+- `lake.query_engine` - removed. Use `lake.recall(raw=True)` for
   unprocessed search results.
-- `remember_batch_legacy()` — removed. Use `remember_batch()`.
+- `remember_batch_legacy()` - removed. Use `remember_batch()`.
 
 ### Chat module tests
 
 71 new tests across 4 files covering the chat module (`chat/engine.py`,
 `chat/history.py`, `chat/persona.py`, `chat/prompt.py`). The module
-itself is unchanged — these tests document and lock existing behavior.
+itself is unchanged - these tests document and lock existing behavior.
 
 ### spaCy sentence splitting
 
 The semantic chunker now uses spaCy's `sentencizer` component when
 available, improving sentence boundary detection. Install with
 `pip install khora[nlp]`. The sentencizer is a rule-based component
-that ships with spaCy core — no model download needed. When spaCy is
+that ships with spaCy core - no model download needed. When spaCy is
 not installed, the chunker falls back to its existing regex-based
 splitter transparently.
 
 ### Docker removal
 
 The `Dockerfile` and CI `docker-build` job have been removed. Khora is
-a library, not a deployable application — the Dockerfile was never used
+a library, not a deployable application - the Dockerfile was never used
 in production and added maintenance burden. Development databases
 continue to use `compose.yaml` via `make dev`.
 
@@ -1676,14 +1676,14 @@ continue to use `compose.yaml` via `make dev`.
 
 ---
 
-## [0.2.3] — Namespace Optimization Design
+## [0.2.3] - Namespace Optimization Design
 
 ### Why: surfacing what's real vs. what's aspirational
 
 A team of five specialist agents audited Khora's namespace isolation,
 multi-tenancy enforcement, and temporal extraction paths. The audit
-found that several documented features — `TenancyMode` routing, ACL
-enforcement, bi-temporal edge storage, and the time hierarchy builder —
+found that several documented features - `TenancyMode` routing, ACL
+enforcement, bi-temporal edge storage, and the time hierarchy builder -
 exist as code but are never exercised at runtime. Meanwhile, the
 namespace-level row filtering that *is* active lacks an orphan-entity
 cleanup path when documents are deleted. This release ships the
@@ -1696,22 +1696,22 @@ act on it.
 New `docs/design/namespace-optimization-plan.md` lays out a six-phase
 implementation roadmap:
 
-1. **Orphan fix** — delete graph entities left behind after `forget()`.
-2. **Data-model hardening** — add `namespace_id` to Neo4j entity/chunk
+1. **Orphan fix** - delete graph entities left behind after `forget()`.
+2. **Data-model hardening** - add `namespace_id` to Neo4j entity/chunk
    nodes and enforce it in Cypher queries.
-3. **Isolated-mode core** — per-org connection routing driven by
+3. **Isolated-mode core** - per-org connection routing driven by
    `TenancyMode.ISOLATED`.
-4. **Shared-mode ACL** — wire `ACLEnforcer` into the API dependency
+4. **Shared-mode ACL** - wire `ACLEnforcer` into the API dependency
    chain for `TenancyMode.SHARED`.
-5. **ACL enforcement** — row-level security policies and graph-side
+5. **ACL enforcement** - row-level security policies and graph-side
    namespace filtering.
-6. **Rust acceleration** — move hot-path namespace filtering into
+6. **Rust acceleration** - move hot-path namespace filtering into
    `khora-accel`.
 
 ### Dead-code inventory
 
 - `TenancyMode` enum (`core/models/tenancy.py`) is defined but never
-  checked at runtime — all orgs use implicit shared mode.
+  checked at runtime - all orgs use implicit shared mode.
 - `ACLEnforcer` and `ACLContext` (`acl/`) are importable but the API
   dependency in `api/deps.py` is disabled.
 - `TemporalEdgeStorage` and `TimeHierarchyBuilder` (`engines/skeleton/`)
@@ -1724,11 +1724,11 @@ implementation roadmap:
 Added status notices to five documentation files flagging features that
 are designed but not yet wired:
 
-- `docs/architecture/multi-tenancy.md` — TenancyMode and ACL sections.
-- `docs/engines/temporal-model.md` — bi-temporal edge model.
-- `docs/engines/skeleton-engine.md` — architecture diagram components.
-- `README.md` — multi-tenancy feature bullet.
-- `docs/architecture/overview.md` — ACL enforcer mention.
+- `docs/architecture/multi-tenancy.md` - TenancyMode and ACL sections.
+- `docs/engines/temporal-model.md` - bi-temporal edge model.
+- `docs/engines/skeleton-engine.md` - architecture diagram components.
+- `README.md` - multi-tenancy feature bullet.
+- `docs/architecture/overview.md` - ACL enforcer mention.
 
 ### Housekeeping
 
@@ -1736,7 +1736,7 @@ are designed but not yet wired:
 
 ---
 
-## [0.2.2] — VectorCypher Optimization
+## [0.2.2] - VectorCypher Optimization
 
 ### Why: making hybrid retrieval competitive on benchmarks
 
@@ -1760,7 +1760,7 @@ MODERATE keeps the 0.6/0.4 default, and COMPLEX flips to 0.4/0.6
 **Adaptive graph traversal depth.** Previously, graph depth was fixed
 at 2 regardless of how many entry entities the vector search returned.
 When many entities match (≥10), deep traversal explodes the candidate
-set without adding signal — so the retriever now drops to depth 1.
+set without adding signal - so the retriever now drops to depth 1.
 Conversely, when very few entities match (≤2), it increases depth to
 compensate. The thresholds are configurable via `RetrieverConfig`.
 
@@ -1776,9 +1776,9 @@ LLM extraction, producing a denser graph for traversal.
 
 ### Configuration wiring
 
-**`VectorCypherConfig` dataclass.** All VectorCypher-specific knobs —
+**`VectorCypherConfig` dataclass.** All VectorCypher-specific knobs -
 routing, skeleton indexing, graph traversal, fusion weights, temporal
-settings, and search thresholds — live in a single dataclass that can
+settings, and search thresholds - live in a single dataclass that can
 be passed through the `MemoryLake` constructor:
 
 ```python
@@ -1821,14 +1821,14 @@ Three new PostgreSQL indexes improve query-time performance:
 
 ---
 
-## [0.2.1] — Concurrency & Throughput
+## [0.2.1] - Concurrency & Throughput
 
 ### Why: filling the gap Rust opened
 
 Version 0.2.0 moved CPU-bound work (similarity scoring, PageRank, BM25
 indexing) off the Python event loop and into native Rust threads. The
 immediate effect was that CPU cycles were no longer the bottleneck during
-large ingestion runs — network I/O to LLM and embedding providers was.
+large ingestion runs - network I/O to LLM and embedding providers was.
 Concurrency limits that once protected against CPU saturation were now
 artificially capping throughput: async tasks sat idle waiting for
 semaphore permits while the CPU and network had headroom to spare.
@@ -1849,7 +1849,7 @@ embedder now batches 200 texts per request (up from 100) and runs 20
 concurrent embedding calls (up from 10), reducing round-trip overhead
 on high-throughput workloads.
 
-**Ingestion pipeline.** The ingestion flow — Khora's primary data path —
+**Ingestion pipeline.** The ingestion flow - Khora's primary data path -
 doubled three independent limits: concurrent extractions (10 to 20),
 embedding batch size (50 to 100), and concurrent document processing
 (5 to 10). Together these allow the pipeline to keep more documents
@@ -1878,14 +1878,14 @@ The CLI default batch size moved from 10 to 20.
 
 ---
 
-## [0.2.0] — Rust Acceleration Layer
+## [0.2.0] - Rust Acceleration Layer
 
 ### The problem
 
-Profiling large ingestion runs showed that CPU-bound operations —
+Profiling large ingestion runs showed that CPU-bound operations -
 cosine similarity over dense embedding matrices, edit-distance
 computations during entity resolution, PageRank convergence over chunk
-graphs, and BM25 scoring — dominated wall-clock time once documents
+graphs, and BM25 scoring - dominated wall-clock time once documents
 were chunked and LLM calls returned. Python's GIL serialized these
 hot loops, and even NumPy could not parallelize the non-BLAS workloads
 (string comparisons, graph iteration, inverted-index lookups).
@@ -1896,7 +1896,7 @@ Khora 0.2.0 introduces `khora-accel`, a Rust extension built with
 PyO3 and maturin. The design philosophy is **zero mandatory
 dependencies**: a three-tier fallback (`_accel.py`) checks for the
 Rust extension first, then NumPy/RapidFuzz, then pure Python. Every
-accelerated function is a drop-in replacement — the Python signature
+accelerated function is a drop-in replacement - the Python signature
 and return type are identical across all three tiers. Set the
 `KHORA_ACCEL_BACKEND` environment variable to `"rust"`, `"numpy"`, or
 `"python"` to pin a specific tier; leave it unset for automatic
@@ -1930,7 +1930,7 @@ IDF scores across the candidate set.
 **Graph algorithms.** PageRank and chunk-edge construction power Skeleton
 Construction's core indexing step, which identifies the ~10% highest-
 value chunks for targeted LLM extraction. Both functions release the
-GIL and run pure Rust graph iteration — adjacency-list storage,
+GIL and run pure Rust graph iteration - adjacency-list storage,
 iterative convergence with early termination, and O(k^2) bidirectional
 edge generation from keyword co-occurrence weighted by IDF.
 
@@ -1958,11 +1958,11 @@ eliminating Python dict/sort overhead on large ranked lists.
 ### Integration
 
 The `_accel.py` facade exposes 18 public functions consumed by:
-- `engines/skeleton/skeleton.py` — PageRank, chunk edges, keywords, BM25
-- `engines/vectorcypher/fusion.py` — RRF, weighted RRF, score normalization
-- `query/engine.py` — cosine similarity, BM25 search
-- `extraction/entity_resolution.py` — batch entity resolution
-- `storage/` and `pipelines/` — embedding similarity, string matching
+- `engines/skeleton/skeleton.py` - PageRank, chunk edges, keywords, BM25
+- `engines/vectorcypher/fusion.py` - RRF, weighted RRF, score normalization
+- `query/engine.py` - cosine similarity, BM25 search
+- `extraction/entity_resolution.py` - batch entity resolution
+- `storage/` and `pipelines/` - embedding similarity, string matching
 
 The active backend is logged at import time for observability.
 

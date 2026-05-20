@@ -1,6 +1,6 @@
 # Conversation Chunking
 
-Standard text chunkers split on token count or sentence boundaries. That works for articles and docs, but conversations are different — meaning lives in the **exchange** between participants, not in isolated sentences. Splitting a Slack thread mid-reply destroys context.
+Standard text chunkers split on token count or sentence boundaries. That works for articles and docs, but conversations are different - meaning lives in the **exchange** between participants, not in isolated sentences. Splitting a Slack thread mid-reply destroys context.
 
 The `ConversationChunker` groups Slack messages into coherent conversation chunks using three layers of grouping, while preserving per-message metadata so individual messages can still be retrieved from search results.
 
@@ -8,7 +8,7 @@ The `ConversationChunker` groups Slack messages into coherent conversation chunk
 
 ### 1. Thread Grouping
 
-Messages that share a `thread_ts` are always kept together. A Slack thread is an intentional conversational unit — splitting it would break context.
+Messages that share a `thread_ts` are always kept together. A Slack thread is an intentional conversational unit - splitting it would break context.
 
 ```
 Channel timeline:
@@ -22,7 +22,7 @@ Result: one chunk for the deploy thread, one for Carol's message.
 
 ### 2. Temporal Windowing
 
-Top-level messages (not in threads) are split when the time gap between consecutive messages exceeds a threshold (default: 15 minutes). Conversations naturally have pauses — a 30-minute gap likely means a topic change.
+Top-level messages (not in threads) are split when the time gap between consecutive messages exceeds a threshold (default: 15 minutes). Conversations naturally have pauses - a 30-minute gap likely means a topic change.
 
 ```
 10:00 alice: "Working on the API"

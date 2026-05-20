@@ -3,7 +3,7 @@
 khora ships first-party adapters for the major agentic-framework
 ecosystems. Each adapter lives in its own optional extra so importing
 `khora` never drags in a framework you don't use, and the adapter
-module itself imports the framework lazily — the top-level package
+module itself imports the framework lazily - the top-level package
 load is free even with all five extras installed. Every adapter
 satisfies one of two runtime-checkable Protocols in
 `khora.integrations.protocol` (`MemoryAdapter` or `RetrieverAdapter`)
@@ -14,14 +14,14 @@ downstream tooling can discover what is installed.
 
 | Framework | Install | Khora surface |
 |---|---|---|
-| [CrewAI](crewai.md) | `pip install khora[crewai]` | `KhoraMemory` — drop-in storage backend for CrewAI's unified `Memory`. |
-| [LangGraph](langgraph.md) | `pip install khora[langgraph]` | `KhoraStore` — `BaseStore` implementation for `StateGraph` semantic long-term memory. |
-| [Google ADK](google_adk.md) | `pip install khora[google-adk]` | `KhoraMemoryService` — `BaseMemoryService` drop-in for ADK `Runner`. |
-| [OpenAI Agents SDK](openai_agents.md) | `pip install khora[openai-agents]` | `KhoraSession` (`SessionABC`), `khora_recall_tool`, `KhoraMemoryHooks` — compose for session memory, recall-as-tool, and auto-persist. |
+| [CrewAI](crewai.md) | `pip install khora[crewai]` | `KhoraMemory` - drop-in storage backend for CrewAI's unified `Memory`. |
+| [LangGraph](langgraph.md) | `pip install khora[langgraph]` | `KhoraStore` - `BaseStore` implementation for `StateGraph` semantic long-term memory. |
+| [Google ADK](google_adk.md) | `pip install khora[google-adk]` | `KhoraMemoryService` - `BaseMemoryService` drop-in for ADK `Runner`. |
+| [OpenAI Agents SDK](openai_agents.md) | `pip install khora[openai-agents]` | `KhoraSession` (`SessionABC`), `khora_recall_tool`, `KhoraMemoryHooks` - compose for session memory, recall-as-tool, and auto-persist. |
 | [LlamaIndex](llamaindex.md) | `pip install khora[llamaindex]` | `KhoraRetriever` (async `BaseRetriever`), `KhoraMemoryBlock`, and the deprecated `KhoraChatStore`. |
 
-All five adapters share the same khora primitives — `Khora.remember`,
-`Khora.recall`, `Khora.forget`, and `Khora.submit_batch` — so a single
+All five adapters share the same khora primitives - `Khora.remember`,
+`Khora.recall`, `Khora.forget`, and `Khora.submit_batch` - so a single
 khora instance can back several frameworks at once. Each adapter
 documents its namespace-resolution rule (typically a UUID5 derived
 from framework-native identifiers) so two instances pointed at the
@@ -67,7 +67,7 @@ framework adapter:
 - Implement `khora.integrations.protocol.MemoryAdapter` (write side)
   or `RetrieverAdapter` (read side), or both. Both are
   runtime-checkable Protocols.
-- Import the target framework lazily inside the adapter module — top-level
+- Import the target framework lazily inside the adapter module - top-level
   imports of optional frameworks are linted out by
   `tools/check_optional_imports.py` in CI.
 - Map framework-native identifiers to khora namespaces deterministically
@@ -76,10 +76,10 @@ framework adapter:
   group in `pyproject.toml`, or call `khora.integrations.register()` for
   test-only registration.
 - Use `khora.integrations._sync.run_sync` if you need to bridge a sync
-  framework callback into khora's async API — it raises if invoked
+  framework callback into khora's async API - it raises if invoked
   from inside a running event loop, surfacing the deadlock surface
   loudly rather than hanging.
 
-See any of the five shipped adapters for a working template — they
+See any of the five shipped adapters for a working template - they
 range from ~150 LOC (CrewAI) to ~600 LOC (OpenAI Agents) and exercise
 every part of the foundation.

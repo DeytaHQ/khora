@@ -1,18 +1,18 @@
-"""OpenAI Agents SDK + khora example — session memory via ``KhoraSession``.
+"""OpenAI Agents SDK + khora example - session memory via ``KhoraSession``.
 
 Runs without Postgres, Neo4j, or an API key. The mock LLM patches
 ``litellm.acompletion`` / ``litellm.aembedding`` so the example is
 hermetic. The khora fixture spins up an in-memory ``sqlite_lance``
 backend in a tmp dir.
 
-The example does NOT spin up a real ``agents.Runner`` — that would
+The example does NOT spin up a real ``agents.Runner`` - that would
 require a live LLM. Instead it exercises the three khora primitives the
 adapter exposes directly: ``KhoraSession`` (SessionABC contract),
 ``khora_recall_tool`` (FunctionTool factory), and ``KhoraMemoryHooks``
 (RunHooks-shaped). Each is what an ``Agent`` would call into.
 
 Kept deliberately small (single ``add_items`` write) so it finishes
-well under the 30s CI smoke budget — every khora write triggers a full
+well under the 30s CI smoke budget - every khora write triggers a full
 extraction pipeline that retries 3x on the mock LLM's non-JSON output.
 """
 
@@ -43,7 +43,7 @@ async def main() -> None:
         namespace = await kb.create_namespace()
         ns_id = namespace.namespace_id
 
-        # 1) Session — one turn is enough to demonstrate the SessionABC
+        # 1) Session - one turn is enough to demonstrate the SessionABC
         #    contract. Every khora write runs full extraction, so we keep
         #    the example light to fit the 30s CI smoke budget.
         session = KhoraSession(kb=kb, namespace=ns_id, session_id="example-conv-1")
@@ -51,12 +51,12 @@ async def main() -> None:
         items = await session.get_items()
         print(f"Session has {len(items)} item(s); latest: {items[-1]['content']!r}")
 
-        # 2) Recall tool — closes over (kb, namespace, top_k). Construction
+        # 2) Recall tool - closes over (kb, namespace, top_k). Construction
         #    is pure Python; no LLM I/O. An Agent would invoke it later.
         tool = khora_recall_tool(kb=kb, namespace=ns_id, top_k=3)
         print(f"Built recall tool: name={tool.name!r}")
 
-        # 3) Memory hooks — construct only. ``on_tool_end`` would normally
+        # 3) Memory hooks - construct only. ``on_tool_end`` would normally
         #    fire from inside ``Runner.run(...)`` and persist the tool
         #    output. We skip the live call here to keep the example fast.
         hooks = KhoraMemoryHooks(kb=kb, namespace=ns_id, app_id="example")

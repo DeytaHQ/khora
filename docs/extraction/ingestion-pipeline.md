@@ -108,7 +108,7 @@ Staging runs in parallel with controlled concurrency - typically `2 * max_concur
 
 ## Phase 2: Enrichment (Staged Batch Pipeline)
 
-This is where content becomes knowledge. The pipeline uses a **staged batch architecture** — instead of processing each document independently through all steps, all documents flow through each stage together:
+This is where content becomes knowledge. The pipeline uses a **staged batch architecture** - instead of processing each document independently through all steps, all documents flow through each stage together:
 
 ```
 Stage 1: chunk(Doc1, Doc2, ..., DocN)              ← all docs chunked first
@@ -116,7 +116,7 @@ Stage 2: embed(all chunks) ∥ extract(all chunks)   ← parallel across all
 Stage 3: store(all results)                        ← batch writes
 ```
 
-Embedding and extraction run **concurrently** via `asyncio.gather` since they both depend only on chunks — extraction doesn't need embeddings, and embedding doesn't need entities. The staged approach provides better LLM API utilization (larger concurrent batches), more efficient batch database writes, and enables cross-document entity deduplication on the full set.
+Embedding and extraction run **concurrently** via `asyncio.gather` since they both depend only on chunks - extraction doesn't need embeddings, and embedding doesn't need entities. The staged approach provides better LLM API utilization (larger concurrent batches), more efficient batch database writes, and enables cross-document entity deduplication on the full set.
 
 > **Note:** Chunking now runs in `asyncio.to_thread()` when using spaCy, avoiding blocking the event loop during sentence splitting.
 
@@ -135,7 +135,7 @@ chunks = await chunk_document(
 
 Why chunk? Embedding models have token limits, and retrieval works better with focused content. A 10,000-word document as a single embedding is too diluted - split it into coherent 500-token pieces.
 
-Each returned `ChunkResult` stamps `metadata["chunker"]` with its registered strategy name (`"fixed"`, `"recursive"`, `"semantic"`, `"conversation"`) so downstream code — and the persisted chunk row — knows how a chunk was produced without re-running the chunker.
+Each returned `ChunkResult` stamps `metadata["chunker"]` with its registered strategy name (`"fixed"`, `"recursive"`, `"semantic"`, `"conversation"`) so downstream code - and the persisted chunk row - knows how a chunk was produced without re-running the chunker.
 
 See [Chunkers](chunkers.md) for the different strategies.
 
@@ -231,10 +231,10 @@ await storage.update_entity_embeddings_batch(updates, namespace_id=namespace_id)
 ```python
 # Batch approach (used by default):
 await storage.create_relationships_batch(relationships, batch_size=50)
-# Uses UNWIND + CREATE in Neo4j — one transaction instead of N individual writes
+# Uses UNWIND + CREATE in Neo4j - one transaction instead of N individual writes
 ```
 
-> Since v0.16.0 (#769) every storage read/write requires `namespace_id` as a kwarg-only argument (or as the leading positional on the small set of methods like `get_document_by_checksum` / `list_entities` / `list_relationships` where it has always been positional). The `StorageCoordinator.{relational,vector,graph,event_store}` attrs are wrapped in `NamespaceRequiredProxy` and emit a `DeprecationWarning` once per role per process; they refuse read calls without `namespace_id=`. Internal canonical refs are `self._{relational,vector,graph,event_store}`. The public attrs disappear in v0.17 — engines that talk to them go through the namespace-scoped coordinator facade instead.
+> Since v0.16.0 (#769) every storage read/write requires `namespace_id` as a kwarg-only argument (or as the leading positional on the small set of methods like `get_document_by_checksum` / `list_entities` / `list_relationships` where it has always been positional). The `StorageCoordinator.{relational,vector,graph,event_store}` attrs are wrapped in `NamespaceRequiredProxy` and emit a `DeprecationWarning` once per role per process; they refuse read calls without `namespace_id=`. Internal canonical refs are `self._{relational,vector,graph,event_store}`. The public attrs disappear in v0.17 - engines that talk to them go through the namespace-scoped coordinator facade instead.
 
 ### Entity ID Remapping
 
@@ -394,7 +394,7 @@ staging_semaphore = asyncio.Semaphore(20)
 | Write type | Mechanism | Concurrency | Why |
 |-----------|-----------|-------------|-----|
 | Entity writes | `_EntityKeyGate` (key-aware) | 12 concurrent, serializes overlapping keys | MERGE transactions on the same `(namespace_id, name, entity_type)` would cause Neo4j lock contention and ~1 s retry backoff |
-| Relationship writes | `asyncio.Semaphore` | 8 concurrent | CREATE transactions don't contend — each is a new edge |
+| Relationship writes | `asyncio.Semaphore` | 8 concurrent | CREATE transactions don't contend - each is a new edge |
 
 These are configurable:
 

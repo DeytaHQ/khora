@@ -22,7 +22,7 @@ These improvements are focused on making Khora faster and more reliable for prod
 | **Smart Entity Resolution** | Done | Two-phase architecture with token-blocked matching. Replaces O(n^2) per-document entity resolution with O(1) per-doc dedup + single O(n*k) post-ingestion pass. Batch storage operations reduce N+1 queries. See [Performance Optimization](architecture/performance-optimization.md). |
 | **Staged Batch Pipeline** | Done | Documents processed through stages (chunk → embed+extract → store) as batches rather than individually. Better LLM utilization, batch DB writes, cross-document dedup on full set. |
 | **Bulk Mode** | Done | `bulk_mode=True` defers HNSW indexes and Neo4j constraints for faster initial data loading. See [Storage Backends](architecture/storage-backends.md). |
-| **Prefix Caching Optimization** | Done | Extraction prompts restructured for LLM prefix caching — static instructions first, variable content last. Reduces per-call latency with OpenAI and Anthropic. |
+| **Prefix Caching Optimization** | Done | Extraction prompts restructured for LLM prefix caching - static instructions first, variable content last. Reduces per-call latency with OpenAI and Anthropic. |
 | **Async Pipeline Fixes** | Done | Blocking sync calls (spaCy chunking, SHA-256, JSON parsing) fixed with `asyncio.to_thread()`. |
 | **Streaming Ingestion** | Planned | Process documents as they arrive rather than waiting for batches. Critical for real-time applications. |
 | **Distributed Workers** | Planned | Scale extraction across multiple machines. Currently limited by single-process throughput. |

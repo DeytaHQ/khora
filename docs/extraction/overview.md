@@ -228,7 +228,7 @@ RememberResult(
 Behind the scenes:
 1. **Staging**: Checksum computed, no duplicate found, document created
 2. **Chunking**: Split into 3 chunks using semantic boundaries
-3. **Embedding + Extraction** (concurrent): 3 chunk embeddings generated *while* 5 entities and 4 relationships are extracted by LLM — the slower step determines wall-clock time
+3. **Embedding + Extraction** (concurrent): 3 chunk embeddings generated *while* 5 entities and 4 relationships are extracted by LLM - the slower step determines wall-clock time
 4. **Storage**: Chunks → pgvector, Entities → Neo4j + pgvector (parallel writes), Relationships → Neo4j (batch)
 5. **Entity Embeddings**: 5 entity embeddings generated and stored in a single batch transaction
 6. **Expansion**: Entity dedup merged 2 entities, inferred 1 relationship
