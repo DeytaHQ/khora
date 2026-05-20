@@ -1020,6 +1020,7 @@ class Khora:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         entity_types: list[str],
@@ -1046,6 +1047,11 @@ class Khora:
             source_type: Provenance category (default "library").
             source_name: Optional provider-level identifier (e.g. "slack", "linear").
             source_url: Optional original-source URL.
+            source_timestamp: Optional original-source timestamp (when the content
+                was authored / occurred at the source). When provided, wins over
+                any timestamp derivable from ``metadata`` via the metadata-based
+                fallback (``sent_at`` / ``occurred_at`` / ``created_at`` / ...).
+                When omitted, the existing metadata-derived fallback is preserved.
             metadata: Optional metadata
             skill_name: Extraction skill to use
             entity_types: Required entity types to extract
@@ -1096,6 +1102,7 @@ class Khora:
                     source_type=source_type,
                     source_name=source_name,
                     source_url=source_url,
+                    source_timestamp=source_timestamp,
                     metadata=metadata,
                     skill_name=skill_name,
                     entity_types=entity_types,
@@ -1127,6 +1134,7 @@ class Khora:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         max_concurrent: int = 10,
         deduplicate: bool = True,
         infer_relationships: bool = True,
@@ -1159,6 +1167,7 @@ class Khora:
                 - source_type: str (optional) — overrides top-level kwarg per doc
                 - source_name: str (optional) — overrides top-level kwarg per doc
                 - source_url: str (optional) — overrides top-level kwarg per doc
+                - source_timestamp: datetime (optional) — overrides top-level kwarg per doc
                 - metadata: dict (optional)
                 - external_id: str (optional) — caller-supplied external identifier
             namespace: Namespace UUID (as UUID or string)
@@ -1166,6 +1175,10 @@ class Khora:
             source_type: Default provenance category for docs that don't supply one.
             source_name: Default provider identifier for docs that don't supply one.
             source_url: Default original-source URL for docs that don't supply one.
+            source_timestamp: Default original-source timestamp for docs that don't
+                supply one. When provided (top-level kwarg or per-doc), wins over
+                the metadata-derived fallback in the ingest pipeline; when omitted,
+                the existing fallback is preserved.
             max_concurrent: Maximum concurrent document processing
             deduplicate: Deduplicate entities across documents (default: True)
             infer_relationships: Infer relationships after ingestion (default: True)
@@ -1209,6 +1222,8 @@ class Khora:
                         doc_data["source_name"] = source_name
                     if "source_url" not in doc_data:
                         doc_data["source_url"] = source_url
+                    if "source_timestamp" not in doc_data:
+                        doc_data["source_timestamp"] = source_timestamp
                 # NOTE: see remember() comment re: custom engine compatibility
                 batch_kwargs: dict[str, Any] = dict(
                     skill_name=skill_name,
@@ -1224,6 +1239,7 @@ class Khora:
                     source_type=source_type,
                     source_name=source_name,
                     source_url=source_url,
+                    source_timestamp=source_timestamp,
                 )
                 if extraction_batch_size is not None:
                     batch_kwargs["extraction_batch_size"] = extraction_batch_size
@@ -1257,6 +1273,7 @@ class Khora:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         entity_types: list[str],
         relationship_types: list[str],
         expertise: ExpertiseConfig | None = None,
@@ -1284,9 +1301,10 @@ class Khora:
 
         Args:
             documents: List of document dicts with 'content', 'title', 'source',
-                'source_type', 'source_name', 'source_url', 'metadata',
-                'external_id' keys. Per-doc source_type / source_name /
-                source_url override the top-level kwargs for that document.
+                'source_type', 'source_name', 'source_url', 'source_timestamp',
+                'metadata', 'external_id' keys. Per-doc source_type / source_name /
+                source_url / source_timestamp override the top-level kwargs for
+                that document.
             on_result: Synchronous callback(completed, total, DocumentResult)
                 invoked per document as processing completes.
             namespace: Namespace UUID (as UUID or string).
@@ -1294,6 +1312,10 @@ class Khora:
             source_type: Default provenance category (e.g. "library", "api").
             source_name: Default provider identifier (e.g. "slack", "linear").
             source_url: Default original-source URL.
+            source_timestamp: Default original-source timestamp for docs that
+                don't supply one. When provided (top-level kwarg or per-doc),
+                wins over the metadata-derived fallback when the document is
+                processed; when omitted, the existing fallback is preserved.
             entity_types: Required entity types to extract.
             relationship_types: Required relationship types to extract.
             expertise: Optional domain-specific extraction config.
@@ -1453,6 +1475,7 @@ class Khora:
                 existing.source_type = doc_data.get("source_type", source_type)
                 existing.source_name = doc_data.get("source_name", source_name) or None
                 existing.source_url = doc_data.get("source_url", source_url) or None
+                existing.source_timestamp = doc_data.get("source_timestamp", source_timestamp)
                 existing.checksum = checksum
                 existing.size_bytes = len(content.encode("utf-8"))
                 existing.metadata = doc_data.get("metadata") or {}
@@ -1489,6 +1512,7 @@ class Khora:
                 source_type=doc_data.get("source_type", source_type),
                 source_name=doc_data.get("source_name", source_name) or None,
                 source_url=doc_data.get("source_url", source_url) or None,
+                source_timestamp=doc_data.get("source_timestamp", source_timestamp),
                 checksum=checksum,
                 size_bytes=len(content.encode("utf-8")),
                 metadata=doc_data.get("metadata") or {},

@@ -251,7 +251,7 @@ def event_to_remember_kwargs(
         # can rewrite ingested memory through `Khora.remember` directly.
         "entity_types": [],
         "relationship_types": [],
-        "source_timestamp_iso": iso_ts,  # consumed by the service, not by remember()
+        "source_timestamp": source_ts,
     }
 
 

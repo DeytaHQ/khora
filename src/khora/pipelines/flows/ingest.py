@@ -635,8 +635,11 @@ async def stage_document(
     # Extract custom metadata
     custom_metadata = doc_input.get("metadata", {})
 
-    # Use source timestamp if available, otherwise use current time
-    source_timestamp = _extract_source_timestamp(custom_metadata)
+    # Use source timestamp if available, otherwise use current time.
+    # Explicit doc_input["source_timestamp"] wins; otherwise fall back to the
+    # metadata-derived value (sent_at / occurred_at / created_at / ...).
+    _explicit_ts = doc_input.get("source_timestamp")
+    source_timestamp = _explicit_ts if _explicit_ts is not None else _extract_source_timestamp(custom_metadata)
     created_at = source_timestamp or datetime.now(UTC)
     session_id = _coerce_session_id(custom_metadata.get("session_id"))
 
@@ -714,7 +717,10 @@ async def stage_documents_batch(
         content = doc_input.get("content", "")
         custom_metadata = doc_input.get("metadata", {})
 
-        source_timestamp = _extract_source_timestamp(custom_metadata)
+        # Explicit doc_input["source_timestamp"] wins; otherwise fall back to
+        # the metadata-derived value (sent_at / occurred_at / created_at / ...).
+        _explicit_ts = doc_input.get("source_timestamp")
+        source_timestamp = _explicit_ts if _explicit_ts is not None else _extract_source_timestamp(custom_metadata)
         created_at = source_timestamp or datetime.now(UTC)
         session_id = _coerce_session_id(custom_metadata.get("session_id"))
 
@@ -786,7 +792,10 @@ async def _stage_all_documents(
         custom_metadata = doc_input.get("metadata", {})
         checksum = compute_checksum(content)
 
-        source_timestamp = _extract_source_timestamp(custom_metadata)
+        # Explicit doc_input["source_timestamp"] wins; otherwise fall back to
+        # the metadata-derived value (sent_at / occurred_at / created_at / ...).
+        _explicit_ts = doc_input.get("source_timestamp")
+        source_timestamp = _explicit_ts if _explicit_ts is not None else _extract_source_timestamp(custom_metadata)
         created_at = source_timestamp or datetime.now(UTC)
         session_id = _coerce_session_id(custom_metadata.get("session_id"))
 

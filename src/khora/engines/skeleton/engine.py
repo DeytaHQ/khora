@@ -228,6 +228,7 @@ class SkeletonConstructionEngine:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         occurred_at: datetime | None = None,
@@ -282,6 +283,7 @@ class SkeletonConstructionEngine:
             source_type=source_type,
             source_name=source_name or None,
             source_url=source_url or None,
+            source_timestamp=source_timestamp,
             checksum=checksum,
             size_bytes=len(content.encode("utf-8")),
             metadata=dict(metadata or {}),
@@ -687,6 +689,7 @@ class SkeletonConstructionEngine:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         bulk_mode: bool = False,
     ) -> BatchResult:
         """Store multiple documents with staged batch pipeline.
@@ -830,6 +833,7 @@ class SkeletonConstructionEngine:
                     source_type=doc_data.get("source_type", source_type),
                     source_name=doc_data.get("source_name", source_name) or None,
                     source_url=doc_data.get("source_url", source_url) or None,
+                    source_timestamp=doc_data.get("source_timestamp", source_timestamp),
                     checksum=checksum,
                     size_bytes=len(content.encode("utf-8")),
                     metadata=dict(doc_metadata),

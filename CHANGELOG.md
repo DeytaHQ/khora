@@ -6,6 +6,10 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+### Added
+
+- **Explicit `source_timestamp` kwarg on `Khora.remember()`, `Khora.remember_batch()`, and `Khora.submit_batch()`.** Callers can now pass `source_timestamp: datetime | None` directly instead of relying on the metadata-derived fallback. Per-doc dict key (`source_timestamp`) on `remember_batch` / `submit_batch` overrides the top-level kwarg for that document, mirroring the existing `source_type` / `source_name` / `source_url` pattern. When the kwarg is provided, it wins over the metadata-based fallback (`sent_at` / `occurred_at` / `created_at` / ...); when omitted, the existing fallback in `_extract_source_timestamp` is preserved unchanged.
+
 ### Security
 
 - **CI security gate allowlist for unfixable upstream CVEs.** pip-audit

@@ -344,10 +344,6 @@ class KhoraMemoryService:
             merged.update(kwargs["metadata"])
             kwargs["metadata"] = merged
 
-        # ``source_timestamp_iso`` is a helper field for the service, not a
-        # ``Khora.remember`` parameter — strip before forwarding.
-        kwargs.pop("source_timestamp_iso", None)
-
         external_id = kwargs["external_id"]
         # Idempotency: if a document for this event already exists, forget
         # it first so we don't accumulate duplicate chunks on re-ingest.
