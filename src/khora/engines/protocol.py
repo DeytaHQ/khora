@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
     from uuid import UUID
 
     from khora.core.models import Document, Entity, MemoryNamespace
@@ -57,6 +58,7 @@ class MemoryEngineProtocol(Protocol):
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         entity_types: list[str],
@@ -76,6 +78,8 @@ class MemoryEngineProtocol(Protocol):
             source_type: Provenance category (e.g. "library", "api", "file").
             source_name: Optional provider-level identifier (e.g. "slack", "linear").
             source_url: Optional original-source URL.
+            source_timestamp: Optional original-source timestamp. When provided,
+                persists directly to ``Document.source_timestamp``.
             metadata: Optional metadata
             skill_name: Extraction skill to use
             entity_types: Required entity types to extract
@@ -159,15 +163,16 @@ class MemoryEngineProtocol(Protocol):
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
 
         Args:
             documents: List of document dicts with keys: content, title, source,
-                source_type, source_name, source_url, metadata, external_id
-                (optional caller-supplied external identifier). Top-level
-                source_type/source_name/source_url per-doc keys override the
-                corresponding kwargs.
+                source_type, source_name, source_url, source_timestamp, metadata,
+                external_id (optional caller-supplied external identifier).
+                Top-level source_type/source_name/source_url/source_timestamp
+                per-doc keys override the corresponding kwargs.
             namespace_id: Target namespace UUID
             skill_name: Extraction skill to use
             max_concurrent: Maximum concurrent document processing

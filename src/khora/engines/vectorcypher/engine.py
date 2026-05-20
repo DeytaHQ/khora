@@ -677,6 +677,7 @@ class VectorCypherEngine:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         expertise: ExpertiseConfig | str | None = None,
@@ -738,6 +739,7 @@ class VectorCypherEngine:
                     source_type=source_type,
                     source_name=source_name,
                     source_url=source_url,
+                    source_timestamp=source_timestamp,
                     metadata=metadata,
                     skill_name=skill_name,
                     expertise=expertise,
@@ -772,6 +774,7 @@ class VectorCypherEngine:
             source_type=source_type,
             source_name=source_name or None,
             source_url=source_url or None,
+            source_timestamp=source_timestamp,
             checksum=checksum,
             size_bytes=len(content.encode("utf-8")),
             metadata=dict(metadata or {}),
@@ -800,6 +803,7 @@ class VectorCypherEngine:
                 namespace_id=namespace_id,
                 title=title,
                 source=source,
+                source_timestamp=source_timestamp,
                 metadata=metadata,
                 skill_name=skill_name,
                 expertise=expertise,
@@ -1333,6 +1337,7 @@ class VectorCypherEngine:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         metadata: dict[str, Any] | None,
         skill_name: str,
         expertise: ExpertiseConfig | str | None,
@@ -1397,7 +1402,7 @@ class VectorCypherEngine:
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
             created_at=existing.created_at,
-            source_timestamp=existing.source_timestamp,
+            source_timestamp=source_timestamp if source_timestamp is not None else existing.source_timestamp,
             processed_at=existing.processed_at,
             session_id=_coerce_session_id_from_metadata(metadata) or existing.session_id,
         )
@@ -2083,6 +2088,7 @@ class VectorCypherEngine:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         bulk_mode: bool = False,
     ) -> BatchResult:
         """Store multiple documents with automatic optimization.
@@ -2140,6 +2146,7 @@ class VectorCypherEngine:
                 source_type=source_type,
                 source_name=source_name,
                 source_url=source_url,
+                source_timestamp=source_timestamp,
             )
         finally:
             if bulk_mode:
@@ -2166,6 +2173,7 @@ class VectorCypherEngine:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
     ) -> BatchResult:
         """Internal implementation of remember_batch (separated for bulk_mode wrapping)."""
         use_streaming = self._vc_config.streaming_pipeline
@@ -2187,6 +2195,7 @@ class VectorCypherEngine:
                 source_type=source_type,
                 source_name=source_name,
                 source_url=source_url,
+                source_timestamp=source_timestamp,
             )
 
         from khora.extraction.chunkers import create_chunker
@@ -2257,6 +2266,7 @@ class VectorCypherEngine:
                     source_type=doc_data.get("source_type", source_type),
                     source_name=doc_data.get("source_name", source_name),
                     source_url=doc_data.get("source_url", source_url),
+                    source_timestamp=doc_data.get("source_timestamp", source_timestamp),
                     metadata=doc_metadata,
                     skill_name=skill_name,
                     expertise=expertise,
@@ -2370,6 +2380,7 @@ class VectorCypherEngine:
                         source_type=doc_data.get("source_type", source_type),
                         source_name=doc_data.get("source_name", source_name) or None,
                         source_url=doc_data.get("source_url", source_url) or None,
+                        source_timestamp=doc_data.get("source_timestamp", source_timestamp),
                         metadata=dict(doc_metadata),
                         extraction_config_hash=extraction_config_hash,
                         external_id=doc_data.get("external_id"),
@@ -2832,6 +2843,7 @@ class VectorCypherEngine:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
     ) -> BatchResult:
         """Legacy per-document remember_batch (non-streaming pipeline)."""
         storage = self._get_storage()
@@ -2885,6 +2897,7 @@ class VectorCypherEngine:
                         source_type=doc_data.get("source_type", source_type),
                         source_name=doc_data.get("source_name", source_name),
                         source_url=doc_data.get("source_url", source_url),
+                        source_timestamp=doc_data.get("source_timestamp", source_timestamp),
                         metadata=doc_metadata,
                         skill_name=skill_name,
                         expertise=expertise,

@@ -3972,3 +3972,345 @@ class TestProvenanceKwargsSubmitBatch:
         assert captured[0].source_type == "library"
         assert captured[0].source_name is None
         assert captured[0].source_url is None
+
+
+# ---------------------------------------------------------------------------
+# Provenance kwarg: source_timestamp
+# ---------------------------------------------------------------------------
+
+from datetime import UTC as _UTC  # noqa: E402
+
+_FIXED_SOURCE_TS = datetime(2024, 1, 15, 12, 0, tzinfo=_UTC)
+_OTHER_SOURCE_TS = datetime(2024, 6, 1, 8, 30, tzinfo=_UTC)
+
+
+def _engine_source_timestamp(call_kwargs: dict) -> object:
+    """Read the effective source_timestamp from an engine call.
+
+    The kwarg may be threaded either as a top-level ``source_timestamp`` kwarg
+    on the engine call (mirroring ``source_type``/``source_name``/``source_url``)
+    OR by stamping the value into ``metadata["source_timestamp"]`` so the
+    downstream ingest pipeline picks it up. Both are valid; this helper picks
+    whichever is populated so the tests assert the user-facing contract
+    (the engine receives the value), not a specific threading style.
+    """
+    if "source_timestamp" in call_kwargs and call_kwargs["source_timestamp"] is not None:
+        return call_kwargs["source_timestamp"]
+    metadata = call_kwargs.get("metadata") or {}
+    return metadata.get("source_timestamp")
+
+
+class TestSourceTimestampKwargRemember:
+    """Tests that remember() threads source_timestamp through to the engine."""
+
+    @pytest.mark.asyncio
+    async def test_remember_passes_explicit_source_timestamp(self) -> None:
+        """Explicit source_timestamp is forwarded to engine.remember()."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember = AsyncMock(
+            return_value=RememberResult(
+                document_id=uuid4(),
+                namespace_id=ns_id,
+                chunks_created=1,
+                entities_extracted=0,
+                relationships_created=0,
+            )
+        )
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember(
+                "content",
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_timestamp=_FIXED_SOURCE_TS,
+            )
+
+        kwargs = kb._engine.remember.call_args.kwargs
+        assert _engine_source_timestamp(kwargs) == _FIXED_SOURCE_TS
+
+    @pytest.mark.asyncio
+    async def test_remember_default_source_timestamp_is_none(self) -> None:
+        """Omitted source_timestamp reaches the engine as None; metadata is preserved
+        for the downstream _extract_source_timestamp fallback."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember = AsyncMock(
+            return_value=RememberResult(
+                document_id=uuid4(),
+                namespace_id=ns_id,
+                chunks_created=0,
+                entities_extracted=0,
+                relationships_created=0,
+            )
+        )
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember(
+                "content",
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                metadata={"created_at": "2024-01-15T12:00:00Z"},
+            )
+
+        kwargs = kb._engine.remember.call_args.kwargs
+        # No explicit kwarg was provided — engine sees no source_timestamp
+        # value, so the downstream pipeline runs _extract_source_timestamp
+        # against metadata (which still carries created_at verbatim).
+        assert _engine_source_timestamp(kwargs) is None
+        assert kwargs["metadata"]["created_at"] == "2024-01-15T12:00:00Z"
+
+    @pytest.mark.asyncio
+    async def test_remember_kwarg_wins_over_metadata_created_at(self) -> None:
+        """Both kwarg and metadata.created_at present → kwarg value reaches the engine."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember = AsyncMock(
+            return_value=RememberResult(
+                document_id=uuid4(),
+                namespace_id=ns_id,
+                chunks_created=0,
+                entities_extracted=0,
+                relationships_created=0,
+            )
+        )
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember(
+                "content",
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                metadata={"created_at": "2024-06-01T08:30:00+00:00"},
+                source_timestamp=_FIXED_SOURCE_TS,
+            )
+
+        kwargs = kb._engine.remember.call_args.kwargs
+        assert _engine_source_timestamp(kwargs) == _FIXED_SOURCE_TS
+
+
+class TestSourceTimestampKwargRememberBatch:
+    """Tests that remember_batch() stamps per-doc dicts with source_timestamp."""
+
+    @pytest.mark.asyncio
+    async def test_top_level_kwarg_applies_to_all_docs(self) -> None:
+        """Top-level source_timestamp is stamped onto every doc dict."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=2, processed=2, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [{"content": "doc one"}, {"content": "doc two"}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_timestamp=_FIXED_SOURCE_TS,
+            )
+
+        # Each doc dict is stamped in-place — this is what the engine /
+        # ingest pipeline consume per-document, matching the pattern used
+        # for source_type / source_name / source_url.
+        for doc in docs:
+            assert doc["source_timestamp"] == _FIXED_SOURCE_TS
+
+    @pytest.mark.asyncio
+    async def test_per_doc_dict_key_overrides_top_level(self) -> None:
+        """Mixed: doc-with-key keeps its own source_timestamp; doc-without inherits top-level."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=2, processed=2, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [
+            {"content": "doc with override", "source_timestamp": _OTHER_SOURCE_TS},
+            {"content": "doc without override"},
+        ]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                source_timestamp=_FIXED_SOURCE_TS,
+            )
+
+        # Doc 0: per-doc key wins.
+        assert docs[0]["source_timestamp"] == _OTHER_SOURCE_TS
+        # Doc 1: gets the top-level fallback.
+        assert docs[1]["source_timestamp"] == _FIXED_SOURCE_TS
+
+    @pytest.mark.asyncio
+    async def test_defaults_when_neither_provided(self) -> None:
+        """No top-level kwarg + no per-doc key → source_timestamp defaults to None."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+
+        kb._engine.remember_batch = AsyncMock(
+            return_value=BatchResult(total=1, processed=1, skipped=0, failed=0, chunks=0, entities=0, relationships=0)
+        )
+
+        docs = [{"content": "doc"}]
+
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            await kb.remember_batch(
+                docs,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        assert docs[0]["source_timestamp"] is None
+
+
+class TestSourceTimestampKwargSubmitBatch:
+    """Tests that submit_batch() honors source_timestamp precedence."""
+
+    @pytest.mark.asyncio
+    async def test_top_level_kwarg_stamps_document(self) -> None:
+        """Top-level source_timestamp ends up on each persisted Document."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        handle = await kb.submit_batch(
+            [{"content": "doc-1"}, {"content": "doc-2"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            source_timestamp=_FIXED_SOURCE_TS,
+        )
+        await handle.wait()
+
+        assert len(captured) == 2
+        for doc in captured:
+            assert doc.source_timestamp == _FIXED_SOURCE_TS
+
+    @pytest.mark.asyncio
+    async def test_per_doc_key_overrides_top_level(self) -> None:
+        """Mixed batch: per-doc source_timestamp wins; others inherit top-level."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        docs = [
+            {"content": "override", "source_timestamp": _OTHER_SOURCE_TS},
+            {"content": "inherit"},
+        ]
+
+        handle = await kb.submit_batch(
+            docs,
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            source_timestamp=_FIXED_SOURCE_TS,
+        )
+        await handle.wait()
+
+        assert len(captured) == 2
+        assert captured[0].source_timestamp == _OTHER_SOURCE_TS
+        assert captured[1].source_timestamp == _FIXED_SOURCE_TS
+
+    @pytest.mark.asyncio
+    async def test_kwarg_wins_over_metadata_created_at(self) -> None:
+        """Both kwarg and metadata.created_at present → kwarg value wins on the persisted Document."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        # metadata.created_at would normally drive _extract_source_timestamp
+        # downstream; with the explicit kwarg present, the kwarg must win.
+        metadata_ts_str = "2024-06-01T08:30:00+00:00"
+
+        handle = await kb.submit_batch(
+            [{"content": "doc", "metadata": {"created_at": metadata_ts_str}}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            source_timestamp=_FIXED_SOURCE_TS,
+        )
+        await handle.wait()
+
+        assert len(captured) == 1
+        assert captured[0].source_timestamp == _FIXED_SOURCE_TS
+
+    @pytest.mark.asyncio
+    async def test_defaults_when_neither_provided(self) -> None:
+        """No top-level kwarg + no per-doc key → persisted Document.source_timestamp is None."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        captured: list = []
+
+        async def _capture_create(doc):
+            captured.append(doc)
+            return doc
+
+        kb._engine._storage.create_document = AsyncMock(side_effect=_capture_create)
+
+        handle = await kb.submit_batch(
+            [{"content": "doc"}],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+        await handle.wait()
+
+        assert len(captured) == 1
+        assert captured[0].source_timestamp is None

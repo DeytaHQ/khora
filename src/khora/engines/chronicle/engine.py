@@ -1027,6 +1027,7 @@ class ChronicleEngine:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         metadata: dict[str, Any] | None = None,
         skill_name: str = "general_entities",
         entity_types: list[str],
@@ -1095,6 +1096,7 @@ class ChronicleEngine:
             source_type=source_type,
             source_name=source_name or None,
             source_url=source_url or None,
+            source_timestamp=source_timestamp,
             checksum=checksum,
             size_bytes=len(content.encode("utf-8")),
             metadata=dict(metadata or {}),
@@ -2295,6 +2297,7 @@ class ChronicleEngine:
         source_type: str = "library",
         source_name: str | None = None,
         source_url: str | None = None,
+        source_timestamp: datetime | None = None,
         extraction_batch_size: int | None = None,
         extraction_max_tokens: int | None = None,
     ) -> BatchResult:
@@ -2347,6 +2350,7 @@ class ChronicleEngine:
                 "source_type": doc_data.get("source_type", source_type),
                 "source_name": doc_data.get("source_name", source_name),
                 "source_url": doc_data.get("source_url", source_url),
+                "source_timestamp": doc_data.get("source_timestamp", source_timestamp),
                 "metadata": doc_data.get("metadata", {}),
             }
             if extraction_config_hash is not None:
