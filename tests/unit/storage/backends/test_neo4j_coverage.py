@@ -1204,3 +1204,310 @@ class TestCreateRelationshipSingleTruncationWiring:
 
         await b.create_relationship(rel)
         b._source_id_truncated_counter.add.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #777 — configurable entity-provenance caps + truncation telemetry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestEntityProvenanceCapDefaults:
+    def test_defaults_preserve_pre_777_behavior(self) -> None:
+        """Defaults stay at 100 / 250 — regression gate."""
+        b = Neo4jBackend("bolt://localhost:7687")
+        assert b._entity_source_document_ids_max == 100
+        assert b._entity_source_chunk_ids_max == 250
+
+    def test_custom_caps_accepted(self) -> None:
+        b = Neo4jBackend(
+            "bolt://localhost:7687",
+            entity_source_document_ids_max=500,
+            entity_source_chunk_ids_max=1000,
+        )
+        assert b._entity_source_document_ids_max == 500
+        assert b._entity_source_chunk_ids_max == 1000
+
+    def test_from_config_threads_caps(self) -> None:
+        cfg = SimpleNamespace(
+            url="bolt://localhost:7687",
+            user="u",
+            password="pw",
+            database="neo4j",
+            max_connection_pool_size=100,
+            connection_acquisition_timeout=60.0,
+            retry_delay_jitter_factor=0.5,
+            max_connection_lifetime=900,
+            liveness_check_timeout=30.0,
+            query_timeout=5.0,
+            entity_write_concurrency=4,
+            relationship_write_concurrency=2,
+            pool_sampler_enabled=False,
+            pool_sampler_interval_ms=500,
+            relationship_source_document_ids_max=100,
+            relationship_source_chunk_ids_max=250,
+            entity_source_document_ids_max=750,
+            entity_source_chunk_ids_max=2000,
+        )
+        b = Neo4jBackend.from_config(cfg)
+        assert b._entity_source_document_ids_max == 750
+        assert b._entity_source_chunk_ids_max == 2000
+
+    def test_from_config_missing_caps_uses_defaults(self) -> None:
+        """getattr fallback path — older Neo4jConfig without the new entity fields."""
+        cfg = SimpleNamespace(
+            url="bolt://localhost:7687",
+            user="u",
+            password="pw",
+            database="neo4j",
+            max_connection_pool_size=100,
+            connection_acquisition_timeout=60.0,
+            retry_delay_jitter_factor=0.5,
+            max_connection_lifetime=900,
+            liveness_check_timeout=30.0,
+            query_timeout=5.0,
+            entity_write_concurrency=4,
+            relationship_write_concurrency=2,
+            pool_sampler_enabled=False,
+            pool_sampler_interval_ms=500,
+            # No entity_source_*_max — exercises the getattr default.
+        )
+        b = Neo4jBackend.from_config(cfg)
+        assert b._entity_source_document_ids_max == 100
+        assert b._entity_source_chunk_ids_max == 250
+
+
+@pytest.mark.unit
+class TestRecordEntityTruncationHelper:
+    def test_zero_dropped_is_noop(self) -> None:
+        b = Neo4jBackend("bolt://localhost:7687")
+        b._entity_source_id_truncated_counter = MagicMock()
+        b._record_entity_truncation(
+            field="source_document_ids",
+            kind="batch",
+            dropped=0,
+            rows_affected=0,
+            limit=100,
+        )
+        b._entity_source_id_truncated_counter.add.assert_not_called()
+
+    def test_negative_dropped_is_noop(self) -> None:
+        b = Neo4jBackend("bolt://localhost:7687")
+        b._entity_source_id_truncated_counter = MagicMock()
+        b._record_entity_truncation(
+            field="source_chunk_ids",
+            kind="batch",
+            dropped=-1,
+            rows_affected=0,
+            limit=250,
+        )
+        b._entity_source_id_truncated_counter.add.assert_not_called()
+
+    def test_positive_dropped_emits_counter_and_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        from loguru import logger as loguru_logger
+
+        b = Neo4jBackend("bolt://localhost:7687")
+        b._entity_source_id_truncated_counter = MagicMock()
+
+        handler_id = loguru_logger.add(
+            lambda msg: caplog.handler.emit(
+                __import__("logging").LogRecord(
+                    name="khora",
+                    level=__import__("logging").WARNING,
+                    pathname="",
+                    lineno=0,
+                    msg=msg.record["message"],
+                    args=None,
+                    exc_info=None,
+                )
+            ),
+            level="WARNING",
+        )
+        try:
+            with caplog.at_level("WARNING"):
+                b._record_entity_truncation(
+                    field="source_document_ids",
+                    kind="batch",
+                    dropped=42,
+                    rows_affected=3,
+                    limit=100,
+                )
+        finally:
+            loguru_logger.remove(handler_id)
+
+        b._entity_source_id_truncated_counter.add.assert_called_once_with(
+            42, attributes={"field": "source_document_ids", "kind": "batch"}
+        )
+        joined = "\n".join(rec.message for rec in caplog.records)
+        assert "dropped 42 source_document_ids" in joined
+        assert "limit=100" in joined
+        assert "ENTITY_SOURCE_DOCUMENT_IDS_MAX" in joined
+
+
+@pytest.mark.unit
+class TestUpsertEntitiesBatchTruncationWiring:
+    @pytest.mark.asyncio
+    async def test_batch_truncation_drives_counter(self) -> None:
+        """Existing entity with deep provenance + incoming row → drops counted."""
+        ns_id = uuid4()
+        ent_id = uuid4()
+        ent = Entity(
+            id=ent_id,
+            namespace_id=ns_id,
+            name="Alice",
+            entity_type="PERSON",
+            source_document_ids=[uuid4() for _ in range(5)],
+            source_chunk_ids=[uuid4() for _ in range(10)],
+        )
+
+        # Pre-existing entity already at the cap — incoming 5 docs + 10
+        # chunks all overflow.
+        pre_row = {
+            "id": str(ent_id),
+            "name": "Alice",
+            "entity_type": "PERSON",
+            "namespace_id": str(ns_id),
+            "attributes": "{}",
+            "description": "",
+            "source_document_ids": [str(uuid4()) for _ in range(100)],
+            "source_chunk_ids": [str(uuid4()) for _ in range(250)],
+            "mention_count": 1,
+            "confidence": 1.0,
+            "metadata": None,
+            "version_valid_from": None,
+        }
+        # MERGE result: ON MATCH (is_new=false), so the input_id maps to
+        # the existing entity id.
+        merge_row = {
+            "id": str(ent_id),
+            "name": "Alice",
+            "input_id": str(ent_id),
+            "is_new": False,
+        }
+
+        pre_result = MagicMock()
+        pre_result.data = AsyncMock(return_value=[pre_row])
+        merge_result = MagicMock()
+        merge_result.data = AsyncMock(return_value=[merge_row])
+
+        call_count = {"n": 0}
+
+        async def _run(*_args: Any, **_kwargs: Any) -> Any:
+            call_count["n"] += 1
+            return pre_result if call_count["n"] == 1 else merge_result
+
+        async def _exec_write(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            tx = MagicMock()
+            tx.run = AsyncMock(side_effect=_run)
+            return await fn(tx, *args, **kwargs)
+
+        session = AsyncMock()
+        session.execute_write = AsyncMock(side_effect=_exec_write)
+        b = _backend_with_session_mock(session)
+        b._entity_source_id_truncated_counter = MagicMock()
+
+        out = await b.upsert_entities_batch(ns_id, [ent])
+        assert len(out) == 1
+
+        # Caps 100/250, union 105/260 → drop 5 docs, 10 chunks.
+        b._entity_source_id_truncated_counter.add.assert_any_call(
+            5, attributes={"field": "source_document_ids", "kind": "batch"}
+        )
+        b._entity_source_id_truncated_counter.add.assert_any_call(
+            10, attributes={"field": "source_chunk_ids", "kind": "batch"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_batch_no_truncation_does_not_fire(self) -> None:
+        """No pre-existing entity → ON CREATE path → no drops."""
+        ns_id = uuid4()
+        ent_id = uuid4()
+        ent = Entity(
+            id=ent_id,
+            namespace_id=ns_id,
+            name="Bob",
+            entity_type="PERSON",
+            source_document_ids=[uuid4()],
+            source_chunk_ids=[uuid4()],
+        )
+
+        pre_result = MagicMock()
+        pre_result.data = AsyncMock(return_value=[])  # nothing existed
+        merge_result = MagicMock()
+        merge_result.data = AsyncMock(
+            return_value=[
+                {
+                    "id": str(ent_id),
+                    "name": "Bob",
+                    "input_id": str(ent_id),
+                    "is_new": True,
+                }
+            ]
+        )
+
+        call_count = {"n": 0}
+
+        async def _run(*_args: Any, **_kwargs: Any) -> Any:
+            call_count["n"] += 1
+            return pre_result if call_count["n"] == 1 else merge_result
+
+        async def _exec_write(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            tx = MagicMock()
+            tx.run = AsyncMock(side_effect=_run)
+            return await fn(tx, *args, **kwargs)
+
+        session = AsyncMock()
+        session.execute_write = AsyncMock(side_effect=_exec_write)
+        b = _backend_with_session_mock(session)
+        b._entity_source_id_truncated_counter = MagicMock()
+
+        await b.upsert_entities_batch(ns_id, [ent])
+        b._entity_source_id_truncated_counter.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_batch_custom_caps_threaded_into_cypher_params(self) -> None:
+        """Custom caps reach the upsert tx.run call as $ent_doc_max / $ent_chunk_max."""
+        ns_id = uuid4()
+        ent_id = uuid4()
+        ent = Entity(
+            id=ent_id,
+            namespace_id=ns_id,
+            name="Carol",
+            entity_type="PERSON",
+        )
+
+        pre_result = MagicMock()
+        pre_result.data = AsyncMock(return_value=[])
+        merge_result = MagicMock()
+        merge_result.data = AsyncMock(
+            return_value=[
+                {
+                    "id": str(ent_id),
+                    "name": "Carol",
+                    "input_id": str(ent_id),
+                    "is_new": True,
+                }
+            ]
+        )
+
+        seen_kwargs_list: list[dict[str, Any]] = []
+
+        async def _run(*_args: Any, **kwargs: Any) -> Any:
+            seen_kwargs_list.append(dict(kwargs))
+            return pre_result if len(seen_kwargs_list) == 1 else merge_result
+
+        async def _exec_write(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            tx = MagicMock()
+            tx.run = AsyncMock(side_effect=_run)
+            return await fn(tx, *args, **kwargs)
+
+        session = AsyncMock()
+        session.execute_write = AsyncMock(side_effect=_exec_write)
+        b = _backend_with_session_mock(session)
+        b._entity_source_document_ids_max = 500
+        b._entity_source_chunk_ids_max = 1000
+
+        await b.upsert_entities_batch(ns_id, [ent])
+        # First call is _PREFETCH_CYPHER (no ent_*_max), second is _UPSERT_CYPHER.
+        assert seen_kwargs_list[1].get("ent_doc_max") == 500
+        assert seen_kwargs_list[1].get("ent_chunk_max") == 1000
