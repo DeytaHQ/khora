@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -316,6 +317,36 @@ from khora.core.models.recall import (  # noqa: E402, I001, F401
 # instantiate and one of the connections would leak.
 _SHARED_LOCK: asyncio.Lock = asyncio.Lock()
 _SHARED_INSTANCES: dict[str, Khora] = {}
+
+
+def _reset_shared_after_fork() -> None:
+    """Drop the parent's shared-Khora cache in a forked child (#790).
+
+    The cached :class:`Khora` instances hold asyncpg pool sockets that
+    the parent process also has open. If the child were to reuse them
+    it would race the parent on connection state - asyncpg's protocol
+    machinery is not fork-safe.
+
+    Also reseat ``_SHARED_LOCK``: ``asyncio.Lock`` in 3.10+ binds to a
+    loop on first acquire, and the parent's loop is gone in the child.
+    A fresh ``Lock()`` re-binds lazily on next ``async with`` from the
+    child.
+
+    Important: do NOT try to ``disconnect()`` the cached instances from
+    the at-fork handler. Closing the asyncpg connections in the child
+    would also close the fds in the parent (they're the same fd
+    numbers). Just discard references and let the parent's instance
+    keep running.
+
+    Registered via ``os.register_at_fork(after_in_child=...)``.
+    """
+    global _SHARED_LOCK
+    _SHARED_INSTANCES.clear()
+    _SHARED_LOCK = asyncio.Lock()
+
+
+if hasattr(os, "register_at_fork"):  # POSIX-only; Windows is a no-op.
+    os.register_at_fork(after_in_child=_reset_shared_after_fork)
 
 
 def _config_hash(config: KhoraConfig) -> str:
