@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from khora.core.models.entity import Entity, Episode, Relationship
 from khora.telemetry import trace
 
-from .mixins import GraphBackendBase, deserialize_dict, serialize_dict
+from .mixins import GraphBackendBase, deserialize_dict, sanitize_cypher_label, serialize_dict
 
 # ---------------------------------------------------------------------------
 # Regex to strip the ``::agtype`` suffix that AGE appends to result strings.
@@ -288,13 +288,13 @@ class AGEBackend(GraphBackendBase):
             return "{}"
         return AGEBackend._escape(serialize_dict(value))
 
-    @staticmethod
-    def _sanitize_label(label: str) -> str:
-        """Ensure a Cypher label/relationship-type is safe.
-
-        Only alphanumeric characters and underscores are kept.
-        """
-        return re.sub(r"[^A-Za-z0-9_]", "_", label)
+    # Cypher relationship-type sanitisation is delegated to the shared
+    # :func:`sanitize_cypher_label` helper (issue #749) so AGE produces the
+    # same UPPER_SNAKE_CASE label as Neo4j / Memgraph / sqlite_lance.  Prior
+    # to #749 AGE's bespoke regex preserved case (``reports_to`` instead of
+    # ``REPORTS_TO``), causing identical inputs to read back differently from
+    # different backends.
+    _sanitize_label = staticmethod(sanitize_cypher_label)
 
     @staticmethod
     def _uuid_lit(value: UUID | str) -> str:
@@ -613,6 +613,10 @@ class AGEBackend(GraphBackendBase):
     async def create_relationship(self, relationship: Relationship) -> Relationship:
         now = datetime.now(UTC).isoformat()
         rel_type = self._sanitize_label(relationship.relationship_type)
+        # Mirror the sanitised label back to the caller so an in-memory
+        # ``Relationship`` object stays consistent with the persisted edge
+        # type across every backend (issue #749).
+        relationship.relationship_type = rel_type
         src_doc_ids = self._cypher_str_list([str(d) for d in relationship.source_document_ids])
         src_chunk_ids = self._cypher_str_list([str(c) for c in relationship.source_chunk_ids])
 

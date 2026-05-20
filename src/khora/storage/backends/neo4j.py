@@ -24,6 +24,7 @@ from neo4j.exceptions import ClientError, ConnectionAcquisitionTimeoutError
 from khora.core.models import Entity, Episode, Relationship
 from khora.storage.backends.mixins import (
     GraphBackendBase,
+    sanitize_cypher_label,
 )
 from khora.storage.backends.mixins import deserialize_dict as _deserialize_dict
 from khora.storage.backends.mixins import element_to_dict as _element_to_dict
@@ -34,6 +35,9 @@ from .._log_safe import _safe_url_for_log
 
 # Neo4j relationship labels must be valid identifiers: letters, digits, underscores.
 # LLM-generated types like "at-risk" or "works for" need sanitizing.
+# Kept for the dynamic index-creation path (lower-cases the sanitized label
+# into the Neo4j index name); rel-type sanitization itself goes through the
+# shared ``sanitize_cypher_label`` helper.
 _NEO4J_LABEL_RE = _re.compile(r"[^A-Za-z0-9_]")
 
 # Default concurrency limits for Neo4j write transactions.
@@ -238,10 +242,13 @@ BIDIRECTIONAL_TYPES: dict[str, str] = {
 }
 
 
-def _sanitize_neo4j_label(label: str) -> str:
-    """Sanitize a string for use as a Neo4j relationship type label."""
-    sanitized = _NEO4J_LABEL_RE.sub("_", label.strip())
-    return sanitized.upper() if sanitized else "RELATES_TO"
+# Kept as an internal module-level alias so callers that already import
+# ``_sanitize_neo4j_label`` (the coordinator, vectorcypher engine) keep
+# working without a second import.  Behavior is identical to the shared
+# ``sanitize_cypher_label`` — same regex, same strip, same upper-case,
+# same ``RELATES_TO`` fallback — and the duplicate function let the two
+# helpers drift in past refactors.
+_sanitize_neo4j_label = sanitize_cypher_label
 
 
 def _derive_version_valid_from(entity: Entity) -> str:
@@ -1802,11 +1809,18 @@ RETURN count(r) AS updated
 
         _per_type_ms: dict[str, float] = {}
 
+        # Normalise the caller-supplied relationship types in place so the
+        # in-memory model matches what is persisted (issue #749).  All later
+        # bookkeeping — inverse derivation, type grouping, indexes — reads
+        # the sanitised value back off the object.
+        for rel in relationships:
+            rel.relationship_type = sanitize_cypher_label(rel.relationship_type)
+
         # Build inverse relationships upfront so they share the same pass,
         # eliminating a second round of write transactions on overlapping nodes.
         all_rels = list(relationships)
         for rel in relationships:
-            rel_type_str = _sanitize_neo4j_label(rel.relationship_type)
+            rel_type_str = rel.relationship_type
             inverse_type = BIDIRECTIONAL_TYPES.get(rel_type_str)
             if inverse_type and inverse_type != rel_type_str:
                 inv = copy(rel)
@@ -1820,7 +1834,7 @@ RETURN count(r) AS updated
         # Group by relationship type (required for dynamic rel type in Cypher)
         type_groups: dict[str, list[Relationship]] = {}
         for rel in all_rels:
-            rel_type = _sanitize_neo4j_label(rel.relationship_type)
+            rel_type = rel.relationship_type
             type_groups.setdefault(rel_type, []).append(rel)
 
         async def _create_type_group(rel_type: str, rels: list[Relationship]) -> int:
@@ -2043,11 +2057,18 @@ RETURN count(r) AS updated
     # =========================================================================
 
     async def create_relationship(self, relationship: Relationship) -> Relationship:
-        """Create a relationship between entities."""
+        """Create a relationship between entities.
 
+        The user-supplied ``relationship_type`` is normalised through
+        :func:`sanitize_cypher_label` (UPPER_SNAKE_CASE, non-identifier
+        characters → ``_``) before being interpolated into Cypher and
+        written back onto the caller's object so reads match writes
+        across every backend (issue #749).
+        """
+
+        rel_type = sanitize_cypher_label(relationship.relationship_type)
+        relationship.relationship_type = rel_type
         params = _relationship_to_cypher_params(relationship)
-
-        rel_type = _sanitize_neo4j_label(relationship.relationship_type)
 
         async def _create(tx: AsyncManagedTransaction) -> None:
             # Use dynamic relationship type with MERGE to prevent duplicates

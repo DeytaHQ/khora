@@ -143,16 +143,20 @@ class TestSerializeDictLiteral:
 
 @pytest.mark.unit
 class TestSanitizeLabel:
-    """AGEBackend._sanitize_label() strips unsafe characters."""
+    """AGEBackend._sanitize_label() delegates to ``sanitize_cypher_label`` so
+    AGE produces the same UPPER_SNAKE_CASE labels as Neo4j / Memgraph /
+    sqlite_lance (issue #749).  Prior to #749 AGE preserved the user's case
+    and silently produced an invalid empty-label Cypher fragment on empty
+    input — both fixed by the shared helper."""
 
     def test_alphanumeric_passthrough(self):
         assert AGEBackend._sanitize_label("RELATES_TO") == "RELATES_TO"
 
     def test_special_chars_replaced(self):
-        assert AGEBackend._sanitize_label("has space!") == "has_space_"
+        assert AGEBackend._sanitize_label("has space!") == "HAS_SPACE_"
 
     def test_empty(self):
-        assert AGEBackend._sanitize_label("") == ""
+        assert AGEBackend._sanitize_label("") == "RELATES_TO"
 
 
 # ---------------------------------------------------------------------------
