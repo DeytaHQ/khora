@@ -236,6 +236,14 @@ QueryResult(
 )
 ```
 
+<!-- TODO(docs-v0.16.0): The query engine layer (HybridQueryEngine) still uses
+the tuple-shaped QueryResult above. Engine-level `kb.recall()` returns the
+typed RecallResult — see [VectorCypher Engine](../engines/vectorcypher-engine.md#recallresult-context).
+RecallResult.documents[] is always populated as of v0.16.0 (#761); the old
+RecallResult.context_text attribute was removed in v0.15.3 — use the public
+`khora.context_text(result)` helper to render a context string. -->
+
+
 ## Using the Query Engine
 
 ### Simple Usage via Khora
@@ -244,14 +252,16 @@ QueryResult(
 from khora import Khora, SearchMode
 
 async with Khora() as kb:
+    ns = await kb.create_namespace("default")
     results = await kb.recall(
         "machine learning applications",
+        namespace=ns.namespace_id,
         mode=SearchMode.HYBRID,
-        limit=10
+        limit=10,
     )
 
-    for chunk, score in results.chunks:
-        print(f"[{score:.2f}] {chunk.content[:100]}...")
+    for chunk in results.chunks:
+        print(f"[{chunk.score:.2f}] {chunk.content[:100]}...")
 ```
 
 ### With Full Configuration
@@ -262,6 +272,7 @@ from khora.query.temporal import TemporalFilter
 
 results = await kb.recall(
     "product updates",
+    namespace=ns_id,
     config=QueryConfig(
         mode=SearchMode.HYBRID,
         limit=20,
@@ -283,6 +294,7 @@ For complex questions, enable multi-step exploration:
 ```python
 results = await kb.recall(
     "What's our competitive strategy?",
+    namespace=ns_id,
     config=QueryConfig(enable_agentic=True)
 )
 

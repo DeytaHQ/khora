@@ -77,3 +77,39 @@ Current dialect-gated migrations:
 ## SurrealDB
 
 SurrealDB doesn't use Alembic. The schema is defined with idempotent `DEFINE … IF NOT EXISTS` statements that execute on `SurrealDBBackend.connect()`. There's no migration flag; the schema is always current. See [architecture/storage-backends.md](architecture/storage-backends.md#surrealdb) for the schema layout.
+
+In v0.16.0 the SurrealDB schema gained `DEFINE FIELD rel_id ON relates_to TYPE string` plus a `UNIQUE INDEX` on it, as part of the `table:⟨$var⟩` interpolation repair (PR #770 / issue #750) — see the v0.16.0 entry in [CHANGELOG.md](../CHANGELOG.md) for the full surface. The schema is reapplied automatically on `connect()`; no action is required on existing SurrealDB stores.
+
+## v0.16.0 — API migration: namespace kwarg required everywhere
+
+v0.16.0 closed out the cross-namespace IDOR family (PRs #761 / #765 / #766 / #769). This is an API migration, not a schema migration — no Alembic revisions are involved — but downstream code that pokes at the storage substrate needs to be updated. See the [Security exception entry in consumers.md](consumers.md#versioning-policy) for the policy rationale.
+
+### What changed
+
+Every read, exists-check, and mutation on every storage backend (`RelationalBackend`, `VectorBackend`, `GraphBackend`, `EventStore`) now requires `*, namespace_id: UUID` (kwarg-only) and filters at the SQL / Cypher / SurrealQL layer.
+
+- **Top-level facade**: `Khora.get_document(doc_id, *, namespace=…)` requires the `namespace=` kwarg. Cross-tenant lookups by id return `None`.
+- **Coordinator getters** (`StorageCoordinator.{relational,vector,graph,event_store}`) are now `NamespaceRequiredProxy` instances. Reading them emits one `DeprecationWarning` per role per process; calling a method on the proxy with no `namespace_id=` raises `TypeError`. Public attributes are removed in **v0.17** — internal canonical references use `self._{relational,vector,graph,event_store}` instead.
+- **Backend methods tightened**:
+  - *Reads*: `RelationalBackend.get_document` / `get_documents_batch` / `get_document_sources_batch` / `get_document_projections_batch` / `get_document_by_external_id` / `get_documents_by_external_ids`; `VectorBackend.entity_exists` plus pgvector-specific `get_entity` / `get_entities_batch`; `GraphBackend.get_entity` / `get_entities_batch` / `get_relationship` / `get_episode` / `get_entity_relationships` / `get_neighborhood` / `get_neighborhoods_batch` / `find_paths` / `get_temporal_neighbors`; `EventStore.get_events_for_resource` / `get_latest_event`.
+  - *Writes*: `RelationalBackend.delete_document`; `VectorBackend.delete_chunks_by_document` / `update_entity` / `update_entity_embedding` / `update_entity_embeddings_batch` / `delete_entities_batch` / `delete_relationships_batch` / `supersede_fact`; `GraphBackend.update_entity` / `delete_entity` / `delete_relationship` / `delete_entities_batch` / `delete_relationships_batch` / Neo4j-specific `retire_orphaned_relationships_batch` / `remap_source_document_ids_batch`.
+- **Cross-namespace reads** return `None` / `{}` / `[]`; cross-namespace writes silently no-op (raising would expose row existence). Graph traversal filters at every hop so a traversal seeded inside namespace A cannot visit a node in namespace B.
+- **Regression gate**: `tests/security/test_cross_namespace_idor_signatures.py` walks every concrete backend at collection time and asserts the contract. CI fails on any future signature drift.
+
+### Migration recipe
+
+If your code calls these methods directly:
+
+```python
+# Before (v0.15.x)
+doc = await kb.get_document(doc_id)
+ent = await kb.storage.graph.get_entity(entity_id)
+await kb.storage.relational.delete_document(doc_id)
+
+# After (v0.16.0+)
+doc = await kb.get_document(doc_id, namespace=ns_id)
+ent = await kb.storage.get_entity(entity_id, namespace_id=ns_id)  # via coordinator
+await kb.storage.delete_document(doc_id, namespace_id=ns_id)      # coordinator method
+```
+
+Code paths that already routed through the `Khora` facade and the documented public surface (`khora-cli`, `khora-explorer`) are unaffected — none touch `kb.storage.{relational,vector,graph,event_store}` directly. Code paths that reach into `kb.storage.<role>` will see the `DeprecationWarning` in v0.16.x and the `AttributeError` in v0.17.

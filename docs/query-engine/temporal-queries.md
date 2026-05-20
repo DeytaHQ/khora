@@ -77,13 +77,14 @@ The engine's `recall()` method runs detection automatically when no explicit `Te
 
 ```python
 # Automatic — the engine classifies the query and adapts retrieval
-results = await kb.recall("What instrument does Alice currently play?")
+results = await kb.recall("What instrument does Alice currently play?", namespace=ns_id)
 # → STATE_QUERY: recency_weight=0.5, temporal_sort=True
 
 # Explicit override — skips automatic detection
 results = await kb.recall(
     "product updates",
-    temporal_filter=TemporalFilter.last_days(7)
+    namespace=ns_id,
+    temporal_filter=TemporalFilter.last_days(7),
 )
 ```
 
@@ -139,7 +140,8 @@ You can also set recency bias explicitly via the API:
 # All content, but prefer recent
 results = await kb.recall(
     "team updates",
-    recency_bias=0.3  # Boost recent content
+    namespace=ns_id,
+    recency_bias=0.3,  # Boost recent content
 )
 ```
 
@@ -273,19 +275,19 @@ Timestamp priority (first available wins):
 
 ```python
 # The engine detects temporal intent and adapts automatically
-results = await kb.recall("What team is Alice on currently?")
+results = await kb.recall("What team is Alice on currently?", namespace=ns_id)
 # → STATE_QUERY: high recency, temporal sort
 
-results = await kb.recall("Which project started first?")
+results = await kb.recall("Which project started first?", namespace=ns_id)
 # → ORDINAL: low recency, temporal sort
 
-results = await kb.recall("How many times has the team restructured?")
+results = await kb.recall("How many times has the team restructured?", namespace=ns_id)
 # → AGGREGATE: no recency, broad recall
 
-results = await kb.recall("What's the latest deployment status?")
+results = await kb.recall("What's the latest deployment status?", namespace=ns_id)
 # → RECENCY: high recency, 7-day decay window
 
-results = await kb.recall("Did Alice switch teams?")
+results = await kb.recall("Did Alice switch teams?", namespace=ns_id)
 # → CHANGE: moderate recency, temporal sort
 ```
 
@@ -295,8 +297,9 @@ results = await kb.recall("Did Alice switch teams?")
 # Override automatic detection with a specific time range
 results = await kb.recall(
     "incident reports",
+    namespace=ns_id,
     temporal_filter=TemporalFilter.last_hours(6),
-    recency_bias=0.5
+    recency_bias=0.5,
 )
 ```
 
@@ -305,6 +308,7 @@ results = await kb.recall(
 ```python
 results = await kb.recall(
     "quarterly planning",
+    namespace=ns_id,
     temporal_filter=TemporalFilter.between(
         datetime(2024, 10, 1),
         datetime(2024, 12, 31)
@@ -317,6 +321,7 @@ results = await kb.recall(
 ```python
 results = await kb.recall(
     "team structure",
+    namespace=ns_id,
     temporal_filter=TemporalFilter(
         operator=TemporalOperator.DURING,
         start=datetime(2022, 1, 1),
@@ -333,6 +338,7 @@ from khora.query.temporal import TemporalFilter
 
 results = await kb.recall(
     "product decisions",
+    namespace=ns_id,
     config=QueryConfig(
         mode=SearchMode.HYBRID,
         temporal_filter=TemporalFilter.last_days(30),
@@ -347,7 +353,7 @@ results = await kb.recall(
 Query results include information about temporal filtering:
 
 ```python
-result = await kb.recall(query, temporal_filter=filter)
+result = await kb.recall(query, namespace=ns_id, temporal_filter=filter)
 
 if result.temporal_info:
     print(f"Filter applied: {result.temporal_info.filter_applied}")
@@ -393,8 +399,8 @@ For true time travel — reconstructing the state of the knowledge graph at a pa
 ```python
 # What entities existed on January 1st?
 events = await storage.get_events(
-    namespace_id,
-    before=datetime(2024, 1, 1)
+    namespace_id=namespace_id,
+    before=datetime(2024, 1, 1),
 )
 
 created = {e.resource_id for e in events if "created" in e.event_type}

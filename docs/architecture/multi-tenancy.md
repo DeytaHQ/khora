@@ -39,6 +39,52 @@ ORDER BY similarity DESC;
 
 You can't accidentally see another namespace's data.
 
+## Protocol-level isolation contract (v0.16.0)
+
+Namespace scoping is part of the storage Protocol contract itself. Every read, exists-check, AND mutation method on every backend (`RelationalBackend`, `VectorBackend`, `GraphBackend`, `EventStore`) declares `*, namespace_id: UUID` as a required keyword-only parameter and filters at the **query layer** (SQL `WHERE`, Cypher `MATCH (... {namespace_id: $ns})`, SurrealQL filter) — the namespace check happens in the database, never as a Python comparison after the row has already been fetched.
+
+Looking up a row whose id belongs to a different namespace returns `None` / `False` / an empty list / dict straight from the query. The caller's `namespace_id` is the authority; the row's stored `namespace_id` only matters as the value the filter matches against.
+
+```python
+# Pattern (v0.16.0+):
+doc = await coordinator.get_document(document_id, namespace_id=caller_ns)
+# `doc` is None if the id does not exist OR belongs to a different namespace.
+
+entity = await coordinator.get_entity(entity_id, namespace_id=caller_ns)
+neighbourhood = await coordinator.get_neighborhood(
+    entity_id, namespace_id=caller_ns, depth=2,
+)
+# Traversal does NOT cross into other namespaces; if the seed entity is
+# outside `caller_ns`, the result is the empty neighbourhood.
+
+ok = await coordinator.delete_document(document_id, namespace_id=caller_ns)
+# `ok` is False when the id is in a different namespace — delete is a no-op.
+```
+
+The surface that received this treatment in PRs #761 / #765 / #766 / #769 covers:
+
+- **Reads** (16 methods): `get_document(_s_batch)`, `get_document_sources_batch`, `get_document_projections_batch`, `get_document_by_external_id`, `get_documents_by_external_ids`, `entity_exists`, vector `get_entity` / `get_entities_batch`, graph `get_entity(_ies_batch)`, `get_relationship`, `get_episode`, `get_entity_relationships`, `get_neighborhood(_s_batch)`, `find_paths`, `get_temporal_neighbors`, event store `get_events_for_resource`, `get_latest_event`.
+- **Writes** (12+ methods): `delete_document`, `delete_chunks_by_document`, `update_entity`, `update_entity_embedding(_s_batch)`, `delete_entities_batch`, `delete_relationships_batch`, `supersede_fact`, `delete_entity`, `delete_relationship`, Neo4j-specific `retire_orphaned_relationships_batch` / `remap_source_document_ids_batch`.
+
+### Structural signature gate
+
+The invariant is enforced statically. `tests/security/test_cross_namespace_idor_signatures.py` walks every concrete backend class at test-collection time, enumerates every method matching the read/write naming patterns (`get_*`, `entity_exists`, `find_paths`, `get_neighborhood*`, `delete_*`, `update_entity*`, `supersede_*`) with a required id-typed parameter, and asserts:
+
+1. The signature includes `namespace_id`.
+2. `namespace_id` is keyword-only (kind `KEYWORD_ONLY` or `VAR_KEYWORD`).
+
+A new backend method without `namespace_id=` fails CI at test collection — the regression cannot land without a security review. Genuine namespace-resolver helpers (e.g. `get_namespace_by_name`) are explicitly allow-listed in `_EXEMPT_METHODS` with a one-line justification.
+
+### Coordinator facade is the supported API
+
+`StorageCoordinator.{relational,vector,graph,event_store}` is now wrapped in a `NamespaceRequiredProxy` (see `src/khora/storage/_namespace_proxy.py`). Direct backend access through these public attributes:
+
+1. Emits a one-shot `DeprecationWarning` per role per process.
+2. Refuses the namespace-scoped read methods unless `namespace_id=` is passed (raises `TypeError`).
+3. Does not forward access to underscore-prefixed attributes — backend internals such as `_engine`, `_handle`, `_conn`, `_session_factory` are reachable only via the private `coord._{role}` accessors used by coordinator internals.
+
+The public attributes are scheduled for removal in v0.17 — call the coordinator's facade methods (`coordinator.get_document(...)`, `coordinator.get_entity(...)`, `coordinator.get_neighborhood(...)`) instead.
+
 ## Creating Namespaces
 
 ```python
@@ -92,7 +138,7 @@ Say you have a "production" namespace with 100,000 documents. You want to rebuil
 
 ### The Solution: Version and Swap
 
-```
+```text
 Before:
   production (v1) <- active, serving queries
 

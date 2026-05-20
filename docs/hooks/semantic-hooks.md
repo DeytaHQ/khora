@@ -24,7 +24,11 @@ async with Khora() as kb:
     kb.subscribe("entity.created", on_entity, filter=filter)
 
     # Ingestion triggers callbacks
-    await kb.remember("Acme Corp announced a partnership with Globex.", namespace=ns_id)
+    ns = await kb.create_namespace("default")
+    await kb.remember(
+        "Acme Corp announced a partnership with Globex.",
+        namespace=ns.namespace_id,
+    )
 ```
 
 ## 3-Level Filter Cascade

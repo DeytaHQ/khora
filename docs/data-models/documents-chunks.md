@@ -157,7 +157,7 @@ This enables accurate temporal queries based on when content was originally crea
 
 ## Document-Chunk Relationship
 
-```
+```text
 Document
     │
     ├── Chunk 0 (chunk_index=0, start_char=0, end_char=512)
@@ -210,13 +210,17 @@ async with Khora() as kb:
 ### Retrieving Documents
 
 ```python
-# Get document by ID
-doc = await kb.storage.get_document(document_id)
+# Get document by ID. `namespace_id` is required and kwarg-only —
+# returns None if the document is not in this namespace (v0.16.0).
+doc = await kb.storage.get_document(document_id, namespace_id=namespace_id)
 print(f"Status: {doc.status}")
 print(f"Chunk count: {doc.chunk_count}")
 
-# Get chunks for a document
-chunks = await kb.storage.get_document_chunks(document_id)
+# Get chunks for a document, scoped to the caller's namespace.
+chunks = await kb.storage.get_chunks_by_document(
+    document_id,
+    namespace_id=namespace_id,
+)
 for chunk in chunks:
     print(f"Chunk {chunk.chunk_index}: {chunk.content[:100]}...")
 ```
@@ -309,9 +313,9 @@ CREATE TABLE chunks (
 );
 
 CREATE INDEX idx_chunks_document ON chunks(document_id);
-CREATE INDEX idx_chunks_embedding ON chunks
-    USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+CREATE INDEX ix_khora_chunks_embedding_hnsw ON chunks
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (ef_construction = 128);
 ```
 
 ## Next Steps

@@ -147,6 +147,7 @@ All thresholds can be overridden per-query or via environment variables:
 # Per-query override
 result = await kb.recall(
     "specific query",
+    namespace=ns_id,
     min_similarity=0.3,  # stricter than default
 )
 

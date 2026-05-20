@@ -232,11 +232,14 @@ Background-coroutine-friendly TTL cleanup. Calls `forget_session()` for each `se
 
 Convenience accessors over the underlying engine's graph-view API. Signatures are stable but return types are engine-specific; consult the type hints in `src/khora/khora.py`.
 
-### `get_entity`
+### `get_entity` and `get_document`
 
 ```python
 entity = await kb.get_entity(entity_id, namespace=ns.namespace_id)
 # Entity | None  — returns None for cross-namespace lookups.
+
+document = await kb.get_document(document_id, namespace=ns.namespace_id)
+# Document | None — namespace kwarg required since v0.16.0.
 ```
 
 `namespace` is **required** (accepts `str | UUID`, mirrors `list_entities` / `find_related_entities`). The facade fetches the row and verifies its `namespace_id` matches — cross-namespace ids resolve to `None` rather than the foreign entity. Calling without `namespace=` raises `TypeError`.
@@ -252,7 +255,9 @@ This shape applies to the whole `kb.storage` getter surface — namespace is the
 | `kb.storage.get_chunks_batch(chunk_ids, *, namespace_id)` | `namespace_id: UUID` — cross-namespace ids silently dropped from the returned dict |
 | `kb.storage.get_chunks_by_document(document_id, *, namespace_id)` | `namespace_id: UUID` — returns `[]` if the document doesn't belong to the namespace |
 
-The underlying graph-backend / vector-backend `get_*` methods retain their id-only shape; they sit below the trust boundary. Filtering happens at the facade.
+**v0.16.0 expanded the contract to every backend method** (PRs #761 / #765 / #766 / #769). Every read, exists-check, and mutation on `RelationalBackend` / `VectorBackend` / `GraphBackend` / `EventStore` now requires `*, namespace_id: UUID` (kwarg-only) and filters at the SQL / Cypher / SurrealQL layer — not post-fetch. Cross-namespace reads return `None` / `{}` / `[]`; cross-namespace writes silently no-op (raising would expose row existence). The full list of tightened methods is in [migrations.md](migrations.md#v0160--api-migration-namespace-kwarg-required-everywhere).
+
+> **Deprecation (v0.16.0 → v0.17).** `StorageCoordinator.{relational,vector,graph,event_store}` are now `NamespaceRequiredProxy` wrappers. Accessing them emits one `DeprecationWarning` per role per process; calling a method without `namespace_id=` raises `TypeError`. Public attributes are removed in v0.17 — call coordinator-level methods (`kb.storage.<method>`) instead.
 
 ### `stats`
 

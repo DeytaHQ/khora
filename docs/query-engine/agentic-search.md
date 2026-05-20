@@ -123,6 +123,7 @@ print(f"Summary: {result.summary}")
 ```python
 result = await kb.recall(
     "product strategy",
+    namespace=ns_id,
     config=QueryConfig(
         enable_agentic=True,
         max_agentic_steps=3

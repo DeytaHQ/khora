@@ -43,7 +43,7 @@ for entity_id, score in entity_ids_scores:
 
 # After: single batch query
 entity_ids = [eid for eid, _ in entity_ids_scores]
-entities_map = await self._storage.get_entities_batch(entity_ids)
+entities_map = await self._storage.get_entities_batch(entity_ids, namespace_id=ns)
 ```
 
 Impact: 8–15% overall latency reduction. The `get_entities_batch()` method uses a single SQL `IN` clause instead of N individual queries.
@@ -54,8 +54,10 @@ Graph search was fetching entity data and neighborhoods sequentially. Now both a
 
 ```python
 entities_map, neighborhoods = await asyncio.gather(
-    self._storage.get_entities_batch(entity_ids),
-    self._storage.get_neighborhoods_batch(entity_ids, depth=max_depth),
+    self._storage.get_entities_batch(entity_ids, namespace_id=ns),
+    self._storage.get_neighborhoods_batch(
+        entity_ids, namespace_id=ns, depth=max_depth,
+    ),
 )
 ```
 
@@ -72,7 +74,7 @@ for chunk, score in step_result.chunks:
 
 # After
 doc_ids = list({chunk.document_id for chunk, _ in step_result.chunks})
-docs = await self._storage.get_documents_batch(doc_ids)
+docs = await self._storage.get_documents_batch(doc_ids, namespace_id=namespace_id)
 ```
 
 Impact: 3–5% improvement per agentic step.
@@ -130,11 +132,11 @@ New batch methods on `StorageCoordinator`:
 
 | Method | Description |
 |--------|-------------|
-| `get_entities_batch(ids)` | Fetch multiple entities in one SQL query |
-| `get_documents_batch(ids)` | Fetch multiple documents in one SQL query |
-| `get_neighborhoods_batch(ids, depth)` | Fetch multiple graph neighborhoods |
+| `get_entities_batch(ids, *, namespace_id)` | Fetch multiple entities in one SQL query |
+| `get_documents_batch(ids, *, namespace_id)` | Fetch multiple documents in one SQL query |
+| `get_neighborhoods_batch(ids, *, namespace_id, depth)` | Fetch multiple graph neighborhoods |
 
-These use `WHERE id IN (...)` clauses (PostgreSQL) and batched Cypher queries (Neo4j) to avoid N+1 query patterns.
+These use `WHERE id IN (...) AND namespace_id = $ns` clauses (PostgreSQL) and analogous filters in Cypher (Neo4j) to avoid N+1 query patterns. The `namespace_id` filter is applied at the query layer, so rows belonging to other namespaces are dropped at the database before the result reaches Python — see [Multi-Tenancy](multi-tenancy.md) for the contract.
 
 ### Query Result Caching
 
@@ -265,7 +267,7 @@ Where k is the token-blocked candidate set size per entity, typically 10-20.
 
 The key technique behind the improvement. Instead of comparing every entity to every other entity, token blocking requires at least one shared name token before running expensive similarity computations:
 
-```
+```text
 "Microsoft Corporation"  ->  tokens: {microsoft, corporation}
 "Microsoft Corp"         ->  tokens: {microsoft, corp}
 "Apple Inc"              ->  tokens: {apple, inc}
@@ -333,7 +335,7 @@ The slower operation (usually extraction) determines wall-clock time, while the 
 
 `extract_multi` groups chunks into batches of ~5 for a single LLM call. Previously these batches ran sequentially. Now all batches run concurrently, bounded by the existing semaphore:
 
-```
+```text
 Before: batch1 → batch2 → batch3  (15-25s sequential)
 After:  batch1 ↕ batch2 ↕ batch3  (3-5s concurrent)
 ```
@@ -480,7 +482,7 @@ This eliminates wall-clock dependency — historical and benchmark data produces
 
 The ingestion pipeline was restructured from a per-document sequential model to a staged batch model. Instead of each document flowing independently through chunk → embed → extract → store, all documents now flow through stages together:
 
-```
+```text
 Before (per-document):
   Doc1: chunk → embed → extract → store
   Doc2: chunk → embed → extract → store  (waits for Doc1)

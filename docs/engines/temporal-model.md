@@ -84,6 +84,7 @@ Edges can have explicit validity windows:
 ```python
 # Alice worked at Acme from Jan 2020 to Dec 2023
 edge = TemporalEdge(
+    namespace_id=ns_id,
     source_entity_id=alice_id,
     target_entity_id=acme_id,
     relationship_type="WORKS_FOR",
@@ -96,6 +97,7 @@ edge = TemporalEdge(
 # Query: "Where did Alice work in 2022?"
 edges = await storage.get_valid_at(
     entity_id=alice_id,
+    namespace_id=ns_id,
     point_in_time=datetime(2022, 6, 1)
 )
 # Returns: WORKS_FOR → Acme
@@ -126,14 +128,16 @@ When a new exclusive relationship is created, conflicting older edges are automa
 # January 2024: Alice works for Acme
 edge1 = await storage.create_edge(
     alice_id, acme_id, "WORKS_FOR",
-    occurred_at=datetime(2024, 1, 15)
+    namespace_id=ns_id,
+    occurred_at=datetime(2024, 1, 15),
 )
 # edge1.is_valid = True
 
 # March 2024: Alice now works for Beta Corp
 edge2 = await storage.create_edge(
     alice_id, beta_id, "WORKS_FOR",
-    occurred_at=datetime(2024, 3, 1)
+    namespace_id=ns_id,
+    occurred_at=datetime(2024, 3, 1),
 )
 # edge2.is_valid = True
 # edge1.is_valid = False (automatically invalidated)
@@ -225,7 +229,8 @@ When storing an edge with a timestamp, the time hierarchy is automatically creat
 # Store edge that occurred on 2024-01-15
 await storage.create_edge(
     source_id, target_id, "MENTIONS",
-    occurred_at=datetime(2024, 1, 15)
+    namespace_id=ns_id,
+    occurred_at=datetime(2024, 1, 15),
 )
 
 # Automatically creates (if not existing):
@@ -382,7 +387,8 @@ BRIN works because:
 # What was true at a specific moment?
 edges = await storage.get_valid_at(
     entity_id=alice_id,
-    point_in_time=datetime(2023, 6, 15)
+    namespace_id=ns_id,
+    point_in_time=datetime(2023, 6, 15),
 )
 ```
 
@@ -393,7 +399,7 @@ edges = await storage.get_valid_at(
 edges = await storage.get_edges_by_time_range(
     namespace_id=ns_id,
     start=datetime(2024, 1, 1),
-    end=datetime(2024, 3, 31)
+    end=datetime(2024, 3, 31),
 )
 ```
 
@@ -403,6 +409,7 @@ edges = await storage.get_edges_by_time_range(
 # How has Alice's employment changed over time?
 all_edges = await storage.get_edges_by_entity(
     alice_id,
+    namespace_id=ns_id,
     relationship_type="WORKS_FOR",
     direction="outgoing",
     valid_only=False  # Include invalidated edges
@@ -426,7 +433,8 @@ for edge in sorted(all_edges, key=lambda e: e.occurred_at):
 
 edges = await storage.get_edges_by_entity(
     alice_id,
-    ingested_before=datetime(2024, 1, 1)
+    namespace_id=ns_id,
+    ingested_before=datetime(2024, 1, 1),
 )
 # Returns only edges ingested before Jan 1, 2024
 # Even if they describe events after that date
