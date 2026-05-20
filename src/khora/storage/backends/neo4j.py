@@ -377,6 +377,8 @@ class Neo4jBackend(GraphBackendBase):
         pool_sampler_interval_ms: int = 500,
         relationship_source_document_ids_max: int = 100,
         relationship_source_chunk_ids_max: int = 250,
+        entity_source_document_ids_max: int = 100,
+        entity_source_chunk_ids_max: int = 250,
     ) -> None:
         """Initialize the Neo4j backend.
 
@@ -410,6 +412,15 @@ class Neo4jBackend(GraphBackendBase):
                 ``source_chunk_ids`` per relationship after MERGE. Same
                 semantics as ``relationship_source_document_ids_max``; counter
                 label ``field=source_chunk_ids``. Default 250.
+            entity_source_document_ids_max: Cap on retained
+                ``source_document_ids`` per entity after MERGE. Same shape as
+                the relationship cap but for the entity-side silent-drop path
+                (#777). Counter is ``khora.neo4j.entity.source_id_truncated``
+                with label ``field=source_document_ids``. Default 100.
+            entity_source_chunk_ids_max: Cap on retained
+                ``source_chunk_ids`` per entity after MERGE. Counter
+                ``khora.neo4j.entity.source_id_truncated`` with label
+                ``field=source_chunk_ids``. Default 250.
         """
         self._url = url
         self._user = user
@@ -442,6 +453,8 @@ class Neo4jBackend(GraphBackendBase):
         self._sampler_finalizer: _weakref.finalize | None = None
         self._relationship_source_document_ids_max = relationship_source_document_ids_max
         self._relationship_source_chunk_ids_max = relationship_source_chunk_ids_max
+        self._entity_source_document_ids_max = entity_source_document_ids_max
+        self._entity_source_chunk_ids_max = entity_source_chunk_ids_max
         self._init_metrics()
 
     def _init_metrics(self) -> None:
@@ -509,6 +522,14 @@ class Neo4jBackend(GraphBackendBase):
                 "source_document_ids / source_chunk_ids cap (#737)."
             ),
         )
+        # Entity-side provenance truncation counter (#777). Same shape as
+        # the relationship counter, but for entity MERGE drops.
+        self._entity_source_id_truncated_counter = metric_counter(
+            "khora.neo4j.entity.source_id_truncated",
+            description=(
+                "Entity MERGE provenance entries dropped due to source_document_ids / source_chunk_ids cap (#777)."
+            ),
+        )
 
     def _record_truncation(
         self,
@@ -538,6 +559,36 @@ class Neo4jBackend(GraphBackendBase):
             field=field,
             rows=rows_affected,
             rel_type_suffix=f", rel_type={rel_type}" if rel_type else "",
+            limit=limit,
+            field_upper=field.upper(),
+        )
+
+    def _record_entity_truncation(
+        self,
+        *,
+        field: str,
+        kind: str,
+        dropped: int,
+        rows_affected: int,
+        limit: int,
+    ) -> None:
+        """Log + emit metric when entity MERGE-time provenance truncation drops entries.
+
+        Entity-side mirror of ``_record_truncation`` (#777). Same skip-on-zero
+        semantics. ``kind`` is ``"batch"`` — the entity upsert path is batched
+        only, there is no single-entity merge in the backend.
+        """
+        if dropped <= 0:
+            return
+        self._entity_source_id_truncated_counter.add(dropped, attributes={"field": field, "kind": kind})
+        logger.warning(
+            "Entity provenance truncated: dropped {dropped} {field} entries "
+            "across {rows} entity(s) (limit={limit}). "
+            "Raise KHORA_STORAGE__GRAPH__ENTITY_{field_upper}_MAX to retain "
+            "deeper provenance.",
+            dropped=dropped,
+            field=field,
+            rows=rows_affected,
             limit=limit,
             field_upper=field.upper(),
         )
@@ -577,6 +628,8 @@ class Neo4jBackend(GraphBackendBase):
             pool_sampler_interval_ms=getattr(config, "pool_sampler_interval_ms", 500),
             relationship_source_document_ids_max=getattr(config, "relationship_source_document_ids_max", 100),
             relationship_source_chunk_ids_max=getattr(config, "relationship_source_chunk_ids_max", 250),
+            entity_source_document_ids_max=getattr(config, "entity_source_document_ids_max", 100),
+            entity_source_chunk_ids_max=getattr(config, "entity_source_chunk_ids_max", 250),
         )
 
     @classmethod
@@ -639,6 +692,8 @@ class Neo4jBackend(GraphBackendBase):
         # set these on the instance directly post-construction.
         instance._relationship_source_document_ids_max = 100
         instance._relationship_source_chunk_ids_max = 250
+        instance._entity_source_document_ids_max = 100
+        instance._entity_source_chunk_ids_max = 250
         instance._init_metrics()
         return instance
 
@@ -1415,8 +1470,8 @@ class Neo4jBackend(GraphBackendBase):
             ON MATCH SET
                 e.description = CASE WHEN size(row.description) > size(coalesce(e.description, ''))
                     THEN row.description ELSE e.description END,
-                e.source_document_ids = (e.source_document_ids + row.source_document_ids)[-100..],
-                e.source_chunk_ids = (e.source_chunk_ids + row.source_chunk_ids)[-250..],
+                e.source_document_ids = (e.source_document_ids + row.source_document_ids)[-$ent_doc_max..],
+                e.source_chunk_ids = (e.source_chunk_ids + row.source_chunk_ids)[-$ent_chunk_max..],
                 e.mention_count = e.mention_count + row.mention_count,
                 e.confidence = CASE WHEN row.confidence > e.confidence THEN row.confidence ELSE e.confidence END,
                 e.updated_at = row.updated_at,
@@ -1489,6 +1544,9 @@ class Neo4jBackend(GraphBackendBase):
             ),
         )
 
+        ent_doc_max = self._entity_source_document_ids_max
+        ent_chunk_max = self._entity_source_chunk_ids_max
+
         for start in range(0, len(sorted_entities), batch_size):
             batch = sorted_entities[start : start + batch_size]
             rows = [_entity_to_cypher_params(e) for e in batch]
@@ -1497,10 +1555,17 @@ class Neo4jBackend(GraphBackendBase):
                 # Bulk mode: skip prefetch+versioning, bypass gate.
                 # Used for --rewrite (new namespace) where no existing entities
                 # can conflict and no prior versions need tracking.
+                # ON MATCH cannot fire here (the namespace is empty), so
+                # the slice never truncates — no telemetry needed.
                 async def _merge_only_tx(
                     tx: AsyncManagedTransaction,
                 ) -> list[dict[str, Any]]:
-                    merge_result = await tx.run(_UPSERT_CYPHER, rows=rows)
+                    merge_result = await tx.run(
+                        _UPSERT_CYPHER,
+                        rows=rows,
+                        ent_doc_max=ent_doc_max,
+                        ent_chunk_max=ent_chunk_max,
+                    )
                     return await merge_result.data()
 
                 _gate_t0 = _time.perf_counter()
@@ -1530,7 +1595,12 @@ class Neo4jBackend(GraphBackendBase):
                 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
                     pre_result = await tx.run(_PREFETCH_CYPHER, keys=prefetch_keys)
                     pre_data = await pre_result.data()
-                    merge_result = await tx.run(_UPSERT_CYPHER, rows=rows)
+                    merge_result = await tx.run(
+                        _UPSERT_CYPHER,
+                        rows=rows,
+                        ent_doc_max=ent_doc_max,
+                        ent_chunk_max=ent_chunk_max,
+                    )
                     merge_data = await merge_result.data()
                     return pre_data, merge_data
 
@@ -1548,6 +1618,42 @@ class Neo4jBackend(GraphBackendBase):
                 for rec in pre_existing:
                     key = (rec["namespace_id"], rec["name"], rec["entity_type"])
                     pre_map[key] = rec
+
+                # Provenance-truncation telemetry (#777). For each matched
+                # entity, compute the pre-truncation union size and the
+                # number of entries that the tail-slice dropped. Sum across
+                # the batch and emit a single warning + counter increment
+                # per field. Mirrors the relationship-side pattern (#737).
+                _doc_dropped = 0
+                _doc_rows = 0
+                _chunk_dropped = 0
+                _chunk_rows = 0
+                for row in rows:
+                    pre = pre_map.get((row["namespace_id"], row["name"], row["entity_type"]))
+                    if pre is None:
+                        continue
+                    union_doc = len(pre.get("source_document_ids") or []) + len(row.get("source_document_ids") or [])
+                    if union_doc > ent_doc_max:
+                        _doc_dropped += union_doc - ent_doc_max
+                        _doc_rows += 1
+                    union_chunk = len(pre.get("source_chunk_ids") or []) + len(row.get("source_chunk_ids") or [])
+                    if union_chunk > ent_chunk_max:
+                        _chunk_dropped += union_chunk - ent_chunk_max
+                        _chunk_rows += 1
+                self._record_entity_truncation(
+                    field="source_document_ids",
+                    kind="batch",
+                    dropped=_doc_dropped,
+                    rows_affected=_doc_rows,
+                    limit=ent_doc_max,
+                )
+                self._record_entity_truncation(
+                    field="source_chunk_ids",
+                    kind="batch",
+                    dropped=_chunk_dropped,
+                    rows_affected=_chunk_rows,
+                    limit=ent_chunk_max,
+                )
 
                 # Phase 2: Create versioned snapshots for entities with changed attributes
                 now_iso = datetime.now(UTC).isoformat()
