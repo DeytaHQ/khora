@@ -97,8 +97,12 @@ async def test_neo4j_create_relationship_mirrors_sanitized_type() -> None:
     fake_session = MagicMock()
     fake_session.__aenter__ = AsyncMock(return_value=fake_session)
     fake_session.__aexit__ = AsyncMock(return_value=None)
-    fake_session.execute_write = AsyncMock(return_value=None)
+    fake_session.execute_write = AsyncMock(
+        return_value={"doc_dropped": 0, "chunk_dropped": 0, "doc_rows": 0, "chunk_rows": 0}
+    )
     backend._session = MagicMock(return_value=fake_session)  # type: ignore[attr-defined]
+    backend._relationship_source_document_ids_max = 100  # type: ignore[attr-defined]
+    backend._relationship_source_chunk_ids_max = 250  # type: ignore[attr-defined]
 
     rel = _make_rel()
     await backend.create_relationship(rel)
@@ -114,7 +118,9 @@ async def test_neo4j_create_relationships_batch_mirrors_sanitized_type() -> None
     fake_session = MagicMock()
     fake_session.__aenter__ = AsyncMock(return_value=fake_session)
     fake_session.__aexit__ = AsyncMock(return_value=None)
-    fake_session.execute_write = AsyncMock(return_value=1)
+    fake_session.execute_write = AsyncMock(
+        return_value={"created": 1, "doc_dropped": 0, "chunk_dropped": 0, "doc_rows": 0, "chunk_rows": 0}
+    )
     backend._session = MagicMock(return_value=fake_session)  # type: ignore[attr-defined]
     # _ensure_relationship_type_indexes touches the live driver — short-circuit.
     backend._ensure_relationship_type_indexes = AsyncMock(return_value=None)  # type: ignore[attr-defined]
@@ -123,6 +129,8 @@ async def test_neo4j_create_relationships_batch_mirrors_sanitized_type() -> None
 
     backend._relationship_write_sem = asyncio.Semaphore(8)  # type: ignore[attr-defined]
     backend._driver = MagicMock()  # type: ignore[attr-defined]
+    backend._relationship_source_document_ids_max = 100  # type: ignore[attr-defined]
+    backend._relationship_source_chunk_ids_max = 250  # type: ignore[attr-defined]
 
     rels = [_make_rel("lives in"), _make_rel("works AT")]
     await backend.create_relationships_batch(rels)
