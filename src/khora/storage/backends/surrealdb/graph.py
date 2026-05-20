@@ -18,6 +18,7 @@ from uuid import UUID
 from loguru import logger
 
 from khora.core.models import Entity, Episode, Relationship
+from khora.storage.backends.mixins import sanitize_cypher_label
 from khora.storage.backends.surrealdb._helpers import (
     _entity_to_bindings,
     _parse_dt,
@@ -581,6 +582,13 @@ class SurrealDBGraphAdapter:
 
     @trace("khora.surrealdb.graph.create_relationship", include={"relationship"})
     async def create_relationship(self, relationship: Relationship) -> Relationship:
+        # Normalise relationship_type the same way Cypher-based backends
+        # do (issue #749).  Before this, SurrealDB stored the raw user
+        # string verbatim while Neo4j / sqlite_lance / AGE upper-snake-
+        # cased it — the same input read back as two different values
+        # depending on backend.
+        relationship.relationship_type = sanitize_cypher_label(relationship.relationship_type)
+
         src = _rid("entity", relationship.source_entity_id)
         tgt = _rid("entity", relationship.target_entity_id)
 
@@ -715,6 +723,11 @@ class SurrealDBGraphAdapter:
     async def create_relationships_batch(self, relationships: list[Relationship], *, batch_size: int = 200) -> int:
         if not relationships:
             return 0
+
+        # Normalise each relationship_type in place so SurrealDB matches the
+        # Cypher backends (issue #749).
+        for rel in relationships:
+            rel.relationship_type = sanitize_cypher_label(rel.relationship_type)
 
         # Build a batch array and execute all RELATEs in a single round-trip
         rels_data: list[dict[str, Any]] = []

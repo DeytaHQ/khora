@@ -445,8 +445,11 @@ async def test_create_relationship_returns_input_and_sanitizes_label() -> None:
     out = await b.create_relationship(rel)
     assert out is rel
     assembled = [str(call.args[0]) for call in session.execute.await_args_list]
-    # ``_sanitize_label`` replaces non-[A-Za-z0-9_] with `_`.
-    assert any("reports_to_" in sql for sql in assembled)
+    # ``sanitize_cypher_label`` UPPER_SNAKE_CASEs the label across every
+    # Cypher-style backend (issue #749).
+    assert any("REPORTS_TO_" in sql for sql in assembled)
+    # And mirrors that form back onto the caller's object.
+    assert rel.relationship_type == "REPORTS_TO_"
 
 
 @pytest.mark.unit
@@ -492,7 +495,9 @@ async def test_get_entity_relationships_with_rel_types_join() -> None:
     b = _connected_backend(session)
     await b.get_entity_relationships(uuid4(), namespace_id=_NS, relationship_types=["knows", "WORKS_AT"])
     assembled = [str(call.args[0]) for call in session.execute.await_args_list]
-    assert any("knows|WORKS_AT" in sql for sql in assembled)
+    # ``sanitize_cypher_label`` UPPER_SNAKE_CASEs filter types too so reads
+    # match writes — see issue #749.
+    assert any("KNOWS|WORKS_AT" in sql for sql in assembled)
 
 
 @pytest.mark.unit

@@ -418,6 +418,10 @@ class MemgraphBackend(GraphBackendBase):
         driver = self._get_driver()
 
         rel_type = sanitize_cypher_label(relationship.relationship_type)
+        # Mirror the sanitised type back so the caller's object matches
+        # the persisted edge label, the same way Neo4j / sqlite_lance now
+        # do (issue #749).
+        relationship.relationship_type = rel_type
 
         # Dynamic relationship type via f-string (parameterized labels not supported in Cypher)
         query = f"""
