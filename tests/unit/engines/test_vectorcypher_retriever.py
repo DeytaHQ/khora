@@ -187,6 +187,38 @@ class TestRetrieverInit:
 
         assert retriever._dual_nodes is None
 
+    def test_init_bypasses_namespace_proxy_for_pool_backend(self) -> None:
+        """``DualNodeManager.pool_backend`` must be the raw graph backend.
+
+        ``StorageCoordinator.graph`` returns a ``NamespaceRequiredProxy`` whose
+        ``__getattr__`` rejects any underscore-prefixed name — including
+        ``_session``. Reading the public attribute caused session-aware search
+        (and any other path that opens a Neo4j session through
+        ``DualNodeManager``) to die with ``AttributeError('_session')`` on
+        every recall once the proxy landed (#765).
+        """
+        from khora.storage.coordinator import StorageCoordinator
+
+        raw_graph = MagicMock(name="raw_graph_backend")
+        raw_graph._session = MagicMock(name="_session")
+        storage = StorageCoordinator()
+        storage.graph = raw_graph  # routes through proxy on assignment
+
+        # Sanity: the public attribute is now the proxy and refuses ``_session``.
+        assert storage.graph is not raw_graph
+        with pytest.raises(AttributeError):
+            storage.graph._session  # noqa: B018
+
+        retriever = VectorCypherRetriever(
+            vector_store=AsyncMock(),
+            neo4j_driver=AsyncMock(),
+            embedder=AsyncMock(),
+            storage=storage,
+        )
+
+        assert retriever._dual_nodes is not None
+        assert retriever._dual_nodes._pool_backend is raw_graph
+
 
 @pytest.mark.unit
 class TestRetrieverSimpleRetrieve:
