@@ -109,6 +109,25 @@ KHORA_STORAGE__GRAPH__POOL_SAMPLER_ENABLED=true
 KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS=500    # clamped to [50, 60000]
 ```
 
+### Neo4j relationship provenance caps
+
+`Relationship.source_document_ids` and `Relationship.source_chunk_ids`
+are append-bounded on every `MERGE` to prevent unbounded growth on
+hot edges. Defaults (100 / 250) preserve pre-#737 behavior; deep-provenance
+workloads — many documents contributing to the same edge — should raise the
+relevant knob and watch the `khora.neo4j.relationship.source_id_truncated`
+counter (labels: `field`, `kind`):
+
+```bash
+KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX=500
+KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_CHUNK_IDS_MAX=1000
+```
+
+When the (existing + incoming) union exceeds the cap, the most-recent
+tail is kept, dropped entries are counted on the metric, and a
+`logger.warning(...)` records the field name, dropped count, rows
+affected, and configured limit. Issue #737.
+
 ### Chronicle: LanceDB embedded backend
 
 The Chronicle engine can run on either PostgreSQL + pgvector (default) or

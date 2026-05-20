@@ -881,3 +881,326 @@ class TestTimeoutCodes:
     def test_codes_present(self) -> None:
         assert "Neo.ClientError.Transaction.TransactionTimedOut" in _NEO4J_TIMEOUT_CODES
         assert all(c.startswith("Neo.ClientError.Transaction.") for c in _NEO4J_TIMEOUT_CODES)
+
+
+# ---------------------------------------------------------------------------
+# Issue #737 — configurable relationship-provenance caps + truncation telemetry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRelationshipProvenanceCapDefaults:
+    def test_defaults_preserve_pre_737_behavior(self) -> None:
+        """Defaults stay at 100 / 250 — regression gate."""
+        b = Neo4jBackend("bolt://localhost:7687")
+        assert b._relationship_source_document_ids_max == 100
+        assert b._relationship_source_chunk_ids_max == 250
+
+    def test_custom_caps_accepted(self) -> None:
+        b = Neo4jBackend(
+            "bolt://localhost:7687",
+            relationship_source_document_ids_max=500,
+            relationship_source_chunk_ids_max=1000,
+        )
+        assert b._relationship_source_document_ids_max == 500
+        assert b._relationship_source_chunk_ids_max == 1000
+
+    def test_from_config_threads_caps(self) -> None:
+        cfg = SimpleNamespace(
+            url="bolt://localhost:7687",
+            user="u",
+            password="pw",
+            database="neo4j",
+            max_connection_pool_size=100,
+            connection_acquisition_timeout=60.0,
+            retry_delay_jitter_factor=0.5,
+            max_connection_lifetime=900,
+            liveness_check_timeout=30.0,
+            query_timeout=5.0,
+            entity_write_concurrency=4,
+            relationship_write_concurrency=2,
+            pool_sampler_enabled=False,
+            pool_sampler_interval_ms=500,
+            relationship_source_document_ids_max=750,
+            relationship_source_chunk_ids_max=2000,
+        )
+        b = Neo4jBackend.from_config(cfg)
+        assert b._relationship_source_document_ids_max == 750
+        assert b._relationship_source_chunk_ids_max == 2000
+
+    def test_from_config_missing_caps_uses_defaults(self) -> None:
+        """getattr fallback path — older Neo4jConfig without the new fields."""
+        cfg = SimpleNamespace(
+            url="bolt://localhost:7687",
+            user="u",
+            password="pw",
+            database="neo4j",
+            max_connection_pool_size=100,
+            connection_acquisition_timeout=60.0,
+            retry_delay_jitter_factor=0.5,
+            max_connection_lifetime=900,
+            liveness_check_timeout=30.0,
+            query_timeout=5.0,
+            entity_write_concurrency=4,
+            relationship_write_concurrency=2,
+            pool_sampler_enabled=False,
+            pool_sampler_interval_ms=500,
+            # No relationship_source_*_max — exercises the getattr default.
+        )
+        b = Neo4jBackend.from_config(cfg)
+        assert b._relationship_source_document_ids_max == 100
+        assert b._relationship_source_chunk_ids_max == 250
+
+
+@pytest.mark.unit
+class TestRecordTruncationHelper:
+    def test_zero_dropped_is_noop(self) -> None:
+        """No log, no metric increment when nothing was truncated."""
+        b = Neo4jBackend("bolt://localhost:7687")
+        b._source_id_truncated_counter = MagicMock()
+        b._record_truncation(
+            field="source_document_ids",
+            kind="batch",
+            dropped=0,
+            rows_affected=0,
+            limit=100,
+        )
+        b._source_id_truncated_counter.add.assert_not_called()
+
+    def test_negative_dropped_is_noop(self) -> None:
+        """Defensive: negative sentinel doesn't fire."""
+        b = Neo4jBackend("bolt://localhost:7687")
+        b._source_id_truncated_counter = MagicMock()
+        b._record_truncation(
+            field="source_chunk_ids",
+            kind="single",
+            dropped=-1,
+            rows_affected=0,
+            limit=250,
+        )
+        b._source_id_truncated_counter.add.assert_not_called()
+
+    def test_positive_dropped_emits_counter_and_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        from loguru import logger as loguru_logger
+
+        b = Neo4jBackend("bolt://localhost:7687")
+        b._source_id_truncated_counter = MagicMock()
+
+        # loguru -> stdlib bridge so caplog sees the warning.
+        handler_id = loguru_logger.add(
+            lambda msg: caplog.handler.emit(
+                __import__("logging").LogRecord(
+                    name="khora",
+                    level=__import__("logging").WARNING,
+                    pathname="",
+                    lineno=0,
+                    msg=msg.record["message"],
+                    args=None,
+                    exc_info=None,
+                )
+            ),
+            level="WARNING",
+        )
+        try:
+            with caplog.at_level("WARNING"):
+                b._record_truncation(
+                    field="source_document_ids",
+                    kind="batch",
+                    dropped=42,
+                    rows_affected=3,
+                    limit=100,
+                    rel_type="WORKS_FOR",
+                )
+        finally:
+            loguru_logger.remove(handler_id)
+
+        b._source_id_truncated_counter.add.assert_called_once_with(
+            42, attributes={"field": "source_document_ids", "kind": "batch"}
+        )
+        # Warning message includes the actionable knob suggestion.
+        joined = "\n".join(rec.message for rec in caplog.records)
+        assert "dropped 42 source_document_ids" in joined
+        assert "WORKS_FOR" in joined
+        assert "limit=100" in joined
+        assert "RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX" in joined
+
+
+@pytest.mark.unit
+class TestCreateRelationshipsBatchTruncationWiring:
+    @pytest.mark.asyncio
+    async def test_batch_truncation_drives_counter(self) -> None:
+        """When the Cypher RETURN signals dropped > 0, the counter fires."""
+        # KNOWS is not in BIDIRECTIONAL_TYPES — single type-group / single tx.
+        ns_id = uuid4()
+        rel = Relationship(
+            namespace_id=ns_id,
+            source_entity_id=uuid4(),
+            target_entity_id=uuid4(),
+            relationship_type="KNOWS",
+        )
+
+        record = {"created": 1, "doc_dropped": 15, "chunk_dropped": 30, "doc_rows": 1, "chunk_rows": 1}
+
+        result = MagicMock()
+        result.single = AsyncMock(return_value=record)
+
+        async def _run(*_args: Any, **_kwargs: Any) -> Any:
+            return result
+
+        async def _exec_write(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            tx = MagicMock()
+            tx.run = AsyncMock(side_effect=_run)
+            return await fn(tx, *args, **kwargs)
+
+        session = AsyncMock()
+        session.execute_write = AsyncMock(side_effect=_exec_write)
+
+        b = _backend_with_session_mock(session)
+        b._source_id_truncated_counter = MagicMock()
+
+        out = await b.create_relationships_batch([rel])
+        assert out == 1
+        # Both fields fired with matching label sets.
+        b._source_id_truncated_counter.add.assert_any_call(
+            15, attributes={"field": "source_document_ids", "kind": "batch"}
+        )
+        b._source_id_truncated_counter.add.assert_any_call(
+            30, attributes={"field": "source_chunk_ids", "kind": "batch"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_batch_no_truncation_does_not_fire(self) -> None:
+        """ON CREATE rows (pre_union always == incoming) → dropped 0 → no emit."""
+        rel = Relationship(
+            namespace_id=uuid4(),
+            source_entity_id=uuid4(),
+            target_entity_id=uuid4(),
+            relationship_type="KNOWS",
+        )
+
+        record = {"created": 1, "doc_dropped": 0, "chunk_dropped": 0, "doc_rows": 0, "chunk_rows": 0}
+        result = MagicMock()
+        result.single = AsyncMock(return_value=record)
+
+        async def _run(*_args: Any, **_kwargs: Any) -> Any:
+            return result
+
+        async def _exec_write(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            tx = MagicMock()
+            tx.run = AsyncMock(side_effect=_run)
+            return await fn(tx, *args, **kwargs)
+
+        session = AsyncMock()
+        session.execute_write = AsyncMock(side_effect=_exec_write)
+        b = _backend_with_session_mock(session)
+        b._source_id_truncated_counter = MagicMock()
+        await b.create_relationships_batch([rel])
+        b._source_id_truncated_counter.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_batch_custom_caps_threaded_into_cypher_params(self) -> None:
+        """Custom caps reach the tx.run call as $src_doc_max / $src_chunk_max."""
+        rel = Relationship(
+            namespace_id=uuid4(),
+            source_entity_id=uuid4(),
+            target_entity_id=uuid4(),
+            relationship_type="KNOWS",
+        )
+
+        record = {"created": 1, "doc_dropped": 0, "chunk_dropped": 0, "doc_rows": 0, "chunk_rows": 0}
+        result = MagicMock()
+        result.single = AsyncMock(return_value=record)
+
+        seen_kwargs: dict[str, Any] = {}
+
+        async def _run(*_args: Any, **kwargs: Any) -> Any:
+            seen_kwargs.update(kwargs)
+            return result
+
+        async def _exec_write(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            tx = MagicMock()
+            tx.run = AsyncMock(side_effect=_run)
+            return await fn(tx, *args, **kwargs)
+
+        session = AsyncMock()
+        session.execute_write = AsyncMock(side_effect=_exec_write)
+
+        driver = MagicMock()
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=session)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        driver.session.return_value = ctx
+
+        b = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+        b._relationship_source_document_ids_max = 500
+        b._relationship_source_chunk_ids_max = 1000
+
+        await b.create_relationships_batch([rel])
+        assert seen_kwargs.get("src_doc_max") == 500
+        assert seen_kwargs.get("src_chunk_max") == 1000
+
+
+@pytest.mark.unit
+class TestCreateRelationshipSingleTruncationWiring:
+    @pytest.mark.asyncio
+    async def test_single_truncation_drives_counter(self) -> None:
+        rel = Relationship(
+            namespace_id=uuid4(),
+            source_entity_id=uuid4(),
+            target_entity_id=uuid4(),
+            relationship_type="OWNS",
+        )
+
+        record = {"doc_dropped": 5, "chunk_dropped": 12}
+        result = MagicMock()
+        result.single = AsyncMock(return_value=record)
+
+        async def _run(*_args: Any, **_kwargs: Any) -> Any:
+            return result
+
+        async def _exec_write(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            tx = MagicMock()
+            tx.run = AsyncMock(side_effect=_run)
+            return await fn(tx, *args, **kwargs)
+
+        session = AsyncMock()
+        session.execute_write = AsyncMock(side_effect=_exec_write)
+        b = _backend_with_session_mock(session)
+        b._source_id_truncated_counter = MagicMock()
+
+        out = await b.create_relationship(rel)
+        assert out is rel  # Method returns the input row unchanged.
+        b._source_id_truncated_counter.add.assert_any_call(
+            5, attributes={"field": "source_document_ids", "kind": "single"}
+        )
+        b._source_id_truncated_counter.add.assert_any_call(
+            12, attributes={"field": "source_chunk_ids", "kind": "single"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_single_no_truncation_does_not_fire(self) -> None:
+        rel = Relationship(
+            namespace_id=uuid4(),
+            source_entity_id=uuid4(),
+            target_entity_id=uuid4(),
+            relationship_type="OWNS",
+        )
+        record = {"doc_dropped": 0, "chunk_dropped": 0}
+        result = MagicMock()
+        result.single = AsyncMock(return_value=record)
+
+        async def _run(*_args: Any, **_kwargs: Any) -> Any:
+            return result
+
+        async def _exec_write(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            tx = MagicMock()
+            tx.run = AsyncMock(side_effect=_run)
+            return await fn(tx, *args, **kwargs)
+
+        session = AsyncMock()
+        session.execute_write = AsyncMock(side_effect=_exec_write)
+        b = _backend_with_session_mock(session)
+        b._source_id_truncated_counter = MagicMock()
+
+        await b.create_relationship(rel)
+        b._source_id_truncated_counter.add.assert_not_called()
