@@ -16,8 +16,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
   vulnerable surface (no torch.jit / profiler / quantization / RNN
   packing / CUDA caching-allocator calls; no transformer checkpoint
   conversion; no direct joblib pickle loading). The allowlist will
-  shrink as upstream fixes ship. Tracked in [issue #TODO] — revisit
-  weekly.
+  shrink as upstream fixes ship. Tracked in #778 — revisit weekly.
 
 ### Fixed
 

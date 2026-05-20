@@ -137,7 +137,7 @@ jobs:
           uv export --no-dev --no-hashes > /tmp/pip-audit-requirements.txt
           # Allowlist for upstream CVEs with no fix version available. Each entry
           # must explain why khora's usage does not reach the vulnerable code.
-          # Revisit weekly — see tracking issue referenced in CHANGELOG.
+          # Revisit weekly — tracking issue: #778.
           uvx pip-audit -r /tmp/pip-audit-requirements.txt --progress-spinner off \
             --ignore-vuln GHSA-xqmj-j6mv-4862 \
             --ignore-vuln PYSEC-2024-277 \
