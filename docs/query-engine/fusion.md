@@ -194,8 +194,8 @@ from khora.query import HybridQueryEngine, QueryConfig
 # The engine can apply recommendations automatically
 result = await engine.query(
     "Who manages engineering?",
-    namespace_id,
-    config=QueryConfig(use_adaptive_weights=True)
+    namespace_id=namespace_id,
+    config=QueryConfig(use_adaptive_weights=True),
 )
 ```
 
@@ -251,7 +251,7 @@ def reciprocal_rank_fusion(
 After fusion, you can see where results came from:
 
 ```python
-result = await kb.recall("machine learning applications")
+result = await kb.recall("machine learning applications", namespace=ns_id)
 
 print(f"Vector contributed: {result.search_contributions.vector} results")
 print(f"Graph contributed: {result.search_contributions.graph} results")
@@ -313,9 +313,11 @@ from khora import Khora, SearchMode
 from khora.query import QueryConfig
 
 async with Khora() as kb:
+    ns = await kb.create_namespace("default")
     # Search with custom fusion settings
     results = await kb.recall(
         "Einstein's contributions to physics",
+        namespace=ns.namespace_id,
         mode=SearchMode.ALL,
         config=QueryConfig(
             vector_weight=0.5,
@@ -326,8 +328,8 @@ async with Khora() as kb:
         )
     )
 
-    for chunk, score in results.chunks:
-        print(f"[{score:.4f}] {chunk.content[:80]}...")
+    for chunk in results.chunks:
+        print(f"[{chunk.score:.4f}] {chunk.content[:80]}...")
 ```
 
 ## What's Next?

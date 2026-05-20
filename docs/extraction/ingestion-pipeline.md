@@ -135,6 +135,8 @@ chunks = await chunk_document(
 
 Why chunk? Embedding models have token limits, and retrieval works better with focused content. A 10,000-word document as a single embedding is too diluted - split it into coherent 500-token pieces.
 
+Each returned `ChunkResult` stamps `metadata["chunker"]` with its registered strategy name (`"fixed"`, `"recursive"`, `"semantic"`, `"conversation"`) so downstream code — and the persisted chunk row — knows how a chunk was produced without re-running the chunker.
+
 See [Chunkers](chunkers.md) for the different strategies.
 
 ### Steps 2 & 3: Embedding + Extraction (Parallel)
@@ -222,7 +224,7 @@ embeddings = await embedder.embed_batch(entity_texts)
 
 # Update all embeddings in a single transaction
 updates = [(e.id, emb, model) for e, emb in zip(entities, embeddings)]
-await storage.update_entity_embeddings_batch(updates)
+await storage.update_entity_embeddings_batch(updates, namespace_id=namespace_id)
 ```
 
 **Relationships → Neo4j:**
@@ -231,6 +233,8 @@ await storage.update_entity_embeddings_batch(updates)
 await storage.create_relationships_batch(relationships, batch_size=50)
 # Uses UNWIND + CREATE in Neo4j — one transaction instead of N individual writes
 ```
+
+> Since v0.16.0 (#769) every storage read/write requires `namespace_id` as a kwarg-only argument (or as the leading positional on the small set of methods like `get_document_by_checksum` / `list_entities` / `list_relationships` where it has always been positional). The `StorageCoordinator.{relational,vector,graph,event_store}` attrs are wrapped in `NamespaceRequiredProxy` and emit a `DeprecationWarning` once per role per process; they refuse read calls without `namespace_id=`. Internal canonical refs are `self._{relational,vector,graph,event_store}`. The public attrs disappear in v0.17 — engines that talk to them go through the namespace-scoped coordinator facade instead.
 
 ### Entity ID Remapping
 

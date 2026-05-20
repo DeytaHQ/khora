@@ -261,7 +261,7 @@ Used to determine if agentic exploration is needed.
 ```python
 result = await engine.query(
     "Einstein collaborators at Princeton",
-    namespace_id,
+    namespace_id=namespace_id,
     config=QueryConfig(
         enable_understanding=True,  # Default
     ),
@@ -309,7 +309,7 @@ For simple queries or cost reduction:
 ```python
 result = await engine.query(
     "simple search",
-    namespace_id,
+    namespace_id=namespace_id,
     config=QueryConfig(
         enable_understanding=False,
     ),

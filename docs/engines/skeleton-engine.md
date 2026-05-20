@@ -70,10 +70,13 @@ from khora import Khora
 
 # Use Skeleton Construction engine explicitly
 async with Khora("postgresql://...", engine="skeleton") as kb:
+    ns = await kb.create_namespace("q1-review")
+
     # Store with temporal context
     result = await kb.remember(
         "Meeting notes from quarterly review",
         title="Q1 Review",
+        namespace=ns.namespace_id,
         metadata={
             "author": "alice@company.com",
             "channel": "leadership",
@@ -84,6 +87,7 @@ async with Khora("postgresql://...", engine="skeleton") as kb:
     # Recall with temporal and structured filters
     results = await kb.recall(
         "What decisions were made?",
+        namespace=ns.namespace_id,
         temporal_filter={
             "occurred_after": "2024-01-01",
             "occurred_before": "2024-03-31",
@@ -133,11 +137,22 @@ For exclusive relationships (WORKS_FOR, REPORTS_TO, MARRIED_TO), new edges autom
 
 ```python
 # Alice works for Acme (Jan 2024)
-edge1 = await storage.create_edge(alice_id, acme_id, "WORKS_FOR", occurred_at=jan_2024)
+edge1 = await storage.create_edge(
+    alice_id, acme_id, "WORKS_FOR",
+    namespace_id=ns_id,
+    occurred_at=jan_2024,
+)
 
 # Alice now works for Beta (Mar 2024) - edge1 is automatically invalidated
-edge2 = await storage.create_edge(alice_id, beta_id, "WORKS_FOR", occurred_at=mar_2024)
+edge2 = await storage.create_edge(
+    alice_id, beta_id, "WORKS_FOR",
+    namespace_id=ns_id,
+    occurred_at=mar_2024,
+)
 ```
+
+<!-- TODO(docs-v0.16.0): TemporalEdgeStorage was never wired into the skeleton engine's ingest/recall path (see v0.2.3 note above). Verify the create_edge/get_valid_at signatures shown here against current code if this module is ever revived. -->
+
 
 ### TimeHierarchyBuilder (`src/khora/engines/skeleton/time_hierarchy.py`)
 
@@ -290,7 +305,7 @@ from khora.engines.skeleton.backends import TemporalFilter
 # By time range
 results = await engine.recall(
     "project updates",
-    namespace_id,
+    namespace_id=namespace_id,
     temporal_filter=TemporalFilter(
         occurred_after=datetime(2024, 1, 1),
         occurred_before=datetime(2024, 3, 31),
@@ -300,7 +315,7 @@ results = await engine.recall(
 # By structured fields
 results = await engine.recall(
     "decisions",
-    namespace_id,
+    namespace_id=namespace_id,
     temporal_filter=TemporalFilter(
         author="alice@company.com",
         channel="leadership",
@@ -311,7 +326,7 @@ results = await engine.recall(
 # Combined
 results = await engine.recall(
     "Q1 decisions",
-    namespace_id,
+    namespace_id=namespace_id,
     temporal_filter=TemporalFilter(
         occurred_after=datetime(2024, 1, 1),
         occurred_before=datetime(2024, 3, 31),
@@ -329,7 +344,7 @@ Combines vector similarity with BM25 keyword matching using Reciprocal Rank Fusi
 # Adjust the blend
 results = await engine.recall(
     query,
-    namespace_id,
+    namespace_id=namespace_id,
     hybrid_alpha=0.7,  # 0.7 * vector + 0.3 * BM25
 )
 ```
@@ -348,10 +363,10 @@ results = await engine.recall(
 from khora import SearchMode
 
 # Vector-only (semantic similarity)
-results = await engine.recall(query, ns_id, mode=SearchMode.VECTOR)
+results = await engine.recall(query, namespace_id=ns_id, mode=SearchMode.VECTOR)
 
 # Hybrid (vector + BM25 with RRF)
-results = await engine.recall(query, ns_id, mode=SearchMode.HYBRID)
+results = await engine.recall(query, namespace_id=ns_id, mode=SearchMode.HYBRID)
 
 # Note: SearchMode.GRAPH is not supported in Skeleton Construction engine
 # Use VectorCypher engine for graph-based queries

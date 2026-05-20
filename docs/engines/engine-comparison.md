@@ -46,13 +46,15 @@ The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunk
 ```python
 # VectorCypher: skeleton-selective extraction
 async with Khora(db_url, engine="vectorcypher") as kb:
-    result = await kb.remember(content)
+    ns = await kb.create_namespace("default")
+    result = await kb.remember(content, namespace=ns.namespace_id)
     print(f"Extracted {result.entities_extracted} entities")
 
 # For 100% extraction (legacy GraphRAG behavior):
 async with Khora(db_url, engine="vectorcypher",
                  engine_kwargs={"skeleton_core_ratio": 1.0}) as kb:
-    result = await kb.remember(content)
+    ns = await kb.create_namespace("default")
+    result = await kb.remember(content, namespace=ns.namespace_id)
 ```
 
 **Skeleton Construction:**
@@ -64,7 +66,8 @@ async with Khora(db_url, engine="vectorcypher",
 ```python
 # Skeleton Construction: minimal extraction, skeleton-based
 async with Khora(db_url, engine="skeleton") as kb:
-    result = await kb.remember(content)
+    ns = await kb.create_namespace("default")
+    result = await kb.remember(content, namespace=ns.namespace_id)
     # Entities only extracted for "core" chunks (high PageRank)
 ```
 
@@ -89,10 +92,18 @@ async with Khora(db_url, engine="skeleton") as kb:
 
 ```python
 # Skeleton Construction: store event with occurrence time
-await kb.remember(content, occurred_at=datetime(2024, 1, 15))
+await kb.remember(
+    content,
+    namespace=ns_id,
+    metadata={"occurred_at": "2024-01-15T00:00:00Z"},
+)
 
 # Query: "What happened in January?"
-results = await kb.recall("January events", time_range=("2024-01-01", "2024-01-31"))
+results = await kb.recall(
+    "January events",
+    namespace=ns_id,
+    time_range=("2024-01-01", "2024-01-31"),
+)
 ```
 
 **Chronicle:**
@@ -108,8 +119,8 @@ results = await kb.recall("January events", time_range=("2024-01-01", "2024-01-3
 
 ```python
 # VectorCypher: query routing determines the search path automatically
-results = await kb.recall("Who founded Acme Corp?")  # Multi-hop entity query
-results = await kb.recall("CEO recent news")  # Hybrid vector + temporal
+results = await kb.recall("Who founded Acme Corp?", namespace=ns_id)  # Multi-hop entity query
+results = await kb.recall("CEO recent news", namespace=ns_id)  # Hybrid vector + temporal
 ```
 
 **Skeleton Construction:**
@@ -120,6 +131,7 @@ results = await kb.recall("CEO recent news")  # Hybrid vector + temporal
 # Skeleton Construction: time-filtered hybrid search
 results = await kb.recall(
     "deployment errors",
+    namespace=ns_id,
     time_range=("2024-01-01", "2024-01-31"),
     mode=SearchMode.HYBRID,
 )
@@ -179,16 +191,16 @@ For 1000 documents averaging 5KB each:
 ```python
 # Before (graphrag — no longer available)
 async with Khora(db_url, engine="graphrag") as kb:
-    await kb.remember(content)
+    await kb.remember(content, namespace=ns_id)
 
 # After — drop-in: vectorcypher with full extraction
 async with Khora(db_url, engine="vectorcypher",
                  engine_kwargs={"skeleton_core_ratio": 1.0}) as kb:
-    await kb.remember(content)
+    await kb.remember(content, namespace=ns_id)
 
 # Or accept default selective extraction (recommended — 30% cheaper):
 async with Khora(db_url, engine="vectorcypher") as kb:
-    await kb.remember(content)
+    await kb.remember(content, namespace=ns_id)
 ```
 
 Existing graphrag-ingested data remains queryable via `vectorcypher` against the same database — the table shapes are identical.
@@ -206,15 +218,15 @@ For complex use cases, consider running multiple engines against the same data s
 
 ```python
 # Example: dual-engine setup (conceptual)
-async def hybrid_query(query: str):
+async def hybrid_query(query: str, ns_id):
     async with Khora(db_url, engine="vectorcypher") as kg_kb:
         async with Khora(db_url, engine="skeleton") as temporal_kb:
             # Route entity queries to VectorCypher
             if has_entity_intent(query):
-                return await kg_kb.recall(query)
+                return await kg_kb.recall(query, namespace=ns_id)
             # Route temporal queries to Skeleton
             elif has_temporal_intent(query):
-                return await temporal_kb.recall(query)
+                return await temporal_kb.recall(query, namespace=ns_id)
 ```
 
 ## Performance Benchmarks

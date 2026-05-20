@@ -163,7 +163,7 @@ Controls the balance between vector and BM25:
 ```python
 results = await engine.recall(
     query,
-    namespace_id,
+    namespace_id=namespace_id,
     hybrid_alpha=0.7,  # 70% vector, 30% BM25
 )
 ```
@@ -200,7 +200,7 @@ from khora.engines.skeleton.backends import TemporalFilter
 
 results = await engine.recall(
     "project updates",
-    namespace_id,
+    namespace_id=namespace_id,
     temporal_filter=TemporalFilter(
         occurred_after=datetime(2024, 1, 1),
         occurred_before=datetime(2024, 6, 30),
@@ -264,9 +264,9 @@ def _build_filter_conditions(
 ```python
 async def search(
     self,
-    namespace_id: UUID,
     query_embedding: list[float],
     *,
+    namespace_id: UUID,
     limit: int = 10,
     hybrid_alpha: float | None = None,
     query_text: str | None = None,
@@ -277,10 +277,10 @@ async def search(
     if hybrid_alpha is not None and query_text:
         # Hybrid search
         vector_results = await self._vector_search(
-            namespace_id, query_embedding, limit=limit * 2
+            query_embedding, namespace_id=namespace_id, limit=limit * 2,
         )
         bm25_results = await self._bm25_search(
-            namespace_id, query_text, limit=limit * 2
+            query_text, namespace_id=namespace_id, limit=limit * 2,
         )
         fused = self._rrf_fusion(
             vector_results, bm25_results, alpha=hybrid_alpha
@@ -289,7 +289,7 @@ async def search(
     else:
         # Vector-only
         results = await self._vector_search(
-            namespace_id, query_embedding, limit=limit
+            query_embedding, namespace_id=namespace_id, limit=limit,
         )
 
     # Apply temporal filter
@@ -299,6 +299,8 @@ async def search(
     return results
 ```
 
+> Since v0.16.0 (#769) `namespace_id` is a required kwarg on every storage read/write and is filtered at the SQL/SurrealQL layer. The `sqlite_lance` backend's `search_similar` additionally re-filters by `namespace_id` on the SQLite re-fetch step as defense-in-depth.
+
 ### Weaviate Backend
 
 Weaviate has native hybrid search with alpha blending:
@@ -306,9 +308,9 @@ Weaviate has native hybrid search with alpha blending:
 ```python
 async def search(
     self,
-    namespace_id: UUID,
     query_embedding: list[float],
     *,
+    namespace_id: UUID,
     limit: int = 10,
     hybrid_alpha: float | None = None,
     query_text: str | None = None,
@@ -372,10 +374,10 @@ Hybrid search issues two queries in parallel:
 async def _hybrid_search(self, ...):
     # Run vector and BM25 in parallel
     vector_task = asyncio.create_task(
-        self._vector_search(namespace_id, query_embedding, limit=limit * 2)
+        self._vector_search(query_embedding, namespace_id=namespace_id, limit=limit * 2)
     )
     bm25_task = asyncio.create_task(
-        self._bm25_search(namespace_id, query_text, limit=limit * 2)
+        self._bm25_search(query_text, namespace_id=namespace_id, limit=limit * 2)
     )
 
     vector_results, bm25_results = await asyncio.gather(vector_task, bm25_task)
@@ -422,6 +424,7 @@ from khora import Khora
 async with Khora(db_url, engine="skeleton") as kb:
     results = await kb.recall(
         query,
+        namespace=ns_id,
         mode=SearchMode.HYBRID,
         hybrid_alpha=0.7,
         temporal_filter={

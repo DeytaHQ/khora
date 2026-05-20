@@ -115,14 +115,22 @@ async with Khora("postgresql://...", engine="vectorcypher") as kb:
 - **`chunks`** — Matching text passages as `RecallChunk` entries (`chunk.content`)
 - **`entities`** — Entities mentioned in matching chunks
 - **`relationships`** — Connections between entities in the result set
+- **`documents`** — Full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship (always populated as of v0.16.0; see [Source Document Population](#source-document-population))
 
-Callers that need a flat context string for an LLM can render one with the
-public `khora.context_text(result, max_chunks=...)` helper — no additional
-queries required.
+The legacy `RecallResult.context_text` attribute was removed in v0.15.3.
+Callers that need a flat context string for an LLM render one with the
+public `khora.context_text(result, max_chunks=...)` helper:
+
+```python
+from khora import Khora, context_text
+
+result = await kb.recall("query", namespace=ns_id)
+prompt_context = context_text(result, max_chunks=5)
+```
 
 ### Source Document Population
 
-`recall()` always returns a `RecallResult` whose `documents` list holds full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship in the result. Khora batch-fetches `DocumentSource` metadata after the engine returns (chunked at 1,000 IDs) and replaces the engine's lightweight stubs in place.
+`recall()` always returns a `RecallResult` whose `documents` list holds full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship in the result — this is a producer-enforced invariant (see #761 / v0.16.0). Khora batch-fetches `DocumentSource` metadata after the engine returns (chunked at 1,000 IDs) and replaces the engine's lightweight stubs in place. The engine itself uses the namespace-scoped coordinator facade for that lookup, so cross-namespace ids never leak through.
 
 ```python
 result = await kb.recall("query", namespace=ns_id)
@@ -131,7 +139,7 @@ for chunk in result.chunks:
     print(docs_by_id[chunk.document_id].title)
 ```
 
-Entity-read methods (`get_entity()`, `list_entities()`, `find_related_entities()`, `search_entities()`) still accept `include_sources: bool = False` to opt-in to per-entity `source_documents` population.
+Entity-read methods (`get_entity()`, `list_entities()`, `find_related_entities()`, `search_entities()`) still accept `include_sources: bool = False` to opt-in to per-entity `source_documents` population. All four require `namespace_id=` (kwarg-only) on every call — the v0.16.0 IDOR close-out (#769) enforces this at the Protocol level on every storage backend.
 
 ### VectorCypherRetriever (`src/khora/engines/vectorcypher/retriever.py`)
 

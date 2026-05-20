@@ -34,7 +34,8 @@ SearchMode.ALL       # All three methods
 # "artificial intelligence morality" or "responsible machine learning"
 results = await kb.recall(
     "AI ethics in healthcare",
-    mode=SearchMode.VECTOR
+    namespace=ns_id,
+    mode=SearchMode.VECTOR,
 )
 ```
 
@@ -60,6 +61,7 @@ results = await kb.recall(
 # Find everything connected to "Machine Learning Team"
 results = await kb.recall(
     "Machine Learning Team projects and members",
+    namespace=ns_id,
     mode=SearchMode.GRAPH,
     config=QueryConfig(
         graph_depth=2,  # Go 2 hops out
@@ -92,7 +94,8 @@ results = await kb.recall(
 # Find content with exactly this error message
 results = await kb.recall(
     '"NullPointerException in UserService.java"',
-    mode=SearchMode.KEYWORD
+    namespace=ns_id,
+    mode=SearchMode.KEYWORD,
 )
 ```
 
@@ -119,7 +122,8 @@ results = await kb.recall(
 # Gets the best of all three methods
 results = await kb.recall(
     "quarterly planning with the product team",
-    mode=SearchMode.HYBRID
+    namespace=ns_id,
+    mode=SearchMode.HYBRID,
 )
 ```
 
@@ -150,7 +154,8 @@ Default weights:
 ```python
 results = await kb.recall(
     "authentication security issues Q4",
-    mode=SearchMode.ALL
+    namespace=ns_id,
+    mode=SearchMode.ALL,
 )
 
 # See what each method contributed
@@ -206,8 +211,9 @@ Limit results to a time window:
 ```python
 results = await kb.recall(
     "product decisions",
+    namespace=ns_id,
     mode=SearchMode.HYBRID,
-    temporal_filter=TemporalFilter.last_days(30)
+    temporal_filter=TemporalFilter.last_days(30),
 )
 ```
 
@@ -218,6 +224,7 @@ Control how deep and what relationships to explore:
 ```python
 results = await kb.recall(
     "engineering org structure",
+    namespace=ns_id,
     mode=SearchMode.GRAPH,
     config=QueryConfig(
         graph_depth=3,
@@ -233,6 +240,7 @@ Let the query engine follow up on initial results:
 ```python
 results = await kb.recall(
     "competitive landscape",
+    namespace=ns_id,
     mode=SearchMode.HYBRID,
     config=QueryConfig(enable_agentic=True)
 )
