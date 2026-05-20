@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -773,6 +773,78 @@ class TestRecordToRelationship:
         r = b._record_to_relationship(node, str(uuid4()), str(uuid4()), "KNOWS")
         assert r.valid_from == datetime(2024, 1, 1, tzinfo=UTC)
         assert r.valid_until == datetime(2024, 6, 1, tzinfo=UTC)
+
+    def test_missing_id_synthesizes_uuid_and_warns(self) -> None:
+        # Loguru intercept — capture WARNs via a custom sink.
+        from loguru import logger as loguru_logger
+
+        node = _rel_node()
+        del node["id"]
+        b = Neo4jBackend("bolt://localhost:7687")
+
+        records: list[str] = []
+        sink_id = loguru_logger.add(lambda msg: records.append(str(msg)), level="WARNING")
+        try:
+            r = b._record_to_relationship(node, str(uuid4()), str(uuid4()), "WORKS_FOR")
+        finally:
+            loguru_logger.remove(sink_id)
+
+        assert isinstance(r.id, UUID)
+        assert any("missing id/namespace_id" in m for m in records), records
+
+    def test_missing_namespace_id_synthesizes_uuid_and_warns(self) -> None:
+        from loguru import logger as loguru_logger
+
+        node = _rel_node()
+        del node["namespace_id"]
+        b = Neo4jBackend("bolt://localhost:7687")
+
+        records: list[str] = []
+        sink_id = loguru_logger.add(lambda msg: records.append(str(msg)), level="WARNING")
+        try:
+            r = b._record_to_relationship(node, str(uuid4()), str(uuid4()), "WORKS_FOR")
+        finally:
+            loguru_logger.remove(sink_id)
+
+        assert isinstance(r.namespace_id, UUID)
+        assert any("missing id/namespace_id" in m for m in records), records
+
+    def test_missing_both_synthesizes_uuids_and_warns(self) -> None:
+        from loguru import logger as loguru_logger
+
+        node = _rel_node()
+        del node["id"]
+        del node["namespace_id"]
+        b = Neo4jBackend("bolt://localhost:7687")
+
+        records: list[str] = []
+        sink_id = loguru_logger.add(lambda msg: records.append(str(msg)), level="WARNING")
+        try:
+            r = b._record_to_relationship(node, str(uuid4()), str(uuid4()), "WORKS_FOR")
+        finally:
+            loguru_logger.remove(sink_id)
+
+        assert isinstance(r.id, UUID)
+        assert isinstance(r.namespace_id, UUID)
+        assert any("missing id/namespace_id" in m for m in records), records
+
+    def test_well_formed_passthrough_no_warn(self) -> None:
+        from loguru import logger as loguru_logger
+
+        rel_id, ns_id = uuid4(), uuid4()
+        node = _rel_node(id=str(rel_id), namespace_id=str(ns_id))
+        b = Neo4jBackend("bolt://localhost:7687")
+
+        records: list[str] = []
+        sink_id = loguru_logger.add(lambda msg: records.append(str(msg)), level="WARNING")
+        try:
+            r = b._record_to_relationship(node, str(uuid4()), str(uuid4()), "WORKS_FOR")
+        finally:
+            loguru_logger.remove(sink_id)
+
+        assert r.id == rel_id
+        assert r.namespace_id == ns_id
+        assert not any("missing id/namespace_id" in m for m in records), records
 
 
 @pytest.mark.unit

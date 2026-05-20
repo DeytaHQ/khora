@@ -718,7 +718,7 @@ class TestNeo4jBackendGetEntityRelationships:
 
         backend = Neo4jBackend.from_driver(driver, query_timeout=None)
 
-        with pytest.raises(TypeError, match="tuple indices"):
+        with pytest.raises(AttributeError, match="'tuple' object has no attribute 'get'"):
             await backend.get_entity_relationships(entity_id, namespace_id=uuid4(), direction="outgoing")
 
     @pytest.mark.asyncio
