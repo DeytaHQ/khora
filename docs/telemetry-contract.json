@@ -729,6 +729,24 @@
       "stability": "internal",
       "owner": "dream",
       "_comment": "Wraps each LLM judge call inside the borderline-merge two-LLM verifier on the vectorcypher dedupe apply path (#667, Phase 4.1 of #649). Attributes: direction ('verifier'|'auditor', bounded), model (str), similarity_score (str), prompt_hash (bounded_text_hash — never raw prompt text), outcome ('parsed'|'parse_error'|'timeout'|'error'), decision ('merge'|'keep_separate'|'defer'; only on 'parsed'), confidence (str; only on 'parsed'), error_type (str; only on 'timeout' / 'error'). Free-text rationale lives in the undo record JSON, never on a span. Verifier-deferred merges record decision='defer' in {run_id}.undo.json and do NOT mutate any DB row — kb.dream_undo on a deferred op is a no-op."
+    },
+    {
+      "name": "khora.integrations.hermes.initialize",
+      "stability": "internal",
+      "owner": "hermes",
+      "_comment": "Issue #628. One span per KhoraMemoryProvider.initialize() call."
+    },
+    {
+      "name": "khora.integrations.hermes.prefetch",
+      "stability": "internal",
+      "owner": "hermes",
+      "_comment": "Issue #628. Wraps the sync prefetch() entry point. Attrs: cache_hit, result_count, hermes.query_hash (bounded_text_hash)."
+    },
+    {
+      "name": "khora.integrations.hermes.sync_turn",
+      "stability": "internal",
+      "owner": "hermes",
+      "_comment": "Issue #628. Traces the enqueue step of sync_turn(); the actual remember I/O happens after the span closes."
     }
   ],
   "pipeline_stages": [
@@ -1172,6 +1190,50 @@
         {"name": "reason", "values": ["open", "io_error", "rename", "manifest", "summary", "undo", "no_open_run"]}
       ],
       "_comment": "Issue #666. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.hermes.remember.success_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "description": "remember / remember_batch tasks completed without raising inside the Hermes adapter's per-session FIFO executor.",
+      "labels": [
+        {"name": "op", "values": ["remember", "remember_batch"], "_comment": "Which Khora write API the task wrapped."}
+      ],
+      "_comment": "Issue #628. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.hermes.remember.failed_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "description": "remember / remember_batch tasks that raised inside the Hermes adapter's per-session FIFO executor. Feeds KhoraMemoryProvider's failure-rate gauge.",
+      "labels": [
+        {"name": "op", "values": ["remember", "remember_batch"], "_comment": "Which Khora write API the task wrapped."}
+      ],
+      "_comment": "Issue #628. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.hermes.queue.shed_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "description": "Pending writes dropped because the per-session FIFO queue was at queue_max_size. Sustained shedding signals ingest throughput cannot keep up with conversation rate.",
+      "labels": [
+        {"name": "op", "values": ["remember", "remember_batch", "recall"], "_comment": "Which task type was shed."}
+      ],
+      "_comment": "Issue #628. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.hermes.tool_call_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "description": "Tool calls dispatched through KhoraMemoryProvider.handle_tool_call. The 'unknown' label fires when Hermes invokes a tool name we don't recognise (defensive).",
+      "labels": [
+        {"name": "tool", "values": ["memory_search", "memory_recall", "unknown"], "_comment": "Which tool the LLM called."}
+      ],
+      "_comment": "Issue #628. NO namespace_id label — cardinality rule."
     }
   ]
 }

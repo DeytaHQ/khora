@@ -6,6 +6,10 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+### Added
+
+- **Hermes memory provider adapter** (#628). `khora.integrations.hermes.KhoraMemoryProvider` wires a `Khora` instance into the NousResearch/hermes-agent `MemoryProvider` ABC. Backs `initialize`, `prefetch` / `queue_prefetch` (with per-session cache), `sync_turn`, `on_pre_compress`, `on_session_end`, and two LLM-callable tools (`memory_search`, `memory_recall`). One `concurrent.futures.ThreadPoolExecutor(max_workers=1)` per provider gives strict FIFO ordering of writes; all async work goes through the shared `khora.integrations._sync.run_sync` bridge — no per-provider asyncio loop. Stability: experimental. Distribution: (a) — adapter in the khora repo; plugin directory shipped under `examples/integrations/hermes/plugin/` (copy into `$HERMES_HOME/plugins/khora/`). The `[hermes]` extra is intentionally NOT declared because `hermes-agent==0.13.0` exact-pins `requests==2.33.0`, which conflicts with khora's CVE-2026-25645 constraint (`requests>=2.33.1`); install `hermes-agent` manually until upstream loosens its pin. New telemetry: 3 internal spans (`khora.integrations.hermes.{initialize,prefetch,sync_turn}`) and 4 public counters (`khora.hermes.tool_call_total`, `khora.hermes.remember.{success,failed}_total`, `khora.hermes.queue.shed_total`). See `docs/integrations/hermes.md`.
+
 ## [0.16.1] — Bug-fix sweep + CI security allowlist
 
 This is a bug-fix release on top of v0.16.0. No new breaking changes; one new config knob (Neo4j source-id truncation caps); one new kwarg (`Khora.remember(..., source_timestamp=…)`); two formatters promoted to the `khora.core.recall_context` public surface. Several CHANGELOG entries below reconstruct work that landed since v0.16.0 but lost its `[Unreleased]` notes to squash-merge collisions.
