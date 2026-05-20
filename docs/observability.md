@@ -38,7 +38,7 @@ from khora.telemetry import configure_telemetry
 async def main():
     configure_telemetry()        # picks up OTEL_* env vars
     async with Khora() as kb:
-        ns = await kb.create_namespace("demo")
+        ns = await kb.create_namespace()      # keyword-only kwargs
         await kb.remember("Marie Curie won the Nobel Prize.", namespace=ns.namespace_id)
 
 asyncio.run(main())
