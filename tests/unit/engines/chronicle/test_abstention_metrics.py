@@ -77,7 +77,7 @@ class TestAbstentionCounter:
         chunks = [(_make_chunk(), 0.9), (_make_chunk(), 0.7)]
         entities = [(_make_entity(), 0.85)]
 
-        engine._compute_abstention_signals(chunks, entities)
+        engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         counter.add.assert_not_called()
 
@@ -91,7 +91,7 @@ class TestAbstentionCounter:
         chunks: list[tuple[Chunk, float]] = []
         entities: list[tuple[Entity, float]] = []
 
-        engine._compute_abstention_signals(chunks, entities)
+        engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         assert counter.add.call_count == 4
         signal_names = {call.kwargs["attributes"]["signal"] for call in counter.add.call_args_list}
@@ -112,7 +112,7 @@ class TestAbstentionCounter:
         chunks = [(_make_chunk(), 0.9)]
         entities: list[tuple[Entity, float]] = []
 
-        engine._compute_abstention_signals(chunks, entities)
+        engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         assert counter.add.call_count == 1
         call = counter.add.call_args_list[0]
@@ -133,7 +133,7 @@ class TestAbstentionHistogram:
         chunks = [(_make_chunk(), 0.9), (_make_chunk(), 0.7)]
         entities = [(_make_entity(), 0.85)]
 
-        engine._compute_abstention_signals(chunks, entities)
+        engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         histogram.record.assert_called_once_with(0.0)
 
@@ -144,7 +144,7 @@ class TestAbstentionHistogram:
         chunks: list[tuple[Chunk, float]] = []
         entities: list[tuple[Entity, float]] = []
 
-        engine._compute_abstention_signals(chunks, entities)
+        engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         histogram.record.assert_called_once_with(1.0)
 
@@ -155,7 +155,7 @@ class TestAbstentionHistogram:
         chunks = [(_make_chunk(), 0.9)]
         entities: list[tuple[Entity, float]] = []  # only entities_empty fires
 
-        engine._compute_abstention_signals(chunks, entities)
+        engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         # entities_empty contributes 0.3 to combined_score.
         histogram.record.assert_called_once_with(0.3)
@@ -165,8 +165,8 @@ class TestAbstentionHistogram:
         _counter, histogram = mock_metrics
         engine = _make_engine()
 
-        engine._compute_abstention_signals([(_make_chunk(), 0.9)], [(_make_entity(), 0.85)])
-        engine._compute_abstention_signals([], [])
-        engine._compute_abstention_signals([(_make_chunk(), 0.1)], [])
+        engine._compute_abstention_signals([(_make_chunk(), 0.9)], [(_make_entity(), 0.85)], top_vector_score=0.9)
+        engine._compute_abstention_signals([], [], top_vector_score=0.0)
+        engine._compute_abstention_signals([(_make_chunk(), 0.1)], [], top_vector_score=0.1)
 
         assert histogram.record.call_count == 3

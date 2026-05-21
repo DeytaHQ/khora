@@ -70,7 +70,7 @@ class TestComputeAbstentionSignals:
         chunks = [(_make_chunk(), 0.9), (_make_chunk(), 0.7)]
         entities = [(_make_entity(), 0.85)]
 
-        sig = engine._compute_abstention_signals(chunks, entities)
+        sig = engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         assert sig["entities_empty"] is False
         assert sig["chunks_empty"] is False
@@ -85,7 +85,7 @@ class TestComputeAbstentionSignals:
         chunks = [(_make_chunk(), 0.9)]
         entities: list[tuple[Entity, float]] = []
 
-        sig = engine._compute_abstention_signals(chunks, entities)
+        sig = engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         assert sig["entities_empty"] is True
         assert sig["chunks_empty"] is False
@@ -101,7 +101,7 @@ class TestComputeAbstentionSignals:
         chunks: list[tuple[Chunk, float]] = []
         entities: list[tuple[Entity, float]] = []
 
-        sig = engine._compute_abstention_signals(chunks, entities)
+        sig = engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         assert sig["entities_empty"] is True
         assert sig["chunks_empty"] is True
@@ -116,7 +116,7 @@ class TestComputeAbstentionSignals:
         chunks = [(_make_chunk(), 0.1), (_make_chunk(), 0.05)]
         entities = [(_make_entity(), 0.7)]
 
-        sig = engine._compute_abstention_signals(chunks, entities)
+        sig = engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         assert sig["entities_empty"] is False
         assert sig["chunks_empty"] is False
@@ -131,7 +131,7 @@ class TestComputeAbstentionSignals:
         chunks = [(_make_chunk(), 0.9) for _ in range(3)]
         entities = [(_make_entity(), 0.8)]
 
-        sig = engine._compute_abstention_signals(chunks, entities)
+        sig = engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         assert sig["chunks_empty"] is False
         assert sig["chunks_below_min"] is True
@@ -146,7 +146,7 @@ class TestComputeAbstentionSignals:
         chunks = [(_make_chunk(), 0.5)]
         entities = [(_make_entity(), 0.9)]
 
-        sig = engine._compute_abstention_signals(chunks, entities)
+        sig = engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         assert sig["top_score_low"] is True
         assert sig["combined_score"] == pytest.approx(0.3)
@@ -157,7 +157,7 @@ class TestComputeAbstentionSignals:
         chunks = [(_make_chunk(), 0.9)]
         entities: list[tuple[Entity, float]] = []  # only entities_empty fires
 
-        sig = engine._compute_abstention_signals(chunks, entities)
+        sig = engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         assert sig["entities_empty"] is True
         assert sig["combined_score"] == pytest.approx(0.3)
@@ -170,10 +170,38 @@ class TestComputeAbstentionSignals:
         chunks = [(_make_chunk(), 0.1)]  # top_score_low fires
         entities: list[tuple[Entity, float]] = []  # entities_empty fires
 
-        sig = engine._compute_abstention_signals(chunks, entities)
+        sig = engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1] if chunks else 0.0)
 
         assert sig["combined_score"] == pytest.approx(0.6)
         assert sig["should_abstain"] is True
+
+    def test_top_score_low_reads_raw_vector_not_post_rerank(self):
+        """Regression for issue #809.
+
+        Cross-encoder reranking compresses post-fusion scores into a
+        narrow high-side band (~0.6-0.8) regardless of topical overlap.
+        When the displayed top-chunk score is high but the underlying
+        pre-rerank vector cosine is low (clearly off-topic query),
+        ``top_score_low`` MUST fire on the raw cosine, not on the
+        post-rerank display value - otherwise the abstention signal
+        becomes a steady-state false negative on every rerank-enabled
+        recall.
+        """
+        engine = _make_engine()
+        # Post-rerank display score is healthy (passes the default 0.3 min)
+        chunks = [(_make_chunk(), 0.715)]
+        entities = [(_make_entity(), 0.85)]
+
+        # ...but the actual pre-rerank cosine is well below threshold.
+        sig = engine._compute_abstention_signals(chunks, entities, top_vector_score=0.18)
+
+        assert sig["top_score_low"] is True, (
+            "top_score_low must reflect the raw vector cosine, not the post-rerank display score - see #809"
+        )
+        # Sanity: feeding the displayed score (the buggy v0.16.2 behavior)
+        # would make this False, so the assertion above is meaningful.
+        sig_buggy = engine._compute_abstention_signals(chunks, entities, top_vector_score=chunks[0][1])
+        assert sig_buggy["top_score_low"] is False
 
 
 # ---------------------------------------------------------------------------
