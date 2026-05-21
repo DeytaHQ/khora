@@ -41,6 +41,7 @@ from khora.core.models.recall import (
     RecallChunk,
     RecallEntity,
 )
+from khora.core.recall_abstention import compute_abstention_signals
 from khora.engines._storage_config import build_storage_config
 from khora.engines.chronicle.compression import (
     FactExtractor,
@@ -1624,44 +1625,29 @@ class ChronicleEngine:
     ) -> dict[str, Any]:
         """Compute passive abstention signals for downstream answer-generation.
 
-        Returns a dict with four boolean flags, a combined float score, and
-        a convenience ``should_abstain`` flag derived from the configured
-        threshold.  Pure function over ``chunks`` and ``entities`` — does
-        not touch storage.  See ``ChronicleEngine.__init__`` for the
-        tunable thresholds.
+        See ``ChronicleEngine.__init__`` for the tunable thresholds.
         """
-        entities_empty = len(entities) == 0
-        chunks_empty = len(chunks) == 0
-        chunks_below_min = len(chunks) < self._abstention_min_chunks
         top_score = chunks[0][1] if chunks else 0.0
-        top_score_low = top_score < self._abstention_min_top_score
+        signals = compute_abstention_signals(
+            chunk_count=len(chunks),
+            top_chunk_score=top_score,
+            entity_count=len(entities),
+            min_chunks=self._abstention_min_chunks,
+            min_top_score=self._abstention_min_top_score,
+            combined_threshold=self._abstention_combined_threshold,
+        )
 
-        # Weighted boolean signals: any one fires → 0.3-0.4; all three → 1.0.
-        # chunks_below_min is weighted highest because zero/few chunks is the
-        # strongest signal that retrieval failed.
-        combined = 0.3 * float(entities_empty) + 0.4 * float(chunks_below_min) + 0.3 * float(top_score_low)
-
-        # Aggregate metrics (Phase 4). Per-signal counter increments
-        # 0-4 times per recall; histogram observed once per recall. Both are
-        # aggregate-only — no namespace_id label (cardinality safety).
-        if entities_empty:
+        if signals["entities_empty"]:
             _ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "entities_empty"})
-        if chunks_empty:
+        if signals["chunks_empty"]:
             _ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "chunks_empty"})
-        if chunks_below_min:
+        if signals["chunks_below_min"]:
             _ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "chunks_below_min"})
-        if top_score_low:
+        if signals["top_score_low"]:
             _ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "top_score_low"})
-        _ABSTENTION_COMBINED_SCORE_HISTOGRAM.record(combined)
+        _ABSTENTION_COMBINED_SCORE_HISTOGRAM.record(signals["combined_score"])
 
-        return {
-            "entities_empty": entities_empty,
-            "chunks_empty": chunks_empty,
-            "chunks_below_min": chunks_below_min,
-            "top_score_low": top_score_low,
-            "combined_score": combined,
-            "should_abstain": combined >= self._abstention_combined_threshold,
-        }
+        return signals
 
     # ------------------------------------------------------------------
     # Retrieval channels (Phase 2)

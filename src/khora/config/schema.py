@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Discriminator, Field, SecretStr, Tag, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Discriminator, Field, SecretStr, Tag, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Lazy module-level import of SemanticHooksConfig avoids the circular-import
@@ -90,6 +91,180 @@ class ParsedNeo4jUrl:
 
 
 # ---------------------------------------------------------------------------
+# Env-var alias helper (Issue #789)
+# ---------------------------------------------------------------------------
+
+
+def _env_aliases(*names: str) -> AliasChoices:
+    """Build AliasChoices from a list of accepted env var names (in priority order).
+
+    Used to expose the same field under both the canonical single-underscore
+    form (preferred, documented) and the legacy double-underscore form
+    (kept working forever for backward compat with existing .env files).
+
+    Priority order matters: the first name wins when multiple aliases are
+    set to the same value. Conflicts between different values across the
+    aliases are surfaced by ``KhoraConfig._reject_alias_conflicts``.
+    """
+    return AliasChoices(*names)
+
+
+def _inject_canonical_env(
+    data: dict[str, Any], legacy_env_name: str, value: str, *, env_prefix: str = "KHORA_"
+) -> None:
+    """Inject a single-underscore env var into the nested-dict slot.
+
+    pydantic-settings's ``env_nested_delimiter="__"`` ingests only the
+    double-underscore form. We translate the legacy env-var name into the
+    nested-key path it would have produced (e.g.
+    ``KHORA_STORAGE__GRAPH__URL`` → ``data["storage"]["graph"]["url"]``)
+    and write the value there if the slot is empty.
+
+    ``env_prefix`` is stripped from the legacy name before splitting, so
+    callers must pass the prefix that matches the BaseSettings owner of
+    the field (``KHORA_`` for ``KhoraConfig``, ``KHORA_DREAM_`` for
+    ``DreamConfig``).
+    """
+    if not legacy_env_name.startswith(env_prefix):
+        return
+    tail = legacy_env_name[len(env_prefix) :]
+    parts = [p.lower() for p in tail.split("__")]
+    if not parts:
+        return
+    node: Any = data
+    for key in parts[:-1]:
+        existing = node.get(key)
+        if existing is None:
+            existing = {}
+            node[key] = existing
+        elif not isinstance(existing, dict):
+            # Caller has already provided a concrete value here — don't
+            # clobber it with a dict.
+            return
+        node = existing
+    leaf_key = parts[-1]
+    if node.get(leaf_key) is None:
+        node[leaf_key] = value
+
+
+def _process_alias_env_pairs(data: Any, pairs: tuple[tuple[str, str], ...], *, env_prefix: str) -> list[str]:
+    """Shared body of the alias-conflict + canonical-promotion validators.
+
+    Mutates ``data`` in place to inject canonical-form values into the
+    nested-dict slot pydantic-settings expects, and returns a list of
+    conflict messages for the caller to assemble into a ``ValueError``.
+    """
+    env = os.environ
+    conflicts: list[str] = []
+    for canonical, legacy in pairs:
+        new_val = env.get(canonical)
+        old_val = env.get(legacy)
+        if new_val is None and old_val is None:
+            continue
+        if new_val is not None and old_val is not None and new_val != old_val:
+            conflicts.append(f"  - {canonical} and {legacy} are both set to different values")
+            continue
+        if new_val is not None and old_val is None and isinstance(data, dict):
+            _inject_canonical_env(data, legacy, new_val, env_prefix=env_prefix)
+    return conflicts
+
+
+# Mapping from canonical single-underscore env var to its legacy double-
+# underscore counterpart for the conflict-detection validator. Generated
+# once here so the validator does not have to walk the model. Pairs whose
+# canonical form is owned by a nested BaseSettings (``DreamConfig``) are
+# tagged via ``_DREAM_ENV_ALIAS_PAIRS`` instead so the right validator
+# handles them.
+_ENV_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (
+    # Discriminator fields — must promote so the union resolver sees the
+    # operator-chosen backend before any backend-specific field validation
+    # runs. Without these, ``KHORA_STORAGE_GRAPH_BACKEND=neptune`` plus
+    # Neptune-specific knobs would route to the default Neo4jConfig and
+    # the Neptune fields would fail ``extra=forbid``.
+    ("KHORA_STORAGE_GRAPH_BACKEND", "KHORA_STORAGE__GRAPH__BACKEND"),
+    ("KHORA_STORAGE_VECTOR_BACKEND", "KHORA_STORAGE__VECTOR__BACKEND"),
+    # storage.graph (Neo4j)
+    ("KHORA_STORAGE_GRAPH_URL", "KHORA_STORAGE__GRAPH__URL"),
+    ("KHORA_STORAGE_GRAPH_USER", "KHORA_STORAGE__GRAPH__USER"),
+    ("KHORA_STORAGE_GRAPH_PASSWORD", "KHORA_STORAGE__GRAPH__PASSWORD"),
+    ("KHORA_STORAGE_GRAPH_DATABASE", "KHORA_STORAGE__GRAPH__DATABASE"),
+    ("KHORA_STORAGE_GRAPH_MAX_CONNECTION_POOL_SIZE", "KHORA_STORAGE__GRAPH__MAX_CONNECTION_POOL_SIZE"),
+    ("KHORA_STORAGE_GRAPH_CONNECTION_ACQUISITION_TIMEOUT", "KHORA_STORAGE__GRAPH__CONNECTION_ACQUISITION_TIMEOUT"),
+    ("KHORA_STORAGE_GRAPH_RETRY_DELAY_JITTER_FACTOR", "KHORA_STORAGE__GRAPH__RETRY_DELAY_JITTER_FACTOR"),
+    ("KHORA_STORAGE_GRAPH_MAX_CONNECTION_LIFETIME", "KHORA_STORAGE__GRAPH__MAX_CONNECTION_LIFETIME"),
+    ("KHORA_STORAGE_GRAPH_LIVENESS_CHECK_TIMEOUT", "KHORA_STORAGE__GRAPH__LIVENESS_CHECK_TIMEOUT"),
+    ("KHORA_STORAGE_GRAPH_QUERY_TIMEOUT", "KHORA_STORAGE__GRAPH__QUERY_TIMEOUT"),
+    ("KHORA_STORAGE_GRAPH_ENTITY_WRITE_CONCURRENCY", "KHORA_STORAGE__GRAPH__ENTITY_WRITE_CONCURRENCY"),
+    ("KHORA_STORAGE_GRAPH_RELATIONSHIP_WRITE_CONCURRENCY", "KHORA_STORAGE__GRAPH__RELATIONSHIP_WRITE_CONCURRENCY"),
+    ("KHORA_STORAGE_GRAPH_POOL_SAMPLER_ENABLED", "KHORA_STORAGE__GRAPH__POOL_SAMPLER_ENABLED"),
+    ("KHORA_STORAGE_GRAPH_POOL_SAMPLER_INTERVAL_MS", "KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS"),
+    (
+        "KHORA_STORAGE_GRAPH_RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX",
+        "KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX",
+    ),
+    (
+        "KHORA_STORAGE_GRAPH_RELATIONSHIP_SOURCE_CHUNK_IDS_MAX",
+        "KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_CHUNK_IDS_MAX",
+    ),
+    ("KHORA_STORAGE_GRAPH_ENTITY_SOURCE_DOCUMENT_IDS_MAX", "KHORA_STORAGE__GRAPH__ENTITY_SOURCE_DOCUMENT_IDS_MAX"),
+    ("KHORA_STORAGE_GRAPH_ENTITY_SOURCE_CHUNK_IDS_MAX", "KHORA_STORAGE__GRAPH__ENTITY_SOURCE_CHUNK_IDS_MAX"),
+    # Neptune-specific
+    ("KHORA_STORAGE_GRAPH_IAM_AUTH", "KHORA_STORAGE__GRAPH__IAM_AUTH"),
+    ("KHORA_STORAGE_GRAPH_AWS_REGION", "KHORA_STORAGE__GRAPH__AWS_REGION"),
+    # SurrealDB graph role
+    ("KHORA_STORAGE_GRAPH_MODE", "KHORA_STORAGE__GRAPH__MODE"),
+    ("KHORA_STORAGE_GRAPH_PATH", "KHORA_STORAGE__GRAPH__PATH"),
+    ("KHORA_STORAGE_GRAPH_NAMESPACE", "KHORA_STORAGE__GRAPH__NAMESPACE"),
+    ("KHORA_STORAGE_GRAPH_EMBEDDING_DIMENSION", "KHORA_STORAGE__GRAPH__EMBEDDING_DIMENSION"),
+    ("KHORA_STORAGE_GRAPH_SYNC_DATA", "KHORA_STORAGE__GRAPH__SYNC_DATA"),
+    # AGE
+    ("KHORA_STORAGE_GRAPH_GRAPH_NAME", "KHORA_STORAGE__GRAPH__GRAPH_NAME"),
+    ("KHORA_STORAGE_GRAPH_POOL_SIZE", "KHORA_STORAGE__GRAPH__POOL_SIZE"),
+    ("KHORA_STORAGE_GRAPH_MAX_OVERFLOW", "KHORA_STORAGE__GRAPH__MAX_OVERFLOW"),
+    # storage.surrealdb (unified)
+    ("KHORA_STORAGE_SURREALDB_MODE", "KHORA_STORAGE__SURREALDB__MODE"),
+    ("KHORA_STORAGE_SURREALDB_URL", "KHORA_STORAGE__SURREALDB__URL"),
+    ("KHORA_STORAGE_SURREALDB_PATH", "KHORA_STORAGE__SURREALDB__PATH"),
+    ("KHORA_STORAGE_SURREALDB_NAMESPACE", "KHORA_STORAGE__SURREALDB__NAMESPACE"),
+    ("KHORA_STORAGE_SURREALDB_DATABASE", "KHORA_STORAGE__SURREALDB__DATABASE"),
+    ("KHORA_STORAGE_SURREALDB_USER", "KHORA_STORAGE__SURREALDB__USER"),
+    ("KHORA_STORAGE_SURREALDB_PASSWORD", "KHORA_STORAGE__SURREALDB__PASSWORD"),
+    ("KHORA_STORAGE_SURREALDB_EMBEDDING_DIMENSION", "KHORA_STORAGE__SURREALDB__EMBEDDING_DIMENSION"),
+    ("KHORA_STORAGE_SURREALDB_SYNC_DATA", "KHORA_STORAGE__SURREALDB__SYNC_DATA"),
+    # storage.vector (PgVector / SurrealDBVector / SQLiteVector)
+    ("KHORA_STORAGE_VECTOR_URL", "KHORA_STORAGE__VECTOR__URL"),
+    ("KHORA_STORAGE_VECTOR_EMBEDDING_DIMENSION", "KHORA_STORAGE__VECTOR__EMBEDDING_DIMENSION"),
+    ("KHORA_STORAGE_VECTOR_MODE", "KHORA_STORAGE__VECTOR__MODE"),
+    ("KHORA_STORAGE_VECTOR_PATH", "KHORA_STORAGE__VECTOR__PATH"),
+    ("KHORA_STORAGE_VECTOR_NAMESPACE", "KHORA_STORAGE__VECTOR__NAMESPACE"),
+    ("KHORA_STORAGE_VECTOR_DATABASE", "KHORA_STORAGE__VECTOR__DATABASE"),
+    ("KHORA_STORAGE_VECTOR_USER", "KHORA_STORAGE__VECTOR__USER"),
+    ("KHORA_STORAGE_VECTOR_PASSWORD", "KHORA_STORAGE__VECTOR__PASSWORD"),
+    # storage.sqlite_lance
+    ("KHORA_STORAGE_SQLITE_LANCE_DB_PATH", "KHORA_STORAGE__SQLITE_LANCE__DB_PATH"),
+    ("KHORA_STORAGE_SQLITE_LANCE_LANCE_PATH", "KHORA_STORAGE__SQLITE_LANCE__LANCE_PATH"),
+    ("KHORA_STORAGE_SQLITE_LANCE_EMBEDDING_DIMENSION", "KHORA_STORAGE__SQLITE_LANCE__EMBEDDING_DIMENSION"),
+    ("KHORA_STORAGE_SQLITE_LANCE_USE_HALFVEC", "KHORA_STORAGE__SQLITE_LANCE__USE_HALFVEC"),
+    ("KHORA_STORAGE_SQLITE_LANCE_LANCE_INDEX", "KHORA_STORAGE__SQLITE_LANCE__LANCE_INDEX"),
+    ("KHORA_STORAGE_SQLITE_LANCE_IVF_PARTITIONS", "KHORA_STORAGE__SQLITE_LANCE__IVF_PARTITIONS"),
+    ("KHORA_STORAGE_SQLITE_LANCE_HNSW_M", "KHORA_STORAGE__SQLITE_LANCE__HNSW_M"),
+    ("KHORA_STORAGE_SQLITE_LANCE_RETRAIN_FACTOR", "KHORA_STORAGE__SQLITE_LANCE__RETRAIN_FACTOR"),
+)
+
+
+# dream.ops aliases — owned by ``DreamConfig`` (a ``BaseSettings`` with
+# its own env-prefix ``KHORA_DREAM_``), so the canonical-→-legacy
+# promotion + conflict check fires inside ``DreamConfig._reject_alias_conflicts``.
+_DREAM_ENV_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (
+    ("KHORA_DREAM_OPS_DEDUPE_ENTITIES", "KHORA_DREAM_OPS__DEDUPE_ENTITIES"),
+    ("KHORA_DREAM_OPS_PRUNE_EDGES", "KHORA_DREAM_OPS__PRUNE_EDGES"),
+    ("KHORA_DREAM_OPS_COMPACT_FACTS", "KHORA_DREAM_OPS__COMPACT_FACTS"),
+    ("KHORA_DREAM_OPS_CLUSTER_EVENTS", "KHORA_DREAM_OPS__CLUSTER_EVENTS"),
+    ("KHORA_DREAM_OPS_RECOMPUTE_CENTROIDS", "KHORA_DREAM_OPS__RECOMPUTE_CENTROIDS"),
+)
+
+
+# ---------------------------------------------------------------------------
 # Graph backend configs (discriminated union on "backend" field)
 # ---------------------------------------------------------------------------
 
@@ -97,27 +272,70 @@ class ParsedNeo4jUrl:
 class Neo4jConfig(BaseModel):
     """Neo4j graph backend configuration."""
 
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
     backend: Literal["neo4j"] = "neo4j"
-    url: SecretStr | None = Field(default=None, description="Neo4j connection URL (bolt:// or neo4j://)")
-    user: str = Field(default="neo4j", description="Neo4j username")
-    password: SecretStr = Field(default=SecretStr(""), description="Neo4j password")
-    database: str = Field(default="neo4j", description="Neo4j database name")
-    max_connection_pool_size: int = Field(default=100, description="Neo4j connection pool size")
+    url: SecretStr | None = Field(
+        default=None,
+        description="Neo4j connection URL (bolt:// or neo4j://)",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_URL", "KHORA_STORAGE__GRAPH__URL"),
+    )
+    user: str = Field(
+        default="neo4j",
+        description="Neo4j username",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_USER", "KHORA_STORAGE__GRAPH__USER"),
+    )
+    password: SecretStr = Field(
+        default=SecretStr(""),
+        description="Neo4j password",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_PASSWORD", "KHORA_STORAGE__GRAPH__PASSWORD"),
+    )
+    database: str = Field(
+        default="neo4j",
+        description="Neo4j database name",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_DATABASE", "KHORA_STORAGE__GRAPH__DATABASE"),
+    )
+    max_connection_pool_size: int = Field(
+        default=100,
+        description="Neo4j connection pool size",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_MAX_CONNECTION_POOL_SIZE",
+            "KHORA_STORAGE__GRAPH__MAX_CONNECTION_POOL_SIZE",
+        ),
+    )
     connection_acquisition_timeout: float = Field(
-        default=60.0, description="Timeout in seconds waiting for a connection from the pool"
+        default=60.0,
+        description="Timeout in seconds waiting for a connection from the pool",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_CONNECTION_ACQUISITION_TIMEOUT",
+            "KHORA_STORAGE__GRAPH__CONNECTION_ACQUISITION_TIMEOUT",
+        ),
     )
     retry_delay_jitter_factor: float = Field(
-        default=0.5, description="Jitter factor for transaction retry delays (0.0-1.0)"
+        default=0.5,
+        description="Jitter factor for transaction retry delays (0.0-1.0)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_RETRY_DELAY_JITTER_FACTOR",
+            "KHORA_STORAGE__GRAPH__RETRY_DELAY_JITTER_FACTOR",
+        ),
     )
     max_connection_lifetime: int = Field(
         default=900,
         description="Max seconds a connection stays in the pool before rotation. "
         "Set below the server-side TTL (e.g. Aura ~20min) to avoid reset errors.",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_MAX_CONNECTION_LIFETIME",
+            "KHORA_STORAGE__GRAPH__MAX_CONNECTION_LIFETIME",
+        ),
     )
     liveness_check_timeout: float | None = Field(
         default=30.0,
         description="Seconds of idle time after which connections are checked for liveness "
         "before being returned from the pool. None disables the check.",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_LIVENESS_CHECK_TIMEOUT",
+            "KHORA_STORAGE__GRAPH__LIVENESS_CHECK_TIMEOUT",
+        ),
     )
     query_timeout: float | None = Field(
         default=5.0,
@@ -135,11 +353,29 @@ class Neo4jConfig(BaseModel):
             "entirely. Values <= 0 are rejected (the driver would interpret 0 "
             "as 'run forever', which defeats the purpose). Values above 300 "
             "seconds (5 minutes) are also rejected as a sanity cap. Override "
-            "via env var KHORA_STORAGE__GRAPH__QUERY_TIMEOUT."
+            "via env var KHORA_STORAGE_GRAPH_QUERY_TIMEOUT."
+        ),
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_QUERY_TIMEOUT",
+            "KHORA_STORAGE__GRAPH__QUERY_TIMEOUT",
         ),
     )
-    entity_write_concurrency: int = Field(default=12, description="Max concurrent entity write transactions")
-    relationship_write_concurrency: int = Field(default=8, description="Max concurrent relationship write transactions")
+    entity_write_concurrency: int = Field(
+        default=12,
+        description="Max concurrent entity write transactions",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_ENTITY_WRITE_CONCURRENCY",
+            "KHORA_STORAGE__GRAPH__ENTITY_WRITE_CONCURRENCY",
+        ),
+    )
+    relationship_write_concurrency: int = Field(
+        default=8,
+        description="Max concurrent relationship write transactions",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_RELATIONSHIP_WRITE_CONCURRENCY",
+            "KHORA_STORAGE__GRAPH__RELATIONSHIP_WRITE_CONCURRENCY",
+        ),
+    )
     pool_sampler_enabled: bool = Field(
         default=False,
         description=(
@@ -147,7 +383,11 @@ class Neo4jConfig(BaseModel):
             "background task that samples driver pool state at "
             "``pool_sampler_interval_ms`` cadence and emits the observations on the "
             "``khora.neo4j.pool.sampled.*`` histograms. Zero-cost when False. "
-            "Set via env: KHORA_STORAGE__GRAPH__POOL_SAMPLER_ENABLED=true."
+            "Set via env: KHORA_STORAGE_GRAPH_POOL_SAMPLER_ENABLED=true."
+        ),
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_POOL_SAMPLER_ENABLED",
+            "KHORA_STORAGE__GRAPH__POOL_SAMPLER_ENABLED",
         ),
     )
     pool_sampler_interval_ms: int = Field(
@@ -157,7 +397,11 @@ class Neo4jConfig(BaseModel):
         description=(
             "Interval in milliseconds between Neo4j pool samples when "
             "``pool_sampler_enabled`` is True. Clamped to [50, 60000]. "
-            "Set via env: KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS=250."
+            "Set via env: KHORA_STORAGE_GRAPH_POOL_SAMPLER_INTERVAL_MS=250."
+        ),
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_POOL_SAMPLER_INTERVAL_MS",
+            "KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS",
         ),
     )
     relationship_source_document_ids_max: int = Field(
@@ -170,7 +414,11 @@ class Neo4jConfig(BaseModel):
             "a warning is logged and ``khora.neo4j.relationship.source_id_truncated`` "
             "is incremented with field=source_document_ids. Default 100 preserves "
             "pre-#737 behavior; deep-provenance workloads should raise it. "
-            "Set via env: KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX=500."
+            "Set via env: KHORA_STORAGE_GRAPH_RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX=500."
+        ),
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX",
+            "KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX",
         ),
     )
     relationship_source_chunk_ids_max: int = Field(
@@ -183,7 +431,11 @@ class Neo4jConfig(BaseModel):
             "a warning is logged and ``khora.neo4j.relationship.source_id_truncated`` "
             "is incremented with field=source_chunk_ids. Default 250 preserves "
             "pre-#737 behavior; deep-provenance workloads should raise it. "
-            "Set via env: KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_CHUNK_IDS_MAX=1000."
+            "Set via env: KHORA_STORAGE_GRAPH_RELATIONSHIP_SOURCE_CHUNK_IDS_MAX=1000."
+        ),
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_RELATIONSHIP_SOURCE_CHUNK_IDS_MAX",
+            "KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_CHUNK_IDS_MAX",
         ),
     )
     entity_source_document_ids_max: int = Field(
@@ -196,7 +448,11 @@ class Neo4jConfig(BaseModel):
             "logged and ``khora.neo4j.entity.source_id_truncated`` is incremented "
             "with field=source_document_ids. Default 100 preserves pre-#777 "
             "behavior; deep-provenance workloads should raise it. "
-            "Set via env: KHORA_STORAGE__GRAPH__ENTITY_SOURCE_DOCUMENT_IDS_MAX=500."
+            "Set via env: KHORA_STORAGE_GRAPH_ENTITY_SOURCE_DOCUMENT_IDS_MAX=500."
+        ),
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_ENTITY_SOURCE_DOCUMENT_IDS_MAX",
+            "KHORA_STORAGE__GRAPH__ENTITY_SOURCE_DOCUMENT_IDS_MAX",
         ),
     )
     entity_source_chunk_ids_max: int = Field(
@@ -209,7 +465,11 @@ class Neo4jConfig(BaseModel):
             "logged and ``khora.neo4j.entity.source_id_truncated`` is incremented "
             "with field=source_chunk_ids. Default 250 preserves pre-#777 behavior; "
             "deep-provenance workloads should raise it. "
-            "Set via env: KHORA_STORAGE__GRAPH__ENTITY_SOURCE_CHUNK_IDS_MAX=1000."
+            "Set via env: KHORA_STORAGE_GRAPH_ENTITY_SOURCE_CHUNK_IDS_MAX=1000."
+        ),
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_ENTITY_SOURCE_CHUNK_IDS_MAX",
+            "KHORA_STORAGE__GRAPH__ENTITY_SOURCE_CHUNK_IDS_MAX",
         ),
     )
 
@@ -217,10 +477,24 @@ class Neo4jConfig(BaseModel):
 class MemgraphConfig(BaseModel):
     """Memgraph graph backend configuration."""
 
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
     backend: Literal["memgraph"] = "memgraph"
-    url: SecretStr | None = Field(default=None, description="Memgraph connection URL (bolt://)")
-    user: str = Field(default="memgraph", description="Memgraph username")
-    password: SecretStr = Field(default=SecretStr(""), description="Memgraph password")
+    url: SecretStr | None = Field(
+        default=None,
+        description="Memgraph connection URL (bolt://)",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_URL", "KHORA_STORAGE__GRAPH__URL"),
+    )
+    user: str = Field(
+        default="memgraph",
+        description="Memgraph username",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_USER", "KHORA_STORAGE__GRAPH__USER"),
+    )
+    password: SecretStr = Field(
+        default=SecretStr(""),
+        description="Memgraph password",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_PASSWORD", "KHORA_STORAGE__GRAPH__PASSWORD"),
+    )
 
 
 class NeptuneConfig(BaseModel):
@@ -230,13 +504,42 @@ class NeptuneConfig(BaseModel):
     Python driver as Neo4j and Memgraph backends.
     """
 
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
     backend: Literal["neptune"] = "neptune"
-    url: SecretStr | None = Field(default=None, description="Neptune Bolt endpoint (bolt://cluster:8182)")
-    user: str = Field(default="", description="Username (empty for IAM auth)")
-    password: SecretStr = Field(default=SecretStr(""), description="Password (empty for IAM auth)")
-    iam_auth: bool = Field(default=False, description="Use AWS IAM SigV4 authentication")
-    aws_region: str = Field(default="us-east-1", description="AWS region for IAM auth signing")
-    max_connection_pool_size: int = Field(default=100, description="Bolt connection pool size (Neptune max: 1000)")
+    url: SecretStr | None = Field(
+        default=None,
+        description="Neptune Bolt endpoint (bolt://cluster:8182)",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_URL", "KHORA_STORAGE__GRAPH__URL"),
+    )
+    user: str = Field(
+        default="",
+        description="Username (empty for IAM auth)",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_USER", "KHORA_STORAGE__GRAPH__USER"),
+    )
+    password: SecretStr = Field(
+        default=SecretStr(""),
+        description="Password (empty for IAM auth)",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_PASSWORD", "KHORA_STORAGE__GRAPH__PASSWORD"),
+    )
+    iam_auth: bool = Field(
+        default=False,
+        description="Use AWS IAM SigV4 authentication",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_IAM_AUTH", "KHORA_STORAGE__GRAPH__IAM_AUTH"),
+    )
+    aws_region: str = Field(
+        default="us-east-1",
+        description="AWS region for IAM auth signing",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_AWS_REGION", "KHORA_STORAGE__GRAPH__AWS_REGION"),
+    )
+    max_connection_pool_size: int = Field(
+        default=100,
+        description="Bolt connection pool size (Neptune max: 1000)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_MAX_CONNECTION_POOL_SIZE",
+            "KHORA_STORAGE__GRAPH__MAX_CONNECTION_POOL_SIZE",
+        ),
+    )
 
 
 class SurrealDBConfig(BaseModel):
@@ -244,18 +547,106 @@ class SurrealDBConfig(BaseModel):
 
     SurrealDB serves as a unified backend providing graph, vector, and
     relational storage in a single database.
+
+    Note: this class is reachable through TWO parent paths — ``storage.graph``
+    (when ``backend=surrealdb``) and ``storage.surrealdb`` (unified-mode slot).
+    Each aliased field therefore declares both ``_GRAPH_`` and ``_SURREALDB_``
+    env-var prefixes (single- and double-underscore variants of each).
     """
 
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
     backend: Literal["surrealdb"] = "surrealdb"
-    mode: str = Field(default="memory", description="Connection mode: memory, embedded, or remote")
-    url: SecretStr | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
-    path: str | None = Field(default=None, description="Database file path (for embedded mode)")
-    namespace: str = Field(default="khora", description="SurrealDB namespace")
-    database: str = Field(default="default", description="SurrealDB database")
-    user: str = Field(default="root", description="SurrealDB username")
-    password: SecretStr = Field(default=SecretStr("root"), description="SurrealDB password")
-    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
-    sync_data: bool = Field(default=True, description="Enable SURREAL_SYNC_DATA for crash-safe writes")
+    mode: str = Field(
+        default="memory",
+        description="Connection mode: memory, embedded, or remote",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_MODE",
+            "KHORA_STORAGE_SURREALDB_MODE",
+            "KHORA_STORAGE__GRAPH__MODE",
+            "KHORA_STORAGE__SURREALDB__MODE",
+        ),
+    )
+    url: SecretStr | None = Field(
+        default=None,
+        description="SurrealDB WebSocket URL (for remote mode)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_URL",
+            "KHORA_STORAGE_SURREALDB_URL",
+            "KHORA_STORAGE__GRAPH__URL",
+            "KHORA_STORAGE__SURREALDB__URL",
+        ),
+    )
+    path: str | None = Field(
+        default=None,
+        description="Database file path (for embedded mode)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_PATH",
+            "KHORA_STORAGE_SURREALDB_PATH",
+            "KHORA_STORAGE__GRAPH__PATH",
+            "KHORA_STORAGE__SURREALDB__PATH",
+        ),
+    )
+    namespace: str = Field(
+        default="khora",
+        description="SurrealDB namespace",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_NAMESPACE",
+            "KHORA_STORAGE_SURREALDB_NAMESPACE",
+            "KHORA_STORAGE__GRAPH__NAMESPACE",
+            "KHORA_STORAGE__SURREALDB__NAMESPACE",
+        ),
+    )
+    database: str = Field(
+        default="default",
+        description="SurrealDB database",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_DATABASE",
+            "KHORA_STORAGE_SURREALDB_DATABASE",
+            "KHORA_STORAGE__GRAPH__DATABASE",
+            "KHORA_STORAGE__SURREALDB__DATABASE",
+        ),
+    )
+    user: str = Field(
+        default="root",
+        description="SurrealDB username",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_USER",
+            "KHORA_STORAGE_SURREALDB_USER",
+            "KHORA_STORAGE__GRAPH__USER",
+            "KHORA_STORAGE__SURREALDB__USER",
+        ),
+    )
+    password: SecretStr = Field(
+        default=SecretStr("root"),
+        description="SurrealDB password",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_PASSWORD",
+            "KHORA_STORAGE_SURREALDB_PASSWORD",
+            "KHORA_STORAGE__GRAPH__PASSWORD",
+            "KHORA_STORAGE__SURREALDB__PASSWORD",
+        ),
+    )
+    embedding_dimension: int = Field(
+        default=1536,
+        description="Embedding vector dimension",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_EMBEDDING_DIMENSION",
+            "KHORA_STORAGE_SURREALDB_EMBEDDING_DIMENSION",
+            "KHORA_STORAGE__GRAPH__EMBEDDING_DIMENSION",
+            "KHORA_STORAGE__SURREALDB__EMBEDDING_DIMENSION",
+        ),
+    )
+    sync_data: bool = Field(
+        default=True,
+        description="Enable SURREAL_SYNC_DATA for crash-safe writes",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_SYNC_DATA",
+            "KHORA_STORAGE_SURREALDB_SYNC_DATA",
+            "KHORA_STORAGE__GRAPH__SYNC_DATA",
+            "KHORA_STORAGE__SURREALDB__SYNC_DATA",
+        ),
+    )
 
 
 class SQLiteLanceConfig(BaseModel):
@@ -266,26 +657,65 @@ class SQLiteLanceConfig(BaseModel):
     both backends run in-process.
     """
 
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
     backend: Literal["sqlite_lance"] = "sqlite_lance"
-    db_path: str = Field(default="./khora.db", description="SQLite database path")
+    db_path: str = Field(
+        default="./khora.db",
+        description="SQLite database path",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_SQLITE_LANCE_DB_PATH",
+            "KHORA_STORAGE__SQLITE_LANCE__DB_PATH",
+        ),
+    )
     lance_path: str | None = Field(
         default=None,
         description="LanceDB directory path. When None, derived from db_path (sibling .lance dir).",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_SQLITE_LANCE_LANCE_PATH",
+            "KHORA_STORAGE__SQLITE_LANCE__LANCE_PATH",
+        ),
     )
-    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+    embedding_dimension: int = Field(
+        default=1536,
+        description="Embedding vector dimension",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_SQLITE_LANCE_EMBEDDING_DIMENSION",
+            "KHORA_STORAGE__SQLITE_LANCE__EMBEDDING_DIMENSION",
+        ),
+    )
     use_halfvec: bool = Field(
         default=False,
         description="Store embeddings as float16 to halve index size (minor recall loss).",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_SQLITE_LANCE_USE_HALFVEC",
+            "KHORA_STORAGE__SQLITE_LANCE__USE_HALFVEC",
+        ),
     )
     lance_index: Literal["auto", "ivf_pq", "hnsw", "brute"] = Field(
         default="auto",
         description="Vector index type. 'auto' picks based on table size.",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_SQLITE_LANCE_LANCE_INDEX",
+            "KHORA_STORAGE__SQLITE_LANCE__LANCE_INDEX",
+        ),
     )
     ivf_partitions: int | None = Field(
         default=None,
         description="IVF partition count (ivf_pq only). None = auto from row count.",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_SQLITE_LANCE_IVF_PARTITIONS",
+            "KHORA_STORAGE__SQLITE_LANCE__IVF_PARTITIONS",
+        ),
     )
-    hnsw_m: int = Field(default=16, description="HNSW M parameter (max connections per layer)")
+    hnsw_m: int = Field(
+        default=16,
+        description="HNSW M parameter (max connections per layer)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_SQLITE_LANCE_HNSW_M",
+            "KHORA_STORAGE__SQLITE_LANCE__HNSW_M",
+        ),
+    )
     retrain_factor: float = Field(
         default=2.0,
         description=(
@@ -293,9 +723,11 @@ class SQLiteLanceConfig(BaseModel):
             "retrain_factor * (rows at last training). Default 2.0 retrains "
             "when the corpus has doubled. Set <= 1.0 to disable retraining."
         ),
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_SQLITE_LANCE_RETRAIN_FACTOR",
+            "KHORA_STORAGE__SQLITE_LANCE__RETRAIN_FACTOR",
+        ),
     )
-
-    model_config = {"extra": "forbid"}
 
 
 class AGEConfig(BaseModel):
@@ -305,11 +737,29 @@ class AGEConfig(BaseModel):
     Can share the same connection pool as the relational backend.
     """
 
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
     backend: Literal["age"] = "age"
-    url: SecretStr | None = Field(default=None, description="PostgreSQL URL (can share with relational backend)")
-    graph_name: str = Field(default="khora_graph", description="Name of the AGE graph")
-    pool_size: int = Field(default=10, description="Connection pool size")
-    max_overflow: int = Field(default=20, description="Max overflow connections")
+    url: SecretStr | None = Field(
+        default=None,
+        description="PostgreSQL URL (can share with relational backend)",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_URL", "KHORA_STORAGE__GRAPH__URL"),
+    )
+    graph_name: str = Field(
+        default="khora_graph",
+        description="Name of the AGE graph",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_GRAPH_NAME", "KHORA_STORAGE__GRAPH__GRAPH_NAME"),
+    )
+    pool_size: int = Field(
+        default=10,
+        description="Connection pool size",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_POOL_SIZE", "KHORA_STORAGE__GRAPH__POOL_SIZE"),
+    )
+    max_overflow: int = Field(
+        default=20,
+        description="Max overflow connections",
+        validation_alias=_env_aliases("KHORA_STORAGE_GRAPH_MAX_OVERFLOW", "KHORA_STORAGE__GRAPH__MAX_OVERFLOW"),
+    )
 
 
 def _graph_discriminator(v: Any) -> str:
@@ -336,26 +786,118 @@ GraphConfig = Annotated[
 class PgVectorConfig(BaseModel):
     """pgvector vector backend configuration."""
 
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
     backend: Literal["pgvector"] = "pgvector"
-    url: SecretStr | None = Field(default=None, description="pgvector connection URL")
-    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+    url: SecretStr | None = Field(
+        default=None,
+        description="pgvector connection URL",
+        validation_alias=_env_aliases("KHORA_STORAGE_VECTOR_URL", "KHORA_STORAGE__VECTOR__URL"),
+    )
+    embedding_dimension: int = Field(
+        default=1536,
+        description="Embedding vector dimension",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_VECTOR_EMBEDDING_DIMENSION",
+            "KHORA_STORAGE__VECTOR__EMBEDDING_DIMENSION",
+        ),
+    )
 
 
 class SurrealDBVectorConfig(BaseModel):
     """SurrealDB unified backend configuration (vector role).
 
-    Shares the same SurrealDB instance as the graph role.
+    Shares the same SurrealDB instance as the graph role. Like
+    :class:`SurrealDBConfig` (graph role), this class is parented under
+    ``storage.vector`` but the env-var contract has historically routed
+    SurrealDB unified-mode config through both ``KHORA_STORAGE_VECTOR_*``
+    and the central ``KHORA_STORAGE_SURREALDB_*`` slots — both forms are
+    accepted here.
     """
 
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
     backend: Literal["surrealdb"] = "surrealdb"
-    mode: str = Field(default="memory", description="Connection mode: memory, embedded, or remote")
-    url: SecretStr | None = Field(default=None, description="SurrealDB WebSocket URL (for remote mode)")
-    path: str | None = Field(default=None, description="Database file path (for embedded mode)")
-    namespace: str = Field(default="khora", description="SurrealDB namespace")
-    database: str = Field(default="default", description="SurrealDB database")
-    user: str = Field(default="root", description="SurrealDB username")
-    password: SecretStr = Field(default=SecretStr("root"), description="SurrealDB password")
-    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+    mode: str = Field(
+        default="memory",
+        description="Connection mode: memory, embedded, or remote",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_VECTOR_MODE",
+            "KHORA_STORAGE_SURREALDB_MODE",
+            "KHORA_STORAGE__VECTOR__MODE",
+            "KHORA_STORAGE__SURREALDB__MODE",
+        ),
+    )
+    url: SecretStr | None = Field(
+        default=None,
+        description="SurrealDB WebSocket URL (for remote mode)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_VECTOR_URL",
+            "KHORA_STORAGE_SURREALDB_URL",
+            "KHORA_STORAGE__VECTOR__URL",
+            "KHORA_STORAGE__SURREALDB__URL",
+        ),
+    )
+    path: str | None = Field(
+        default=None,
+        description="Database file path (for embedded mode)",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_VECTOR_PATH",
+            "KHORA_STORAGE_SURREALDB_PATH",
+            "KHORA_STORAGE__VECTOR__PATH",
+            "KHORA_STORAGE__SURREALDB__PATH",
+        ),
+    )
+    namespace: str = Field(
+        default="khora",
+        description="SurrealDB namespace",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_VECTOR_NAMESPACE",
+            "KHORA_STORAGE_SURREALDB_NAMESPACE",
+            "KHORA_STORAGE__VECTOR__NAMESPACE",
+            "KHORA_STORAGE__SURREALDB__NAMESPACE",
+        ),
+    )
+    database: str = Field(
+        default="default",
+        description="SurrealDB database",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_VECTOR_DATABASE",
+            "KHORA_STORAGE_SURREALDB_DATABASE",
+            "KHORA_STORAGE__VECTOR__DATABASE",
+            "KHORA_STORAGE__SURREALDB__DATABASE",
+        ),
+    )
+    user: str = Field(
+        default="root",
+        description="SurrealDB username",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_VECTOR_USER",
+            "KHORA_STORAGE_SURREALDB_USER",
+            "KHORA_STORAGE__VECTOR__USER",
+            "KHORA_STORAGE__SURREALDB__USER",
+        ),
+    )
+    password: SecretStr = Field(
+        default=SecretStr("root"),
+        description="SurrealDB password",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_VECTOR_PASSWORD",
+            "KHORA_STORAGE_SURREALDB_PASSWORD",
+            "KHORA_STORAGE__VECTOR__PASSWORD",
+            "KHORA_STORAGE__SURREALDB__PASSWORD",
+        ),
+    )
+    embedding_dimension: int = Field(
+        default=1536,
+        description="Embedding vector dimension",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_VECTOR_EMBEDDING_DIMENSION",
+            "KHORA_STORAGE_SURREALDB_EMBEDDING_DIMENSION",
+            "KHORA_STORAGE__VECTOR__EMBEDDING_DIMENSION",
+            "KHORA_STORAGE__SURREALDB__EMBEDDING_DIMENSION",
+        ),
+    )
 
 
 class SQLiteVectorConfig(BaseModel):
@@ -365,9 +907,22 @@ class SQLiteVectorConfig(BaseModel):
     Vector search is brute-force cosine via khora._accel.
     """
 
+    model_config = {"extra": "forbid", "populate_by_name": True}
+
     backend: Literal["sqlite"] = "sqlite"
-    url: str | None = Field(default=None, description="SQLite path (sqlite:///path.db or :memory:)")
-    embedding_dimension: int = Field(default=1536, description="Embedding vector dimension")
+    url: str | None = Field(
+        default=None,
+        description="SQLite path (sqlite:///path.db or :memory:)",
+        validation_alias=_env_aliases("KHORA_STORAGE_VECTOR_URL", "KHORA_STORAGE__VECTOR__URL"),
+    )
+    embedding_dimension: int = Field(
+        default=1536,
+        description="Embedding vector dimension",
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_VECTOR_EMBEDDING_DIMENSION",
+            "KHORA_STORAGE__VECTOR__EMBEDDING_DIMENSION",
+        ),
+    )
 
 
 def _vector_discriminator(v: Any) -> str:
@@ -1154,6 +1709,37 @@ class KhoraConfig(BaseSettings):
         default_factory=DreamConfig,
         description="Dream-phase configuration",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_alias_conflicts(cls, data: Any) -> Any:
+        """Reject conflicting single-underscore and double-underscore env vars.
+
+        Issue #789: each nested-config field accepts both ``KHORA_FOO_BAR``
+        (canonical) and ``KHORA_FOO__BAR`` (legacy) forms. If the operator
+        sets BOTH forms to **different** values we refuse to silently pick
+        one — the wrong half of the .env file would be ignored without
+        warning. Same value on both forms is fine (just redundant).
+
+        Beyond conflict detection, this validator also **promotes** the
+        canonical single-underscore env var into the legacy double-
+        underscore slot inside ``data`` — pydantic-settings's
+        ``env_nested_delimiter="__"`` only ingests the double-underscore
+        form, so without this promotion the new spelling would silently
+        be ignored. We mutate ``data`` (the dict pydantic-settings already
+        built from env vars) by walking the canonical name and stitching
+        the value into the nested-dict structure.
+        """
+        conflicts = _process_alias_env_pairs(data, _ENV_ALIAS_PAIRS, env_prefix="KHORA_")
+        if conflicts:
+            raise ValueError(
+                "Conflicting Khora env vars: the same field is configured via "
+                "both the new single-underscore form and the legacy "
+                "double-underscore form with different values. Pick one — the "
+                "single-underscore form is preferred; the double-underscore "
+                "form is kept for backward compatibility.\n" + "\n".join(conflicts)
+            )
+        return data
 
     @model_validator(mode="after")
     def _propagate_shortcuts(self) -> KhoraConfig:

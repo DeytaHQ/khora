@@ -53,10 +53,16 @@ def test_dream_config_defaults() -> None:
 
 
 def test_dream_config_env_var_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Env-vars must populate both flat and nested DreamConfig fields."""
+    """Env-vars must populate both flat and nested DreamConfig fields.
+
+    Uses the canonical single-underscore env-var spelling for nested
+    fields (Issue #789). The legacy double-underscore spelling is
+    regression-covered by
+    ``test_dream_config_env_var_precedence_legacy_double_underscore``.
+    """
     monkeypatch.setenv("KHORA_DREAM_ENABLED", "true")
     monkeypatch.setenv("KHORA_DREAM_LLM_MAX_TOKENS_PER_RUN", "300000")
-    monkeypatch.setenv("KHORA_DREAM_OPS__DEDUPE_ENTITIES", "true")
+    monkeypatch.setenv("KHORA_DREAM_OPS_DEDUPE_ENTITIES", "true")
 
     cfg = KhoraConfig()
     assert cfg.dream.enabled is True
@@ -64,6 +70,23 @@ def test_dream_config_env_var_precedence(monkeypatch: pytest.MonkeyPatch) -> Non
     assert cfg.dream.ops.dedupe_entities is True
     # Other ops still default off.
     assert cfg.dream.ops.prune_edges is False
+
+
+def test_dream_config_env_var_precedence_legacy_double_underscore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy ``KHORA_DREAM_OPS__DEDUPE_ENTITIES`` still wires through.
+
+    Regression coverage for the back-compat alias preserved by #789 —
+    existing operator ``.env`` files using the double-underscore form
+    must keep working forever.
+    """
+    monkeypatch.setenv("KHORA_DREAM_ENABLED", "true")
+    monkeypatch.setenv("KHORA_DREAM_OPS__DEDUPE_ENTITIES", "true")
+
+    cfg = KhoraConfig()
+    assert cfg.dream.enabled is True
+    assert cfg.dream.ops.dedupe_entities is True
 
 
 def test_khora_config_nested() -> None:

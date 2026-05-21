@@ -17,7 +17,9 @@ KHORA_QUERY_DEFAULT_MODE=hybrid
 KHORA_EXTRACTION_BATCH_SIZE=5
 ```
 
-Legacy double-underscore nesting (`KHORA_STORAGE__POSTGRESQL_URL`) is still accepted for backwards compatibility.
+Legacy double-underscore nesting (`KHORA_STORAGE__GRAPH__URL`) is still accepted as a backwards-compatible alias on every nested-config field. New code and `.env` files should use the single-underscore form shown throughout this document; the legacy form continues to work but is no longer documented.
+
+Nested-object env vars (graph backend, vector backend, unified SurrealDB, SQLite+LanceDB, dream-phase per-op toggles) have their own dedicated reference: [nested-env-vars.md](nested-env-vars.md).
 
 ### Programmatic
 
@@ -105,8 +107,8 @@ gauges - see [observability.md](observability.md)). For high-frequency
 sub-minute sampling enable:
 
 ```bash
-KHORA_STORAGE__GRAPH__POOL_SAMPLER_ENABLED=true
-KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS=500    # clamped to [50, 60000]
+KHORA_STORAGE_GRAPH_POOL_SAMPLER_ENABLED=true
+KHORA_STORAGE_GRAPH_POOL_SAMPLER_INTERVAL_MS=500    # clamped to [50, 60000]
 ```
 
 ### Neo4j relationship provenance caps
@@ -119,9 +121,11 @@ relevant knob and watch the `khora.neo4j.relationship.source_id_truncated`
 counter (labels: `field`, `kind`):
 
 ```bash
-KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX=500
-KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_CHUNK_IDS_MAX=1000
+KHORA_STORAGE_GRAPH_RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX=500
+KHORA_STORAGE_GRAPH_RELATIONSHIP_SOURCE_CHUNK_IDS_MAX=1000
 ```
+
+See [nested-env-vars.md](nested-env-vars.md#neo4j-backendneo4j-the-default) for the full Neo4j-and-friends nested-env-var table, including the matching entity-side caps.
 
 When the (existing + incoming) union exceeds the cap, the most-recent
 tail is kept, dropped entries are counted on the metric, and a
@@ -153,8 +157,8 @@ inherit the choice when no `storage_backend` argument is passed:
 
 ```bash
 KHORA_STORAGE_BACKEND=sqlite_lance
-KHORA_STORAGE_SQLITE_LANCE__DB_PATH=./data/chronicle.db
-KHORA_STORAGE_SQLITE_LANCE__EMBEDDING_DIMENSION=1536
+KHORA_STORAGE_SQLITE_LANCE_DB_PATH=./data/chronicle.db
+KHORA_STORAGE_SQLITE_LANCE_EMBEDDING_DIMENSION=1536
 ```
 
 Install with `pip install 'khora[sqlite-lance]'` (pulls in `aiosqlite` and
@@ -180,20 +184,9 @@ Known gaps and warts:
 - **Point-in-time queries are not supported** on the embedded stack. The CTE port does not expose the equivalent of pgvector's PIT semantics.
 - **FTS5 covers chunks only** - entity-anchored recall falls back to `LIKE` / JSON-equality. Recommend the PostgreSQL stack for entity-heavy corpora.
 - **Install footprint** is ~130–180 MB unpacked (pyarrow + lancedb native + Arrow C++ runtime). "Embedded" means "no server", not "no native deps".
-- **IVF-PQ retraining** is automatic when the corpus grows past `retrain_factor × (rows at last training)`. Tune via `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` (see below).
+- **IVF-PQ retraining** is automatic when the corpus grows past `retrain_factor × (rows at last training)`. Tune via `KHORA_STORAGE_SQLITE_LANCE_RETRAIN_FACTOR`.
 
-Vector index tuning fields on the `sqlite_lance` storage config:
-
-| Variable | Default | Description |
-|---|---|---|
-| `KHORA_STORAGE_SQLITE_LANCE__DB_PATH` | `./khora.db` | SQLite file path. |
-| `KHORA_STORAGE_SQLITE_LANCE__LANCE_PATH` | sibling `.lance` dir | LanceDB directory. |
-| `KHORA_STORAGE_SQLITE_LANCE__EMBEDDING_DIMENSION` | `1536` | Vector dimension. |
-| `KHORA_STORAGE_SQLITE_LANCE__USE_HALFVEC` | `false` | Store as float16. |
-| `KHORA_STORAGE_SQLITE_LANCE__LANCE_INDEX` | `auto` | `auto` / `ivf_pq` / `hnsw` / `brute`. |
-| `KHORA_STORAGE_SQLITE_LANCE__IVF_PARTITIONS` | `null` (auto) | IVF partition count. |
-| `KHORA_STORAGE_SQLITE_LANCE__HNSW_M` | `16` | HNSW `M`. |
-| `KHORA_STORAGE_SQLITE_LANCE__RETRAIN_FACTOR` | `2.0` | Rebuild the LanceDB ANN index once the row count grows to `retrain_factor × (rows at last training)`. Default `2.0` retrains when the corpus has doubled. Set ≤ `1.0` to disable retraining. |
+Vector index tuning lives on the `sqlite_lance` storage sub-config — see the [`KHORA_STORAGE_SQLITE_LANCE_*` table in nested-env-vars.md](nested-env-vars.md#khora_storage_sqlite_lance_-sqlite--lancedb-unified) for `DB_PATH`, `LANCE_PATH`, `EMBEDDING_DIMENSION`, `USE_HALFVEC`, `LANCE_INDEX`, `IVF_PARTITIONS`, `HNSW_M`, and `RETRAIN_FACTOR` with defaults and tuning guidance.
 
 ### SurrealDB (experimental, unified store)
 

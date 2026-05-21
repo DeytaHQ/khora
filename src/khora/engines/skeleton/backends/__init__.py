@@ -38,6 +38,7 @@ class TemporalChunk:
     tags: list[str] = field(default_factory=list)
     confidence: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    chunker_info: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

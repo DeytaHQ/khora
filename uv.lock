@@ -11,13 +11,13 @@ conflicts = [[
 ]]
 
 [options]
-exclude-newer = "2026-05-13T14:08:12.582437Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
-urllib3 = { timestamp = "2026-05-20T14:08:12.582445Z", span = "PT0S" }
-litellm = { timestamp = "2026-05-20T14:08:12.582451Z", span = "PT0S" }
-idna = { timestamp = "2026-05-20T14:08:12.582452Z", span = "PT0S" }
+urllib3 = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
+litellm = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
+idna = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
 
 [manifest]
 constraints = [
@@ -2548,7 +2548,7 @@ requires-dist = [
     { name = "pyarrow", marker = "extra == 'lancedb'", specifier = ">=24.0.0" },
     { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=24.0.0" },
     { name = "pyarrow", marker = "extra == 'sqlite-lance'", specifier = ">=24.0.0" },
-    { name = "pydantic-settings", specifier = ">=2.10.1" },
+    { name = "pydantic-settings", specifier = ">=2.10.1,<3" },
     { name = "pymupdf", marker = "extra == 'binary-readers'", specifier = ">=1.27.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.3.0" },

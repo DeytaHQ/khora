@@ -6,6 +6,7 @@ from .models.document import Chunk, Document
 from .models.entity import Entity, Episode, Relationship
 from .models.event import EventType, MemoryEvent
 from .models.tenancy import MemoryNamespace, TenancyMode
+from .recall_abstention import compute_abstention_signals
 
 __all__ = [
     # Tenancy
@@ -21,4 +22,6 @@ __all__ = [
     # Event
     "MemoryEvent",
     "EventType",
+    # Recall helpers
+    "compute_abstention_signals",
 ]

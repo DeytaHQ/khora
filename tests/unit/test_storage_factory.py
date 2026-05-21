@@ -309,7 +309,14 @@ class TestPoolPrePing:
         assert kwargs["pool_pre_ping"] is True
 
     def test_khora_config_env_var(self):
-        """pool_pre_ping can be set via KHORA_STORAGE__POSTGRESQL_POOL_PRE_PING."""
+        """pool_pre_ping can be set via KHORA_STORAGE_POSTGRESQL_POOL_PRE_PING.
+
+        The field is flat on ``StorageSettings`` (not nested under another
+        config object), so the env-var form is a single underscore between
+        ``KHORA_STORAGE_`` and the field name — not double. The previous
+        docstring claimed ``KHORA_STORAGE__POSTGRESQL_POOL_PRE_PING`` which
+        was wrong on both counts.
+        """
         from khora.config.schema import KhoraConfig
 
         config = KhoraConfig(storage={"postgresql_pool_pre_ping": True})

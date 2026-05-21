@@ -139,7 +139,6 @@ jobs:
           # must explain why khora's usage does not reach the vulnerable code.
           # Revisit weekly — tracking issue: #778.
           uvx pip-audit -r /tmp/pip-audit-requirements.txt --progress-spinner off \
-            --ignore-vuln GHSA-xqmj-j6mv-4862 \
             --ignore-vuln PYSEC-2024-277 \
             --ignore-vuln PYSEC-2025-211 \
             --ignore-vuln PYSEC-2025-212 \
@@ -161,7 +160,6 @@ jobs:
             --ignore-vuln PYSEC-2025-210 \
             --ignore-vuln PYSEC-2026-139
           # Justifications (each --ignore-vuln above corresponds to one line here):
-          #   GHSA-xqmj-j6mv-4862   litellm SSTI in /prompts/test — proxy-only, not exploitable via SDK.
           #   PYSEC-2024-277        joblib NumpyArrayWrapper deserialization — disputed by maintainer; khora never imports joblib (transitive dep only, no untrusted .joblib files loaded).
           #   PYSEC-2025-211        transformers Perceiver checkpoint RCE — khora never instantiates Perceiver; CrossEncoder loads vetted reranker model IDs only.
           #   PYSEC-2025-212        transformers Transformer-XL checkpoint RCE — khora never loads Transformer-XL; reranker model IDs are hard-coded vetted IDs.

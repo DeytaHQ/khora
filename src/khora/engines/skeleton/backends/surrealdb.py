@@ -75,6 +75,7 @@ DEFINE FIELD IF NOT EXISTS channel ON temporal_chunk TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS tags ON temporal_chunk TYPE option<array<string>>;
 DEFINE FIELD IF NOT EXISTS confidence ON temporal_chunk TYPE float DEFAULT 1.0;
 DEFINE FIELD IF NOT EXISTS metadata_ ON temporal_chunk FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS chunker_info ON temporal_chunk FLEXIBLE TYPE object DEFAULT {};
 
 DEFINE INDEX IF NOT EXISTS idx_tc_namespace ON temporal_chunk FIELDS namespace;
 DEFINE INDEX IF NOT EXISTS idx_tc_document ON temporal_chunk FIELDS document;
@@ -198,7 +199,8 @@ class SurrealDBTemporalStore(TemporalVectorStore):
             "channel = $channel, "
             "tags = $tags, "
             "confidence = $confidence, "
-            "metadata_ = $metadata_"
+            "metadata_ = $metadata_, "
+            "chunker_info = $chunker_info"
         )
         bindings = self._chunk_to_bindings(chunk, chunk_id)
         bindings["chunk_rid"] = _rid("temporal_chunk", chunk_id)
@@ -224,7 +226,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
                     "namespace": _rid("memory_namespace", chunk.namespace_id),
                     "document": _rid("document", chunk.document_id),
                     "content": chunk.content,
-                    "embedding": list(chunk.embedding) if chunk.embedding is not None else None,
+                    "embedding": (list(chunk.embedding) if chunk.embedding is not None else None),
                     "occurred_at": chunk.occurred_at,
                     "created_at": (chunk.created_at or datetime.now(UTC)),
                     "source_system": chunk.source_system,
@@ -233,6 +235,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
                     "tags": _ensure_list(chunk.tags),
                     "confidence": chunk.confidence,
                     "metadata_": chunk.metadata or {},
+                    "chunker_info": chunk.chunker_info or {},
                 }
             )
 
@@ -357,7 +360,11 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         # Vector search (fetch extra for fusion if hybrid)
         vector_limit = limit * 2 if hybrid else limit
         vector_results = await self._vector_search(
-            filter_clauses, filter_bindings, query_embedding, vector_limit, min_similarity
+            filter_clauses,
+            filter_bindings,
+            query_embedding,
+            vector_limit,
+            min_similarity,
         )
 
         if hybrid and query_text:
@@ -561,6 +568,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
             "tags": _ensure_list(chunk.tags),
             "confidence": chunk.confidence,
             "metadata_": chunk.metadata or {},
+            "chunker_info": chunk.chunker_info or {},
         }
 
     @staticmethod
@@ -583,6 +591,10 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         if not isinstance(meta, dict):
             meta = {}
 
+        chunker_info = row.get("chunker_info") or {}
+        if not isinstance(chunker_info, dict):
+            chunker_info = {}
+
         return TemporalChunk(
             id=chunk_id,
             namespace_id=namespace_id,
@@ -597,6 +609,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
             tags=tags,
             confidence=float(row.get("confidence", 1.0)),
             metadata=meta,
+            chunker_info=chunker_info,
         )
 
     @staticmethod
