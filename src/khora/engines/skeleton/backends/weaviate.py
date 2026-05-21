@@ -494,22 +494,20 @@ class WeaviateTemporalStore(TemporalVectorStore):
         return combined
 
     def _object_to_chunk(self, obj: Any, namespace_id: UUID) -> TemporalChunk:
-        """Convert a Weaviate object to a TemporalChunk."""
+        """Convert a Weaviate object to a TemporalChunk.
+
+        Weaviate v4 returns DATE columns as ``datetime`` objects (already
+        parsed) rather than ISO strings, so we accept either via
+        ``_coerce_datetime`` - calling ``.replace("Z", ...)`` on a
+        ``datetime`` would invoke ``datetime.replace(year=...)`` and
+        raise ``TypeError``. The embedding can come back as a dict keyed
+        by vector name or as a plain list / numpy array depending on
+        client version.
+        """
         props = obj.properties
 
-        occurred_at = None
-        if props.get("occurred_at"):
-            try:
-                occurred_at = datetime.fromisoformat(props["occurred_at"].replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                pass
-
-        created_at = None
-        if props.get("created_at"):
-            try:
-                created_at = datetime.fromisoformat(props["created_at"].replace("Z", "+00:00"))
-            except (ValueError, AttributeError):
-                pass
+        occurred_at = _coerce_datetime(props.get("occurred_at"))
+        created_at = _coerce_datetime(props.get("created_at"))
 
         metadata: dict[str, Any] = {}
         if props.get("metadata_json"):
@@ -521,9 +519,9 @@ class WeaviateTemporalStore(TemporalVectorStore):
         return TemporalChunk(
             id=UUID(str(obj.uuid)),
             namespace_id=namespace_id,
-            document_id=UUID(props["document_id"]),
+            document_id=UUID(str(props["document_id"])),
             content=props.get("content", ""),
-            embedding=list(obj.vector["default"]) if obj.vector else None,
+            embedding=_extract_vector(getattr(obj, "vector", None)),
             occurred_at=occurred_at,
             created_at=created_at,
             source_system=props.get("source_system"),
@@ -562,6 +560,59 @@ def _parse_host_port(url: str) -> tuple[str, int]:
     host = parsed.hostname or "localhost"
     port = parsed.port if parsed.port else 8080
     return host, port
+
+
+def _coerce_datetime(value: Any) -> datetime | None:
+    """Accept either a ``datetime`` or an ISO-8601 string and return a ``datetime``.
+
+    Weaviate v4 returns ``DATE`` properties as ``datetime`` objects;
+    older versions and some serializations send ISO strings. Returns
+    ``None`` on unparseable input rather than raising - this is the
+    read path and a single malformed row shouldn't poison search.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_vector(vector_field: Any) -> list[float] | None:
+    """Pull a vector out of the v4 client's polymorphic ``obj.vector`` shape.
+
+    The v4 client returns ``obj.vector`` as one of:
+    - ``None`` when ``include_vector=False`` (or not requested)
+    - ``dict[str, list[float]]`` keyed by vector name (default ``"default"``)
+    - a plain list / numpy array on older minor versions
+
+    Returns ``None`` when no vector is available or the shape is
+    unrecognised - callers can still use the chunk; the embedding is
+    only required for re-vectorisation, not for reads.
+    """
+    if vector_field is None:
+        return None
+    if isinstance(vector_field, dict):
+        # Most common: vector keyed by name. Take the default slot, or
+        # the first available if the default key is missing.
+        if "default" in vector_field:
+            payload = vector_field["default"]
+        elif vector_field:
+            payload = next(iter(vector_field.values()))
+        else:
+            return None
+        try:
+            return list(payload)
+        except TypeError:
+            return None
+    try:
+        return list(vector_field)
+    except TypeError:
+        return None
 
 
 def _chunk_to_properties(chunk: TemporalChunk) -> dict[str, Any]:

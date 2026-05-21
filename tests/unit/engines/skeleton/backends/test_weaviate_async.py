@@ -8,6 +8,7 @@ cluster live behind ``WEAVIATE_INTEGRATION_TEST=1`` (see
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -22,6 +23,8 @@ from khora.engines.skeleton.backends.weaviate import (
     WeaviateBackendConfig,
     WeaviateTemporalStore,
     _coerce_backend_config,
+    _coerce_datetime,
+    _extract_vector,
     _parse_host_port,
 )
 
@@ -103,6 +106,40 @@ class TestHelpers:
     def test_coerce_rejects_other_types(self) -> None:
         with pytest.raises(TypeError):
             _coerce_backend_config(8080)  # type: ignore[arg-type]
+
+    # Defensive parsers used by _object_to_chunk — regression coverage
+    # for the v4-client shape mismatch that broke #803's first run.
+
+    def test_coerce_datetime_none(self) -> None:
+        assert _coerce_datetime(None) is None
+
+    def test_coerce_datetime_passthrough(self) -> None:
+        dt = datetime(2026, 5, 21, 12, 30, tzinfo=UTC)
+        assert _coerce_datetime(dt) is dt
+
+    def test_coerce_datetime_iso_string(self) -> None:
+        out = _coerce_datetime("2026-05-21T12:30:00Z")
+        assert out == datetime(2026, 5, 21, 12, 30, tzinfo=UTC)
+
+    def test_coerce_datetime_invalid_returns_none(self) -> None:
+        assert _coerce_datetime("not a date") is None
+        assert _coerce_datetime(42) is None  # not str / datetime
+
+    def test_extract_vector_none(self) -> None:
+        assert _extract_vector(None) is None
+
+    def test_extract_vector_default_keyed_dict(self) -> None:
+        assert _extract_vector({"default": [0.1, 0.2, 0.3]}) == [0.1, 0.2, 0.3]
+
+    def test_extract_vector_first_value_when_default_missing(self) -> None:
+        # Older / alternate vector names still surface a list
+        assert _extract_vector({"main": [0.5, 0.6]}) == [0.5, 0.6]
+
+    def test_extract_vector_empty_dict(self) -> None:
+        assert _extract_vector({}) is None
+
+    def test_extract_vector_plain_list(self) -> None:
+        assert _extract_vector([0.7, 0.8, 0.9]) == [0.7, 0.8, 0.9]
 
 
 # ---------------------------------------------------------------------------
