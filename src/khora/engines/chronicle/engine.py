@@ -1521,8 +1521,15 @@ class ChronicleEngine:
         # ── Abstention signals ───────────────────────────────
         # Passive metadata for downstream consumers (LLM answer-generation)
         # to decide whether to refuse vs answer.  Does NOT alter retrieval.
-        entity_hits: list[tuple[Entity, float]] = []  # Phase 2: entity-level results
-        abstention_signals = self._compute_abstention_signals(chunks_with_scores, entity_hits)
+        # ``top_vector_score`` is the pre-rerank raw cosine captured above
+        # (NOT ``chunks_with_scores[0][1]``, which is the post-fusion /
+        # post-rerank display score) - cross-encoder reranking compresses
+        # scores into a narrow high-side band even for off-topic queries,
+        # so feeding the post-rerank value would make ``top_score_low``
+        # a steady-state false negative on rerank-enabled queries (#809).
+        abstention_signals = self._compute_abstention_signals(
+            chunks_with_scores, entity_hits, top_vector_score=max_raw_cosine
+        )
 
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
 
@@ -1622,15 +1629,22 @@ class ChronicleEngine:
         self,
         chunks: list[tuple[Chunk, float]],
         entities: list[tuple[Entity, float]],
+        *,
+        top_vector_score: float,
     ) -> dict[str, Any]:
         """Compute passive abstention signals for downstream answer-generation.
 
+        ``top_vector_score`` is the pre-rerank, pre-fusion raw cosine of
+        the top semantic-channel chunk. The post-fusion ``chunks[0][1]``
+        score is unfit for the ``top_score_low`` check because cross-
+        encoder reranking compresses scores into a narrow high-side band
+        regardless of query relevance (#809).
+
         See ``ChronicleEngine.__init__`` for the tunable thresholds.
         """
-        top_score = chunks[0][1] if chunks else 0.0
         signals = compute_abstention_signals(
             chunk_count=len(chunks),
-            top_chunk_score=top_score,
+            top_vector_score=top_vector_score,
             entity_count=len(entities),
             min_chunks=self._abstention_min_chunks,
             min_top_score=self._abstention_min_top_score,

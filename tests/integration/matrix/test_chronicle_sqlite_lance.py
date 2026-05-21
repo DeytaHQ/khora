@@ -403,3 +403,47 @@ async def test_chronicle_concurrent_remember(kb: Khora, namespace_id: UUID) -> N
 
     result = await kb.recall("Marie Curie", namespace=namespace_id, limit=10)
     assert len(result.chunks) >= 5
+
+
+async def test_chronicle_recall_surfaces_entities_and_abstention_flag(kb: Khora, namespace_id: UUID) -> None:
+    """Regression for issue #808.
+
+    `Chronicle.recall()` had a one-line shadow re-assignment that wiped
+    `entity_hits` to `[]` immediately after `_collect_entities` populated
+    it, so `RecallResult.entities` was always empty and the
+    `entities_empty` abstention flag was permanently `True` even when
+    entities were extracted at ingest and the query directly named one.
+
+    Asserts: when a corpus has known extracted entities and the recall
+    query references one of them, `RecallResult.entities` is non-empty
+    AND `abstention_signals['entities_empty']` is `False`.
+    """
+    _plan_extraction(
+        "Sarah Chen",
+        entities=[
+            ("Sarah Chen", "PERSON"),
+            ("Globex Corp", "ORGANIZATION"),
+            ("expense reimbursements", "CONCEPT"),
+        ],
+    )
+    await _remember(
+        kb,
+        namespace_id=namespace_id,
+        content="Sarah Chen is the CFO at Globex Corp. She approves all expense reimbursements over 2000 USD.",
+    )
+
+    result = await kb.recall("What does Sarah Chen approve?", namespace=namespace_id, limit=5)
+
+    assert result.entities, (
+        "recall returned zero entities despite a corpus with three extracted entities - "
+        "the entity_hits shadow-reassignment from issue #808 has regressed"
+    )
+    # At least one of the three planted entities must surface; the exact
+    # identity depends on stub embedding similarity and isn't part of the
+    # contract under test (the contract is "entity_hits flows through").
+    surfaced = {e.name for e in result.entities}
+    expected = {"Sarah Chen", "Globex Corp", "expense reimbursements"}
+    assert surfaced & expected, f"none of the planted entities surfaced; got {surfaced!r}"
+
+    signals = result.engine_info.get("abstention_signals", {})
+    assert signals.get("entities_empty") is False, f"entities_empty must reflect actual entity count, got {signals!r}"
