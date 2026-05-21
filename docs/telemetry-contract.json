@@ -961,6 +961,18 @@
       "unit": "1"
     },
     {
+      "name": "khora.vectorcypher.abstention_signal",
+      "type": "counter",
+      "stability": "public",
+      "unit": ""
+    },
+    {
+      "name": "khora.vectorcypher.abstention_combined_score",
+      "type": "histogram",
+      "stability": "public",
+      "unit": "1"
+    },
+    {
       "name": "khora.memory.recall.duration",
       "type": "histogram",
       "stability": "public",

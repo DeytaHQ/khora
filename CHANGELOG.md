@@ -6,6 +6,10 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+### Added
+
+- **vectorcypher: emit ADR-098 canonical `engine_info` keys** (DYT-4601). `RecallResult.engine_info` from `VectorCypherEngine.retrieve()` now includes the five canonical keys named in ADR-098 §1 alongside the existing engine-specific telemetry: `mode` (from the `SearchMode` argument), `channels_used` (subset of `{"vector", "graph", "bm25"}` derived from per-channel chunk counts), `rrf_k` (from `vc_config.fusion_rrf_k`), `temporal_signal` (`{category, source}` dict, defaults to `{"category": "none", "source": "none"}` when no signal detected), and `abstention_signals` (4 boolean flags + `combined_score` + `should_abstain`, same shape as chronicle). Two new metrics: `khora.vectorcypher.abstention_signal` (counter) and `khora.vectorcypher.abstention_combined_score` (histogram). Chronicle's `_compute_abstention_signals` refactored to delegate to the shared `khora.core.recall_abstention.compute_abstention_signals` helper — chronicle's output and metric emission are unchanged.
+
 ## [0.16.3] - Recall response shape fixes + chunker_info persistence
 
 Patch release on top of v0.16.2. Two end-to-end recall-contract fixes (chunker self-identification now round-trips on vectorcypher; unset optional strings serialize as `null` rather than `""`) plus a CVE-allowlist trim as `litellm` SSTI is no longer load-bearing on the pinned version.
