@@ -14,6 +14,7 @@ This structure enables efficient retrieval by:
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -182,7 +183,8 @@ class DualNodeManager:
             author: $author,
             channel: $channel,
             confidence: $confidence,
-            metadata: $metadata
+            metadata: $metadata,
+            chunker_info: $chunker_info
         })
         RETURN c.id AS id
         """
@@ -199,6 +201,7 @@ class DualNodeManager:
             channel=chunk.channel,
             confidence=chunk.confidence,
             metadata=serialize_dict(chunk.metadata or {}),
+            chunker_info=json.dumps(chunk.chunker_info or {}),
         )
 
         async with self._session() as session:
@@ -250,6 +253,7 @@ class DualNodeManager:
                     "channel": chunk.channel,
                     "confidence": chunk.confidence,
                     "metadata": serialize_dict(chunk.metadata or {}),
+                    "chunker_info": json.dumps(chunk.chunker_info or {}),
                 }
             )
 
@@ -266,7 +270,8 @@ class DualNodeManager:
             author: chunk.author,
             channel: chunk.channel,
             confidence: chunk.confidence,
-            metadata: chunk.metadata
+            metadata: chunk.metadata,
+            chunker_info: chunk.chunker_info
         })
         """
 
@@ -496,6 +501,7 @@ class DualNodeManager:
                c.document_id AS document_id,
                c.occurred_at AS occurred_at,
                c.metadata AS metadata,
+               c.chunker_info AS chunker_info,
                collect(DISTINCT e.id) AS entity_ids,
                sum(r.mention_count) AS total_mentions
         {order_clause}

@@ -70,7 +70,8 @@ _KHORA_CHUNKS_SCHEMA: tuple[str, ...] = (
         channel TEXT,
         tags TEXT NOT NULL DEFAULT '[]',
         confidence REAL NOT NULL DEFAULT 1.0,
-        metadata TEXT NOT NULL DEFAULT '{}'
+        metadata TEXT NOT NULL DEFAULT '{}',
+        chunker_info TEXT NOT NULL DEFAULT '{}'
     )
     """,
     "CREATE INDEX IF NOT EXISTS ix_khora_chunks_namespace ON khora_chunks(namespace_id)",
@@ -238,6 +239,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                     to_json_text(c.tags or []),
                     float(c.confidence) if c.confidence is not None else 1.0,
                     to_json_text(c.metadata or {}),
+                    to_json_text(c.chunker_info or {}),
                 )
             )
             if c.embedding:
@@ -254,8 +256,8 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         await self._sqlite.executemany(
             "INSERT INTO khora_chunks "
             "(id, namespace_id, document_id, content, occurred_at, created_at, "
-            "source_system, author, channel, tags, confidence, metadata) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_system, author, channel, tags, confidence, metadata, chunker_info) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             sqlite_rows,
         )
         await self._sqlite.commit()
@@ -633,6 +635,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
             tags_list = []
 
         meta = from_json_text(row["metadata"]) if row["metadata"] else {}
+        chunker_info = from_json_text(row["chunker_info"]) if row["chunker_info"] else {}
 
         return TemporalChunk(
             id=UUID(row["id"]),
@@ -648,6 +651,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
             tags=tags_list,
             confidence=row["confidence"] if row["confidence"] is not None else 1.0,
             metadata=meta,
+            chunker_info=chunker_info,
         )
 
     # ------------------------------------------------------------------

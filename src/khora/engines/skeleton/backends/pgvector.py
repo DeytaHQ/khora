@@ -66,6 +66,12 @@ khora_chunks_table = Table(
     Column("tags", ARRAY(String), default=[]),
     Column("confidence", Float, default=1.0),
     Column("metadata", JSONB, default=dict),
+    Column(
+        "chunker_info",
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    ),
     # Full-text search
     Column("content_tsv", TSVECTOR, nullable=True),
     # Indexes are defined below
@@ -212,6 +218,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 tags=chunk.tags or [],
                 confidence=chunk.confidence,
                 metadata=chunk.metadata or {},
+                chunker_info=chunk.chunker_info or {},
             )
             await session.execute(stmt)
             await session.commit()
@@ -243,6 +250,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
                     "tags": chunk.tags or [],
                     "confidence": chunk.confidence,
                     "metadata": chunk.metadata or {},
+                    "chunker_info": chunk.chunker_info or {},
                 }
             )
 
@@ -598,7 +606,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
             namespace_id=row.namespace_id,
             document_id=row.document_id,
             content=row.content,
-            embedding=list(row.embedding) if hasattr(row, "embedding") and row.embedding is not None else None,
+            embedding=(list(row.embedding) if hasattr(row, "embedding") and row.embedding is not None else None),
             occurred_at=row.occurred_at,
             created_at=row.created_at,
             source_system=row.source_system,
@@ -607,6 +615,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
             tags=list(row.tags) if row.tags is not None else [],
             confidence=row.confidence or 1.0,
             metadata=row.metadata or {},
+            chunker_info=dict(row.chunker_info) if row.chunker_info else {},
         )
 
     async def health_check(self) -> dict[str, Any]:

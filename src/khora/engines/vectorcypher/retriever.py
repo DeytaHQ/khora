@@ -15,6 +15,7 @@ Performance optimizations:
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 from dataclasses import dataclass, field
@@ -802,6 +803,11 @@ class VectorCypherRetriever:
                         document_id=UUID(c_data["document_id"]),
                         content=c_data.get("content", ""),
                         metadata={"occurred_at": c_data.get("occurred_at")},
+                        chunker_info=(
+                            json.loads(c_data["chunker_info"])
+                            if isinstance(c_data.get("chunker_info"), str)
+                            else (c_data.get("chunker_info") or {})
+                        ),
                     )
                     chunks.append((chunk, rank_score))
 
@@ -1936,6 +1942,7 @@ class VectorCypherRetriever:
                         "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
                         **(r.chunk.metadata or {}),
                     },
+                    chunker_info=r.chunk.chunker_info or {},
                     created_at=r.chunk.created_at or r.chunk.occurred_at,
                 )
                 chunk_results.append((chunk, r.combined_score or r.similarity))
@@ -2496,6 +2503,7 @@ class VectorCypherRetriever:
                                     "total_mentions": 1,
                                     "entity_ids": [],
                                     "occurred_at": getattr(chunk, "source_timestamp", None),
+                                    "chunker_info": getattr(chunk, "chunker_info", None) or {},
                                 }
                             )
                 except Exception as e:
@@ -2522,6 +2530,11 @@ class VectorCypherRetriever:
                         "connected_entities": record.get("entity_ids", []),
                         **(record.get("metadata") or {}),
                     },
+                    chunker_info=(
+                        json.loads(record["chunker_info"])
+                        if isinstance(record.get("chunker_info"), str)
+                        else (record.get("chunker_info") or {})
+                    ),
                 )
                 results.append((chunk_id, score, chunk))
 
@@ -2578,6 +2591,7 @@ class VectorCypherRetriever:
                             "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
                             **(r.chunk.metadata or {}),
                         },
+                        chunker_info=r.chunk.chunker_info or {},
                         created_at=r.chunk.created_at or r.chunk.occurred_at,
                     ),
                 )
@@ -2671,6 +2685,7 @@ class VectorCypherRetriever:
                                 ),
                                 **(getattr(chunk, "metadata", None) or {}),
                             },
+                            chunker_info=getattr(chunk, "chunker_info", None) or {},
                             created_at=getattr(chunk, "created_at", None) or getattr(chunk, "occurred_at", None),
                         ),
                     )

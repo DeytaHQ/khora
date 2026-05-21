@@ -6,6 +6,10 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+### Fixed
+
+- vectorcypher: persist `chunker_info` end-to-end so recall surfaces the chunker self-identification dict instead of `{}`.
+
 ## [0.16.2] - Fork-safe integrations + vectorcypher proxy fix + Hermes adapter
 
 Patch release on top of v0.16.1. Two production-impacting fixes (fork-safe integration globals; `Khora.recall()` `AttributeError` on session-less corpora introduced by the v0.16.0 namespace proxy), plus the Hermes memory-provider adapter and the env-var naming consolidation that already landed on `main` since v0.16.1.
