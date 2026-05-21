@@ -97,8 +97,8 @@ def _assert_pg_version_ok() -> None:
         )
 
 
-def _upgrade_impl() -> bool:
-    """Perform the schema change. Returns True if the column was added."""
+def _upgrade_impl() -> None:
+    """Perform the schema change."""
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     if not inspector.has_table("khora_chunks"):
@@ -111,7 +111,7 @@ def _upgrade_impl() -> bool:
         # the updated ``khora_chunks_table`` definition. The migration is
         # still required for existing production deployments where
         # ``khora_chunks`` was created before this column existed.
-        return False
+        return
 
     is_pg = _is_postgres()
 
@@ -144,21 +144,18 @@ def _upgrade_impl() -> bool:
                 server_default=sa.text("'{}'"),
             ),
         )
-    return True
 
 
 def upgrade() -> None:
     start = time.monotonic()
-    applied = False
     try:
-        applied = _upgrade_impl()
+        _upgrade_impl()
     except OperationalError as exc:
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.bind(
             migration_id=revision,
             duration_ms=duration_ms,
             lock_timeout_tripped=_is_lock_timeout(exc),
-            applied=False,
         ).error("khora.migration.applied")
         # Bare ``raise`` re-raises the active exception with the original
         # traceback preserved. env.py's wrapping context.begin_transaction()
@@ -170,7 +167,6 @@ def upgrade() -> None:
         migration_id=revision,
         duration_ms=duration_ms,
         lock_timeout_tripped=False,
-        applied=applied,
     ).info("khora.migration.applied")
 
 
