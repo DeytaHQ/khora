@@ -53,8 +53,9 @@ chain expects 033 to be on the same branch.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+
+from alembic import op
 
 revision: str = "034_chronicle_events_bitemporal"
 down_revision: str | Sequence[str] | None = "033_bitemporal_columns"

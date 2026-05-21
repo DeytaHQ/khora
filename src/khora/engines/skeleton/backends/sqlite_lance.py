@@ -32,11 +32,13 @@ from uuid import UUID, uuid4
 import pyarrow as pa
 from loguru import logger
 
+from khora.core.models.document import Chunk
 from khora.engines.skeleton.backends import (
     TemporalChunk,
     TemporalFilter,
     TemporalSearchResult,
     TemporalVectorStore,
+    temporal_chunk_to_chunk,
 )
 from khora.storage.backends._fts5 import escape_fts5_query
 from khora.storage.backends.sqlite_lance._helpers import (
@@ -486,6 +488,30 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
             if len(out) >= limit:
                 break
         return out
+
+    async def search_fulltext(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> list[tuple[Chunk, float]]:
+        """Public BM25 (SQLite FTS5) lookup over ``khora_chunks`` for the
+        StorageCoordinator dispatch path. See :func:`temporal_chunk_to_chunk`
+        for the ``TemporalChunk`` → ``Chunk`` adaptation.
+        """
+        if not query_text or not query_text.strip():
+            return []
+        temporal_filter: TemporalFilter | None = None
+        if created_after is not None or created_before is not None:
+            temporal_filter = TemporalFilter(
+                created_after=created_after,
+                created_before=created_before,
+            )
+        results = await self._bm25_search(namespace_id, query_text, temporal_filter, limit)
+        return [(temporal_chunk_to_chunk(r.chunk), float(r.bm25_score or 0.0)) for r in results]
 
     async def _bm25_search(
         self,

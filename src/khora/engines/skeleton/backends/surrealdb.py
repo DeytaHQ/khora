@@ -14,11 +14,13 @@ from uuid import UUID, uuid4
 
 from loguru import logger
 
+from khora.core.models.document import Chunk
 from khora.engines.skeleton.backends import (
     TemporalChunk,
     TemporalFilter,
     TemporalSearchResult,
     TemporalVectorStore,
+    temporal_chunk_to_chunk,
 )
 from khora.storage.backends.surrealdb._helpers import (
     _parse_dt,
@@ -437,6 +439,33 @@ class SurrealDBTemporalStore(TemporalVectorStore):
     # ------------------------------------------------------------------
     # BM25 search
     # ------------------------------------------------------------------
+
+    async def search_fulltext(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> list[tuple[Chunk, float]]:
+        """Public BM25 lookup over the SurrealDB temporal-chunk table.
+
+        See :func:`temporal_chunk_to_chunk` for the ``TemporalChunk`` →
+        ``Chunk`` adaptation. Falls back to ``[]`` on backends without
+        a BM25 index configured (``optimize_storage()`` not yet run).
+        """
+        if not query_text or not query_text.strip():
+            return []
+        temporal_filter: TemporalFilter | None = None
+        if created_after is not None or created_before is not None:
+            temporal_filter = TemporalFilter(
+                created_after=created_after,
+                created_before=created_before,
+            )
+        filter_clauses, filter_bindings = self._build_filter_clauses(namespace_id, temporal_filter)
+        results = await self._bm25_search(filter_clauses, filter_bindings, query_text, limit)
+        return [(temporal_chunk_to_chunk(r.chunk), float(r.bm25_score or 0.0)) for r in results]
 
     async def _bm25_search(
         self,

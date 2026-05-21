@@ -15,6 +15,7 @@ recency stays index-only.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "028_typed_entity_recency_index"

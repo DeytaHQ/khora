@@ -12,8 +12,9 @@ dedup-by-external_id support (Phase 2).
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy import text
+
+from alembic import op
 
 revision: str = "021_add_document_external_id"
 down_revision: str | Sequence[str] | None = "020_partial_index_dedup_active"

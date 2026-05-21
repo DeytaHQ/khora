@@ -34,11 +34,13 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
+from khora.core.models.document import Chunk
 from khora.engines.skeleton.backends import (
     TemporalChunk,
     TemporalFilter,
     TemporalSearchResult,
     TemporalVectorStore,
+    temporal_chunk_to_chunk,
 )
 from khora.telemetry import trace_span
 
@@ -455,6 +457,43 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 )
 
         return results
+
+    async def search_fulltext(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> list[tuple[Chunk, float]]:
+        """Public BM25 / ts_rank lookup over ``khora_chunks`` for the
+        StorageCoordinator dispatch path.
+
+        Returns rows as ``(Chunk, score)`` tuples to match the
+        coordinator's ``search_fulltext_chunks`` contract; the underlying
+        ``TemporalChunk`` is adapted via :func:`temporal_chunk_to_chunk`
+        so the retriever sees a uniform ``Chunk`` shape regardless of
+        whether the data came from ``chunks`` or ``khora_chunks``.
+        """
+        if not query_text or not query_text.strip():
+            return []
+        conditions: list = [khora_chunks_table.c.namespace_id == namespace_id]
+        # ``khora_chunks`` exposes ``occurred_at`` (event time) and
+        # ``created_at`` (ingest time). Mirror ``ChunkModel.search_fulltext``'s
+        # pushdown of ``COALESCE(source_timestamp, created_at)`` by
+        # coalescing event time first.
+        if created_after is not None:
+            conditions.append(
+                func.coalesce(khora_chunks_table.c.occurred_at, khora_chunks_table.c.created_at) >= created_after
+            )
+        if created_before is not None:
+            conditions.append(
+                func.coalesce(khora_chunks_table.c.occurred_at, khora_chunks_table.c.created_at) <= created_before
+            )
+        async with self._get_session() as session:
+            results = await self._bm25_search(session, query_text, conditions, limit)
+        return [(temporal_chunk_to_chunk(r.chunk), float(r.bm25_score or 0.0)) for r in results]
 
     async def _bm25_search(
         self,

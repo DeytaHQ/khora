@@ -12,6 +12,7 @@ relationships_created value instead of always returning 0.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "023_add_document_relationship_count"

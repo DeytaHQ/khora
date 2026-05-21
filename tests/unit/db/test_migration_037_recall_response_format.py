@@ -47,12 +47,13 @@ from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
-from alembic import command
 from alembic.config import Config
 from loguru import logger
 from sqlalchemy import inspect
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from alembic import command
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 _PRIOR_REV = "036_dream_conflicts"

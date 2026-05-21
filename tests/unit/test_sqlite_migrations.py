@@ -10,9 +10,10 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import create_async_engine
+
+from alembic import command
 
 
 def _make_config(url: str) -> Config:
@@ -80,7 +81,7 @@ class TestSqliteMigrations:
                     # Version table must point at head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
                     version = result.scalar()
-                    assert version == "038_khora_chunks_chunker_info"
+                    assert version == "039_khora_chunks_content_tsv_gin"
             finally:
                 await engine.dispose()
 

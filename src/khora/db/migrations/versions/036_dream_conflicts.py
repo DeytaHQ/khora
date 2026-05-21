@@ -50,9 +50,10 @@ detection is Postgres-only in v0.16.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import ARRAY, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+
+from alembic import op
 
 revision: str = "036_dream_conflicts"
 down_revision: str | Sequence[str] | None = "035_dream_communities"

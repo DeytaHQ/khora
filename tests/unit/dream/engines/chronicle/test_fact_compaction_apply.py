@@ -26,7 +26,6 @@ from uuid import UUID, uuid4
 
 import pytest
 import sqlalchemy as sa
-from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -34,6 +33,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from alembic import command
 from khora.dream._undo_record import UndoRecord
 from khora.dream.config import DreamConfig
 from khora.dream.engines.chronicle import plan_chronicle_fact_compaction

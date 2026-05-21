@@ -11,6 +11,7 @@ VARCHAR(255) accommodates compound keys and longer hash algorithms.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers

@@ -16,8 +16,9 @@ recreated.
 
 from collections.abc import Sequence
 
-from alembic import op
 from sqlalchemy import text
+
+from alembic import op
 
 revision: str = "018_halfvec_hnsw_indexes"
 down_revision: str | Sequence[str] | None = "017_temporal_coalesce_index"

@@ -11,6 +11,7 @@ For fresh installs, these columns are already included in 000_initial_schema.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 # revision identifiers, used by Alembic.
