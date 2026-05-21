@@ -1950,10 +1950,18 @@ class VectorCypherEngine:
                 documents.append(DocumentProjection(id=did, created_at=datetime.now(UTC), source_type="library"))
 
         # Canonical engine_info keys for the recall response.
-        top_chunk_score = validated_chunks[0][1] if validated_chunks else 0.0
+        #
+        # Use the engine's captured pre-rerank raw vector cosine
+        # (``max_raw_vector_score``) for ``top_score_low``, NOT the
+        # post-fusion ``validated_chunks[0][1]``. Cross-encoder reranking
+        # compresses scores into a narrow high-side band even for
+        # off-topic queries; mirroring the chronicle fix (#809). When the
+        # vector channel is empty (graph-only recall), this is 0.0 and
+        # the signal correctly flags as "low".
+        max_raw_vector_score = float(result.metadata.get("max_raw_vector_score") or 0.0)
         abstention_signals = compute_abstention_signals(
             chunk_count=len(validated_chunks),
-            top_chunk_score=top_chunk_score,
+            top_vector_score=max_raw_vector_score,
             entity_count=len(recall_entities),
             # Hardcoded to ChronicleEngine defaults — same passive-signal semantics.
             min_chunks=1,
