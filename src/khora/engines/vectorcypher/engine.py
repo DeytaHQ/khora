@@ -42,6 +42,7 @@ from khora.core.models.recall import (
     RecallEntity,
     RecallRelationship,
 )
+from khora.core.recall_abstention import compute_abstention_signals
 from khora.engines._storage_config import build_storage_config
 from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
 from khora.engines.skeleton.skeleton import SkeletonIndexer
@@ -50,6 +51,7 @@ from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
 from khora.storage import StorageConfig, create_storage_coordinator
 from khora.telemetry import trace, trace_span
+from khora.telemetry.metrics import metric_counter, metric_histogram
 
 from .dual_nodes import DualNodeManager, EntityChunkLink
 from .retriever import RetrieverConfig, VectorCypherRetriever
@@ -63,6 +65,17 @@ if TYPE_CHECKING:
     from khora.extraction.skills import ExpertiseConfig
     from khora.khora import _GlobalChunkSemaphore
     from khora.storage import StorageCoordinator
+
+
+_VC_ABSTENTION_SIGNAL_COUNTER = metric_counter(
+    "khora.vectorcypher.abstention_signal",
+    description="VectorCypher abstention signal firings, by signal name.",
+)
+_VC_ABSTENTION_COMBINED_SCORE_HISTOGRAM = metric_histogram(
+    "khora.vectorcypher.abstention_combined_score",
+    unit="1",
+    description="VectorCypher abstention combined-score (0.0=confident, 1.0=should-abstain).",
+)
 
 
 def _ensure_tags(value: Any) -> list[str]:
@@ -1936,6 +1949,36 @@ class VectorCypherEngine:
                 seen_doc_ids.add(did)
                 documents.append(DocumentProjection(id=did, created_at=datetime.now(UTC), source_type="library"))
 
+        # Canonical engine_info keys for the recall response.
+        top_chunk_score = validated_chunks[0][1] if validated_chunks else 0.0
+        abstention_signals = compute_abstention_signals(
+            chunk_count=len(validated_chunks),
+            top_chunk_score=top_chunk_score,
+            entity_count=len(recall_entities),
+            # Hardcoded to ChronicleEngine defaults — same passive-signal semantics.
+            min_chunks=1,
+            min_top_score=0.3,
+            combined_threshold=0.5,
+        )
+
+        if abstention_signals["entities_empty"]:
+            _VC_ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "entities_empty"})
+        if abstention_signals["chunks_empty"]:
+            _VC_ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "chunks_empty"})
+        if abstention_signals["chunks_below_min"]:
+            _VC_ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "chunks_below_min"})
+        if abstention_signals["top_score_low"]:
+            _VC_ABSTENTION_SIGNAL_COUNTER.add(1, attributes={"signal": "top_score_low"})
+        _VC_ABSTENTION_COMBINED_SCORE_HISTOGRAM.record(abstention_signals["combined_score"])
+
+        channels_used: list[str] = []
+        if result.metadata.get("vector_chunk_count", 0) > 0:
+            channels_used.append("vector")
+        if result.metadata.get("graph_chunk_count", 0) > 0:
+            channels_used.append("graph")
+        if result.metadata.get("bm25_chunk_count", 0) > 0:
+            channels_used.append("bm25")
+
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
@@ -1945,6 +1988,15 @@ class VectorCypherEngine:
             relationships=recall_relationships,
             engine_info={
                 "engine": "vectorcypher",
+                "mode": mode.value,
+                "channels_used": channels_used,
+                "rrf_k": self._vc_config.fusion_rrf_k,
+                "temporal_signal": (
+                    {"category": temporal_signal.category.value, "source": temporal_signal.source}
+                    if temporal_signal is not None
+                    else {"category": "none", "source": "none"}
+                ),
+                "abstention_signals": abstention_signals,
                 "routing": result.routing_decision.complexity.value,
                 "use_graph": result.routing_decision.use_graph,
                 "graph_depth": result.routing_decision.graph_depth,
