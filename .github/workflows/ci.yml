@@ -396,3 +396,74 @@ jobs:
             fi
           done
           exit $fail
+
+  # ============================================================================
+  # Weaviate integration (#783) — async client against a real cluster.
+  #
+  # Spins up a stock Weaviate container as a services-block side-car and
+  # runs the @pytest.mark.integration tests gated on
+  # WEAVIATE_INTEGRATION_TEST=1. Mirrors the gating convention used by
+  # the Neo4j integration tests (NEO4J_INTEGRATION_TEST). Keeps the
+  # `test` job hermetic (no Weaviate runtime there) so the unit suite
+  # stays fast.
+  # ============================================================================
+  weaviate-integration:
+    needs: install
+    runs-on: ubuntu-latest
+    services:
+      weaviate:
+        image: cr.weaviate.io/semitechnologies/weaviate:1.28.4
+        ports:
+          - 8080:8080
+          - 50051:50051
+        env:
+          QUERY_DEFAULTS_LIMIT: 25
+          AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+          PERSISTENCE_DATA_PATH: /var/lib/weaviate
+          DEFAULT_VECTORIZER_MODULE: none
+          ENABLE_MODULES: ""
+          CLUSTER_HOSTNAME: node1
+          DISABLE_TELEMETRY: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Restore venv cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
+
+      - name: Wait for Weaviate readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/v1/.well-known/ready >/dev/null; then
+              echo "weaviate ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "weaviate did not become ready within 60s"
+          exit 1
+
+      - name: Run Weaviate integration tests
+        env:
+          WEAVIATE_INTEGRATION_TEST: "1"
+          WEAVIATE_URL: "http://localhost:8080"
+          WEAVIATE_GRPC_PORT: "50051"
+        run: |
+          uv run pytest tests/integration/test_weaviate_async_integration.py \
+            --no-cov -v -m integration
