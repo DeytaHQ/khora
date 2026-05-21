@@ -83,7 +83,7 @@ class TestCombinedScoreBounds:
         engine = _engine_with_thresholds(min_chunks, min_top, threshold)
         chunks = [_make_chunk(top_score)] + [_make_chunk(top_score / 2)] * max(0, n_chunks - 1)
         entities = [_make_entity()] * n_entities
-        result = engine._compute_abstention_signals(chunks, entities)
+        result = engine._compute_abstention_signals(chunks, entities, top_vector_score=top_score if chunks else 0.0)
         assert 0.0 <= result["combined_score"] <= 1.0, (
             f"combined_score out of range: {result['combined_score']} for "
             f"n_chunks={n_chunks}, n_entities={n_entities}, top={top_score}"
@@ -171,7 +171,7 @@ class TestShouldAbstainThreshold:
         engine = _engine_with_thresholds(min_chunks=1, min_top=0.3, combined=threshold)
         chunks = [_make_chunk(top_score)] + [_make_chunk(top_score / 2)] * max(0, n_chunks - 1)
         entities = [_make_entity()] * n_entities
-        result = engine._compute_abstention_signals(chunks, entities)
+        result = engine._compute_abstention_signals(chunks, entities, top_vector_score=top_score if chunks else 0.0)
         assert result["should_abstain"] == (result["combined_score"] >= threshold), (
             f"should_abstain inconsistent with threshold: combined={result['combined_score']}, "
             f"threshold={threshold}, should_abstain={result['should_abstain']}"
@@ -198,7 +198,7 @@ class TestChunksEmptyImpliesBelowMin:
     @settings(max_examples=50, deadline=None)
     def test_chunks_empty_always_implies_below_min(self, min_chunks: int) -> None:
         engine = _engine_with_thresholds(min_chunks=min_chunks, min_top=0.3, combined=0.5)
-        result = engine._compute_abstention_signals([], [])
+        result = engine._compute_abstention_signals([], [], top_vector_score=0.0)
         # chunks_empty True (no chunks) → chunks_below_min must also be True.
         assert result["chunks_empty"] is True
         assert result["chunks_below_min"] is True, (
