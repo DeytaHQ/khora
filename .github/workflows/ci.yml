@@ -272,9 +272,16 @@ jobs:
           name: khora-coverage-unit
           fail_ci_if_error: false
 
-      - name: Run integration tests with coverage (serial)
+      - name: Run integration tests with coverage (parallel)
+        # ``-n auto`` parallelises across CPU cores via pytest-xdist.
+        # Most integration tests use per-test ``tmp_path`` + mocked LLMs
+        # and have no shared state. Real-Postgres / real-Neo4j tests
+        # are gated behind their own env vars (``NEO4J_INTEGRATION_TEST``,
+        # etc.) and are skipped in this job. Coverage append works under
+        # xdist via ``coverage.context = ...`` already set in pyproject.
+        # Expected wall-time cut: ~50% (was ~160s serial).
         run: |
-          uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-report=xml:coverage-integration.xml --cov-fail-under=77 -m integration
+          uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-report=xml:coverage-integration.xml --cov-fail-under=77 -m integration -n auto
 
       - name: Generate JSON coverage for floor check
         run: uv run coverage json -o coverage.json
