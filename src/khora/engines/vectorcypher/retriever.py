@@ -371,6 +371,7 @@ class VectorCypherRetriever:
         self._config = config or RetrieverConfig()
         self._storage = storage
         self._backend = backend
+        self._bm25_empty_warned_ns: set[str] = set()
 
         # Initialize router with config, syncing adaptive depth settings
         if router_config is None:
@@ -2713,10 +2714,14 @@ class VectorCypherRetriever:
         namespace_id: UUID,
         limit: int,
     ) -> list[tuple[UUID, float, Chunk]]:
-        """Full-text BM25 search on chunks via StorageCoordinator.
+        """Full-text BM25 search on chunks.
 
-        Mirrors the pattern of ``_vector_search_chunks`` but uses PostgreSQL
-        full-text search (``ts_rank``) instead of vector similarity.
+        Prefers the temporal vector store's ``search_fulltext`` when
+        available — that's where the batch ingest path actually writes
+        chunk content. Falls back to the coordinator's
+        ``search_fulltext_chunks`` (relational ``chunks`` table) for
+        backends that don't expose a fulltext-search method on the
+        temporal store.
 
         Args:
             query: Original query text
@@ -2726,19 +2731,39 @@ class VectorCypherRetriever:
         Returns:
             List of (chunk_id, score, chunk) tuples
         """
-        if not self._storage:
-            logger.debug("Storage coordinator not available for BM25 search")
+        if not self._storage and not self._vector_store:
+            logger.debug("No storage available for BM25 search")
             return []
 
         with trace_span("khora.vectorcypher.bm25_search_chunks", namespace_id=str(namespace_id)) as span:
             try:
-                results = await self._storage.search_fulltext_chunks(
-                    namespace_id,
-                    query,
-                    limit=limit,
-                )
+                results: list[tuple[Chunk, float]] = []
+                source = "coordinator"
+                temporal_fulltext = getattr(self._vector_store, "search_fulltext", None)
+                if callable(temporal_fulltext):
+                    raw = await temporal_fulltext(namespace_id, query, limit=limit)
+                    # Real backends return ``list[tuple[Chunk, float]]``; the
+                    # ``isinstance`` check rejects the bare-AsyncMock case
+                    # (and any other non-list return) so we fall through to
+                    # the coordinator path instead of silently iterating
+                    # an unrelated object.
+                    if isinstance(raw, list) and raw:
+                        results = raw
+                        source = "temporal_store"
+                if not results and self._storage is not None:
+                    coord_results = await self._storage.search_fulltext_chunks(
+                        namespace_id,
+                        query,
+                        limit=limit,
+                    )
+                    if coord_results:
+                        results = coord_results
+                        source = "coordinator"
                 span.set_attribute("chunk_count", len(results))
-                logger.debug(f"BM25 channel returned {len(results)} chunks")
+                span.set_attribute("source", source)
+                if not results:
+                    self._warn_bm25_empty_once(namespace_id)
+                logger.debug(f"BM25 channel returned {len(results)} chunks via {source}")
                 return [
                     (
                         chunk.id,
@@ -2750,6 +2775,24 @@ class VectorCypherRetriever:
             except Exception as e:
                 logger.warning(f"BM25 search failed: {e}")
                 return []
+
+    def _warn_bm25_empty_once(self, namespace_id: UUID) -> None:
+        """Log a one-shot WARNING when the BM25 channel returns 0 chunks.
+
+        Tracks the first miss per namespace so dashboards and operators
+        notice a silently-broken hybrid retrieval instead of having the
+        signal buried at DEBUG level.
+        """
+        key = str(namespace_id)
+        if key in self._bm25_empty_warned_ns:
+            return
+        self._bm25_empty_warned_ns.add(key)
+        logger.warning(
+            "BM25 channel returned 0 chunks for namespace {ns} — verify the "
+            "ingest path populated the temporal-store chunk table "
+            "(GitHub issue #813 tracked a write/read divergence on this path).",
+            ns=key,
+        )
 
     def _lazy_expand_chunks(
         self,

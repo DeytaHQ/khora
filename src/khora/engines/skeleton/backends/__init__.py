@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID
+
+from khora.core.models.document import Chunk
 
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
@@ -149,6 +151,68 @@ class TemporalVectorStore(Protocol):
         """Check backend health."""
         ...
 
+    # Optional capability — backends that store ingested chunk content
+    # in their own table override this to expose a BM25 / full-text path
+    # for the StorageCoordinator dispatch. Default returns an empty list
+    # so backends without a fulltext-search table fall through to the
+    # relational ``chunks``-table reader on the coordinator.
+    async def search_fulltext(
+        self,
+        namespace_id: UUID,
+        query_text: str,
+        *,
+        limit: int = 10,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> list[tuple[Chunk, float]]:
+        """Full-text search over the temporal store's chunk table.
+
+        Returns ``[]`` by default; backends with a populated fulltext
+        column override this.
+        """
+        return []
+
+
+def temporal_chunk_to_chunk(tc: TemporalChunk) -> Chunk:
+    """Adapt a ``TemporalChunk`` (skeleton storage) to a public ``Chunk``.
+
+    Preserves fields the retriever and rerankers depend on:
+    ``chunker_info`` (#800), ``created_at`` (#810), and ``session_id``
+    (#620 — stamped into ``TemporalChunk.metadata`` by the engines).
+    Maps ``occurred_at`` to ``source_timestamp`` so temporal-decay
+    boosts use the document time rather than the ingest time.
+    """
+    md = tc.metadata or {}
+    sid_raw = md.get("session_id")
+    session_id: UUID | None
+    if isinstance(sid_raw, UUID):
+        session_id = sid_raw
+    elif sid_raw:
+        try:
+            session_id = UUID(str(sid_raw))
+        except (TypeError, ValueError):
+            session_id = None
+    else:
+        session_id = None
+
+    return Chunk(
+        id=tc.id,
+        namespace_id=tc.namespace_id,
+        document_id=tc.document_id,
+        content=tc.content,
+        chunk_index=int(md.get("chunk_index", 0) or 0),
+        start_char=int(md.get("start_char", 0) or 0),
+        end_char=int(md.get("end_char", 0) or 0),
+        token_count=int(md.get("token_count", 0) or 0),
+        metadata=md,
+        chunker_info=tc.chunker_info or {},
+        embedding=tc.embedding,
+        embedding_model=str(md.get("embedding_model", "") or ""),
+        created_at=tc.created_at or datetime.now(UTC),
+        source_timestamp=tc.occurred_at,
+        session_id=session_id,
+    )
+
 
 def create_temporal_store(
     backend: str,
@@ -224,4 +288,5 @@ __all__ = [
     "TemporalSearchResult",
     "TemporalVectorStore",
     "create_temporal_store",
+    "temporal_chunk_to_chunk",
 ]
