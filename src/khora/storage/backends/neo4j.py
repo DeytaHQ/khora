@@ -553,7 +553,7 @@ class Neo4jBackend(GraphBackendBase):
         logger.warning(
             "Relationship provenance truncated: dropped {dropped} {field} entries "
             "across {rows} relationship(s){rel_type_suffix} (limit={limit}). "
-            "Raise KHORA_STORAGE__GRAPH__RELATIONSHIP_{field_upper}_MAX to retain "
+            "Raise KHORA_STORAGE_GRAPH_RELATIONSHIP_{field_upper}_MAX to retain "
             "deeper provenance.",
             dropped=dropped,
             field=field,
@@ -584,7 +584,7 @@ class Neo4jBackend(GraphBackendBase):
         logger.warning(
             "Entity provenance truncated: dropped {dropped} {field} entries "
             "across {rows} entity(s) (limit={limit}). "
-            "Raise KHORA_STORAGE__GRAPH__ENTITY_{field_upper}_MAX to retain "
+            "Raise KHORA_STORAGE_GRAPH_ENTITY_{field_upper}_MAX to retain "
             "deeper provenance.",
             dropped=dropped,
             field=field,
