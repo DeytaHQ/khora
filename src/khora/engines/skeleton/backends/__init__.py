@@ -153,7 +153,7 @@ def create_temporal_store(
     backend: str,
     config: KhoraConfig,
     *,
-    weaviate_url: str | None = None,
+    weaviate_url: str | Any | None = None,
     surrealdb_config: Any | None = None,
     surrealdb_connection: Any | None = None,
     engine: Any | None = None,
@@ -164,7 +164,9 @@ def create_temporal_store(
     Args:
         backend: Backend type ("pgvector", "weaviate", "surrealdb", or "sqlite_lance")
         config: Khora configuration
-        weaviate_url: Weaviate URL (required for weaviate backend)
+        weaviate_url: Either a Weaviate connection URL (str, self-hosted)
+            or a :class:`khora.engines.skeleton.backends.weaviate.WeaviateBackendConfig`
+            (cloud / auth / custom-port). Required for the weaviate backend.
         surrealdb_config: SurrealDBConfig instance (optional, falls back to config.storage.surrealdb)
         surrealdb_connection: Shared ``SurrealDBConnection`` (surrealdb backend only).
             When provided, the temporal store reuses this connection instead

@@ -281,12 +281,45 @@ CREATE INDEX idx_chunks_content_tsv ON khora_chunks USING GIN (content_tsv);
 For horizontal scaling and native multi-tenancy:
 
 ```python
+# Self-hosted (compose.yaml `weaviate` profile)
 engine = SkeletonConstructionEngine(
     config,
     backend="weaviate",
-    weaviate_url="http://localhost:8080"
+    weaviate_url="http://localhost:8090",
 )
 ```
+
+**Auth and Weaviate Cloud** (added in v0.16.3 / issue #783). The
+backend accepts a `WeaviateBackendConfig` in place of the URL string
+for cloud, authenticated, or custom-port deployments:
+
+```python
+from khora.engines.skeleton.backends.weaviate import WeaviateBackendConfig
+
+# Weaviate Cloud
+cloud_config = WeaviateBackendConfig(
+    cluster_url="https://my-cluster.weaviate.network",
+    api_key="...",  # SecretStr also accepted
+)
+engine = SkeletonConstructionEngine(config, backend="weaviate", weaviate_url=cloud_config)
+
+# Self-hosted with API-key auth + non-default gRPC port
+local_auth = WeaviateBackendConfig(
+    url="http://localhost:8090",
+    api_key="local-key",
+    grpc_port=50061,            # compose.yaml offset
+)
+engine = SkeletonConstructionEngine(config, backend="weaviate", weaviate_url=local_auth)
+```
+
+`url` and `cluster_url` are mutually exclusive; `cluster_url` requires
+`api_key`. The `weaviate_url` constructor argument keeps the legacy
+string-only contract for back-compat (wraps into a default
+`WeaviateBackendConfig(url=...)`).
+
+**Async client.** The backend uses `weaviate.use_async_with_local /
+use_async_with_custom / use_async_with_weaviate_cloud` under the hood
+so the Skeleton event loop does not block on Weaviate I/O.
 
 **Features:**
 
@@ -294,6 +327,13 @@ engine = SkeletonConstructionEngine(
 - Multi-tenant isolation (namespace = tenant)
 - Horizontal scaling
 - Built-in BM25 + vector fusion
+- API-key auth + Weaviate Cloud (added v0.16.3)
+
+**Tests.** Unit tests exercise the async client via mocks. Integration
+tests against a real cluster live in
+`tests/integration/test_weaviate_async_integration.py` and are gated
+behind `WEAVIATE_INTEGRATION_TEST=1`; CI provisions a Weaviate
+service-container side-car for the `weaviate-integration` job.
 
 ## Query Capabilities
 

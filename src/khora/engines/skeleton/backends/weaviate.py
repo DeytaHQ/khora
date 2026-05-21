@@ -5,15 +5,42 @@ This backend provides:
 - Rich filtering on any property (timestamps, keywords, custom fields)
 - Multi-tenancy with tenant isolation
 - Horizontal scaling for large datasets
+
+Async / auth / cloud (issue #783):
+
+The Weaviate client is the v4 ``WeaviateAsyncClient`` (not the sync
+``WeaviateClient`` we used until v0.16.2). Every storage method here
+awaits the underlying client so the Skeleton engine event loop stays
+unblocked under load.
+
+Three deployment shapes are supported through ``WeaviateBackendConfig``:
+
+- **Local**: pass ``WeaviateBackendConfig(url="http://localhost:8090")``
+  or just ``WeaviateTemporalStore(config, "http://localhost:8090")``.
+  Used by ``compose.yaml``'s ``weaviate`` profile.
+- **Cloud**: ``WeaviateBackendConfig(cluster_url="https://...weaviate.network", api_key="...")``.
+  Auth via Weaviate Cloud API key.
+- **Custom / self-hosted**: pass ``url=`` plus optional ``grpc_port``,
+  ``http_secure``, ``grpc_secure``, ``additional_headers``. API key
+  optional. Use this when you run Weaviate behind a reverse proxy or on
+  non-default ports.
+
+The legacy string-only constructor ``WeaviateTemporalStore(config, "http://...")``
+is preserved for back-compat; it wraps the URL in a default
+``WeaviateBackendConfig``.
 """
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from loguru import logger
+from pydantic import SecretStr
 
 from khora.engines.skeleton.backends import (
     TemporalChunk,
@@ -30,25 +57,118 @@ if TYPE_CHECKING:
 COLLECTION_NAME = "KhoraChunk"
 
 
+@dataclass(frozen=True)
+class WeaviateBackendConfig:
+    """Connection config for ``WeaviateTemporalStore``.
+
+    One of ``url`` (self-hosted) or ``cluster_url`` (Weaviate Cloud) must
+    be set. Combining both is rejected at validation time.
+
+    Attributes:
+        url: HTTP endpoint for self-hosted Weaviate (e.g.
+            ``http://localhost:8090``). Mutually exclusive with
+            ``cluster_url``.
+        cluster_url: Weaviate Cloud cluster URL (e.g.
+            ``https://my-cluster.weaviate.network``). Mutually exclusive
+            with ``url``. Requires ``api_key``.
+        api_key: API key for auth. Required for ``cluster_url`` mode;
+            optional for self-hosted (if the cluster is configured with
+            ``AUTHENTICATION_APIKEY_ENABLED=true``). Accepts ``str`` or
+            ``SecretStr``; stored as ``SecretStr``.
+        grpc_port: gRPC port (self-hosted / custom only). Default 50051
+            matches Weaviate's stock port; ``compose.yaml`` offsets to
+            ``50061`` - pass it explicitly when running against the
+            project's compose profile.
+        http_secure: ``True`` to use TLS for the HTTP channel
+            (self-hosted only; cloud is always TLS).
+        grpc_secure: ``True`` to use TLS for the gRPC channel
+            (self-hosted only).
+        additional_headers: Optional headers to send with every request
+            (e.g. ``{"X-OpenAI-Api-Key": "sk-..."}`` if a Weaviate module
+            needs vendor credentials forwarded). Khora itself does not
+            use vectorizer modules so this is rarely needed.
+        skip_init_checks: When ``True`` the client skips its
+            startup-readiness probe. Use only when the cluster is on a
+            slow link and the readiness check times out spuriously.
+    """
+
+    url: str | None = None
+    cluster_url: str | None = None
+    api_key: SecretStr | str | None = None
+    grpc_port: int = 50051
+    http_secure: bool = False
+    grpc_secure: bool = False
+    additional_headers: dict[str, str] | None = None
+    skip_init_checks: bool = False
+
+    def __post_init__(self) -> None:
+        if self.url and self.cluster_url:
+            raise ValueError(
+                "WeaviateBackendConfig: pass either `url` (self-hosted) or `cluster_url` (Weaviate Cloud), not both."
+            )
+        if not self.url and not self.cluster_url:
+            raise ValueError(
+                "WeaviateBackendConfig requires either `url` (self-hosted) or `cluster_url` (Weaviate Cloud)."
+            )
+        if self.cluster_url and self.api_key is None:
+            raise ValueError(
+                "WeaviateBackendConfig: `cluster_url` requires an `api_key`. "
+                "Weaviate Cloud rejects anonymous connections."
+            )
+
+    @property
+    def is_cloud(self) -> bool:
+        """``True`` when the config targets Weaviate Cloud."""
+        return bool(self.cluster_url)
+
+    def secret_api_key(self) -> str | None:
+        """Return the API key as plain text (or ``None`` if unset)."""
+        if self.api_key is None:
+            return None
+        if isinstance(self.api_key, SecretStr):
+            return self.api_key.get_secret_value()
+        return self.api_key
+
+    def log_safe_endpoint(self) -> str:
+        """Endpoint string suitable for log lines (no credentials)."""
+        return _safe_url_for_log(self.cluster_url or self.url or "")
+
+
+def _coerce_backend_config(value: str | WeaviateBackendConfig) -> WeaviateBackendConfig:
+    if isinstance(value, WeaviateBackendConfig):
+        return value
+    if isinstance(value, str):
+        return WeaviateBackendConfig(url=value)
+    raise TypeError(f"WeaviateTemporalStore requires a URL str or WeaviateBackendConfig; got {type(value).__name__}")
+
+
 class WeaviateTemporalStore(TemporalVectorStore):
     """Weaviate implementation of TemporalVectorStore.
 
     Provides native hybrid search combining BM25 and vector similarity
-    with rich filtering capabilities.
+    with rich filtering capabilities. Uses the v4 async client so
+    Skeleton engine I/O does not block the event loop.
     """
 
-    def __init__(self, config: KhoraConfig, weaviate_url: str):
+    def __init__(self, config: KhoraConfig, weaviate_url: str | WeaviateBackendConfig):
         """Initialize the backend.
 
         Args:
-            config: Khora configuration
-            weaviate_url: Weaviate server URL (e.g., "http://localhost:8080")
+            config: Khora configuration.
+            weaviate_url: Either a connection URL (back-compat,
+                self-hosted) or a :class:`WeaviateBackendConfig` for
+                cloud / authenticated / custom-port deployments.
         """
         self._config = config
-        self._weaviate_url = weaviate_url
-        self._client = None
+        self._weaviate_config = _coerce_backend_config(weaviate_url)
+        self._client: Any = None  # weaviate.WeaviateAsyncClient when connected
         self._connected = False
+        self._tenants_seen: set[str] = set()
         self._embedding_dimension = config.llm.embedding_dimension or 1536
+
+    # -------------------------------------------------------------------
+    # Lifecycle
+    # -------------------------------------------------------------------
 
     async def connect(self) -> None:
         """Connect to Weaviate and ensure schema exists."""
@@ -58,22 +178,47 @@ class WeaviateTemporalStore(TemporalVectorStore):
         try:
             import weaviate
             from weaviate.classes.config import Configure, DataType, Property
-        except ImportError:
+            from weaviate.classes.init import Auth
+        except ImportError as exc:
             raise ImportError(
                 "weaviate-client is required for the Weaviate backend. "
-                "Install it with: pip install weaviate-client>=4.10.0 "
+                "Install it with: pip install weaviate-client>=4.21.0 "
                 "or: pip install khora[weaviate]"
+            ) from exc
+
+        cfg = self._weaviate_config
+        api_key = cfg.secret_api_key()
+        auth = Auth.api_key(api_key) if api_key else None
+
+        if cfg.is_cloud:
+            self._client = weaviate.use_async_with_weaviate_cloud(
+                cluster_url=cfg.cluster_url,
+                auth_credentials=auth,
+                headers=cfg.additional_headers,
+                skip_init_checks=cfg.skip_init_checks,
+            )
+        else:
+            host, http_port = _parse_host_port(cfg.url or "")
+            self._client = weaviate.use_async_with_custom(
+                http_host=host,
+                http_port=http_port,
+                http_secure=cfg.http_secure,
+                grpc_host=host,
+                grpc_port=cfg.grpc_port,
+                grpc_secure=cfg.grpc_secure,
+                auth_credentials=auth,
+                headers=cfg.additional_headers,
+                skip_init_checks=cfg.skip_init_checks,
             )
 
-        # Connect to Weaviate (sync client, async operations below)
-        self._client = weaviate.connect_to_local(
-            host=self._weaviate_url.replace("http://", "").replace("https://", "").split(":")[0],
-            port=int(self._weaviate_url.split(":")[-1]) if ":" in self._weaviate_url else 8080,
-        )
+        # v4 async clients require an explicit ``connect()`` before use.
+        # The sync ``connect_to_*`` helpers do this implicitly; the async
+        # ``use_async_with_*`` helpers do not.
+        await self._client.connect()
 
         # Create collection if it doesn't exist
-        if not self._client.collections.exists(COLLECTION_NAME):
-            self._client.collections.create(
+        if not await self._client.collections.exists(COLLECTION_NAME):
+            await self._client.collections.create(
                 name=COLLECTION_NAME,
                 vectorizer_config=Configure.Vectorizer.none(),  # We provide embeddings
                 properties=[
@@ -94,146 +239,145 @@ class WeaviateTemporalStore(TemporalVectorStore):
             logger.info(f"Created Weaviate collection: {COLLECTION_NAME}")
 
         self._connected = True
-        logger.info("WeaviateTemporalStore connected to {url}", url=_safe_url_for_log(self._weaviate_url))
+        logger.info(
+            "WeaviateTemporalStore connected ({mode}) to {url}",
+            mode="cloud" if cfg.is_cloud else "self-hosted",
+            url=cfg.log_safe_endpoint(),
+        )
 
     async def disconnect(self) -> None:
         """Disconnect from Weaviate."""
-        if self._client:
-            self._client.close()
+        if self._client is not None:
+            try:
+                await self._client.close()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug(f"WeaviateAsyncClient close raised: {exc}")
             self._client = None
+        self._tenants_seen.clear()
         self._connected = False
         logger.info("WeaviateTemporalStore disconnected")
 
-    def _get_collection(self, namespace_id: UUID):
-        """Get collection with tenant context."""
+    # -------------------------------------------------------------------
+    # Tenant-scoped collection accessor
+    # -------------------------------------------------------------------
+
+    async def _get_collection(self, namespace_id: UUID) -> Any:
+        """Get collection with tenant context.
+
+        Ensures the tenant exists in Weaviate before returning the
+        tenant-scoped collection handle. Tenant existence is cached
+        in-process so we don't pay the create RTT on every call.
+        """
         if not self._client:
-            raise RuntimeError("Not connected")
+            raise RuntimeError("WeaviateTemporalStore is not connected")
+
+        from weaviate.classes.tenants import Tenant
 
         collection = self._client.collections.get(COLLECTION_NAME)
-
-        # Ensure tenant exists
         tenant_name = str(namespace_id)
-        try:
-            from weaviate.classes.tenants import Tenant
 
-            collection.tenants.create([Tenant(name=tenant_name)])
-        except Exception as e:
-            logger.debug(f"Tenant creation skipped (likely already exists): {e}")
+        if tenant_name not in self._tenants_seen:
+            try:
+                await collection.tenants.create([Tenant(name=tenant_name)])
+            except Exception as exc:
+                # ``tenants.create`` raises when the tenant already
+                # exists. Cache the result either way - the caller only
+                # needs to know it's safe to ``with_tenant`` on it.
+                logger.debug(f"Tenant create skipped for {tenant_name}: {exc}")
+            self._tenants_seen.add(tenant_name)
 
         return collection.with_tenant(tenant_name)
+
+    # -------------------------------------------------------------------
+    # CRUD
+    # -------------------------------------------------------------------
 
     async def create_chunk(self, chunk: TemporalChunk) -> TemporalChunk:
         """Store a chunk with temporal metadata."""
         chunk_id = chunk.id or uuid4()
         chunk.id = chunk_id
 
-        collection = self._get_collection(chunk.namespace_id)
-
-        import json
-
-        properties = {
-            "content": chunk.content,
-            "document_id": str(chunk.document_id),
-            "namespace_id": str(chunk.namespace_id),
-            "occurred_at": chunk.occurred_at.isoformat() if chunk.occurred_at else None,
-            "created_at": (chunk.created_at or datetime.now(UTC)).isoformat(),
-            "source_system": chunk.source_system,
-            "author": chunk.author,
-            "channel": chunk.channel,
-            "tags": chunk.tags or [],
-            "confidence": chunk.confidence,
-            "metadata_json": json.dumps(chunk.metadata or {}),
-        }
-
-        collection.data.insert(
+        collection = await self._get_collection(chunk.namespace_id)
+        await collection.data.insert(
             uuid=chunk_id,
-            properties=properties,
+            properties=_chunk_to_properties(chunk),
             vector=chunk.embedding,
         )
-
         return chunk
 
     async def create_chunks_batch(self, chunks: list[TemporalChunk]) -> list[TemporalChunk]:
-        """Store multiple chunks in batch."""
+        """Store multiple chunks.
+
+        The v4 async client does not expose the ``batch.dynamic()``
+        helper that the sync client carries. For correctness we issue
+        per-chunk inserts; for parallelism we fan them out within a
+        single namespace via ``asyncio.gather``. Native async batching
+        can land in a follow-up once weaviate-client exposes the API.
+        """
+        import asyncio
+
         if not chunks:
             return []
 
-        import json
-
-        # Group by namespace for batch insert
+        # Group by namespace - each tenant resolution is a single RTT
         by_namespace: dict[UUID, list[TemporalChunk]] = {}
         for chunk in chunks:
             chunk.id = chunk.id or uuid4()
             by_namespace.setdefault(chunk.namespace_id, []).append(chunk)
 
         for namespace_id, ns_chunks in by_namespace.items():
-            collection = self._get_collection(namespace_id)
-
-            with collection.batch.dynamic() as batch:
-                for chunk in ns_chunks:
-                    properties = {
-                        "content": chunk.content,
-                        "document_id": str(chunk.document_id),
-                        "namespace_id": str(chunk.namespace_id),
-                        "occurred_at": chunk.occurred_at.isoformat() if chunk.occurred_at else None,
-                        "created_at": (chunk.created_at or datetime.now(UTC)).isoformat(),
-                        "source_system": chunk.source_system,
-                        "author": chunk.author,
-                        "channel": chunk.channel,
-                        "tags": chunk.tags or [],
-                        "confidence": chunk.confidence,
-                        "metadata_json": json.dumps(chunk.metadata or {}),
-                    }
-                    batch.add_object(
+            collection = await self._get_collection(namespace_id)
+            await asyncio.gather(
+                *(
+                    collection.data.insert(
                         uuid=chunk.id,
-                        properties=properties,
+                        properties=_chunk_to_properties(chunk),
                         vector=chunk.embedding,
                     )
+                    for chunk in ns_chunks
+                )
+            )
 
         return chunks
 
     async def get_chunk(self, chunk_id: UUID, namespace_id: UUID) -> TemporalChunk | None:
         """Get a chunk by ID."""
-        collection = self._get_collection(namespace_id)
-
+        collection = await self._get_collection(namespace_id)
         try:
-            obj = collection.query.fetch_object_by_id(chunk_id, include_vector=True)
+            obj = await collection.query.fetch_object_by_id(chunk_id, include_vector=True)
             if not obj:
                 return None
             return self._object_to_chunk(obj, namespace_id)
-        except Exception as e:
-            logger.debug(f"Failed to get chunk {chunk_id}: {e}")
+        except Exception as exc:
+            logger.debug(f"Failed to get chunk {chunk_id}: {exc}")
             return None
 
     async def delete_chunk(self, chunk_id: UUID, namespace_id: UUID) -> bool:
         """Delete a chunk by ID."""
-        collection = self._get_collection(namespace_id)
-
+        collection = await self._get_collection(namespace_id)
         try:
-            collection.data.delete_by_id(chunk_id)
+            await collection.data.delete_by_id(chunk_id)
             return True
-        except Exception as e:
-            logger.debug(f"Failed to delete chunk {chunk_id}: {e}")
+        except Exception as exc:
+            logger.debug(f"Failed to delete chunk {chunk_id}: {exc}")
             return False
 
     async def delete_chunks_by_document(self, document_id: UUID, namespace_id: UUID) -> int:
         """Delete all chunks for a document."""
+        import asyncio
+
         from weaviate.classes.query import Filter
 
-        collection = self._get_collection(namespace_id)
-
-        # Query for matching chunks
-        result = collection.query.fetch_objects(
+        collection = await self._get_collection(namespace_id)
+        result = await collection.query.fetch_objects(
             filters=Filter.by_property("document_id").equal(str(document_id)),
             limit=10000,
         )
+        if not result.objects:
+            return 0
 
-        count = 0
-        for obj in result.objects:
-            collection.data.delete_by_id(obj.uuid)
-            count += 1
-
-        return count
+        await asyncio.gather(*(collection.data.delete_by_id(obj.uuid) for obj in result.objects))
+        return len(result.objects)
 
     async def search(
         self,
@@ -255,15 +399,11 @@ class WeaviateTemporalStore(TemporalVectorStore):
         """
         from weaviate.classes.query import HybridFusion, MetadataQuery
 
-        collection = self._get_collection(namespace_id)
-
-        # Build filters
+        collection = await self._get_collection(namespace_id)
         weaviate_filter = self._build_weaviate_filter(temporal_filter) if temporal_filter else None
 
-        # Perform search
         if hybrid_alpha is not None and query_text:
-            # Hybrid search
-            result = collection.query.hybrid(
+            result = await collection.query.hybrid(
                 query=query_text,
                 vector=query_embedding,
                 alpha=hybrid_alpha,
@@ -271,11 +411,10 @@ class WeaviateTemporalStore(TemporalVectorStore):
                 limit=limit,
                 return_metadata=MetadataQuery(score=True, distance=True),
                 include_vector=True,
-                fusion_type=HybridFusion.RELATIVE_SCORE,  # Better fusion
+                fusion_type=HybridFusion.RELATIVE_SCORE,
             )
         else:
-            # Vector-only search
-            result = collection.query.near_vector(
+            result = await collection.query.near_vector(
                 near_vector=query_embedding,
                 filters=weaviate_filter,
                 limit=limit,
@@ -283,15 +422,11 @@ class WeaviateTemporalStore(TemporalVectorStore):
                 include_vector=True,
             )
 
-        # Convert results
         search_results = []
         for obj in result.objects:
             chunk = self._object_to_chunk(obj, namespace_id)
-
-            # Calculate similarity from distance (cosine: similarity = 1 - distance)
             distance = obj.metadata.distance if obj.metadata else 0
             similarity = 1 - distance if distance else 0
-
             if similarity >= min_similarity:
                 search_results.append(
                     TemporalSearchResult(
@@ -304,7 +439,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
 
         return search_results
 
-    def _build_weaviate_filter(self, f: TemporalFilter):
+    def _build_weaviate_filter(self, f: TemporalFilter) -> Any:
         """Build Weaviate filter from TemporalFilter."""
         from weaviate.classes.query import Filter
 
@@ -327,11 +462,9 @@ class WeaviateTemporalStore(TemporalVectorStore):
             filters.append(Filter.by_property("channel").equal(f.channel))
 
         if f.tags:
-            # Weaviate TEXT_ARRAY contains filter
             for tag in f.tags:
                 filters.append(Filter.by_property("tags").contains_any([tag]))
 
-        # Handle additional filters
         for key, value in f.additional.items():
             if isinstance(value, dict):
                 for op, val in value.items():
@@ -350,25 +483,20 @@ class WeaviateTemporalStore(TemporalVectorStore):
             else:
                 filters.append(Filter.by_property(key).equal(value))
 
-        # Combine filters with AND
         if not filters:
             return None
         if len(filters) == 1:
             return filters[0]
 
         combined = filters[0]
-        for f in filters[1:]:
-            combined = combined & f
+        for f_extra in filters[1:]:
+            combined = combined & f_extra
         return combined
 
-    def _object_to_chunk(self, obj, namespace_id: UUID) -> TemporalChunk:
+    def _object_to_chunk(self, obj: Any, namespace_id: UUID) -> TemporalChunk:
         """Convert a Weaviate object to a TemporalChunk."""
-        import json
-        from datetime import datetime
-
         props = obj.properties
 
-        # Parse dates
         occurred_at = None
         if props.get("occurred_at"):
             try:
@@ -383,8 +511,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
             except (ValueError, AttributeError):
                 pass
 
-        # Parse metadata
-        metadata = {}
+        metadata: dict[str, Any] = {}
         if props.get("metadata_json"):
             try:
                 metadata = json.loads(props["metadata_json"])
@@ -411,14 +538,47 @@ class WeaviateTemporalStore(TemporalVectorStore):
         """Check backend health."""
         if not self._connected or not self._client:
             return {"status": "disconnected", "backend": "weaviate"}
-
         try:
-            if self._client.is_ready():
+            ready = await self._client.is_ready()
+            if ready:
                 return {"status": "healthy", "backend": "weaviate"}
-            else:
-                return {"status": "unhealthy", "backend": "weaviate", "error": "Not ready"}
-        except Exception as e:
-            return {"status": "unhealthy", "backend": "weaviate", "error": str(e)}
+            return {"status": "unhealthy", "backend": "weaviate", "error": "Not ready"}
+        except Exception as exc:
+            return {"status": "unhealthy", "backend": "weaviate", "error": str(exc)}
 
 
-__all__ = ["WeaviateTemporalStore"]
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_host_port(url: str) -> tuple[str, int]:
+    """Split a URL into ``(host, port)``.
+
+    Falls back to port 8080 when the URL has no explicit port. Used to
+    feed ``weaviate.use_async_with_custom(http_host=..., http_port=...)``.
+    """
+    parsed = urlparse(url if "://" in url else f"http://{url}")
+    host = parsed.hostname or "localhost"
+    port = parsed.port if parsed.port else 8080
+    return host, port
+
+
+def _chunk_to_properties(chunk: TemporalChunk) -> dict[str, Any]:
+    """Translate a TemporalChunk into the property dict Weaviate expects."""
+    return {
+        "content": chunk.content,
+        "document_id": str(chunk.document_id),
+        "namespace_id": str(chunk.namespace_id),
+        "occurred_at": chunk.occurred_at.isoformat() if chunk.occurred_at else None,
+        "created_at": (chunk.created_at or datetime.now(UTC)).isoformat(),
+        "source_system": chunk.source_system,
+        "author": chunk.author,
+        "channel": chunk.channel,
+        "tags": chunk.tags or [],
+        "confidence": chunk.confidence,
+        "metadata_json": json.dumps(chunk.metadata or {}),
+    }
+
+
+__all__ = ["WeaviateBackendConfig", "WeaviateTemporalStore"]
