@@ -518,6 +518,50 @@ async def test_vc_dual_node_persistence(kb: Khora, namespace_id: UUID) -> None:
     assert rels, "expected at least one relationship after dual-node write"
 
 
+async def test_vc_cooccurrence_carries_source_document_ids(kb: Khora, namespace_id: UUID) -> None:
+    """ASSOCIATED_WITH co-occurrence edges round-trip with ``source_document_ids`` (DYT-4607).
+
+    Ingest a single doc that yields ≥2 entities in one chunk → VC's
+    ``_build_cooccurrence_relationships`` synthesizes an
+    ``ASSOCIATED_WITH`` edge between them.  Read the edge back from the
+    embedded graph and assert its provenance is populated — both
+    ``source_chunk_ids`` (which chunk produced the pair) and
+    ``source_document_ids`` (which document that chunk belongs to).
+
+    Prior to DYT-4607, these provenance fields were always empty on
+    co-occurrence edges, breaking source-attribution downstream of
+    recall.
+    """
+    _plan_extraction(
+        "Marie Curie",
+        entities=[("Marie Curie", "PERSON"), ("radium", "CONCEPT")],
+    )
+    r = await _remember(
+        kb,
+        namespace_id=namespace_id,
+        content="Marie Curie discovered radium and polonium in 1898.",
+    )
+
+    coord = kb._engine._storage  # type: ignore[union-attr]
+    row_ns_id = await coord.resolve_namespace(namespace_id)
+    rels = await coord.graph.list_relationships(row_ns_id, limit=100)
+
+    cooccurrence_rels = [rel for rel in rels if rel.relationship_type == "ASSOCIATED_WITH"]
+    assert cooccurrence_rels, (
+        f"expected at least one ASSOCIATED_WITH co-occurrence edge, got types: "
+        f"{sorted({rel.relationship_type for rel in rels})}"
+    )
+    for rel in cooccurrence_rels:
+        assert rel.source_document_ids, (
+            f"ASSOCIATED_WITH edge {rel.id} has empty source_document_ids — DYT-4607 provenance regression"
+        )
+        assert r.document_id in rel.source_document_ids, f"expected {r.document_id} in {rel.source_document_ids}"
+        assert rel.source_chunk_ids, (
+            f"ASSOCIATED_WITH edge {rel.id} has empty source_chunk_ids — "
+            f"co-occurrence edges should know which chunk they came from"
+        )
+
+
 @pytest.mark.xfail(
     strict=False,
     reason=(

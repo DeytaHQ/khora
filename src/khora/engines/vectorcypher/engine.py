@@ -161,6 +161,7 @@ def _bfs_distances_from(seed: UUID, relationships: list[Any]) -> dict[UUID, int]
 
 def _build_cooccurrence_relationships(
     entities: list[Entity],
+    chunks: list[Chunk],
     namespace_id: UUID,
     existing_relationships: list[Relationship],
 ) -> list[Relationship]:
@@ -169,12 +170,18 @@ def _build_cooccurrence_relationships(
     This mirrors the co-occurrence logic in ``pipelines/flows/ingest.py:369-405``
     to ensure VectorCypher builds equally dense graphs.  Capped at
     ``_MAX_COOCCURRENCE_PER_CHUNK`` per chunk to prevent quadratic explosion.
+
+    ``chunks`` carries the (chunk_id → document_id) mapping used to stamp
+    provenance (``source_chunk_ids`` / ``source_document_ids``) on each new
+    edge (DYT-4607).
     """
     # Build chunk → entities map
     chunk_entity_map: dict[UUID, list[Entity]] = {}
     for entity in entities:
         for chunk_id in entity.source_chunk_ids:
             chunk_entity_map.setdefault(chunk_id, []).append(entity)
+
+    chunk_to_doc: dict[UUID, UUID] = {c.id: c.document_id for c in chunks}
 
     # Collect existing pairs to avoid duplicates
     existing_pairs: set[tuple[UUID, UUID]] = set()
@@ -186,6 +193,15 @@ def _build_cooccurrence_relationships(
     for chunk_id, chunk_entities in chunk_entity_map.items():
         if len(chunk_entities) < 2:
             continue
+        document_id = chunk_to_doc.get(chunk_id)
+        if document_id is None:
+            logger.warning(
+                f"VectorCypher co-occurrence: chunk {chunk_id} missing from chunks list; "
+                "relationship will have empty source_document_ids"
+            )
+            source_document_ids: list[UUID] = []
+        else:
+            source_document_ids = [document_id]
         chunk_count = 0
         for i, e1 in enumerate(chunk_entities):
             for e2 in chunk_entities[i + 1 :]:
@@ -201,6 +217,8 @@ def _build_cooccurrence_relationships(
                         namespace_id=namespace_id,
                         description="Co-occurs in same chunk",
                         properties={},
+                        source_chunk_ids=[chunk_id],
+                        source_document_ids=list(source_document_ids),
                         confidence=0.4,
                     )
                 )
@@ -1193,7 +1211,7 @@ class VectorCypherEngine:
             await storage.upsert_entities_batch(namespace_id, entities)
 
             # Create co-occurrence relationships between entities in the same chunk
-            cooccurrence_rels = _build_cooccurrence_relationships(entities, namespace_id, relationships)
+            cooccurrence_rels = _build_cooccurrence_relationships(entities, chunk_objects, namespace_id, relationships)
             if cooccurrence_rels:
                 relationships = list(relationships) + cooccurrence_rels
 
@@ -1329,7 +1347,7 @@ class VectorCypherEngine:
             entity.embedding_model = embedder.model_name
 
         # Create co-occurrence relationships between entities in the same chunk
-        cooccurrence_rels = _build_cooccurrence_relationships(entities, namespace_id, relationships)
+        cooccurrence_rels = _build_cooccurrence_relationships(entities, chunk_objects, namespace_id, relationships)
         if cooccurrence_rels:
             relationships = list(relationships) + cooccurrence_rels
 
@@ -1509,7 +1527,9 @@ class VectorCypherEngine:
                     new_entities = list(extracted_entities)
                     new_relationships = list(extracted_relationships)
 
-                    cooccurrence_rels = _build_cooccurrence_relationships(new_entities, namespace_id, new_relationships)
+                    cooccurrence_rels = _build_cooccurrence_relationships(
+                        new_entities, new_chunks, namespace_id, new_relationships
+                    )
                     if cooccurrence_rels:
                         new_relationships.extend(cooccurrence_rels)
 
@@ -2737,7 +2757,7 @@ class VectorCypherEngine:
 
                         # Co-occurrence relationships
                         cooccurrence_rels = _build_cooccurrence_relationships(
-                            all_entities, namespace_id, all_relationships
+                            all_entities, all_core_chunk_objects, namespace_id, all_relationships
                         )
                         if cooccurrence_rels:
                             all_relationships.extend(cooccurrence_rels)
