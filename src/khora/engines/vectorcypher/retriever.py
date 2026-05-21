@@ -84,6 +84,26 @@ _NEO4J_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
 _BENCH_MODE: bool = os.environ.get("KHORA_BENCH_MODE", "").strip().lower() in {"true", "1", "yes"}
 
 
+def _decode_chunker_info(value: Any) -> dict[str, Any]:
+    """Normalize the value of ``chunker_info`` returned by a record dict.
+
+    Neo4j serializes ``chunker_info`` as a JSON string at write time (see
+    ``dual_nodes.create_chunk_nodes_batch``); other graph stores return
+    a native dict. A corrupted persisted value (direct DB tampering, a
+    half-finished migration) must not crash ``recall()`` — fall back to
+    an empty dict on ``json.JSONDecodeError``.
+    """
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
 @dataclass
 class VectorCypherResult:
     """Result from VectorCypher retrieval."""
@@ -803,11 +823,7 @@ class VectorCypherRetriever:
                         document_id=UUID(c_data["document_id"]),
                         content=c_data.get("content", ""),
                         metadata={"occurred_at": c_data.get("occurred_at")},
-                        chunker_info=(
-                            json.loads(c_data["chunker_info"])
-                            if isinstance(c_data.get("chunker_info"), str)
-                            else (c_data.get("chunker_info") or {})
-                        ),
+                        chunker_info=_decode_chunker_info(c_data.get("chunker_info")),
                     )
                     chunks.append((chunk, rank_score))
 
@@ -2530,11 +2546,7 @@ class VectorCypherRetriever:
                         "connected_entities": record.get("entity_ids", []),
                         **(record.get("metadata") or {}),
                     },
-                    chunker_info=(
-                        json.loads(record["chunker_info"])
-                        if isinstance(record.get("chunker_info"), str)
-                        else (record.get("chunker_info") or {})
-                    ),
+                    chunker_info=_decode_chunker_info(record.get("chunker_info")),
                 )
                 results.append((chunk_id, score, chunk))
 
