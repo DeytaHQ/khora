@@ -31,6 +31,10 @@ if TYPE_CHECKING:
     pass
 
 
+def _none_if_empty(v: str | None) -> str | None:
+    return v if v else None
+
+
 class PostgreSQLBackend(AsyncSessionMixin):
     """PostgreSQL backend for relational data.
 
@@ -712,12 +716,12 @@ class PostgreSQLBackend(AsyncSessionMixin):
                     id=row.id,
                     created_at=row.created_at,
                     source_type=row.source_type or "library",
-                    title=row.title,
-                    external_id=row.external_id,
-                    source=row.source,
-                    source_name=row.source_name,
-                    source_url=row.source_url,
-                    content_type=row.content_type,
+                    title=_none_if_empty(row.title),
+                    external_id=_none_if_empty(row.external_id),
+                    source=_none_if_empty(row.source),
+                    source_name=_none_if_empty(row.source_name),
+                    source_url=_none_if_empty(row.source_url),
+                    content_type=_none_if_empty(row.content_type),
                     source_timestamp=row.source_timestamp,
                     metadata=dict(row.metadata_ or {}),
                 )
@@ -726,10 +730,6 @@ class PostgreSQLBackend(AsyncSessionMixin):
 
     def _document_model_to_domain(self, model: DocumentModel) -> Document:
         """Convert DocumentModel to domain Document."""
-
-        def _none_if_empty(v: str | None) -> str | None:
-            return v if v else None
-
         return Document(
             id=model.id,
             namespace_id=model.namespace_id,

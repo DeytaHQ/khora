@@ -30,6 +30,10 @@ from khora.storage.backends.surrealdb.connection import SurrealDBConnection
 # ---------------------------------------------------------------------------
 
 
+def _none_if_empty(v: str | None) -> str | None:
+    return v if v else None
+
+
 class SurrealDBRelationalAdapter:
     """Relational backend backed by SurrealDB.
 
@@ -632,12 +636,12 @@ class SurrealDBRelationalAdapter:
                 id=uid,
                 created_at=_parse_dt(r.get("created_at")) or datetime.now(UTC),
                 source_type=r.get("source_type") or "library",
-                title=r.get("title") or None,
-                external_id=r.get("external_id") or None,
-                source=r.get("source") or None,
-                source_name=r.get("source_name") or None,
-                source_url=r.get("source_url") or None,
-                content_type=r.get("content_type") or None,
+                title=_none_if_empty(r.get("title")),
+                external_id=_none_if_empty(r.get("external_id")),
+                source=_none_if_empty(r.get("source")),
+                source_name=_none_if_empty(r.get("source_name")),
+                source_url=_none_if_empty(r.get("source_url")),
+                content_type=_none_if_empty(r.get("content_type")),
                 source_timestamp=_parse_dt(r.get("source_timestamp")),
                 metadata=dict(r.get("metadata_") or {}),
             )
@@ -646,9 +650,6 @@ class SurrealDBRelationalAdapter:
     # -- document row → domain model --
 
     def _row_to_document(self, row: dict[str, Any]) -> Document:
-        def _none_if_empty(v: str | None) -> str | None:
-            return v if v else None
-
         status_raw = row.get("status", "pending")
         return Document(
             id=_parse_uuid(row["id"]),

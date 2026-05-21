@@ -119,6 +119,70 @@ class TestGetDocumentProjectionsBatchPg:
         assert proj.metadata == {"k": "v", "n": 1, "nested": {"a": True}}
         assert proj.created_at is not None
 
+    async def test_get_document_projections_batch_normalizes_empty_strings_to_none(
+        self, backend: PostgreSQLBackend
+    ) -> None:
+        """Recall-response contract: unset optional strings surface as ``None`` for both
+        ``""`` and ``NULL`` rows."""
+        from sqlalchemy import update
+
+        from khora.db.models import DocumentModel
+
+        ns = await backend.create_namespace(MemoryNamespace())
+
+        # Row A: build with None at construction, then UPDATE the columns to ``""``
+        # at the row level (Document dataclass forbids blank ``external_id``).
+        doc_a = Document(
+            id=uuid4(),
+            namespace_id=ns.id,
+            content="row-a",
+            status=DocumentStatus.PENDING,
+            checksum=f"pg-empty-a-{uuid4().hex[:8]}",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        await backend.create_document(doc_a)
+        assert backend._session_factory is not None
+        async with backend._session_factory() as session:
+            await session.execute(
+                update(DocumentModel)
+                .where(DocumentModel.id == doc_a.id)
+                .values(
+                    title="",
+                    external_id="",
+                    source="",
+                    source_name="",
+                    source_url="",
+                    content_type="",
+                )
+            )
+            await session.commit()
+
+        # Row B: all six fields stay None at construction time.
+        doc_b = Document(
+            id=uuid4(),
+            namespace_id=ns.id,
+            content="row-b",
+            status=DocumentStatus.PENDING,
+            checksum=f"pg-empty-b-{uuid4().hex[:8]}",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        await backend.create_document(doc_b)
+
+        projections = await backend.get_document_projections_batch([doc_a.id, doc_b.id], namespace_id=ns.id)
+
+        assert set(projections.keys()) == {doc_a.id, doc_b.id}
+        for doc_id in (doc_a.id, doc_b.id):
+            proj = projections[doc_id]
+            assert isinstance(proj, DocumentProjection)
+            assert proj.title is None
+            assert proj.external_id is None
+            assert proj.source is None
+            assert proj.source_name is None
+            assert proj.source_url is None
+            assert proj.content_type is None
+
     async def test_null_source_type_defaults_to_library(self, backend: PostgreSQLBackend) -> None:
         """Document with falsy ``source_type`` projects as ``source_type="library"``."""
         ns = await backend.create_namespace(MemoryNamespace())

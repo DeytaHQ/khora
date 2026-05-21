@@ -151,6 +151,10 @@ def _register_pragmas(engine: AsyncEngine) -> None:
             cursor.close()
 
 
+def _none_if_empty(v: str | None) -> str | None:
+    return v if v else None
+
+
 class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
     """Relational backend backed by SQLite + SQLAlchemy.
 
@@ -670,12 +674,12 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
                     id=row.id,
                     created_at=row.created_at or datetime.now(UTC),
                     source_type=row.source_type or "library",
-                    title=row.title or None,
-                    external_id=row.external_id or None,
-                    source=row.source or None,
-                    source_name=row.source_name or None,
-                    source_url=row.source_url or None,
-                    content_type=row.content_type or None,
+                    title=_none_if_empty(row.title),
+                    external_id=_none_if_empty(row.external_id),
+                    source=_none_if_empty(row.source),
+                    source_name=_none_if_empty(row.source_name),
+                    source_url=_none_if_empty(row.source_url),
+                    content_type=_none_if_empty(row.content_type),
                     source_timestamp=row.source_timestamp,
                     metadata=dict(row.metadata_ or {}),
                 )
@@ -683,9 +687,6 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             }
 
     def _document_model_to_domain(self, model: DocumentModel) -> Document:
-        def _none_if_empty(v: str | None) -> str | None:
-            return v if v else None
-
         return Document(
             id=model.id,
             namespace_id=model.namespace_id,

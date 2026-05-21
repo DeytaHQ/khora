@@ -88,6 +88,47 @@ async def test_projections_batch_full_field_roundtrip(adapter, namespace) -> Non
     assert proj.created_at is not None
 
 
+async def test_projections_batch_normalizes_empty_strings_to_none(adapter, namespace) -> None:
+    """Recall-response contract: unset optional strings surface as ``None`` for both
+    ``""`` and ``NULL`` rows."""
+    from khora.storage.backends.surrealdb.relational import _record_id
+
+    # Row A: build with None at construction, then UPDATE the columns to ``""``
+    # at the row level (the Document dataclass forbids blank ``external_id``).
+    doc_a = Document(
+        namespace_id=namespace.id,
+        content="row-a",
+        checksum="surreal-empty-a",
+    )
+    await adapter.create_document(doc_a)
+    await adapter._conn.query(
+        "UPDATE $rid SET title = $blank, external_id = $blank, source = $blank, "
+        "source_name = $blank, source_url = $blank, content_type = $blank",
+        {"rid": _record_id("document", doc_a.id), "blank": ""},
+    )
+
+    # Row B: all six fields stay None at construction time.
+    doc_b = Document(
+        namespace_id=namespace.id,
+        content="row-b",
+        checksum="surreal-empty-b",
+    )
+    await adapter.create_document(doc_b)
+
+    projections = await adapter.get_document_projections_batch([doc_a.id, doc_b.id], namespace_id=namespace.id)
+
+    assert set(projections.keys()) == {doc_a.id, doc_b.id}
+    for doc_id in (doc_a.id, doc_b.id):
+        proj = projections[doc_id]
+        assert isinstance(proj, DocumentProjection)
+        assert proj.title is None
+        assert proj.external_id is None
+        assert proj.source is None
+        assert proj.source_name is None
+        assert proj.source_url is None
+        assert proj.content_type is None
+
+
 async def test_projections_batch_null_source_type_defaults_to_library(adapter, namespace) -> None:
     """A document with falsy ``source_type`` projects as ``source_type="library"``.
 

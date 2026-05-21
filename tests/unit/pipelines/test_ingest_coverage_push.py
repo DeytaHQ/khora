@@ -293,6 +293,20 @@ class TestStageDocument:
         assert doc is not None
         assert doc.session_id == sid
 
+    async def test_omitted_content_type_stays_none(self):
+        ns = uuid4()
+        storage = _make_storage()
+        doc = await stage_document({"content": "no-ct"}, ns, storage)
+        assert doc is not None
+        assert doc.content_type is None
+
+    async def test_empty_content_type_normalizes_to_none(self):
+        ns = uuid4()
+        storage = _make_storage()
+        doc = await stage_document({"content": "blank-ct", "content_type": ""}, ns, storage)
+        assert doc is not None
+        assert doc.content_type is None
+
 
 @pytest.mark.unit
 @pytest.mark.asyncio
