@@ -1521,7 +1521,6 @@ class ChronicleEngine:
         # ── Abstention signals ───────────────────────────────
         # Passive metadata for downstream consumers (LLM answer-generation)
         # to decide whether to refuse vs answer.  Does NOT alter retrieval.
-        entity_hits: list[tuple[Entity, float]] = []  # Phase 2: entity-level results
         abstention_signals = self._compute_abstention_signals(chunks_with_scores, entity_hits)
 
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
