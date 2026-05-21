@@ -947,6 +947,7 @@ class VectorCypherEngine:
                                 if hasattr(raw_chunk, "end_char")
                                 else len(raw_chunk.content),
                             },
+                            chunker_info=dict(raw_chunk.metadata),
                         )
                         temporal_chunks.append(temporal_chunk)
 
@@ -1140,6 +1141,7 @@ class VectorCypherEngine:
                         document_id=tc.document_id,
                         content=tc.content,
                         created_at=tc.created_at or tc.occurred_at,
+                        chunker_info=dict(tc.chunker_info or {}),
                     )
                 )
 
@@ -1282,6 +1284,7 @@ class VectorCypherEngine:
                 document_id=tc.document_id,
                 content=tc.content,
                 created_at=tc.created_at or tc.occurred_at,
+                chunker_info=dict(tc.chunker_info or {}),
             )
             for tc in core_temporal_chunks
         ]
@@ -1431,6 +1434,7 @@ class VectorCypherEngine:
                         start_char=getattr(raw_chunk, "start_char", 0),
                         end_char=getattr(raw_chunk, "end_char", len(raw_chunk.content)),
                         metadata={**new_doc_metadata, "chunk_index": i},
+                        chunker_info=dict(raw_chunk.metadata),
                         embedding=embedding,
                         embedding_model=embedder.model_name,
                         created_at=now,
@@ -1456,6 +1460,7 @@ class VectorCypherEngine:
                         embedding=c.embedding,
                         occurred_at=occurred_at,
                         created_at=c.created_at,
+                        chunker_info=dict(c.chunker_info or {}),
                     )
                     for c in new_chunks
                 ]
@@ -1531,6 +1536,7 @@ class VectorCypherEngine:
                         "start_char": c.start_char,
                         "end_char": c.end_char or len(c.content),
                     },
+                    chunker_info=dict(c.chunker_info or {}),
                 )
             )
 
@@ -2522,6 +2528,7 @@ class VectorCypherEngine:
                             if hasattr(raw_chunk, "end_char")
                             else len(raw_chunk.content),
                         },
+                        chunker_info=dict(raw_chunk.metadata),
                     )
                     all_temporal_chunks.append(tc)
 
@@ -2581,6 +2588,7 @@ class VectorCypherEngine:
                                     document_id=tc.document_id,
                                     content=tc.content,
                                     created_at=tc.created_at or tc.occurred_at,
+                                    chunker_info=dict(tc.chunker_info or {}),
                                 )
                             )
 

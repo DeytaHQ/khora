@@ -15,6 +15,7 @@ Performance optimizations:
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 from dataclasses import dataclass, field
@@ -81,6 +82,26 @@ _NEO4J_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
 # Read once at import to avoid an env lookup per recency-score computation
 # on the hot path. Set ``KHORA_BENCH_MODE=true|1|yes`` to enable.
 _BENCH_MODE: bool = os.environ.get("KHORA_BENCH_MODE", "").strip().lower() in {"true", "1", "yes"}
+
+
+def _decode_chunker_info(value: Any) -> dict[str, Any]:
+    """Normalize the value of ``chunker_info`` returned by a record dict.
+
+    Neo4j serializes ``chunker_info`` as a JSON string at write time (see
+    ``dual_nodes.create_chunk_nodes_batch``); other graph stores return
+    a native dict. A corrupted persisted value (direct DB tampering, a
+    half-finished migration) must not crash ``recall()`` — fall back to
+    an empty dict on ``json.JSONDecodeError``.
+    """
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    if isinstance(value, dict):
+        return value
+    return {}
 
 
 @dataclass
@@ -802,6 +823,7 @@ class VectorCypherRetriever:
                         document_id=UUID(c_data["document_id"]),
                         content=c_data.get("content", ""),
                         metadata={"occurred_at": c_data.get("occurred_at")},
+                        chunker_info=_decode_chunker_info(c_data.get("chunker_info")),
                     )
                     chunks.append((chunk, rank_score))
 
@@ -1936,6 +1958,7 @@ class VectorCypherRetriever:
                         "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
                         **(r.chunk.metadata or {}),
                     },
+                    chunker_info=r.chunk.chunker_info or {},
                     created_at=r.chunk.created_at or r.chunk.occurred_at,
                 )
                 chunk_results.append((chunk, r.combined_score or r.similarity))
@@ -2496,6 +2519,7 @@ class VectorCypherRetriever:
                                     "total_mentions": 1,
                                     "entity_ids": [],
                                     "occurred_at": getattr(chunk, "source_timestamp", None),
+                                    "chunker_info": getattr(chunk, "chunker_info", None) or {},
                                 }
                             )
                 except Exception as e:
@@ -2522,6 +2546,7 @@ class VectorCypherRetriever:
                         "connected_entities": record.get("entity_ids", []),
                         **(record.get("metadata") or {}),
                     },
+                    chunker_info=_decode_chunker_info(record.get("chunker_info")),
                 )
                 results.append((chunk_id, score, chunk))
 
@@ -2578,6 +2603,7 @@ class VectorCypherRetriever:
                             "occurred_at": r.chunk.occurred_at.isoformat() if r.chunk.occurred_at else None,
                             **(r.chunk.metadata or {}),
                         },
+                        chunker_info=r.chunk.chunker_info or {},
                         created_at=r.chunk.created_at or r.chunk.occurred_at,
                     ),
                 )
@@ -2671,6 +2697,7 @@ class VectorCypherRetriever:
                                 ),
                                 **(getattr(chunk, "metadata", None) or {}),
                             },
+                            chunker_info=getattr(chunk, "chunker_info", None) or {},
                             created_at=getattr(chunk, "created_at", None) or getattr(chunk, "occurred_at", None),
                         ),
                     )

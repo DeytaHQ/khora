@@ -33,6 +33,7 @@ def _make_row(embedding=None, tags=None):
         tags=tags,
         confidence=0.95,
         metadata={"key": "value"},
+        chunker_info={},
     )
 
 

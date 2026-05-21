@@ -75,6 +75,7 @@ def _row(**kwargs) -> SimpleNamespace:
         tags=["urgent"],
         confidence=0.9,
         metadata={"chunk_index": 0},
+        chunker_info={},
     )
     base.update(kwargs)
     return SimpleNamespace(**base)
