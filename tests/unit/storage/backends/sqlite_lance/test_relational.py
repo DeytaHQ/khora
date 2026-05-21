@@ -362,6 +362,59 @@ async def test_get_document_projections_batch_full_field_roundtrip(adapter, name
     assert proj.created_at is not None
 
 
+async def test_get_document_projections_batch_normalizes_empty_strings_to_none(adapter, namespace):
+    """Recall-response contract: unset optional strings surface as ``None`` for both
+    ``""`` and ``NULL`` rows."""
+    from sqlalchemy import update
+
+    from khora.core.models import DocumentProjection
+    from khora.db.models import DocumentModel
+
+    # Row A: build with None at construction, then UPDATE the columns to ``""``
+    # at the row level (the Document dataclass forbids blank ``external_id``).
+    doc_a = Document(
+        namespace_id=namespace.id,
+        content="row-a",
+        checksum="proj-empty-a",
+    )
+    await adapter.create_document(doc_a)
+    async with adapter._session_factory() as session:
+        await session.execute(
+            update(DocumentModel)
+            .where(DocumentModel.id == doc_a.id)
+            .values(
+                title="",
+                external_id="",
+                source="",
+                source_name="",
+                source_url="",
+                content_type="",
+            )
+        )
+        await session.commit()
+
+    # Row B: all six fields stay None at construction time.
+    doc_b = Document(
+        namespace_id=namespace.id,
+        content="row-b",
+        checksum="proj-empty-b",
+    )
+    await adapter.create_document(doc_b)
+
+    projections = await adapter.get_document_projections_batch([doc_a.id, doc_b.id], namespace_id=namespace.id)
+
+    assert set(projections.keys()) == {doc_a.id, doc_b.id}
+    for doc_id in (doc_a.id, doc_b.id):
+        proj = projections[doc_id]
+        assert isinstance(proj, DocumentProjection)
+        assert proj.title is None
+        assert proj.external_id is None
+        assert proj.source is None
+        assert proj.source_name is None
+        assert proj.source_url is None
+        assert proj.content_type is None
+
+
 async def test_get_document_projections_batch_null_source_type_defaults_to_library(adapter, namespace):
     """``source_type`` defaults to ``"library"`` when the column is NULL/empty."""
     from khora.core.models import DocumentProjection
