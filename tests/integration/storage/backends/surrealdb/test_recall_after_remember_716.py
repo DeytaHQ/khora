@@ -78,7 +78,19 @@ def _patch_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def _surrealdb_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Configure a fresh in-memory SurrealDB stack per test."""
+    """Configure a fresh in-memory SurrealDB stack per test.
+
+    Uses the canonical single-underscore env-var spelling (Issue #789).
+    The legacy double-underscore spelling is regression-covered by
+    ``test_recall_with_legacy_double_underscore_env_vars`` below.
+    """
+    monkeypatch.setenv("KHORA_STORAGE_BACKEND", "surrealdb")
+    monkeypatch.setenv("KHORA_STORAGE_SURREALDB_MODE", "memory")
+
+
+@pytest.fixture
+def _surrealdb_env_legacy_double_underscore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy double-underscore env-var spelling — kept for regression coverage."""
     monkeypatch.setenv("KHORA_STORAGE__BACKEND", "surrealdb")
     monkeypatch.setenv("KHORA_STORAGE__SURREALDB__MODE", "memory")
 
@@ -163,3 +175,27 @@ async def test_recall_namespace_isolation_surrealdb_memory(
         b_contents = " ".join(c.content for c in result_b.chunks)
         assert "payments" in a_contents.lower(), "ns_a should match its own document"
         assert "payments" not in b_contents.lower(), f"ns_b leaked content from ns_a: {b_contents!r}"
+
+
+async def test_recall_with_legacy_double_underscore_env_vars(
+    _surrealdb_env_legacy_double_underscore: None,
+) -> None:
+    """Legacy ``KHORA_STORAGE__BACKEND`` / ``KHORA_STORAGE__SURREALDB__MODE`` still work.
+
+    Regression coverage for the back-compat alias preserved by #789 —
+    existing operator ``.env`` files using the double-underscore form
+    must keep configuring the in-memory SurrealDB stack correctly.
+    """
+    config = KhoraConfig()
+    config.storage.embedding_dimension = _EMBED_DIM
+    config.llm.embedding_dimension = _EMBED_DIM
+
+    async with Khora(config, engine="skeleton", run_migrations=False) as kb:
+        ns = await kb.create_namespace()
+        rem = await kb.remember(
+            "PagerDuty triggered for the payments service.",
+            namespace=ns.namespace_id,
+            entity_types=["EVENT", "PRODUCT"],
+            relationship_types=["RELATES_TO"],
+        )
+        assert rem.chunks_created >= 1

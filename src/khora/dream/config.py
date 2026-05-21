@@ -12,10 +12,53 @@ major-version bump until the dream orchestrator stabilizes (#649).
 
 from __future__ import annotations
 
-from typing import Literal
+import os
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Canonical / legacy env-var pairs for dream nested-config fields (#789).
+# Mirrors ``khora.config.schema._DREAM_ENV_ALIAS_PAIRS`` — duplicated here
+# to avoid an import cycle (config.schema imports DreamConfig).
+_DREAM_ENV_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (
+    ("KHORA_DREAM_OPS_DEDUPE_ENTITIES", "KHORA_DREAM_OPS__DEDUPE_ENTITIES"),
+    ("KHORA_DREAM_OPS_PRUNE_EDGES", "KHORA_DREAM_OPS__PRUNE_EDGES"),
+    ("KHORA_DREAM_OPS_COMPACT_FACTS", "KHORA_DREAM_OPS__COMPACT_FACTS"),
+    ("KHORA_DREAM_OPS_CLUSTER_EVENTS", "KHORA_DREAM_OPS__CLUSTER_EVENTS"),
+    ("KHORA_DREAM_OPS_RECOMPUTE_CENTROIDS", "KHORA_DREAM_OPS__RECOMPUTE_CENTROIDS"),
+)
+
+
+def _inject_dream_canonical_env(data: dict[str, Any], legacy_env_name: str, value: str) -> None:
+    """Inject a single-underscore dream env var into the nested-dict slot.
+
+    DreamConfig has ``env_prefix="KHORA_DREAM_"`` and
+    ``env_nested_delimiter="__"`` — so legacy ``KHORA_DREAM_OPS__DEDUPE_ENTITIES``
+    is split into ``data["ops"]["dedupe_entities"]`` by pydantic-settings.
+    Canonical ``KHORA_DREAM_OPS_DEDUPE_ENTITIES`` is ignored unless we
+    inject it here.
+    """
+    prefix = "KHORA_DREAM_"
+    if not legacy_env_name.startswith(prefix):
+        return
+    tail = legacy_env_name[len(prefix) :]
+    parts = [p.lower() for p in tail.split("__")]
+    if not parts:
+        return
+    node: Any = data
+    for key in parts[:-1]:
+        existing = node.get(key)
+        if existing is None:
+            existing = {}
+            node[key] = existing
+        elif not isinstance(existing, dict):
+            return
+        node = existing
+    leaf_key = parts[-1]
+    if node.get(leaf_key) is None:
+        node[leaf_key] = value
+
 
 # Hard floor on fact-compaction retention. Operators cannot configure
 # the dream phase to hard-delete tombstoned facts younger than this many
@@ -30,28 +73,52 @@ class DreamOpsConfig(BaseModel):
     Every destructive op defaults to ``False`` — a fresh ``DreamConfig()``
     cannot delete anything until the operator opts in per-op. Each toggle
     is independently overridable via env var, e.g.
-    ``KHORA_DREAM_OPS__DEDUPE_ENTITIES=true``.
+    ``KHORA_DREAM_OPS_DEDUPE_ENTITIES=true`` (single-underscore canonical
+    form; the legacy double-underscore form ``KHORA_DREAM_OPS__DEDUPE_ENTITIES``
+    is also accepted, see #789).
     """
+
+    model_config = {"populate_by_name": True}
 
     dedupe_entities: bool = Field(
         default=False,
         description="Merge entities the resolver judges duplicates.",
+        validation_alias=AliasChoices(
+            "KHORA_DREAM_OPS_DEDUPE_ENTITIES",
+            "KHORA_DREAM_OPS__DEDUPE_ENTITIES",
+        ),
     )
     prune_edges: bool = Field(
         default=False,
         description="Remove low-confidence / orphaned relationship edges.",
+        validation_alias=AliasChoices(
+            "KHORA_DREAM_OPS_PRUNE_EDGES",
+            "KHORA_DREAM_OPS__PRUNE_EDGES",
+        ),
     )
     compact_facts: bool = Field(
         default=False,
         description="Collapse superseded fact records.",
+        validation_alias=AliasChoices(
+            "KHORA_DREAM_OPS_COMPACT_FACTS",
+            "KHORA_DREAM_OPS__COMPACT_FACTS",
+        ),
     )
     cluster_events: bool = Field(
         default=False,
         description="Group related events into episode summaries.",
+        validation_alias=AliasChoices(
+            "KHORA_DREAM_OPS_CLUSTER_EVENTS",
+            "KHORA_DREAM_OPS__CLUSTER_EVENTS",
+        ),
     )
     recompute_centroids: bool = Field(
         default=False,
         description="Recompute entity / cluster centroid embeddings.",
+        validation_alias=AliasChoices(
+            "KHORA_DREAM_OPS_RECOMPUTE_CENTROIDS",
+            "KHORA_DREAM_OPS__RECOMPUTE_CENTROIDS",
+        ),
     )
 
 
@@ -63,13 +130,15 @@ class DreamConfig(BaseSettings):
     - ``KHORA_DREAM_ENABLED=true``
     - ``KHORA_DREAM_DEFAULT_MODE=apply``
     - ``KHORA_DREAM_LLM_MAX_TOKENS_PER_RUN=200000``
-    - ``KHORA_DREAM_OPS__DEDUPE_ENTITIES=true``
+    - ``KHORA_DREAM_OPS_DEDUPE_ENTITIES=true`` (single-underscore canonical;
+      the legacy double-underscore form ``KHORA_DREAM_OPS__DEDUPE_ENTITIES``
+      is also accepted — see #789)
 
     Modelled as :class:`pydantic_settings.BaseSettings` (matching
     :class:`khora.config.PipelineSettings` /
     :class:`khora.hooks.SemanticHooksConfig`) so flat
     ``KHORA_DREAM_*`` env vars populate top-level fields and
-    ``KHORA_DREAM_OPS__*`` populates the nested
+    ``KHORA_DREAM_OPS_*`` populates the nested
     :class:`DreamOpsConfig`.
     """
 
@@ -78,6 +147,39 @@ class DreamConfig(BaseSettings):
         env_nested_delimiter="__",
         case_sensitive=False,
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_dream_alias_conflicts(cls, data: Any) -> Any:
+        """Reject conflicting single/double-underscore dream env vars.
+
+        Mirrors the behavior of
+        :meth:`khora.config.schema.KhoraConfig._reject_alias_conflicts`
+        for dream-owned env vars (the ``KHORA_DREAM_*`` namespace). Same
+        same-value-on-both is OK / different-values raises rule. Also
+        promotes the canonical single-underscore form into the
+        nested-dict slot pydantic-settings expects.
+        """
+        env = os.environ
+        conflicts: list[str] = []
+        for canonical, legacy in _DREAM_ENV_ALIAS_PAIRS:
+            new_val = env.get(canonical)
+            old_val = env.get(legacy)
+            if new_val is None and old_val is None:
+                continue
+            if new_val is not None and old_val is not None and new_val != old_val:
+                conflicts.append(f"  - {canonical} and {legacy} are both set to different values")
+                continue
+            if new_val is not None and old_val is None and isinstance(data, dict):
+                _inject_dream_canonical_env(data, legacy, new_val)
+        if conflicts:
+            raise ValueError(
+                "Conflicting Khora dream env vars: the same field is configured "
+                "via both the new single-underscore form and the legacy "
+                "double-underscore form with different values. Pick one — the "
+                "single-underscore form is preferred.\n" + "\n".join(conflicts)
+            )
+        return data
 
     enabled: bool = Field(
         default=False,

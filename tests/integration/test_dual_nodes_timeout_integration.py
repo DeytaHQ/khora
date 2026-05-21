@@ -8,7 +8,7 @@ This test is marked ``@pytest.mark.integration`` (not ``unit``) because it
 exercises the full configuration-to-execution composition that unit tests
 mock piecewise — specifically the wiring path:
 
-    KHORA_STORAGE__GRAPH__QUERY_TIMEOUT=<value>
+    KHORA_STORAGE_GRAPH_QUERY_TIMEOUT=<value>
       → KhoraConfig() load
       → Neo4jConfig.query_timeout
       → engine.py:  getattr(neo4j_cfg, "query_timeout", 5.0)
@@ -72,15 +72,15 @@ class TestDyt1948TimeoutCompositionIntegration:
     """Full composition: config → manager → timeout catch → empty dict."""
 
     def test_config_env_var_wires_through_to_manager(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """``KHORA_STORAGE__GRAPH__QUERY_TIMEOUT`` reaches ``DualNodeManager``.
+        """``KHORA_STORAGE_GRAPH_QUERY_TIMEOUT`` reaches ``DualNodeManager``.
 
-        Exercises the exact env var documented in
-        ``Neo4jConfig.query_timeout.description`` (double underscore
-        nesting, per ``env_nested_delimiter='__'``).
+        Exercises the canonical single-underscore env var spelling
+        (Issue #789). The legacy double-underscore spelling is covered by
+        ``test_config_env_var_wires_through_to_manager_legacy_double_underscore``.
         """
-        monkeypatch.setenv("KHORA_STORAGE__GRAPH__BACKEND", "neo4j")
-        monkeypatch.setenv("KHORA_STORAGE__GRAPH__URL", "bolt://localhost:7687")
-        monkeypatch.setenv("KHORA_STORAGE__GRAPH__QUERY_TIMEOUT", "4.2")
+        monkeypatch.setenv("KHORA_STORAGE_GRAPH_BACKEND", "neo4j")
+        monkeypatch.setenv("KHORA_STORAGE_GRAPH_URL", "bolt://localhost:7687")
+        monkeypatch.setenv("KHORA_STORAGE_GRAPH_QUERY_TIMEOUT", "4.2")
 
         cfg = KhoraConfig()
         graph_cfg = cfg.get_graph_config()
@@ -98,6 +98,24 @@ class TestDyt1948TimeoutCompositionIntegration:
         # Hoisted decorator exists — catches a future un-hoist regression
         # at the composition boundary, not just at the unit level.
         assert manager._timed_unit_of_work is not None
+
+    def test_config_env_var_wires_through_to_manager_legacy_double_underscore(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Legacy ``KHORA_STORAGE__GRAPH__QUERY_TIMEOUT`` still wires through.
+
+        Regression coverage for the back-compat alias preserved by #789 —
+        existing operator ``.env`` files using the double-underscore form
+        must keep working forever.
+        """
+        monkeypatch.setenv("KHORA_STORAGE__GRAPH__BACKEND", "neo4j")
+        monkeypatch.setenv("KHORA_STORAGE__GRAPH__URL", "bolt://localhost:7687")
+        monkeypatch.setenv("KHORA_STORAGE__GRAPH__QUERY_TIMEOUT", "4.2")
+
+        cfg = KhoraConfig()
+        graph_cfg = cfg.get_graph_config()
+        assert isinstance(graph_cfg, Neo4jConfig)
+        assert graph_cfg.query_timeout == 4.2
 
     @pytest.mark.parametrize("timeout_code", _NEO4J_TIMEOUT_CODES)
     @pytest.mark.asyncio
