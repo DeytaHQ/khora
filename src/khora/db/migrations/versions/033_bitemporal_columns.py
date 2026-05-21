@@ -51,9 +51,8 @@ after #676 lands on main.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-
 from alembic import op
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 revision: str = "033_bitemporal_columns"
 down_revision: str | Sequence[str] | None = "032_dream_runs"

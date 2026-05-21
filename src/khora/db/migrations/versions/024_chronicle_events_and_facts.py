@@ -20,10 +20,9 @@ gating mirrors migration 002 / 004.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+from alembic import op
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
-
-from alembic import op
 
 revision: str = "024_chronicle_events_and_facts"
 down_revision: str | Sequence[str] | None = "023_add_document_relationship_count"

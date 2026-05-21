@@ -18,9 +18,8 @@ Steps:
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from sqlalchemy import text
-
 from alembic import op
+from sqlalchemy import text
 
 revision: str = "011_drop_namespace_slug"
 down_revision: str | Sequence[str] | None = "010_flatten_namespace_hierarchy"

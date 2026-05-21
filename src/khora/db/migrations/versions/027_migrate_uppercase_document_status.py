@@ -23,9 +23,8 @@ all statuses are already lowercase).
 
 from collections.abc import Sequence
 
-from sqlalchemy import text
-
 from alembic import op
+from sqlalchemy import text
 
 revision: str = "027_migrate_uppercase_document_status"
 down_revision: str | Sequence[str] | None = "026_widen_alembic_version_column"

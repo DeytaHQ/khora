@@ -31,7 +31,6 @@ so the sqlite_lance test fixtures pass.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-
 from alembic import op
 
 revision: str = "039_khora_chunks_content_tsv_gin"

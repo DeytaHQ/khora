@@ -26,9 +26,8 @@ All three are tuned consistently here.
 
 from collections.abc import Sequence
 
-from sqlalchemy import text
-
 from alembic import op
+from sqlalchemy import text
 
 revision: str = "007_hnsw_parameter_tuning"
 down_revision: str | Sequence[str] | None = "006_uuid_as_uuid"

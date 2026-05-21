@@ -42,11 +42,10 @@ import time
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+from alembic import op
 from loguru import logger
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import OperationalError
-
-from alembic import op
 
 revision: str = "038_khora_chunks_chunker_info"
 down_revision: str | Sequence[str] | None = "037_recall_response_format"

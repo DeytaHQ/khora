@@ -10,10 +10,9 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import create_async_engine
-
-from alembic import command
 
 
 def _make_config(url: str) -> Config:

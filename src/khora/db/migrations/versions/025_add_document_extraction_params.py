@@ -13,9 +13,8 @@ intent without hardcoding defaults.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import JSONB
-
 from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB
 
 revision: str = "025_add_document_extraction_params"
 down_revision: str | Sequence[str] | None = "024_chronicle_events_and_facts"

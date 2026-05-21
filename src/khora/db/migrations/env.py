@@ -10,13 +10,13 @@ import random
 import time
 from logging.config import fileConfig
 
+from alembic import context
 from alembic.ddl.impl import DefaultImpl
 from alembic.script import ScriptDirectory
 from sqlalchemy import Column, MetaData, PrimaryKeyConstraint, String, Table, pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from alembic import context
 from khora.config._secrets import redact_dsn
 from khora.db.models import Base
 from khora.db.session import _DatabaseAheadError

@@ -14,9 +14,8 @@ enough.
 
 from collections.abc import Sequence
 
-from sqlalchemy import text
-
 from alembic import op
+from sqlalchemy import text
 
 revision: str = "026_widen_alembic_version_column"
 down_revision: str | Sequence[str] | None = "025_add_document_extraction_params"

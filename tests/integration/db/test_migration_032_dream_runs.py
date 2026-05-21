@@ -31,10 +31,10 @@ from urllib.parse import urlparse
 
 import pytest
 import sqlalchemy as sa
+from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from alembic import command
 from khora.db.session import run_migrations
 
 DATABASE_URL = os.environ.get(

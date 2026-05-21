@@ -16,10 +16,10 @@ from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from alembic import command
 from khora.extraction.skills.base import (
     EventExtractionConfig,
     ExpertiseConfig,

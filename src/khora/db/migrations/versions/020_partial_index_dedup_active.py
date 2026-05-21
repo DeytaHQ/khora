@@ -11,9 +11,8 @@ scanning rows that will never match.
 
 from collections.abc import Sequence
 
-from sqlalchemy import text
-
 from alembic import op
+from sqlalchemy import text
 
 revision: str = "020_partial_index_dedup_active"
 down_revision: str | Sequence[str] | None = "019_document_last_activity_index"

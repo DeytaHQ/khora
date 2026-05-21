@@ -45,10 +45,9 @@ path.
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-
-from alembic import op
 
 revision: str = "032_dream_runs"
 down_revision: str | Sequence[str] | None = "031_session_id_indexes"

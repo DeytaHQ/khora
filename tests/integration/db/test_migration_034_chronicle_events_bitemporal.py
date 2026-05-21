@@ -335,9 +335,8 @@ async def test_migration_034_downgrade_reverses(pg_engine: AsyncEngine) -> None:
 
     import asyncio
 
-    from alembic.config import Config
-
     from alembic import command
+    from alembic.config import Config
 
     sync_url = DATABASE_URL.replace("+asyncpg", "")
     migrations_dir = Path(_MIGRATION_034.__file__).resolve().parents[0].parent

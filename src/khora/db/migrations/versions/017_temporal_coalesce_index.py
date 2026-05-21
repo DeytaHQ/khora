@@ -17,9 +17,8 @@ used in the WHERE clauses, enabling index range scans.
 
 from collections.abc import Sequence
 
-from sqlalchemy import text
-
 from alembic import op
+from sqlalchemy import text
 
 revision: str = "017_temporal_coalesce_index"
 down_revision: str = "016_widen_extraction_config_hash"

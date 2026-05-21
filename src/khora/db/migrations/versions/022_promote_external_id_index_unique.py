@@ -17,9 +17,8 @@ transactional approach (no CONCURRENTLY support).
 
 from collections.abc import Sequence
 
-from sqlalchemy import text
-
 from alembic import op
+from sqlalchemy import text
 
 revision: str = "022_promote_external_id_index_unique"
 down_revision: str | Sequence[str] | None = "021_add_document_external_id"

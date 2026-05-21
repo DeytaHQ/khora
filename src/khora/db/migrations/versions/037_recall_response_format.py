@@ -87,11 +87,10 @@ import time
 from collections.abc import Sequence
 
 import sqlalchemy as sa
+from alembic import op
 from loguru import logger
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import OperationalError
-
-from alembic import op
 
 revision: str = "037_recall_response_format"
 down_revision: str | Sequence[str] | None = "036_dream_conflicts"

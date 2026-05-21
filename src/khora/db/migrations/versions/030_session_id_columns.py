@@ -21,9 +21,8 @@ Works on both PostgreSQL and SQLite. Index creation is split into migration
 from collections.abc import Sequence
 
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-
 from alembic import op
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 revision: str = "030_session_id_columns"
 down_revision: str | Sequence[str] | None = "029_chunks_created_at_brin"
