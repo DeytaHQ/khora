@@ -32,7 +32,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from khora.core.models import Entity, Relationship
+from khora.core.models import Chunk, Entity, Relationship
 from khora.engines.vectorcypher.engine import (
     VectorCypherConfig,
     VectorCypherEngine,
@@ -156,17 +156,21 @@ class TestBfsDistancesFromExtra:
 class TestBuildCooccurrenceRelationships:
     def test_no_pairs_when_single_entity_per_chunk(self) -> None:
         ns = uuid4()
+        doc = uuid4()
         chunk = uuid4()
         e1 = Entity(name="A", entity_type="PERSON", source_chunk_ids=[chunk])
-        rels = _build_cooccurrence_relationships([e1], ns, [])
+        chunks = [Chunk(id=chunk, namespace_id=ns, document_id=doc)]
+        rels = _build_cooccurrence_relationships([e1], chunks, ns, [])
         assert rels == []
 
     def test_pairs_created_for_shared_chunk(self) -> None:
         ns = uuid4()
+        doc = uuid4()
         chunk = uuid4()
         e1 = Entity(name="A", entity_type="PERSON", source_chunk_ids=[chunk])
         e2 = Entity(name="B", entity_type="PERSON", source_chunk_ids=[chunk])
-        rels = _build_cooccurrence_relationships([e1, e2], ns, [])
+        chunks = [Chunk(id=chunk, namespace_id=ns, document_id=doc)]
+        rels = _build_cooccurrence_relationships([e1, e2], chunks, ns, [])
         assert len(rels) == 1
         assert rels[0].relationship_type == "ASSOCIATED_WITH"
         assert rels[0].namespace_id == ns
@@ -176,6 +180,7 @@ class TestBuildCooccurrenceRelationships:
 
     def test_existing_pair_skipped(self) -> None:
         ns = uuid4()
+        doc = uuid4()
         chunk = uuid4()
         e1 = Entity(name="A", entity_type="PERSON", source_chunk_ids=[chunk])
         e2 = Entity(name="B", entity_type="PERSON", source_chunk_ids=[chunk])
@@ -186,16 +191,19 @@ class TestBuildCooccurrenceRelationships:
             relationship_type="KNOWS",
             namespace_id=ns,
         )
-        rels = _build_cooccurrence_relationships([e1, e2], ns, [existing])
+        chunks = [Chunk(id=chunk, namespace_id=ns, document_id=doc)]
+        rels = _build_cooccurrence_relationships([e1, e2], chunks, ns, [existing])
         assert rels == []
 
     def test_per_chunk_cap(self) -> None:
         """Co-occurrence is capped at 15 pairs per chunk to prevent quadratic explosion."""
         ns = uuid4()
+        doc = uuid4()
         chunk = uuid4()
         # 7 entities in a single chunk → C(7,2)=21 raw pairs, capped at 15
         entities = [Entity(name=f"E{i}", entity_type="X", source_chunk_ids=[chunk]) for i in range(7)]
-        rels = _build_cooccurrence_relationships(entities, ns, [])
+        chunks = [Chunk(id=chunk, namespace_id=ns, document_id=doc)]
+        rels = _build_cooccurrence_relationships(entities, chunks, ns, [])
         assert len(rels) == 15
 
 

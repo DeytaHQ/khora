@@ -6,6 +6,10 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+### Fixed
+
+- **vectorcypher: stamp co-occurrence edges with chunk + document provenance.** `_build_cooccurrence_relationships` now takes the originating `chunks: list[Chunk]` argument and sets `source_chunk_ids=[chunk_id]` / `source_document_ids=[chunk.document_id]` on every ASSOCIATED_WITH edge it emits, matching the sibling builder in `pipelines/flows/ingest.py`. Previously the four call sites in `engines/vectorcypher/engine.py` (standard create-path, skeleton-deferred, multi-stage extraction, batch path) persisted co-occurrence relationships to Neo4j with empty provenance arrays, leaving downstream provenance/expansion queries unable to trace these edges back to their source chunks or documents. If an entity's `source_chunk_ids` references a chunk that is not in the passed list (shouldn't happen via normal extraction paths), the builder logs a warning and falls back to an empty `source_document_ids` list rather than crashing.
+
 ### Added
 
 - **vectorcypher: emit canonical `engine_info` keys**. `RecallResult.engine_info` from `VectorCypherEngine.recall()` now includes five engine-agnostic canonical keys alongside the existing engine-specific telemetry: `mode` (from the `SearchMode` argument), `channels_used` (subset of `{"vector", "graph", "bm25"}` derived from per-channel chunk counts), `rrf_k` (from `vc_config.fusion_rrf_k`), `temporal_signal` (`{category, source}` dict, defaults to `{"category": "none", "source": "none"}` when no signal detected), and `abstention_signals` (4 boolean flags + `combined_score` + `should_abstain`, same shape as chronicle). Two new metrics: `khora.vectorcypher.abstention_signal` (counter) and `khora.vectorcypher.abstention_combined_score` (histogram). Chronicle's `_compute_abstention_signals` refactored to delegate to the shared `khora.core.recall_abstention.compute_abstention_signals` helper — chronicle's output and metric emission are unchanged.
