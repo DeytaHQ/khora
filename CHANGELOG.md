@@ -6,9 +6,18 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ## [Unreleased]
 
+## [0.16.3] - Recall response shape fixes + chunker_info persistence
+
+Patch release on top of v0.16.2. Two end-to-end recall-contract fixes (chunker self-identification now round-trips on vectorcypher; unset optional strings serialize as `null` rather than `""`) plus a CVE-allowlist trim as `litellm` SSTI is no longer load-bearing on the pinned version.
+
 ### Fixed
 
-- vectorcypher: persist `chunker_info` end-to-end so recall surfaces the chunker self-identification dict instead of `{}`.
+- **vectorcypher: persist `chunker_info` end-to-end** (#800). `Chunk.chunker_info` now surfaces the chunker self-identification dict on recall instead of `{}`. Wires the field through every `TemporalChunk(...)` write site (single-document, replace-document, batch), every `Chunk(...)` retriever construction (Neo4j JSON string or `TemporalChunk` field), and the Cypher `RETURN` clauses that feed retriever sites. New Alembic migration `038_khora_chunks_chunker_info` adds the column to production deployments that predate it; fresh deploys and the sqlite_lance test fixture pick it up via `metadata.create_all` / runtime DDL.
+- **recall: surface unset optional strings as `null` on recall response** (#801). `title`, `external_id`, `source`, `source_name`, `source_url`, and `content_type` now serialize as `None` (→ `null`) rather than `""` when unset, on all three relational backends (postgresql, sqlite_lance, surrealdb). The ingest pipeline's `text/plain` default on `content_type` is dropped at all three call sites so unset content types stay `None` end-to-end. Behavior of `source_type` (still defaults to `"library"`), `source_timestamp`, and `metadata` is unchanged.
+
+### Chores
+
+- **Drop `GHSA-xqmj-j6mv-4862` from CVE allowlist** (#778, #799). `litellm` SSTI fix landed in 1.83.7; khora pins `litellm` 1.84.0, so the allowlist entry was no longer load-bearing. Verified via `pip-audit`: trimmed allowlist still reports zero known vulnerabilities.
 
 ## [0.16.2] - Fork-safe integrations + vectorcypher proxy fix + Hermes adapter
 
