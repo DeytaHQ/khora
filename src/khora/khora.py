@@ -57,6 +57,44 @@ def _coerce_session_id_from_dict(metadata: dict[str, Any] | None) -> UUID | None
         return None
 
 
+def _safe_exc_summary(exc: BaseException, *, max_len: int = 200) -> str:
+    """Return a bounded, safe one-line summary of *exc* for logging.
+
+    Primarily targets SQLAlchemy's asyncpg-wrapped ``DBAPIError`` family
+    (e.g. ``IntegrityError``) — the ``.orig`` / ``__cause__`` preference and
+    the ``[SQL:]`` / ``[parameters:]`` stripping below are tailored to that
+    exception shape. Plain (non-DB) exceptions pass through the same path
+    harmlessly.
+
+    A bare ``{exc}`` (or ``exc_info=True``) on a SQLAlchemy ``IntegrityError``
+    / ``DBAPIError`` renders the full failed statement *and its bind-parameter
+    tuple* — which for a document INSERT is the entire document content and
+    metadata. That is a content-leak and a log-bloat hazard, so we never log
+    the raw ``str()`` of a DB exception.
+
+    Prefer the underlying driver exception (SQLAlchemy exposes it as ``.orig``
+    / ``__cause__``); the asyncpg message it carries has no bind-param tuple.
+    Only when neither is present do we fall back to ``str(exc)``, and even
+    then we hard-cut the ``[SQL: ...]`` / ``[parameters: ...]`` tail that
+    SQLAlchemy appends so a stray wrapper without ``.orig`` can't leak the
+    params. The result is newline-stripped, length-capped, and class-name
+    prefixed so the log stays diagnostic.
+    """
+    underlying = getattr(exc, "orig", None) or exc.__cause__
+    message = str(underlying) if underlying is not None else str(exc)
+    # Defense in depth: SQLAlchemy appends "\n[SQL: ...]\n[parameters: ...]"
+    # to its str(); cut everything from the first such marker regardless of
+    # which branch produced ``message``.
+    for marker in ("[SQL:", "[parameters:"):
+        idx = message.find(marker)
+        if idx != -1:
+            message = message[:idx]
+    message = message.replace("\n", " ").strip()
+    if len(message) > max_len:
+        message = message[:max_len] + "…"
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
 def _is_undefined_table_error(exc: BaseException) -> bool:
     """Return True if *exc* is (or wraps) a Postgres "undefined table" error.
 
@@ -859,19 +897,23 @@ class Khora:
                 logger.info(f"pending_processor: recovered orphan doc {doc.id}")
         except Exception as exc:
             partial_usage = collect_usage()
-            logger.error(f"pending_processor: failed to process document {doc.id}: {exc}")
+            # _safe_exc_summary, not {exc}: a payload-bearing DBAPIError here
+            # would otherwise leak the document content + metadata bind params.
+            # (doc.mark_failed below keeps str(exc) — that persists to the
+            # error_message column, a separate surface tracked elsewhere.)
+            logger.error(f"pending_processor: failed to process document {doc.id}: {_safe_exc_summary(exc)}")
             doc.mark_failed(str(exc))
             try:
                 await storage.update_document(doc)
             except Exception as upd_exc:
-                logger.warning(f"pending_processor: could not update document status: {upd_exc}")
+                logger.warning(f"pending_processor: could not update document status: {_safe_exc_summary(upd_exc)}")
             if batch_reg:
                 batch_reg.fire_result(
                     DocumentResult(
                         document_id=doc.id,
                         namespace_id=namespace_id,
                         success=False,
-                        error=str(exc),
+                        error=_safe_exc_summary(exc),
                         llm_usage=partial_usage,
                         external_id=doc.external_id,
                     )
@@ -1101,6 +1143,7 @@ class Khora:
         """
         import time as _time
 
+        from khora.pipelines.flows.ingest import coerce_source_timestamp
         from khora.telemetry.aggregate_metrics import record_ingest_duration
         from khora.telemetry.context import (
             clear_trace_id,
@@ -1115,6 +1158,10 @@ class Khora:
         _status = "success"
         try:
             namespace_id = await self._resolve_namespace(namespace)
+            # Normalize a possibly-string source_timestamp before it reaches
+            # the engine's Document(...) — upstream callers hand us ISO strings
+            # despite the datetime-typed kwarg.
+            source_timestamp = coerce_source_timestamp(source_timestamp)
             # Stamp session_id into the metadata dict so engines that bypass
             # the ingest pipeline (vectorcypher builds Document directly)
             # can recover it from ``document.metadata["session_id"]``
@@ -1227,6 +1274,7 @@ class Khora:
         """
         import time as _time
 
+        from khora.pipelines.flows.ingest import coerce_source_timestamp
         from khora.telemetry.aggregate_metrics import record_ingest_duration
         from khora.telemetry.context import (
             clear_trace_id,
@@ -1241,6 +1289,9 @@ class Khora:
         _status = "success"
         try:
             namespace_id = await self._resolve_namespace(namespace)
+            # Normalize a possibly-string default before it propagates to the
+            # per-doc dicts and the engine — see remember() for the rationale.
+            source_timestamp = coerce_source_timestamp(source_timestamp)
             with trace_span("khora.remember_batch", namespace_id=str(namespace_id), batch_size=len(documents)):
                 # Pre-stamp the top-level provenance kwargs onto each doc dict
                 # so engines (and the ingest pipeline) read a single source of
@@ -1255,6 +1306,8 @@ class Khora:
                         doc_data["source_url"] = source_url
                     if "source_timestamp" not in doc_data:
                         doc_data["source_timestamp"] = source_timestamp
+                    else:
+                        doc_data["source_timestamp"] = coerce_source_timestamp(doc_data["source_timestamp"])
                 # NOTE: see remember() comment re: custom engine compatibility
                 batch_kwargs: dict[str, Any] = dict(
                     skill_name=skill_name,
@@ -1375,9 +1428,14 @@ class Khora:
             return handle
 
         from khora.core.models.document import DocumentStatus
+        from khora.pipelines.flows.ingest import coerce_source_timestamp
 
         namespace_id = await self._resolve_namespace(namespace)
         storage = self.storage
+
+        # Normalize a possibly-string default once; the per-doc override is
+        # coerced at each Document(...) site below.
+        source_timestamp = coerce_source_timestamp(source_timestamp)
 
         # Stamp the batch-level session_id into each doc's metadata so the
         # ingest pipeline's ``stage_document`` path picks it up as a
@@ -1506,7 +1564,7 @@ class Khora:
                 existing.source_type = doc_data.get("source_type", source_type)
                 existing.source_name = doc_data.get("source_name", source_name) or None
                 existing.source_url = doc_data.get("source_url", source_url) or None
-                existing.source_timestamp = doc_data.get("source_timestamp", source_timestamp)
+                existing.source_timestamp = coerce_source_timestamp(doc_data.get("source_timestamp", source_timestamp))
                 existing.checksum = checksum
                 existing.size_bytes = len(content.encode("utf-8"))
                 existing.metadata = doc_data.get("metadata") or {}
@@ -1528,10 +1586,15 @@ class Khora:
                     pending_docs.append(existing)
                     pending_doc_data.append(doc_data)
                 except Exception as exc:
+                    # Never interpolate the raw exc repr — a SQLAlchemy DBAPIError
+                    # embeds the failed statement + its bind-param tuple (= the
+                    # full document content + metadata). _safe_exc_summary bounds it.
+                    safe_err = _safe_exc_summary(exc)
                     logger.warning(
-                        f"submit_batch: could not update document record (external_id={external_id!r}): {exc}"
+                        f"submit_batch: could not update document record "
+                        f"(external_id={external_id!r}, doc_id={existing.id}): {safe_err}"
                     )
-                    pre_failed_docs.append((existing, str(exc)))
+                    pre_failed_docs.append((existing, safe_err))
                 continue
 
             # No existing document — normal insert path.
@@ -1543,7 +1606,7 @@ class Khora:
                 source_type=doc_data.get("source_type", source_type),
                 source_name=doc_data.get("source_name", source_name) or None,
                 source_url=doc_data.get("source_url", source_url) or None,
-                source_timestamp=doc_data.get("source_timestamp", source_timestamp),
+                source_timestamp=coerce_source_timestamp(doc_data.get("source_timestamp", source_timestamp)),
                 checksum=checksum,
                 size_bytes=len(content.encode("utf-8")),
                 metadata=doc_data.get("metadata") or {},
@@ -1557,11 +1620,15 @@ class Khora:
                 pending_docs.append(doc)
                 pending_doc_data.append(doc_data)
             except Exception as exc:
+                # Never interpolate the raw exc repr — a SQLAlchemy DBAPIError
+                # embeds the failed INSERT + its bind-param tuple (= the full
+                # document content + metadata). _safe_exc_summary bounds it.
+                safe_err = _safe_exc_summary(exc)
                 logger.warning(
                     f"submit_batch: could not create document record "
-                    f"(external_id={doc_data.get('external_id')!r}): {exc}"
+                    f"(external_id={external_id!r}, doc_id={doc.id}): {safe_err}"
                 )
-                pre_failed_docs.append((doc, str(exc)))
+                pre_failed_docs.append((doc, safe_err))
 
         # Initialize (or validate) the global chunk semaphore.
         # The first call that sets max_chunks_in_flight establishes the semaphore capacity.
