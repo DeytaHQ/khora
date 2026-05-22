@@ -103,6 +103,57 @@ class TestExtractSourceTimestamp:
         assert _extract_source_timestamp({"sent_at": "not-a-date"}) is None
 
 
+class TestCoerceSourceTimestamp:
+    """Direct unit tests for the source_timestamp coercion helper.
+
+    The helper turns the strings that upstream connectors hand to the
+    public ``source_timestamp`` kwarg into real ``datetime`` objects so a
+    stray string can't crash a Postgres write (asyncpg DataError). It must
+    never raise — unparseable input returns ``None``.
+    """
+
+    def test_iso_with_trailing_z(self) -> None:
+        from khora.pipelines.flows.ingest import coerce_source_timestamp
+
+        result = coerce_source_timestamp("2025-01-15T10:30:00Z")
+        assert result == datetime(2025, 1, 15, 10, 30, 0, tzinfo=UTC)
+
+    def test_iso_with_explicit_offset(self) -> None:
+        from khora.pipelines.flows.ingest import coerce_source_timestamp
+
+        result = coerce_source_timestamp("2025-01-15T10:30:00+00:00")
+        assert result == datetime(2025, 1, 15, 10, 30, 0, tzinfo=UTC)
+
+    def test_date_only_string(self) -> None:
+        from khora.pipelines.flows.ingest import coerce_source_timestamp
+
+        result = coerce_source_timestamp("2025-04-01")
+        assert result == datetime(2025, 4, 1, 0, 0, 0, tzinfo=UTC)
+
+    def test_datetime_passthrough(self) -> None:
+        from khora.pipelines.flows.ingest import coerce_source_timestamp
+
+        when = datetime(2025, 1, 15, 9, 0, 0, tzinfo=UTC)
+        assert coerce_source_timestamp(when) is when
+
+    def test_none_passthrough(self) -> None:
+        from khora.pipelines.flows.ingest import coerce_source_timestamp
+
+        assert coerce_source_timestamp(None) is None
+
+    def test_unparseable_string_returns_none_without_raising(self) -> None:
+        from khora.pipelines.flows.ingest import coerce_source_timestamp
+
+        # The whole point: a bad string must NOT crash ingestion.
+        assert coerce_source_timestamp("not-a-date") is None
+
+    def test_empty_string_returns_none(self) -> None:
+        from khora.pipelines.flows.ingest import coerce_source_timestamp
+
+        assert coerce_source_timestamp("") is None
+        assert coerce_source_timestamp("   ") is None
+
+
 class TestSourceTimestampInTemporalFiltering:
     """Tests that source_timestamp is used for temporal filtering."""
 

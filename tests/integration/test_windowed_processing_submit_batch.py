@@ -580,3 +580,105 @@ class TestSubmitBatchIntegration:
         assert graph is not None, "graph backend required for entity count check"
         entity_count = await graph.count_entities(row_ns_id)
         assert entity_count == 1, f"expected 1 entity (Alice deduplicated), got {entity_count}"
+
+    # ------------------------------------------------------------------
+    # 10. String source_timestamp is coerced before the Postgres bind
+    # ------------------------------------------------------------------
+
+    async def test_string_source_timestamp_persists_as_datetime(self, kb_ns: Any) -> None:
+        """A STRING source_timestamp round-trips to a real timestamptz on the insert path.
+
+        Before the fix, the ISO string was bound verbatim and asyncpg raised
+        ``DataError`` (str where timestamptz expected). This pins that the
+        string is coerced: no failure, and the re-read document carries a
+        ``datetime`` with the expected value.
+        """
+        from datetime import UTC, datetime
+
+        kb, stable_ns_id, row_ns_id = kb_ns
+        ext_id = f"sts-insert-{uuid4().hex[:8]}"
+        ts_str = "2026-05-21T22:18:55+00:00"
+        expected = datetime(2026, 5, 21, 22, 18, 55, tzinfo=UTC)
+
+        handle = await kb.submit_batch(
+            [{"content": _short_content(0), "external_id": ext_id, "source_timestamp": ts_str}],
+            on_result=lambda c, t, r: None,
+            namespace=stable_ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            chunk_strategy="fixed",
+        )
+        await asyncio.wait_for(handle.wait(), timeout=60.0)
+
+        # (a) No asyncpg DataError surfaced as a failed document.
+        assert handle.failed == 0, "string source_timestamp must not fail the bind"
+
+        # (b) The persisted value re-reads as a datetime with the expected instant.
+        doc = await kb.storage.get_document_by_external_id(ext_id, namespace_id=row_ns_id)
+        assert doc is not None
+        assert isinstance(doc.source_timestamp, datetime), (
+            f"expected datetime, got {type(doc.source_timestamp).__name__}"
+        )
+        assert doc.source_timestamp == expected
+
+    async def test_string_source_timestamp_coerced_on_requeue_update_path(self, kb_ns: Any) -> None:
+        """The re-queue/update path also coerces a STRING source_timestamp.
+
+        First submit fails processing → document lands FAILED. Re-submitting the
+        same external_id with a new STRING source_timestamp takes the
+        update_document path; the re-read document must carry the updated
+        ``datetime`` (not a str), proving the bind no longer raises DataError.
+        """
+        from datetime import UTC, datetime
+
+        kb, stable_ns_id, row_ns_id = kb_ns
+        ext_id = f"sts-requeue-{uuid4().hex[:8]}"
+        first_ts = "2026-05-20T08:00:00+00:00"
+        second_ts = "2026-05-21T22:18:55+00:00"
+        expected_second = datetime(2026, 5, 21, 22, 18, 55, tzinfo=UTC)
+
+        # First submit: force processing to fail so the doc lands FAILED.
+        original_process = kb._get_engine().process_staged_document
+
+        async def _failing_process(doc: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("forced failure to drive the re-queue path")
+
+        kb._get_engine().process_staged_document = _failing_process
+        try:
+            handle1 = await kb.submit_batch(
+                [{"content": _short_content(0), "external_id": ext_id, "source_timestamp": first_ts}],
+                on_result=lambda c, t, r: None,
+                namespace=stable_ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                chunk_strategy="fixed",
+            )
+            await asyncio.wait_for(handle1.wait(), timeout=60.0)
+        finally:
+            kb._get_engine().process_staged_document = original_process
+
+        failed_doc = await kb.storage.get_document_by_external_id(ext_id, namespace_id=row_ns_id)
+        assert failed_doc is not None
+        assert failed_doc.status == DocumentStatus.FAILED, (
+            f"expected FAILED to set up the re-queue path, got {failed_doc.status}"
+        )
+
+        # Second submit: same external_id → update_document (re-queue) path.
+        handle2 = await kb.submit_batch(
+            [{"content": _short_content(0), "external_id": ext_id, "source_timestamp": second_ts}],
+            on_result=lambda c, t, r: None,
+            namespace=stable_ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            chunk_strategy="fixed",
+        )
+        await asyncio.wait_for(handle2.wait(), timeout=60.0)
+
+        assert handle2.failed == 0, "string source_timestamp on the update path must not fail the bind"
+
+        doc = await kb.storage.get_document_by_external_id(ext_id, namespace_id=row_ns_id)
+        assert doc is not None
+        assert isinstance(doc.source_timestamp, datetime), (
+            f"expected datetime, got {type(doc.source_timestamp).__name__}"
+        )
+        assert doc.source_timestamp == expected_second

@@ -516,6 +516,45 @@ def compute_checksum(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def coerce_source_timestamp(value: datetime | str | None) -> datetime | None:
+    """Coerce a source-timestamp value to a ``datetime``.
+
+    Returns an existing ``datetime`` unchanged, parses ISO-8601 strings
+    (trailing ``Z``, explicit offset, or date-only ``YYYY-MM-DD``), and
+    returns ``None`` for ``None`` / empty / unparseable input *without*
+    raising. The public ``source_timestamp`` kwarg is typed ``datetime``,
+    but upstream connectors and adapters routinely hand us ISO strings;
+    coercing here keeps a stray string from crashing ingestion.
+
+    Accepted string forms (for adapter authors):
+
+    - ``"2026-01-15T10:30:00Z"``      — UTC, trailing ``Z``
+    - ``"2026-01-15T10:30:00+00:00"`` — explicit offset
+    - ``"2026-01-15"``                — date-only (parsed at midnight UTC)
+    """
+    from datetime import datetime
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        if "T" in value:
+            # ISO format with or without timezone.
+            if value.endswith("Z"):
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return datetime.fromisoformat(value)
+        # Date-only format.
+        return datetime.fromisoformat(value + "T00:00:00+00:00")
+    except (ValueError, TypeError):
+        return None
+
+
 def _extract_source_timestamp(metadata: dict[str, Any]) -> datetime | None:
     """Extract the original timestamp from source metadata.
 
@@ -527,8 +566,6 @@ def _extract_source_timestamp(metadata: dict[str, Any]) -> datetime | None:
     preferred over ``sent_at`` since the event time, not the dispatch
     time, is the meaningful temporal anchor.
     """
-    from datetime import datetime
-
     source_type = metadata.get("source_type")
     if source_type in {"calendar", "meeting", "event"}:
         timestamp_fields = [
@@ -551,21 +588,9 @@ def _extract_source_timestamp(metadata: dict[str, Any]) -> datetime | None:
 
     for field in timestamp_fields:
         if field in metadata and metadata[field]:
-            value = metadata[field]
-            try:
-                if isinstance(value, datetime):
-                    return value
-                if isinstance(value, str):
-                    # Try ISO format first
-                    if "T" in value:
-                        # Handle ISO format with or without timezone
-                        if value.endswith("Z"):
-                            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-                        return datetime.fromisoformat(value)
-                    # Try date-only format
-                    return datetime.fromisoformat(value + "T00:00:00+00:00")
-            except (ValueError, TypeError):
-                continue
+            parsed = coerce_source_timestamp(metadata[field])
+            if parsed is not None:
+                return parsed
     return None
 
 
@@ -638,7 +663,7 @@ async def stage_document(
     # Use source timestamp if available, otherwise use current time.
     # Explicit doc_input["source_timestamp"] wins; otherwise fall back to the
     # metadata-derived value (sent_at / occurred_at / created_at / ...).
-    _explicit_ts = doc_input.get("source_timestamp")
+    _explicit_ts = coerce_source_timestamp(doc_input.get("source_timestamp"))
     source_timestamp = _explicit_ts if _explicit_ts is not None else _extract_source_timestamp(custom_metadata)
     created_at = source_timestamp or datetime.now(UTC)
     session_id = _coerce_session_id(custom_metadata.get("session_id"))
@@ -719,7 +744,7 @@ async def stage_documents_batch(
 
         # Explicit doc_input["source_timestamp"] wins; otherwise fall back to
         # the metadata-derived value (sent_at / occurred_at / created_at / ...).
-        _explicit_ts = doc_input.get("source_timestamp")
+        _explicit_ts = coerce_source_timestamp(doc_input.get("source_timestamp"))
         source_timestamp = _explicit_ts if _explicit_ts is not None else _extract_source_timestamp(custom_metadata)
         created_at = source_timestamp or datetime.now(UTC)
         session_id = _coerce_session_id(custom_metadata.get("session_id"))
@@ -794,7 +819,7 @@ async def _stage_all_documents(
 
         # Explicit doc_input["source_timestamp"] wins; otherwise fall back to
         # the metadata-derived value (sent_at / occurred_at / created_at / ...).
-        _explicit_ts = doc_input.get("source_timestamp")
+        _explicit_ts = coerce_source_timestamp(doc_input.get("source_timestamp"))
         source_timestamp = _explicit_ts if _explicit_ts is not None else _extract_source_timestamp(custom_metadata)
         created_at = source_timestamp or datetime.now(UTC)
         session_id = _coerce_session_id(custom_metadata.get("session_id"))
