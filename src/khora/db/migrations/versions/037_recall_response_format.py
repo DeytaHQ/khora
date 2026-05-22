@@ -17,11 +17,25 @@ Schema changes:
   per-chunk metadata describing which chunker produced the chunk and
   with what params.
 
-Nullability flip on ``documents`` (six columns previously
-``NOT NULL DEFAULT ''``): ``source``, ``content_type``, ``title``,
-``author``, ``language``, ``checksum``. Now nullable with no default.
-Existing rows whose values equal the empty string are normalized to
-NULL — see "Idempotency model" below.
+Nullability flip on ``documents`` for six columns: ``source``,
+``content_type``, ``title``, ``author``, ``language``, ``checksum``.
+After this migration they are nullable with no default. Their starting
+state depends on how the database was created:
+
+* Alembic-chain-created databases: already nullable with DEFAULT ``''``.
+  The flip is effectively a no-op on nullability and just drops the
+  default.
+* Databases created via the legacy ``create_tables()`` /
+  ``Base.metadata.create_all`` path (from the old ``Mapped[str]`` ORM,
+  which implied ``nullable=False``): ``NOT NULL DEFAULT ''``. The flip
+  drops both the NOT NULL constraint and the default.
+
+Because of the second case, the ``DROP NOT NULL`` MUST precede the
+empty-string → NULL normalization UPDATE. If the UPDATE ran first while
+the columns were still NOT NULL, writing NULL would violate the
+constraint and roll back the entire revision, leaving the database
+stuck at the prior revision. Existing rows whose values equal the empty
+string are normalized to NULL — see "Idempotency model" below.
 
 ``source_type`` stays ``NOT NULL`` but its DB default switches from
 ``''`` to ``'library'`` (matching the new ORM default). Existing
@@ -281,14 +295,14 @@ def _upgrade_impl() -> tuple[int, int]:
                 server_default="library",
             )
 
-    # Nullability flip for the six columns. Issue empty-string → NULL UPDATEs
-    # first (re-run-safe within this txn via the WHERE predicate), then drop
-    # NOT NULL + DEFAULT. ADD COLUMN / DROP NOT NULL idempotency comes from
-    # Alembic's revision tracking + the surrounding transaction, NOT from the
-    # WHERE predicate.
-    for col, _ in _NULLABLE_FLIP_COLUMNS:
-        op.execute(sa.text(f"UPDATE documents SET {col} = NULL WHERE {col} = ''"))  # noqa: S608
-
+    # Nullability flip for the six columns. Drop NOT NULL + DEFAULT FIRST, then
+    # run the empty-string → NULL normalization. The flip must precede the
+    # UPDATE: on databases where these columns are still NOT NULL (legacy
+    # create_tables() shape), setting them to NULL before dropping the
+    # constraint would violate it and roll back the whole revision. The UPDATE
+    # is re-run-safe within this txn via the WHERE predicate. ADD COLUMN /
+    # DROP NOT NULL idempotency comes from Alembic's revision tracking + the
+    # surrounding transaction, NOT from the WHERE predicate.
     if is_pg:
         for col, _ in _NULLABLE_FLIP_COLUMNS:
             op.execute(f"ALTER TABLE documents ALTER COLUMN {col} DROP NOT NULL")
@@ -303,6 +317,9 @@ def _upgrade_impl() -> tuple[int, int]:
                     nullable=True,
                     server_default=None,
                 )
+
+    for col, _ in _NULLABLE_FLIP_COLUMNS:
+        op.execute(sa.text(f"UPDATE documents SET {col} = NULL WHERE {col} = ''"))  # noqa: S608
 
     # Backfill source_name from nango sources. Counts go into the structured log.
     return _backfill_source_name()
