@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -139,6 +140,72 @@ async def _seed_documents(engine: AsyncEngine, ns_id: str, rows: list[dict[str, 
                 params,
             )
     return ids
+
+
+async def _make_flipped_columns_not_null(engine: AsyncEngine) -> None:
+    """Rebuild ``documents`` so the six flipped columns are ``NOT NULL DEFAULT ''``.
+
+    The Alembic chain creates these columns nullable (``server_default=''`` only),
+    so a chain-built DB never reproduces the legacy ``create_tables()`` /
+    ``Base.metadata.create_all`` starting state, where the old ``Mapped[str]``
+    ORM declaration implied ``nullable=False``. SQLite cannot ``ALTER COLUMN``
+    to add ``NOT NULL`` in place, so we table-copy: read the live ``documents``
+    DDL, inject ``NOT NULL DEFAULT ''`` into the six target columns, recreate the
+    table under the same name, copy every row, and restore the indexes.
+
+    Reading the DDL at runtime keeps this faithful to whatever the prior
+    revision actually emits, rather than hard-coding a snapshot that would rot.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(sa.text("PRAGMA foreign_keys=OFF"))
+        ddl = (
+            await conn.execute(sa.text("SELECT sql FROM sqlite_master WHERE name = 'documents' AND type = 'table'"))
+        ).scalar()
+        assert ddl is not None, "documents table DDL not found in sqlite_master"
+        index_ddls = [
+            row[0]
+            for row in (
+                await conn.execute(
+                    sa.text(
+                        "SELECT sql FROM sqlite_master "
+                        "WHERE tbl_name = 'documents' AND type = 'index' AND sql IS NOT NULL"
+                    )
+                )
+            ).fetchall()
+        ]
+        col_names = [row[1] for row in (await conn.execute(sa.text("PRAGMA table_info(documents)"))).fetchall()]
+
+        new_ddl = ddl
+        for col in _FLIPPED_COLUMNS:
+            pattern = re.compile(rf"^(\s*{col}\s+VARCHAR\(\d+\)[^,\n]*?)(,?\s*)$", re.MULTILINE)
+
+            def _force_not_null(match: re.Match[str]) -> str:
+                body = re.sub(
+                    r"DEFAULT\s*\([^)]*\)|DEFAULT\s*'[^']*'",
+                    "DEFAULT ''",
+                    match.group(1),
+                )
+                if "DEFAULT" not in body:
+                    body += " DEFAULT ''"
+                return f"{body} NOT NULL{match.group(2)}"
+
+            new_ddl, replaced = pattern.subn(_force_not_null, new_ddl)
+            assert replaced == 1, f"expected to rewrite exactly one {col} column line, got {replaced}"
+
+        new_ddl = new_ddl.replace('CREATE TABLE "documents"', 'CREATE TABLE "documents_new"', 1)
+        columns = ", ".join(col_names)
+        await conn.execute(sa.text("ALTER TABLE documents RENAME TO documents_old"))
+        await conn.execute(sa.text(new_ddl))
+        await conn.execute(
+            sa.text(
+                f"INSERT INTO documents_new ({columns}) SELECT {columns} FROM documents_old"  # noqa: S608
+            )
+        )
+        await conn.execute(sa.text("DROP TABLE documents_old"))
+        await conn.execute(sa.text("ALTER TABLE documents_new RENAME TO documents"))
+        for index_ddl in index_ddls:
+            await conn.execute(sa.text(index_ddl))
+        await conn.execute(sa.text("PRAGMA foreign_keys=ON"))
 
 
 @pytest.mark.unit
@@ -311,6 +378,82 @@ class TestNullabilityFlip:
                 assert row is not None
                 for idx, col_name in enumerate(_FLIPPED_COLUMNS):
                     assert row[idx] is None, f"{col_name} expected NULL after upgrade normalized '', got {row[idx]!r}"
+            finally:
+                await engine.dispose()
+
+        asyncio.run(check())
+
+
+@pytest.mark.unit
+class TestLegacyNotNullStartingState:
+    """Regression — upgrade must survive a legacy ``NOT NULL DEFAULT ''`` start.
+
+    On databases created via the legacy ``create_tables()`` /
+    ``Base.metadata.create_all`` path, the six flipped columns start as
+    ``NOT NULL DEFAULT ''`` (the old ``Mapped[str]`` ORM implied
+    ``nullable=False``). The ``DROP NOT NULL`` must run before the
+    empty-string → NULL normalization UPDATE; otherwise writing NULL while the
+    constraint is still in force raises a NOT NULL violation that rolls back
+    the whole revision and strands the DB at the prior revision.
+
+    The Alembic-chain fixture leaves these columns nullable, so the rest of the
+    suite never exercises this path — hence the explicit table-copy here.
+    """
+
+    def test_upgrade_succeeds_and_normalizes_empty_strings_to_null(self, cfg_at_036: Config, sqlite_url: str) -> None:
+        async def seed() -> str:
+            engine = create_async_engine(sqlite_url)
+            try:
+                await _make_flipped_columns_not_null(engine)
+                # Confirm the simulated legacy state actually took: all six
+                # columns must report NOT NULL before the upgrade runs.
+                async with engine.connect() as conn:
+                    info = (await conn.execute(sa.text("PRAGMA table_info(documents)"))).fetchall()
+                not_null = {row[1]: bool(row[3]) for row in info}
+                for col in _FLIPPED_COLUMNS:
+                    assert not_null[col] is True, f"{col} should be NOT NULL in the simulated legacy state"
+
+                ns = await _seed_namespace(engine)
+                doc_id = str(uuid4())
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        sa.text(
+                            "INSERT INTO documents "
+                            "(id, namespace_id, content, source, source_type, content_type, "
+                            " title, author, language, checksum) "
+                            "VALUES (:id, :ns, 'c', '', '', '', '', '', '', '')"
+                        ),
+                        {"id": doc_id, "ns": ns},
+                    )
+            finally:
+                await engine.dispose()
+            return doc_id
+
+        doc_id = asyncio.run(seed())
+
+        # Must not raise. Pre-reorder this raised a NOT NULL constraint violation
+        # (surfaced as OperationalError / IntegrityError) and rolled the txn back.
+        command.upgrade(cfg_at_036, _TARGET_REV)
+
+        async def check() -> None:
+            engine = create_async_engine(sqlite_url)
+            try:
+                async with engine.connect() as conn:
+                    row = (
+                        await conn.execute(
+                            sa.text(
+                                "SELECT source, content_type, title, author, language, checksum "
+                                "FROM documents WHERE id = :id"
+                            ),
+                            {"id": doc_id},
+                        )
+                    ).first()
+                assert row is not None
+                for idx, col_name in enumerate(_FLIPPED_COLUMNS):
+                    assert row[idx] is None, (
+                        f"{col_name} expected NULL after upgrade normalized '' on a legacy "
+                        f"NOT NULL start, got {row[idx]!r}"
+                    )
             finally:
                 await engine.dispose()
 
@@ -580,7 +723,11 @@ class TestStructuredLogEvent:
             try:
                 ns = await _seed_namespace(engine)
                 async with engine.begin() as conn:
-                    for src in ("nango://linear/issues", "nango://github/prs", "library:foo"):
+                    for src in (
+                        "nango://linear/issues",
+                        "nango://github/prs",
+                        "library:foo",
+                    ):
                         await conn.execute(
                             sa.text(
                                 "INSERT INTO documents "
