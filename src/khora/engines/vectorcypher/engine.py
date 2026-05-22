@@ -2016,7 +2016,7 @@ class VectorCypherEngine:
             relationships=recall_relationships,
             engine_info={
                 "engine": "vectorcypher",
-                "mode": mode.value,
+                "mode": mode.name.lower(),
                 "channels_used": channels_used,
                 "rrf_k": self._vc_config.fusion_rrf_k,
                 "temporal_signal": (

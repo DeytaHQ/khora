@@ -126,8 +126,8 @@ class TestEngineInfoCanonicalKeys:
     async def test_mode_echoes_search_mode_value(self) -> None:
         engine = _make_populated_engine()
         result = await engine.recall("q", uuid4(), mode=SearchMode.HYBRID)
-        # 3. engine_info["mode"] echoes the passed SearchMode.value.
-        assert result.engine_info["mode"] == SearchMode.HYBRID.value
+        # 3. engine_info["mode"] echoes the passed SearchMode as a lowercase string.
+        assert result.engine_info["mode"] == "hybrid"
 
     @pytest.mark.asyncio
     async def test_temporal_signal_is_dict_with_category_and_source(self) -> None:
