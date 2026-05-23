@@ -309,16 +309,59 @@ async def test_vc_entity_extraction(kb: Khora, namespace_id: UUID) -> None:
     assert "analytical engine" in names
 
 
+async def test_vc_second_ingest_sharing_entity_does_not_crash(kb: Khora, namespace_id: UUID) -> None:
+    """Regression for issue #806.
+
+    The second ``remember()`` into the same namespace that re-mentions
+    an entity from the first ingest was crashing with
+    ``sqlite3.IntegrityError: FOREIGN KEY constraint failed``. Root cause:
+    ``VectorCypherEngine._run_skeleton_extraction`` passed relationships
+    to ``create_relationships_batch`` whose ``source_entity_id`` /
+    ``target_entity_id`` still carried the extraction-time UUIDs while
+    ``upsert_entities_batch`` had canonicalised the entity's id to the
+    persisted row's UUID. The FK on the relationships table then bit.
+    On PG + Neo4j the same shape silently dropped the relationships
+    inside Neo4j's ``MATCH``-by-id.
+
+    Plant the same entity on both ingests and assert neither raises.
+    """
+    _plan_extraction(
+        "Alice",
+        entities=[("Alice", "PERSON")],
+        relationships=[],
+    )
+    await _remember(
+        kb,
+        namespace_id=namespace_id,
+        content="Alice's dietary preferences: vegetarian, no meat, no dairy.",
+    )
+    # Second ingest re-mentions Alice. Pre-fix this raised
+    # IntegrityError; the assertion is "does not raise".
+    await _remember(
+        kb,
+        namespace_id=namespace_id,
+        content="Alice's dietary preferences: keto, eats meat and dairy, no carbs.",
+    )
+
+    coord = kb._engine._storage  # type: ignore[union-attr]
+    row_ns_id = await coord.resolve_namespace(namespace_id)
+    entities = await coord.graph.list_entities(row_ns_id, limit=100)
+    alice_rows = [e for e in entities if e.name == "alice"]
+    # Exactly one Alice persisted (deduped by (namespace, name, type)),
+    # carrying mention_count >= 2 to prove both ingests landed.
+    assert len(alice_rows) == 1, f"expected one canonical Alice row, got {len(alice_rows)}: {alice_rows!r}"
+
+
 @pytest.mark.xfail(
     strict=False,
     reason=(
-        "VC's sync remember path does not rebind extraction-time entity IDs "
-        "to upsert-resolved IDs (fixed only in pipelines/flows/ingest.py, "
-        "not in vectorcypher/engine._run_skeleton_extraction). "
-        "On sqlite_lance, that produces FOREIGN KEY failures when a second "
-        "document re-mentions an entity from the first doc."
+        "Khora.recall() removed the ``graph_depth`` kwarg at some point and the test "
+        "still passes it - separate issue from #806. Keeping the test under xfail "
+        "while we figure out the new traversal-depth surface; the FK-on-second-ingest "
+        "shape the previous xfail tracked is fixed in #806 and covered by "
+        "test_vc_second_ingest_sharing_entity_does_not_crash above."
     ),
-    raises=Exception,
+    raises=TypeError,
 )
 async def test_vc_two_hop_traversal(kb: Khora, namespace_id: UUID) -> None:
     """3 connected docs (A→B→C), query about A surfaces C via 2-hop traversal."""
