@@ -51,6 +51,7 @@ Programmatic values take priority over environment variables.
 | `neptune-iam` | Neptune with IAM SigV4 | `neo4j>=6.1.0`, `boto3` |
 | `age` | PostgreSQL AGE graph backend | `asyncpg` |
 | `weaviate` | Weaviate vector store | `weaviate-client>=4.20.1` |
+| `turbopuffer` | **[experimental]** Serverless vector + BM25 store for the Skeleton engine. See [engines/skeleton-engine.md](engines/skeleton-engine.md#turbopuffer-serverless--large-scale) | `turbopuffer>=2.1.0,<3.0` |
 | `sqlite` | SQLite embedded relational + vector | `aiosqlite>=0.20.0` |
 | `lancedb` | LanceDB embedded vector store | `lancedb>=0.17.0`, `pyarrow` |
 | `sqlite-lance` | **[experimental]** Unified SQLite + LanceDB embedded backend. Recommended embedded stack; covers VectorCypher / Skeleton / Chronicle | `lancedb>=0.17.0`, `aiosqlite>=0.20.0`, `pyarrow` |

@@ -67,7 +67,7 @@ class TemporalSignal:
     is_temporal: bool               # Whether temporal intent was detected
     category: TemporalCategory      # One of the 7 categories
     confidence: float               # 0.0–1.0
-    source: str                     # "dictionary", "semantic", or "none"
+    source: str                     # "dictionary", "semantic", "api", or "none"
     temporal_filter: TemporalFilter | None  # Date-range filter (EXPLICIT only)
 ```
 
@@ -232,7 +232,7 @@ filter = TemporalFilter(
 
 ### Automatic Date Extraction
 
-When the dictionary detector classifies a query as `EXPLICIT`, it also attempts to extract dates from the query text and build a `TemporalFilter` automatically:
+When the dictionary detector classifies a query as `EXPLICIT`, it also attempts to extract dates from the query text and build a `TemporalFilter` automatically. Callers can also pass `temporal_filter=...` to `recall()` directly: as of v0.17.0, vectorcypher and graphrag synthesize an `EXPLICIT`-category signal with `confidence=1.0` and `source="api"` so version-aware scoring and the sparse-results fallback fire the same way auto-detected bounds would (previously the explicit kwarg was silently dropped on these two engines).
 
 ```python
 # Query: "What happened before April 2024?"

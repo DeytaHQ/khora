@@ -182,7 +182,7 @@ result: RecallResult = await kb.recall(
 - `mode` - one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, or `ALL`.
 - `agentic=True` - multi-step exploration with follow-up queries.
 - `raw=True` - skips query understanding, reranking, HyDE, and entity linking (useful for benchmarks).
-- `start_time` / `end_time` - explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required.
+- `start_time` / `end_time` - explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required. Honored on all three engines (chronicle, vectorcypher, graphrag) as of v0.17.0 - vectorcypher and graphrag previously dropped the explicit bound silently.
 
 ### `context_text`
 
@@ -345,7 +345,7 @@ JSON-serializable response projection. Lives at `khora.core.models.recall.Recall
 | `source_name` | `str \| None` | SaaS-tool / connector identifier. |
 | `source_url` | `str \| None` | Addressable doc URL. |
 | `content_type` | `str \| None` | MIME / content type. |
-| `source_timestamp` | `datetime \| None` | Source-system timestamp (e.g., message sent-at), distinct from ingest `created_at`. |
+| `source_timestamp` | `datetime \| None` | Source-system timestamp (e.g., message sent-at), distinct from ingest `created_at`. ISO-8601 strings are accepted on input and coerced via `coerce_source_timestamp` (v0.17.0+). |
 | `metadata` | `dict[str, Any]` | Free-form user metadata. |
 
 #### `RecallChunk`

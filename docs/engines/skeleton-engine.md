@@ -33,7 +33,7 @@ Choose VectorCypher instead when:
 │           │                     │                     │                      │
 ├───────────┴─────────────────────┴─────────────────────┴──────────────────────┤
 │                          TemporalVectorStore                                 │
-│                    (pgvector backend | weaviate backend)                     │
+│         (pgvector | weaviate | turbopuffer | sqlite_lance | surrealdb)       │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                                                                              │
 │  ┌──────────────────┐                      ┌──────────────────┐              │

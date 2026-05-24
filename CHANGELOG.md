@@ -4,13 +4,24 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
-## [Unreleased]
+## [0.17.0] - Turbopuffer Skeleton backend + relationship-FK remap + API time-bound fix
+
+Minor release on top of v0.16.4. Headline is the new opt-in Turbopuffer backend for the Skeleton engine (serverless scale tier) alongside a vectorcypher correctness fix where entity ID canonicalization during upsert left relationships pointing at throwaway IDs - a sqlite_lance FK crash and a silent Neo4j edge drop. Plus a recall-API fix where explicit `temporal_filter` was bypassed on vectorcypher and graphrag, and two smaller ingest / vectorcypher hardening items.
+
+### Added
+
+- **Skeleton engine: opt-in Turbopuffer backend** (#827, closes #824). New `src/khora/engines/skeleton/backends/turbopuffer.py` (~440 LOC) ships `TurbopufferBackendConfig` and `TurbopufferTemporalStore`, mapping one Turbopuffer namespace per khora `namespace_id` (`khora_<hex>`). Hybrid retrieval is client-side RRF over a multi-query batch, so `hybrid_alpha` is a documented no-op; ALL-tags filters fold into N `Contains` clauses. 42 new unit tests run against an injected fake SDK. New `[turbopuffer]` pyproject extra pins `turbopuffer>=2.1.0,<3.0`. Out of scope for this release: a real-cluster CI integration job (needs a sandbox API key) and Chronicle / VectorCypher bindings.
+
+### Changed
+
+- **VectorCypher engine: `engine_info.mode` is now the lowercase mode string** (#822). `RecallResult.engine_info["mode"]` is emitted as `mode.name.lower()` (one of `vector` | `graph` | `hybrid` | `all` | `keyword`) instead of the `SearchMode` enum integer, matching the documented recall `mode` vocabulary. Builds on the canonical `engine_info` keys from #805 (v0.16.4). `engine_info` is "free-form engine telemetry" per `docs/api-reference.md` (only the `"engine"` key is contractual), so this is not a breaking change to a documented public surface - flagged here for any consumer who happened to parse the field as an int.
 
 ### Fixed
 
-- **ingest: coerce string `source_timestamp` to `datetime` instead of letting it reach `Document(...)`.** The public `source_timestamp` kwarg on `remember` / `remember_batch` / `submit_batch` is typed `datetime`, but upstream connectors and adapters routinely pass ISO-8601 strings (trailing `Z`, explicit offset, or date-only `YYYY-MM-DD`). A new shared `coerce_source_timestamp(value)` helper returns an existing `datetime` unchanged, parses those string forms, and returns `None` for empty/unparseable input without raising; `_extract_source_timestamp` now delegates to it so there is a single parsing path. The helper is applied at every `Document(...)` construction site that takes an explicit or per-doc `source_timestamp` (the three ingest staging paths plus the `submit_batch` insert and re-queue paths), so a stray string can no longer be persisted as-is or crash ingestion.
-- **document ingestion: stop logging the raw DB exception repr on persist failure.** Several failure paths interpolated `{exc}` directly into a log line or surfaced `str(exc)` as `DocumentResult.error`; on a SQLAlchemy `DBAPIError` that string embeds the failed statement *and* its bind-parameter tuple — i.e. the full document content and metadata — leaking it into logs and to callers. The `submit_batch` create/update-record warnings *and* the pending/staged-document processing failure surfaces (process error log, status-update-failure warning, and the `DocumentResult.error` returned to callers) now use a bounded `_safe_exc_summary` that prefers the underlying driver message (via `.orig` / `__cause__`), strips the `[SQL: ...]` / `[parameters: ...]` tail, truncates, and prefixes the exception class name, while keeping the `external_id` / `doc_id` context. The persisted `error_message` column is unchanged.
-- VectorCypher engine: `engine_info.mode` is now the lowercase mode string (e.g. `hybrid`) instead of the `SearchMode` enum integer, matching the documented recall `mode` vocabulary (`vector` | `graph` | `hybrid` | `all`).
+- **vectorcypher: remap entity IDs after upsert so relationships don't crash on shared entities** (#825, closes #806). The engine built `Relationship.source_entity_id` / `target_entity_id` from extraction-time UUIDs, but `upsert_entities_batch` then canonicalised `entity.id` to the persisted row's UUID on match - leaving relationships pointing at throwaway IDs. On sqlite_lance the FK fired and crashed the write; on Neo4j the `MATCH`-by-id silently dropped the edge. Three-place fix: (1) `sqlite_lance/graph.py:upsert_entities_batch` now mutates input `entity.id` on match (mirrors the Neo4j path), (2) `vectorcypher/engine._run_skeleton_extraction` snapshots pre-upsert IDs and remaps relationships after the batch, and (3) the streaming batch path composes dedup + upsert remaps. Regression test in `tests/integration/matrix/test_vectorcypher_sqlite_lance.py`.
+- **recall: API-supplied `temporal_filter` no longer silently dropped on vectorcypher + graphrag.** Both engines guarded the auto-detect block with `temporal_filter is None`, so an explicit caller-supplied bound bypassed `TemporalSignal` synthesis - the retriever then saw `temporal_signal=None` and skipped version-aware scoring, recency weighting, and the sparse-results fallback. Both engines now synthesize an `EXPLICIT`-category `TemporalSignal` with `confidence=1.0` and `source="api"` when `temporal_filter` is supplied; graphrag's `apply_recency_bias` is untouched on the API path because `EXPLICIT` does not match the `RECENCY`/`STATE_QUERY` guard. The new `source="api"` value joins the existing `"dictionary" / "semantic" / "none"` set on the `temporal_detect` span.
+- **ingest: coerce string `source_timestamp` to `datetime` instead of letting it reach `Document(...)`** (PR #823). The public `source_timestamp` kwarg on `remember` / `remember_batch` / `submit_batch` is typed `datetime`, but upstream connectors and adapters routinely pass ISO-8601 strings (trailing `Z`, explicit offset, or date-only `YYYY-MM-DD`). A new shared `coerce_source_timestamp(value)` helper returns an existing `datetime` unchanged, parses those string forms, and returns `None` for empty / unparseable input without raising; `_extract_source_timestamp` now delegates to it. Applied at every `Document(...)` construction site that takes an explicit or per-doc `source_timestamp` (three ingest staging paths plus the `submit_batch` insert and re-queue paths), so a stray string can no longer be persisted as-is or crash ingestion.
+- **document ingestion: stop logging the raw DB exception repr on persist failure** (PR #823 sibling). Several failure paths interpolated `{exc}` directly into a log line or surfaced `str(exc)` as `DocumentResult.error`; on a SQLAlchemy `DBAPIError` that string embeds the failed statement *and* its bind-parameter tuple - i.e. the full document content and metadata - leaking it into logs and to callers. The `submit_batch` create / update-record warnings *and* the pending / staged-document processing failure surfaces (process error log, status-update-failure warning, and the `DocumentResult.error` returned to callers) now use a bounded `_safe_exc_summary` that prefers the underlying driver message (via `.orig` / `__cause__`), strips the `[SQL: ...]` / `[parameters: ...]` tail, truncates, and prefixes the exception class name, while keeping the `external_id` / `doc_id` context. The persisted `error_message` column is unchanged.
 
 ## [0.16.4] - Abstention-signal correctness + BM25 routing + Weaviate hardening
 
@@ -830,44 +841,6 @@ deprecation shim was higher than the breaking-change cost of a hard removal.
       ...
 ```
 
-
-## [Unreleased] - Recall API time bounds honored
-
-### Fixed - API-supplied `temporal_filter` no longer dropped
-
-Callers passing an explicit `temporal_filter` to `MemoryLake.recall()` had their bounds silently bypassed in two places:
-
-* **vectorcypher**: when `temporal_filter` was provided, the auto-detection branch (which also synthesizes the `TemporalSignal` consumed by the retriever's skip-fallback / version-filter / recency-weighting logic) was skipped entirely. The retriever then saw `temporal_signal=None` and applied none of the temporal-aware behavior the caller had asked for, including the sparse-results fallback that re-runs the search without the time bound.
-* **graphrag**: same shape - the auto-detect block was guarded by `temporal_filter is None`, so the resulting `RecallResult.metadata` was missing `temporal_category` / `temporal_confidence` for API-bounded queries.
-
-Both engines now synthesize an `EXPLICIT`-category `TemporalSignal` with `confidence=1.0` and `source="api"` when `temporal_filter` is supplied, so downstream behavior is consistent regardless of whether the bounds came from the caller or were detected from the query string. The new `source="api"` value joins the existing `"dictionary"` / `"semantic"` / `"none"` set on the `temporal_detect` span - telemetry contract unchanged (span attributes are not enumerated). graphrag's `apply_recency_bias` remains untouched on the API path: `EXPLICIT` does not match the `RECENCY`/`STATE_QUERY` guard, preserving existing behavior for API callers.
-
----
-
-## [Unreleased] - Connector throughput restoration
-
-### Performance - restore pre-0.9.0 LiteLLM throughput
-
-The shared aiohttp session introduced in v0.9.0 was created with hard-coded `TCPConnector(limit=20, limit_per_host=10)`. `limit_per_host=10` silently throttled all OpenAI / Anthropic / etc. requests to 10 in flight per host, regardless of caller-configured concurrency. Downstream services (e.g. Genesis with `max_concurrent_llm_calls=200`) regressed ~5–20× on wall-time after upgrading to 0.9.x because the shared session became the dominant ceiling on parallel LLM/embedding calls.
-
-The connector is now configurable through `LiteLLMConfig` and `LLMSettings`:
-
-| Field                       | Default | aiohttp arg            |
-|-----------------------------|---------|------------------------|
-| `max_total_connections`     | 200     | `limit`                |
-| `max_connections_per_host`  | 0 (unlimited) | `limit_per_host` |
-| `keepalive_timeout_s`       | 30.0    | `keepalive_timeout`    |
-
-Defaults restore pre-0.9.0 throughput: total cap is generous, no per-host throttle. Fields are read by `_init_shared_session` from a cache populated by `configure_litellm` (first-call-wins; subsequent calls with non-matching connector settings log a warning and are ignored).
-
-**Migration call-out** - anyone who relied on the v0.9.0 connector throttle as a budget brake or rate-limit circuit-breaker should set `max_connections_per_host` explicitly in YAML / env (`KHORA_LLM_MAX_CONNECTIONS_PER_HOST`). On Anthropic Claude tier 1 in particular, an unlimited per-host connector combined with extraction loops can produce 429 storms that the previous 10-cap masked. Pick a value that matches your provider tier rather than relying on the connector for backpressure.
-
-### Out of scope (related but tracked separately)
-
-* `_bisect_and_extract` issues up to 2N LLM calls when truncation is detected - amplifies any concurrency change downstream. Not touched here.
-* unified pending processor spawns 20 background workers on every `MemoryLake.connect()` even for engines that never call `submit_batch`. Idle but not free. Not touched here.
-
----
 
 ## [Unreleased] - Telemetry Public Surface, OSS Observability Contract
 

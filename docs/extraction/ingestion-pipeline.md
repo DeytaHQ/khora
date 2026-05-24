@@ -86,6 +86,8 @@ for field in timestamp_fields:
 
 This matters for temporal queries - "what was discussed last week?" should find content from last week, not content that was ingested last week about events from six months ago.
 
+As of v0.17.0, ISO-8601 strings (trailing `Z`, explicit offset, or date-only `YYYY-MM-DD`) can be handed directly to `remember(..., source_timestamp=...)` / `remember_batch` / `submit_batch` - Khora coerces them via the internal `coerce_source_timestamp` helper, so connectors no longer need to parse upstream.
+
 ### Document Creation
 
 Finally, we create the document record:
