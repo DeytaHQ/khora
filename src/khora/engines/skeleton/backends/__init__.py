@@ -219,6 +219,7 @@ def create_temporal_store(
     config: KhoraConfig,
     *,
     weaviate_url: str | Any | None = None,
+    turbopuffer_config: str | Any | None = None,
     surrealdb_config: Any | None = None,
     surrealdb_connection: Any | None = None,
     engine: Any | None = None,
@@ -261,6 +262,14 @@ def create_temporal_store(
         from khora.engines.skeleton.backends.weaviate import WeaviateTemporalStore
 
         return WeaviateTemporalStore(config, weaviate_url)
+    elif backend == "turbopuffer":
+        if not turbopuffer_config:
+            raise ValueError(
+                "turbopuffer_config is required for turbopuffer backend (api-key str or TurbopufferBackendConfig)"
+            )
+        from khora.engines.skeleton.backends.turbopuffer import TurbopufferTemporalStore
+
+        return TurbopufferTemporalStore(config, turbopuffer_config)
     elif backend == "surrealdb":
         from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore
 
@@ -279,7 +288,9 @@ def create_temporal_store(
 
         return SQLiteLanceTemporalStore(sqlite_lance_handle)
     else:
-        raise ValueError(f"Unknown backend: {backend}. Available: pgvector, weaviate, surrealdb, sqlite_lance")
+        raise ValueError(
+            f"Unknown backend: {backend}. Available: pgvector, weaviate, turbopuffer, surrealdb, sqlite_lance"
+        )
 
 
 __all__ = [

@@ -92,6 +92,10 @@ age = ["asyncpg>=0.31.0"]  # AGE uses PostgreSQL via asyncpg
 graph-all = ["neo4j>=6.2.0"]
 # Weaviate vector database
 weaviate = ["weaviate-client>=4.21.0"]
+# turbopuffer serverless vector + BM25 store (skeleton-engine opt-in,
+# #824 - YELLOW verdict: clean SDK + filters, SaaS-only, client-side
+# RRF for hybrid). Pinned to 2.x (current).
+turbopuffer = ["turbopuffer>=2.1.0,<3.0"]
 # All backends
 all-backends = [
     "neo4j>=6.2.0",
@@ -340,7 +344,7 @@ exclude-newer = "7 days"
 # staging window so a same-week CVE fix isn't held back. Use sparingly —
 # every entry here is an explicit "we trust this package enough to skip
 # the staging window".
-exclude-newer-package = { urllib3 = "0 days", litellm = "0 days", idna = "0 days" }  # urllib3: CVE-2026-44431/44432; litellm: CVE-2026-42208/42271/40217 (1.83.10+); idna: CVE-2026-45409 (3.15+)
+exclude-newer-package = { urllib3 = "0 days", litellm = "0 days", idna = "0 days", "turbopuffer" = "0 days" }  # urllib3: CVE-2026-44431/44432; litellm: CVE-2026-42208/42271/40217 (1.83.10+); idna: CVE-2026-45409 (3.15+); turbopuffer: 2.1.0 newer than the 7-day window when introduced in #824 - opt-in extra so safe to bypass.
 constraint-dependencies = [
     # Security: CVE-2026-25645 fixed in 2.33.0
     "requests>=2.33.1",

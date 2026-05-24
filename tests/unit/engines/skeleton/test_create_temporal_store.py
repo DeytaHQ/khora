@@ -62,6 +62,18 @@ def stub_weaviate_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 
 @pytest.fixture
+def stub_turbopuffer_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    instance = MagicMock(name="TurbopufferTemporalStore-instance")
+    cls = MagicMock(return_value=instance)
+    _install_module(
+        monkeypatch,
+        "khora.engines.skeleton.backends.turbopuffer",
+        {"TurbopufferTemporalStore": cls},
+    )
+    return cls
+
+
+@pytest.fixture
 def stub_surrealdb_store(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     instance = MagicMock(name="SurrealDBTemporalStore-instance")
     cls = MagicMock(return_value=instance)
@@ -106,6 +118,16 @@ class TestWeaviateDispatch:
     def test_passes_url_to_constructor(self, mock_config: MagicMock, stub_weaviate_store: MagicMock) -> None:
         create_temporal_store("weaviate", mock_config, weaviate_url="http://w:8080")
         stub_weaviate_store.assert_called_once_with(mock_config, "http://w:8080")
+
+
+class TestTurbopufferDispatch:
+    def test_requires_config(self, mock_config: MagicMock) -> None:
+        with pytest.raises(ValueError, match="turbopuffer_config is required"):
+            create_temporal_store("turbopuffer", mock_config)
+
+    def test_passes_config_to_constructor(self, mock_config: MagicMock, stub_turbopuffer_store: MagicMock) -> None:
+        create_temporal_store("turbopuffer", mock_config, turbopuffer_config="tpuf_key")
+        stub_turbopuffer_store.assert_called_once_with(mock_config, "tpuf_key")
 
 
 class TestSurrealDBDispatch:

@@ -335,6 +335,76 @@ tests against a real cluster live in
 behind `WEAVIATE_INTEGRATION_TEST=1`; CI provisions a Weaviate
 service-container side-car for the `weaviate-integration` job.
 
+### Turbopuffer (Serverless / Large-Scale)
+
+Pay-per-query serverless vector + BM25 store backed by object storage.
+Pitched at scale tiers above what pgvector / self-hosted Weaviate
+make economical (2.5T vectors in production at Cursor, Notion):
+
+```python
+from khora.engines.skeleton.backends.turbopuffer import TurbopufferBackendConfig
+
+cfg = TurbopufferBackendConfig(
+    api_key="tpuf_...",            # str or SecretStr
+    region="gcp-us-central1",      # see https://turbopuffer.com/docs/regions
+)
+engine = SkeletonConstructionEngine(
+    config,
+    backend="turbopuffer",
+    turbopuffer_config=cfg,
+)
+```
+
+The constructor also accepts a bare API-key string for back-compat with
+the other backends' shape.
+
+**Mapping:** one turbopuffer namespace per khora `namespace_id`, named
+`f"khora_{namespace_id.hex}"`. The `khora_` prefix lets
+`GET /v2/namespaces?prefix=khora_` enumerate only this deployment's
+tenants (useful for cross-tenant audit + GDPR delete-by-tenant).
+
+**Hybrid search is client-side RRF.** turbopuffer doesn't expose a
+server-blended linear alpha score; it offers a multi-query batch that
+the client fuses with Reciprocal Rank Fusion. Consequence: the
+`hybrid_alpha` parameter is a **no-op** on this backend — the fusion is
+rank-based, not score-weighted. If you need true server-blended linear
+alpha scores, stay on Weaviate.
+
+**Filter expressibility:** every `TemporalFilter` predicate compiles
+to turbopuffer's filter DSL (`Eq`, `Gte`, `Lte`, `Lt`, `In`, `Contains`,
+`ContainsAny`). The one workaround: ALL-tags semantics fold into an
+`And` of N `Contains` clauses (turbopuffer has no native `ContainsAll`).
+
+**Features:**
+
+- Multi-region serverless (no infrastructure to run)
+- Native BM25 + vector via multi-query batch
+- Pay-per-write (per-WU) + pay-per-read (per-RU) + storage at object-store rates
+- Apache-2.0 SDK; SaaS backend (closed-source)
+
+**When NOT to pick it:**
+
+- You need an embedded / offline path. turbopuffer is SaaS-only; sqlite_lance is the right answer.
+- You need server-blended alpha hybrid. Weaviate.
+- Corpora under ~10M chunks with modest query volume. pgvector is cheaper and faster at that tier.
+
+**Crossover guidance.** At a 1 GB namespace and 1M queries/month
+turbopuffer runs roughly ~$8 (queries) + ~$0.33 (storage) + write
+amortisation — call it ~$25/month. The same workload on
+self-hosted Postgres+pgvector is ~$30-50/month in VM + storage cost
+plus ops overhead. Crossover lands somewhere around 50M chunks
+with sustained query volume; below that pgvector wins, above that
+turbopuffer wins. Numbers as of 2026-05-24 — re-check
+[pricing](https://turbopuffer.com/pricing) before adopting.
+
+**Install:** `pip install khora[turbopuffer]`.
+
+**Tests.** 42 unit tests exercise the SDK via a fake `turbopuffer`
+module injected into `sys.modules` (no real network or API key needed).
+Real-cluster integration tests are gated behind
+`TURBOPUFFER_INTEGRATION_TEST=1` + a `TURBOPUFFER_API_KEY` env var; not
+wired into CI yet (would need a repo secret for the sandbox key).
+
 ## Query Capabilities
 
 ### Temporal Filtering
