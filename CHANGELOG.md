@@ -4,7 +4,9 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
-## [Unreleased]
+## [0.16.5] - ingest source_timestamp coercion + ingestion log redaction + engine_info.mode string
+
+Patch release on top of v0.16.4. Three correctness/safety fixes — string `source_timestamp` values from upstream connectors are now coerced to `datetime` before reaching `Document(...)` (a stray ISO-8601 string could previously be persisted as-is or crash ingestion); document-persist failure logs and the `DocumentResult.error` returned to callers no longer leak raw SQL statements and their bind-parameter content (i.e. document body + metadata) via a bounded exception summary; and the vectorcypher `engine_info.mode` is now emitted as the lowercase mode string (`hybrid`) instead of the `SearchMode` enum integer, matching the documented recall `mode` vocabulary.
 
 ### Fixed
 
