@@ -437,6 +437,19 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
             existing = existing_map.get(key)
             if existing is not None:
                 existing.merge_with(entity)
+                # Sync the input entity's id to the persisted canonical
+                # id (#806). The Neo4j backend does this at
+                # ``neo4j.py:1739`` for the same reason: callers hold
+                # references to the input ``entities`` list and may
+                # have already built ``Relationship`` objects whose
+                # ``source_entity_id`` / ``target_entity_id`` were
+                # captured from ``entity.id`` BEFORE upsert. Without
+                # the in-place mutation, those relationships point at
+                # the throwaway extraction-time UUID and the FK
+                # constraint (sqlite_lance) / silent MATCH drop (Neo4j
+                # smart-resolution path) bites on the second ingest
+                # that shares an entity.
+                entity.id = existing.id
                 to_update.append(existing)
                 results.append((existing, False))
                 # Guard against two input entities that share the same key:

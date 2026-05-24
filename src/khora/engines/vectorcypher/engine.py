@@ -1207,8 +1207,40 @@ class VectorCypherEngine:
             storage = self._get_storage()
             dual_nodes = self._get_dual_nodes()
 
+            # Snapshot pre-upsert IDs (#806). On the second ingest that
+            # shares an entity, the storage backends match by
+            # ``(namespace_id, name, entity_type)`` and rewrite the input
+            # ``entity.id`` to the canonical persisted UUID. Any
+            # relationship built from the extraction-time UUID needs to
+            # be remapped to the canonical id before
+            # ``create_relationships_batch`` runs - otherwise sqlite_lance
+            # fires an FK violation and Neo4j silently drops the row
+            # because its ``MATCH (source {id: ...})`` finds nothing.
+            pre_upsert_ids = [str(e.id) for e in entities]
+
             # Store entities in Neo4j + pgvector
             await storage.upsert_entities_batch(namespace_id, entities)
+
+            # Build pre-upsert -> canonical remap (only diffs).
+            id_remap: dict[str, str] = {}
+            for pre_id, entity in zip(pre_upsert_ids, entities):
+                canonical_id = str(entity.id)
+                if pre_id != canonical_id:
+                    id_remap[pre_id] = canonical_id
+
+            # Apply the remap to the LLM-extracted relationships before
+            # we build co-occurrence rels (which already use the
+            # canonical ids because they read ``entity.id`` post-upsert).
+            if id_remap and relationships:
+                from uuid import UUID as _UUID
+
+                for rel in relationships:
+                    src_str = str(rel.source_entity_id)
+                    tgt_str = str(rel.target_entity_id)
+                    if src_str in id_remap:
+                        rel.source_entity_id = _UUID(id_remap[src_str])
+                    if tgt_str in id_remap:
+                        rel.target_entity_id = _UUID(id_remap[tgt_str])
 
             # Create co-occurrence relationships between entities in the same chunk
             cooccurrence_rels = _build_cooccurrence_relationships(entities, chunk_objects, namespace_id, relationships)
@@ -2786,6 +2818,15 @@ class VectorCypherEngine:
 
             # ── Stage 6: Batch store entities + relationships ───────────────
             if all_entities:
+                # Track the discarded-or-mutated entity IDs so we can
+                # remap ``all_relationships`` endpoints below (#806).
+                # Both the cross-document dedup AND the upsert mutate
+                # ``entity.id``; without remapping, relationships built
+                # from a window's throwaway extraction-time UUID become
+                # FK violations (sqlite_lance) or silent MATCH drops
+                # (Neo4j).
+                id_remap: dict[str, str] = {}
+
                 # Cross-document entity dedup by normalized name:type
                 if self._vc_config.enable_smart_resolution:
                     from khora._accel import normalize_entity_name
@@ -2795,6 +2836,9 @@ class VectorCypherEngine:
                         key = f"{normalize_entity_name(entity.name)}:{entity.entity_type}"
                         if key in deduped:
                             existing = deduped[key]
+                            # Record the discard so dependent rels remap.
+                            if entity.id != existing.id:
+                                id_remap[str(entity.id)] = str(existing.id)
                             existing.mention_count += entity.mention_count
                             for doc_id in entity.source_document_ids:
                                 if doc_id not in existing.source_document_ids:
@@ -2817,9 +2861,26 @@ class VectorCypherEngine:
                         for chunk_id in entity.source_chunk_ids
                     ]
 
+                # Snapshot pre-upsert IDs so the post-upsert mutation
+                # also lands in the remap.
+                pre_upsert_ids = [str(e.id) for e in all_entities]
+
                 _t0 = _time.perf_counter()
                 await storage.upsert_entities_batch(namespace_id, all_entities)
                 _stage6_upsert_ms += (_time.perf_counter() - _t0) * 1000
+
+                # Extend id_remap with post-upsert canonicalisations.
+                # Compose with the dedup pass: if dedup said X -> Y and
+                # upsert then said Y -> Z, the relationship endpoint
+                # X must end up as Z.
+                for pre_id, entity in zip(pre_upsert_ids, all_entities):
+                    canonical_id = str(entity.id)
+                    if pre_id != canonical_id:
+                        id_remap[pre_id] = canonical_id
+                if id_remap:
+                    for src, tgt in list(id_remap.items()):
+                        if tgt in id_remap:
+                            id_remap[src] = id_remap[tgt]
 
                 # Rebuild entity-chunk links after upsert: upsert_entities_batch()
                 # mutates entity.id in-place to the DB's canonical UUID when the entity
@@ -2830,6 +2891,19 @@ class VectorCypherEngine:
                     for entity in all_entities
                     for chunk_id in entity.source_chunk_ids
                 ]
+
+                # Apply the dedup + canonical-id remap to relationships
+                # captured during window extraction (#806).
+                if id_remap and all_relationships:
+                    from uuid import UUID as _UUID
+
+                    for rel in all_relationships:
+                        src_str = str(rel.source_entity_id)
+                        tgt_str = str(rel.target_entity_id)
+                        if src_str in id_remap:
+                            rel.source_entity_id = _UUID(id_remap[src_str])
+                        if tgt_str in id_remap:
+                            rel.target_entity_id = _UUID(id_remap[tgt_str])
 
                 if all_relationships:
                     _t0 = _time.perf_counter()
