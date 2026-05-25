@@ -973,6 +973,18 @@
       "unit": "1"
     },
     {
+      "name": "khora.vectorcypher.llm_reranking.skipped_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "vectorcypher",
+      "description": "Number of times the VectorCypher LLM rerank step was skipped, by reason. Surfaces the discoverability bug from issue #814 — when enable_llm_reranking=True but the gate fires, this counter increments so operators can see the skip without scraping DEBUG logs.",
+      "labels": [
+        {"name": "reason", "values": ["not_temporal", "no_version_metadata", "decisive_winner"]}
+      ],
+      "_comment": "Issue #814. NO namespace_id label — cardinality rule."
+    },
+    {
       "name": "khora.memory.recall.duration",
       "type": "histogram",
       "stability": "public",

@@ -21,7 +21,7 @@ import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from loguru import logger
@@ -334,11 +334,28 @@ class VectorCypherConfig:
     reranking_top_n: int = 50  # How many candidates to feed to the cross-encoder
     reranking_blend_weight: float = 0.7  # Rerank vs original score blend (passed to reranker)
 
-    # LLM reranking (applied after cross-encoder, only for temporal queries)
+    # LLM reranking (applied after cross-encoder, only for temporal queries).
+    #
+    # When ``enable_llm_reranking=True``, the retriever still applies a
+    # version-metadata precondition by default — if no chunk in the top
+    # candidates carries ``metadata["version"]`` (the enterprise temporal
+    # signal), the LLM rerank step is skipped because PR #364 showed it
+    # regresses MRR on conversational benchmarks (LongMemEval / LoCoMo).
+    # Set ``llm_reranking_mode="always"`` to disable that precondition and
+    # force LLM rerank on every temporal query (the "decisive winner"
+    # latency optimization still applies).
     enable_llm_reranking: bool = False
     llm_reranking_model: str = "gpt-4o-mini"
     llm_reranking_top_n: int = 5
     llm_reranking_confidence_threshold: float = 0.1
+    # ``"auto"`` (default) — gate LLM rerank on the version-metadata
+    # precondition (current behavior). The first time the gate fires for
+    # a given namespace, a one-time WARNING is emitted so users who opted
+    # in to ``enable_llm_reranking=True`` discover why the LLM is not
+    # being invoked.
+    # ``"always"`` — skip the version-metadata precondition; LLM rerank
+    # runs on every temporal query (subject to the decisive-winner skip).
+    llm_reranking_mode: Literal["auto", "always"] = "auto"
 
 
 class VectorCypherEngine:
@@ -590,6 +607,7 @@ class VectorCypherEngine:
             llm_reranking_model=self._vc_config.llm_reranking_model,
             llm_reranking_top_n=self._vc_config.llm_reranking_top_n,
             llm_reranking_confidence_threshold=self._vc_config.llm_reranking_confidence_threshold,
+            llm_reranking_mode=self._vc_config.llm_reranking_mode,
             # Issue #567 Phase A — pull temporal flags from KhoraConfig.query.
             # All default OFF; operators opt in per-namespace.
             temporal_reference_wall_clock=self._config.query.temporal_reference_wall_clock,

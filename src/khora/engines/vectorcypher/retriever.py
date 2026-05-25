@@ -38,6 +38,7 @@ except ImportError:
 
 from khora.core.models import Chunk, Entity, Relationship
 from khora.telemetry import bounded_text_hash, trace_span
+from khora.telemetry.metrics import metric_counter
 
 from .dual_nodes import DualNodeManager
 from .fusion import (
@@ -82,6 +83,19 @@ _NEO4J_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
 # Read once at import to avoid an env lookup per recency-score computation
 # on the hot path. Set ``KHORA_BENCH_MODE=true|1|yes`` to enable.
 _BENCH_MODE: bool = os.environ.get("KHORA_BENCH_MODE", "").strip().lower() in {"true", "1", "yes"}
+
+
+# LLM rerank skip counter (issue #814). Tracks how often the LLM rerank
+# step is skipped, broken down by reason. No ``namespace_id`` label —
+# cardinality rule (see CLAUDE.md). Module-level so the meter provider
+# can de-duplicate by name across retriever instances.
+_LLM_RERANKING_SKIPPED_COUNTER = metric_counter(
+    "khora.vectorcypher.llm_reranking.skipped_total",
+    description=(
+        "Number of times the VectorCypher LLM rerank step was skipped, "
+        "by reason (not_temporal / no_version_metadata / decisive_winner)."
+    ),
+)
 
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
@@ -226,11 +240,26 @@ class RetrieverConfig:
     reranking_top_n: int = 50  # Candidates to feed to the cross-encoder
     reranking_blend_weight: float = 0.7  # Rerank vs original score blend
 
-    # LLM reranking (applied after cross-encoder, only for temporal queries)
+    # LLM reranking (applied after cross-encoder, only for temporal queries).
+    #
+    # ``enable_llm_reranking=True`` is also gated by ``llm_reranking_mode``
+    # (see below): in the default ``"auto"`` mode the LLM rerank step is
+    # skipped when no chunk in the top candidates carries
+    # ``metadata["version"]`` — PR #364 showed it regresses MRR on
+    # conversational benchmarks. Set ``llm_reranking_mode="always"`` to
+    # bypass that precondition.
     enable_llm_reranking: bool = False
     llm_reranking_model: str = "gpt-4o-mini"
     llm_reranking_top_n: int = 5
     llm_reranking_confidence_threshold: float = 0.1  # Skip LLM reranking when cross-encoder gap >= this
+    # ``"auto"`` (default) — gate LLM rerank on the version-metadata
+    # precondition. When the gate fires for a namespace, a one-time
+    # WARNING surfaces the skip so users discover why their opt-in did
+    # not invoke the LLM (issue #814).
+    # ``"always"`` — bypass the version-metadata precondition; LLM rerank
+    # runs on every temporal query (subject to the decisive-winner skip,
+    # which is a latency optimization not the bug being addressed).
+    llm_reranking_mode: Literal["auto", "always"] = "auto"
     # "Decisive winner" gate (Sprint 1 — multihop latency regression).
     # Skip LLM rerank when the cross-encoder's #1 result is BOTH high-scoring
     # AND well-separated from #2 — the LLM call adds 200–400 ms and rarely
@@ -292,6 +321,53 @@ def _extract_source_system(item: Any) -> str | None:
         return None
     value = str(value).strip()
     return value or None
+
+
+def _candidates_have_versions(candidates: list[Any]) -> bool:
+    """Return ``True`` if any candidate carries ``metadata["version"]``.
+
+    Used by :meth:`VectorCypherRetriever._evaluate_llm_rerank_gate` to
+    decide whether the version-metadata precondition (PR #364, issue #814)
+    is satisfied. Accepts both candidate shapes that the LLM-rerank gate
+    sees in practice:
+
+    - ``FusedResult`` (complex path) — metadata lives at ``r.item.metadata``.
+    - ``(Chunk, score)`` (simple path) — metadata lives at ``c.metadata``.
+    """
+    for cand in candidates:
+        # Simple-path shape: (Chunk, score)
+        if isinstance(cand, tuple) and len(cand) == 2:
+            chunk = cand[0]
+            meta = getattr(chunk, "metadata", None)
+            if isinstance(meta, dict) and meta.get("version"):
+                return True
+            continue
+        # Complex-path shape: FusedResult (has .item with .metadata)
+        item = getattr(cand, "item", None)
+        meta = getattr(item, "metadata", None) if item is not None else None
+        if isinstance(meta, dict) and meta.get("version"):
+            return True
+    return False
+
+
+def _extract_top_two_scores(candidates: list[Any]) -> tuple[float | None, float | None]:
+    """Return ``(top_score, second_score)`` from candidates, or ``(None, None)``.
+
+    Mirrors ``_candidates_have_versions`` in handling both candidate
+    shapes. When fewer than two candidates are available, returns
+    ``(None, None)`` so callers can short-circuit the decisive-winner
+    check without raising.
+    """
+    if len(candidates) < 2:
+        return None, None
+    first, second = candidates[0], candidates[1]
+    if isinstance(first, tuple) and len(first) == 2 and isinstance(second, tuple) and len(second) == 2:
+        return float(first[1]), float(second[1])
+    top = getattr(first, "rrf_score", None)
+    runner = getattr(second, "rrf_score", None)
+    if top is None or runner is None:
+        return None, None
+    return float(top), float(runner)
 
 
 def _has_target_date(
@@ -407,6 +483,12 @@ class VectorCypherRetriever:
 
         # Cached LLM reranker for temporal queries (lazy-init on first use)
         self._llm_reranker: LLMReranker | None = None
+
+        # Issue #814 — one-time WARNING dedupe for LLM-rerank skip reasons.
+        # Tuples are ``(namespace_id_or_None, skip_reason)``; once a tuple
+        # has been logged we keep silent on subsequent queries for that
+        # namespace so a hot recall path doesn't spam the operator log.
+        self._warned_rerank_skips: set[tuple[UUID | None, str]] = set()
 
     async def retrieve(
         self,
@@ -1338,30 +1420,24 @@ class VectorCypherRetriever:
             with trace_span("khora.vectorcypher.reranking", candidate_count=len(fused_results)):
                 fused_results = await self._apply_reranking(query, fused_results, limit, namespace_id=namespace_id)
 
-        # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder)
-        # Skip when:
-        #   - Cross-encoder is already confident (large gap between #1 and #2)
-        #   - No version metadata in results (conversational data like LongMemEval/LoCoMo
-        #     doesn't benefit from temporal LLM reranking — it can hurt MRR)
-        if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal:
-            _skip_llm = False
-            # Check if any results carry version metadata (enterprise temporal signal)
-            _has_versions = any(
-                (r.item.metadata or {}).get("version")
-                if hasattr(r.item, "metadata") and isinstance(r.item.metadata, dict)
-                else False
-                for r in fused_results[:10]
+        # Step 8d: LLM reranking of top-N for temporal queries (after cross-encoder).
+        # Gating centralised in ``_evaluate_llm_rerank_gate`` (issue #814) — covers
+        # the not-temporal, no-version-metadata, and decisive-winner skips and
+        # emits the one-time warning when mode='auto' triggers the version gate.
+        if self._config.enable_llm_reranking:
+            should_run, skip_reason = self._evaluate_llm_rerank_gate(
+                fused_results,
+                temporal_signal,
+                namespace_id=namespace_id,
             )
-            if not _has_versions:
-                _skip_llm = True
-                logger.debug("Skipping LLM reranking: no version metadata in results (conversational data)")
-            elif len(fused_results) >= 2:
-                top_score = fused_results[0].rrf_score
-                gap = top_score - fused_results[1].rrf_score
-                if self._should_skip_llm_rerank(top_score, gap):
-                    _skip_llm = True
-            if not _skip_llm:
-                with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused_results)):
+            if not should_run and skip_reason is not None:
+                _LLM_RERANKING_SKIPPED_COUNTER.add(1, attributes={"reason": skip_reason})
+            if should_run:
+                with trace_span(
+                    "khora.vectorcypher.llm_reranking",
+                    candidate_count=len(fused_results),
+                    mode=self._config.llm_reranking_mode,
+                ):
                     fused_results = await self._apply_llm_reranking(
                         query, fused_results, limit, namespace_id=namespace_id
                     )
@@ -1802,6 +1878,76 @@ class VectorCypherRetriever:
             return True
         return False
 
+    def _evaluate_llm_rerank_gate(
+        self,
+        candidates: list[Any],
+        temporal_signal: TemporalSignal | None,
+        *,
+        namespace_id: UUID | None,
+    ) -> tuple[bool, str | None]:
+        """Centralized gate for the LLM rerank step (issue #814).
+
+        Consolidates the three independent skip reasons that historically
+        lived inline in both the complex ``_vectorcypher_retrieve`` path and
+        the simple ``_simple_retrieve`` path:
+
+        - ``"not_temporal"``: ``enable_llm_reranking=True`` but the query
+          isn't temporal. Documented behavior — never logs a warning.
+        - ``"no_version_metadata"``: ``llm_reranking_mode="auto"`` (the
+          default) and no chunk in the top candidates carries
+          ``metadata["version"]``. Logs a one-time WARNING per
+          ``(namespace_id, reason)`` tuple so users who opted in to LLM
+          rerank discover why it isn't being invoked.
+        - ``"decisive_winner"``: cross-encoder already produced a confident
+          #1 (latency optimization — runs in both modes).
+
+        ``candidates`` may be a list of ``FusedResult`` (complex path) or a
+        list of ``(Chunk, score)`` tuples (simple path); both shapes are
+        handled by ``_extract_candidate_metadata`` / ``_extract_top_scores``.
+
+        Returns ``(should_run, skip_reason)``. ``skip_reason`` is ``None``
+        only when ``should_run`` is ``True``.
+        """
+        if not self._config.enable_llm_reranking:
+            # Caller already gated on this — defensive return so the helper
+            # can be invoked unconditionally without paying the unused-skip
+            # warning cost.
+            return False, "not_temporal"
+
+        if not (temporal_signal and temporal_signal.is_temporal):
+            return False, "not_temporal"
+
+        if not candidates:
+            # Nothing to rerank — treat as a decisive-winner-style skip
+            # (silent, no warning).
+            return False, "decisive_winner"
+
+        # Version-metadata gate is bypassed in "always" mode (issue #814).
+        if self._config.llm_reranking_mode == "auto":
+            has_versions = _candidates_have_versions(candidates[:10])
+            if not has_versions:
+                key = (namespace_id, "no_version_metadata")
+                if key not in self._warned_rerank_skips:
+                    self._warned_rerank_skips.add(key)
+                    logger.warning(
+                        "VectorCypher LLM reranking skipped for this namespace: "
+                        "enable_llm_reranking=True but no chunks in the top "
+                        "candidates carry metadata['version']. Set "
+                        "llm_reranking_mode='always' to force LLM rerank on all "
+                        "temporal queries, or set enable_llm_reranking=False to "
+                        "suppress this warning."
+                    )
+                return False, "no_version_metadata"
+
+        # Decisive-winner gate — applies in both auto and always modes.
+        top_score, second_score = _extract_top_two_scores(candidates)
+        if top_score is not None and second_score is not None:
+            gap = top_score - second_score
+            if self._should_skip_llm_rerank(top_score, gap):
+                return False, "decisive_winner"
+
+        return True, None
+
     async def _apply_llm_reranking(
         self,
         query: str,
@@ -2013,23 +2159,24 @@ class VectorCypherRetriever:
                     fused = await self._apply_reranking(query, fused, limit, namespace_id=namespace_id)
                 chunk_results = [(r.item, r.rrf_score) for r in fused]
 
-            # LLM reranking of top-N for temporal queries (after cross-encoder)
-            # Skip when: no version metadata (conversational data) or cross-encoder confident.
-            if self._config.enable_llm_reranking and temporal_signal and temporal_signal.is_temporal and chunk_results:
-                _skip_llm_simple = False
-                _has_versions_simple = any(
-                    (c.metadata or {}).get("version") for c, _ in chunk_results[:10] if isinstance(c.metadata, dict)
+            # LLM reranking of top-N for temporal queries (after cross-encoder).
+            # Gating centralised in ``_evaluate_llm_rerank_gate`` (issue #814) —
+            # see the parallel comment in ``_vectorcypher_retrieve``.
+            if self._config.enable_llm_reranking and chunk_results:
+                should_run, skip_reason = self._evaluate_llm_rerank_gate(
+                    chunk_results,
+                    temporal_signal,
+                    namespace_id=namespace_id,
                 )
-                if not _has_versions_simple:
-                    _skip_llm_simple = True
-                elif len(chunk_results) >= 2:
-                    _top_score = chunk_results[0][1]
-                    _gap = _top_score - chunk_results[1][1]
-                    if self._should_skip_llm_rerank(_top_score, _gap):
-                        _skip_llm_simple = True
-                if not _skip_llm_simple:
+                if not should_run and skip_reason is not None:
+                    _LLM_RERANKING_SKIPPED_COUNTER.add(1, attributes={"reason": skip_reason})
+                if should_run:
                     fused = [FusedResult(item=c, rrf_score=s, item_id=c.id) for c, s in chunk_results]
-                    with trace_span("khora.vectorcypher.llm_reranking", candidate_count=len(fused)):
+                    with trace_span(
+                        "khora.vectorcypher.llm_reranking",
+                        candidate_count=len(fused),
+                        mode=self._config.llm_reranking_mode,
+                    ):
                         fused = await self._apply_llm_reranking(query, fused, limit, namespace_id=namespace_id)
                     chunk_results = [(r.item, r.rrf_score) for r in fused]
 
