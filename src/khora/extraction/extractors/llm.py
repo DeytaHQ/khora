@@ -11,6 +11,11 @@ from loguru import logger
 from tenacity import AsyncRetrying, stop_after_attempt, stop_after_delay, wait_exponential
 
 from khora.config.llm import get_shared_session
+from khora.extraction.embedders._request_telemetry import (
+    parse_rate_limit_headers,
+    set_connector_attributes,
+    set_rate_limit_attributes,
+)
 
 from .base import (
     EntityExtractor,
@@ -313,9 +318,9 @@ class LLMEntityExtractor(EntityExtractor):
     @staticmethod
     def _log_rate_limit_headers(response: Any) -> None:  # noqa: ANN401
         """Log rate-limit headers from an LLM response at DEBUG level."""
-        headers = getattr(response, "_headers", {}) or {}
-        rl_limit = headers.get("x-ratelimit-limit-requests", "")
-        rl_remaining = headers.get("x-ratelimit-remaining-requests", "")
+        parsed = parse_rate_limit_headers(response)
+        rl_remaining = parsed.get("ratelimit.remaining_requests", "")
+        rl_limit = parsed.get("ratelimit.limit_requests", "")
         if rl_limit or rl_remaining:
             logger.debug("Rate limit: {}/{} remaining requests", rl_remaining, rl_limit)
 
@@ -766,7 +771,8 @@ class LLMEntityExtractor(EntityExtractor):
                         # is constant regardless of input size. Let the model use its full budget.
                         effective_max_tokens = self._max_tokens
 
-                        with trace_span("khora.extraction.llm_call", model=self._model, call_type="single"):
+                        with trace_span("khora.extraction.llm_call", model=self._model, call_type="single") as llm_span:
+                            set_connector_attributes(llm_span, get_shared_session())
                             response = await litellm.acompletion(
                                 model=self._model,
                                 messages=[
@@ -780,6 +786,7 @@ class LLMEntityExtractor(EntityExtractor):
                                 response_format=self._get_response_format(),
                                 shared_session=get_shared_session(),
                             )
+                            set_rate_limit_attributes(llm_span, response)
                         _latency = (_time.perf_counter() - _t0) * 1000
                         self._log_rate_limit_headers(response)
 
@@ -911,7 +918,10 @@ class LLMEntityExtractor(EntityExtractor):
                 from khora.telemetry import get_collector, trace_span
 
                 _t0 = _time.perf_counter()
-                with trace_span("khora.extraction.llm_call", model=self._model, call_type="relationship_second_pass"):
+                with trace_span(
+                    "khora.extraction.llm_call", model=self._model, call_type="relationship_second_pass"
+                ) as llm_span:
+                    set_connector_attributes(llm_span, get_shared_session())
                     response = await litellm.acompletion(
                         model=self._model,
                         messages=[
@@ -924,6 +934,7 @@ class LLMEntityExtractor(EntityExtractor):
                         response_format=self._get_response_format(),
                         shared_session=get_shared_session(),
                     )
+                    set_rate_limit_attributes(llm_span, response)
                 _latency = (_time.perf_counter() - _t0) * 1000
                 self._log_rate_limit_headers(response)
 
@@ -1678,7 +1689,8 @@ Return ONLY valid JSON, no other text."""
                             model=self._model,
                             call_type="multi_batch",
                             batch_size=len(texts),
-                        ):
+                        ) as llm_span:
+                            set_connector_attributes(llm_span, get_shared_session())
                             response = await litellm.acompletion(
                                 model=self._model,
                                 messages=[
@@ -1692,6 +1704,7 @@ Return ONLY valid JSON, no other text."""
                                 response_format=self._get_multi_response_format(),
                                 shared_session=get_shared_session(),
                             )
+                            set_rate_limit_attributes(llm_span, response)
                         _latency = (_time.perf_counter() - _t0) * 1000
                         self._log_rate_limit_headers(response)
 

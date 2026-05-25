@@ -15,6 +15,7 @@ from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
 from khora.config.llm import get_shared_session
 from khora.telemetry import trace_span
 
+from ._request_telemetry import set_connector_attributes, set_rate_limit_attributes
 from .base import Embedder
 
 try:
@@ -413,6 +414,7 @@ class LiteLLMEmbedder(Embedder):
                     req_span.set_attribute("timeout", self._timeout)
 
                     _t0 = _time.perf_counter()
+                    set_connector_attributes(req_span, get_shared_session())
                     response = await litellm.aembedding(
                         model=self._model,
                         input=sanitized,
@@ -420,6 +422,7 @@ class LiteLLMEmbedder(Embedder):
                         dimensions=self._dimension,
                         shared_session=get_shared_session(),
                     )
+                    set_rate_limit_attributes(req_span, response)
                     _latency = (_time.perf_counter() - _t0) * 1000
                     req_span.set_attribute("latency_ms", round(_latency, 2))
 
