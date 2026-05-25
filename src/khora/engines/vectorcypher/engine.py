@@ -1829,8 +1829,6 @@ class VectorCypherEngine:
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
         min_similarity: float = 0.0,
-        agentic: bool = False,
-        raw: bool = False,
         # VectorCypher-specific parameters
         temporal_filter: TemporalFilter | None = None,
         graph_depth: int | None = None,
@@ -1844,8 +1842,6 @@ class VectorCypherEngine:
             limit: Maximum number of results
             mode: Search mode (VECTOR, GRAPH, HYBRID)
             min_similarity: Minimum similarity threshold
-            agentic: Whether to use agentic mode
-            raw: Disable all LLM features
             temporal_filter: Temporal constraints
             graph_depth: Override graph traversal depth
             hybrid_alpha: Blend factor (0=graph, 1=vector)
@@ -1855,11 +1851,10 @@ class VectorCypherEngine:
         """
         retriever = self._get_retriever()
 
-        # Cascade temporal detection: Aho-Corasick dictionary → (optional) semantic
+        # Cascade temporal detection: Aho-Corasick dictionary -> (optional) semantic
         # Replaces the old regex + dateparser approach with categorized signals.
-        # Always run temporal detection (dictionary-based, <10μs, deterministic)
-        # even in raw mode — raw skips LLM enrichment but temporal category
-        # detection is critical for recency weighting and sort order.
+        # Always run temporal detection (dictionary-based, <10μs, deterministic);
+        # temporal category detection is critical for recency weighting and sort order.
         temporal_signal: TemporalSignal | None = None
         if temporal_filter is not None:
             # API-asserted bounds: synthesize an EXPLICIT signal so downstream

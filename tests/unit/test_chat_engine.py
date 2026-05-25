@@ -129,7 +129,6 @@ class TestChatEngineInit:
         assert engine.persona is persona
         assert engine.khora is kb
         assert engine.llm_model == "gpt-4o-mini"
-        assert engine.agentic_search is False
 
     def test_default_model(self) -> None:
         """Default LLM model is gpt-4o."""
@@ -159,15 +158,6 @@ class TestChatEngineInit:
         engine = ChatEngine(persona, kb)
 
         assert engine.prompt_generator.persona is persona
-
-    def test_agentic_search_flag(self) -> None:
-        """Agentic search flag is stored."""
-        persona = _make_persona()
-        kb = _make_mock_kb()
-
-        engine = ChatEngine(persona, kb, agentic_search=True)
-
-        assert engine.agentic_search is True
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +218,6 @@ class TestChatEngineChat:
             "test query",
             namespace=ns_id,
             limit=10,
-            agentic=False,
         )
 
     async def test_chat_calls_litellm(self) -> None:

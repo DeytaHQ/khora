@@ -207,7 +207,7 @@ KHORA_QUERY_DIVERSITY_LAMBDA=0.7
 
 ### Coherence Scoring (v0.3.5)
 
-The VectorCypher retriever applies a lightweight text coherence signal after RRF fusion to penalize word-shuffled confounders. This is particularly effective when using `raw=True` (no LLM reranking), where confounders would otherwise rank alongside genuine results.
+The VectorCypher retriever applies a lightweight text coherence signal after RRF fusion to penalize word-shuffled confounders. This is particularly effective when LLM reranking is disabled (`KHORA_QUERY_ENABLE_LLM_RERANKING=false`), where confounders would otherwise rank alongside genuine results.
 
 **How it works:** `bigram_coherence_score()` checks function-word transitions (articles → content words, prepositions → noun phrases). Genuine text has predictable bigram patterns; word-shuffled text does not. The score is blended into the RRF score via `apply_coherence_boost()`.
 

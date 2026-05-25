@@ -30,9 +30,6 @@ Example usage:
         result = await kb.remember_batch(documents)
         print(f"Processed {result.processed} docs, {result.entities} entities")
 
-    # Raw search without LLM features (for benchmarks)
-    results = await kb.recall(query, mode=SearchMode.ALL, raw=True)
-
     # Chronicle engine — temporal-semantic recall, no graph DB needed
     async with Khora("postgresql://localhost/mydb", engine="chronicle") as kb:
         ns = await kb.create_namespace()

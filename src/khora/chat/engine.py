@@ -37,7 +37,6 @@ class ChatEngine:
         persona: PersonaConfig,
         khora: Khora,
         llm_model: str = "gpt-4o",
-        agentic_search: bool = False,
     ) -> None:
         """Initialize the chat engine.
 
@@ -45,12 +44,10 @@ class ChatEngine:
             persona: Persona configuration for response generation
             khora: Khora instance for search
             llm_model: LLM model to use for response generation
-            agentic_search: Whether to use multi-step agentic search
         """
         self.persona = persona
         self.khora = khora
         self.llm_model = llm_model
-        self.agentic_search = agentic_search
 
         self.history_manager = HistoryManager(
             max_turns=persona.chat.max_history_turns,
@@ -92,7 +89,6 @@ class ChatEngine:
             query,
             namespace=namespace_id,
             limit=10,
-            agentic=self.agentic_search,
         )
 
         # Convert to simple dict format for prompt
