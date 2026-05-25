@@ -499,6 +499,7 @@ class VectorCypherRetriever:
         temporal_signal: TemporalSignal | None = None,
         graph_depth: int | None = None,
         limit: int | None = None,
+        min_similarity: float = 0.0,
     ) -> VectorCypherResult:
         """Retrieve relevant chunks using VectorCypher hybrid approach.
 
@@ -509,6 +510,9 @@ class VectorCypherRetriever:
             temporal_signal: Optional temporal detection signal (drives recency/sort behavior)
             graph_depth: Override for graph traversal depth
             limit: Maximum chunks to return
+            min_similarity: Minimum cosine-similarity floor applied to the
+                vector channel. Chunks below this threshold are filtered at
+                the storage layer before any fusion / reranking happens.
 
         Returns:
             VectorCypherResult with chunks, entities, and metadata
@@ -681,6 +685,7 @@ class VectorCypherRetriever:
                     temporal_sort=params.temporal_sort,
                     recency_floor=params.recency_floor,
                     temporal_signal=temporal_signal,
+                    min_similarity=min_similarity,
                 )
             else:
                 # Complex/moderate path: VectorCypher with parallel execution
@@ -696,6 +701,7 @@ class VectorCypherRetriever:
                         routing=routing,
                         temporal_params=params,
                         temporal_signal=temporal_signal,
+                        min_similarity=min_similarity,
                     )
                 except _NEO4J_TRANSIENT_ERRORS as e:
                     logger.warning(f"Graph search failed, falling back to vector-only: {e}")
@@ -711,6 +717,7 @@ class VectorCypherRetriever:
                         temporal_sort=params.temporal_sort,
                         recency_floor=params.recency_floor,
                         temporal_signal=temporal_signal,
+                        min_similarity=min_similarity,
                     )
 
             span.set_attribute("chunk_count", len(result.chunks))
@@ -932,6 +939,7 @@ class VectorCypherRetriever:
         *,
         temporal_params: RetrievalParams | None = None,
         temporal_signal: TemporalSignal | None = None,
+        min_similarity: float = 0.0,
     ) -> VectorCypherResult:
         """Internal VectorCypher retrieval with graph traversal.
 
@@ -966,6 +974,7 @@ class VectorCypherRetriever:
                 query_text=query,
                 limit=limit,
                 hybrid_alpha_override=effective_hybrid_alpha,
+                min_similarity=min_similarity,
             )
         )
 
@@ -1013,6 +1022,7 @@ class VectorCypherRetriever:
                 temporal_sort=_tp.temporal_sort,
                 recency_floor=_tp.recency_floor,
                 temporal_signal=temporal_signal,
+                min_similarity=min_similarity,
             )
 
         # Step 3b: Session-aware parallel retrieval
@@ -1088,6 +1098,7 @@ class VectorCypherRetriever:
                                 query_text=query,
                                 limit=per_session_limit,
                                 hybrid_alpha_override=effective_hybrid_alpha,
+                                min_similarity=min_similarity,
                             )
                         )
                     )
@@ -1104,6 +1115,7 @@ class VectorCypherRetriever:
                             query_text=query,
                             limit=fallback_limit,
                             hybrid_alpha_override=effective_hybrid_alpha,
+                            min_similarity=min_similarity,
                         )
                     )
                 )
@@ -1270,6 +1282,7 @@ class VectorCypherRetriever:
                 query_text=query,
                 limit=limit,
                 hybrid_alpha_override=effective_hybrid_alpha,
+                min_similarity=min_similarity,
             )
 
         # Await BM25 results (also launched in parallel at the beginning)
@@ -1300,6 +1313,7 @@ class VectorCypherRetriever:
                         temporal_filter=None,  # No temporal filter — want current state
                         query_text=current_state_query,
                         limit=limit,
+                        min_similarity=min_similarity,
                     )
                     # Merge sub-query results, deduplicating by chunk ID
                     existing_ids = {c[0] for c in vector_chunks}
@@ -1720,6 +1734,7 @@ class VectorCypherRetriever:
         temporal_sort: bool = False,
         recency_floor: float = 0.5,
         temporal_signal: TemporalSignal | None = None,
+        min_similarity: float = 0.0,
     ) -> VectorCypherResult:
         """Fallback to vector-only search when graph operations fail.
 
@@ -1741,6 +1756,7 @@ class VectorCypherRetriever:
             temporal_sort=temporal_sort,
             recency_floor=recency_floor,
             temporal_signal=temporal_signal,
+            min_similarity=min_similarity,
         )
 
         # Update metadata to indicate fallback was used
@@ -2051,6 +2067,7 @@ class VectorCypherRetriever:
         temporal_sort: bool = False,
         recency_floor: float = 0.5,
         temporal_signal: TemporalSignal | None = None,
+        min_similarity: float = 0.0,
     ) -> VectorCypherResult:
         """Simple retrieval path - vector search only.
 
@@ -2088,6 +2105,7 @@ class VectorCypherRetriever:
                 namespace_id=namespace_id,
                 query_embedding=query_embedding,
                 limit=limit,
+                min_similarity=min_similarity,
                 temporal_filter=temporal_filter,
                 hybrid_alpha=effective_alpha,
                 query_text=query,
@@ -2710,6 +2728,7 @@ class VectorCypherRetriever:
         limit: int,
         *,
         hybrid_alpha_override: float | None = None,
+        min_similarity: float = 0.0,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Direct vector search on chunks via pgvector.
 
@@ -2722,6 +2741,8 @@ class VectorCypherRetriever:
             hybrid_alpha_override: If set, overrides the configured hybrid_alpha.
                                    Used to force pure vector (1.0) when the BM25
                                    channel is active to avoid double-counting.
+            min_similarity: Per-call cosine-similarity floor applied at the
+                storage layer. Forwarded to ``TemporalVectorStore.search``.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -2732,6 +2753,7 @@ class VectorCypherRetriever:
                 namespace_id=namespace_id,
                 query_embedding=query_embedding,
                 limit=limit,
+                min_similarity=min_similarity,
                 temporal_filter=temporal_filter,
                 hybrid_alpha=effective_alpha,
                 query_text=query_text,

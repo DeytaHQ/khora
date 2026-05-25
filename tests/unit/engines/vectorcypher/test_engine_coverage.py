@@ -916,6 +916,16 @@ class TestRecallContextFormatting:
         assert signal.is_temporal is True
 
     @pytest.mark.asyncio
+    async def test_recall_forwards_min_similarity_to_retriever(self) -> None:
+        """#830 regression: ``recall(min_similarity=T)`` must be plumbed through to
+        ``retriever.retrieve(min_similarity=T)``. Prior to v0.17.1 the engine
+        declared the kwarg but did not forward it, so the floor was a no-op."""
+        engine = self._make_recall_engine()
+        await engine.recall("q", uuid4(), min_similarity=0.5)
+        call = engine._retriever.retrieve.call_args
+        assert call.kwargs["min_similarity"] == 0.5
+
+    @pytest.mark.asyncio
     async def test_recall_single_chunk_score_signals(self) -> None:
         """Single-chunk result still computes mean_score, variance=0, gap=0."""
         engine = self._make_recall_engine()

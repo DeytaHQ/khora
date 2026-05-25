@@ -1917,6 +1917,7 @@ class VectorCypherEngine:
                 temporal_signal=temporal_signal,
                 graph_depth=graph_depth,
                 limit=limit,
+                min_similarity=min_similarity,
             )
         finally:
             retriever._config.hybrid_alpha = original_alpha

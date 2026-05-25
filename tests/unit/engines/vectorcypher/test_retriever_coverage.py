@@ -704,6 +704,61 @@ class TestSimpleRetrieveExtra:
         assert result.chunks[1][0].content == "old"
 
     @pytest.mark.asyncio
+    async def test_simple_retrieve_forwards_min_similarity(self) -> None:
+        """#830 regression: ``_simple_retrieve(min_similarity=T)`` must forward
+        T to the vector store. Prior to v0.17.1 the value was silently dropped
+        before reaching pgvector's cosine floor."""
+        retriever = _make_retriever(config=RetrieverConfig(enable_reranking=False))
+        retriever._vector_store.search = AsyncMock(return_value=[])
+
+        routing = RoutingDecision(
+            complexity=QueryComplexity.SIMPLE, use_graph=False, graph_depth=0, confidence=0.5, reasoning=""
+        )
+        await retriever._simple_retrieve(
+            query="q",
+            query_embedding=[0.1],
+            namespace_id=uuid4(),
+            temporal_filter=None,
+            limit=10,
+            routing=routing,
+            min_similarity=0.42,
+        )
+        call = retriever._vector_store.search.call_args
+        assert call.kwargs["min_similarity"] == 0.42
+
+    @pytest.mark.asyncio
+    async def test_vector_search_chunks_forwards_min_similarity(self) -> None:
+        """#830 regression: ``_vector_search_chunks(min_similarity=T)`` reaches
+        the storage layer."""
+        retriever = _make_retriever()
+        retriever._vector_store.search = AsyncMock(return_value=[])
+        await retriever._vector_search_chunks(
+            query_embedding=[0.1],
+            namespace_id=uuid4(),
+            temporal_filter=None,
+            query_text="q",
+            limit=10,
+            min_similarity=0.33,
+        )
+        call = retriever._vector_store.search.call_args
+        assert call.kwargs["min_similarity"] == 0.33
+
+    @pytest.mark.asyncio
+    async def test_vector_search_chunks_default_min_similarity_is_zero(self) -> None:
+        """Callers that omit ``min_similarity`` keep the historical 0.0 floor."""
+        retriever = _make_retriever()
+        retriever._vector_store.search = AsyncMock(return_value=[])
+        await retriever._vector_search_chunks(
+            query_embedding=[0.1],
+            namespace_id=uuid4(),
+            temporal_filter=None,
+            query_text="q",
+            limit=10,
+        )
+        call = retriever._vector_store.search.call_args
+        assert call.kwargs["min_similarity"] == 0.0
+
+    @pytest.mark.asyncio
     async def test_temporal_sort_ordinal_ascending(self) -> None:
         """ORDINAL category re-sorts ascending (earliest first)."""
         retriever = _make_retriever(config=RetrieverConfig(enable_reranking=False))
