@@ -49,7 +49,7 @@ from .core.models.event import EventType
 from .core.recall_context import context_text
 from .dream import DreamConfig, DreamMode, DreamResult, DreamRunInfo, DreamScope, OpKind
 from .engines import create_engine, list_engines, register_engine
-from .exceptions import KhoraError
+from .exceptions import EngineCapabilityError, KhoraError
 from .extraction.skills import EntityTypeConfig, ExpertiseConfig, RelationshipTypeConfig
 from .hooks import SemanticFilter
 from .khora import (
@@ -71,6 +71,7 @@ from .query import SearchMode
 __version__ = __import__("importlib").metadata.version("khora")
 
 __all__ = [
+    "EngineCapabilityError",
     "KhoraError",
     "Khora",
     "LLMUsage",
