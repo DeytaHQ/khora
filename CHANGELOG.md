@@ -4,6 +4,34 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.17.1] - Recall-API contract repair (Damir feedback batch)
+
+Patch release on top of v0.17.0. Six bug reports from an external user (Damir Krstanovic) exposed `Khora.recall(...)` as a leaky abstraction: parameters documented but silently ignored, parameters that meant different things on different engines, behavior that contradicted docs. This release bundles a coherent contract repair across all three engines.
+
+### Added
+
+- **`EngineCapabilityError`** (`src/khora/exceptions.py`) - new exception raised when a caller passes a `SearchMode` an engine doesn't support. Exported from `khora` and `khora.exceptions`. Each engine now declares `supported_modes: ClassVar[frozenset[SearchMode]]` on the class.
+- **`khora.core.recall_scoring.min_max_normalize`** - shared helper used by Chronicle and Skeleton to normalize recall scores. Handles tied/single/empty inputs; returns `[1.0] * n` when all scores tie.
+
+### Changed
+
+- **`RecallChunk.score` is now min-max normalized rank in [0, 1] on every engine** (#834). Top chunk = 1.0, bottom = 0.0 (with 2+ chunks); single chunk = 1.0; tied = 1.0. Previously the field meant three different things: VectorCypher already returned this shape; Chronicle returned a post-rerank fused score (arbitrary scale); Skeleton returned raw cosine or BM25 (engine-internal). Callers writing `if chunk.score > 0.3` now get consistent semantics across engines.
+- **VectorCypher: `min_similarity` is now honored** (#830). The parameter was declared on `Khora.recall(min_similarity=T)` and forwarded into the VectorCypher engine but dropped at the retriever boundary, making it a no-op on the flagship engine while Skeleton and Chronicle honored it. The threshold is now applied as a raw-cosine floor on the vector channel before RRF fusion, matching Skeleton/Chronicle semantics (`engine.py` -> `retriever.retrieve()` -> `_vector_search_chunks()` -> `vector_store.search(min_similarity=T)`).
+- **VectorCypher: real channel-skip support for `mode=VECTOR / GRAPH / KEYWORD`** (#833). Previously VC collapsed every mode except `ALL` to `HYBRID`. The retriever now honors each mode by skipping the unused channels: VECTOR skips graph + BM25; GRAPH skips chunk-level vector + BM25 (entity-vector seeding still runs as graph entry point, by design); KEYWORD bypasses RRF fusion and surfaces BM25 chunks directly. `ALL` retains its existing balanced-RRF behavior (hybrid_alpha=0.5); `HYBRID` is vector-weighted hybrid (hybrid_alpha=0.7). Documented at the top of `engine.recall()`.
+- **Chronicle and Skeleton raise `EngineCapabilityError` on unsupported modes** (#833). Chronicle supports VECTOR, HYBRID, ALL (KEYWORD and GRAPH were silently returning empty results). Skeleton supports VECTOR, HYBRID, KEYWORD (GRAPH and ALL were silently mapping to HYBRID). Mode validation runs at the top of each engine's `recall()` before any I/O.
+
+### Removed
+
+- **`raw: bool` kwarg on `Khora.recall()`** (#831). Documented to "skip query understanding, entity linking, reranking, and HyDE" but never branched on in any engine body - HyDE / query understanding live in a separate `QueryEngine` not invoked from `engine.recall()` at all. For benchmark / LLM-free recall, use the config flags `enable_llm_reranking`, `enable_hyde`, and `temporal_llm_disambiguation_enabled` on `KhoraConfig.query`. Parameter removed from `Khora.recall()`, `MemoryEngineProtocol.recall()`, and all three engine signatures.
+- **`agentic: bool` kwarg on `Khora.recall()`** (#832). Documented to enable multi-step exploration with follow-up queries, but never branched on - implementation was removed when graphrag engine was deprecated, though the docstring was never updated. `AgenticSearchAgent` still lives at `khora.query.agentic` and can be invoked directly via `HybridQueryEngine.query(agentic=True)`. Re-introducing as a recall-level feature is queued for a future minor.
+- **`src/khora/__main__.py`** (#835). The file imported `khora.cli` which was removed when the CLI moved to a separate `khora-cli` package. `python -m khora` now produces the standard `No module named khora.__main__` Python message.
+
+### Migration
+
+- **Callers passing `raw=True` or `agentic=True`** to `Khora.recall(...)` will get a `TypeError: unexpected keyword argument`. The parameters never did what their docstrings claimed; deletion makes the documented contract honest. Switch LLM-free benchmark paths to the `KhoraConfig.query` flags listed above.
+- **Callers comparing `RecallChunk.score` against absolute thresholds** should re-tune. Pre-0.17.1 thresholds calibrated on Chronicle (post-rerank scores ~0.7) or Skeleton (raw cosine ~0.01) will not transfer to the new normalized [0, 1] rank scale.
+- **Callers passing `mode=KEYWORD` or `mode=GRAPH` to Chronicle, or `mode=GRAPH` or `mode=ALL` to Skeleton** will now hit `EngineCapabilityError` instead of getting silently-empty results. The error message lists `supported_modes` for the engine.
+
 ## [0.17.0] - Turbopuffer Skeleton backend + relationship-FK remap + API time-bound fix
 
 Minor release on top of v0.16.4. Headline is the new opt-in Turbopuffer backend for the Skeleton engine (serverless scale tier) alongside a vectorcypher correctness fix where entity ID canonicalization during upsert left relationships pointing at throwaway IDs - a sqlite_lance FK crash and a silent Neo4j edge drop. Plus a recall-API fix where explicit `temporal_filter` was bypassed on vectorcypher and graphrag, and two smaller ingest / vectorcypher hardening items.
