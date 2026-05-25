@@ -1,6 +1,7 @@
-"""Allow running as python -m khora."""
+"""Allow running as python -m khora.
 
-from .cli import main
+Khora is a library. The CLI tooling lives in the separate khora-cli package.
+"""
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit("Khora is a library and does not provide a CLI. Use khora-cli instead.")
