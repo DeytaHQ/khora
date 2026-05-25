@@ -110,3 +110,91 @@ async def test_recall_explicit_hybrid_alpha_overrides_mode_default() -> None:
     assert result.engine_info["hybrid_alpha"] == 0.25
     forwarded = temporal_store.search.await_args.kwargs["hybrid_alpha"]
     assert forwarded == 0.25
+
+
+async def test_recall_chunk_scores_are_min_max_normalized() -> None:
+    """#834: ``RecallChunk.score`` must be a min-max normalized rank in [0, 1].
+
+    Skeleton previously surfaced ``result.combined_score or result.similarity``
+    on an arbitrary scale (e.g. 0.013-0.015 for raw cosine). The unified
+    contract: top chunk = 1.0, bottom chunk = 0.0 when 2+ chunks are returned.
+    """
+    from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+
+    engine, temporal_store = _build_engine_with_stubs()
+    namespace_id = uuid4()
+
+    raw_scores = [0.01335, 0.01317, 0.01299]
+    results = [
+        TemporalSearchResult(
+            chunk=TemporalChunk(
+                id=uuid4(),
+                namespace_id=namespace_id,
+                document_id=uuid4(),
+                content=f"chunk-{i}",
+            ),
+            similarity=score,
+        )
+        for i, score in enumerate(raw_scores)
+    ]
+    temporal_store.search = AsyncMock(return_value=results)
+
+    recall_result = await engine.recall("alpha", namespace_id, mode=SearchMode.VECTOR)
+
+    assert len(recall_result.chunks) == 3
+    assert recall_result.chunks[0].score == 1.0
+    assert recall_result.chunks[-1].score == 0.0
+    # Middle chunk lands strictly between.
+    assert 0.0 < recall_result.chunks[1].score < 1.0
+
+
+async def test_recall_chunk_scores_single_chunk_is_one() -> None:
+    """Edge case: a single chunk gets score=1.0 (degenerate min-max)."""
+    from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+
+    engine, temporal_store = _build_engine_with_stubs()
+    namespace_id = uuid4()
+
+    results = [
+        TemporalSearchResult(
+            chunk=TemporalChunk(
+                id=uuid4(),
+                namespace_id=namespace_id,
+                document_id=uuid4(),
+                content="solo",
+            ),
+            similarity=0.42,
+        )
+    ]
+    temporal_store.search = AsyncMock(return_value=results)
+
+    recall_result = await engine.recall("alpha", namespace_id, mode=SearchMode.VECTOR)
+
+    assert len(recall_result.chunks) == 1
+    assert recall_result.chunks[0].score == 1.0
+
+
+async def test_recall_chunk_scores_all_tied_collapse_to_one() -> None:
+    """Edge case: when max == min, every chunk collapses to 1.0."""
+    from khora.engines.skeleton.backends import TemporalChunk, TemporalSearchResult
+
+    engine, temporal_store = _build_engine_with_stubs()
+    namespace_id = uuid4()
+
+    results = [
+        TemporalSearchResult(
+            chunk=TemporalChunk(
+                id=uuid4(),
+                namespace_id=namespace_id,
+                document_id=uuid4(),
+                content=f"tied-{i}",
+            ),
+            similarity=0.5,
+        )
+        for i in range(3)
+    ]
+    temporal_store.search = AsyncMock(return_value=results)
+
+    recall_result = await engine.recall("alpha", namespace_id, mode=SearchMode.VECTOR)
+
+    assert [c.score for c in recall_result.chunks] == [1.0, 1.0, 1.0]
