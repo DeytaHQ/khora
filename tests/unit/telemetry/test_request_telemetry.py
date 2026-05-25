@@ -180,6 +180,13 @@ class TestParseRateLimitHeaders:
         """A None response is tolerated and yields {}."""
         assert parse_rate_limit_headers(None) == {}
 
+    def test_non_dict_hidden_params_tolerated(self) -> None:
+        """A non-dict ``_hidden_params`` is ignored, not crashed on."""
+        resp = _response_with(headers={"x-ratelimit-remaining-requests": "7"})
+        resp._hidden_params = "not-a-dict"  # litellm should never do this, but be safe
+        # The _headers source still parses; the bad _hidden_params is skipped.
+        assert parse_rate_limit_headers(resp) == {"ratelimit.remaining_requests": 7}
+
     def test_unrelated_headers_ignored(self) -> None:
         """Headers not in the spec are dropped."""
         resp = _response_with(headers={"content-type": "application/json", "x-request-id": "abc"})
