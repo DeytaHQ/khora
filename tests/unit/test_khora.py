@@ -1122,40 +1122,6 @@ class TestStorageProperty:
 
 
 # ---------------------------------------------------------------------------
-# New API: Raw flag in recall
-# ---------------------------------------------------------------------------
-
-
-class TestRecallRawMode:
-    """Tests for raw mode in recall()."""
-
-    @pytest.mark.asyncio
-    async def test_raw_mode_passed_to_engine(self) -> None:
-        """raw=True is passed to engine."""
-        kb = _make_kb(connected=True)
-        ns_id = uuid4()
-
-        mock_result = RecallResult(
-            query="test",
-            namespace_id=ns_id,
-            documents=[],
-            chunks=[],
-            entities=[],
-            relationships=[],
-        )
-        kb._engine.recall = AsyncMock(return_value=mock_result)
-
-        with (
-            patch("khora.telemetry.context.ensure_trace_id"),
-            patch("khora.telemetry.context.clear_trace_id"),
-        ):
-            await kb.recall("test query", namespace=ns_id, raw=True)
-
-        call_kwargs = kb._engine.recall.call_args
-        assert call_kwargs.kwargs.get("raw") is True
-
-
-# ---------------------------------------------------------------------------
 # New API: Convenience methods
 # ---------------------------------------------------------------------------
 

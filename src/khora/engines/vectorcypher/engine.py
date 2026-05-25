@@ -21,7 +21,7 @@ import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from uuid import UUID
 
 from loguru import logger
@@ -46,6 +46,7 @@ from khora.core.recall_abstention import compute_abstention_signals
 from khora.engines._storage_config import build_storage_config
 from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
 from khora.engines.skeleton.skeleton import SkeletonIndexer
+from khora.exceptions import EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
@@ -390,6 +391,20 @@ class VectorCypherEngine:
             graph_depth=2,
         )
     """
+
+    # VectorCypher honestly implements all five modes. KEYWORD / VECTOR /
+    # GRAPH skip the unused channels at retrieve-time; HYBRID is the default
+    # (vector-weighted RRF); ALL is HYBRID with ``hybrid_alpha=0.5``
+    # (balanced fusion). See ``recall`` below.
+    supported_modes: ClassVar[frozenset[SearchMode]] = frozenset(
+        {
+            SearchMode.VECTOR,
+            SearchMode.GRAPH,
+            SearchMode.HYBRID,
+            SearchMode.ALL,
+            SearchMode.KEYWORD,
+        }
+    )
 
     def __init__(
         self,
@@ -1829,8 +1844,6 @@ class VectorCypherEngine:
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
         min_similarity: float = 0.0,
-        agentic: bool = False,
-        raw: bool = False,
         # VectorCypher-specific parameters
         temporal_filter: TemporalFilter | None = None,
         graph_depth: int | None = None,
@@ -1842,10 +1855,13 @@ class VectorCypherEngine:
             query: Query text
             namespace_id: Namespace to search
             limit: Maximum number of results
-            mode: Search mode (VECTOR, GRAPH, HYBRID)
+            mode: Search mode. VectorCypher implements all five honestly:
+                ``VECTOR`` (vector channel only), ``GRAPH`` (graph expansion
+                only - no vector chunks, no BM25), ``KEYWORD`` (BM25 only),
+                ``HYBRID`` (vector-weighted RRF, the default), and ``ALL``
+                (balanced fusion with ``hybrid_alpha=0.5``). Unsupported
+                modes raise ``EngineCapabilityError``.
             min_similarity: Minimum similarity threshold
-            agentic: Whether to use agentic mode
-            raw: Disable all LLM features
             temporal_filter: Temporal constraints
             graph_depth: Override graph traversal depth
             hybrid_alpha: Blend factor (0=graph, 1=vector)
@@ -1853,13 +1869,16 @@ class VectorCypherEngine:
         Returns:
             RecallResult with chunks, entities, and context
         """
+        # #833: validate the mode contract before doing any storage work.
+        if mode not in self.supported_modes:
+            raise EngineCapabilityError("vectorcypher", mode, self.supported_modes)
+
         retriever = self._get_retriever()
 
-        # Cascade temporal detection: Aho-Corasick dictionary → (optional) semantic
+        # Cascade temporal detection: Aho-Corasick dictionary -> (optional) semantic
         # Replaces the old regex + dateparser approach with categorized signals.
-        # Always run temporal detection (dictionary-based, <10μs, deterministic)
-        # even in raw mode — raw skips LLM enrichment but temporal category
-        # detection is critical for recency weighting and sort order.
+        # Always run temporal detection (dictionary-based, <10μs, deterministic);
+        # temporal category detection is critical for recency weighting and sort order.
         temporal_signal: TemporalSignal | None = None
         if temporal_filter is not None:
             # API-asserted bounds: synthesize an EXPLICIT signal so downstream
@@ -1922,6 +1941,8 @@ class VectorCypherEngine:
                 temporal_signal=temporal_signal,
                 graph_depth=graph_depth,
                 limit=limit,
+                min_similarity=min_similarity,
+                mode=mode,
             )
         finally:
             retriever._config.hybrid_alpha = original_alpha

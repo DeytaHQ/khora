@@ -267,3 +267,82 @@ async def test_recall_metadata_keeps_existing_keys():
     assert "timings" in result.engine_info
     # New key
     assert "abstention_signals" in result.engine_info
+
+
+# ---------------------------------------------------------------------------
+# #834: RecallChunk.score is min-max normalized in [0, 1] on every engine.
+# ---------------------------------------------------------------------------
+
+
+def _make_chunk_with_doc(content: str) -> Chunk:
+    """Chunk wired with namespace + document IDs and a recent created_at."""
+    return Chunk(
+        id=uuid4(),
+        namespace_id=uuid4(),
+        document_id=uuid4(),
+        content=content,
+        created_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_recall_chunk_scores_are_min_max_normalized():
+    """#834: Chronicle RecallChunk.score is min-max normalized in [0, 1].
+
+    Reporter Damir observed post-rerank fused scores on an arbitrary scale,
+    e.g. [0.7285, 0.0236, 0.0171]. The unified contract: top = 1.0, bottom
+    = 0.0 in the returned set.
+    """
+    engine = _make_engine()
+
+    chunks = [_make_chunk_with_doc(f"chunk-{i}") for i in range(3)]
+    # Raw cosines on the semantic channel - descending order, distinct values
+    # so the post-fusion fused score is also strictly monotonic.
+    semantic_results: list[tuple[Chunk, float]] = [
+        (chunks[0], 0.92),
+        (chunks[1], 0.61),
+        (chunks[2], 0.31),
+    ]
+
+    mock_storage = MagicMock()
+    mock_storage.search_fulltext_chunks = AsyncMock(return_value=[])
+    mock_storage.search_similar_chunks = AsyncMock(return_value=semantic_results)
+    mock_storage.search_similar_entities = AsyncMock(return_value=[])
+    engine._storage = mock_storage
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed = AsyncMock(return_value=[0.1] * 1536)
+    engine._embedder = mock_embedder
+    engine._connected = True
+
+    result: RecallResult = await engine.recall("alpha", uuid4(), limit=3)
+
+    assert len(result.chunks) == 3
+    assert result.chunks[0].score == 1.0
+    assert result.chunks[-1].score == 0.0
+    # The middle chunk must fall strictly between - rules out the legacy
+    # "raw fused score" leak where the middle could equal one of the bounds.
+    assert 0.0 < result.chunks[1].score < 1.0
+
+
+@pytest.mark.asyncio
+async def test_recall_chunk_scores_single_chunk_is_one():
+    """Edge case: a single returned chunk collapses to score=1.0."""
+    engine = _make_engine()
+
+    chunks = [_make_chunk_with_doc("solo")]
+    mock_storage = MagicMock()
+    mock_storage.search_fulltext_chunks = AsyncMock(return_value=[])
+    mock_storage.search_similar_chunks = AsyncMock(return_value=[(chunks[0], 0.42)])
+    mock_storage.search_similar_entities = AsyncMock(return_value=[])
+    engine._storage = mock_storage
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed = AsyncMock(return_value=[0.1] * 1536)
+    engine._embedder = mock_embedder
+    engine._connected = True
+
+    result: RecallResult = await engine.recall("alpha", uuid4(), limit=3)
+
+    assert len(result.chunks) == 1
+    assert result.chunks[0].score == 1.0

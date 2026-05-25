@@ -172,17 +172,14 @@ result: RecallResult = await kb.recall(
     limit: int = 10,
     mode: SearchMode = SearchMode.HYBRID,
     min_similarity: float = 0.0,
-    agentic: bool = False,
-    raw: bool = False,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
 )
 ```
 
 - `mode` - one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, or `ALL`.
-- `agentic=True` - multi-step exploration with follow-up queries.
-- `raw=True` - skips query understanding, reranking, HyDE, and entity linking (useful for benchmarks).
 - `start_time` / `end_time` - explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required. Honored on all three engines (chronicle, vectorcypher, graphrag) as of v0.17.0 - vectorcypher and graphrag previously dropped the explicit bound silently.
+- To skip LLM-side work (reranking, HyDE expansion), set the config flags `enable_llm_reranking=False` and `enable_hyde="never"` on `KhoraConfig.query` (env: `KHORA_QUERY_ENABLE_LLM_RERANKING`, `KHORA_QUERY_ENABLE_HYDE`).
 
 ### `context_text`
 

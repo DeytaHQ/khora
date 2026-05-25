@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -23,6 +23,11 @@ class MemoryEngineProtocol(Protocol):
     Engines encapsulate the full implementation of memory storage and retrieval.
     The Khora facade delegates all operations to the configured engine.
     """
+
+    # Each engine declares the ``SearchMode`` values it implements honestly.
+    # ``recall()`` raises ``EngineCapabilityError`` for any mode outside this
+    # set rather than silently degrading. See ``khora.exceptions``.
+    supported_modes: ClassVar[frozenset[SearchMode]]
 
     # =========================================================================
     # Lifecycle
@@ -106,8 +111,6 @@ class MemoryEngineProtocol(Protocol):
         limit: int = 10,
         mode: SearchMode = ...,
         min_similarity: float = 0.0,
-        agentic: bool = False,
-        raw: bool = False,
         # Temporal parameters (optional — engines may ignore these)
         temporal_filter: Any | None = None,
         recency_bias: float | None = None,
@@ -120,8 +123,6 @@ class MemoryEngineProtocol(Protocol):
             limit: Maximum results to return
             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
             min_similarity: Minimum similarity threshold
-            agentic: If True, use multi-step agentic search
-            raw: If True, skip all LLM features
             temporal_filter: Optional temporal filter for time-scoped retrieval.
                 Type varies by engine (e.g. TemporalFilter for Skeleton).
                 Engines that do not support temporal filtering may ignore this.

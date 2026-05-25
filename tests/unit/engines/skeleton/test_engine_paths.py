@@ -278,7 +278,8 @@ class TestRecall:
         assert len(result.chunks) == 1
         returned_chunk = result.chunks[0]
         assert returned_chunk.content == "hello"
-        assert returned_chunk.score == 0.9
+        # Single-chunk recall: min-max normalization collapses to 1.0 (#834).
+        assert returned_chunk.score == 1.0
         assert "hello" in returned_chunk.content
         assert result.engine_info["backend"] == "pgvector"
         eng._temporal_store.search.assert_awaited_once()

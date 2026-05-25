@@ -29,7 +29,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from uuid import UUID
 
 from loguru import logger
@@ -42,6 +42,7 @@ from khora.core.models.recall import (
     RecallEntity,
 )
 from khora.core.recall_abstention import compute_abstention_signals
+from khora.core.recall_scoring import min_max_normalize
 from khora.engines._storage_config import build_storage_config
 from khora.engines.chronicle.compression import (
     FactExtractor,
@@ -50,6 +51,7 @@ from khora.engines.chronicle.compression import (
     MemoryFact,
 )
 from khora.engines.chronicle.events import ChronicleEvent, EventExtractor
+from khora.exceptions import EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
@@ -447,6 +449,16 @@ class ChronicleEngine:
                 entity_types=["PERSON"], relationship_types=["KNOWS"])
             result = await kb.recall("query", namespace=ns_id)
     """
+
+    # #833: Chronicle's 4-channel design supports VECTOR (semantic only),
+    # HYBRID (semantic + BM25 + temporal + entity), and ALL (same as HYBRID
+    # here - no extra channels to add). KEYWORD and GRAPH are NOT supported:
+    # KEYWORD would require disabling the temporal + entity channels and
+    # returning only BM25 results, which contradicts chronicle's design
+    # intent (temporal scoring is its differentiator); GRAPH is impossible
+    # because chronicle has no graph backend. Both raise
+    # ``EngineCapabilityError``.
+    supported_modes: ClassVar[frozenset[SearchMode]] = frozenset({SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL})
 
     def __init__(
         self,
@@ -1183,8 +1195,6 @@ class ChronicleEngine:
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
         min_similarity: float = 0.0,
-        agentic: bool = False,
-        raw: bool = False,
         temporal_filter: Any | None = None,
         recency_bias: float | None = None,
     ) -> RecallResult:
@@ -1193,8 +1203,8 @@ class ChronicleEngine:
         Phase 1 channels:
           1. Semantic (vector similarity via pgvector)
           2. BM25 (PostgreSQL full-text search)
-          3. Temporal — stubbed, returns empty (Phase 2)
-          4. Entity — stubbed, returns empty (Phase 2)
+          3. Temporal - stubbed, returns empty (Phase 2)
+          4. Entity - stubbed, returns empty (Phase 2)
 
         Results are fused via Reciprocal Rank Fusion and then re-scored
         with Ebbinghaus temporal decay.
@@ -1205,14 +1215,16 @@ class ChronicleEngine:
             limit: Maximum results
             mode: Search mode (VECTOR, KEYWORD, HYBRID, ALL)
             min_similarity: Minimum similarity threshold
-            agentic: Reserved for future multi-step search
-            raw: If True, skip LLM features (temporal decay still applies)
             temporal_filter: Reserved for Phase 2 temporal filtering
             recency_bias: Override temporal decay weight (0.0-1.0)
 
         Returns:
             RecallResult with fused and decay-scored chunks
         """
+        # #833: validate the mode contract before doing any storage work.
+        if mode not in self.supported_modes:
+            raise EngineCapabilityError("chronicle", mode, self.supported_modes)
+
         storage = self._get_storage()
         embedder = self._get_embedder()
         timings: dict[str, float] = {}
@@ -1540,6 +1552,13 @@ class ChronicleEngine:
             f"in {timings['total_ms']:.1f}ms"
         )
 
+        # #834: ``RecallChunk.score`` is a min-max normalized rank in [0, 1]
+        # across all engines. The raw post-rerank fused score (cross-encoder +
+        # temporal decay + version + RRF) lives on an arbitrary scale; min-max
+        # collapses it to the documented top=1.0 / bottom=0.0 shape. Normalize
+        # AFTER cross-session expansion and the final ``[:limit]`` trim so the
+        # top of the returned set gets 1.0, not some pre-expansion intermediate.
+        normalized_chunk_scores = min_max_normalize([s for _, s in chunks_with_scores])
         recall_chunks = [
             RecallChunk(
                 id=chunk.id,
@@ -1550,7 +1569,7 @@ class ChronicleEngine:
                 occurred_at=chunk.source_timestamp,
                 chunker_info=chunk.chunker_info or {},
             )
-            for chunk, score in chunks_with_scores
+            for (chunk, _), score in zip(chunks_with_scores, normalized_chunk_scores, strict=False)
         ]
 
         recall_entities = [

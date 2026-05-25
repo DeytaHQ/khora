@@ -1708,8 +1708,6 @@ class Khora:
         limit: int = 10,
         mode: SearchMode = SearchMode.HYBRID,
         min_similarity: float = 0.0,
-        agentic: bool = False,
-        raw: bool = False,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
     ) -> RecallResult:
@@ -1721,27 +1719,12 @@ class Khora:
         3. Fuses results using Reciprocal Rank Fusion
         4. Returns ranked results
 
-        When agentic=True, uses multi-step exploration:
-        1. Initial comprehensive search with query understanding
-        2. Executes pre-computed follow-up queries for deeper exploration
-        3. Explores under-represented sources
-        4. Returns combined results with full trace
-
-        When raw=True, skips all LLM features:
-        - Query understanding
-        - Entity linking
-        - Reranking
-        - HyDE expansion
-        This is useful for benchmarks and simple searches.
-
         Args:
             query: Query text
             namespace: Namespace UUID (as UUID or string)
             limit: Maximum results to return
             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
             min_similarity: Minimum similarity threshold
-            agentic: If True, use multi-step agentic search (default: False)
-            raw: If True, skip all LLM features (default: False)
             start_time: Optional lower bound (inclusive) for memory time.
                 Timezone-aware datetimes are recommended; naive datetimes are
                 assumed UTC. When provided, bypasses NLP temporal detection.
@@ -1823,8 +1806,6 @@ class Khora:
                     limit=limit,
                     mode=mode,
                     min_similarity=min_similarity,
-                    agentic=agentic,
-                    raw=raw,
                     temporal_filter=temporal_filter,
                 )
                 # Engines return DocumentProjection stubs (id + bare
