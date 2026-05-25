@@ -29,7 +29,7 @@ import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from uuid import UUID
 
 from loguru import logger
@@ -51,6 +51,7 @@ from khora.engines.chronicle.compression import (
     MemoryFact,
 )
 from khora.engines.chronicle.events import ChronicleEvent, EventExtractor
+from khora.exceptions import EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
@@ -448,6 +449,16 @@ class ChronicleEngine:
                 entity_types=["PERSON"], relationship_types=["KNOWS"])
             result = await kb.recall("query", namespace=ns_id)
     """
+
+    # #833: Chronicle's 4-channel design supports VECTOR (semantic only),
+    # HYBRID (semantic + BM25 + temporal + entity), and ALL (same as HYBRID
+    # here - no extra channels to add). KEYWORD and GRAPH are NOT supported:
+    # KEYWORD would require disabling the temporal + entity channels and
+    # returning only BM25 results, which contradicts chronicle's design
+    # intent (temporal scoring is its differentiator); GRAPH is impossible
+    # because chronicle has no graph backend. Both raise
+    # ``EngineCapabilityError``.
+    supported_modes: ClassVar[frozenset[SearchMode]] = frozenset({SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.ALL})
 
     def __init__(
         self,
@@ -1210,6 +1221,10 @@ class ChronicleEngine:
         Returns:
             RecallResult with fused and decay-scored chunks
         """
+        # #833: validate the mode contract before doing any storage work.
+        if mode not in self.supported_modes:
+            raise EngineCapabilityError("chronicle", mode, self.supported_modes)
+
         storage = self._get_storage()
         embedder = self._get_embedder()
         timings: dict[str, float] = {}

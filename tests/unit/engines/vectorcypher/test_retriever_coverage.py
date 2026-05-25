@@ -759,6 +759,80 @@ class TestSimpleRetrieveExtra:
         assert call.kwargs["min_similarity"] == 0.0
 
     @pytest.mark.asyncio
+    async def test_simple_retrieve_vector_mode_skips_bm25(self) -> None:
+        """#833 mode=VECTOR: pgvector-internal BM25 is disabled (alpha=None),
+        and no separate BM25 channel runs."""
+        from khora.query import SearchMode
+
+        config = RetrieverConfig(enable_bm25_channel=True, enable_reranking=False)
+        storage = MagicMock()
+        # Sentinel: this MUST NOT be awaited.
+        storage.search_fulltext_chunks = AsyncMock(return_value=[])
+        retriever = _make_retriever(config=config, storage=storage)
+        retriever._vector_store.search = AsyncMock(return_value=[])
+
+        routing = RoutingDecision(
+            complexity=QueryComplexity.SIMPLE, use_graph=False, graph_depth=0, confidence=0.5, reasoning=""
+        )
+        await retriever._simple_retrieve(
+            query="q",
+            query_embedding=[0.1],
+            namespace_id=uuid4(),
+            temporal_filter=None,
+            limit=10,
+            routing=routing,
+            mode=SearchMode.VECTOR,
+        )
+        # The pgvector search was called with hybrid_alpha=None
+        # (pure vector, no internal RRF with BM25).
+        assert retriever._vector_store.search.call_args.kwargs["hybrid_alpha"] is None
+        # The independent BM25 channel never ran.
+        storage.search_fulltext_chunks.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_simple_retrieve_keyword_mode_skips_vector(self) -> None:
+        """#833 mode=KEYWORD: vector_store.search is skipped entirely;
+        chunks come solely from the BM25 channel."""
+        from khora.query import SearchMode
+
+        config = RetrieverConfig(enable_reranking=False)
+        storage = MagicMock()
+        # _bm25_search_chunks delegates to storage.search_fulltext_chunks
+        # which returns ``list[tuple[Chunk, float]]``.
+        bm25_chunk = _make_chunk("keyword-hit")
+        storage.search_fulltext_chunks = AsyncMock(return_value=[(bm25_chunk, 1.5)])
+        retriever = _make_retriever(config=config, storage=storage)
+        retriever._vector_store.search = AsyncMock(return_value=[])
+        # Prevent the temporal_store.search_fulltext fast-path from
+        # short-circuiting the storage delegate (it returns AsyncMock by
+        # default which is non-list, so the inner ``isinstance`` check
+        # already discards it - explicit assignment makes intent obvious).
+        retriever._vector_store.search_fulltext = AsyncMock(return_value=[])
+
+        routing = RoutingDecision(
+            complexity=QueryComplexity.SIMPLE, use_graph=False, graph_depth=0, confidence=0.5, reasoning=""
+        )
+        result = await retriever._simple_retrieve(
+            query="q",
+            query_embedding=[0.1],
+            namespace_id=uuid4(),
+            temporal_filter=None,
+            limit=10,
+            routing=routing,
+            mode=SearchMode.KEYWORD,
+        )
+        # vector_store.search was NOT called (KEYWORD bypasses it).
+        retriever._vector_store.search.assert_not_called()
+        # BM25 channel was called via the storage coordinator.
+        storage.search_fulltext_chunks.assert_awaited_once()
+        # The BM25 chunk surfaced in the results.
+        assert len(result.chunks) == 1
+        assert result.chunks[0][0].content == "keyword-hit"
+        # Channel-count metadata is honest: vector=0, bm25>0.
+        assert result.metadata["vector_chunk_count"] == 0
+        assert result.metadata["bm25_chunk_count"] == 1
+
+    @pytest.mark.asyncio
     async def test_temporal_sort_ordinal_ascending(self) -> None:
         """ORDINAL category re-sorts ascending (earliest first)."""
         retriever = _make_retriever(config=RetrieverConfig(enable_reranking=False))

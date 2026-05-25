@@ -37,6 +37,7 @@ except ImportError:
     ConnectionPoolError = ServiceUnavailable  # type: ignore[misc,assignment]
 
 from khora.core.models import Chunk, Entity, Relationship
+from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
 from khora.telemetry.metrics import metric_counter
 
@@ -500,6 +501,7 @@ class VectorCypherRetriever:
         graph_depth: int | None = None,
         limit: int | None = None,
         min_similarity: float = 0.0,
+        mode: SearchMode = SearchMode.HYBRID,
     ) -> VectorCypherResult:
         """Retrieve relevant chunks using VectorCypher hybrid approach.
 
@@ -513,6 +515,13 @@ class VectorCypherRetriever:
             min_similarity: Minimum cosine-similarity floor applied to the
                 vector channel. Chunks below this threshold are filtered at
                 the storage layer before any fusion / reranking happens.
+            mode: Search mode contract (#833). ``HYBRID`` and ``ALL`` keep the
+                existing multi-channel behaviour. ``VECTOR`` skips the graph
+                and BM25 channels (pure vector); ``GRAPH`` skips vector +
+                BM25 (chunks come solely from cypher expansion); ``KEYWORD``
+                skips vector + graph (BM25 only). The engine is responsible
+                for validating this against ``supported_modes`` before
+                calling retrieve.
 
         Returns:
             VectorCypherResult with chunks, entities, and metadata
@@ -656,8 +665,16 @@ class VectorCypherRetriever:
                     _post_hits = self._embedder.cache_stats["hits"]
                     embed_span.set_attribute("cache_hit", _post_hits > _pre_hits)
 
+            # #833 mode dispatch: VECTOR / KEYWORD short-circuit to the
+            # simple path (no graph traversal). GRAPH forces the vectorcypher
+            # path (entity expansion). HYBRID / ALL keep the legacy routing.
+            # The sub-paths receive ``mode`` and honor the channel-skip
+            # contract internally.
+            force_simple = mode in (SearchMode.VECTOR, SearchMode.KEYWORD)
+            force_graph = mode == SearchMode.GRAPH
+
             # Step 3: Vector search for entry points
-            if routing.complexity == QueryComplexity.TYPED_ENTITY_RECENT:
+            if not force_simple and not force_graph and routing.complexity == QueryComplexity.TYPED_ENTITY_RECENT:
                 # Phase C fast path (#569): a single Cypher query that
                 # finds typed entities (ACTION_ITEM, DECISION, BLOCKER,
                 # RISK) ordered by last MENTIONED_IN chunk timestamp.
@@ -671,8 +688,9 @@ class VectorCypherRetriever:
                     limit=limit,
                     routing=routing,
                 )
-            elif routing.complexity == QueryComplexity.SIMPLE:
-                # Simple path: direct chunk retrieval
+            elif force_simple or (not force_graph and routing.complexity == QueryComplexity.SIMPLE):
+                # Simple path: direct chunk retrieval. Also the destination
+                # for mode=VECTOR / mode=KEYWORD short-circuits.
                 result = await self._simple_retrieve(
                     query=query,
                     query_embedding=query_embedding,
@@ -686,9 +704,12 @@ class VectorCypherRetriever:
                     recency_floor=params.recency_floor,
                     temporal_signal=temporal_signal,
                     min_similarity=min_similarity,
+                    mode=mode,
                 )
             else:
-                # Complex/moderate path: VectorCypher with parallel execution
+                # Complex/moderate path: VectorCypher with parallel execution.
+                # Also the destination for mode=GRAPH (entity expansion,
+                # vector + BM25 channels skipped).
                 # Wrap in try/except for graceful fallback on graph failures
                 try:
                     result = await self._vectorcypher_retrieve(
@@ -702,6 +723,7 @@ class VectorCypherRetriever:
                         temporal_params=params,
                         temporal_signal=temporal_signal,
                         min_similarity=min_similarity,
+                        mode=mode,
                     )
                 except _NEO4J_TRANSIENT_ERRORS as e:
                     logger.warning(f"Graph search failed, falling back to vector-only: {e}")
@@ -718,6 +740,7 @@ class VectorCypherRetriever:
                         recency_floor=params.recency_floor,
                         temporal_signal=temporal_signal,
                         min_similarity=min_similarity,
+                        mode=mode,
                     )
 
             span.set_attribute("chunk_count", len(result.chunks))
@@ -940,6 +963,7 @@ class VectorCypherRetriever:
         temporal_params: RetrievalParams | None = None,
         temporal_signal: TemporalSignal | None = None,
         min_similarity: float = 0.0,
+        mode: SearchMode = SearchMode.HYBRID,
     ) -> VectorCypherResult:
         """Internal VectorCypher retrieval with graph traversal.
 
@@ -960,27 +984,35 @@ class VectorCypherRetriever:
         base_depth = graph_depth or routing.graph_depth
         entry_limit = routing.suggested_entry_limit
 
+        # #833 channel-skip: GRAPH mode drops vector + BM25 chunk channels
+        # (entry entities still come from the entity-level vector index,
+        # since the cypher expansion needs seeds).
+        skip_vector_channel = mode == SearchMode.GRAPH
+        skip_bm25_channel = mode == SearchMode.GRAPH
+
         # OPTIMIZATION: Start vector chunk search immediately in parallel
         # This operation doesn't depend on entity search results.
         # When the BM25 channel is active, use pure vector (hybrid_alpha=1.0)
         # to avoid double-counting BM25 (once in the vector blend, once as
         # its own independent channel).
         effective_hybrid_alpha = 1.0 if self._config.enable_bm25_channel else None
-        vector_chunks_task = asyncio.create_task(
-            self._vector_search_chunks(
-                query_embedding=query_embedding,
-                namespace_id=namespace_id,
-                temporal_filter=temporal_filter,
-                query_text=query,
-                limit=limit,
-                hybrid_alpha_override=effective_hybrid_alpha,
-                min_similarity=min_similarity,
+        vector_chunks_task: asyncio.Task[list[tuple[UUID, float, Chunk]]] | None = None
+        if not skip_vector_channel:
+            vector_chunks_task = asyncio.create_task(
+                self._vector_search_chunks(
+                    query_embedding=query_embedding,
+                    namespace_id=namespace_id,
+                    temporal_filter=temporal_filter,
+                    query_text=query,
+                    limit=limit,
+                    hybrid_alpha_override=effective_hybrid_alpha,
+                    min_similarity=min_similarity,
+                )
             )
-        )
 
         # Launch BM25 search in parallel with vector search (independent channel)
         bm25_chunks_task: asyncio.Task[list[tuple[UUID, float, Chunk]]] | None = None
-        if self._config.enable_bm25_channel and self._storage:
+        if not skip_bm25_channel and self._config.enable_bm25_channel and self._storage:
             bm25_chunks_task = asyncio.create_task(
                 self._bm25_search_chunks(
                     query=query,
@@ -999,11 +1031,12 @@ class VectorCypherRetriever:
         if not entry_entities:
             logger.debug("No entry entities found, falling back to simple retrieval")
             # Cancel the parallel tasks since we're taking a different path
-            vector_chunks_task.cancel()
-            try:
-                await vector_chunks_task
-            except asyncio.CancelledError:
-                pass
+            if vector_chunks_task is not None:
+                vector_chunks_task.cancel()
+                try:
+                    await vector_chunks_task
+                except asyncio.CancelledError:
+                    pass
             if bm25_chunks_task is not None:
                 bm25_chunks_task.cancel()
                 try:
@@ -1023,6 +1056,7 @@ class VectorCypherRetriever:
                 recency_floor=_tp.recency_floor,
                 temporal_signal=temporal_signal,
                 min_similarity=min_similarity,
+                mode=mode,
             )
 
         # Step 3b: Session-aware parallel retrieval
@@ -1055,11 +1089,12 @@ class VectorCypherRetriever:
 
             if len(entity_channels) >= 2:
                 # Cancel the original global vector search
-                vector_chunks_task.cancel()
-                try:
-                    await vector_chunks_task
-                except asyncio.CancelledError:
-                    pass
+                if vector_chunks_task is not None:
+                    vector_chunks_task.cancel()
+                    try:
+                        await vector_chunks_task
+                    except asyncio.CancelledError:
+                        pass
 
                 # Fan out per-session vector searches + one unscoped fallback
                 session_aware_activated = True
@@ -1261,19 +1296,28 @@ class VectorCypherRetriever:
         if _session_aware_chunks is not None:
             vector_chunks = _session_aware_chunks
             # The original task was already cancelled; no need to await.
-        else:
+        elif vector_chunks_task is not None:
             vector_chunks = await vector_chunks_task
+        else:
+            # #833: mode=GRAPH skipped the vector chunk channel entirely.
+            vector_chunks = []
 
         # Fallback: if temporal filter was too restrictive, re-run without it.
         # SKIP fallback when the temporal signal is EXPLICIT with a parsed date —
         # sparse results are the correct signal (the data may not exist for that
         # time window, which is important for abstention on unanswerable queries).
+        # Also skip when mode=GRAPH (vector channel is intentionally disabled).
         is_explicit_with_date = (
             temporal_signal
             and temporal_signal.category == TemporalCategory.EXPLICIT
             and temporal_signal.temporal_filter is not None
         )
-        if temporal_filter and len(vector_chunks) < limit // 2 and not is_explicit_with_date:
+        if (
+            not skip_vector_channel
+            and temporal_filter
+            and len(vector_chunks) < limit // 2
+            and not is_explicit_with_date
+        ):
             logger.debug(f"Temporal filter too restrictive ({len(vector_chunks)} results), falling back to unfiltered")
             vector_chunks = await self._vector_search_chunks(
                 query_embedding=query_embedding,
@@ -1735,6 +1779,7 @@ class VectorCypherRetriever:
         recency_floor: float = 0.5,
         temporal_signal: TemporalSignal | None = None,
         min_similarity: float = 0.0,
+        mode: SearchMode = SearchMode.HYBRID,
     ) -> VectorCypherResult:
         """Fallback to vector-only search when graph operations fail.
 
@@ -1743,7 +1788,12 @@ class VectorCypherRetriever:
         """
         logger.info("Using vector-only fallback due to graph search failure")
 
-        # Use the simple retrieval path which only needs pgvector
+        # Use the simple retrieval path which only needs pgvector. When the
+        # caller asked for mode=GRAPH and we ended up here because Neo4j is
+        # unavailable, downgrade to HYBRID in the fallback so the user gets
+        # *something* rather than an empty response - the metadata still
+        # tracks the failure via ``graph_unavailable``.
+        fallback_mode = SearchMode.HYBRID if mode == SearchMode.GRAPH else mode
         result = await self._simple_retrieve(
             query=query,
             query_embedding=query_embedding,
@@ -1757,6 +1807,7 @@ class VectorCypherRetriever:
             recency_floor=recency_floor,
             temporal_signal=temporal_signal,
             min_similarity=min_similarity,
+            mode=fallback_mode,
         )
 
         # Update metadata to indicate fallback was used
@@ -2068,6 +2119,7 @@ class VectorCypherRetriever:
         recency_floor: float = 0.5,
         temporal_signal: TemporalSignal | None = None,
         min_similarity: float = 0.0,
+        mode: SearchMode = SearchMode.HYBRID,
     ) -> VectorCypherResult:
         """Simple retrieval path - vector search only.
 
@@ -2079,37 +2131,53 @@ class VectorCypherRetriever:
         (matches the graph-path behaviour for temporal categories).
         """
         with trace_span("khora.vectorcypher.simple_retrieve", namespace_id=str(namespace_id)) as span:
+            # #833 channel-skip:
+            #   VECTOR  -> pure vector store search, no internal BM25 fusion,
+            #              no independent BM25 channel.
+            #   KEYWORD -> skip vector store search entirely; results come
+            #              solely from the BM25 channel.
+            #   HYBRID / ALL -> legacy behaviour (vector + optional BM25).
+            skip_vector_in_store = mode == SearchMode.KEYWORD
+            run_bm25_channel = mode in (SearchMode.HYBRID, SearchMode.ALL, SearchMode.KEYWORD)
+
             # When BM25 channel is active, use pure vector (hybrid_alpha=1.0)
             # to avoid double-counting BM25 in both the vector blend and the
             # independent channel. Otherwise, lower alpha for SIMPLE queries
             # to boost the pgvector-internal BM25 signal.
-            if self._config.enable_bm25_channel:
+            if mode == SearchMode.VECTOR:
+                # Pure-vector: skip the pgvector-internal BM25 fusion entirely.
+                effective_alpha = None
+            elif self._config.enable_bm25_channel and run_bm25_channel:
                 effective_alpha = 1.0
             else:
                 effective_alpha = self._config.hybrid_alpha
                 if routing.complexity == QueryComplexity.SIMPLE:
                     effective_alpha = min(effective_alpha, 0.5)
 
-            # Launch BM25 search in parallel with vector search
+            # Launch BM25 search in parallel with vector search. KEYWORD mode
+            # always launches BM25 (it is the only source of chunks).
             bm25_task: asyncio.Task[list[tuple[UUID, float, Chunk]]] | None = None
-            if self._config.enable_bm25_channel and self._storage:
+            if run_bm25_channel and self._storage and (self._config.enable_bm25_channel or mode == SearchMode.KEYWORD):
                 bm25_task = asyncio.create_task(
                     self._bm25_search_chunks(
                         query=query,
                         namespace_id=namespace_id,
-                        limit=self._config.bm25_top_k,
+                        limit=self._config.bm25_top_k if mode != SearchMode.KEYWORD else max(limit, 50),
                     )
                 )
 
-            results = await self._vector_store.search(
-                namespace_id=namespace_id,
-                query_embedding=query_embedding,
-                limit=limit,
-                min_similarity=min_similarity,
-                temporal_filter=temporal_filter,
-                hybrid_alpha=effective_alpha,
-                query_text=query,
-            )
+            if skip_vector_in_store:
+                results = []
+            else:
+                results = await self._vector_store.search(
+                    namespace_id=namespace_id,
+                    query_embedding=query_embedding,
+                    limit=limit,
+                    min_similarity=min_similarity,
+                    temporal_filter=temporal_filter,
+                    hybrid_alpha=effective_alpha,
+                    query_text=query,
+                )
 
             chunk_results: list[tuple[Chunk, float]] = []
             _max_raw_cosine = max((r.similarity for r in results), default=0.0)
@@ -2138,7 +2206,11 @@ class VectorCypherRetriever:
                     bm25_results = []
 
                 simple_bm25_count = len(bm25_results)
-                if bm25_results:
+                if mode == SearchMode.KEYWORD:
+                    # #833 KEYWORD: BM25-only - sole source of chunks. Skip
+                    # the RRF fusion (there are no vector results to merge).
+                    chunk_results = [(c, score) for _cid, score, c in bm25_results][:limit]
+                elif bm25_results:
                     from khora.query.fusion import reciprocal_rank_fusion as _nlist_rrf
 
                     bm25_weight = self._config.bm25_weight
@@ -2290,6 +2362,19 @@ class VectorCypherRetriever:
                 },
             }
 
+            # #833: honest channel-count reporting. KEYWORD mode has 0
+            # vector chunks; VECTOR mode has 0 BM25 chunks regardless of
+            # whether BM25 was queried.
+            if mode == SearchMode.KEYWORD:
+                reported_vector_count = 0
+                reported_bm25_count = simple_bm25_count
+            elif mode == SearchMode.VECTOR:
+                reported_vector_count = len(results)
+                reported_bm25_count = 0
+            else:
+                reported_vector_count = len(results)
+                reported_bm25_count = simple_bm25_count
+
             return VectorCypherResult(
                 chunks=chunk_results,
                 entities=[],
@@ -2297,9 +2382,9 @@ class VectorCypherRetriever:
                 metadata={
                     "search_mode": "simple_vector" if not simple_bm25_count else "simple_vector_bm25",
                     "routing_confidence": routing.confidence,
-                    "vector_chunk_count": len(chunk_results),
+                    "vector_chunk_count": reported_vector_count,
                     "graph_chunk_count": 0,
-                    "bm25_chunk_count": simple_bm25_count,
+                    "bm25_chunk_count": reported_bm25_count,
                     "effective_recency": effective_recency,
                     "temporal_sort": temporal_sort,
                     # Max raw cosine similarity (pre-fusion) for abstention system

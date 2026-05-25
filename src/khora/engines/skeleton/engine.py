@@ -14,7 +14,7 @@ import hashlib
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
 from loguru import logger
@@ -29,6 +29,7 @@ from khora.core.models import (
 from khora.core.models.recall import DocumentProjection, RecallChunk
 from khora.core.recall_scoring import min_max_normalize
 from khora.engines._storage_config import build_storage_config
+from khora.exceptions import EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
@@ -61,6 +62,16 @@ class SkeletonConstructionEngine:
         engine = SkeletonConstructionEngine(config, backend="weaviate", weaviate_url="http://localhost:8080")
         await engine.connect()
     """
+
+    # #833: Skeleton supports VECTOR (semantic), HYBRID (vector + BM25 via
+    # the temporal store), and KEYWORD (pure BM25). GRAPH is unsupported -
+    # Skeleton has no graph backend and its temporal edges are not wired
+    # into recall(). ALL is unsupported because Skeleton has no additional
+    # channels beyond what HYBRID already covers, so ALL would either
+    # silently equal HYBRID or mislead callers about extra signal sources.
+    supported_modes: ClassVar[frozenset[SearchMode]] = frozenset(
+        {SearchMode.VECTOR, SearchMode.HYBRID, SearchMode.KEYWORD}
+    )
 
     def __init__(
         self,
@@ -464,6 +475,10 @@ class SkeletonConstructionEngine:
         Returns:
             RecallResult with chunks and context
         """
+        # #833: validate the mode contract before doing any storage work.
+        if mode not in self.supported_modes:
+            raise EngineCapabilityError("skeleton", mode, self.supported_modes)
+
         embedder = self._get_embedder()
         temporal_store = self._get_temporal_store()
 

@@ -74,16 +74,14 @@ def _build_engine_with_stubs() -> tuple[SkeletonConstructionEngine, AsyncMock]:
         (SearchMode.VECTOR, 1.0),
         (SearchMode.KEYWORD, 0.0),
         (SearchMode.HYBRID, 0.7),
-        (SearchMode.GRAPH, 0.7),  # Falls into the else branch (treated as HYBRID).
-        (SearchMode.ALL, 0.7),  # Same.
     ],
 )
 async def test_recall_resolves_hybrid_alpha_per_mode(mode: SearchMode, expected_alpha: float) -> None:
-    """Every SearchMode value must resolve a ``hybrid_alpha`` without crashing.
+    """Every supported SearchMode resolves a ``hybrid_alpha`` without crashing.
 
-    Previously, ``mode=HYBRID`` (the Khora default) raised
-    ``AttributeError: SearchMode has no attribute 'KEYWORD'`` because the
-    ``elif`` RHS was evaluated whenever the ``if`` branch was False.
+    Skeleton's supported_modes is ``{VECTOR, HYBRID, KEYWORD}`` (#833).
+    GRAPH and ALL raise ``EngineCapabilityError`` - covered in the
+    dedicated test below.
     """
     engine, temporal_store = _build_engine_with_stubs()
     namespace_id = uuid4()
@@ -94,6 +92,23 @@ async def test_recall_resolves_hybrid_alpha_per_mode(mode: SearchMode, expected_
     temporal_store.search.assert_awaited_once()
     forwarded = temporal_store.search.await_args.kwargs["hybrid_alpha"]
     assert forwarded == expected_alpha
+
+
+@pytest.mark.parametrize("mode", [SearchMode.GRAPH, SearchMode.ALL])
+async def test_recall_unsupported_mode_raises(mode: SearchMode) -> None:
+    """#833: Skeleton refuses GRAPH (no graph backend) and ALL (no extra
+    channels beyond HYBRID). Both raise ``EngineCapabilityError``."""
+    from khora.exceptions import EngineCapabilityError
+
+    engine, temporal_store = _build_engine_with_stubs()
+    namespace_id = uuid4()
+
+    with pytest.raises(EngineCapabilityError) as excinfo:
+        await engine.recall("alpha", namespace_id, mode=mode)
+    assert excinfo.value.engine_name == "skeleton"
+    assert excinfo.value.mode is mode
+    # Storage was never touched.
+    temporal_store.search.assert_not_awaited()
 
 
 async def test_recall_explicit_hybrid_alpha_overrides_mode_default() -> None:

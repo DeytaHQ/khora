@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -23,6 +23,11 @@ class MemoryEngineProtocol(Protocol):
     Engines encapsulate the full implementation of memory storage and retrieval.
     The Khora facade delegates all operations to the configured engine.
     """
+
+    # Each engine declares the ``SearchMode`` values it implements honestly.
+    # ``recall()`` raises ``EngineCapabilityError`` for any mode outside this
+    # set rather than silently degrading. See ``khora.exceptions``.
+    supported_modes: ClassVar[frozenset[SearchMode]]
 
     # =========================================================================
     # Lifecycle

@@ -21,7 +21,7 @@ import time as _time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from uuid import UUID
 
 from loguru import logger
@@ -46,6 +46,7 @@ from khora.core.recall_abstention import compute_abstention_signals
 from khora.engines._storage_config import build_storage_config
 from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
 from khora.engines.skeleton.skeleton import SkeletonIndexer
+from khora.exceptions import EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
@@ -390,6 +391,20 @@ class VectorCypherEngine:
             graph_depth=2,
         )
     """
+
+    # VectorCypher honestly implements all five modes. KEYWORD / VECTOR /
+    # GRAPH skip the unused channels at retrieve-time; HYBRID is the default
+    # (vector-weighted RRF); ALL is HYBRID with ``hybrid_alpha=0.5``
+    # (balanced fusion). See ``recall`` below.
+    supported_modes: ClassVar[frozenset[SearchMode]] = frozenset(
+        {
+            SearchMode.VECTOR,
+            SearchMode.GRAPH,
+            SearchMode.HYBRID,
+            SearchMode.ALL,
+            SearchMode.KEYWORD,
+        }
+    )
 
     def __init__(
         self,
@@ -1840,7 +1855,12 @@ class VectorCypherEngine:
             query: Query text
             namespace_id: Namespace to search
             limit: Maximum number of results
-            mode: Search mode (VECTOR, GRAPH, HYBRID)
+            mode: Search mode. VectorCypher implements all five honestly:
+                ``VECTOR`` (vector channel only), ``GRAPH`` (graph expansion
+                only - no vector chunks, no BM25), ``KEYWORD`` (BM25 only),
+                ``HYBRID`` (vector-weighted RRF, the default), and ``ALL``
+                (balanced fusion with ``hybrid_alpha=0.5``). Unsupported
+                modes raise ``EngineCapabilityError``.
             min_similarity: Minimum similarity threshold
             temporal_filter: Temporal constraints
             graph_depth: Override graph traversal depth
@@ -1849,6 +1869,10 @@ class VectorCypherEngine:
         Returns:
             RecallResult with chunks, entities, and context
         """
+        # #833: validate the mode contract before doing any storage work.
+        if mode not in self.supported_modes:
+            raise EngineCapabilityError("vectorcypher", mode, self.supported_modes)
+
         retriever = self._get_retriever()
 
         # Cascade temporal detection: Aho-Corasick dictionary -> (optional) semantic
@@ -1918,6 +1942,7 @@ class VectorCypherEngine:
                 graph_depth=graph_depth,
                 limit=limit,
                 min_similarity=min_similarity,
+                mode=mode,
             )
         finally:
             retriever._config.hybrid_alpha = original_alpha
