@@ -166,14 +166,18 @@ No API key needed - just run Ollama locally.
 
 ```python
 # Uses configured default embedding model
-await kb.remember("Your content...")
-
-# Override for specific content
 await kb.remember(
     "Your content...",
-    embedding_model="text-embedding-3-large"
+    namespace=ns.namespace_id,
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["MENTIONS"],
 )
 ```
+
+`embedding_model` isn't a per-call kwarg on `kb.remember()`. Configure the
+embedding model globally via `KhoraConfig.embedding.model` (or env var
+`KHORA_EMBEDDING_MODEL`, or pass `embedding_model="text-embedding-3-large"`
+to the `Khora(...)` constructor).
 
 ### In Pipelines
 

@@ -426,12 +426,11 @@ async with Khora(db_url, engine="skeleton") as kb:
         query,
         namespace=ns_id,
         mode=SearchMode.HYBRID,
-        hybrid_alpha=0.7,
-        temporal_filter={
-            "occurred_after": "2024-01-01",
-            "author": "alice@company.com"
-        }
+        start_time=datetime(2024, 1, 1),
     )
+# Note: per-call hybrid alpha / author filters aren't exposed on the
+# public facade. Configure global weighting via environment variables
+# (see below) or `KhoraConfig.query`.
 ```
 
 ### Via Environment

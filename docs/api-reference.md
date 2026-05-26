@@ -13,7 +13,7 @@ from khora import (
     RememberResult,
     RecallResult,
     BatchResult,
-    BatchHandle,        # submit_batch() return value - has .wait() and .id
+    BatchHandle,        # submit_batch() return value - has .wait() and .batch_id
     DocumentResult,     # per-document callback payload from submit_batch
     Stats,
     LLMUsage,

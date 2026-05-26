@@ -443,5 +443,4 @@ edges = await storage.get_edges_by_entity(
 ## Related Documentation
 
 - [Skeleton Construction Engine](skeleton-engine.md) - Overview of the Skeleton Construction engine
-- [References](../REFERENCES.md) - Graphiti and TG-RAG paper citations
 - [Query Engine](../query-engine/temporal-queries.md) - Temporal query patterns

@@ -77,7 +77,7 @@ async def main():
         engine="chronicle",
         run_migrations=True,
     ) as kb:
-        ns = await kb.create_namespace("conversations")
+        ns = await kb.create_namespace()
 
         # Store conversation turns
         await kb.remember(
@@ -85,6 +85,8 @@ async def main():
             "Bob: I agree, monthly is too frequent.",
             namespace=ns.namespace_id,
             metadata={"occurred_at": "2026-03-15T10:00:00Z"},
+            entity_types=["PERSON", "TOPIC"],
+            relationship_types=["DISCUSSES", "AGREES_WITH"],
         )
 
         await kb.remember(
@@ -92,6 +94,8 @@ async def main():
             "The team prefers the faster cadence.",
             namespace=ns.namespace_id,
             metadata={"occurred_at": "2026-03-22T14:00:00Z"},
+            entity_types=["PERSON", "TOPIC"],
+            relationship_types=["DISCUSSES", "AGREES_WITH"],
         )
 
         # Temporal query - Chronicle uses recency to find the latest stance
@@ -109,8 +113,13 @@ asyncio.run(main())
 
 ```python
 async with Khora("memory://", engine="chronicle") as kb:
-    ns = await kb.create_namespace("demo")
-    await kb.remember("...", namespace=ns.namespace_id)
+    ns = await kb.create_namespace()
+    await kb.remember(
+        "...",
+        namespace=ns.namespace_id,
+        entity_types=["PERSON", "TOPIC"],
+        relationship_types=["DISCUSSES", "AGREES_WITH"],
+    )
     result = await kb.recall("...", namespace=ns.namespace_id)
 ```
 

@@ -195,11 +195,15 @@ chunk_overlap = 50
 from khora import Khora
 
 async with Khora() as kb:
+    ns = await kb.create_namespace()
     result = await kb.remember(
         "Einstein developed the theory of relativity in 1905.",
+        namespace=ns.namespace_id,
         title="Physics History",
         source="wikipedia",
         metadata={"topic": "physics"},
+        entity_types=["PERSON", "ORG"],
+        relationship_types=["MENTIONS"],
     )
 
     print(f"Document ID: {result.document_id}")
@@ -236,8 +240,11 @@ documents = [
 
 result = await kb.remember_batch(
     documents,
+    namespace=ns.namespace_id,
     skill_name="general_entities",
     max_concurrent=10,
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["MENTIONS"],
 )
 
 print(f"Processed: {result['processed_documents']}")
@@ -248,7 +255,7 @@ print(f"Skipped (duplicates): {result['skipped_documents']}")
 
 ```python
 # Remove document and all associated data
-await kb.forget(document_id)
+await kb.forget(document_id, namespace=ns.namespace_id)
 
 # This removes:
 # - The document

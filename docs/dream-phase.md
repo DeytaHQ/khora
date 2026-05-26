@@ -26,7 +26,7 @@ The master switch is `KhoraConfig.dream.enabled` (env var `KHORA_DREAM_ENABLED`)
 from khora import Khora, KhoraConfig, DreamConfig
 
 kb = Khora(
-    config=KhoraConfig(
+    KhoraConfig(
         dream=DreamConfig(
             enabled=True,
             report_file_sink_enabled=True,

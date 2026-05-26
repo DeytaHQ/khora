@@ -80,11 +80,14 @@ The engine's `recall()` method runs detection automatically when no explicit `Te
 results = await kb.recall("What instrument does Alice currently play?", namespace=ns_id)
 # → STATE_QUERY: recency_weight=0.5, temporal_sort=True
 
-# Explicit override - skips automatic detection
+# Explicit override - skips automatic detection.
+# `kb.recall()` accepts `start_time` / `end_time` directly:
+from datetime import datetime, timedelta, timezone
+
 results = await kb.recall(
     "product updates",
     namespace=ns_id,
-    temporal_filter=TemporalFilter.last_days(7),
+    start_time=datetime.now(timezone.utc) - timedelta(days=7),
 )
 ```
 
@@ -134,19 +137,13 @@ Cost: zero additional LLM calls - only the system prompt changes. Category detec
 
 ### Manual Recency Bias
 
-You can also set recency bias explicitly via the API:
+Per-call `recency_bias=` isn't exposed on `kb.recall()`. Configure
+recency weighting globally via `QueryConfig.apply_recency_bias` and
+`QueryConfig.recency_weight` (passed through `KhoraConfig.query` at
+construction time) or via `KHORA_QUERY_*` env vars:
 
-```python
-# All content, but prefer recent
-results = await kb.recall(
-    "team updates",
-    namespace=ns_id,
-    recency_bias=0.3,  # Boost recent content
-)
-```
-
-| Value | Effect |
-|-------|--------|
+| `recency_weight` | Effect |
+|------------------|--------|
 | `0.0` | No recency preference |
 | `0.1` | Subtle - barely noticeable |
 | `0.3` | Moderate - recent content noticeably higher |
@@ -294,12 +291,15 @@ results = await kb.recall("Did Alice switch teams?", namespace=ns_id)
 ### Explicit Temporal Filter
 
 ```python
-# Override automatic detection with a specific time range
+from datetime import datetime, timedelta, timezone
+
+# Override automatic detection with a specific time range. Per-call
+# recency_bias isn't exposed on the facade; set recency weighting
+# globally via KhoraConfig.query.
 results = await kb.recall(
     "incident reports",
     namespace=ns_id,
-    temporal_filter=TemporalFilter.last_hours(6),
-    recency_bias=0.5,
+    start_time=datetime.now(timezone.utc) - timedelta(hours=6),
 )
 ```
 
@@ -309,10 +309,8 @@ results = await kb.recall(
 results = await kb.recall(
     "quarterly planning",
     namespace=ns_id,
-    temporal_filter=TemporalFilter.between(
-        datetime(2024, 10, 1),
-        datetime(2024, 12, 31)
-    )
+    start_time=datetime(2024, 10, 1),
+    end_time=datetime(2024, 12, 31),
 )
 ```
 
@@ -322,38 +320,40 @@ results = await kb.recall(
 results = await kb.recall(
     "team structure",
     namespace=ns_id,
-    temporal_filter=TemporalFilter(
-        operator=TemporalOperator.DURING,
-        start=datetime(2022, 1, 1),
-        end=datetime(2022, 12, 31)
-    )
+    start_time=datetime(2022, 1, 1),
+    end_time=datetime(2022, 12, 31),
 )
 ```
 
 ### Full Config Example
 
 ```python
-from khora.query import QueryConfig
-from khora.query.temporal import TemporalFilter
+from datetime import datetime, timedelta, timezone
 
 results = await kb.recall(
     "product decisions",
     namespace=ns_id,
-    config=QueryConfig(
-        mode=SearchMode.HYBRID,
-        temporal_filter=TemporalFilter.last_days(30),
-        recency_bias=0.3,
-        limit=20
-    )
+    mode=SearchMode.HYBRID,
+    start_time=datetime.now(timezone.utc) - timedelta(days=30),
+    limit=20,
 )
 ```
+
+`kb.recall()` accepts `mode`, `limit`, `min_similarity`, `start_time`,
+and `end_time` directly. Fusion weights and recency knobs are global;
+configure them via `KhoraConfig.query` at construction time.
 
 ## Result Metadata
 
 Query results include information about temporal filtering:
 
 ```python
-result = await kb.recall(query, namespace=ns_id, temporal_filter=filter)
+result = await kb.recall(
+    query,
+    namespace=ns_id,
+    start_time=start,
+    end_time=end,
+)
 
 if result.temporal_info:
     print(f"Filter applied: {result.temporal_info.filter_applied}")

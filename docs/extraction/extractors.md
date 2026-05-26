@@ -372,10 +372,16 @@ for attempt in range(self._max_retries):
 ```python
 result = await kb.remember(
     content,
-    extraction_model="gpt-4o-mini",
+    namespace=ns.namespace_id,
     skill_name="general_entities",
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["WORKS_AT"],
 )
 ```
+
+`extraction_model` isn't a per-call kwarg on `kb.remember()`. Set the
+extraction model globally via `KhoraConfig.llm.model` (or env var
+`KHORA_LLM_MODEL`) at construction time.
 
 ### In Pipeline Tasks
 

@@ -188,16 +188,9 @@ source_priority = {
 
 To use these recommendations:
 
-```python
-from khora.query import HybridQueryEngine, QueryConfig
-
-# The engine can apply recommendations automatically
-result = await engine.query(
-    "Who manages engineering?",
-    namespace_id=namespace_id,
-    config=QueryConfig(use_adaptive_weights=True),
-)
-```
+Adaptive fusion (auto-tuned weights from query characteristics) isn't
+exposed as a per-call `QueryConfig` flag today; it's handled internally
+by the VectorCypher engine when temporal/complexity signals fire.
 
 ## Rust-Accelerated RRF
 
@@ -310,22 +303,17 @@ config = RetrieverConfig(
 
 ```python
 from khora import Khora, SearchMode
-from khora.query import QueryConfig
 
 async with Khora() as kb:
-    ns = await kb.create_namespace("default")
-    # Search with custom fusion settings
+    ns = await kb.create_namespace()
+    # kb.recall() exposes mode, limit and similarity threshold. Fusion
+    # weights (vector / graph / keyword / rrf_k) aren't per-call kwargs -
+    # set them globally via KhoraConfig.query or KHORA_QUERY_* env vars.
     results = await kb.recall(
         "Einstein's contributions to physics",
         namespace=ns.namespace_id,
         mode=SearchMode.ALL,
-        config=QueryConfig(
-            vector_weight=0.5,
-            graph_weight=0.3,
-            keyword_weight=0.2,
-            rrf_k=60,
-            limit=10
-        )
+        limit=10,
     )
 
     for chunk in results.chunks:

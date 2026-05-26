@@ -109,10 +109,10 @@ Every read, exists-check, and mutation on every storage backend (`RelationalBack
 If your code calls these methods directly:
 
 ```python
-# Before (v0.15.x)
-doc = await kb.get_document(doc_id)
-ent = await kb.storage.graph.get_entity(entity_id)
-await kb.storage.relational.delete_document(doc_id)
+# Before (v0.15.x) - implicit namespace was allowed
+# doc = await kb.get_document(doc_id)
+# ent = await kb.storage.graph.get_entity(entity_id)
+# await kb.storage.relational.delete_document(doc_id)
 
 # After (v0.16.0+)
 doc = await kb.get_document(doc_id, namespace=ns_id)
@@ -128,17 +128,27 @@ The `graphrag` engine is no longer available. Replace it with `vectorcypher`:
 
 ```python
 # Old (graphrag - no longer available)
-async with Khora(db_url, engine="graphrag") as kb:
-    await kb.remember(content, namespace=ns_id)
+# async with Khora(db_url, engine="graphrag") as kb:
+#     await kb.remember(content, namespace=ns_id, ...)
 
 # Drop-in replacement: vectorcypher with full extraction
 async with Khora(db_url, engine="vectorcypher",
                  engine_kwargs={"skeleton_core_ratio": 1.0}) as kb:
-    await kb.remember(content, namespace=ns_id)
+    await kb.remember(
+        content,
+        namespace=ns_id,
+        entity_types=["PERSON"],
+        relationship_types=["KNOWS"],
+    )
 
 # Or accept default selective extraction (recommended - 30% cheaper):
 async with Khora(db_url, engine="vectorcypher") as kb:
-    await kb.remember(content, namespace=ns_id)
+    await kb.remember(
+        content,
+        namespace=ns_id,
+        entity_types=["PERSON"],
+        relationship_types=["KNOWS"],
+    )
 ```
 
 Existing graphrag-ingested data remains queryable via `vectorcypher` against the same database - the table shapes are identical.

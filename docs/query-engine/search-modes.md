@@ -63,11 +63,9 @@ results = await kb.recall(
     "Machine Learning Team projects and members",
     namespace=ns_id,
     mode=SearchMode.GRAPH,
-    config=QueryConfig(
-        graph_depth=2,  # Go 2 hops out
-        graph_relationship_types=["WORKS_ON", "MEMBER_OF", "MANAGES"]
-    )
 )
+# Note: per-call graph depth isn't exposed; configure max_graph_depth
+# globally via KhoraConfig.query at construction time.
 ```
 
 **The magic**: If Alice works at Acme and Bob also works at Acme, graph search can infer they're colleagues - even if no document explicitly says so.
@@ -209,40 +207,26 @@ QueryConfig(
 Limit results to a time window:
 
 ```python
+from datetime import datetime, timedelta, timezone
+
 results = await kb.recall(
     "product decisions",
     namespace=ns_id,
     mode=SearchMode.HYBRID,
-    temporal_filter=TemporalFilter.last_days(30),
+    start_time=datetime.now(timezone.utc) - timedelta(days=30),
 )
 ```
 
 ### With Graph Constraints
 
-Control how deep and what relationships to explore:
+Graph depth is configured globally (`KhoraConfig.query.max_graph_depth`)
+rather than per-call - there's no `config=` kwarg on `kb.recall()`:
 
 ```python
 results = await kb.recall(
     "engineering org structure",
     namespace=ns_id,
     mode=SearchMode.GRAPH,
-    config=QueryConfig(
-        graph_depth=3,
-        graph_relationship_types=["REPORTS_TO", "MANAGES", "MEMBER_OF"]
-    )
-)
-```
-
-### With Agentic Exploration
-
-Let the query engine follow up on initial results:
-
-```python
-results = await kb.recall(
-    "competitive landscape",
-    namespace=ns_id,
-    mode=SearchMode.HYBRID,
-    config=QueryConfig(enable_agentic=True)
 )
 ```
 

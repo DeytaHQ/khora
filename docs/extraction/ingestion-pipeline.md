@@ -398,13 +398,16 @@ staging_semaphore = asyncio.Semaphore(20)
 | Entity writes | `_EntityKeyGate` (key-aware) | 12 concurrent, serializes overlapping keys | MERGE transactions on the same `(namespace_id, name, entity_type)` would cause Neo4j lock contention and ~1 s retry backoff |
 | Relationship writes | `asyncio.Semaphore` | 8 concurrent | CREATE transactions don't contend - each is a new edge |
 
-These are configurable:
+These are configurable on `remember_batch` via `max_concurrent`, and at
+the engine level via `KhoraConfig` / engine kwargs:
 
 ```python
 result = await kb.remember_batch(
     documents,
-    max_concurrent_documents=10,
-    max_concurrent_extractions=20
+    namespace=ns.namespace_id,
+    max_concurrent=10,
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["WORKS_AT"],
 )
 ```
 
@@ -428,7 +431,12 @@ for doc, result in zip(docs, results):
 Check for failures in the result:
 
 ```python
-result = await kb.remember_batch(documents)
+result = await kb.remember_batch(
+    documents,
+    namespace=ns.namespace_id,
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["WORKS_AT"],
+)
 
 print(f"Processed: {result['processed_documents']}")
 print(f"Skipped (duplicates): {result['skipped_documents']}")
@@ -442,8 +450,11 @@ print(f"Failed: {result['failed_documents']}")
 ```python
 result = await kb.remember(
     "Your content here...",
+    namespace=ns.namespace_id,
     title="Document Title",
-    source="manual"
+    source="manual",
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["WORKS_AT"],
 )
 
 print(f"Document: {result.document_id}")
@@ -461,7 +472,10 @@ documents = [
 
 result = await kb.remember_batch(
     documents,
+    namespace=ns.namespace_id,
     max_concurrent=10,
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["WORKS_AT"],
 )
 ```
 
@@ -472,13 +486,18 @@ result = await kb.remember_batch(
 ```python
 result = await kb.remember(
     content,
+    namespace=ns.namespace_id,
     chunk_strategy="recursive",
-    chunk_size=1024,
-    embedding_model="text-embedding-3-large",
-    extraction_model="claude-sonnet-4-20250514",
-    expertise="technical_docs"
+    expertise="technical_docs",
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["WORKS_AT"],
 )
 ```
+
+`chunk_size`, `embedding_model`, and `extraction_model` aren't per-call
+kwargs on `kb.remember()`. Configure them at construction time via
+`KhoraConfig.chunker.chunk_size`, `KhoraConfig.embedding.model`, and
+`KhoraConfig.llm.model` (or the corresponding `KHORA_*` env vars).
 
 ### Direct Pipeline Call
 

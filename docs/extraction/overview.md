@@ -210,10 +210,12 @@ Here's the complete flow for `remember()`:
 
 ```python
 result = await kb.remember(
-    content="Einstein published his theory of general relativity in 1915...",
+    "Einstein published his theory of general relativity in 1915...",
+    namespace=ns.namespace_id,
     title="Physics History",
     chunk_strategy="semantic",
-    enable_expansion=True
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["WORKS_AT"],
 )
 
 # Result
@@ -224,6 +226,9 @@ RememberResult(
     relationships_extracted=4
 )
 ```
+
+(Semantic expansion is currently controlled globally via
+`KhoraConfig.extraction.enable_semantic_expansion`, not per-call.)
 
 Behind the scenes:
 1. **Staging**: Checksum computed, no duplicate found, document created
@@ -253,13 +258,18 @@ extraction_model = "gpt-4o-mini"
 ```python
 await kb.remember(
     content,
+    namespace=ns.namespace_id,
     chunk_strategy="recursive",
-    chunk_size=1024,
-    embedding_model="text-embedding-3-large",
-    extraction_model="claude-sonnet-4-20250514",
-    expertise="technical_docs"  # Domain-specific extraction
+    expertise="technical_docs",  # Domain-specific extraction
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["WORKS_AT"],
 )
 ```
+
+`chunk_size`, `embedding_model`, and `extraction_model` aren't per-call
+kwargs. Set them via `KhoraConfig.chunker.chunk_size`,
+`KhoraConfig.embedding.model`, and `KhoraConfig.llm.model` (or the
+matching `KHORA_*` env vars) at construction time.
 
 ### Batch Processing
 
@@ -268,11 +278,15 @@ For large ingestions:
 ```python
 results = await kb.remember_batch(
     documents,
-    max_concurrent_documents=10,     # Process 10 docs at once
-    max_concurrent_extractions=20,   # Max 20 LLM calls in flight
-    enable_expansion=True
+    namespace=ns.namespace_id,
+    max_concurrent=10,               # Process 10 docs at once
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["WORKS_AT"],
 )
 ```
+
+(Extraction concurrency and semantic expansion are configured globally
+via `KhoraConfig.extraction.*`, not per call.)
 
 ## Error Handling
 
