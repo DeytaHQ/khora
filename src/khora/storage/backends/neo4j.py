@@ -990,8 +990,16 @@ class Neo4jBackend(GraphBackendBase):
         """Register OTel gauge callbacks for Neo4j connection pool state.
 
         Relies on ``driver._pool`` internals (``connections``,
-        ``connections_reservations``), verified stable in neo4j 5.x–6.1.
+        ``connections_reservations``), verified stable in neo4j 5.x–6.2.
         Degrades gracefully via ``getattr`` fallbacks if internals change.
+
+        These pool metrics and the high-frequency sampler are specific to the
+        Neo4j backend (``Neo4jBackend``); khora's other graph backends
+        (SurrealDB, Memgraph, Neptune, AGE) do not emit them. The standard
+        ``khora.neo4j.pool.connections.*`` gauges are OTel observable gauges
+        exported on a ~60s cadence — too coarse to see a sub-minute burst's
+        ramp, so the opt-in sub-second sampler (``pool_sampler_enabled``,
+        disabled by default) exists to make that ramp observable.
         """
         if self._pool_metrics_registered:
             return
