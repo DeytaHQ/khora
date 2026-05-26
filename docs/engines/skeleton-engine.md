@@ -497,8 +497,8 @@ config = KhoraConfig(
 )
 # Engine selection is a Khora() constructor kwarg, not a config field:
 #     kb = Khora(config, engine="skeleton")
-# Per-query hybrid alpha isn't exposed; set it globally via
-# KHORA_QUERY_HYBRID_ALPHA (environment) instead.
+# `hybrid_alpha` is a per-call argument to kb.recall(...) only; there is
+# no global env-var or config-field equivalent.
 ```
 
 ### Via Environment Variables

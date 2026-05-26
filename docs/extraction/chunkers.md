@@ -303,8 +303,8 @@ await kb.remember(
 ```
 
 `chunk_size` isn't a per-call kwarg on `kb.remember()`; configure it
-globally via `KhoraConfig.chunker.chunk_size` (or env var
-`KHORA_CHUNKER_CHUNK_SIZE`) at construction time.
+globally via `KhoraConfig.pipelines.chunk_size` (or env var
+`KHORA_PIPELINES_CHUNK_SIZE`) at construction time.
 
 ### Direct Usage
 
