@@ -31,7 +31,7 @@ telemetry public surface. It is enforced by
 
 - **public** - appears in dashboards, alerts, or downstream code that we
   don't control. Cannot break without a coordinated major version bump
-  across downstream consumers (e.g. khora-cli, khora-explorer).
+  across downstream consumers.
 - **internal** - emitted today, but the names are not part of the public
   contract. Rename freely; just keep this file in sync with the codebase.
 

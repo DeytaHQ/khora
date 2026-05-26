@@ -134,7 +134,7 @@ Default weights:
 - Graph: 30% (relationships add important context)
 - Keyword: 20% (catches exact terms, proper nouns, dates)
 
-> **Note**: HYBRID previously only ran vector + graph. Keyword search was added to HYBRID after [benchmark analysis](retrieval-tuning.md) showed that the missing keyword fallback caused 25% of descriptive queries to return zero results. You can disable it with `enable_keyword_search=False` if you want the old behavior.
+> **Note**: HYBRID includes keyword search alongside vector + graph. [Benchmark analysis](retrieval-tuning.md) showed that without the keyword fallback, 25% of descriptive queries returned zero results. You can disable keyword search with `enable_keyword_search=False`.
 
 ## All Sources
 

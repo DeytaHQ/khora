@@ -105,7 +105,7 @@ final_score = base_score * boost
 
 Recency is computed **relative to the result set**, not wall-clock time. The reference point is `max(occurred_at)` across all results in the current query, with a fallback to `datetime.now(UTC)` when no timestamps exist.
 
-**Why this matters:** If your data is from 2024 but you run queries in 2026, wall-clock-based recency would give every result a near-zero score (all ~2 years old). Relative recency ensures meaningful score discrimination within any time range. For live data where `max(occurred_at) ≈ now`, the behavior is equivalent to the old wall-clock approach.
+**Why this matters:** If your data is from 2024 but you run queries in 2026, wall-clock-based recency would give every result a near-zero score (all ~2 years old). Relative recency ensures meaningful score discrimination within any time range. For live data where `max(occurred_at) ≈ now`, the behavior is equivalent to a wall-clock reference.
 
 ### Category-Specific Behavior
 
@@ -130,7 +130,7 @@ When HyDE is enabled (`enable_hyde` set to `auto` or `always`) and the query's `
 | `RECENCY`, `STATE_QUERY`, `CHANGE` | Time-anchored: injects today's ISO date, asks for specific dates / weekdays / relative markers |
 | `NONE`, `EXPLICIT`, `ORDINAL`, `AGGREGATE` | Generic: time-blind, factual passage |
 
-Cost: zero additional LLM calls - only the system prompt changes. Category detection is sub-millisecond (Rust Aho-Corasick), so the auto-detection path adds no measurable overhead. Available since v0.12.0 (Issue #592, Phase D1).
+Cost: zero additional LLM calls - only the system prompt changes. Category detection is sub-millisecond (Rust Aho-Corasick), so the auto-detection path adds no measurable overhead. (Issue #592, Phase D1)
 
 ### Manual Recency Bias
 
@@ -232,7 +232,7 @@ filter = TemporalFilter(
 
 ### Automatic Date Extraction
 
-When the dictionary detector classifies a query as `EXPLICIT`, it also attempts to extract dates from the query text and build a `TemporalFilter` automatically. Callers can also pass `temporal_filter=...` to `recall()` directly: as of v0.17.0, vectorcypher and graphrag synthesize an `EXPLICIT`-category signal with `confidence=1.0` and `source="api"` so version-aware scoring and the sparse-results fallback fire the same way auto-detected bounds would (previously the explicit kwarg was silently dropped on these two engines).
+When the dictionary detector classifies a query as `EXPLICIT`, it also attempts to extract dates from the query text and build a `TemporalFilter` automatically. Callers can also pass `temporal_filter=...` to `recall()` directly: vectorcypher and graphrag synthesize an `EXPLICIT`-category signal with `confidence=1.0` and `source="api"` so version-aware scoring and the sparse-results fallback fire the same way auto-detected bounds would.
 
 ```python
 # Query: "What happened before April 2024?"

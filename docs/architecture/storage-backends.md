@@ -341,7 +341,7 @@ neighborhood = await coordinator.get_neighborhood(
 await coordinator.disconnect()
 ```
 
-### Namespace-scoped reads and writes (v0.16.0)
+### Namespace-scoped reads and writes
 
 Every read, exists-check, and mutation method on each storage backend Protocol takes `*, namespace_id: UUID` as a required keyword-only parameter and filters at the SQL / Cypher / SurrealQL layer. The namespace is **never** post-checked against a returned row - when an id belongs to a different namespace, the backend returns `None` / an empty result / `False` straight from the query. The full surface tightened in PRs #761, #765, #766, #769:
 
@@ -354,7 +354,7 @@ The coordinator's public `coordinator.{relational,vector,graph,event_store}` att
 2. Refuses to dispatch any of the namespace-scoped read methods listed above unless the caller passes `namespace_id=…` (raises `TypeError`).
 3. Does not forward access to underscore-prefixed attributes - backend internals such as `_engine`, `_handle`, `_conn`, `_session_factory` are only reachable via the private `coord._{role}` accessors used by coordinator internals.
 
-The public `coordinator.{relational,vector,graph,event_store}` attributes are scheduled for removal in v0.17. Internal coordinator code uses `self._{role}` directly.
+The public `coordinator.{relational,vector,graph,event_store}` attributes are deprecated; call the coordinator's facade methods instead. Internal coordinator code uses `self._{role}` directly.
 
 A structural signature gate (`tests/security/test_cross_namespace_idor_signatures.py`) walks every concrete backend at collection time and asserts that every `get_*` / `entity_exists` / `find_paths` / `get_neighborhood*` / `delete_*` / `update_entity*` / `supersede_*` method with a required id-typed parameter declares `*, namespace_id: UUID` kwarg-only. A new method that violates this contract fails CI at collection time. See `docs/architecture/multi-tenancy.md` for the structural invariant rationale.
 
@@ -576,7 +576,7 @@ The doubled `GRAPH` in `KHORA_STORAGE_GRAPH_GRAPH_NAME` is not a typo — the fi
 
 **When to use:** When you want graph queries without adding another database to your stack. AGE runs inside PostgreSQL, so there is no extra infrastructure to manage.
 
-**UUID interpolation hardening (v0.16.0).** AGE's `cypher()` SQL function rejects `$param` placeholders, so UUIDs are interpolated directly into the Cypher source. `AgeBackend._uuid_lit(value)` routes every UUID interpolation site (in `storage/backends/age.py`) through `UUID(...)` validation before string conversion. This is type-safe today - every caller passes `uuid.UUID` - and injection-resistant against future duck-typed callers that might pass a `str`. Invalid UUIDs fail fast at the boundary with a `ValueError`, never reaching the graph store.
+**UUID interpolation hardening.** AGE's `cypher()` SQL function rejects `$param` placeholders, so UUIDs are interpolated directly into the Cypher source. `AgeBackend._uuid_lit(value)` routes every UUID interpolation site (in `storage/backends/age.py`) through `UUID(...)` validation before string conversion. This is type-safe today - every caller passes `uuid.UUID` - and injection-resistant against future duck-typed callers that might pass a `str`. Invalid UUIDs fail fast at the boundary with a `ValueError`, never reaching the graph store.
 
 ## SurrealDB: The Unified Backend
 
@@ -626,9 +626,9 @@ src/khora/storage/backends/surrealdb/
 └── _helpers.py       # Shared utilities (UUID conversion, _rid binding, etc.)
 ```
 
-### `RELATES_TO` schema (v0.16.0)
+### `RELATES_TO` schema
 
-The `relates_to` RELATION table now carries a Khora-owned identity column:
+The `relates_to` RELATION table carries a Khora-owned identity column:
 
 ```surql
 DEFINE TABLE IF NOT EXISTS relates_to TYPE RELATION SCHEMAFULL;
@@ -637,22 +637,22 @@ DEFINE FIELD IF NOT EXISTS rel_id ON relates_to TYPE string;
 DEFINE INDEX IF NOT EXISTS idx_relates_to_rel_id ON relates_to FIELDS rel_id UNIQUE;
 ```
 
-`rel_id` stores the Khora `Relationship.id` UUID. Until v0.16.0 the graph adapter relied on SurrealDB's auto-generated record id, but `SCHEMAFULL` plus the parameterized-id bug below meant some `RELATE` writes silently dropped their endpoints and Khora's `Relationship.id` was not round-tripped at all. The `UNIQUE` index on `rel_id` lets `get_relationship(...)` look up edges by the Khora id without colliding with adjacent rows.
+`rel_id` stores the Khora `Relationship.id` UUID. The `UNIQUE` index on `rel_id` lets `get_relationship(...)` look up edges by the Khora id without colliding with adjacent rows.
 
-### `table:⟨$var⟩` interpolation bug fix (v0.16.0, PR #770)
+### `table:⟨$var⟩` interpolation (PR #770)
 
-SurrealDB does not substitute parameters inside the RecordID-literal shorthand `table:⟨$var⟩` - the `$var` reaches the engine as a literal string. 19 sites across `storage/backends/surrealdb/{graph,vector}.py` were silently broken before v0.16.0: `graph.get_relationship`, `vector.get_chunk`, and `vector.get_chunks_by_document` always returned `None` / empty, and every relationship row stored by `RELATE` had corrupted `in` / `out` endpoints with a `rel_id` of `None` (the `SCHEMAFULL` table dropped the writes without raising). The fix is two-fold:
+SurrealDB does not substitute parameters inside the RecordID-literal shorthand `table:⟨$var⟩` - the `$var` reaches the engine as a literal string. Khora avoids this in two ways:
 
 - Bind via the `_rid()` parameter helper (in `surrealdb/_helpers.py`), which constructs a real `RecordID` object Surreal honours as a parameter.
 - Use `(type::thing($var))` in `FOR` loops where a parameter-substituted record-id is needed inside SurrealQL.
 
-Combined with the new `rel_id` field + `UNIQUE` index, the graph adapter now writes and reads relationships correctly under embedded, memory, and remote modes.
+Combined with the `rel_id` field + `UNIQUE` index, the graph adapter writes and reads relationships correctly under embedded, memory, and remote modes.
 
 ### SurrealDB transactions and batching
 
 SurrealDB supports SurrealQL-level transactions (`BEGIN` / `COMMIT` / `CANCEL`) on the WebSocket connection. The Python client surfaces these as ordinary queries in remote mode. Embedded (`surrealkv://`) and memory (`memory://`) modes raise `UnsupportedFeatureError` on `BEGIN`, so khora preserves the per-statement-atomicity contract there and exposes a batched alternative.
 
-`SurrealDBConnection` (v0.12.0) ships three primitives:
+`SurrealDBConnection` ships three primitives:
 
 | Method / property | Remote (`ws://`) | Embedded / memory |
 |---|---|---|
@@ -689,7 +689,7 @@ The coordinator's `StorageCoordinator.transaction()` remains session-shaped (SQL
 | **SurrealDB** | WebSocket/HTTP | Unified single-server setup |
 | **LanceDB** | Embedded (file-backed) | Chronicle engine, zero-infrastructure deployments |
 
-### `sqlite_lance` defense-in-depth (v0.16.0, PR #769)
+### `sqlite_lance` defense-in-depth (PR #769)
 
 The `sqlite_lance` adapter pairs SQLite (chunk metadata, source of truth) with LanceDB (vector index). After the LanceDB nearest-neighbour query returns a list of chunk ids, the SQLite re-fetch step now adds `AND namespace_id = ?` to the row lookup rather than trusting LanceDB's filter alone. If LanceDB's where-clause ever regresses, the SQLite filter still keeps cross-namespace rows out of the result.
 

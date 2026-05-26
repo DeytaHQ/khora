@@ -205,7 +205,7 @@ Database connection pools are sized to match concurrent operation patterns:
 | PostgreSQL max overflow | 30 |
 | Neo4j max connection pool | 50 |
 
-As of v0.3.0, `StorageFactory` caches engines by normalized URL. When PostgreSQL, pgvector, and the event store share the same database URL (the common case), they reuse a single connection pool instead of creating three independent ones. This reduces total database connections to one-third of the previous default without any configuration changes.
+`StorageFactory` caches engines by normalized URL. When PostgreSQL, pgvector, and the event store share the same database URL (the common case), they reuse a single connection pool instead of creating three independent ones. This keeps total database connections to one-third of what three independent pools would use.
 
 ## Search Pipeline Timing
 
@@ -364,7 +364,7 @@ The PostgreSQL entity upsert changed from N individual INSERT statements in a si
 
 ### `remember_batch` Through `ingest_documents`
 
-`Khora.remember_batch()` now delegates to `ingest_documents` instead of calling `remember()` N times. This enables the shared `EntityIndex` for cross-document entity deduplication, smart mode resolution, and parallel document processing - all of which were previously only available through the direct pipeline API.
+`Khora.remember_batch()` delegates to `ingest_documents` rather than calling `remember()` N times. This enables the shared `EntityIndex` for cross-document entity deduplication, smart mode resolution, and parallel document processing.
 
 ### Impact
 
@@ -377,9 +377,9 @@ The PostgreSQL entity upsert changed from N individual INSERT statements in a si
 
 After optimizing database patterns and pipeline parallelism, the remaining bottlenecks were CPU-bound: cosine similarity, Levenshtein distance, PageRank, keyword extraction, and entity resolution. These operations are now accelerated via an optional Rust extension (`khora-accel`) that provides native implementations with automatic fallback to NumPy or pure Python. See [Rust Acceleration](rust-acceleration.md) for full details.
 
-### Concurrency Headroom (v0.2.1)
+### Concurrency Headroom
 
-With Rust handling CPU-intensive work, Python's event loop has more headroom for I/O concurrency. The default concurrency limits were doubled:
+With Rust handling CPU-intensive work, Python's event loop has more headroom for I/O concurrency. The default concurrency limits are:
 
 | Setting | Before | After | Where |
 |---------|--------|-------|-------|
@@ -388,9 +388,9 @@ With Rust handling CPU-intensive work, Python's event loop has more headroom for
 | `max_concurrent_documents` | 5 | 10 | `ingest_documents` |
 | `max_concurrent_extractions` | 10 | 20 | `ingest_documents` |
 
-These higher limits are safe because Rust acceleration reduces per-operation CPU time, leaving the GIL free for asyncio tasks.
+These limits are safe because Rust acceleration reduces per-operation CPU time, leaving the GIL free for asyncio tasks.
 
-## Phase 8: VectorCypher Query Optimizations (v0.3.5)
+## Phase 8: VectorCypher Query Optimizations
 
 ### Coherence Scoring
 
@@ -406,7 +406,7 @@ config = RetrieverConfig(
 
 `bigram_coherence_score()` checks function-word transitions (articles → content words, prepositions → noun phrases). The score is blended into the RRF score via `apply_coherence_boost()`. This adds negligible latency (pure Python string analysis, no LLM calls) while improving confounder rejection when LLM reranking is disabled (`KHORA_QUERY_ENABLE_LLM_RERANKING=false`).
 
-## Phase 9: Neo4j Write Contention Elimination (v0.3.9)
+## Phase 9: Neo4j Write Contention Elimination
 
 ### The Problem
 
@@ -459,19 +459,13 @@ This is a classic deadlock prevention technique: when all transactions acquire r
 
 ### Relative Recency Scoring
 
-Recency decay previously used `datetime.now()` (wall-clock time) as the reference point. This had two problems:
+Recency decay uses `max(occurred_at)` from the result set as the reference timestamp rather than `datetime.now()` (wall-clock time). A wall-clock reference has two problems:
 
-1. **Non-deterministic** - the same query run seconds apart could produce different scores
-2. **Clock-dependent** - scoring behaved differently across timezones or clock-skewed environments
-
-The recency calculation now uses `max(occurred_at)` from the result set as the reference timestamp:
+1. **Non-deterministic** - the same query run seconds apart can produce different scores
+2. **Clock-dependent** - scoring behaves differently across timezones or clock-skewed environments
 
 ```python
-# Before: wall-clock reference
-now = datetime.now(tz=UTC)
-age_days = (now - doc.occurred_at).total_seconds() / 86400
-
-# After: result-relative reference
+# Result-relative reference:
 max_occurred = max(doc.occurred_at for doc in results)
 age_days = (max_occurred - doc.occurred_at).total_seconds() / 86400
 ```

@@ -4,7 +4,7 @@ Khora ships its own Alembic migrations bundled inside the package at `src/khora/
 
 ## Who runs migrations?
 
-Library consumers (e.g. khora-cli and custom services) need Khora's schema to exist before calling `Khora()`. Two options:
+Library consumers need Khora's schema to exist before calling `Khora()`. Two options:
 
 ### 1. Let Khora run them for you
 
@@ -73,6 +73,14 @@ Current dialect-gated migrations:
 - **`029_chunks_created_at_brin` (v0.12.0)** - BRIN index on `chunks.created_at` (`pages_per_range = 32`), built with `CREATE INDEX CONCURRENTLY` inside an Alembic autocommit block so online traffic is not blocked. BRIN indexes are tiny (KB-sized) and well-suited to time-correlated columns like `created_at`; they don't compete with HNSW vector indexes or the existing B-trees on chunks. The index helps long-range archive / export queries (months of data) that today sequential-scan the table. No effect on point queries or HNSW similarity search. SQLite-backed embedded stacks skip this migration entirely - see Issue #593 for the rationale.
 - **`030_session_id_columns`** - adds a nullable `session_id UUID` column to `documents`, `chunks`, `memory_events`, `chronicle_events`, and `memory_facts`. Runs on both PostgreSQL and SQLite (the column itself is portable). Existing rows naturally carry `NULL`; adapters that don't track sessions can keep ignoring the field. Companion to migration 031.
 - **`031_session_id_indexes`** - Postgres-only. Adds two partial B-tree indexes on `(namespace_id, session_id) WHERE session_id IS NOT NULL` for `chunks` and `documents`, and a BRIN index on `chunks (session_id, created_at)` (`pages_per_range = 32`). All created with `CREATE INDEX CONCURRENTLY` inside an autocommit block. The partial indexes cover session-scoped recall (`WHERE namespace_id = ? AND session_id = ?`); the BRIN accelerates time-bounded session replay and `gc.expire_sessions(before=…)`. SQLite-backed embedded stacks skip silently - point lookups on `chunks` are fine at SQLite scale and `CREATE INDEX CONCURRENTLY` is Postgres-specific. See Issue #620.
+- **`032_dream_runs`** - Postgres-only via the same dialect gate as migration 029. Adds `khora_dream_runs`, a per-namespace checkpoint table so the dream-phase orchestrator can resume a crashed apply pass against the last committed op-seq rather than restarting from scratch. The embedded `sqlite_lance` stack mirrors checkpoint state to a `dream_runs.jsonl` file sink instead. See Issue #651 (dream Phase 0.2).
+- **`033_bitemporal_columns`** - Adds nullable `valid_to`, `invalidated_at`, `invalidated_by` to `relationships` and `memory_facts`. The column adds run on both dialects (columns are portable); the partial indexes `ix_relationships_live` and `ix_memory_facts_live` (`WHERE invalidated_at IS NULL`) are Postgres-only via `CREATE INDEX CONCURRENTLY` inside an autocommit block. Existing rows backfill to all-NULL (= "still valid"). See Issue #653 (dream Phase 0.3).
+- **`034_chronicle_events_bitemporal`** - Adds `invalidated_at`, `invalidated_by`, and `merged_into_event_id` (self-FK with `ON DELETE SET NULL`, created via `use_alter=True` mirroring migration 004) to `chronicle_events`. The partial composite index `ix_chronicle_events_live` on `(namespace_id, occurred_at) WHERE invalidated_at IS NULL` is Postgres-only. See Issue #669 (dream Phase 4 event clustering).
+- **`035_dream_communities`** - Postgres-only via the dialect gate. Adds `khora_dream_communities` for community-summary persistence with bi-temporal validity; the apply path writes grounded LLM summaries (uncited claims dropped before INSERT). The `sqlite_lance` stack mirrors community state to the JSONL undo sink instead. See Issue #670 (dream Phase 5.1).
+- **`036_dream_conflicts`** - Postgres-only via the dialect gate. Adds `dream_conflicts` for the vectorcypher contradiction-detection op's report-only findings (the op never mutates `relationships` — Phase 5.4 / Issue #673 will own that). See Issue #672 (dream Phase 5.3).
+- **`037_recall_response_format`** - Cross-dialect. Adds `documents.source_name VARCHAR(64)` (backfilled from `nango://<provider>/...` patterns in `source`), `documents.source_url VARCHAR(2048)`, and `chunks.chunker_info JSONB NOT NULL DEFAULT '{}'::jsonb`. Also flips six `documents` columns (`source`, `content_type`, `title`, `author`, `language`, `checksum`) to nullable-with-no-default; legacy `create_tables()`-created rows that were `NOT NULL DEFAULT ''` need their `NOT NULL` dropped before the empty-string normalisation runs (see PR #819).
+- **`038_khora_chunks_chunker_info`** - Mirrors 037's `chunker_info` onto the vectorcypher temporal-store table `khora_chunks`. Postgres-specific: asserts `server_version_num >= 110000` so the fast `ADD COLUMN NOT NULL DEFAULT` path is available (avoids a multi-hour table rewrite on PG < 11), and issues `SET lock_timeout = '5s'` before DDL so the `AccessExclusiveLock` acquisition is bounded; on lock-timeout, logs `khora.migration.applied` with `lock_timeout_tripped=True` and SQLSTATE `55P03` for dashboard correlation.
+- **`039_khora_chunks_content_tsv_gin`** - Postgres-only. Adds a GIN index on `khora_chunks.content_tsv` (BM25 / `ts_rank` queries against vectorcypher's temporal-store chunks) via `CREATE INDEX CONCURRENTLY ... IF NOT EXISTS` in an autocommit block. Converges cleanly with the runtime `CREATE INDEX IF NOT EXISTS` in `PgVectorTemporalStore.connect()` — whichever runs first wins. SQLite uses an FTS5 virtual table instead.
 
 ## SurrealDB
 
@@ -112,4 +120,39 @@ ent = await kb.storage.get_entity(entity_id, namespace_id=ns_id)  # via coordina
 await kb.storage.delete_document(doc_id, namespace_id=ns_id)      # coordinator method
 ```
 
-Code paths that already routed through the `Khora` facade and the documented public surface (`khora-cli`, `khora-explorer`) are unaffected - none touch `kb.storage.{relational,vector,graph,event_store}` directly. Code paths that reach into `kb.storage.<role>` will see the `DeprecationWarning` in v0.16.x and the `AttributeError` in v0.17.
+Code paths that already routed through the `Khora` facade are unaffected - none touch `kb.storage.{relational,vector,graph,event_store}` directly. Code paths that reach into `kb.storage.<role>` will see the `DeprecationWarning` in v0.16.x and the `AttributeError` in v0.17.
+
+## Replacing the removed GraphRAG engine
+
+The `graphrag` engine is no longer available. Replace it with `vectorcypher`:
+
+```python
+# Old (graphrag - no longer available)
+async with Khora(db_url, engine="graphrag") as kb:
+    await kb.remember(content, namespace=ns_id)
+
+# Drop-in replacement: vectorcypher with full extraction
+async with Khora(db_url, engine="vectorcypher",
+                 engine_kwargs={"skeleton_core_ratio": 1.0}) as kb:
+    await kb.remember(content, namespace=ns_id)
+
+# Or accept default selective extraction (recommended - 30% cheaper):
+async with Khora(db_url, engine="vectorcypher") as kb:
+    await kb.remember(content, namespace=ns_id)
+```
+
+Existing graphrag-ingested data remains queryable via `vectorcypher` against the same database - the table shapes are identical.
+
+## v0.8.0 - CLI extraction
+
+The CLI commands (`khora extract`, `khora search`, `khora ontology …`) were removed from the `khora` package so the library has no CLI dependencies (no `click`, no `rich`, no PDF / Excel readers by default). The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseConfig`, etc.) are unchanged — call them directly from your service or notebook.
+
+Companion CLI packages (`khora-cli`, `khora-explorer`) are planned for a later release and are not available today. Until they ship, there is no in-library CLI replacement.
+
+The one piece of CLI functionality available inside the library today is binary-document text extraction. Install with `pip install khora[binary-readers]` and use it directly:
+
+```python
+from khora.extraction.binary_readers import extract_if_needed
+```
+
+Old `from khora.discovery …` and `from khora.cli …` imports have no in-library replacement — call the public `khora` API instead.

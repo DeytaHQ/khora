@@ -9,8 +9,11 @@ optional SQLite + LanceDB embedded path).
 ```bash
 git clone https://github.com/DeytaHQ/khora.git
 cd khora
-uv sync --all-extras
+make install ## installs support for crewai
 ```
+
+Alternatitively you can run `make install-adk` if you want to play around with google-adk.
+Currently, due to third party dependencies, it is not possible to install google-adk and crewai support together.
 
 You need Python 3.13 and [`uv`](https://github.com/astral-sh/uv). For
 integration tests against Postgres/Neo4j you also need Docker.

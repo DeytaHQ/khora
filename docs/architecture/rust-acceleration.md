@@ -233,7 +233,7 @@ Weighted PageRank for skeleton indexing (where ~10% of chunks are identified as 
 - `khora._accel.pagerank` - called by the skeleton engine's `_calculate_pagerank` (uniform init, document-time)
 - `khora._accel.build_chunk_edges` - called by the skeleton engine's `_build_chunk_edges`
 
-The `personalization` parameter (added in v0.12.0, Issue #597) is the enabler for the HippoRAG-2 query-time graph scoring tracked in Issue #542 - seeding PPR from query entities can produce sharper passage scores than BFS + RRF on dense graphs. The actual VectorCypher swap from BFS+RRF → PPR remains gated on the graph-density audit (`scripts/audit_graph_density.py`, Issue #598) and is not enabled by default; until the audit confirms the lift, callers passing `personalization=None` (every existing call site) get identical behaviour to pre-v0.12.0.
+The `personalization` parameter (Issue #597) is the enabler for the HippoRAG-2 query-time graph scoring tracked in Issue #542 - seeding PPR from query entities can produce sharper passage scores than BFS + RRF on dense graphs. The actual VectorCypher swap from BFS+RRF → PPR remains gated on the graph-density audit (`scripts/audit_graph_density.py`, Issue #598) and is not enabled by default; passing `personalization=None` runs uniform PageRank.
 
 ---
 

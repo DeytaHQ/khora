@@ -298,7 +298,7 @@ class GraphBackendProtocol(Protocol):
     ) -> dict[str, Any]: ...
 ```
 
-Since v0.16.0, every read / exists / mutation method on a storage backend takes `*, namespace_id: UUID` as a required keyword-only parameter and filters at the SQL / Cypher / SurrealQL layer. See [Multi-Tenancy](multi-tenancy.md) for the structural invariant and [Storage Backends](storage-backends.md) for the full surface.
+Every read / exists / mutation method on a storage backend takes `*, namespace_id: UUID` as a required keyword-only parameter and filters at the SQL / Cypher / SurrealQL layer. See [Multi-Tenancy](multi-tenancy.md) for the structural invariant and [Storage Backends](storage-backends.md) for the full surface.
 
 ## What's Next?
 

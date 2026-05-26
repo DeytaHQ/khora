@@ -276,7 +276,7 @@ RRF has several nice properties:
 
 Research has shown RRF performs comparably to learned fusion methods while being much simpler to implement and understand.
 
-## Coherence Scoring (v0.3.5)
+## Coherence Scoring
 
 After RRF fusion, the VectorCypher retriever applies a lightweight coherence signal to penalize word-shuffled confounders - documents that share the same vocabulary as a relevant chunk but in a nonsensical order. This avoids the cost of an LLM reranking call for obvious confounders.
 

@@ -716,7 +716,7 @@
       "name": "khora.dream.vectorcypher.normalize_schema",
       "stability": "internal",
       "owner": "dream",
-      "_comment": "Inner span for the vectorcypher schema-drift normalization op (OpKind.VECTORCYPHER_NORMALIZE_SCHEMA, #673, Phase 5.4 of #649). Operator-driven rename of entity_type / relationship_type values per DreamConfig.normalize_schema_mapping; never auto-derives. Attributes: namespace_id (span attr only, never a metric label per cardinality rule), mapping_size (int, number of old_type -> new_type rules), entity_rename_count (int), relationship_rename_count (int). Apply path emits one MemoryEvent (ENTITY_UPDATED / RELATIONSHIP_UPDATED) per renamed row via coordinator.dispatch_hook. Type renames touch the consumer contract (khora-cli, khora-explorer) — coordinated release required."
+      "_comment": "Inner span for the vectorcypher schema-drift normalization op (OpKind.VECTORCYPHER_NORMALIZE_SCHEMA, #673, Phase 5.4 of #649). Operator-driven rename of entity_type / relationship_type values per DreamConfig.normalize_schema_mapping; never auto-derives. Attributes: namespace_id (span attr only, never a metric label per cardinality rule), mapping_size (int, number of old_type -> new_type rules), entity_rename_count (int), relationship_rename_count (int). Apply path emits one MemoryEvent (ENTITY_UPDATED / RELATIONSHIP_UPDATED) per renamed row via coordinator.dispatch_hook. Type renames touch the consumer contract."
     },
     {
       "name": "khora.dream.undo.write",

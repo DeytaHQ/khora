@@ -11,8 +11,8 @@ These improvements are focused on making Khora faster and more reliable for prod
 | Item | Why It Matters |
 |------|----------------|
 | **HNSW Index Support** | Done. Migration 005 rebuilds the vector index as HNSW with `ef_construction=128`. See [Performance Optimization](architecture/performance-optimization.md). |
-| **Coherence Scoring** | Done (v0.3.5). Bigram coherence scoring for confounder rejection in VectorCypher's RRF fusion (`coherence_weight=0.1`). |
-| **Streaming Pipeline** | Done (v0.3.2). `streaming_pipeline=True` default in `VectorCypherConfig`. |
+| **Coherence Scoring** | Done. Bigram coherence scoring for confounder rejection in VectorCypher's RRF fusion (`coherence_weight=0.1`). |
+| **Streaming Pipeline** | Done. `streaming_pipeline=True` default in `VectorCypherConfig`. |
 | **Incremental Index Updates** | Currently, adding new vectors requires rebuilding indexes. Incremental updates would make real-time ingestion practical. |
 
 ### Ingestion Performance
@@ -141,7 +141,7 @@ Longer-term ideas we're exploring. Less certain timelines.
 
 | Area | What We're Exploring |
 |------|----------------------|
-| **HyDE (Hypothetical Document Embedding)** | Done. Implemented in v0.3.1, disabled by default (`enable_hyde=False`). Generate a hypothetical answer, embed that, search for similar real content. Improves recall for question-style queries. |
+| **HyDE (Hypothetical Document Embedding)** | Done. Disabled by default (`enable_hyde=False`). Generate a hypothetical answer, embed that, search for similar real content. Improves recall for question-style queries. |
 | **Self-Query** | Let the LLM write its own filters based on the query. "Find documents about AI from last month" → automatic date filter. |
 | **Contextual Compression** | Before returning chunks, compress them to just the relevant parts. Reduces noise in results. |
 
