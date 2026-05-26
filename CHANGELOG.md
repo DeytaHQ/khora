@@ -4,6 +4,27 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.17.2] - Extraction + batch hardening (Damir follow-ups)
+
+Patch release on top of v0.17.1. Two more bug reports from Damir Krstanovic surfaced after the 0.17.1 batch: a `submit_batch` kwarg that did nothing, and a silent entity-type drop when the configured LLM was off the strict-JSON-schema allowlist.
+
+### Added
+
+- **`gpt-5`, `gpt-5-mini`, `gpt-5.4`, `gpt-5.4-mini` join `MODELS_REQUIRING_JSON_SCHEMA`** in `src/khora/extraction/extractors/llm.py`. These OpenAI models support strict `json_schema` response format - they belong on the same fast path as `gpt-4o*` / `gpt-4.1*` / `o1*`, not in the lenient `json_object` fallback.
+- **One-shot warning when the configured extraction model is not on the allowlist**, telling operators that fallback parsing is in play and pointing at `MODELS_REQUIRING_JSON_SCHEMA`. Deduped per-process via class-level `_WARNED_NON_ALLOWLIST_MODELS` so CI logs don't drown.
+
+### Changed
+
+- **LLM response parser now accepts both long and short JSON keys** (#839). Pre-0.17.2, the parser at `src/khora/extraction/extractors/llm.py` read only `entity_type` / `relationship_type` / `event_type` / `source_entity` / `target_entity`. Off-allowlist models (e.g. local llama.cpp, Anthropic in some configurations) fell back to `{"type": "json_object"}` with no schema enforcement and emitted the short forms (`type`, `source`, `target`). The parser's `.get(...)` calls returned `None` and the dataclass defaults (`"CONCEPT"`, `"RELATES_TO"`, `"EVENT"`, `""`) kicked in - so users saw every entity stored as `CONCEPT` and every relationship as `ASSOCIATED_WITH` despite the LLM having returned the correct types. Six parse sites in `llm.py` (lines around 981, 1847, 1894, 2013, 2045, 2068) now read `dict.get("long") or dict.get("short") or "<default>"`.
+
+### Fixed
+
+- **`submit_batch(max_concurrent=N)` is now honored as a per-batch concurrency cap** (#838). Previously declared in the signature but never branched on - this release wires it to a per-batch `asyncio.Semaphore` that caps in-flight document processing for that batch. Defaults to 20. Bounded above by the global `pending_processor_max_concurrent` pool size, so effective per-batch concurrency is `min(pool_size, max_concurrent)`. Concurrent batches each carry their own semaphore - they do not share state and their `max_concurrent` values do not stack.
+
+### Migration
+
+- **No migration needed for #839**: the parser now accepts both key shapes, so existing models continue to work and previously-broken off-allowlist models (most notably gpt-5.x) now produce correctly-typed entities and relationships.
+
 ## [0.17.1] - Recall-API contract repair (Damir feedback batch)
 
 Patch release on top of v0.17.0. Six bug reports from an external user (Damir Krstanovic) exposed `Khora.recall(...)` as a leaky abstraction: parameters documented but silently ignored, parameters that meant different things on different engines, behavior that contradicted docs. This release bundles a coherent contract repair across all three engines.

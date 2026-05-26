@@ -162,6 +162,8 @@ handle: BatchHandle = await kb.submit_batch(
 
 Deferred sibling of `remember_batch()`: persists every document as `PENDING` and returns a `BatchHandle` immediately; processing continues in the background and fires `on_result` per document as it completes. Accepts the same provenance kwargs and per-doc dict shape as `remember_batch()` - per-doc dict values override the top-level kwargs. See [`BatchHandle`](#batchhandle) below for the wait/identity surface.
 
+`max_concurrent` caps concurrency for this batch's documents specifically; the global processor pool size still applies as a ceiling. The pool is sized via `KhoraConfig.pipelines.pending_processor_max_concurrent` (env: `KHORA_PIPELINES_PENDING_PROCESSOR_MAX_CONCURRENT`); effective per-batch concurrency is `min(pool_size, max_concurrent)`. Two batches submitted concurrently are rate-limited independently - their `max_concurrent` values do not stack.
+
 ### `recall`
 
 ```python

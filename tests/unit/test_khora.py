@@ -2077,6 +2077,137 @@ class TestSubmitBatch:
         assert handle_a.batch_id != handle_b.batch_id
 
     @pytest.mark.asyncio
+    async def test_max_concurrent_caps_in_flight_per_batch(self) -> None:
+        """submit_batch(max_concurrent=2) caps peak in-flight processing at 2 (#838)."""
+        import asyncio
+
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        in_flight = 0
+        peak = 0
+        lock = asyncio.Lock()
+
+        original_impl = kb._process_pending_item_impl
+
+        async def _slow_impl(item):
+            nonlocal in_flight, peak
+            async with lock:
+                in_flight += 1
+                if in_flight > peak:
+                    peak = in_flight
+            try:
+                await asyncio.sleep(0.05)
+                await original_impl(item)
+            finally:
+                async with lock:
+                    in_flight -= 1
+
+        kb._process_pending_item_impl = _slow_impl  # type: ignore[method-assign]
+
+        handle = await kb.submit_batch(
+            [{"content": f"doc-{i}", "external_id": f"mc-{i}"} for i in range(5)],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_concurrent=2,
+        )
+        await handle.wait()
+
+        assert peak <= 2, f"per-batch concurrency cap violated: peak={peak}"
+        assert peak >= 1, "at least one doc should have been processed"
+
+    @pytest.mark.asyncio
+    async def test_max_concurrent_independent_across_batches(self) -> None:
+        """Two concurrent submit_batch calls each honor their own max_concurrent (#838)."""
+        import asyncio
+
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        # Per-batch in-flight counters keyed on the registration object id.
+        in_flight: dict[int, int] = {}
+        peak: dict[int, int] = {}
+        lock = asyncio.Lock()
+
+        original_impl = kb._process_pending_item_impl
+
+        async def _slow_impl(item):
+            key = id(item.batch_reg)
+            async with lock:
+                in_flight[key] = in_flight.get(key, 0) + 1
+                if in_flight[key] > peak.get(key, 0):
+                    peak[key] = in_flight[key]
+            try:
+                await asyncio.sleep(0.05)
+                await original_impl(item)
+            finally:
+                async with lock:
+                    in_flight[key] -= 1
+
+        kb._process_pending_item_impl = _slow_impl  # type: ignore[method-assign]
+
+        # Stash batch_reg ids by capturing them after submit returns by
+        # walking the queue items. Easier: submit, snapshot ids from queue.
+        handle_a = await kb.submit_batch(
+            [{"content": f"a{i}", "external_id": f"a-{i}"} for i in range(6)],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_concurrent=2,
+        )
+        handle_b = await kb.submit_batch(
+            [{"content": f"b{i}", "external_id": f"b-{i}"} for i in range(6)],
+            on_result=lambda c, t, r: None,
+            namespace=ns_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+            max_concurrent=5,
+        )
+
+        await asyncio.gather(handle_a.wait(), handle_b.wait())
+
+        # Two batches => two distinct batch_reg keys in the counters.
+        assert len(peak) == 2, f"expected two batch reg keys, got {peak}"
+        peaks = sorted(peak.values())
+        # smaller cap honored
+        assert peaks[0] <= 2
+        # larger cap honored
+        assert peaks[1] <= 5
+        # the larger batch should actually have run more than 2 in flight
+        # (otherwise we can't distinguish the per-batch behavior).
+        assert peaks[1] >= 3, f"larger-cap batch did not exceed 2 in-flight; peaks={peaks}"
+
+    @pytest.mark.asyncio
+    async def test_max_concurrent_zero_raises_value_error(self) -> None:
+        """submit_batch(max_concurrent=0) raises ValueError before persisting docs (#838)."""
+        ns_id = uuid4()
+        kb = _make_kb_with_staged_support(ns_id)
+
+        with pytest.raises(ValueError, match="max_concurrent"):
+            await kb.submit_batch(
+                [{"content": "doc"}],
+                on_result=lambda c, t, r: None,
+                namespace=ns_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                max_concurrent=0,
+            )
+
+    @pytest.mark.asyncio
+    async def test_max_concurrent_has_default_value(self) -> None:
+        """submit_batch has a default max_concurrent=20 (#838) - param is optional."""
+        import inspect
+
+        from khora.khora import Khora
+
+        sig = inspect.signature(Khora.submit_batch)
+        param = sig.parameters["max_concurrent"]
+        assert param.default == 20, f"expected default=20, got {param.default}"
+
+    @pytest.mark.asyncio
     async def test_document_result_carries_stats(self) -> None:
         """DocumentResult contains chunks/entities/rels from process_staged_document."""
 
@@ -2247,7 +2378,6 @@ class TestSubmitBatch:
             namespace=ns_id,
             entity_types=["PERSON"],
             relationship_types=["KNOWS"],
-            max_concurrent=2,
         )
         await handle.wait()
 

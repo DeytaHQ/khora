@@ -134,6 +134,138 @@ class TestParseResponse:
         result = extractor._parse_response(json.dumps(data))
         assert result.entities[0].attributes == {}
 
+    def test_short_key_entity_type(self) -> None:
+        """Entities using short 'type' key parse correctly (issue #839).
+
+        Off-allowlist models (e.g. local llama.cpp, Anthropic in some
+        configurations, any model not in MODELS_REQUIRING_JSON_SCHEMA)
+        fall back to json_object response format with no schema enforcement.
+        They tend to emit the short 'type' key instead of 'entity_type'.
+        The parser must accept either.
+        """
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                {"name": "Quantum mechanics", "type": "PRINCIPLE", "description": "physics"},
+                {"name": "Schrodinger", "type": "PERSON"},
+            ],
+            "relationships": [],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        assert len(result.entities) == 2
+        assert result.entities[0].entity_type == "PRINCIPLE"
+        assert result.entities[1].entity_type == "PERSON"
+
+    def test_long_key_entity_type_still_works(self) -> None:
+        """Backward compat: 'entity_type' long key still parses (issue #839)."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                {"name": "Alice", "entity_type": "PERSON"},
+            ],
+            "relationships": [],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        assert result.entities[0].entity_type == "PERSON"
+
+    def test_short_key_relationship(self) -> None:
+        """Relationships using short 'source'/'target'/'type' keys parse correctly (issue #839)."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [
+                {"name": "Schrodinger equation", "type": "EQUATION"},
+                {"name": "Quantum mechanics", "type": "PRINCIPLE"},
+            ],
+            "relationships": [
+                {
+                    "source": "Schrodinger equation",
+                    "target": "Quantum mechanics",
+                    "type": "GOVERNS",
+                    "description": "the equation governs the principle",
+                }
+            ],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        assert len(result.relationships) == 1
+        rel = result.relationships[0]
+        assert rel.source_entity == "Schrodinger equation"
+        assert rel.target_entity == "Quantum mechanics"
+        assert rel.relationship_type == "GOVERNS"
+
+    def test_short_key_event_type(self) -> None:
+        """Events using short 'type' key parse correctly (issue #839)."""
+        extractor = self._make_extractor()
+        data = {
+            "entities": [],
+            "relationships": [],
+            "events": [
+                {
+                    "description": "Project kickoff",
+                    "type": "MEETING",
+                    "occurred_at": "2024-01-15",
+                }
+            ],
+        }
+        result = extractor._parse_response(json.dumps(data))
+        assert len(result.events) == 1
+        assert result.events[0].event_type == "MEETING"
+
+
+class TestOffAllowlistModelWarning:
+    """Tests for the one-shot warning when a model isn't on the
+    MODELS_REQUIRING_JSON_SCHEMA allowlist (issue #839)."""
+
+    def test_warning_fires_for_off_allowlist_model(self) -> None:
+        """Constructing an extractor with an unknown model logs one warning."""
+        from loguru import logger
+
+        # Reset the per-process dedup set so this test is order-independent.
+        LLMEntityExtractor._WARNED_NON_ALLOWLIST_MODELS.clear()
+
+        messages: list[str] = []
+        sink_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            LLMEntityExtractor(model="gpt-5.4-not-on-allowlist")
+        finally:
+            logger.remove(sink_id)
+
+        joined = "\n".join(messages)
+        assert "gpt-5.4-not-on-allowlist" in joined
+        assert "json_schema allowlist" in joined
+
+    def test_warning_only_fires_once_per_model(self) -> None:
+        """A second extractor for the same off-allowlist model does NOT re-warn."""
+        from loguru import logger
+
+        LLMEntityExtractor._WARNED_NON_ALLOWLIST_MODELS.clear()
+
+        messages: list[str] = []
+        sink_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            LLMEntityExtractor(model="some-local-llm")
+            LLMEntityExtractor(model="some-local-llm")
+        finally:
+            logger.remove(sink_id)
+
+        hits = [m for m in messages if "some-local-llm" in m]
+        assert len(hits) == 1
+
+    def test_no_warning_for_allowlisted_model(self) -> None:
+        """Allowlisted models (e.g. gpt-4o-mini) do not emit the warning."""
+        from loguru import logger
+
+        LLMEntityExtractor._WARNED_NON_ALLOWLIST_MODELS.clear()
+
+        messages: list[str] = []
+        sink_id = logger.add(lambda m: messages.append(str(m)), level="WARNING")
+        try:
+            LLMEntityExtractor(model="gpt-4o-mini")
+        finally:
+            logger.remove(sink_id)
+
+        joined = "\n".join(messages)
+        assert "json_schema allowlist" not in joined
+
 
 class TestExtractJsonFromText:
     """Tests for _extract_json_from_text."""
