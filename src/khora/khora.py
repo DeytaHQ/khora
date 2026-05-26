@@ -1364,7 +1364,6 @@ class Khora:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
-        max_concurrent: int = 20,
         reprocess_archived: bool = False,
         session_id: UUID | None = None,
     ) -> BatchHandle:
@@ -1407,12 +1406,18 @@ class Khora:
             chunk_strategy: Override chunking strategy for this batch.
             max_chunks_in_flight: Maximum chunks processed per window. Controls
                 memory usage during background processing. None = unbounded.
-            max_concurrent: Maximum documents to process concurrently in background
-                (default: 20).
             reprocess_archived: If True, ARCHIVED documents are reset to PENDING
                 and re-processed like FAILED documents. If False (default), ARCHIVED
-                documents are skipped with a warning — preserving intentional
+                documents are skipped with a warning - preserving intentional
                 archival semantics.
+
+        Note:
+            Background processing concurrency is set globally on the Khora
+            instance via ``KhoraConfig.pipelines.pending_processor_max_concurrent``
+            (env: ``KHORA_PIPELINES_PENDING_PROCESSOR_MAX_CONCURRENT``). The
+            pending processor is a single worker on the Khora instance that
+            drains PENDING documents across all submit_batch() calls, so the
+            concurrency knob is process-wide rather than per-batch.
 
         Returns:
             BatchHandle with batch_id, completion status, and wait() method.

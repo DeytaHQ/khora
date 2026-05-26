@@ -2247,7 +2247,6 @@ class TestSubmitBatch:
             namespace=ns_id,
             entity_types=["PERSON"],
             relationship_types=["KNOWS"],
-            max_concurrent=2,
         )
         await handle.wait()
 
