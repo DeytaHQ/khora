@@ -259,6 +259,10 @@ class LLMEntityExtractor(EntityExtractor):
     DEFAULT_INPUT_MULTIPLIER = 3  # Fallback for unknown models
     _BATCH_FAILURE_THRESHOLD = 2  # Circuit breaker trips after this many consecutive batch failures
 
+    # Tracks models we've already warned about (to avoid log spam across many
+    # extractor instances configured with the same off-allowlist model).
+    _WARNED_NON_ALLOWLIST_MODELS: set[str] = set()
+
     def __init__(
         self,
         model: str = "gpt-4o-mini",
@@ -294,6 +298,27 @@ class LLMEntityExtractor(EntityExtractor):
 
         # Register litellm failure callback to log 429 rate-limit responses
         self._register_rate_limit_callback()
+
+        # Warn once per process if the configured model isn't on the
+        # json_schema allowlist. Off-allowlist models fall back to a looser
+        # json_object response_format, which means entity/relationship key
+        # names depend on whatever the LLM emits. The parser accepts both
+        # `entity_type` and `type` (and `source`/`target`) since v0.17.2, so
+        # extraction still works, but adding the model to the allowlist
+        # remains the cleanest path when the provider supports strict
+        # structured output. See issue #839.
+        if model not in self.MODELS_REQUIRING_JSON_SCHEMA and model not in self._WARNED_NON_ALLOWLIST_MODELS:
+            self._WARNED_NON_ALLOWLIST_MODELS.add(model)
+            logger.warning(
+                "Extraction model '{}' is not on the json_schema allowlist; "
+                "falling back to json_object response format. "
+                "Entity/relationship types should still parse "
+                "(v0.17.2+ accepts both 'entity_type' and 'type' keys), "
+                "but you may want to add this model to "
+                "MODELS_REQUIRING_JSON_SCHEMA if its provider supports "
+                "strict structured output.",
+                model,
+            )
 
     @staticmethod
     def _register_rate_limit_callback() -> None:
@@ -978,8 +1003,8 @@ class LLMEntityExtractor(EntityExtractor):
             for r in data.get("relationships", []):
                 if not isinstance(r, dict):
                     continue
-                source = r.get("source_entity", "")
-                target = r.get("target_entity", "")
+                source = r.get("source_entity") or r.get("source") or ""
+                target = r.get("target_entity") or r.get("target") or ""
                 # Only accept relationships referencing known entities
                 if source not in entity_names or target not in entity_names:
                     continue
@@ -988,7 +1013,7 @@ class LLMEntityExtractor(EntityExtractor):
                     ExtractedRelationship(
                         source_entity=source,
                         target_entity=target,
-                        relationship_type=r.get("relationship_type", "RELATES_TO"),
+                        relationship_type=r.get("relationship_type") or r.get("type") or "RELATES_TO",
                         description=r.get("description", ""),
                         confidence=confidence,
                     )
@@ -1844,7 +1869,7 @@ Return ONLY valid JSON, no other text."""
 
         name = entity_data.get("name") or ""
         description = entity_data.get("description") or ""
-        entity_type = entity_data.get("entity_type") or ""
+        entity_type = entity_data.get("entity_type") or entity_data.get("type") or ""
         aliases = entity_data.get("aliases") or []
 
         # Name quality (max +0.2)
@@ -1891,9 +1916,9 @@ Return ONLY valid JSON, no other text."""
 
         score = 0.5  # Base score
 
-        source = rel_data.get("source_entity") or ""
-        target = rel_data.get("target_entity") or ""
-        rel_type = rel_data.get("relationship_type") or ""
+        source = rel_data.get("source_entity") or rel_data.get("source") or ""
+        target = rel_data.get("target_entity") or rel_data.get("target") or ""
+        rel_type = rel_data.get("relationship_type") or rel_data.get("type") or ""
         description = rel_data.get("description") or ""
 
         # Entity reference validity (max +0.25)
@@ -2010,7 +2035,7 @@ Return ONLY valid JSON, no other text."""
                 entities.append(
                     ExtractedEntity(
                         name=e.get("name") or "",
-                        entity_type=e.get("entity_type") or "CONCEPT",
+                        entity_type=e.get("entity_type") or e.get("type") or "CONCEPT",
                         description=e.get("description") or "",
                         attributes=attrs,
                         aliases=e.get("aliases") or [],
@@ -2042,9 +2067,9 @@ Return ONLY valid JSON, no other text."""
 
                 relationships.append(
                     ExtractedRelationship(
-                        source_entity=r.get("source_entity") or "",
-                        target_entity=r.get("target_entity") or "",
-                        relationship_type=r.get("relationship_type") or "RELATES_TO",
+                        source_entity=r.get("source_entity") or r.get("source") or "",
+                        target_entity=r.get("target_entity") or r.get("target") or "",
+                        relationship_type=r.get("relationship_type") or r.get("type") or "RELATES_TO",
                         description=r.get("description") or "",
                         properties=r.get("properties") or {},
                         temporal=temporal,
@@ -2065,7 +2090,7 @@ Return ONLY valid JSON, no other text."""
                 events.append(
                     ExtractedEvent(
                         description=ev.get("description") or "",
-                        event_type=ev.get("event_type") or "EVENT",
+                        event_type=ev.get("event_type") or ev.get("type") or "EVENT",
                         occurred_at=ev.get("occurred_at"),
                         participants=ev.get("participants") or [],
                         confidence=confidence,
