@@ -22,7 +22,7 @@ Choose Skeleton Construction instead when:
 - **No Neo4j available**: VectorCypher requires Neo4j
 - **Simple infrastructure preferred**: Skeleton works with PostgreSQL only
 
-For graphrag-equivalent comprehensive extraction (100% of chunks), pass `engine_kwargs={"skeleton_core_ratio": 1.0}` - VectorCypher's KET-RAG selectivity defaults to the top 70% of chunks but accepts a 1.0 override that matches the legacy GraphRAG engine's extraction quality at the same LLM cost.
+For comprehensive extraction over 100% of chunks, pass `engine_kwargs={"skeleton_core_ratio": 1.0}` - VectorCypher's KET-RAG selectivity defaults to the top 70% of chunks but accepts a 1.0 override that extracts from every chunk.
 
 ## Architecture Overview
 
@@ -115,9 +115,8 @@ async with Khora("postgresql://...", engine="vectorcypher") as kb:
 - **`chunks`** - Matching text passages as `RecallChunk` entries (`chunk.content`)
 - **`entities`** - Entities mentioned in matching chunks
 - **`relationships`** - Connections between entities in the result set
-- **`documents`** - Full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship (always populated as of v0.16.0; see [Source Document Population](#source-document-population))
+- **`documents`** - Full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship (always populated; see [Source Document Population](#source-document-population))
 
-The legacy `RecallResult.context_text` attribute was removed in v0.15.3.
 Callers that need a flat context string for an LLM render one with the
 public `khora.context_text(result, max_chunks=...)` helper:
 
@@ -130,7 +129,7 @@ prompt_context = context_text(result, max_chunks=5)
 
 ### Source Document Population
 
-`recall()` always returns a `RecallResult` whose `documents` list holds full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship in the result - this is a producer-enforced invariant (see #761 / v0.16.0). Khora batch-fetches `DocumentSource` metadata after the engine returns (chunked at 1,000 IDs) and replaces the engine's lightweight stubs in place. The engine itself uses the namespace-scoped coordinator facade for that lookup, so cross-namespace ids never leak through.
+`recall()` always returns a `RecallResult` whose `documents` list holds full `DocumentProjection` rows for every document referenced by a chunk, entity, or relationship in the result - this is a producer-enforced invariant (see #761). Khora batch-fetches `DocumentSource` metadata after the engine returns (chunked at 1,000 IDs) and replaces the engine's lightweight stubs in place. The engine itself uses the namespace-scoped coordinator facade for that lookup, so cross-namespace ids never leak through.
 
 ```python
 result = await kb.recall("query", namespace=ns_id)
@@ -139,7 +138,7 @@ for chunk in result.chunks:
     print(docs_by_id[chunk.document_id].title)
 ```
 
-Entity-read methods (`get_entity()`, `list_entities()`, `find_related_entities()`, `search_entities()`) still accept `include_sources: bool = False` to opt-in to per-entity `source_documents` population. All four require `namespace_id=` (kwarg-only) on every call - the v0.16.0 IDOR close-out (#769) enforces this at the Protocol level on every storage backend.
+Entity-read methods (`get_entity()`, `list_entities()`, `find_related_entities()`, `search_entities()`) accept `include_sources: bool = False` to opt-in to per-entity `source_documents` population. All four require `namespace_id=` (kwarg-only) on every call - the IDOR close-out (#769) enforces this at the Protocol level on every storage backend.
 
 ### VectorCypherRetriever (`src/khora/engines/vectorcypher/retriever.py`)
 
@@ -390,7 +389,7 @@ The detector classifies the query, and the resulting `TemporalSignal.category` m
 
 ### Simple Path Recency
 
-The SIMPLE retrieval path (vector-only, no graph traversal) now also applies recency boosting when the temporal category calls for it. Previously, `_simple_retrieve()` returned raw pgvector scores with no recency adjustment. Now it wraps results in `FusedResult` objects, calls `_calculate_recency_scores()`, and applies `apply_recency_boost()` when the effective recency weight is greater than zero.
+The SIMPLE retrieval path (vector-only, no graph traversal) applies recency boosting when the temporal category calls for it. `_simple_retrieve()` wraps results in `FusedResult` objects, calls `_calculate_recency_scores()`, and applies `apply_recency_boost()` when the effective recency weight is greater than zero.
 
 ### Relative Recency Reference
 
@@ -602,7 +601,7 @@ This prevents two failure modes: (1) candidate explosion when many entities each
 
 The fusion function `weighted_rrf_normalized` normalizes vector and graph scores to [0, 1] via min-max normalization before computing Reciprocal Rank Fusion. This matters when the two sources produce scores on very different scales - for example, cosine similarity scores in [0.3, 0.9] vs graph proximity scores in [0.01, 0.5]. Without normalization, the source with larger absolute scores dominates the fusion.
 
-Both the SIMPLE and COMPLEX retrieval paths normalize final scores to [0,1] using min-max normalization. Previously, only the COMPLEX path applied normalization; SIMPLE path scores could exceed 1.0 when vector and graph contributions were summed.
+Both the SIMPLE and COMPLEX retrieval paths normalize final scores to [0,1] using min-max normalization.
 
 ```
 RRF score = vector_weight / (k + vector_rank) + graph_weight / (k + graph_rank)

@@ -271,8 +271,7 @@ otherwise vanilla OTel takes over.
 
 The one-line rename: `install_neo4j_logfire_handler` is now
 `install_neo4j_log_bridge` (it still picks the logfire handler when
-logfire is installed). The old name is kept as a deprecated alias for
-khora 0.10.x and will be removed in 0.12.
+logfire is installed). The old name is kept as a deprecated alias.
 
 ## Troubleshooting
 

@@ -299,7 +299,7 @@ async def search(
     return results
 ```
 
-> Since v0.16.0 (#769) `namespace_id` is a required kwarg on every storage read/write and is filtered at the SQL/SurrealQL layer. The `sqlite_lance` backend's `search_similar` additionally re-filters by `namespace_id` on the SQLite re-fetch step as defense-in-depth.
+> `namespace_id` is a required kwarg on every storage read/write and is filtered at the SQL/SurrealQL layer (#769). The `sqlite_lance` backend's `search_similar` additionally re-filters by `namespace_id` on the SQLite re-fetch step as defense-in-depth.
 
 ### Weaviate Backend
 

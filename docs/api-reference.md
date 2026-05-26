@@ -178,7 +178,7 @@ result: RecallResult = await kb.recall(
 ```
 
 - `mode` - one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, or `ALL`.
-- `start_time` / `end_time` - explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required. Honored on all three engines (chronicle, vectorcypher, graphrag) as of v0.17.0 - vectorcypher and graphrag previously dropped the explicit bound silently.
+- `start_time` / `end_time` - explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required. Honored on all three engines (chronicle, vectorcypher, skeleton).
 - To skip LLM-side work (reranking, HyDE expansion), set the config flags `enable_llm_reranking=False` and `enable_hyde="never"` on `KhoraConfig.query` (env: `KHORA_QUERY_ENABLE_LLM_RERANKING`, `KHORA_QUERY_ENABLE_HYDE`).
 
 ### `context_text`
@@ -236,7 +236,7 @@ entity = await kb.get_entity(entity_id, namespace=ns.namespace_id)
 # Entity | None  - returns None for cross-namespace lookups.
 
 document = await kb.get_document(document_id, namespace=ns.namespace_id)
-# Document | None - namespace kwarg required since v0.16.0.
+# Document | None - namespace kwarg required.
 ```
 
 `namespace` is **required** (accepts `str | UUID`, mirrors `list_entities` / `find_related_entities`). The facade fetches the row and verifies its `namespace_id` matches - cross-namespace ids resolve to `None` rather than the foreign entity. Calling without `namespace=` raises `TypeError`.
@@ -252,9 +252,9 @@ This shape applies to the whole `kb.storage` getter surface - namespace is the t
 | `kb.storage.get_chunks_batch(chunk_ids, *, namespace_id)` | `namespace_id: UUID` - cross-namespace ids silently dropped from the returned dict |
 | `kb.storage.get_chunks_by_document(document_id, *, namespace_id)` | `namespace_id: UUID` - returns `[]` if the document doesn't belong to the namespace |
 
-**v0.16.0 expanded the contract to every backend method** (PRs #761 / #765 / #766 / #769). Every read, exists-check, and mutation on `RelationalBackend` / `VectorBackend` / `GraphBackend` / `EventStore` now requires `*, namespace_id: UUID` (kwarg-only) and filters at the SQL / Cypher / SurrealQL layer - not post-fetch. Cross-namespace reads return `None` / `{}` / `[]`; cross-namespace writes silently no-op (raising would expose row existence). The full list of tightened methods is in [migrations.md](migrations.md#v0160--api-migration-namespace-kwarg-required-everywhere).
+**The contract applies to every backend method** (PRs #761 / #765 / #766 / #769). Every read, exists-check, and mutation on `RelationalBackend` / `VectorBackend` / `GraphBackend` / `EventStore` requires `*, namespace_id: UUID` (kwarg-only) and filters at the SQL / Cypher / SurrealQL layer - not post-fetch. Cross-namespace reads return `None` / `{}` / `[]`; cross-namespace writes silently no-op (raising would expose row existence). The full list of tightened methods is in [migrations.md](migrations.md#v0160--api-migration-namespace-kwarg-required-everywhere).
 
-> **Deprecation (v0.16.0 → v0.17).** `StorageCoordinator.{relational,vector,graph,event_store}` are now `NamespaceRequiredProxy` wrappers. Accessing them emits one `DeprecationWarning` per role per process; calling a method without `namespace_id=` raises `TypeError`. Public attributes are removed in v0.17 - call coordinator-level methods (`kb.storage.<method>`) instead.
+> **Deprecation.** `StorageCoordinator.{relational,vector,graph,event_store}` are `NamespaceRequiredProxy` wrappers. Accessing them emits one `DeprecationWarning` per role per process; calling a method without `namespace_id=` raises `TypeError`. Call coordinator-level methods (`kb.storage.<method>`) instead.
 
 ### `stats`
 
@@ -342,7 +342,7 @@ JSON-serializable response projection. Lives at `khora.core.models.recall.Recall
 | `source_name` | `str \| None` | SaaS-tool / connector identifier. |
 | `source_url` | `str \| None` | Addressable doc URL. |
 | `content_type` | `str \| None` | MIME / content type. |
-| `source_timestamp` | `datetime \| None` | Source-system timestamp (e.g., message sent-at), distinct from ingest `created_at`. ISO-8601 strings are accepted on input and coerced via `coerce_source_timestamp` (v0.17.0+). |
+| `source_timestamp` | `datetime \| None` | Source-system timestamp (e.g., message sent-at), distinct from ingest `created_at`. ISO-8601 strings are accepted on input and coerced via `coerce_source_timestamp`. |
 | `metadata` | `dict[str, Any]` | Free-form user metadata. |
 
 #### `RecallChunk`
@@ -426,7 +426,7 @@ A custom engine **must** implement the full `MemoryEngineProtocol` from `src/kho
 
 ## Expertise
 
-`ExpertiseConfig` is a stable sibling API maintained in coordination with khora-explorer.
+`ExpertiseConfig` is a stable public API.
 
 ```python
 from khora import ExpertiseConfig, EntityTypeConfig, RelationshipTypeConfig
@@ -457,7 +457,7 @@ from khora import SemanticFilter, EventType
 
 Subscribe to extraction and recall events. The full Phase 2 surface (EventBridge-style `match` DSL, `CHUNK_ENTITIES_RESOLVED` for co-occurrence filtering, Level 2 LLM evaluator with cache + per-subscription budget) is documented in [hooks/semantic-hooks.md](hooks/semantic-hooks.md).
 
-## Advanced (opt-in, v0.12.0)
+## Advanced (opt-in)
 
 These surfaces are documented for completeness but are **default-OFF** behind config flags pending A/B validation.
 
@@ -484,6 +484,6 @@ except KhoraError as exc:
 
 ## Stability guarantee
 
-Symbols imported from the top-level `khora` namespace and `khora.extraction.skills` are stable. Additive changes land in minor releases; breaking changes require a major version bump and coordinated release with khora-cli and khora-explorer.
+Symbols imported from the top-level `khora` namespace and `khora.extraction.skills` are stable. Additive changes land in minor releases; breaking changes require a major version bump.
 
 Private imports (`khora.engines.vectorcypher`, `khora.query.engine`, `khora.pipelines.flows`, etc.) are **not** stable and can change between minor versions.

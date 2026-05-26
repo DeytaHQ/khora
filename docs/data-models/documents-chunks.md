@@ -211,7 +211,7 @@ async with Khora() as kb:
 
 ```python
 # Get document by ID. `namespace_id` is required and kwarg-only -
-# returns None if the document is not in this namespace (v0.16.0).
+# returns None if the document is not in this namespace.
 doc = await kb.storage.get_document(document_id, namespace_id=namespace_id)
 print(f"Status: {doc.status}")
 print(f"Chunk count: {doc.chunk_count}")

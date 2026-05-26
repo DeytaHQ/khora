@@ -218,7 +218,7 @@ config = QueryConfig(enable_reranking=True)
 
 This uses a cross-encoder model that looks at query-document pairs together, catching nuances that initial retrieval might miss.
 
-**Optional date-prefix experiment (v0.12.0, opt-in).** `CrossEncoderReranker(include_date_prefix=True)` (or the `include_date_prefix=True` kwarg on `create_reranker`) prepends `[YYYY-MM-DD] ` to each candidate's content before scoring. Off-the-shelf cross-encoders tokenize ISO dates fine, so this gives them an explicit recency signal at negligible token cost. Date source priority: `metadata.custom.occurred_at` → `metadata.custom.sent_at` → `metadata.created_at`. Default **OFF** pending an A/B run on the corporate-shape benchmark (Issue #594, Phase D5).
+**Optional date-prefix experiment (opt-in).** `CrossEncoderReranker(include_date_prefix=True)` (or the `include_date_prefix=True` kwarg on `create_reranker`) prepends `[YYYY-MM-DD] ` to each candidate's content before scoring. Off-the-shelf cross-encoders tokenize ISO dates fine, so this gives them an explicit recency signal at negligible token cost. Date source priority: `metadata.custom.occurred_at` → `metadata.custom.sent_at` → `metadata.created_at`. Default **OFF** pending an A/B run on the corporate-shape benchmark (Issue #594, Phase D5).
 
 ## Step 7: Result Limiting
 
@@ -238,7 +238,7 @@ QueryResult(
 
 > **Two retrieval surfaces, two result shapes.** Khora exposes two independent retrieval paths and they intentionally use different result types:
 >
-> - **`Khora.recall()`** - the top-level public API. Returns a typed `RecallResult` from `khora.core.models.recall` (re-exported as `from khora import RecallResult`) with `chunks: list[RecallChunk]`, `entities: list[RecallEntity]`, `relationships: list[RecallRelationship]`, and a producer-enforced `documents: list[DocumentProjection]` invariant - every chunk's `document_id` and every entity / relationship `source_document_ids` entry is guaranteed to appear in `documents[]`. Use `khora.context_text(result)` to render a formatted context string. The old `RecallResult.context_text` attribute was removed in v0.15.3.
+> - **`Khora.recall()`** - the top-level public API. Returns a typed `RecallResult` from `khora.core.models.recall` (re-exported as `from khora import RecallResult`) with `chunks: list[RecallChunk]`, `entities: list[RecallEntity]`, `relationships: list[RecallRelationship]`, and a producer-enforced `documents: list[DocumentProjection]` invariant - every chunk's `document_id` and every entity / relationship `source_document_ids` entry is guaranteed to appear in `documents[]`. Use `khora.context_text(result)` to render a formatted context string.
 >
 > - **`HybridQueryEngine.query()`** (this doc) - the in-package retrieval surface used by `khora.query.agentic.AgenticSearchAgent`. Returns the tuple-shaped `QueryResult` shown above. Carries richer per-method telemetry (`search_contributions`, `graph_info`, `temporal_info`) that doesn't fit the recall projection. Not consumed by `Khora.recall()` or by any of the typed engines (vectorcypher / chronicle / skeleton).
 >

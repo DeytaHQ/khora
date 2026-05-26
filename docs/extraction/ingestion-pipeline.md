@@ -86,7 +86,7 @@ for field in timestamp_fields:
 
 This matters for temporal queries - "what was discussed last week?" should find content from last week, not content that was ingested last week about events from six months ago.
 
-As of v0.17.0, ISO-8601 strings (trailing `Z`, explicit offset, or date-only `YYYY-MM-DD`) can be handed directly to `remember(..., source_timestamp=...)` / `remember_batch` / `submit_batch` - Khora coerces them via the internal `coerce_source_timestamp` helper, so connectors no longer need to parse upstream.
+ISO-8601 strings (trailing `Z`, explicit offset, or date-only `YYYY-MM-DD`) can be handed directly to `remember(..., source_timestamp=...)` / `remember_batch` / `submit_batch` - Khora coerces them via the internal `coerce_source_timestamp` helper, so connectors don't need to parse upstream.
 
 ### Document Creation
 
@@ -236,7 +236,7 @@ await storage.create_relationships_batch(relationships, batch_size=50)
 # Uses UNWIND + CREATE in Neo4j - one transaction instead of N individual writes
 ```
 
-> Since v0.16.0 (#769) every storage read/write requires `namespace_id` as a kwarg-only argument (or as the leading positional on the small set of methods like `get_document_by_checksum` / `list_entities` / `list_relationships` where it has always been positional). The `StorageCoordinator.{relational,vector,graph,event_store}` attrs are wrapped in `NamespaceRequiredProxy` and emit a `DeprecationWarning` once per role per process; they refuse read calls without `namespace_id=`. Internal canonical refs are `self._{relational,vector,graph,event_store}`. The public attrs disappear in v0.17 - engines that talk to them go through the namespace-scoped coordinator facade instead.
+> Every storage read/write requires `namespace_id` as a kwarg-only argument (or as the leading positional on the small set of methods like `get_document_by_checksum` / `list_entities` / `list_relationships` where it has always been positional) (#769). The `StorageCoordinator.{relational,vector,graph,event_store}` attrs are wrapped in `NamespaceRequiredProxy` and emit a `DeprecationWarning` once per role per process; they refuse read calls without `namespace_id=`. Internal canonical refs are `self._{relational,vector,graph,event_store}`. Engines go through the namespace-scoped coordinator facade instead.
 
 ### Entity ID Remapping
 

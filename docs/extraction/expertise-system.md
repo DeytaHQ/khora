@@ -205,7 +205,7 @@ class ConfidenceConfig:
     min_inferred: float = 0.3      # Minimum inferred relationship confidence
 ```
 
-> **Note (v0.3.5):** The `min_relationship` default of 0.5 shown above is the dataclass fallback. The builtin `general.yaml` skill overrides this to `min_relationship: 0.25` for denser relationship extraction. If you are using the `general_entities` skill (the default), the effective threshold is 0.25.
+> **Note:** The `min_relationship` default of 0.5 shown above is the dataclass fallback. The builtin `general.yaml` skill overrides this to `min_relationship: 0.25` for denser relationship extraction. If you are using the `general_entities` skill (the default), the effective threshold is 0.25.
 
 ## ExpansionConfig
 
@@ -424,7 +424,7 @@ skill = ExtractionSkill.business_intel()
 skill = ExtractionSkill.research_papers()
 # Types: PERSON, ORGANIZATION, CONCEPT, TECHNOLOGY, EVENT
 
-# Slack messages (v0.3.1)
+# Slack messages
 skill = ExtractionSkill.slack()
 # Types: PERSON, CHANNEL, TEAM, TOPIC, PROJECT, DECISION
 # Extracts DM recipients, conversation threads, and team dynamics

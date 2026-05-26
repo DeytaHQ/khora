@@ -116,17 +116,16 @@ async with Khora("memory://", engine="chronicle") as kb:
 
 ### Recall response shape
 
-Since v0.16.0 (#761), `result.documents` is always populated for every
-document referenced by a chunk in the result - Chronicle relies on the
-namespace-scoped coordinator facade to batch-fetch documents, never on
-the legacy public sub-backend attrs. The `RecallResult.context_text`
-attribute is gone; render a context string with the public
+`result.documents` is always populated for every
+document referenced by a chunk in the result (#761) - Chronicle relies on the
+namespace-scoped coordinator facade to batch-fetch documents. Render a
+context string with the public
 `khora.context_text(result, max_chunks=…)` helper if you need one.
 
 Chronicle's namespace scoping is enforced at the SQL/SurrealQL layer:
 every read filters by `namespace_id` directly rather than post-fetching
 and comparing in Python (which would leak existence as a timing oracle).
-See the v0.16.0 IDOR close-out (#769) for the full Protocol-level
+See the IDOR close-out (#769) for the full Protocol-level
 contract on every storage backend.
 
 ## Comparison with Other Engines

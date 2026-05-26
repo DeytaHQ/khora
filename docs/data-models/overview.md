@@ -299,7 +299,7 @@ await storage.create_document(doc)
 
 ```python
 # Get a document. `namespace_id` is required and kwarg-only - the lookup
-# returns None if the id belongs to a different namespace (v0.16.0).
+# returns None if the id belongs to a different namespace.
 doc = await storage.get_document(doc_id, namespace_id=namespace_id)
 
 # Find entities by type (list-style scan; namespace_id is positional).

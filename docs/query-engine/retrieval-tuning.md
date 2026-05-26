@@ -168,9 +168,9 @@ KHORA_QUERY_ENTITY_LINKING_FUZZY_THRESHOLD=0.6
 KHORA_QUERY_ENTITY_LINKING_EMBEDDING_THRESHOLD=0.4
 ```
 
-### Adaptive Top-K with "Very Focused" Tier (v0.3.1)
+### Adaptive Top-K with "Very Focused" Tier
 
-The query engine uses the `complexity_score` from query understanding to determine how many chunks to retrieve. In v0.3.1, a new "very_focused" tier was added for simple factual queries:
+The query engine uses the `complexity_score` from query understanding to determine how many chunks to retrieve. A "very_focused" tier handles simple factual queries:
 
 | Tier | Complexity | Chunk Limit | Use Case |
 |------|-----------|-------------|----------|
@@ -181,20 +181,20 @@ The query engine uses the `complexity_score` from query understanding to determi
 
 The very_focused tier reduces noise for straightforward questions where a single chunk is likely sufficient. The complexity score is computed during query understanding based on entity count, relationship complexity, and temporal references.
 
-### MMR Diversity Selection (v0.3.1)
+### MMR Diversity Selection
 
-The diversity stage (Stage 5 of the query pipeline) uses Maximal Marginal Relevance to select a diverse set of results from the candidate pool. In v0.3.1:
+The diversity stage (Stage 5 of the query pipeline) uses Maximal Marginal Relevance to select a diverse set of results from the candidate pool:
 
-1. **Enabled by default**: `enable_diversity` now defaults to `True` in both `QueryConfig` and `QuerySettings`. Previously, `QuerySettings` defaulted to `False`, which meant the diversity stage was never activated via environment config.
+1. **Enabled by default**: `enable_diversity` defaults to `True` in both `QueryConfig` and `QuerySettings`.
 
 2. **Rust acceleration**: MMR selection uses a 3-tier fallback (Rust → NumPy → pure Python). The Rust implementation in `khora-accel` uses SIMD-friendly dot product with GIL release, providing ~5x speedup over pure Python for typical result set sizes.
 
-3. **Pre-normalized embeddings**: Embeddings are now L2-normalized at ingest time, allowing MMR to use dot product instead of cosine similarity (~3x speedup since normalization is amortized).
+3. **Pre-normalized embeddings**: Embeddings are L2-normalized at ingest time, allowing MMR to use dot product instead of cosine similarity (~3x speedup since normalization is amortized).
 
 Configuration:
 ```python
 config = QueryConfig(
-    enable_diversity=True,    # default: True (changed in v0.3.1)
+    enable_diversity=True,    # default: True
     diversity_lambda=0.7,     # balance: 1.0 = pure relevance, 0.0 = pure diversity
 )
 ```
@@ -205,7 +205,7 @@ KHORA_QUERY_ENABLE_DIVERSITY=true   # default
 KHORA_QUERY_DIVERSITY_LAMBDA=0.7
 ```
 
-### Coherence Scoring (v0.3.5)
+### Coherence Scoring
 
 The VectorCypher retriever applies a lightweight text coherence signal after RRF fusion to penalize word-shuffled confounders. This is particularly effective when LLM reranking is disabled (`KHORA_QUERY_ENABLE_LLM_RERANKING=false`), where confounders would otherwise rank alongside genuine results.
 
@@ -240,7 +240,7 @@ These changes should eliminate the zero-result problem and significantly improve
 - Latency: some improvement from reranking skip, but the main latency contributors (query understanding, reranking) are unchanged
 
 Further improvements to consider:
-- **HyDE (Hypothetical Document Embeddings)**: Generates a hypothetical document for the query to improve embedding similarity for descriptive queries. Mode is controlled by `KHORA_QUERY_ENABLE_HYDE` taking `auto` (default), `always`, or `never` (booleans `True`/`False` are still accepted and normalize to `always`/`never`). In `auto` mode HyDE fires when the query understanding layer flags the query as complex or temporal. Since v0.12.0, RECENCY / STATE_QUERY / CHANGE queries get a time-anchored hypothetical that injects today's ISO date - see [Temporal queries](temporal-queries.md#temporal-anchored-hyde).
-- **HyDE-Cypher (v0.12.0, opt-in)**: For *structured* RECENCY queries (e.g. "latest action items", "who works for Acme", "Phoenix and security recently"), khora can ask an LLM to pick a parameterized Cypher template and execute it against the graph backend as an additional retrieval channel. Three templates ship: `recent_by_type`, `entity_relationships`, `cooccurrence`. Slot values are validated against `ExpertiseConfig` whitelists and bound via Neo4j parameters - slot strings never reach the Cypher source. Enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`; cap result-set size with `KHORA_QUERY_HYDE_CYPHER_LIMIT` (default 20). **Default OFF - flip after an A/B run on a hand-curated structured-query set.**
-- **Cross-encoder date-prefix experiment (v0.12.0, opt-in)**: `CrossEncoderReranker(include_date_prefix=True)` prepends `[YYYY-MM-DD] ` to each candidate's content before scoring. Off-the-shelf rerankers tokenize ISO dates fine and the extra ~12 tokens per candidate are negligible vs. the model's forward pass. Source-priority: `metadata.custom.occurred_at` → `metadata.custom.sent_at` → `metadata.created_at`. **Default OFF - A/B required before flipping.**
+- **HyDE (Hypothetical Document Embeddings)**: Generates a hypothetical document for the query to improve embedding similarity for descriptive queries. Mode is controlled by `KHORA_QUERY_ENABLE_HYDE` taking `auto` (default), `always`, or `never` (booleans `True`/`False` are still accepted and normalize to `always`/`never`). In `auto` mode HyDE fires when the query understanding layer flags the query as complex or temporal. RECENCY / STATE_QUERY / CHANGE queries get a time-anchored hypothetical that injects today's ISO date - see [Temporal queries](temporal-queries.md#temporal-anchored-hyde).
+- **HyDE-Cypher (opt-in)**: For *structured* RECENCY queries (e.g. "latest action items", "who works for Acme", "Phoenix and security recently"), khora can ask an LLM to pick a parameterized Cypher template and execute it against the graph backend as an additional retrieval channel. Three templates ship: `recent_by_type`, `entity_relationships`, `cooccurrence`. Slot values are validated against `ExpertiseConfig` whitelists and bound via Neo4j parameters - slot strings never reach the Cypher source. Enable via `KHORA_QUERY_ENABLE_HYDE_CYPHER=true`; cap result-set size with `KHORA_QUERY_HYDE_CYPHER_LIMIT` (default 20). **Default OFF - flip after an A/B run on a hand-curated structured-query set.**
+- **Cross-encoder date-prefix experiment (opt-in)**: `CrossEncoderReranker(include_date_prefix=True)` prepends `[YYYY-MM-DD] ` to each candidate's content before scoring. Off-the-shelf rerankers tokenize ISO dates fine and the extra ~12 tokens per candidate are negligible vs. the model's forward pass. Source-priority: `metadata.custom.occurred_at` → `metadata.custom.sent_at` → `metadata.created_at`. **Default OFF - A/B required before flipping.**
 - **SearchMode.ALL as default**: Now that keyword search runs in HYBRID, the distinction between HYBRID and ALL is smaller - HYBRID is effectively ALL.

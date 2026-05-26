@@ -2,9 +2,7 @@
 
 Khora supports three pluggable engines with different strengths. This guide helps you choose the right engine for your use case.
 
-> **Note (0.10.1):** The `graphrag` engine was removed in v0.10.1. Use `vectorcypher` (default) for hybrid graph+vector recall; set `engine_kwargs={"skeleton_core_ratio": 1.0}` for the legacy GraphRAG behavior of extracting entities from 100% of chunks instead of the default selective 70%.
-
-## Production-readiness by stack (v0.9.0)
+## Production-readiness by stack
 
 Production-readiness is **per (engine × stack)**, not per engine. The same engine can be production-ready on one storage stack and experimental on another.
 
@@ -14,7 +12,7 @@ Production-readiness is **per (engine × stack)**, not per engine. The same engi
 | Chronicle     | n/a (graph not required)       | **Production-ready**             | Experimental                | Experimental               |
 | Skeleton      | n/a (graph not required)       | Available                        | Experimental     | Experimental               |
 
-- **Production-ready** - qualified for production deployment in v0.9.0; covered by integration and e2e tests; documented gotchas have known mitigations.
+- **Production-ready** - qualified for production deployment; covered by integration and e2e tests; documented gotchas have known mitigations.
 - **Available** - supported, exercised in tests, but not stamped production-ready. Equivalent retrieval semantics; less load-tested.
 - **Experimental** - feature-complete enough for demos, evaluation, and tests on small corpora. Not a deployment story. See the [embedded backend caveats](../configuration.md#embedded-backends-experimental) for the full list of gaps.
 
@@ -184,33 +182,14 @@ For 1000 documents averaging 5KB each:
 - **Temporal queries**: "What did Alice say last week about the budget?"
 - **No graph DB**: Runs on PostgreSQL + pgvector only.
 
-## Migration
+## Switching engines
 
-### Replacing GraphRAG (removed in 0.10.1)
-
-```python
-# Before (graphrag - no longer available)
-async with Khora(db_url, engine="graphrag") as kb:
-    await kb.remember(content, namespace=ns_id)
-
-# After - drop-in: vectorcypher with full extraction
-async with Khora(db_url, engine="vectorcypher",
-                 engine_kwargs={"skeleton_core_ratio": 1.0}) as kb:
-    await kb.remember(content, namespace=ns_id)
-
-# Or accept default selective extraction (recommended - 30% cheaper):
-async with Khora(db_url, engine="vectorcypher") as kb:
-    await kb.remember(content, namespace=ns_id)
-```
-
-Existing graphrag-ingested data remains queryable via `vectorcypher` against the same database - the table shapes are identical.
-
-### Between VectorCypher and Skeleton Construction
-
-VectorCypher and Skeleton store data differently (Skeleton has no graph backend), so switching is a re-ingest, not a query-side switch. Pick based on your workload:
+Switching between VectorCypher and Skeleton Construction is a re-ingest, not a query-side switch - they store data differently (Skeleton has no graph backend). Pick based on your workload:
 
 - Cost-sensitive + PG-only → Skeleton
 - Multi-hop entity queries + graph DB available → VectorCypher
+
+For migration from the retired `graphrag` engine to `vectorcypher`, see [migrations.md](../migrations.md#replacing-the-removed-graphrag-engine).
 
 ## Hybrid Approach
 

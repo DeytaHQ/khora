@@ -375,7 +375,7 @@ for entity, score in related:
 
 ```python
 # Get entity neighborhood (graph context). namespace_id is required and
-# kwarg-only (v0.16.0) - the traversal does not cross into other namespaces.
+# kwarg-only - the traversal does not cross into other namespaces.
 neighborhood = await kb.storage.get_neighborhood(
     entity_id,
     namespace_id=namespace_id,

@@ -349,7 +349,7 @@ def filter_empty_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
     return [c for c in chunks if len(c.content.strip()) >= MIN_CHUNK_CHARS]
 ```
 
-This filtering happens at chunk creation time rather than query time, so empty chunks never enter the vector index. Previously, ~17% of retrieval queries encountered sub-10-character chunks that had to be filtered during search.
+This filtering happens at chunk creation time rather than query time, so empty chunks never enter the vector index. Without this, sub-10-character chunks would otherwise be filtered during search (impacting ~17% of retrieval queries in early benchmarks).
 
 ## Performance Tips
 

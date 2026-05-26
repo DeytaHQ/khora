@@ -45,7 +45,7 @@ Choose VectorCypher instead when:
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-> **Note (v0.2.3):** `TemporalEdge Storage` and `TimeHierarchy Builder` shown above exist as code modules but are not yet wired into the engine's ingest/recall pipeline. Temporal filtering via `occurred_at` on chunks works through the pgvector backend directly.
+> **Note:** `TemporalEdge Storage` and `TimeHierarchy Builder` shown above exist as code modules but are not yet wired into the engine's ingest/recall pipeline. Temporal filtering via `occurred_at` on chunks works through the pgvector backend directly.
 
 ### Core Design Principles
 
@@ -151,7 +151,7 @@ edge2 = await storage.create_edge(
 )
 ```
 
-<!-- TODO(docs-v0.16.0): TemporalEdgeStorage was never wired into the skeleton engine's ingest/recall path (see v0.2.3 note above). Verify the create_edge/get_valid_at signatures shown here against current code if this module is ever revived. -->
+<!-- TODO(docs): TemporalEdgeStorage is not wired into the skeleton engine's ingest/recall path (see status note above). Verify the create_edge/get_valid_at signatures shown here against current code if this module is ever revived. -->
 
 
 ### TimeHierarchyBuilder (`src/khora/engines/skeleton/time_hierarchy.py`)
@@ -289,7 +289,7 @@ engine = SkeletonConstructionEngine(
 )
 ```
 
-**Auth and Weaviate Cloud** (added in v0.16.3 / issue #783). The
+**Auth and Weaviate Cloud** (issue #783). The
 backend accepts a `WeaviateBackendConfig` in place of the URL string
 for cloud, authenticated, or custom-port deployments:
 
@@ -327,7 +327,7 @@ so the Skeleton event loop does not block on Weaviate I/O.
 - Multi-tenant isolation (namespace = tenant)
 - Horizontal scaling
 - Built-in BM25 + vector fusion
-- API-key auth + Weaviate Cloud (added v0.16.3)
+- API-key auth + Weaviate Cloud
 
 **Tests.** Unit tests exercise the async client via mocks. Integration
 tests against a real cluster live in

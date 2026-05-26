@@ -1,71 +1,16 @@
-# Downstream Consumers
+# Public API
 
-Khora is a library. Its stable public API is consumed by several first-party packages. This page is the quick map for anyone asking "where did `khora extract` go?" or "how do I plug khora into my service?"
+Khora is a library. Its stable public API is consumed by services and notebooks. This page documents the public surface that downstream code may rely on.
 
-## Sibling packages
+## No in-library CLI
 
-### khora-cli
+The CLI commands (`khora extract`, `khora search`, `khora ontology …`) were removed from the `khora` package so the library has no CLI dependencies. The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseConfig`, etc.) are unchanged — call them directly from your service or notebook. See [migrations.md](migrations.md#v080---cli-extraction) for the removal notice.
 
-khora-cli (to be released soon) - extract and search CLI.
-
-```bash
-uv pip install khora-cli
-uv run khora-cli extract report.pdf
-uv run khora-cli search "Who worked on the API design?" -n <namespace-id>
-```
-
-Prior to khora v0.8.0, these commands shipped as `uv run khora extract` / `uv run khora search`. The package was split out so that the library has no CLI dependencies (no `click`, no `rich`, no PDF/Excel readers by default). If you need the binary readers without the CLI, install `pip install khora[binary-readers]` and import `from khora.extraction.binary_readers import extract_if_needed`.
-
-khora-cli imports a narrow slice of khora's public API:
+The one piece of CLI-flavoured functionality available inside the library is binary-document text extraction. Install with `pip install khora[binary-readers]` and import directly:
 
 ```python
-from khora import (
-    Khora, KhoraConfig, SearchMode, LLMUsage,
-    RememberResult, RecallResult, BatchResult,
-)
 from khora.extraction.binary_readers import extract_if_needed
-from khora.logging_config import setup_logging
 ```
-
-### khora-explorer
-
-khora-explorer (to be released soon) - ontology construction, validation, and preview.
-
-```bash
-uv pip install khora-explorer
-uv run khora-explorer construct --source <path-or-glob>
-uv run khora-explorer validate my_ontology.yaml
-uv run khora-explorer preview my_ontology.yaml
-```
-
-Prior to v0.7.52 these lived under `uv run khora ontology …` and the underlying `khora.discovery` package. They were extracted because ontology construction needs a heavier dependency set (PDF/HTML scraping, Firecrawl fallback, multi-provider LLM routing) than this library should carry.
-
-khora-explorer imports:
-
-```python
-from khora.extraction.skills.base import (
-    ExpertiseConfig, EntityTypeConfig, RelationshipTypeConfig,
-    ConfidenceConfig, ExpansionConfig, CorrelationRule, InferenceRule,
-)
-from khora.config.schema import KhoraConfig
-```
-
-## Migration from pre-v0.8 khora
-
-If your project installed `khora` before v0.8.0 and used the CLI:
-
-| Before (khora ≤ 0.7.51) | After (khora ≥ 0.8.0) |
-|---|---|
-| `uv run khora extract file.pdf` | `uv pip install khora-cli && uv run khora-cli extract file.pdf` |
-| `uv run khora search "query" -n ns` | `uv run khora-cli search "query" -n ns` |
-| `uv run khora ontology construct --source …` | `uv pip install khora-explorer && uv run khora-explorer construct --source …` |
-| `uv run khora ontology validate file.yaml` | `uv run khora-explorer validate file.yaml` |
-| `uv run khora ontology preview file.yaml` | `uv run khora-explorer preview file.yaml` |
-| `from khora.discovery.extraction import extract_if_needed` | `from khora.extraction.binary_readers import extract_if_needed` |
-| `from khora.discovery import …` | Install `khora-explorer`. Module has moved. |
-| `from khora.cli import …` | Install `khora-cli`. Module has moved. |
-
-The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseConfig`, etc.) are unchanged and continue to work.
 
 ## Stability contract
 
@@ -101,10 +46,8 @@ Canonical machine-readable contract: `__all__` in `src/khora/extraction/skills/b
 ### Versioning policy
 
 - **Additive changes** are permitted in minor and patch releases: new optional dataclass fields with defaults, new optional keyword arguments to existing methods, new helper modules. Adding a field must preserve existing `from_dict` / `to_dict` round-trips for older payloads.
-- **Breaking changes** require a major version bump: renaming or removing a field/method, changing a type, changing a default in a way that alters observable behaviour, removing a class. Breaking changes coordinate with the published consumer packages (khora-cli, khora-explorer).
-- **Security exception.** Breaking changes that close a confidentiality or integrity vulnerability may land in a patch release without a major bump. The patch CHANGELOG entry calls out the affected signatures under `### Changed (breaking)` and the corresponding security finding under `### Security`. Coordinated consumer-package updates still apply; the carve-out only covers the timing of the bump, not the disclosure. Examples:
-  - **v0.15.1** promoted `kb.get_entity` and the `kb.storage` getters (`get_entity` / `get_relationship` / `get_episode` / `get_chunk` / `get_chunks_batch` / `get_chunks_by_document`) to require a `namespace` / `namespace_id` keyword argument.
-  - **v0.16.0** (PRs #761 / #765 / #766 / #769) closed out the rest of the cross-namespace IDOR family. Every read, exists-check, and mutation on every storage backend (`RelationalBackend`, `VectorBackend`, `GraphBackend`, `EventStore`) now requires `*, namespace_id: UUID` (kwarg-only) and filters at the SQL / Cypher / SurrealQL layer rather than post-fetch. `Khora.get_document(doc_id, *, namespace=…)` requires the namespace kwarg. `StorageCoordinator.{relational,vector,graph,event_store}` is wrapped in a `NamespaceRequiredProxy` that emits one `DeprecationWarning` per role per process on first access; the public attributes are kept as a deprecation surface and will be removed in v0.17 - internal canonical references are `self._{relational,vector,graph,event_store}`. A signature-level regression gate (`tests/security/test_cross_namespace_idor_signatures.py`) blocks future drift at test-collection time.
+- **Breaking changes** require a major version bump: renaming or removing a field/method, changing a type, changing a default in a way that alters observable behaviour, removing a class. Breaking changes are recorded in CHANGELOG.md.
+- **Security exception.** Breaking changes that close a confidentiality or integrity vulnerability may land in a patch release without a major bump. The patch CHANGELOG entry calls out the affected signatures under `### Changed (breaking)` and the corresponding security finding under `### Security`. The cross-namespace IDOR close-out (`namespace_id` required on every storage read/write) was landed under this exception - see [migrations.md](migrations.md) and [CHANGELOG.md](../CHANGELOG.md).
 - `from_dict` for extraction-skill dataclasses preserves backward compatibility with historical YAML/JSON payloads for at least one major version after schema evolution.
 
 ### What's NOT pinned
@@ -112,7 +55,7 @@ Canonical machine-readable contract: `__all__` in `src/khora/extraction/skills/b
 - Anything not listed in either `__all__`.
 - Internal models exported from `khora.core.models` - `Document`, `Chunk`, `Entity`, `Episode`, `Relationship`, `MemoryEvent`. Their shapes are dictated by storage schemas and may evolve; consumers that persist these objects should copy them into their own types.
 - The `khora.chat` module aside from `ChatResponse`. The rest (`ChatEngine`, `ChatMessage`, `ConversationHistory`, `HistoryManager`, `PersonaConfig`, `load_persona_config`, `PromptGenerator`) is evolving; breaking changes are announced in CHANGELOG `### Deprecated` one minor release before removal.
-- The `khora.storage.StorageCoordinator` surface exposed via the `Khora.storage` property. The property exists; its API is not pinned. **Note (v0.16.0):** `StorageCoordinator.{relational,vector,graph,event_store}` are now `NamespaceRequiredProxy` wrappers - they emit a `DeprecationWarning` on first access per role per process and refuse dispatch on read methods missing `namespace_id=`. The public attributes are removed in v0.17. Downstream code that needs the unwrapped backends should call coordinator-level methods (all of which take `namespace_id=` as a kwarg-only argument) instead.
+- The `khora.storage.StorageCoordinator` surface exposed via the `Khora.storage` property. The property exists; its API is not pinned. `StorageCoordinator.{relational,vector,graph,event_store}` are `NamespaceRequiredProxy` wrappers - they emit a `DeprecationWarning` on first access per role per process and refuse dispatch on read methods missing `namespace_id=`. Downstream code that needs the unwrapped backends should call coordinator-level methods (all of which take `namespace_id=` as a kwarg-only argument) instead.
 - Anything whose name starts with an underscore.
 
 For full method signatures and dataclass field lists, read the symbols directly (`help(Khora)`, the source on GitHub, or your IDE's type-stub navigation).
@@ -121,10 +64,10 @@ For full method signatures and dataclass field lists, read the symbols directly 
 
 For a new downstream consumer:
 
-1. `pip install khora[<backend-of-choice>]` - pick the backend matrix that matches your infra (`postgres`-default for PG, `surrealdb` for zero-infra, `all-backends` if unsure).
+1. `pip install khora[<backend-of-choice>]` - pick the backend matrix that matches your infra (`postgres`-default for PG, `surrealdb` for zero-infra, `all-backends` if unsure). For binary-document ingestion, add `khora[binary-readers]`.
 2. Either call `khora.logging_config.setup_logging()` once per process, or configure your own loguru sinks with `enqueue=True`. The default loguru sink blocks the event loop in async code - see [configuration.md](configuration.md#logging).
 3. Run migrations (for PostgreSQL) - pass `run_migrations=True` to `Khora` or invoke `alembic upgrade head` out-of-band. See [migrations.md](migrations.md).
 4. Import only from the symbols listed in [api-reference.md](api-reference.md) unless you are willing to follow khora's internal churn.
-5. Pin Khora by major version. Minor-version upgrades are safe; majors may require coordinated releases.
+5. Pin Khora by major version. Minor-version upgrades are safe; majors may include breaking API changes documented in CHANGELOG.md.
 6. **Reading credentials back out of `KhoraConfig`?** Credential fields are `pydantic.SecretStr` - call `.get_secret_value()` for the cleartext. `str(cfg.storage.postgresql_url)` returns `'**********'` by design. See [configuration.md](configuration.md#secretstr-typed-credential-fields).
 7. **Need spans/metrics?** Install `khora[otel]` and call `khora.telemetry.configure_telemetry()` at process startup, or rely on env-based auto-bootstrap. See [observability.md](observability.md) for the precedence rules and vendor recipes.

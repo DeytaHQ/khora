@@ -16,7 +16,7 @@ uv run alembic upgrade head                       # Run migrations
 
 **Installing all extras at once doesn't work.** `crewai` and `google-adk` declare mutually-incompatible `opentelemetry-api` ranges (crewai pins `<1.35`, google-adk pins `>=1.36`) and `[tool.uv].conflicts` makes the conflict explicit, so `uv sync --all-extras` is rejected. Pick one combo: `make install` for crewai (matches CI's `test` job), `make install-adk` for google-adk. CI also keeps `UV_NO_SYNC=1` set so subsequent `uv run` calls don't silently re-resolve the venv to the other combo.
 
-CLI tooling (`extract`, `search`) lives in the separate `khora-cli` package (to be released soon). Ontology tooling (construct / validate / preview) lives in `khora-explorer` (to be released soon). khora is a Python library.
+CLI tooling (`extract`, `search`, ontology tools) was removed from the `khora` package. khora is a Python library.
 
 ## Test Commands
 
@@ -40,7 +40,7 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 - **Engines:** implement `MemoryEngineProtocol` in `engines/protocol.py`. Default engine is `vectorcypher`
 - **Graph backends:** Neo4j, SurrealDB, Memgraph, Neptune, AGE - implement `GraphBackend` in `storage/backends/base.py`
 - **SurrealDB:** unified backend (graph + vector + relational). Modes: `memory://`, `surrealkv://` (embedded), `ws://` (remote). Set `backend: surrealdb` in config
-- **Extraction skills:** YAML-defined in `extraction/skills/builtin/`. Generate with `khora-explorer construct` (separate package)
+- **Extraction skills:** YAML-defined in `extraction/skills/builtin/`.
 - **Config:** env vars with `KHORA_` prefix and single underscore (e.g., `KHORA_QUERY_ENABLE_HYDE=true`, `KHORA_LLM_MODEL=gpt-4o`). The legacy `__` nesting form is kept working silently for backward compatibility; single underscore is the documented form
 
 ### Key Entry Points
@@ -52,7 +52,7 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 - `storage/backends/surrealdb/` - Unified SurrealDB backend
 - `db/models.py` - SQLAlchemy ORM (UUID columns use `as_uuid=True`)
 - `_accel.py` - Rust/NumPy acceleration (MMR, cosine, pagerank, entity resolution, community detection, temporal)
-- `extraction/binary_readers.py` - PDF/xlsx/docx/parquet readers consumed by khora-cli (stable boundary)
+- `extraction/binary_readers.py` - PDF/xlsx/docx/parquet readers; stable public boundary.
 - `pipelines/flows/ingest.py` - Document ingestion pipeline (3-phase: stage → enrich → expand)
 - `db/migrations/env.py` - Alembic with advisory locking
 - `config/schema.py` - `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
@@ -215,15 +215,15 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 
 ### Logging
 - **loguru sinks are sync by default** - `logger.add(...)` has `enqueue=False`. In async code, `logger.*` calls then block the event loop on each format+write. Khora's `setup_logging()` enables `enqueue=True` on all sinks it installs, and registers `atexit.register(logger.complete)` so the queue drains on clean exit.
-- **Library consumers MUST either** (a) call `khora.logging_config.setup_logging()`, OR (b) configure their own loguru sinks with `enqueue=True` explicitly. If a downstream service imports khora without doing either, it inherits loguru's default sync stderr sink and silently pays event-loop-blocking cost on every `logger.*` call inside an `async def`.
-- **Graceful shutdown drains via `logger.complete()`** - setup_logging registers this via atexit. Downstream consumers that configure their own sinks must do the same, otherwise in-flight queue entries are lost on exit.
+- **Downstream code MUST either** (a) call `khora.logging_config.setup_logging()`, OR (b) configure its own loguru sinks with `enqueue=True` explicitly. If a downstream service imports khora without doing either, it inherits loguru's default sync stderr sink and silently pays event-loop-blocking cost on every `logger.*` call inside an `async def`.
+- **Graceful shutdown drains via `logger.complete()`** - setup_logging registers this via atexit. Downstream code that configures its own sinks must do the same, otherwise in-flight queue entries are lost on exit.
 - **Abrupt termination (SIGKILL, crash) drops in-flight log records.** This is inherent to the enqueue model - the queue is drained by a background thread that can't run during a kill.
 - **loguru queue is unbounded in 0.7.3.** Under sustained burst (DEBUG mode + error storm + slow sink), records accumulate faster than the background thread can drain them and eventually OOM the process. Napkin math: ~1 KB/record × ~9k records/s net accumulation → 512 MB pod OOMs in ~60s (INFO) or ~3s (DEBUG with cascading errors). loguru 0.7.3 does not expose a `maxsize` kwarg on `logger.add()`. Mitigation: keep log volume bounded by request rate (avoid unbounded DEBUG in prod); watch for `MemoryError` in low-memory containers. Revisit if loguru exposes `maxsize` upstream.
 - **`enqueue=True` is not a free latency win.** See `scripts/bench_logger_enqueue.py`: on fast buffered sinks, the pickle + IPC overhead dominates a userspace memcpy, so enqueue is ~5× slower per call than sync. On slow sinks with sustained throughput (no idle between bursts), enqueue does not help either - the kernel pipe fills and the producer blocks. Enqueue wins only in the realistic case: slow sink + idle between bursts (a request handler doing async I/O between log calls), where p99 event-loop stalls drop ~25-40% (≈15-18 ms → ≈11 ms, run-dependent) and wall time drops ~23% (2058 ms → 1593 ms) on the handler-shaped scenario. Keep this in mind when evaluating logging overhead on hot paths.
 
 ### Telemetry
 - **Public contract lives at `docs/telemetry-contract.json`** (with sibling explainer `docs/telemetry-contract.md`). When you add a span (`trace_span`), pipeline stage (`pipeline_stage` / `record_pipeline_stage`), metric (`metric_counter` / `metric_histogram` / `metric_gauge_callback`), event-type field, or new public export to `khora.telemetry.__all__`, you MUST update the contract JSON in the same PR. CI fails otherwise via `tests/unit/telemetry/test_contract.py` (10-test drift gate that walks the codebase with ripgrep).
-- **Public vs internal stability tags.** Items tagged `stability: public` in the contract are part of the OSS API surface - renaming or removing them requires a major version bump and prior coordination with published consumer packages (khora-cli, khora-explorer). Items tagged `internal` may be renamed freely as long as the JSON is updated. Top-level engine entry points (`khora.recall`, `khora.remember`, `khora.vectorcypher.retrieve`) and operator-facing metrics (`khora.memory.recall.duration`, `khora.llm.tokens`, etc.) are public. Inner-loop spans (`khora.vectorcypher.coherence_boost`, `khora.vectorcypher.rrf_fusion`, etc.) are internal.
+- **Public vs internal stability tags.** Items tagged `stability: public` in the contract are part of the OSS API surface - renaming or removing them requires a major version bump and prior coordination through the CHANGELOG / release-notes process. Items tagged `internal` may be renamed freely as long as the JSON is updated. Top-level engine entry points (`khora.recall`, `khora.remember`, `khora.vectorcypher.retrieve`) and operator-facing metrics (`khora.memory.recall.duration`, `khora.llm.tokens`, etc.) are public. Inner-loop spans (`khora.vectorcypher.coherence_boost`, `khora.vectorcypher.rrf_fusion`, etc.) are internal.
 - **Cardinality rule - never put `namespace_id` on a metric.** It is a span attribute and a log field only. Phase-0 audit measured 438 distinct namespace IDs over the production retention window in one deployment; Logfire and Prometheus bill per series, so a `namespace_id` label produces an unbounded cost curve. The same rule applies to any other attribute with cardinality ~O(tenants).
 - **Free-text span attributes.** Use `khora.telemetry.bounded_text_hash` (added in #504) for any free-text value (raw user query, document content, chunk text) - it returns a SHA1[:8] hash. Never put raw text on a span attribute: it is both a privacy hazard and a cardinality bomb.
 - **OTel semconv adopted for new attributes.** `gen_ai.*` for LLM (model, prompt tokens, completion tokens), `db.*` for storage backends, `code.*` for stack info. Keeps khora vendor-neutral over the OTel exporter chain.
@@ -234,7 +234,7 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **Telemetry collector is opt-in.** `KHORA_TELEMETRY_DATABASE_URL` enables PostgreSQL-backed event recording; without it, `NoOpCollector` is used (zero cost). Logfire integration is gated by `_HAS_LOGFIRE` - `trace_span()` yields a no-op when the optional `logfire` extra is absent.
 
 ### Downstream
-- The published consumer packages `khora-cli` and `khora-explorer` consume khora's public API. `kb.storage` is a stable public API. The full stability policy is documented in `docs/consumers.md`.
-- **LLMUsage contract:** `LLMUsage` fields are part of the stable public API and are consumed by external cost-tracking integrations - changes require coordination.
-- **ExpertiseConfig contract:** stable API - `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` changes require coordination with published consumer packages. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract.
-- Any breaking change to the stable public API requires coordinated release with published consumer packages. `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface.
+- `kb.storage` is a stable public API.
+- **LLMUsage contract:** `LLMUsage` fields are part of the stable public API; breaking changes are recorded in CHANGELOG.md.
+- **ExpertiseConfig contract:** stable API - changes to `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` are recorded in CHANGELOG.md. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract.
+- Any breaking change to the stable public API is recorded in CHANGELOG.md. `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface.
