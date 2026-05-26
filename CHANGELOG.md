@@ -17,13 +17,12 @@ Patch release on top of v0.17.1. Two more bug reports from Damir Krstanovic surf
 
 - **LLM response parser now accepts both long and short JSON keys** (#839). Pre-0.17.2, the parser at `src/khora/extraction/extractors/llm.py` read only `entity_type` / `relationship_type` / `event_type` / `source_entity` / `target_entity`. Off-allowlist models (e.g. local llama.cpp, Anthropic in some configurations) fell back to `{"type": "json_object"}` with no schema enforcement and emitted the short forms (`type`, `source`, `target`). The parser's `.get(...)` calls returned `None` and the dataclass defaults (`"CONCEPT"`, `"RELATES_TO"`, `"EVENT"`, `""`) kicked in - so users saw every entity stored as `CONCEPT` and every relationship as `ASSOCIATED_WITH` despite the LLM having returned the correct types. Six parse sites in `llm.py` (lines around 981, 1847, 1894, 2013, 2045, 2068) now read `dict.get("long") or dict.get("short") or "<default>"`.
 
-### Removed
+### Fixed
 
-- **`max_concurrent: int = 20` kwarg on `Khora.submit_batch()`** (#838). Declared, documented, never branched on inside `submit_batch`'s body. Background processing concurrency is governed by the global pending processor on the Khora instance, configured via `KHORA_PIPELINES_PENDING_PROCESSOR_MAX_CONCURRENT` (or `KhoraConfig.pipelines.pending_processor_max_concurrent`).
+- **`submit_batch(max_concurrent=N)` is now honored as a per-batch concurrency cap** (#838). Previously declared in the signature but never branched on - this release wires it to a per-batch `asyncio.Semaphore` that caps in-flight document processing for that batch. Defaults to 20. Bounded above by the global `pending_processor_max_concurrent` pool size, so effective per-batch concurrency is `min(pool_size, max_concurrent)`. Concurrent batches each carry their own semaphore - they do not share state and their `max_concurrent` values do not stack.
 
 ### Migration
 
-- **Callers passing `max_concurrent=` to `Khora.submit_batch(...)`** will hit `TypeError: unexpected keyword argument`. To tune background concurrency, set the env var `KHORA_PIPELINES_PENDING_PROCESSOR_MAX_CONCURRENT` or the corresponding `KhoraConfig.pipelines` field. This affects the whole Khora instance, not just one batch - which matches the actual architecture (one pending-processor task per instance).
 - **No migration needed for #839**: the parser now accepts both key shapes, so existing models continue to work and previously-broken off-allowlist models (most notably gpt-5.x) now produce correctly-typed entities and relationships.
 
 ## [0.17.1] - Recall-API contract repair (Damir feedback batch)

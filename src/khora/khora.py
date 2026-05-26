@@ -313,6 +313,12 @@ class _BatchRegistration:
     namespace_id: UUID
     pre_failed_doc_ids: set[UUID] = field(default_factory=set)
     _remaining: int = 0
+    # Per-batch concurrency cap (#838). When set, the unified pending processor
+    # acquires this semaphore around _process_pending_item_impl for items
+    # belonging to this batch, capping in-flight processing of this batch's
+    # documents at `max_concurrent` regardless of how many global pool workers
+    # are available. None for orphan-recovery items (no batch to limit).
+    concurrency_sem: asyncio.Semaphore | None = None
 
     def fire_result(self, result: DocumentResult) -> None:
         """Record a result and fire the callback. Mark handle done when all results delivered."""
@@ -779,6 +785,24 @@ class Khora:
             logger.debug(f"pending_processor: no orphaned PENDING documents found (grace_period={grace_minutes}m)")
 
     async def _process_pending_item(self, item: _ProcessorItem) -> None:
+        """Process a single PENDING document, gated by the per-batch semaphore.
+
+        Acquires the batch's `concurrency_sem` (if set) around
+        `_process_pending_item_impl` so in-flight docs *for this batch* never
+        exceed the batch's `max_concurrent`. Concurrent batches each have
+        their own semaphore - they don't share state.
+
+        Orphan-recovery items (`batch_reg is None`) carry no per-batch
+        semaphore and run unguarded.
+        """
+        sem = item.batch_reg.concurrency_sem if item.batch_reg is not None else None
+        if sem is not None:
+            async with sem:
+                await self._process_pending_item_impl(item)
+        else:
+            await self._process_pending_item_impl(item)
+
+    async def _process_pending_item_impl(self, item: _ProcessorItem) -> None:
         """Process a single PENDING document through the engine pipeline.
 
         Handles both enqueued items (from submit_batch with batch_reg) and
@@ -1364,6 +1388,7 @@ class Khora:
         extraction_config_hash: str | None = None,
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
+        max_concurrent: int = 20,
         reprocess_archived: bool = False,
         session_id: UUID | None = None,
     ) -> BatchHandle:
@@ -1406,18 +1431,16 @@ class Khora:
             chunk_strategy: Override chunking strategy for this batch.
             max_chunks_in_flight: Maximum chunks processed per window. Controls
                 memory usage during background processing. None = unbounded.
+            max_concurrent: Maximum number of documents from THIS batch being
+                processed concurrently (default: 20). Bounded above by the
+                global processor pool size, which is set via
+                ``KhoraConfig.pipelines.pending_processor_max_concurrent``.
+                Two batches submitted concurrently are independently
+                rate-limited - their ``max_concurrent`` values do not stack.
             reprocess_archived: If True, ARCHIVED documents are reset to PENDING
                 and re-processed like FAILED documents. If False (default), ARCHIVED
                 documents are skipped with a warning - preserving intentional
                 archival semantics.
-
-        Note:
-            Background processing concurrency is set globally on the Khora
-            instance via ``KhoraConfig.pipelines.pending_processor_max_concurrent``
-            (env: ``KHORA_PIPELINES_PENDING_PROCESSOR_MAX_CONCURRENT``). The
-            pending processor is a single worker on the Khora instance that
-            drains PENDING documents across all submit_batch() calls, so the
-            concurrency knob is process-wide rather than per-batch.
 
         Returns:
             BatchHandle with batch_id, completion status, and wait() method.
@@ -1426,6 +1449,9 @@ class Khora:
             RuntimeError: If the engine does not support staged document processing.
         """
         from khora.core.models.document import Document
+
+        if max_concurrent < 1:
+            raise ValueError(f"submit_batch: max_concurrent must be >= 1, got {max_concurrent}")
 
         if not documents:
             handle = BatchHandle(batch_id=uuid4(), total=0)
@@ -1653,6 +1679,12 @@ class Khora:
             total=len(pending_docs) + len(pre_failed_docs) + len(pre_completed_docs),
         )
 
+        # Per-batch concurrency cap (#838): each batch carries its own
+        # asyncio.Semaphore so concurrent submit_batch() calls don't stack
+        # their limits. The unified pending processor acquires this around
+        # _process_pending_item_impl below.
+        per_batch_sem = asyncio.Semaphore(max_concurrent)
+
         # Create batch registration for callback delivery.
         batch_reg = _BatchRegistration(
             handle=handle,
@@ -1660,6 +1692,7 @@ class Khora:
             namespace_id=namespace_id,
             pre_failed_doc_ids=pre_failed_doc_ids,
             _remaining=len(pending_docs) + len(pre_failed_docs) + len(pre_completed_docs),
+            concurrency_sem=per_batch_sem,
         )
 
         # Fire error results for documents that failed to be created.
