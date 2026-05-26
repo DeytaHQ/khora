@@ -438,9 +438,9 @@ result = await kb.remember_batch(
     relationship_types=["WORKS_AT"],
 )
 
-print(f"Processed: {result['processed_documents']}")
-print(f"Skipped (duplicates): {result['skipped_documents']}")
-print(f"Failed: {result['failed_documents']}")
+print(f"Processed: {result.processed}")
+print(f"Skipped (duplicates): {result.skipped}")
+print(f"Failed: {result.failed}")
 ```
 
 ## Usage Examples
@@ -488,7 +488,6 @@ result = await kb.remember(
     content,
     namespace=ns.namespace_id,
     chunk_strategy="recursive",
-    expertise="technical_docs",
     entity_types=["PERSON", "ORG"],
     relationship_types=["WORKS_AT"],
 )
@@ -496,8 +495,14 @@ result = await kb.remember(
 
 `chunk_size`, `embedding_model`, and `extraction_model` aren't per-call
 kwargs on `kb.remember()`. Configure them at construction time via
-`KhoraConfig.chunker.chunk_size`, `KhoraConfig.embedding.model`, and
-`KhoraConfig.llm.model` (or the corresponding `KHORA_*` env vars).
+`KhoraConfig.pipelines.chunk_size`, `KhoraConfig.llm.embedding_model`,
+and `KhoraConfig.llm.model` (or the corresponding env vars
+`KHORA_PIPELINES_CHUNK_SIZE`, `KHORA_LLM_EMBEDDING_MODEL`,
+`KHORA_LLM_MODEL`). The `expertise` kwarg on `kb.remember` accepts an
+`ExpertiseConfig` instance, not a string — for ad-hoc per-call
+expertise without setting up the config object, use the lower-level
+`ingest_documents()` direct path shown below, which accepts the
+string form.
 
 ### Direct Pipeline Call
 

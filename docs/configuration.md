@@ -43,25 +43,27 @@ Programmatic values take priority over environment variables.
 | Extra | Purpose | Pulls in |
 |---|---|---|
 | *(default)* | Core: PostgreSQL + pgvector + Neo4j driver + litellm | - |
-| `surrealdb` | **[experimental]** Unified SurrealDB backend (embedded or remote). SDK on alpha track; KNN unreliable in embedded mode | `surrealdb>=2.0.0a1` |
-| `embedded` | Alias for `surrealdb` (zero-infrastructure path) - **experimental** | `surrealdb>=2.0.0a1` |
-| `memgraph` | Memgraph via Bolt | `neo4j>=6.1.0` |
-| `neptune` | AWS Neptune via Bolt | `neo4j>=6.1.0` |
-| `neptune-iam` | Neptune with IAM SigV4 | `neo4j>=6.1.0`, `boto3` |
-| `age` | PostgreSQL AGE graph backend | `asyncpg` |
-| `weaviate` | Weaviate vector store | `weaviate-client>=4.20.1` |
+| `surrealdb` | **[experimental]** Unified SurrealDB backend (embedded or remote). KNN unreliable in embedded mode | `surrealdb>=2.0.0,<3.0` |
+| `embedded` | Alias for `surrealdb` (zero-infrastructure path) - **experimental** | `surrealdb>=2.0.0,<3.0` |
+| `memgraph` | Memgraph via Bolt | `neo4j>=6.2.0` |
+| `neptune` | AWS Neptune via Bolt | `neo4j>=6.2.0` |
+| `neptune-iam` | Neptune with IAM SigV4 | `neo4j>=6.2.0`, `boto3>=1.35.0` |
+| `age` | PostgreSQL AGE graph backend | `asyncpg>=0.31.0` |
+| `weaviate` | Weaviate vector store | `weaviate-client>=4.21.0` |
 | `turbopuffer` | **[experimental]** Serverless vector + BM25 store for the Skeleton engine. See [engines/skeleton-engine.md](engines/skeleton-engine.md#turbopuffer-serverless--large-scale) | `turbopuffer>=2.1.0,<3.0` |
-| `sqlite` | SQLite embedded relational + vector | `aiosqlite>=0.20.0` |
-| `lancedb` | LanceDB embedded vector store | `lancedb>=0.17.0`, `pyarrow` |
-| `sqlite-lance` | **[experimental]** Unified SQLite + LanceDB embedded backend. Recommended embedded stack; covers VectorCypher / Skeleton / Chronicle | `lancedb>=0.17.0`, `aiosqlite>=0.20.0`, `pyarrow` |
-| `binary-readers` | PDF / docx / xlsx readers (used by downstream ingestors) | `pymupdf`, `openpyxl`, `python-docx` |
-| `parquet` | Parquet readers | `pyarrow>=18.0.0` |
-| `nlp` | spaCy-based sentence splitting | `spacy>=3.8` |
-| `otel` | OpenTelemetry SDK + OTLP/HTTP exporter (vendor-neutral) | `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` |
-| `otel-grpc` | `khora[otel]` + OTLP/gRPC transport | adds `opentelemetry-exporter-otlp-proto-grpc` |
-| `logfire` | Logfire - managed OTel backend with auto-bootstrap | `logfire>=4.0` |
-| `rust` | Rust acceleration (`khora-accel`) | `khora-accel>=0.1.0` |
-| `all-backends` | Everything graph-and-vector (no observability/nlp/rust) | - |
+| `sqlite` | SQLite embedded relational + vector | `aiosqlite>=0.21.0` |
+| `lancedb` | LanceDB embedded vector store | `lancedb>=0.30.0`, `pyarrow>=24.0.0` |
+| `sqlite-lance` | **[experimental]** Unified SQLite + LanceDB embedded backend. Recommended embedded stack; covers VectorCypher / Skeleton / Chronicle | `lancedb>=0.30.0`, `aiosqlite>=0.21.0`, `pyarrow>=24.0.0` |
+| `reranking` | Neural reranking via cross-encoders | `sentence-transformers>=5.4.1` |
+| `binary-readers` | PDF / docx / xlsx readers (used by downstream ingestors) | `pymupdf>=1.27.2`, `openpyxl>=3.1.0`, `python-docx>=1.2.0` |
+| `parquet` | Parquet readers | `pyarrow>=24.0.0` |
+| `accel` | Accelerated CPU ops (string-matching fuzz, used by dream-phase centroid recompute) | `rapidfuzz>=3.0.0` |
+| `nlp` | spaCy-based sentence splitting | `spacy>=3.8.0` |
+| `otel` | OpenTelemetry SDK + OTLP/HTTP exporter (vendor-neutral) | `opentelemetry-sdk>=1.34.1`, `opentelemetry-exporter-otlp-proto-http>=1.34.1` |
+| `otel-grpc` | `khora[otel]` + OTLP/gRPC transport | adds `opentelemetry-exporter-otlp-proto-grpc>=1.34.1` |
+| `logfire` | Logfire - managed OTel backend with auto-bootstrap | `logfire>=4.6.0` |
+| `rust` | Rust acceleration (`khora-accel`); pin tracks khora's own version in lockstep | `khora-accel` (exact lockstep pin) |
+| `all-backends` | All graph + vector backends (no observability / nlp / rust / accel) | postgres + neo4j + weaviate + surrealdb + sqlite + lancedb pins |
 
 Combine extras as needed: `pip install 'khora[surrealdb,otel]'`. See
 [observability.md](observability.md) for the full env-var contract,

@@ -86,6 +86,8 @@ async def main() -> None:
         await kb.remember(
             "Marie Curie won the Nobel Prize in Physics in 1903.",
             namespace=ns.namespace_id,
+            entity_types=["PERSON", "AWARD"],
+            relationship_types=["WON"],
         )
         result = await kb.recall("What did Curie win?", namespace=ns.namespace_id)
         print(context_text(result))
@@ -106,6 +108,8 @@ async with Khora() as kb:
         [{"content": "doc 1"}, {"content": "doc 2"}],
         on_result=lambda completed, total, result: print(result),
         namespace=ns_id,
+        entity_types=["PERSON", "ORG"],
+        relationship_types=["WORKS_AT"],
     )
     await handle.wait()
 ```
@@ -140,7 +144,7 @@ Khora ships an **offline maintenance pass** ("dream phase") that audits an accum
 ```python
 from khora import Khora, KhoraConfig, DreamConfig
 
-kb = Khora(config=KhoraConfig(dream=DreamConfig(enabled=True)))
+kb = Khora(KhoraConfig(dream=DreamConfig(enabled=True)))
 
 # Dry-run - pure observation/planning, zero writes.
 result = await kb.dream(namespace_id, mode="dry-run")
@@ -149,22 +153,24 @@ for op in result.ops:
     print(op.op_type, op.decision, op.outputs)
 ```
 
-Ten operations ship in v0.15.0 across both engines:
+Operations span both engines and cover audits (Phase 1: read-only,
+report-only), planning (Phase 2: emit `DreamOp` per work item), and
+apply (mutating with snapshot-before-delete and per-op transactions).
+The current `OpKind` surface is enumerated in
+[docs/dream-phase.md](docs/dream-phase.md); examples include
+schema-drift / orphan-PageRank / `source_chunk_ids` audits on the
+vectorcypher side, abstention-threshold + tombstone audits on
+chronicle, and planners for cross-batch entity dedupe, centroid
+recompute, `source_chunk_ids` GC, fact compaction, event clustering,
+community summary, contradiction detection, and schema normalization.
 
-| Phase | Engine | Operation | Surfaces |
-|---|---|---|---|
-| 1 audit | chronicle | abstention-threshold drift | Configured thresholds vs observed p50/p90/p99 |
-| 1 audit | chronicle | tombstone audit | Active / inactive / invalidated fact ratios + age distribution |
-| 1 audit | vectorcypher | schema drift | New / unused / frequency-changed types vs `ExpertiseConfig` |
-| 1 audit | vectorcypher | orphan PageRank | Bottom-5% PR entities flagged as `archive_candidate` |
-| 1 audit | vectorcypher | source_chunk_ids audit | Dead UUID counts + array-length distribution |
-| 2 planner | vectorcypher | cross-batch entity dedupe | Pairs above the per-type cosine threshold, planned merges |
-| 2 planner | vectorcypher | centroid recompute | Per-cluster `centroid` / `re_embed` / `skip_multimodal` decisions |
-| 2 planner | vectorcypher | source_chunk_ids GC | Per-entity rewrites dropping dead chunk UUIDs |
-| 2 planner | chronicle | memory_facts compaction | Tombstoned rows past `retention_days` |
-| 2 planner | chronicle | event clustering | Near-duplicate `chronicle_events` within a sliding window |
-
-Default is `DreamConfig(enabled=False)` - the master switch is opt-in. **Both modes are live in v0.15.0**: `mode="dry-run"` emits the plan only; `mode="apply"` runs the matching apply handler under a per-op transaction with the pre-state snapshotted into `undo.json` before each mutation. Five guardrails protect the apply path (7-day hard retention floor, `KHORA_DREAM_DISABLE_APPLY` kill-switch, chunk_id runtime assertion, snapshot-before-delete, advisory-lock-held-through-apply).
+Default is `DreamConfig(enabled=False)` - the master switch is opt-in.
+**Both modes are live**: `mode="dry-run"` emits the plan only;
+`mode="apply"` runs the matching apply handler under a per-op
+transaction with the pre-state snapshotted into `undo.json` before
+each mutation. Five guardrails protect the apply path (7-day hard
+retention floor, `KHORA_DREAM_DISABLE_APPLY` kill-switch, `chunk_id`
+runtime assertion, snapshot-before-delete, advisory-lock-held-through-apply).
 
 See [docs/dream-phase.md](docs/dream-phase.md) for the full operator guide: research lineage, configuration surface, sink wiring, telemetry contract, storage substrate, and stability tags.
 
