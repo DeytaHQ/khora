@@ -224,7 +224,11 @@ class LLMEntityExtractor(EntityExtractor):
         "o1-mini",
         "o1-preview",
         "o3-mini",
+        "gpt-5",
+        "gpt-5-mini",
         "gpt-5-nano",
+        "gpt-5.4",
+        "gpt-5.4-mini",
     }
 
     # Model input token multipliers for adaptive batching
@@ -303,20 +307,19 @@ class LLMEntityExtractor(EntityExtractor):
         # json_schema allowlist. Off-allowlist models fall back to a looser
         # json_object response_format, which means entity/relationship key
         # names depend on whatever the LLM emits. The parser accepts both
-        # `entity_type` and `type` (and `source`/`target`) since v0.17.2, so
-        # extraction still works, but adding the model to the allowlist
-        # remains the cleanest path when the provider supports strict
-        # structured output. See issue #839.
+        # `entity_type` and `type` (and `source`/`target`) so extraction
+        # still works, but adding the model to the allowlist remains the
+        # cleanest path when the provider supports strict structured output.
+        # See issue #839.
         if model not in self.MODELS_REQUIRING_JSON_SCHEMA and model not in self._WARNED_NON_ALLOWLIST_MODELS:
             self._WARNED_NON_ALLOWLIST_MODELS.add(model)
             logger.warning(
                 "Extraction model '{}' is not on the json_schema allowlist; "
                 "falling back to json_object response format. "
-                "Entity/relationship types should still parse "
-                "(v0.17.2+ accepts both 'entity_type' and 'type' keys), "
-                "but you may want to add this model to "
-                "MODELS_REQUIRING_JSON_SCHEMA if its provider supports "
-                "strict structured output.",
+                "Entity/relationship types should still parse - the parser "
+                "accepts both 'entity_type' and 'type' keys - but you may "
+                "want to add this model to MODELS_REQUIRING_JSON_SCHEMA if "
+                "its provider supports strict structured output.",
                 model,
             )
 

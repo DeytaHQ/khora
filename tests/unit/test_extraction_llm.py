@@ -137,9 +137,11 @@ class TestParseResponse:
     def test_short_key_entity_type(self) -> None:
         """Entities using short 'type' key parse correctly (issue #839).
 
-        Off-allowlist models like gpt-5.4 fall back to json_object response
-        format with no schema enforcement. They tend to emit the short
-        'type' key instead of 'entity_type'. The parser must accept either.
+        Off-allowlist models (e.g. local llama.cpp, Anthropic in some
+        configurations, any model not in MODELS_REQUIRING_JSON_SCHEMA)
+        fall back to json_object response format with no schema enforcement.
+        They tend to emit the short 'type' key instead of 'entity_type'.
+        The parser must accept either.
         """
         extractor = self._make_extractor()
         data = {
