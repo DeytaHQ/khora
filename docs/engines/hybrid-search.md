@@ -436,18 +436,28 @@ async with Khora(db_url, engine="skeleton") as kb:
 ### Via Environment
 
 ```bash
-KHORA_QUERY_HYBRID_ALPHA=0.7
-KHORA_QUERY_DEFAULT_LIMIT=10
-KHORA_QUERY_MIN_SIMILARITY=0.0
+KHORA_QUERY_VECTOR_WEIGHT=0.7
+KHORA_QUERY_KEYWORD_WEIGHT=0.3
+KHORA_QUERY_MIN_CHUNK_SIMILARITY=0.0
+KHORA_QUERY_MIN_ENTITY_SIMILARITY=0.0
 ```
+
+`hybrid_alpha` is a per-call argument to `kb.recall(...)` only — there
+is no global env-var equivalent. The vector/keyword channel weights
+above (`KHORA_QUERY_VECTOR_WEIGHT` / `KHORA_QUERY_KEYWORD_WEIGHT`) are
+the closest tunable defaults. The per-call `limit` argument likewise
+has no env-var default; see `KHORA_QUERY_STAGE1_RECALL_LIMIT`,
+`KHORA_QUERY_STAGE3_FILTER_LIMIT`, and `KHORA_QUERY_STAGE4_RERANK_LIMIT`
+for per-stage caps.
 
 ### Via YAML
 
 ```yaml
 query:
-  hybrid_alpha: 0.7
-  default_limit: 10
-  min_similarity: 0.0
+  vector_weight: 0.7
+  keyword_weight: 0.3
+  min_chunk_similarity: 0.0
+  min_entity_similarity: 0.0
   recency_decay_days: 30
 ```
 

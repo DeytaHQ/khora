@@ -505,22 +505,19 @@ config = KhoraConfig(
 
 ```bash
 KHORA_DATABASE_URL=postgresql://localhost/khora
-KHORA_ENGINE_NAME=skeleton
-KHORA_ENGINE_BACKEND=pgvector
-KHORA_QUERY_HYBRID_ALPHA=0.7
 KHORA_QUERY_RECENCY_DECAY_DAYS=30
 ```
+
+Engine and backend selection are constructor-only — pass
+`engine="skeleton"` and `engine_kwargs={"backend": "pgvector"}` to
+`Khora(...)`. The `hybrid_alpha` blend weight is a per-call argument
+to `kb.recall(...)` and has no env-var equivalent.
 
 ### Via YAML
 
 ```yaml
 # config/skeleton/khora.yaml
-engine:
-  name: skeleton
-  backend: pgvector
-
 query:
-  hybrid_alpha: 0.7
   recency_decay_days: 30
 
 temporal:
