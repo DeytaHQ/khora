@@ -81,20 +81,27 @@ from khora import Khora
 
 # Use VectorCypher engine explicitly
 async with Khora("postgresql://...", engine="vectorcypher") as kb:
+    ns = await kb.create_namespace()
+
     # Store with temporal context
     result = await kb.remember(
         "Meeting notes from Q1 planning with John",
+        namespace=ns.namespace_id,
         title="Q1 Planning",
         metadata={
             "author": "alice@company.com",
             "occurred_at": "2024-01-15T10:00:00Z"
-        }
+        },
+        entity_types=["PERSON", "EVENT"],
+        relationship_types=["PARTICIPATES_IN"],
     )
 
-    # Recall with graph-enhanced retrieval
+    # Recall with graph-enhanced retrieval. Per-call graph depth isn't
+    # exposed on kb.recall(); configure globally via
+    # `KhoraConfig.query.max_graph_depth`.
     results = await kb.recall(
         "What did we discuss with John about planning?",
-        graph_depth=2,  # Expand 2 hops in graph
+        namespace=ns.namespace_id,
     )
 ```
 
@@ -454,8 +461,14 @@ async with Khora(
         retriever_min_entity_similarity=0.25,
     )},
 ) as kb:
-    result = await kb.remember("content")
-    results = await kb.recall("query")
+    ns = await kb.create_namespace()
+    result = await kb.remember(
+        "content",
+        namespace=ns.namespace_id,
+        entity_types=["PERSON", "ORG"],
+        relationship_types=["WORKS_AT"],
+    )
+    results = await kb.recall("query", namespace=ns.namespace_id)
 ```
 
 The `engine_kwargs` dict is forwarded directly to the `VectorCypherEngine` constructor, which accepts `vectorcypher_config` as a keyword argument.
@@ -643,4 +656,3 @@ uv run alembic upgrade head
 - [Temporal Model](temporal-model.md) - Bi-temporal design deep dive
 - [Hybrid Search](hybrid-search.md) - Vector + BM25 fusion details
 - [Temporal Queries](../query-engine/temporal-queries.md) - Temporal detection, recency bias, and temporal filters
-- [References](../REFERENCES.md) - Research papers and inspirations (HippoRAG 2, Graph RAG 2026)

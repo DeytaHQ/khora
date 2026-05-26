@@ -439,7 +439,10 @@ The Slack skill (`extraction/skills/builtin/slack.yaml`) is designed for ingesti
 ```python
 result = await kb.remember(
     content,
+    namespace=ns.namespace_id,
     expertise="saas_expert",  # Name or path
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["WORKS_AT"],
 )
 ```
 

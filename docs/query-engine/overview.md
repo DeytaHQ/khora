@@ -191,12 +191,10 @@ TemporalFilter.last_days(7)
 TemporalFilter.after("2023-06-01")
 ```
 
-Recency bias can also be applied - recent content scores higher:
-
-```python
-# Exponential decay: score *= e^(-decay * days_old)
-config = QueryConfig(recency_bias=0.3)
-```
+Recency bias can also be applied - recent content scores higher.
+Recency weighting is configured globally via `QueryConfig.apply_recency_bias`
+and `QueryConfig.recency_weight`; the legacy `recency_bias=` knob isn't
+exposed on the current public surface.
 
 ## Step 5b: MMR Diversity Selection (Optional)
 
@@ -253,7 +251,7 @@ QueryResult(
 from khora import Khora, SearchMode
 
 async with Khora() as kb:
-    ns = await kb.create_namespace("default")
+    ns = await kb.create_namespace()
     results = await kb.recall(
         "machine learning applications",
         namespace=ns.namespace_id,
@@ -268,40 +266,29 @@ async with Khora() as kb:
 ### With Full Configuration
 
 ```python
-from khora.query import QueryConfig
-from khora.query.temporal import TemporalFilter
+from datetime import datetime, timedelta, timezone
 
 results = await kb.recall(
     "product updates",
     namespace=ns_id,
-    config=QueryConfig(
-        mode=SearchMode.HYBRID,
-        limit=20,
-        min_similarity=0.1,
-        vector_weight=0.6,
-        graph_weight=0.2,
-        keyword_weight=0.2,
-        temporal_filter=TemporalFilter.last_days(30),
-        recency_bias=0.2,
-        enable_reranking=True
-    )
+    mode=SearchMode.HYBRID,
+    limit=20,
+    min_similarity=0.1,
+    start_time=datetime.now(timezone.utc) - timedelta(days=30),
 )
 ```
+
+`kb.recall()` accepts `mode`, `limit`, `min_similarity`, `start_time`,
+and `end_time` directly. Fusion weights, reranking, and recency knobs
+are global - configure them via `KhoraConfig.query` (`QueryConfig`) at
+construction time or via `KHORA_QUERY_*` environment variables; there
+is no `config=` kwarg on `kb.recall()`.
 
 ### Agentic Search
 
-For complex questions, enable multi-step exploration:
-
-```python
-results = await kb.recall(
-    "What's our competitive strategy?",
-    namespace=ns_id,
-    config=QueryConfig(enable_agentic=True)
-)
-
-# The engine may execute follow-up queries automatically
-print(results.trace)  # See the full exploration path
-```
+Per-query agentic search isn't exposed on `kb.recall()`. Use
+`khora.query.agentic.AgenticSearchAgent` directly (see
+[agentic-search.md](agentic-search.md)).
 
 ## Search Mode Quick Reference
 

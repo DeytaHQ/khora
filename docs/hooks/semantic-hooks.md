@@ -24,10 +24,12 @@ async with Khora() as kb:
     kb.subscribe("entity.created", on_entity, filter=filter)
 
     # Ingestion triggers callbacks
-    ns = await kb.create_namespace("default")
+    ns = await kb.create_namespace()
     await kb.remember(
         "Acme Corp announced a partnership with Globex.",
         namespace=ns.namespace_id,
+        entity_types=["ORGANIZATION"],
+        relationship_types=["PARTNERSHIP_WITH"],
     )
 ```
 

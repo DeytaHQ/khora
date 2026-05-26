@@ -275,14 +275,36 @@ More overlap = more redundancy = better boundary handling, but larger storage.
 
 ```python
 # Use semantic chunking (default)
-await kb.remember(content, chunk_strategy="semantic")
+await kb.remember(
+    content,
+    namespace=ns.namespace_id,
+    chunk_strategy="semantic",
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["MENTIONS"],
+)
 
 # Use recursive for structured docs
-await kb.remember(content, chunk_strategy="recursive", chunk_size=1024)
+await kb.remember(
+    content,
+    namespace=ns.namespace_id,
+    chunk_strategy="recursive",
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["MENTIONS"],
+)
 
 # Use fixed for speed
-await kb.remember(content, chunk_strategy="fixed", chunk_size=512)
+await kb.remember(
+    content,
+    namespace=ns.namespace_id,
+    chunk_strategy="fixed",
+    entity_types=["PERSON", "ORG"],
+    relationship_types=["MENTIONS"],
+)
 ```
+
+`chunk_size` isn't a per-call kwarg on `kb.remember()`; configure it
+globally via `KhoraConfig.chunker.chunk_size` (or env var
+`KHORA_CHUNKER_CHUNK_SIZE`) at construction time.
 
 ### Direct Usage
 

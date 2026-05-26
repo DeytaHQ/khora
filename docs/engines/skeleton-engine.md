@@ -70,7 +70,7 @@ from khora import Khora
 
 # Use Skeleton Construction engine explicitly
 async with Khora("postgresql://...", engine="skeleton") as kb:
-    ns = await kb.create_namespace("q1-review")
+    ns = await kb.create_namespace()
 
     # Store with temporal context
     result = await kb.remember(
@@ -81,20 +81,20 @@ async with Khora("postgresql://...", engine="skeleton") as kb:
             "author": "alice@company.com",
             "channel": "leadership",
             "occurred_at": "2024-01-15T10:00:00Z"
-        }
+        },
+        entity_types=["PERSON", "EVENT"],
+        relationship_types=["PARTICIPATES_IN"],
     )
 
-    # Recall with temporal and structured filters
+    # Recall with temporal filters
     results = await kb.recall(
         "What decisions were made?",
         namespace=ns.namespace_id,
-        temporal_filter={
-            "occurred_after": "2024-01-01",
-            "occurred_before": "2024-03-31",
-            "author": "alice@company.com"
-        },
-        hybrid_alpha=0.7  # 70% vector, 30% BM25
+        start_time=datetime(2024, 1, 1),
+        end_time=datetime(2024, 3, 31),
     )
+    # Note: structured filters (author, channel) and per-call hybrid
+    # alpha aren't exposed on the public facade today.
 ```
 
 **Key Methods:**
@@ -487,19 +487,18 @@ results = await engine.recall(query, namespace_id=ns_id, mode=SearchMode.HYBRID)
 ### Via KhoraConfig
 
 ```python
-from khora.config import KhoraConfig
+from khora.config import KhoraConfig, QueryConfig
 
 config = KhoraConfig(
     database_url="postgresql://localhost/khora",
-    engine=EngineConfig(
-        name="skeleton",
-        backend="pgvector",  # or "weaviate"
-    ),
     query=QueryConfig(
-        hybrid_alpha=0.7,
         recency_decay_days=30,
     ),
 )
+# Engine selection is a Khora() constructor kwarg, not a config field:
+#     kb = Khora(config, engine="skeleton")
+# Per-query hybrid alpha isn't exposed; set it globally via
+# KHORA_QUERY_HYBRID_ALPHA (environment) instead.
 ```
 
 ### Via Environment Variables
@@ -546,4 +545,3 @@ temporal:
 - [Temporal Model](temporal-model.md) - Deep dive into bi-temporal design
 - [Skeleton Indexing](skeleton-indexing.md) - PageRank-based core selection
 - [Hybrid Search](hybrid-search.md) - Vector + BM25 fusion details
-- [References](../REFERENCES.md) - Research papers and inspirations

@@ -44,15 +44,25 @@ The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunk
 ```python
 # VectorCypher: skeleton-selective extraction
 async with Khora(db_url, engine="vectorcypher") as kb:
-    ns = await kb.create_namespace("default")
-    result = await kb.remember(content, namespace=ns.namespace_id)
+    ns = await kb.create_namespace()
+    result = await kb.remember(
+        content,
+        namespace=ns.namespace_id,
+        entity_types=["PERSON", "ORG"],
+        relationship_types=["WORKS_AT"],
+    )
     print(f"Extracted {result.entities_extracted} entities")
 
 # For 100% extraction (legacy GraphRAG behavior):
 async with Khora(db_url, engine="vectorcypher",
                  engine_kwargs={"skeleton_core_ratio": 1.0}) as kb:
-    ns = await kb.create_namespace("default")
-    result = await kb.remember(content, namespace=ns.namespace_id)
+    ns = await kb.create_namespace()
+    result = await kb.remember(
+        content,
+        namespace=ns.namespace_id,
+        entity_types=["PERSON", "ORG"],
+        relationship_types=["WORKS_AT"],
+    )
 ```
 
 **Skeleton Construction:**
@@ -64,8 +74,13 @@ async with Khora(db_url, engine="vectorcypher",
 ```python
 # Skeleton Construction: minimal extraction, skeleton-based
 async with Khora(db_url, engine="skeleton") as kb:
-    ns = await kb.create_namespace("default")
-    result = await kb.remember(content, namespace=ns.namespace_id)
+    ns = await kb.create_namespace()
+    result = await kb.remember(
+        content,
+        namespace=ns.namespace_id,
+        entity_types=["PERSON", "ORG"],
+        relationship_types=["MENTIONS"],
+    )
     # Entities only extracted for "core" chunks (high PageRank)
 ```
 
@@ -94,13 +109,16 @@ await kb.remember(
     content,
     namespace=ns_id,
     metadata={"occurred_at": "2024-01-15T00:00:00Z"},
+    entity_types=["PERSON", "EVENT"],
+    relationship_types=["PARTICIPATES_IN"],
 )
 
 # Query: "What happened in January?"
 results = await kb.recall(
     "January events",
     namespace=ns_id,
-    time_range=("2024-01-01", "2024-01-31"),
+    start_time=datetime(2024, 1, 1),
+    end_time=datetime(2024, 1, 31),
 )
 ```
 
@@ -130,7 +148,8 @@ results = await kb.recall("CEO recent news", namespace=ns_id)  # Hybrid vector +
 results = await kb.recall(
     "deployment errors",
     namespace=ns_id,
-    time_range=("2024-01-01", "2024-01-31"),
+    start_time=datetime(2024, 1, 1),
+    end_time=datetime(2024, 1, 31),
     mode=SearchMode.HYBRID,
 )
 ```
@@ -226,4 +245,3 @@ async def hybrid_query(query: str, ns_id):
 - [Chronicle Engine](chronicle-engine.md) - conversational + temporal.
 - [Temporal Model](temporal-model.md) - bi-temporal design details.
 - [Hybrid Search](hybrid-search.md) - vector + BM25 fusion primitive.
-- [References](../REFERENCES.md) - research papers and inspirations.

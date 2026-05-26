@@ -15,7 +15,9 @@ async with Khora() as kb:
     # Store in a specific namespace (required)
     await kb.remember(
         "Important document content...",
-        namespace=namespace_id
+        namespace=namespace_id,
+        entity_types=["PERSON", "ORG"],
+        relationship_types=["WORKS_AT"],
     )
 
     # Search within that namespace (required)
@@ -97,7 +99,9 @@ async with Khora() as kb:
     # Now store data using the stable namespace_id
     await kb.remember(
         "Important content...",
-        namespace=namespace.namespace_id
+        namespace=namespace.namespace_id,
+        entity_types=["PERSON", "ORG"],
+        relationship_types=["WORKS_AT"],
     )
 ```
 
@@ -171,7 +175,9 @@ async with Khora() as kb:
     for doc in all_your_documents:
         await kb.remember(
             doc.content,
-            namespace=new_version.id
+            namespace=new_version.id,
+            entity_types=["PERSON", "ORG"],
+            relationship_types=["WORKS_AT"],
         )
 
     # 4. Verify everything looks good
@@ -238,7 +244,12 @@ new_messages = await slack_client.get_messages(since=checkpoint)
 
 # Process them...
 for msg in new_messages:
-    await kb.remember(msg.content, namespace=namespace_id)
+    await kb.remember(
+        msg.content,
+        namespace=namespace_id,
+        entity_types=["PERSON", "TOPIC"],
+        relationship_types=["DISCUSSES", "AGREES_WITH"],
+    )
 
 # Update checkpoint
 await kb.storage.set_sync_checkpoint(

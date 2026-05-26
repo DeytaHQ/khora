@@ -120,29 +120,19 @@ print(f"Summary: {result.summary}")
 
 ### Via Khora
 
+Per-query agentic search isn't currently exposed on the public facade -
+use the `AgenticSearchAgent` shown above for now. Temporal narrowing on
+the standard `kb.recall()` facade is handled via the `start_time` /
+`end_time` kwargs (no `temporal_filter` / `recency_bias` configuration
+is exposed today):
+
 ```python
+from datetime import datetime, timedelta, timezone
+
 result = await kb.recall(
     "product strategy",
     namespace=ns_id,
-    config=QueryConfig(
-        enable_agentic=True,
-        max_agentic_steps=3
-    )
-)
-```
-
-### With Other Options
-
-```python
-result = await agent.search(
-    query,
-    namespace_id,
-    config=QueryConfig(
-        mode=SearchMode.HYBRID,
-        temporal_filter=TemporalFilter.last_days(30),
-        recency_bias=0.2
-    ),
-    max_steps=3
+    start_time=datetime.now(timezone.utc) - timedelta(days=30),
 )
 ```
 

@@ -263,7 +263,7 @@ result = await engine.query(
     "Einstein collaborators at Princeton",
     namespace_id=namespace_id,
     config=QueryConfig(
-        enable_understanding=True,  # Default
+        enable_query_understanding=True,  # Default
     ),
 )
 
@@ -311,7 +311,7 @@ result = await engine.query(
     "simple search",
     namespace_id=namespace_id,
     config=QueryConfig(
-        enable_understanding=False,
+        enable_query_understanding=False,
     ),
 )
 ```

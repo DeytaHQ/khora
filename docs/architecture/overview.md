@@ -148,17 +148,25 @@ Your primary interface. Lives at `src/khora/khora.py`.
 from khora import Khora
 
 async with Khora() as kb:
+    ns = await kb.create_namespace()
+
     # Store something
     result = await kb.remember(
         "Einstein developed relativity while working at the patent office.",
-        title="Einstein Biography"
+        namespace=ns.namespace_id,
+        title="Einstein Biography",
+        entity_types=["PERSON", "ORG"],
+        relationship_types=["WORKS_AT"],
     )
 
     # Find it later
-    results = await kb.recall("Who developed the theory of relativity?")
+    results = await kb.recall(
+        "Who developed the theory of relativity?",
+        namespace=ns.namespace_id,
+    )
 
     # Remove if needed
-    await kb.forget(result.document_id)
+    await kb.forget(result.document_id, namespace=ns.namespace_id)
 ```
 
 Khora handles all the complexity of coordinating three databases, running extraction pipelines, and combining search results. You just tell it what to remember and what to recall.
