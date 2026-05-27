@@ -105,9 +105,11 @@ class EventType(str, Enum):
 
 ## Factory Methods
 
-`MemoryEvent` provides factory methods for common event types:
-
-### Document Events
+`MemoryEvent` provides four factory classmethods that wrap the common
+event shapes for the four most-frequent resource types. Each takes
+`(namespace_id, <resource>_id, data, **kwargs)`; the `**kwargs`
+forward to the dataclass constructor (`actor_id`, `actor_type`,
+`correlation_id`, `causation_id`, …).
 
 ```python
 # Document created
@@ -123,26 +125,6 @@ event = MemoryEvent.document_created(
     actor_type="user",
 )
 
-# Document processed
-event = MemoryEvent.document_processed(
-    namespace_id=ns_id,
-    document_id=doc.id,
-    data={
-        "chunk_count": 5,
-        "entity_count": 12,
-    },
-)
-
-# Document deleted
-event = MemoryEvent.document_deleted(
-    namespace_id=ns_id,
-    document_id=doc.id,
-)
-```
-
-### Entity Events
-
-```python
 # Entity created
 event = MemoryEvent.entity_created(
     namespace_id=ns_id,
@@ -151,39 +133,6 @@ event = MemoryEvent.entity_created(
         "name": entity.name,
         "type": entity.entity_type.value,
         "confidence": entity.confidence,
-    },
-)
-
-# Entity merged
-event = MemoryEvent.entity_merged(
-    namespace_id=ns_id,
-    entity_id=merged_into.id,
-    data={
-        "merged_entity_id": str(merged_from.id),
-        "merged_entity_name": merged_from.name,
-    },
-)
-
-# Entity updated
-event = MemoryEvent.entity_updated(
-    namespace_id=ns_id,
-    entity_id=entity.id,
-    data={"confidence": 0.95},
-    previous_data={"confidence": 0.85},
-)
-```
-
-### Chunk Events
-
-```python
-# Chunk created
-event = MemoryEvent.chunk_created(
-    namespace_id=ns_id,
-    chunk_id=chunk.id,
-    data={
-        "document_id": str(chunk.document_id),
-        "index": chunk.index,
-        "token_count": chunk.token_count,
     },
 )
 
@@ -196,31 +145,36 @@ event = MemoryEvent.chunk_embedded(
         "dimension": 1536,
     },
 )
+
+# Relationship created
+event = MemoryEvent.relationship_created(
+    namespace_id=ns_id,
+    relationship_id=rel.id,
+    data={
+        "source_id": str(rel.source_entity_id),
+        "target_id": str(rel.target_entity_id),
+        "type": rel.relationship_type,
+    },
+)
 ```
 
-### Sync Events
+For event types without a factory (document updates, entity merges,
+sync events, deletes, anything custom), construct `MemoryEvent`
+directly with `event_type=EventType.<KIND>`:
 
 ```python
-# Sync started
-event = MemoryEvent.sync_started(
-    namespace_id=ns_id,
-    sync_id=sync_id,
-    data={
-        "source": "slack",
-        "channel": "general",
-    },
-)
+from khora.core.models.event import MemoryEvent, EventType
 
-# Sync completed
-event = MemoryEvent.sync_completed(
+event = MemoryEvent(
+    event_type=EventType.DOCUMENT_DELETED,
     namespace_id=ns_id,
-    sync_id=sync_id,
-    data={
-        "documents_processed": 25,
-        "entities_extracted": 150,
-    },
+    resource_id=doc.id,
+    resource_type="document",
+    data={"reason": "manual_purge"},
 )
 ```
+
+See [Event Types](#event-types) above for the full enum.
 
 ## Correlation IDs
 
@@ -238,15 +192,15 @@ events = [
         ...,
         correlation_id=correlation_id,
     ),
-    MemoryEvent.chunk_created(
-        ...,
-        correlation_id=correlation_id,
-    ),
     MemoryEvent.chunk_embedded(
         ...,
         correlation_id=correlation_id,
     ),
     MemoryEvent.entity_created(
+        ...,
+        correlation_id=correlation_id,
+    ),
+    MemoryEvent.relationship_created(
         ...,
         correlation_id=correlation_id,
     ),

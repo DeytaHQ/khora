@@ -458,7 +458,7 @@ query:
   keyword_weight: 0.3
   min_chunk_similarity: 0.0
   min_entity_similarity: 0.0
-  recency_decay_days: 30
+  recency_decay_days: 7
 ```
 
 ## Related Documentation

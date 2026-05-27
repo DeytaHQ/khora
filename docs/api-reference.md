@@ -160,7 +160,9 @@ handle: BatchHandle = await kb.submit_batch(
 )
 ```
 
-Deferred sibling of `remember_batch()`: persists every document as `PENDING` and returns a `BatchHandle` immediately; processing continues in the background and fires `on_result` per document as it completes. Accepts the same provenance kwargs and per-doc dict shape as `remember_batch()` - per-doc dict values override the top-level kwargs. See [`BatchHandle`](#batchhandle) below for the wait/identity surface.
+Deferred sibling of `remember_batch()`: persists every document as `PENDING` and returns a `BatchHandle` immediately; the pending processor picks each document up and fires `on_result` as it completes. Accepts the same provenance kwargs and per-doc dict shape as `remember_batch()` - per-doc dict values override the top-level kwargs. See [`BatchHandle`](#batchhandle) below for the wait/identity surface.
+
+> **The pending processor is opt-in and must be running.** `submit_batch()` raises if `kb.start_pending_processor()` has not been called first (after `connect()`). The check is enforced after the documents are staged as `PENDING`, so a failure leaves rows in the queue. Call `start_pending_processor()` on every write-path service.
 
 `max_concurrent` caps concurrency for this batch's documents specifically; the global processor pool size still applies as a ceiling. The pool is sized via `KhoraConfig.pipelines.pending_processor_max_concurrent` (env: `KHORA_PIPELINES_PENDING_PROCESSOR_MAX_CONCURRENT`); effective per-batch concurrency is `min(pool_size, max_concurrent)`. Two batches submitted concurrently are rate-limited independently - their `max_concurrent` values do not stack.
 
@@ -292,7 +294,7 @@ All result types are frozen slotted dataclasses.
 
 ### `BatchHandle`
 
-Returned by `kb.submit_batch(...)` (the async-staging path that returns immediately and processes via a background worker). Use `await handle.wait()` to block until all documents finish. `submit_batch` also accepts an optional `session_id: UUID | None = None` kwarg that is stamped onto every staged document (per-document `metadata["session_id"]` wins if both are set) - see #620 and the [`session_id` column](migrations.md) for retention/forget semantics.
+Returned by `kb.submit_batch(...)` (the async-staging path that returns immediately and is processed by the pending-processor task — which must already be running via `kb.start_pending_processor()`; `submit_batch` raises otherwise). Use `await handle.wait()` to block until all documents finish. `submit_batch` also accepts an optional `session_id: UUID | None = None` kwarg that is stamped onto every staged document (per-document `metadata["session_id"]` wins if both are set) - see #620 and the [`session_id` column](migrations.md) for retention/forget semantics.
 
 | Field / method | Type | Description |
 |---|---|---|

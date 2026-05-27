@@ -120,9 +120,10 @@ event = await storage.append_event(
 
 # Batch (more efficient for pipelines)
 events = await storage.append_events_batch([
-    MemoryEvent.chunk_created(...),
+    MemoryEvent.document_created(...),
     MemoryEvent.chunk_embedded(...),
-    MemoryEvent.entity_created(...)
+    MemoryEvent.entity_created(...),
+    MemoryEvent.relationship_created(...)
 ])
 ```
 
