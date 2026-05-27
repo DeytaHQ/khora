@@ -238,3 +238,7 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 - **LLMUsage contract:** `LLMUsage` fields are part of the stable public API; breaking changes are recorded in CHANGELOG.md.
 - **ExpertiseConfig contract:** stable API - changes to `ExpertiseConfig`, `EntityTypeConfig`, `RelationshipTypeConfig`, `ConfidenceConfig`, `ExpansionConfig`, `CorrelationRule`, `InferenceRule` are recorded in CHANGELOG.md. `__all__` in `src/khora/extraction/skills/base.py` is the machine-readable contract.
 - Any breaking change to the stable public API is recorded in CHANGELOG.md. `__all__` in `src/khora/__init__.py` is the machine-readable contract for the top-level surface.
+
+<!-- ttoj:python-secret-typing:begin -->
+@.claude/docs/python-secret-typing.md
+<!-- ttoj:python-secret-typing:end -->
