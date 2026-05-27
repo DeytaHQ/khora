@@ -925,6 +925,20 @@
       "unit": ""
     },
     {
+      "name": "khora.neo4j.pool.keepalive.pings",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "RETURN 1 keepalive pings attempted on idle pooled connections by the opt-in connection-pool keepalive (KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_ENABLED). Counts every ping attempt, fired only when the keepalive loop observes idle connections. Zero when the keepalive is disabled."
+    },
+    {
+      "name": "khora.neo4j.pool.keepalive.failures",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Keepalive pings that raised. A non-zero rate is the expected dead-connection self-heal canary (the failed close runs to completion in the background and removes the stale connection from the pool), not an error condition."
+    },
+    {
       "name": "khora.neo4j.relationship.source_id_truncated",
       "type": "counter",
       "stability": "public",

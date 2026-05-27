@@ -182,6 +182,68 @@ def test_neo4j_provenance_max_fields_single_underscore(
 
 
 # ---------------------------------------------------------------------------
+# Neo4j connection-pool keepalive (opt-in)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "env_var",
+    [
+        "KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_ENABLED",
+        "KHORA_STORAGE__GRAPH__POOL_KEEPALIVE_ENABLED",
+    ],
+)
+def test_neo4j_pool_keepalive_enabled_both_forms(monkeypatch: pytest.MonkeyPatch, env_var: str) -> None:
+    """Both alias spellings flip ``Neo4jConfig.pool_keepalive_enabled``."""
+    monkeypatch.setenv("KHORA_STORAGE_GRAPH_BACKEND", "neo4j")
+    monkeypatch.setenv("KHORA_STORAGE_GRAPH_URL", "bolt://localhost:7687")
+    monkeypatch.setenv(env_var, "true")
+
+    config = KhoraConfig()
+    assert isinstance(config.storage.graph, Neo4jConfig)
+    assert config.storage.graph.pool_keepalive_enabled is True
+
+
+@pytest.mark.parametrize(
+    "env_var",
+    [
+        "KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_INTERVAL_MS",
+        "KHORA_STORAGE__GRAPH__POOL_KEEPALIVE_INTERVAL_MS",
+    ],
+)
+def test_neo4j_pool_keepalive_interval_ms_both_forms(monkeypatch: pytest.MonkeyPatch, env_var: str) -> None:
+    """Both alias spellings populate ``Neo4jConfig.pool_keepalive_interval_ms``."""
+    monkeypatch.setenv("KHORA_STORAGE_GRAPH_BACKEND", "neo4j")
+    monkeypatch.setenv("KHORA_STORAGE_GRAPH_URL", "bolt://localhost:7687")
+    monkeypatch.setenv(env_var, "30000")
+
+    config = KhoraConfig()
+    assert isinstance(config.storage.graph, Neo4jConfig)
+    assert config.storage.graph.pool_keepalive_interval_ms == 30000
+
+
+def test_neo4j_pool_keepalive_alias_conflict_raises_when_values_differ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Conflict detection must fire for the keepalive aliases too.
+
+    The keepalive pair must be registered in the canonical/legacy alias
+    table, so setting both spellings to different values names both env
+    vars in the error.
+    """
+    monkeypatch.setenv("KHORA_STORAGE_GRAPH_BACKEND", "neo4j")
+    monkeypatch.setenv("KHORA_STORAGE_GRAPH_URL", "bolt://localhost:7687")
+    monkeypatch.setenv("KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_INTERVAL_MS", "30000")
+    monkeypatch.setenv("KHORA_STORAGE__GRAPH__POOL_KEEPALIVE_INTERVAL_MS", "45000")
+
+    with pytest.raises(ValueError) as excinfo:
+        KhoraConfig()
+    message = str(excinfo.value)
+    assert "KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_INTERVAL_MS" in message
+    assert "KHORA_STORAGE__GRAPH__POOL_KEEPALIVE_INTERVAL_MS" in message
+
+
+# ---------------------------------------------------------------------------
 # dream.ops nested
 # ---------------------------------------------------------------------------
 

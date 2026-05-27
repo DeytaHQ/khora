@@ -198,6 +198,8 @@ _ENV_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (
     ("KHORA_STORAGE_GRAPH_RELATIONSHIP_WRITE_CONCURRENCY", "KHORA_STORAGE__GRAPH__RELATIONSHIP_WRITE_CONCURRENCY"),
     ("KHORA_STORAGE_GRAPH_POOL_SAMPLER_ENABLED", "KHORA_STORAGE__GRAPH__POOL_SAMPLER_ENABLED"),
     ("KHORA_STORAGE_GRAPH_POOL_SAMPLER_INTERVAL_MS", "KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS"),
+    ("KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_ENABLED", "KHORA_STORAGE__GRAPH__POOL_KEEPALIVE_ENABLED"),
+    ("KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_INTERVAL_MS", "KHORA_STORAGE__GRAPH__POOL_KEEPALIVE_INTERVAL_MS"),
     (
         "KHORA_STORAGE_GRAPH_RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX",
         "KHORA_STORAGE__GRAPH__RELATIONSHIP_SOURCE_DOCUMENT_IDS_MAX",
@@ -402,6 +404,37 @@ class Neo4jConfig(BaseModel):
         validation_alias=_env_aliases(
             "KHORA_STORAGE_GRAPH_POOL_SAMPLER_INTERVAL_MS",
             "KHORA_STORAGE__GRAPH__POOL_SAMPLER_INTERVAL_MS",
+        ),
+    )
+    pool_keepalive_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in Neo4j connection-pool keepalive. When True, Khora starts a "
+            "background task that fires periodic ``RETURN 1`` pings on idle pooled "
+            "connections at ``pool_keepalive_interval_ms`` cadence so they are never "
+            "idle-dropped by an intermediary (load balancer, firewall) before the "
+            "driver's own liveness check would catch a stale connection. Zero-cost "
+            "when False. Set via env: KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_ENABLED=true."
+        ),
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_ENABLED",
+            "KHORA_STORAGE__GRAPH__POOL_KEEPALIVE_ENABLED",
+        ),
+    )
+    pool_keepalive_interval_ms: int = Field(
+        default=15000,
+        ge=50,
+        le=60_000,
+        description=(
+            "Interval in milliseconds between Neo4j keepalive pings when "
+            "``pool_keepalive_enabled`` is True. Clamped to [50, 60000]. Default "
+            "15000 is intentionally below the driver's 30s liveness window so idle "
+            "connections are exercised before they go stale. "
+            "Set via env: KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_INTERVAL_MS=15000."
+        ),
+        validation_alias=_env_aliases(
+            "KHORA_STORAGE_GRAPH_POOL_KEEPALIVE_INTERVAL_MS",
+            "KHORA_STORAGE__GRAPH__POOL_KEEPALIVE_INTERVAL_MS",
         ),
     )
     relationship_source_document_ids_max: int = Field(
