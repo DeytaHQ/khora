@@ -467,7 +467,7 @@ class TestFromDriver:
 
     def test_sampler_explicitly_disabled_on_from_driver(self) -> None:
         b = Neo4jBackend.from_driver(MagicMock())
-        # from_driver hard-disables the sampler regardless of init args.
+        # from_driver leaves the sampler off by default (no pool_sampler_enabled arg here).
         assert b._pool_sampler_enabled is False
         assert b._sampler_task is None
 
