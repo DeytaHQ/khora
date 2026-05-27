@@ -892,13 +892,15 @@ class TestConnectStartsSampler:
         await backend.connect()
         try:
             assert backend._sampler_task is not None, "connect() must start the sampler when enabled"
-            await asyncio.sleep(0.2)  # ~20 ticks at 10ms
+            await asyncio.sleep(0.4)  # ~40 ticks at 10ms; threshold below leaves ~2.7x margin
         finally:
             await backend.disconnect()
 
         assert backend._sampler_task is None, "disconnect() must stop the sampler"
+        # >= 15 catches a sampler that stalls after a few ticks while staying well
+        # clear of the ~40 expected emits, so event-loop jitter under load won't flake.
         for key, count in observed.items():
-            assert count >= 5, f"{key}: expected the sampler to emit, got {count}"
+            assert count >= 15, f"{key}: expected the sampler to emit repeatedly, got {count}"
 
     @pytest.mark.asyncio
     async def test_connect_does_not_start_sampler_when_disabled(self) -> None:

@@ -849,6 +849,11 @@ class TestDisconnectOrdering:
         with patch("khora.telemetry.shutdown_telemetry", new_callable=AsyncMock):
             await engine.disconnect()
 
+        # Both must actually be awaited (not merely called) — guards against a
+        # called-but-not-awaited regression that mock_calls alone would miss.
+        order.storage_disconnect.assert_awaited_once()
+        order.driver_close.assert_awaited_once()
+
         names = [c[0] for c in order.mock_calls]
         assert "storage_disconnect" in names
         assert "driver_close" in names
