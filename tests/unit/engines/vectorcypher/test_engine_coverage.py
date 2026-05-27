@@ -821,6 +821,63 @@ class TestDisconnectReentrancy:
             assert engine._connected is False
 
 
+@pytest.mark.unit
+class TestDisconnectOrdering:
+    """disconnect() must stop the backend's pool task before closing the shared driver.
+
+    The Neo4jBackend wrapped via ``from_driver`` runs a pool sampler against the
+    shared driver's pool. Closing the driver first would tear the pool out from
+    under a still-running sampler tick. ``disconnect()`` therefore calls
+    ``self._storage.disconnect()`` (which stops the sampler) BEFORE
+    ``self._neo4j_driver.close()``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_storage_disconnect_runs_before_driver_close(self) -> None:
+        from unittest.mock import patch
+
+        engine = _make_connected_engine()
+
+        # Attach both call sites to one parent spy so mock_calls records their
+        # relative order across the two distinct objects.
+        order = MagicMock()
+        order.storage_disconnect = AsyncMock()
+        order.driver_close = AsyncMock()
+        engine._storage.disconnect = order.storage_disconnect
+        engine._neo4j_driver.close = order.driver_close
+
+        with patch("khora.telemetry.shutdown_telemetry", new_callable=AsyncMock):
+            await engine.disconnect()
+
+        # Both must actually be awaited (not merely called) — guards against a
+        # called-but-not-awaited regression that mock_calls alone would miss.
+        order.storage_disconnect.assert_awaited_once()
+        order.driver_close.assert_awaited_once()
+
+        names = [c[0] for c in order.mock_calls]
+        assert "storage_disconnect" in names
+        assert "driver_close" in names
+        assert names.index("storage_disconnect") < names.index("driver_close"), (
+            f"storage.disconnect() must run before driver.close(); saw order {names}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_both_storage_and_driver_are_torn_down(self) -> None:
+        from unittest.mock import patch
+
+        engine = _make_connected_engine()
+        storage = engine._storage
+        driver = engine._neo4j_driver
+
+        with patch("khora.telemetry.shutdown_telemetry", new_callable=AsyncMock):
+            await engine.disconnect()
+
+        storage.disconnect.assert_awaited_once()
+        driver.close.assert_awaited_once()
+        assert engine._storage is None
+        assert engine._neo4j_driver is None
+
+
 # ---------------------------------------------------------------------------
 # Recall — entity/relationship section formatting + hybrid_alpha override
 # ---------------------------------------------------------------------------

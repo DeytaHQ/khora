@@ -837,6 +837,91 @@ class TestPoolSampler:
 
 
 # ---------------------------------------------------------------------------
+# connect() on the shared-driver path starts/skips the sampler per the
+# from_driver kwarg, and emits the khora.neo4j.pool.sampled.* histograms.
+# ---------------------------------------------------------------------------
+
+
+def _make_sampler_driver() -> MagicMock:
+    """Shared-driver mock with a pool the sampler can read deterministically."""
+    driver = MagicMock()
+    pool = MagicMock()
+    pool.connections = {"addr1": deque([MagicMock()])}
+    pool.connections_reservations = {"addr1": 0}
+    pool.in_use_connection_count = MagicMock(return_value=1)
+    pool.lock = MagicMock()
+    pool.lock.__enter__ = MagicMock(return_value=pool.lock)
+    pool.lock.__exit__ = MagicMock(return_value=False)
+    pool.pool_config = MagicMock()
+    pool.pool_config.max_connection_pool_size = 10
+    driver._pool = pool
+    return driver
+
+
+def _wire_sampled_recorders(backend: Neo4jBackend) -> dict[str, int]:
+    """Replace the 5 sampled histograms with counting recorders."""
+    observed: dict[str, int] = {k: 0 for k in ("active", "idle", "total", "creating", "utilization")}
+    for key in observed:
+        attr = f"_sampled_{key}_histogram"
+        setattr(backend, attr, MagicMock())
+
+        def make_recorder(k: str):
+            def record(_v: float, attributes: Any = None, **_kw: Any) -> None:
+                observed[k] += 1
+
+            return record
+
+        getattr(backend, attr).record = make_recorder(key)
+    return observed
+
+
+@pytest.mark.unit
+class TestConnectStartsSampler:
+    """connect() on the shared-driver path honors the from_driver sampler kwarg."""
+
+    @pytest.mark.asyncio
+    async def test_connect_starts_sampler_and_emits_when_enabled(self) -> None:
+        driver = _make_sampler_driver()
+        backend = Neo4jBackend.from_driver(driver, pool_sampler_enabled=True, pool_sampler_interval_ms=10)
+
+        # Isolate the sampler: stub out the other connect() side effects.
+        backend._create_indexes = AsyncMock()
+        backend._register_pool_metrics = MagicMock()
+        observed = _wire_sampled_recorders(backend)
+
+        await backend.connect()
+        try:
+            assert backend._sampler_task is not None, "connect() must start the sampler when enabled"
+            await asyncio.sleep(0.4)  # ~40 ticks at 10ms; threshold below leaves ~2.7x margin
+        finally:
+            await backend.disconnect()
+
+        assert backend._sampler_task is None, "disconnect() must stop the sampler"
+        # >= 15 catches a sampler that stalls after a few ticks while staying well
+        # clear of the ~40 expected emits, so event-loop jitter under load won't flake.
+        for key, count in observed.items():
+            assert count >= 15, f"{key}: expected the sampler to emit repeatedly, got {count}"
+
+    @pytest.mark.asyncio
+    async def test_connect_does_not_start_sampler_when_disabled(self) -> None:
+        driver = _make_sampler_driver()
+        backend = Neo4jBackend.from_driver(driver)  # default: pool_sampler_enabled=False
+
+        backend._create_indexes = AsyncMock()
+        backend._register_pool_metrics = MagicMock()
+        observed = _wire_sampled_recorders(backend)
+
+        await backend.connect()
+        try:
+            assert backend._sampler_task is None, "default connect() must NOT start the sampler"
+            await asyncio.sleep(0.05)
+        finally:
+            await backend.disconnect()
+
+        assert all(count == 0 for count in observed.values()), f"disabled sampler must emit nothing; got {observed}"
+
+
+# ---------------------------------------------------------------------------
 # Config: pool_sampler_enabled / pool_sampler_interval_ms plumbing
 # ---------------------------------------------------------------------------
 
@@ -877,6 +962,64 @@ class TestSamplerConfig:
         backend = Neo4jBackend.from_config(cfg)
         assert backend._pool_sampler_enabled is True
         assert backend._pool_sampler_interval_ms == 750
+
+    def test_from_driver_honors_sampler_kwargs(self) -> None:
+        """from_driver wires its sampler kwargs into the instance fields
+        (was previously hardcoded to False / 500)."""
+        driver = MagicMock()
+        backend = Neo4jBackend.from_driver(
+            driver,
+            pool_sampler_enabled=True,
+            pool_sampler_interval_ms=250,
+        )
+        assert backend._pool_sampler_enabled is True
+        assert backend._pool_sampler_interval_ms == 250
+
+    def test_from_driver_sampler_defaults_off(self) -> None:
+        """from_driver leaves the sampler off by default."""
+        backend = Neo4jBackend.from_driver(MagicMock())
+        assert backend._pool_sampler_enabled is False
+        assert backend._pool_sampler_interval_ms == 500
+
+
+# ---------------------------------------------------------------------------
+# from_driver: gauge/utilization denominator seeded from the shared driver's
+# real pool ceiling (so the gauge denominator equals the sampler's).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestFromDriverMaxPoolSize:
+    def test_seeds_max_pool_size_from_driver_pool_config(self) -> None:
+        """from_driver reads ``_pool.pool_config.max_connection_pool_size`` so the
+        gauge denominator matches the sampler's observed ceiling (not the 100
+        fallback)."""
+        driver = MagicMock()
+        pool = MagicMock()
+        pool.pool_config = MagicMock()
+        pool.pool_config.max_connection_pool_size = 37  # != 100 default
+        driver._pool = pool
+
+        backend = Neo4jBackend.from_driver(driver)
+        assert backend._max_connection_pool_size == 37
+
+    def test_falls_back_to_100_when_pool_config_missing(self) -> None:
+        """A driver whose pool exposes no readable ceiling degrades to the
+        neo4j default (100), matching the gauge's own ``or 100`` fallback."""
+        driver = MagicMock(spec=[])  # no _pool attribute at all
+        backend = Neo4jBackend.from_driver(driver)
+        assert backend._max_connection_pool_size == 100
+
+    def test_falls_back_to_100_when_ceiling_is_zero(self) -> None:
+        """A zero ceiling is falsy → degrades to 100 (never a 0 denominator)."""
+        driver = MagicMock()
+        pool = MagicMock()
+        pool.pool_config = MagicMock()
+        pool.pool_config.max_connection_pool_size = 0
+        driver._pool = pool
+
+        backend = Neo4jBackend.from_driver(driver)
+        assert backend._max_connection_pool_size == 100
 
 
 # ---------------------------------------------------------------------------

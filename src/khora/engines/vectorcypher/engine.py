@@ -507,6 +507,8 @@ class VectorCypherEngine:
                     entity_write_concurrency=getattr(neo4j_cfg, "entity_write_concurrency", 12),
                     relationship_write_concurrency=getattr(neo4j_cfg, "relationship_write_concurrency", 8),
                     query_timeout=neo4j_query_timeout,
+                    pool_sampler_enabled=getattr(neo4j_cfg, "pool_sampler_enabled", False),
+                    pool_sampler_interval_ms=getattr(neo4j_cfg, "pool_sampler_interval_ms", 500),
                 )
 
         await self._storage.connect()
@@ -683,17 +685,20 @@ class VectorCypherEngine:
 
         await shutdown_telemetry()
 
-        if self._neo4j_driver:
-            await self._neo4j_driver.close()
-            self._neo4j_driver = None
+        # Disconnect the storage coordinator (which owns the from_driver-wrapped
+        # Neo4jBackend) BEFORE closing the shared driver, so the backend's
+        # pool sampler task is stopped while the pool is still alive.
+        if self._storage:
+            await self._storage.disconnect()
+            self._storage = None
 
         if self._temporal_store:
             await self._temporal_store.disconnect()
             self._temporal_store = None
 
-        if self._storage:
-            await self._storage.disconnect()
-            self._storage = None
+        if self._neo4j_driver:
+            await self._neo4j_driver.close()
+            self._neo4j_driver = None
 
         self._embedder = None
         self._retriever = None

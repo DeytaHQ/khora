@@ -641,20 +641,21 @@ class Neo4jBackend(GraphBackendBase):
         entity_write_concurrency: int = _DEFAULT_ENTITY_WRITE_CONCURRENCY,
         relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
         query_timeout: float | None = 5.0,
+        pool_sampler_enabled: bool = False,
+        pool_sampler_interval_ms: int = 500,
     ) -> Neo4jBackend:
         """Create a Neo4jBackend from an existing AsyncDriver.
 
         The backend will NOT close the driver on disconnect, since
         it does not own it.
 
-        **Sampler note**: the high-frequency pool sampler is *not* started
-        by this constructor, even if the caller mutates
-        ``instance._pool_sampler_enabled`` afterwards. ``from_driver()`` is
-        typically used by shared-driver integrations (tests, fixtures,
-        connection-multiplexing setups) where the owner of the driver is
-        responsible for metric lifecycle. If you need the sampler on a
-        shared-driver backend, use the standard ``Neo4jBackend(...)``
-        constructor with a dedicated driver instead.
+        The high-frequency pool sampler is honored on this path: pass
+        ``pool_sampler_enabled=True`` (with an optional
+        ``pool_sampler_interval_ms``) and ``connect()`` starts the sampler
+        against the shared driver's pool, just as the standard constructor
+        does. The gauge/utilization denominator is read from the shared
+        driver's real ``_pool.pool_config.max_connection_pool_size`` so it
+        matches the sampler's observations.
 
         Args:
             driver: An existing Neo4j async driver
@@ -662,6 +663,8 @@ class Neo4jBackend(GraphBackendBase):
             entity_write_concurrency: Max concurrent entity write transactions
             relationship_write_concurrency: Max concurrent relationship write transactions
             query_timeout: Per-transaction timeout in seconds for bounded read queries (None disables)
+            pool_sampler_enabled: Start the high-frequency pool sampler on connect
+            pool_sampler_interval_ms: Sampler cadence in milliseconds when enabled
 
         Returns:
             Neo4jBackend wrapping the shared driver
@@ -671,7 +674,14 @@ class Neo4jBackend(GraphBackendBase):
         instance._user = ""
         instance._password = ""
         instance._database = database
-        instance._max_connection_pool_size = 0
+        # Read the shared driver's real pool ceiling so the utilization gauge
+        # denominator matches the sampler's observations. Internals are
+        # getattr-guarded (verified stable neo4j 5.x–6.2); falls back to the
+        # neo4j driver default (100), matching the gauge's own fallback at
+        # ``_register_pool_metrics`` so both denominators agree in every branch.
+        _pool = getattr(driver, "_pool", None)
+        _pool_config = getattr(_pool, "pool_config", None)
+        instance._max_connection_pool_size = getattr(_pool_config, "max_connection_pool_size", 0) or 100
         instance._connection_acquisition_timeout = 60.0
         instance._retry_delay_jitter_factor = 0.5
         instance._max_connection_lifetime = 900
@@ -682,8 +692,8 @@ class Neo4jBackend(GraphBackendBase):
         instance._owns_driver = False
         instance._entity_key_gate = _EntityKeyGate(max_concurrent=entity_write_concurrency)
         instance._relationship_write_sem = asyncio.Semaphore(relationship_write_concurrency)
-        instance._pool_sampler_enabled = False
-        instance._pool_sampler_interval_ms = 500
+        instance._pool_sampler_enabled = pool_sampler_enabled
+        instance._pool_sampler_interval_ms = pool_sampler_interval_ms
         instance._sampler_task = None
         instance._sampler_warned = False
         instance._sampler_finalizer = None
