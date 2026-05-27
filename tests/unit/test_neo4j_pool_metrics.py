@@ -490,6 +490,10 @@ class TestGaugeCallbackObservations:
         driver._pool.connections_reservations = {}
 
         backend = Neo4jBackend.from_driver(driver)
+        # Pin the denominator to a real int so the utilization gauge yields a
+        # numeric 0.0 here (a bare MagicMock pool_config would otherwise seed
+        # _max_connection_pool_size with a MagicMock).
+        backend._max_connection_pool_size = 100
         callbacks = _capture_gauge_callbacks(driver, backend)
 
         obs = _invoke_gauge(callbacks["khora.neo4j.pool.connections.active"])
@@ -505,7 +509,7 @@ class TestGaugeCallbackObservations:
         assert obs[0].value == 0.0
 
     def test_utilization_zero_max_pool_size_falls_back(self) -> None:
-        """Utilization falls back to max_size=100 when _max_connection_pool_size is 0."""
+        """Utilization gauge falls back to max_size=100 when _max_connection_pool_size is 0."""
         driver = MagicMock()
         driver._pool = MagicMock()
         driver._pool.connections = {
@@ -514,8 +518,10 @@ class TestGaugeCallbackObservations:
         driver._pool.connections_reservations = {}
 
         backend = Neo4jBackend.from_driver(driver)
-        # from_driver sets _max_connection_pool_size=0; `or 100` fallback applies
-        assert backend._max_connection_pool_size == 0
+        # Force the falsy denominator so the gauge's own `or 100` fallback applies.
+        # (from_driver now seeds the denominator from the driver's pool_config; a
+        # zero/unreadable ceiling still degrades to the 100 default here.)
+        backend._max_connection_pool_size = 0
         callbacks = _capture_gauge_callbacks(driver, backend)
 
         obs = _invoke_gauge(callbacks["khora.neo4j.pool.utilization"])
