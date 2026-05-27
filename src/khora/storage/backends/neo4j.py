@@ -1362,7 +1362,10 @@ class Neo4jBackend(GraphBackendBase):
             idle = max(0, total - active)
         except Exception as exc:
             if not self._keepalive_warned:
-                logger.warning(f"Neo4j pool keepalive read failed; disabling further warnings: {exc}")
+                logger.warning(
+                    "Neo4j pool keepalive read failed; disabling further warnings: {error}",
+                    error=exc,
+                )
                 self._keepalive_warned = True
             return 0
         return idle
@@ -1380,6 +1383,9 @@ class Neo4jBackend(GraphBackendBase):
         try:
             while True:
                 free = self._count_free_connections()
+                # Cap per-cycle fan-out: warming any idle connection resets the
+                # network idle timer, so a small fixed cap suffices even on a
+                # large idle pool and bounds the concurrent-session burst.
                 n = min(free, 16)
                 for _ in range(n):
                     ping = asyncio.create_task(self._keepalive_ping_once())
@@ -1414,7 +1420,7 @@ class Neo4jBackend(GraphBackendBase):
                 await session.close()
         except Exception as exc:
             self._keepalive_failures_counter.add(1)
-            logger.debug(f"Neo4j keepalive ping failed (expected self-heal canary): {exc}")
+            logger.debug("Neo4j keepalive ping failed (expected self-heal canary): {error}", error=exc)
 
     def _start_pool_keepalive(self) -> None:
         """Start the background keepalive task if enabled and not already running.
@@ -1452,7 +1458,7 @@ class Neo4jBackend(GraphBackendBase):
             pass
         except Exception as exc:
             # Keepalive is best-effort; never propagate cleanup errors.
-            logger.debug(f"Neo4j pool keepalive shutdown raised: {exc}")
+            logger.debug("Neo4j pool keepalive shutdown raised: {error}", error=exc)
 
     # =========================================================================
     # Entity operations
