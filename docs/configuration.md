@@ -14,7 +14,6 @@ KHORA_NEO4J_URL=bolt://neo4j:pleaseletmein@localhost:7688
 KHORA_LLM_MODEL=gpt-4o
 KHORA_QUERY_ENABLE_HYDE=auto
 KHORA_QUERY_DEFAULT_MODE=hybrid
-KHORA_EXTRACTION_BATCH_SIZE=5
 ```
 
 Legacy double-underscore nesting (`KHORA_STORAGE__GRAPH__URL`) is still accepted as a backwards-compatible alias on every nested-config field. New code and `.env` files should use the single-underscore form shown throughout this document; the legacy form continues to work but is no longer documented.

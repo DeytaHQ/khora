@@ -174,10 +174,11 @@ await kb.remember(
 )
 ```
 
-`embedding_model` isn't a per-call kwarg on `kb.remember()`. Configure the
-embedding model globally via `KhoraConfig.embedding.model` (or env var
-`KHORA_EMBEDDING_MODEL`, or pass `embedding_model="text-embedding-3-large"`
-to the `Khora(...)` constructor).
+`embedding_model` isn't a per-call kwarg on `kb.remember()`. Configure
+the embedding model globally via `KhoraConfig.llm.embedding_model` (or
+env var `KHORA_LLM_EMBEDDING_MODEL`, or pass
+`embedding_model="text-embedding-3-large"` to the `Khora(...)`
+constructor).
 
 ### In Pipelines
 

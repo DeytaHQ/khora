@@ -479,20 +479,17 @@ The `engine_kwargs` dict is forwarded directly to the `VectorCypherEngine` const
 # Storage
 KHORA_DATABASE_URL=postgresql://localhost/khora
 KHORA_NEO4J_URL=bolt://localhost:7687
-KHORA_NEO4J_USER=neo4j
-KHORA_NEO4J_PASSWORD=password
-
-# Engine
-KHORA_ENGINE_NAME=vectorcypher
+KHORA_STORAGE_NEO4J_USER=neo4j
+KHORA_STORAGE_NEO4J_PASSWORD=password
 ```
+
+Engine selection is constructor-only — pass `engine="vectorcypher"` to
+`Khora(...)` (it is also the default).
 
 ### Via YAML
 
 ```yaml
 # config/vectorcypher/khora.yaml
-engine:
-  name: vectorcypher
-
 vectorcypher:
   routing:
     enabled: true
@@ -508,7 +505,6 @@ vectorcypher:
     graph_weight: 0.4
 
 query:
-  hybrid_alpha: 0.7
   apply_recency_bias: true
 ```
 
@@ -526,8 +522,8 @@ query:
 # Environment setup
 KHORA_DATABASE_URL=postgresql://localhost/khora
 KHORA_NEO4J_URL=bolt://localhost:7687
-KHORA_NEO4J_USER=neo4j
-KHORA_NEO4J_PASSWORD=password
+KHORA_STORAGE_NEO4J_USER=neo4j
+KHORA_STORAGE_NEO4J_PASSWORD=password
 ```
 
 ## Performance Characteristics
