@@ -141,6 +141,7 @@ def _apply_temporal_decay(
     decay_weight: float = DEFAULT_CHRONICLE_DECAY_WEIGHT,
     half_life_hours: float = DEFAULT_CHRONICLE_HALF_LIFE_HOURS,
     reference_time: datetime | None = None,
+    enable_reinforcement: bool = False,
 ) -> list[tuple[Chunk, float]]:
     """Re-score chunks by blending relevance score with temporal decay.
 
@@ -158,6 +159,12 @@ def _apply_temporal_decay(
     (#848). This prevents a 6-month-old conversation from being treated as
     "fresh" because it was just ingested.
 
+    When ``enable_reinforcement`` is True (#855), the effective event time
+    is ``max(source_timestamp, last_accessed_at)`` and falls back to
+    ``created_at`` only when both are NULL. This keeps frequently-recalled
+    chunks fresh even as their ``source_timestamp`` ages, matching the
+    Stanford generative-agents reinforcement pattern.
+
     Uses Rust-accelerated ``batch_recency_scores`` from ``khora._accel``
     when available (~10x faster than per-item Python loop for large batches).
     Falls back to per-item computation otherwise.
@@ -172,9 +179,17 @@ def _apply_temporal_decay(
     # Collect timestamps: prefer source_timestamp (event time) over created_at
     # (ingest time). This matters for backfilled / batched ingest where every
     # chunk's created_at is "now" but the events happened months ago (#848).
+    # With reinforcement (#855), the effective time is the most recent of
+    # source_timestamp and last_accessed_at.
     timestamps: list[float] = []
     for chunk, _score in chunks_with_scores:
-        ts = chunk.source_timestamp or chunk.created_at
+        if enable_reinforcement:
+            candidates = [
+                ts for ts in (chunk.source_timestamp, getattr(chunk, "last_accessed_at", None)) if ts is not None
+            ]
+            ts = max(candidates) if candidates else chunk.created_at
+        else:
+            ts = chunk.source_timestamp or chunk.created_at
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
         timestamps.append(ts.timestamp())
@@ -1268,6 +1283,7 @@ class ChronicleEngine:
             if qs
             else DEFAULT_CHRONICLE_HALF_LIFE_HOURS
         )
+        _enable_reinforcement = getattr(qs, "chronicle_enable_recall_reinforcement", False) if qs else False
         overfetch_limit = limit * _overfetch
 
         # Resolve temporal references from query (fast dateparser, ~0.25ms)
@@ -1507,6 +1523,7 @@ class ChronicleEngine:
             chunks_with_scores,
             decay_weight=decay_weight,
             half_life_hours=_cfg_half_life,
+            enable_reinforcement=_enable_reinforcement,
         )
         timings["decay_ms"] = (time.perf_counter() - start) * 1000
 
@@ -1650,6 +1667,17 @@ class ChronicleEngine:
                         source_type="library",
                     )
                 )
+
+        # ── Reinforcement on recall (#855) ──────────────────────────────
+        # Fire-and-forget: stamp ``last_accessed_at = now`` on the chunks
+        # we're about to return so the next decay pass treats them as
+        # fresh. Wrapped in a task so the recall response returns
+        # immediately; failures log a warning but never fail recall.
+        if _enable_reinforcement and chunks_with_scores:
+            reinforce_ids = [c.id for c, _ in chunks_with_scores]
+            reinforce_ts = datetime.now(UTC)
+            asyncio.create_task(self._reinforce_last_accessed(storage, namespace_id, reinforce_ids, reinforce_ts))
+
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
@@ -1672,6 +1700,28 @@ class ChronicleEngine:
                 "timings": timings,
             },
         )
+
+    async def _reinforce_last_accessed(
+        self,
+        storage: StorageCoordinator,
+        namespace_id: UUID,
+        chunk_ids: list[UUID],
+        ts: datetime,
+    ) -> None:
+        """Best-effort UPDATE of ``last_accessed_at`` for the given chunks (#855).
+
+        Runs in a fire-and-forget task spawned by ``recall``. Logs a
+        warning on failure (DB down, network blip) but never raises -
+        reinforcement loss is acceptable; breaking recall is not.
+        """
+        try:
+            await storage.update_last_accessed(namespace_id, chunk_ids, ts)
+        except Exception as exc:
+            logger.warning(
+                "Chronicle reinforcement update failed for {} chunks: {}",
+                len(chunk_ids),
+                exc,
+            )
 
     def _compute_abstention_signals(
         self,

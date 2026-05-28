@@ -4,6 +4,20 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.18.0] - Chronicle reinforcement-on-recall
+
+Minor release introducing **reinforcement-on-recall** for the Chronicle engine (#855). Each chunk gains a nullable `last_accessed_at` column; when the new opt-in flag is set, Chronicle stamps it on every recall and the temporal-decay path uses `max(source_timestamp, last_accessed_at)` as the effective event time. Frequently-recalled memories stay fresh even as their `source_timestamp` ages - mirrors the Stanford generative-agents pattern. Counter-based reinforcement (Mem0-style) remains a future enhancement.
+
+### Added
+
+- **`QuerySettings.chronicle_enable_recall_reinforcement`** (`KHORA_QUERY_CHRONICLE_ENABLE_RECALL_REINFORCEMENT`) - default `False`. When True, Chronicle fires a fire-and-forget UPDATE after every recall to stamp `last_accessed_at = now()` on the returned chunks, and `_apply_temporal_decay` reads the most recent of `source_timestamp` and `last_accessed_at` as the effective event time. Failures log a warning but never break recall.
+- **`StorageCoordinator.update_last_accessed(namespace_id, chunk_ids, ts)`** - single-statement UPDATE on the chunks table, namespace-scoped to prevent IDOR. Implemented on pgvector and sqlite_lance.
+- **`Chunk.last_accessed_at: datetime | None`** on the dataclass and ORM model. Nullable; existing chunks land at NULL and adopt the new behavior on first recall.
+
+### Migration
+
+- **Alembic migration 040** adds the `last_accessed_at TIMESTAMPTZ NULL` column to `chunks` plus a partial index `ix_chunks_last_accessed_at (namespace_id, last_accessed_at) WHERE last_accessed_at IS NOT NULL` on both Postgres and SQLite (via `sqlite_where`). Existing namespaces require no data migration - the column is nullable.
+
 ## [0.17.3] - Chronicle bi-temporal + Skeleton source_timestamp + decay-default unification
 
 Patch release on top of v0.17.2. Six bug reports from Damir Krstanovic - one of them critical to Chronicle's bi-temporal promise. The Chronicle temporal-decay code path was reading ingest time instead of user-supplied event time, the half-life default disagreed in three places (24h field default vs 168h function defaults vs 168h docs), the canonical formula was written one way in the docstring and another in the implementation, and Skeleton silently dropped `source_timestamp` on the way to `chunk.occurred_at`. Plus a tuning bump on the chronicle decay weight default.

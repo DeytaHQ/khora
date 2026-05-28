@@ -1621,6 +1621,13 @@ class QuerySettings(BaseSettings):
     chronicle_rrf_entity_weight: float = Field(
         default=0.85, ge=0.0, le=2.0, description="RRF weight for entity co-occurrence channel in Chronicle fusion"
     )
+    chronicle_enable_recall_reinforcement: bool = Field(
+        default=False,
+        description="When True, Chronicle updates chunk.last_accessed_at on recall "
+        "and the decay function uses max(source_timestamp, last_accessed_at) "
+        "as the effective event time. Frequently-recalled chunks stay 'fresh' "
+        "even as their source_timestamp ages. See issue #855.",
+    )
 
     # LLM listwise reranking
     enable_llm_reranking: bool = Field(

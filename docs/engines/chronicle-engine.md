@@ -44,6 +44,32 @@ Defaults:
 
 Configurable via `chronicle_decay_weight` and `temporal_half_life_hours` on `QuerySettings`, or the matching env vars `KHORA_QUERY_CHRONICLE_DECAY_WEIGHT` and `KHORA_QUERY_TEMPORAL_HALF_LIFE_HOURS`.
 
+### Reinforcement on Recall
+
+Chronicle can optionally "freshen" chunks every time they are returned by a recall, so that frequently-accessed memories stay sticky and rarely-accessed ones fade. The implementation follows the Stanford generative-agents pattern: each chunk carries a `last_accessed_at` timestamp that the engine stamps after every recall, and the decay function treats the most recent of `source_timestamp` and `last_accessed_at` as the effective event time.
+
+Enable it by setting `KHORA_QUERY_CHRONICLE_ENABLE_RECALL_REINFORCEMENT=true` (or `chronicle_enable_recall_reinforcement=True` on `QuerySettings`). Default is OFF.
+
+When the flag is on, the decay formula's age input changes from:
+
+```
+age = now - (source_timestamp OR created_at)
+```
+
+to:
+
+```
+age = now - max(source_timestamp, last_accessed_at, fallback=created_at)
+```
+
+The blend formula itself does not change.
+
+Trade-offs:
+
+- One extra UPDATE per recall (single-statement, scoped to namespace) - fired as `asyncio.create_task(...)` so the recall response is not delayed.
+- Eventual consistency on `last_accessed_at`: a recall that runs concurrently with the prior recall's UPDATE may not yet see the freshened timestamp. The reinforcement is best-effort - failures (DB down, network blip) log a warning and never break recall.
+- Reinforcement loss across process restarts on the embedded sqlite_lance backend - if the process exits before the spawned task finishes, the UPDATE is dropped. Acceptable: reinforcement is an optimization, not a correctness property.
+
 ## Key Features
 
 ### Event Decomposition
@@ -167,6 +193,7 @@ Chronicle respects standard `KHORA_QUERY_*` env vars, plus these are particularl
 | `KHORA_QUERY_CHRONICLE_DECAY_WEIGHT` | Multiplicative decay weight (max age penalty) | `0.30` |
 | `KHORA_QUERY_TEMPORAL_HALF_LIFE_HOURS` | Half-life in hours for the exponential decay | `168.0` (7 days) |
 | `KHORA_QUERY_CHRONICLE_TEMPORAL_WINDOW_DAYS` | Temporal channel window (0 = unlimited, -1 = disable) | `0.0` |
+| `KHORA_QUERY_CHRONICLE_ENABLE_RECALL_REINFORCEMENT` | Stamp `last_accessed_at` on recall and treat `max(source_timestamp, last_accessed_at)` as the effective event time | `false` |
 
 ## Related Documentation
 
