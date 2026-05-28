@@ -1311,7 +1311,11 @@ def batch_recency_scores(
 
     scores: list[float] = []
     for ts in timestamps_secs:
-        age_days = (now_secs - ts) / _SECONDS_PER_DAY
+        # Clamp future timestamps (clock skew, deliberate forward-dating) to
+        # age=0 so a forward-dated chunk gets full freshness rather than
+        # decay > 1.0 from math.exp(positive). Mirrors the `max(0, ...)`
+        # clamp in chronicle/engine.py's `_apply_temporal_decay`.
+        age_days = max(0.0, (now_secs - ts) / _SECONDS_PER_DAY)
         decay = math.exp(decay_factor * age_days)
         scores.append(base + recency_weight * decay)
     return scores

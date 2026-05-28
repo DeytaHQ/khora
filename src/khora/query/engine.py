@@ -362,7 +362,9 @@ class QueryConfig:
 
     # Temporal scoring parameters
     temporal_hard_cutoff_days: float = 30.0
-    temporal_half_life_hours: float = 24.0
+    # Default 168h matches QuerySettings.temporal_half_life_hours (kept in sync
+    # to avoid surprises when this dataclass is constructed without settings).
+    temporal_half_life_hours: float = 168.0
 
     # Graph search scoring
     graph_chunk_query_sim_weight: float = 0.6
@@ -444,7 +446,7 @@ class QueryConfig:
             stage1_keyword_ratio=getattr(settings, "stage1_keyword_ratio", 0.3),
             reranking_blend_weight=getattr(settings, "reranking_blend_weight", 0.7),
             temporal_hard_cutoff_days=getattr(settings, "temporal_hard_cutoff_days", 30.0),
-            temporal_half_life_hours=getattr(settings, "temporal_half_life_hours", 24.0),
+            temporal_half_life_hours=getattr(settings, "temporal_half_life_hours", 168.0),
             graph_chunk_query_sim_weight=getattr(settings, "graph_chunk_query_sim_weight", 0.6),
             expanded_query_discount=getattr(settings, "expanded_query_discount", 0.7),
             linked_entity_boost=getattr(settings, "linked_entity_boost", 1.5),
@@ -1220,7 +1222,12 @@ class HybridQueryEngine:
 
             # Step 5: Apply soft temporal scoring (exponential decay outside window)
             if temporal_filter:
-                fused_chunks = self._soft_temporal_score(fused_chunks, temporal_filter)
+                fused_chunks = self._soft_temporal_score(
+                    fused_chunks,
+                    temporal_filter,
+                    hard_cutoff_days=cfg.temporal_hard_cutoff_days,
+                    half_life_hours=cfg.temporal_half_life_hours,
+                )
 
             # Apply recency bias (batch-accelerated via Rust)
             if cfg.apply_recency_bias:
@@ -2163,7 +2170,7 @@ class HybridQueryEngine:
         temporal_filter: TemporalFilter,
         *,
         hard_cutoff_days: float = 30.0,
-        half_life_hours: float = 24.0,
+        half_life_hours: float = 168.0,
     ) -> list[tuple[Any, float]]:
         """Apply soft temporal scoring with exponential decay.
 
@@ -2753,7 +2760,12 @@ class HybridQueryEngine:
         # Chunks inside the window get full score; chunks outside get
         # exponential decay.  Only hard-filter chunks >30 days outside.
         if temporal_filter:
-            filtered_chunks = self._soft_temporal_score(filtered_chunks, temporal_filter)
+            filtered_chunks = self._soft_temporal_score(
+                filtered_chunks,
+                temporal_filter,
+                hard_cutoff_days=config.temporal_hard_cutoff_days,
+                half_life_hours=config.temporal_half_life_hours,
+            )
 
         # Apply recency bias (batch-accelerated via Rust)
         if config.apply_recency_bias:

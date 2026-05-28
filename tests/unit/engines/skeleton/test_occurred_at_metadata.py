@@ -191,3 +191,108 @@ class TestRememberRememberBatchParity:
         # remember_batch's same-shaped fallback yields a value within [t0, t1].
         # Allow a tiny buffer for clock granularity.
         assert t0 - timedelta(seconds=1) <= passed <= t1 + timedelta(seconds=1)
+
+
+@pytest.mark.unit
+class TestRememberSourceTimestampPropagation:
+    """``source_timestamp`` must flow into the chunk's ``occurred_at`` (#856).
+
+    Resolution order: explicit ``occurred_at`` > ``metadata['occurred_at']`` >
+    ``source_timestamp`` > ``datetime.now(UTC)``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_source_timestamp_propagates_to_occurred_at(self) -> None:
+        """``source_timestamp`` becomes ``occurred_at`` when nothing else is set."""
+        engine = _connected_engine()
+        namespace_id = uuid4()
+        intended = datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC)
+
+        with patch.object(engine, "_process_document", new_callable=AsyncMock, return_value=(1, 0, 0)) as proc:
+            await engine.remember(
+                "hello world",
+                namespace_id,
+                source_timestamp=intended,
+                entity_types=[],
+                relationship_types=[],
+            )
+
+        assert proc.await_args.kwargs["occurred_at"] == intended
+
+    @pytest.mark.asyncio
+    async def test_explicit_occurred_at_wins_over_source_timestamp(self) -> None:
+        """``occurred_at=`` kwarg beats ``source_timestamp``."""
+        engine = _connected_engine()
+        namespace_id = uuid4()
+        explicit = datetime(2026, 1, 1, tzinfo=UTC)
+        source_ts = datetime(2024, 6, 15, tzinfo=UTC)
+
+        with patch.object(engine, "_process_document", new_callable=AsyncMock, return_value=(1, 0, 0)) as proc:
+            await engine.remember(
+                "hello world",
+                namespace_id,
+                occurred_at=explicit,
+                source_timestamp=source_ts,
+                entity_types=[],
+                relationship_types=[],
+            )
+
+        assert proc.await_args.kwargs["occurred_at"] == explicit
+
+    @pytest.mark.asyncio
+    async def test_metadata_occurred_at_wins_over_source_timestamp(self) -> None:
+        """``metadata['occurred_at']`` beats ``source_timestamp``."""
+        engine = _connected_engine()
+        namespace_id = uuid4()
+        meta_value = datetime(2025, 3, 10, 9, 0, 0, tzinfo=UTC)
+        source_ts = datetime(2024, 6, 15, tzinfo=UTC)
+
+        with patch.object(engine, "_process_document", new_callable=AsyncMock, return_value=(1, 0, 0)) as proc:
+            await engine.remember(
+                "hello world",
+                namespace_id,
+                metadata={"occurred_at": "2025-03-10T09:00:00Z"},
+                source_timestamp=source_ts,
+                entity_types=[],
+                relationship_types=[],
+            )
+
+        assert proc.await_args.kwargs["occurred_at"] == meta_value
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_now_when_nothing_supplied(self) -> None:
+        """No kwargs, no metadata, no source_timestamp - fall back to now(UTC)."""
+        engine = _connected_engine()
+        namespace_id = uuid4()
+
+        with patch.object(engine, "_process_document", new_callable=AsyncMock, return_value=(1, 0, 0)) as proc:
+            before = datetime.now(UTC)
+            await engine.remember(
+                "hello world",
+                namespace_id,
+                entity_types=[],
+                relationship_types=[],
+            )
+            after = datetime.now(UTC)
+
+        passed = proc.await_args.kwargs["occurred_at"]
+        assert before - timedelta(seconds=1) <= passed <= after + timedelta(seconds=1)
+
+    @pytest.mark.asyncio
+    async def test_reporter_invariant_chunk_occurred_at_within_60s(self) -> None:
+        """Mirror reporter's repro: |occurred_at - source_timestamp| < 60s (#856)."""
+        engine = _connected_engine()
+        namespace_id = uuid4()
+        intended = datetime(2024, 6, 15, 12, 30, 0, tzinfo=UTC)
+
+        with patch.object(engine, "_process_document", new_callable=AsyncMock, return_value=(1, 0, 0)) as proc:
+            await engine.remember(
+                "hello world",
+                namespace_id,
+                source_timestamp=intended,
+                entity_types=[],
+                relationship_types=[],
+            )
+
+        passed = proc.await_args.kwargs["occurred_at"]
+        assert abs((passed - intended).total_seconds()) < 60

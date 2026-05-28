@@ -1535,9 +1535,14 @@ class QuerySettings(BaseSettings):
         "window by more than this many days are scored zero.",
     )
     temporal_half_life_hours: float = Field(
-        default=24.0,
+        # Must match khora.engines.chronicle.engine.DEFAULT_CHRONICLE_HALF_LIFE_HOURS
+        # (kept duplicated to avoid engines -> config import cycle).
+        default=168.0,
         ge=1.0,
-        description="Half-life in hours for temporal decay outside the query window.",
+        description="Half-life in hours for temporal decay. Default 168h (7 days): "
+        "a memory retains ~50% strength after one week, ~25% after two weeks. "
+        "Used by Chronicle's Ebbinghaus decay; also consulted by VectorCypher's "
+        "soft temporal scoring.",
     )
 
     # Graph search scoring (previously hardcoded)
@@ -1591,10 +1596,15 @@ class QuerySettings(BaseSettings):
         description="Temporal channel window: 0=unlimited (search all data), >0=N-day window, -1=disable channel",
     )
     chronicle_decay_weight: float = Field(
-        default=0.10,
+        # Must match khora.engines.chronicle.engine.DEFAULT_CHRONICLE_DECAY_WEIGHT
+        # (kept duplicated to avoid engines -> config import cycle).
+        default=0.30,
         ge=0.0,
         le=1.0,
-        description="Weight of temporal decay in Chronicle scoring (blended with relevance score)",
+        description="Weight of temporal decay in Chronicle's multiplicative scoring "
+        "blend: final = relevance * ((1 - w) + w * retention). Default 0.30 means "
+        "a fully-faded memory (retention -> 0) keeps 70% of its relevance score, "
+        "while a fresh memory keeps 100%. Higher values lean more heavily on recency.",
     )
     chronicle_overfetch_multiplier: int = Field(
         default=4, ge=2, le=10, description="Over-fetch multiplier for Chronicle retrieval channels"

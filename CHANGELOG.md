@@ -4,6 +4,35 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.17.3] - Chronicle bi-temporal + Skeleton source_timestamp + decay-default unification
+
+Patch release on top of v0.17.2. Six bug reports from Damir Krstanovic - one of them critical to Chronicle's bi-temporal promise. The Chronicle temporal-decay code path was reading ingest time instead of user-supplied event time, the half-life default disagreed in three places (24h field default vs 168h function defaults vs 168h docs), the canonical formula was written one way in the docstring and another in the implementation, and Skeleton silently dropped `source_timestamp` on the way to `chunk.occurred_at`. Plus a tuning bump on the chronicle decay weight default.
+
+### Changed
+
+- **Chronicle temporal decay now reads `chunk.source_timestamp or chunk.created_at`** instead of `chunk.created_at` (#848). The user-supplied event time was being persisted on `Chunk.source_timestamp` since v0.13 but never reached the scoring path - decay differentiated chunks only by ingestion time. Backfilling a year of historical events with their true `source_timestamp` collapsed to "all events equally fresh" from decay's perspective.
+- **`QuerySettings.temporal_half_life_hours` default raised from 24.0 to 168.0** (#851). Three places disagreed: the field default was 24h, the function-level defaults in `_ebbinghaus_decay` / `_apply_temporal_decay` were 168h, and the docs claimed 168h. Real users got 24h - aggressive enough that a memory was half-faded after one day. Unified on 168h (7 days) as the single source of truth via new module constants `DEFAULT_CHRONICLE_HALF_LIFE_HOURS` and `DEFAULT_CHRONICLE_DECAY_WEIGHT` in `khora.engines.chronicle.engine`.
+- **`QuerySettings.chronicle_decay_weight` default raised from 0.10 to 0.30** (#853). Under the multiplicative decay formula, the prior 0.10 default capped the max age penalty at 10% - relevance dominated, ancient facts routinely outranked recent ones. The new 0.30 default keeps fresh memories at 100% of relevance and fully-faded memories at 70%, giving recency enough weight to matter in personal-assistant and incident-memory use cases.
+- **Canonical Chronicle decay formula documented as multiplicative** (#852): `score = relevance * ((1 - w) + w * retention)`, matching what the implementation always ran (and what Elasticsearch / Mem0 use). The function docstring at `_apply_temporal_decay:140` previously claimed an additive form (`(1 - w) * relevance + w * retention`) that the code did not match; both the docstring and `docs/engines/chronicle-engine.md` now show the multiplicative form with a worked example.
+- **VectorCypher `_soft_temporal_score` decoupled from its hardcoded 24h half-life**. Both call sites in `src/khora/query/engine.py` (around lines 1225 and 2758) now pass `cfg.temporal_half_life_hours` and `cfg.temporal_hard_cutoff_days` through explicitly. Previously VectorCypher's soft temporal scoring ran at 24h regardless of the configured value, so the chronicle batch's 168h bump above also flips VectorCypher behavior - this is the intentional cross-engine alignment.
+
+### Fixed
+
+- **Skeleton `Khora.remember(source_timestamp=t)` now propagates the timestamp to `chunk.occurred_at`** (#856). Prior resolution order in `engines/skeleton/engine.py:remember()` was `occurred_at kwarg > metadata["occurred_at"] > now()`, dropping the user-supplied `source_timestamp` entirely. New order: `occurred_at kwarg > metadata["occurred_at"] > source_timestamp > now()`. Same fix applied to the batch path, with the batch-level `source_timestamp` kwarg used as the per-doc fallback when `doc_data["source_timestamp"]` isn't set.
+- **Chronicle docs reference the real tuning knobs** (#850). `docs/engines/chronicle-engine.md` previously claimed decay was "Configurable via `recency_weight` and `recency_decay_days`" - those exist on `QuerySettings` but are VectorCypher's knobs and have no effect on Chronicle. Replaced with `chronicle_decay_weight` and `temporal_half_life_hours` (and their env-var equivalents `KHORA_QUERY_CHRONICLE_DECAY_WEIGHT` / `KHORA_QUERY_TEMPORAL_HALF_LIFE_HOURS`).
+- **`_accel.batch_recency_scores` clamps future timestamps to age=0** in the pure-Python fallback. The chronicle-engine variant of decay already clamped, but the accel shim's fallback did not - a forward-dated `source_timestamp` produced negative `age_days`, `math.exp(positive)` returned > 1.0, and the resulting score could exceed the relevance ceiling. Now matches the chronicle clamp.
+
+### Migration
+
+- **Anyone running with the implicit `temporal_half_life_hours=24.0` default** will see decay run 7x slower under v0.17.3. Set `KHORA_QUERY_TEMPORAL_HALF_LIFE_HOURS=24` (or the YAML equivalent) to restore the prior behavior.
+- **Anyone relying on `chronicle_decay_weight=0.10`** will see recency weighted 3x more under v0.17.3. Set `KHORA_QUERY_CHRONICLE_DECAY_WEIGHT=0.10` to restore.
+- **Code that hardcoded `chunk.created_at` as "when the event happened"** should switch to `chunk.source_timestamp or chunk.created_at` for chronicle-style use cases.
+- **Skeleton callers passing both `source_timestamp` and `occurred_at`**: explicit `occurred_at` still wins. Callers passing only `source_timestamp` now get bi-temporal behavior that they probably expected all along.
+
+### Out of scope (filed separately)
+
+- **#855** (Chronicle reinforcement-on-recall) is a feature request, not a bug fix. Decay-only behavior continues to be the contract in v0.17.3; reinforcement is queued for a future minor.
+
 ## [0.17.2] - Extraction + batch hardening (Damir follow-ups)
 
 Patch release on top of v0.17.1. Two more bug reports from Damir Krstanovic surfaced after the 0.17.1 batch: a `submit_batch` kwarg that did nothing, and a silent entity-type drop when the configured LLM was off the strict-JSON-schema allowlist.
