@@ -25,3 +25,29 @@ def test_default_chronicle_decay_weight_is_0_30() -> None:
     cfg = KhoraConfig()
     assert cfg.query.chronicle_decay_weight == 0.30
     assert cfg.query.chronicle_decay_weight == DEFAULT_CHRONICLE_DECAY_WEIGHT
+
+
+def test_vectorcypher_queryconfig_half_life_matches_chronicle() -> None:
+    """Pins the second duplicated literal: QueryConfig dataclass default in
+    `khora.query.engine`. Devil's-advocate caught this site at v0.17.3 - it
+    must stay aligned with `DEFAULT_CHRONICLE_HALF_LIFE_HOURS`.
+    """
+    from khora.query.engine import QueryConfig
+
+    assert QueryConfig.__dataclass_fields__["temporal_half_life_hours"].default == 168.0
+    assert QueryConfig.__dataclass_fields__["temporal_half_life_hours"].default == DEFAULT_CHRONICLE_HALF_LIFE_HOURS
+
+
+def test_soft_temporal_score_default_matches_chronicle() -> None:
+    """Pins the third duplicated literal: `_soft_temporal_score`'s function
+    default. Without this guard the VectorCypher recall path silently
+    decoupled from chronicle's half-life - see v0.17.3 devil's-advocate
+    review.
+    """
+    import inspect
+
+    from khora.query.engine import HybridQueryEngine
+
+    sig = inspect.signature(HybridQueryEngine._soft_temporal_score)
+    assert sig.parameters["half_life_hours"].default == 168.0
+    assert sig.parameters["half_life_hours"].default == DEFAULT_CHRONICLE_HALF_LIFE_HOURS
