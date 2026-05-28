@@ -975,6 +975,30 @@
       "unit": "1"
     },
     {
+      "name": "khora.chronicle.reinforce.updates_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "chronicle",
+      "description": "Issue #855. Chronicle reinforcement-on-recall UPDATE batches that completed successfully. Each successful UPDATE of chunks.last_accessed_at after a recall increments this counter once per batch (not once per chunk). NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.chronicle.reinforce.failures_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "chronicle",
+      "description": "Issue #855. Chronicle reinforcement-on-recall UPDATE batches that raised an exception. The recall path swallows the error to avoid breaking the response; this counter is the only signal that reinforcement is silently failing."
+    },
+    {
+      "name": "khora.chronicle.reinforce.duration",
+      "type": "histogram",
+      "stability": "internal",
+      "unit": "s",
+      "owner": "chronicle",
+      "description": "Issue #855. Chronicle reinforcement-on-recall task wall-clock duration from create_task schedule through UPDATE completion (or failure). Recorded in the task's finally block so both success and failure paths emit."
+    },
+    {
       "name": "khora.vectorcypher.abstention_signal",
       "type": "counter",
       "stability": "public",
