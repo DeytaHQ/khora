@@ -1,0 +1,116 @@
+# Khora — Embedded Configuration (SQLite + LanceDB)
+#
+# Zero-infrastructure config: everything runs in-process from one directory.
+# Suitable for the getting-started demos, evaluation, local notebooks, and
+# CI smoke tests. Not a deployment story — embedded is **Experimental** in
+# v0.9.0 for VectorCypher and **Available** for Skeleton / Chronicle; see
+# docs/engines/engine-comparison.md for the production-readiness matrix and
+# the documented scale ceiling (~1M chunks, ~100k entities, ~500k edges).
+#
+# REQUIRED INSTALL EXTRA
+# ----------------------
+#   pip install "khora[sqlite-lance]"     # pulls aiosqlite + lancedb + pyarrow
+#
+# Without this extra, `pip install khora` ships only the PostgreSQL drivers
+# (asyncpg, pgvector, neo4j) and any attempt to run migrations against the
+# sqlite_lance backend fails with `ModuleNotFoundError: No module named
+# 'aiosqlite'` inside Alembic.
+#
+# Optional speedup:
+#   pip install "khora[sqlite-lance,rust]"  # adds khora-accel for ~2-5× MMR/cosine
+#
+# Load and use:
+#   from khora import Khora
+#   from khora.config import KhoraConfig
+#
+#   config = KhoraConfig.from_yaml("examples/khora.embedded.yaml")
+#   async with Khora(config=config) as kb:
+#       ns = await kb.create_namespace("demo")
+#       await kb.remember("hello world", namespace=ns.namespace_id)
+#
+# Any field can be overridden via env vars (e.g. KHORA_LLM_MODEL=gpt-4o).
+
+app_name: khora
+environment: development
+debug: false
+auth_enabled: false  # local-only; no auth on the embedded path
+
+# =============================================================================
+# Storage — SQLite (relational + graph) + LanceDB (vectors), both in-process
+# =============================================================================
+storage:
+  backend: sqlite_lance
+  sqlite_lance:
+    db_path: ./khora.db                  # SQLite file (graph + relational + events)
+    lance_path: null                     # null → sibling ./khora.lance/ directory
+    embedding_dimension: 1536            # must match llm.embedding_dimension below
+    use_halfvec: false                   # set true to halve index size (minor recall loss)
+    lance_index: auto                    # auto | ivf_pq | hnsw | brute
+    hnsw_m: 16
+    retrain_factor: 2.0                  # rebuild ANN index once corpus has doubled
+
+# =============================================================================
+# LLM
+# =============================================================================
+llm:
+  model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY            # env-var **name**, not the key value
+  temperature: 0.7
+  max_tokens: 2000
+  timeout: 30
+  max_retries: 3
+  max_concurrent_llm_calls: 4            # smaller default for laptop runs
+
+  embedding_model: text-embedding-3-small
+  embedding_dimension: 1536              # must equal storage.sqlite_lance.embedding_dimension
+
+# =============================================================================
+# Pipeline — chunking + extraction
+# =============================================================================
+pipelines:
+  chunking_strategy: semantic            # fixed | semantic | recursive
+  chunk_size: 512
+  chunk_overlap: 50
+
+  extract_entities: true
+  entity_types:
+    - PERSON
+    - ORGANIZATION
+    - CONCEPT
+    - LOCATION
+    - EVENT
+    - PRODUCT
+    - TECHNOLOGY
+
+  # KET-RAG selective extraction: top-K chunks get full LLM extraction;
+  # the rest get lightweight co-occurrence edges. Set extraction_importance_ratio
+  # to 1.0 for the legacy "extract everything" behavior (replaces the removed
+  # graphrag engine — see docs/engines/engine-comparison.md#replacing-graphrag).
+  selective_extraction: true
+  extraction_importance_ratio: 0.7
+  extraction_min_importance: 0.2
+
+# =============================================================================
+# Query
+# =============================================================================
+query:
+  default_mode: hybrid                   # vector | graph | hybrid | all
+  min_chunk_similarity: 0.05
+  min_entity_similarity: 0.05
+
+  # Fusion weights (RRF channels)
+  vector_weight: 0.5
+  graph_weight: 0.3
+  keyword_weight: 0.2
+
+  # Recency / temporal
+  apply_recency_bias: false
+  recency_weight: 0.2
+  recency_decay_days: 30.0
+
+# =============================================================================
+# Tenancy
+# =============================================================================
+tenancy:
+  default_mode: shared
+  enforce_namespace: true
