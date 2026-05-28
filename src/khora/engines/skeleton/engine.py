@@ -267,7 +267,9 @@ class SkeletonConstructionEngine:
             source: Document source
             metadata: Additional metadata
             skill_name: Extraction skill (default: general_entities)
-            occurred_at: When this content/event occurred (default: now)
+            occurred_at: When this content/event occurred. Resolution order:
+                explicit ``occurred_at`` kwarg > ``metadata["occurred_at"]`` >
+                ``source_timestamp`` > ``datetime.now(UTC)``.
             chunk_strategy: Override chunking strategy for this call.
                 Valid values: "fixed", "semantic", "recursive", "conversation".
                 When None (default), uses the configured pipeline default.
@@ -316,14 +318,20 @@ class SkeletonConstructionEngine:
         # still persisted for change-detection workflows.
 
         # Resolve occurred_at: explicit kwarg wins, then metadata["occurred_at"]
-        # (parity with remember_batch), finally fall back to now().
+        # (parity with remember_batch), then the user-supplied source_timestamp
+        # (parity with the relational Document.source_timestamp field), finally
+        # fall back to now(). Fixes #856 - source_timestamp was previously
+        # ignored on the chunk side even though it was persisted on Document.
         if occurred_at is None:
-            occurred_at = datetime.now(UTC)
             if metadata and "occurred_at" in metadata:
                 try:
                     occurred_at = self._parse_datetime(metadata["occurred_at"])
                 except ValueError:
                     pass
+            if occurred_at is None and source_timestamp is not None:
+                occurred_at = source_timestamp
+            if occurred_at is None:
+                occurred_at = datetime.now(UTC)
 
         # Process through simplified pipeline (no full KG extraction)
         chunks_created, entities_extracted, relationships_created = await self._process_document(
@@ -841,13 +849,22 @@ class SkeletonConstructionEngine:
                 content = doc_data.get("content", "")
                 doc_metadata = doc_data.get("metadata", {})
 
-                # Parse occurred_at
-                occurred_at = datetime.now(UTC)
+                # Parse occurred_at - resolution order:
+                # metadata["occurred_at"] > source_timestamp (per-doc or batch
+                # fallback) > now(). Fixes #856 - source_timestamp was ignored
+                # on the chunk side even though it was persisted on Document.
+                occurred_at: datetime | None = None
                 if "occurred_at" in doc_metadata:
                     try:
                         occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
                     except ValueError:
                         pass
+                if occurred_at is None:
+                    doc_source_ts = doc_data.get("source_timestamp", source_timestamp)
+                    if doc_source_ts is not None:
+                        occurred_at = doc_source_ts
+                if occurred_at is None:
+                    occurred_at = datetime.now(UTC)
 
                 document = Document(
                     namespace_id=namespace_id,
