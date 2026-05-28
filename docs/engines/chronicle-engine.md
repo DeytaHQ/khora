@@ -26,13 +26,23 @@ All four channels execute in parallel via `asyncio.gather()`, then results are f
 
 ### Ebbinghaus Temporal Decay
 
-Chronicle applies an exponential decay curve inspired by the Ebbinghaus forgetting curve:
+Chronicle applies an exponential decay curve inspired by the Ebbinghaus forgetting curve. Retention is folded into the relevance score via a multiplicative blend (matches Elasticsearch / Mem0 industry convention):
 
 ```
-score = base + weight * exp(-ln(2) * age_days / half_life)
+retention = exp(-ln(2) * age_hours / half_life_hours)
+final_score = relevance * ((1 - decay_weight) + decay_weight * retention)
 ```
 
-Default half-life: 168 hours (7 days). A memory retains 50% strength after one week, 25% after two weeks. Configurable via `recency_weight` and `recency_decay_days`.
+The max age penalty is `decay_weight` (when `retention -> 0`): a fully-faded memory keeps `(1 - decay_weight)` of its relevance score, while a fresh memory keeps 100%.
+
+Age is measured against `chunk.source_timestamp` (event time, supplied by the user via `metadata['occurred_at']` etc.), falling back to `chunk.created_at` (ingest time) only when no event time was supplied. This prevents a 6-month-old conversation from being treated as "fresh" because it was just ingested.
+
+Defaults:
+
+- `temporal_half_life_hours = 168` (7 days): a memory retains 50% strength after one week, 25% after two weeks.
+- `chronicle_decay_weight = 0.30`: a fully-faded memory keeps 70% of its relevance, a fresh memory keeps 100%.
+
+Configurable via `chronicle_decay_weight` and `temporal_half_life_hours` on `QuerySettings`, or the matching env vars `KHORA_QUERY_CHRONICLE_DECAY_WEIGHT` and `KHORA_QUERY_TEMPORAL_HALF_LIFE_HOURS`.
 
 ## Key Features
 
@@ -154,9 +164,9 @@ Chronicle respects standard `KHORA_QUERY_*` env vars, plus these are particularl
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `KHORA_QUERY_APPLY_RECENCY_BIAS` | Enable temporal decay | `false` (Chronicle enables internally) |
-| `KHORA_QUERY_RECENCY_WEIGHT` | Decay weight | `0.2` |
-| `KHORA_QUERY_RECENCY_DECAY_DAYS` | Half-life in days | `30.0` |
+| `KHORA_QUERY_CHRONICLE_DECAY_WEIGHT` | Multiplicative decay weight (max age penalty) | `0.30` |
+| `KHORA_QUERY_TEMPORAL_HALF_LIFE_HOURS` | Half-life in hours for the exponential decay | `168.0` (7 days) |
+| `KHORA_QUERY_CHRONICLE_TEMPORAL_WINDOW_DAYS` | Temporal channel window (0 = unlimited, -1 = disable) | `0.0` |
 
 ## Related Documentation
 

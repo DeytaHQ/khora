@@ -67,6 +67,13 @@ if TYPE_CHECKING:
 ChronicleStorageBackend = Literal["pgvector", "lancedb"]
 
 
+# Chronicle temporal-decay parameters - single source of truth for defaults.
+# Bump in lockstep with config/schema.py (QuerySettings.temporal_half_life_hours,
+# chronicle_decay_weight) and docs/engines/chronicle-engine.md.
+DEFAULT_CHRONICLE_HALF_LIFE_HOURS: float = 168.0
+DEFAULT_CHRONICLE_DECAY_WEIGHT: float = 0.30
+
+
 # --- Abstention metrics (Phase 4) ---
 # Module-level instruments so every recall() shares one OTel handle.
 # No namespace label — Phase 0 audit identified 438 distinct namespaces,
@@ -112,7 +119,7 @@ def _coerce_session_id_from_metadata(metadata: dict[str, Any] | None) -> UUID | 
 # ---------------------------------------------------------------------------
 
 
-def _ebbinghaus_decay(age_hours: float, *, half_life_hours: float = 168.0) -> float:
+def _ebbinghaus_decay(age_hours: float, *, half_life_hours: float = DEFAULT_CHRONICLE_HALF_LIFE_HOURS) -> float:
     """Compute a retention factor using an Ebbinghaus-inspired forgetting curve.
 
     R(t) = exp(-t / tau) where tau = half_life / ln(2).
@@ -131,13 +138,25 @@ def _ebbinghaus_decay(age_hours: float, *, half_life_hours: float = 168.0) -> fl
 def _apply_temporal_decay(
     chunks_with_scores: list[tuple[Chunk, float]],
     *,
-    decay_weight: float = 0.15,
-    half_life_hours: float = 168.0,
+    decay_weight: float = DEFAULT_CHRONICLE_DECAY_WEIGHT,
+    half_life_hours: float = DEFAULT_CHRONICLE_HALF_LIFE_HOURS,
     reference_time: datetime | None = None,
 ) -> list[tuple[Chunk, float]]:
     """Re-score chunks by blending relevance score with temporal decay.
 
-    final_score = (1 - decay_weight) * relevance + decay_weight * retention
+    Multiplicative blend (matches Elasticsearch / Mem0 industry convention):
+
+        final_score = relevance * ((1 - decay_weight) + decay_weight * retention)
+
+    The max age penalty is ``decay_weight`` (when retention -> 0): a fully-faded
+    memory keeps ``(1 - decay_weight)`` of its relevance score, while a fresh
+    memory (retention -> 1) keeps 100%.
+
+    Age is computed against ``chunk.source_timestamp`` (event time, supplied by
+    the user via ``metadata['occurred_at']`` etc.), falling back to
+    ``chunk.created_at`` (ingest time) only when no event time was supplied
+    (#848). This prevents a 6-month-old conversation from being treated as
+    "fresh" because it was just ingested.
 
     Uses Rust-accelerated ``batch_recency_scores`` from ``khora._accel``
     when available (~10x faster than per-item Python loop for large batches).
@@ -150,13 +169,15 @@ def _apply_temporal_decay(
     now_secs = now.timestamp()
     decay_days = half_life_hours / 24.0
 
-    # Collect timestamps
+    # Collect timestamps: prefer source_timestamp (event time) over created_at
+    # (ingest time). This matters for backfilled / batched ingest where every
+    # chunk's created_at is "now" but the events happened months ago (#848).
     timestamps: list[float] = []
     for chunk, _score in chunks_with_scores:
-        created = chunk.created_at
-        if created.tzinfo is None:
-            created = created.replace(tzinfo=UTC)
-        timestamps.append(created.timestamp())
+        ts = chunk.source_timestamp or chunk.created_at
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        timestamps.append(ts.timestamp())
 
     # Batch compute recency scores via Rust/NumPy/Python acceleration
     from khora._accel import batch_recency_scores
@@ -1237,8 +1258,16 @@ class ChronicleEngine:
         _rrf_w_bm25 = getattr(qs, "chronicle_rrf_bm25_weight", 0.8) if qs else 0.8
         _rrf_w_temporal = getattr(qs, "chronicle_rrf_temporal_weight", 0.9) if qs else 0.9
         _rrf_w_entity = getattr(qs, "chronicle_rrf_entity_weight", 0.85) if qs else 0.85
-        _cfg_decay = getattr(qs, "chronicle_decay_weight", 0.25) if qs else 0.25
-        _cfg_half_life = getattr(qs, "temporal_half_life_hours", 168.0) if qs else 168.0
+        _cfg_decay = (
+            getattr(qs, "chronicle_decay_weight", DEFAULT_CHRONICLE_DECAY_WEIGHT)
+            if qs
+            else DEFAULT_CHRONICLE_DECAY_WEIGHT
+        )
+        _cfg_half_life = (
+            getattr(qs, "temporal_half_life_hours", DEFAULT_CHRONICLE_HALF_LIFE_HOURS)
+            if qs
+            else DEFAULT_CHRONICLE_HALF_LIFE_HOURS
+        )
         overfetch_limit = limit * _overfetch
 
         # Resolve temporal references from query (fast dateparser, ~0.25ms)
