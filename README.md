@@ -148,7 +148,7 @@ Run any demo from the repo root (e.g. `uv run python examples/30_workloads/01_pe
 
 ## Maintenance: dream phase
 
-Khora ships an **offline maintenance pass** ("dream phase") that audits an accumulated namespace and plans consolidation work - entity dedupe, fact compaction, event clustering. Run it on a schedule (cron, Temporal, k8s CronJob) and consume the structured reports through three independently-togglable sinks: file, semantic-event, or telemetry collector.
+Khora ships an **offline maintenance pass** ("dream phase") that audits an accumulated namespace and plans consolidation work - entity dedupe, fact compaction, event clustering.
 
 ```python
 from khora import Khora, KhoraConfig, DreamConfig
