@@ -331,6 +331,7 @@ class PgVectorBackend(AsyncSessionMixin):
             embedding_model=chunk.embedding_model,
             created_at=chunk.created_at,
             source_timestamp=getattr(chunk, "source_timestamp", None),
+            last_accessed_at=getattr(chunk, "last_accessed_at", None),
             session_id=getattr(chunk, "session_id", None),
         )
         session.add(model)
@@ -370,6 +371,7 @@ class PgVectorBackend(AsyncSessionMixin):
                 embedding_model=chunk.embedding_model,
                 created_at=chunk.created_at,
                 source_timestamp=getattr(chunk, "source_timestamp", None),
+                last_accessed_at=getattr(chunk, "last_accessed_at", None),
                 session_id=getattr(chunk, "session_id", None),
             )
             for chunk in chunks
@@ -459,6 +461,32 @@ class PgVectorBackend(AsyncSessionMixin):
                 )
             )
             await own_session.commit()
+            return result.rowcount  # type: ignore[unresolved-attribute]
+
+    async def update_last_accessed(
+        self,
+        namespace_id: UUID,
+        chunk_ids: list[UUID],
+        ts: datetime,
+    ) -> int:
+        """Stamp ``last_accessed_at = ts`` on the given chunks (#855).
+
+        Single UPDATE statement, scoped to ``namespace_id`` to prevent
+        cross-tenant writes through forged ids. Returns the row count.
+        Used by the Chronicle reinforcement-on-recall path.
+        """
+        if not chunk_ids:
+            return 0
+        async with self._get_session() as session:
+            result = await session.execute(
+                update(ChunkModel)
+                .where(
+                    ChunkModel.id.in_(chunk_ids),
+                    ChunkModel.namespace_id == namespace_id,
+                )
+                .values(last_accessed_at=ts)
+            )
+            await session.commit()
             return result.rowcount  # type: ignore[unresolved-attribute]
 
     async def delete_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> int:
@@ -710,6 +738,7 @@ class PgVectorBackend(AsyncSessionMixin):
             embedding_model=model.embedding_model,
             created_at=model.created_at,
             source_timestamp=getattr(model, "source_timestamp", None),
+            last_accessed_at=getattr(model, "last_accessed_at", None),
             session_id=getattr(model, "session_id", None),
         )
 

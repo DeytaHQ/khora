@@ -248,6 +248,11 @@ class ChunkModel(Base):
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Reinforcement-on-recall (#855): NULL until first recall. When the
+    # ``chronicle_enable_recall_reinforcement`` flag is set, the Chronicle
+    # decay path treats ``max(source_timestamp, last_accessed_at)`` as the
+    # effective event time so frequently-recalled chunks stay fresh.
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Session attribution for agentic-framework adapters (#620).
     # Inherited from the parent document at chunking time.
