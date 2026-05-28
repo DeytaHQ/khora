@@ -509,6 +509,8 @@ class VectorCypherEngine:
                     query_timeout=neo4j_query_timeout,
                     pool_sampler_enabled=getattr(neo4j_cfg, "pool_sampler_enabled", False),
                     pool_sampler_interval_ms=getattr(neo4j_cfg, "pool_sampler_interval_ms", 500),
+                    pool_keepalive_enabled=getattr(neo4j_cfg, "pool_keepalive_enabled", False),
+                    pool_keepalive_interval_ms=getattr(neo4j_cfg, "pool_keepalive_interval_ms", 15000),
                 )
 
         await self._storage.connect()

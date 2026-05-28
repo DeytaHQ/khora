@@ -122,6 +122,22 @@ def _cancel_sampler_task_on_gc(task: asyncio.Task[None]) -> None:
         pass
 
 
+def _cancel_keepalive_task_on_gc(task: asyncio.Task[None]) -> None:
+    """Cancel a keepalive task from a ``weakref.finalize`` callback.
+
+    Never raises: finalizers run at interpreter shutdown too, where logging
+    may no longer be available. If the loop is closed or the task is done,
+    silently no-op. Defense in depth — the primary cleanup path is
+    ``disconnect()``.
+    """
+    if task.done():
+        return
+    try:
+        task.cancel()
+    except Exception:  # pragma: no cover  # noqa: S110 — finalizer must never raise
+        pass
+
+
 class _InstrumentedSession:
     """Proxy around an ``AsyncSession`` that records real pool acquire time.
 
@@ -375,6 +391,8 @@ class Neo4jBackend(GraphBackendBase):
         relationship_write_concurrency: int = _DEFAULT_RELATIONSHIP_WRITE_CONCURRENCY,
         pool_sampler_enabled: bool = False,
         pool_sampler_interval_ms: int = 500,
+        pool_keepalive_enabled: bool = False,
+        pool_keepalive_interval_ms: int = 15000,
         relationship_source_document_ids_max: int = 100,
         relationship_source_chunk_ids_max: int = 250,
         entity_source_document_ids_max: int = 100,
@@ -401,6 +419,15 @@ class Neo4jBackend(GraphBackendBase):
                 ``khora.neo4j.pool.sampled.*`` histograms. Zero cost when False.
             pool_sampler_interval_ms: Sampler interval in milliseconds. Clamped to
                 [50, 60000]. Only relevant when ``pool_sampler_enabled`` is True.
+            pool_keepalive_enabled: When True, start a background task that fires
+                periodic ``RETURN 1`` pings on idle pooled connections every
+                ``pool_keepalive_interval_ms`` milliseconds so they are never
+                idle-dropped before the driver's liveness check would catch a
+                stale connection. Zero cost when False.
+            pool_keepalive_interval_ms: Keepalive ping interval in milliseconds.
+                Clamped to [50, 60000]. Only relevant when
+                ``pool_keepalive_enabled`` is True. Default 15000 is intentionally
+                below the driver's 30s liveness window.
             relationship_source_document_ids_max: Cap on retained
                 ``source_document_ids`` per relationship after MERGE. When the
                 (existing + incoming) union exceeds this cap the most-recent
@@ -451,6 +478,11 @@ class Neo4jBackend(GraphBackendBase):
         self._sampler_task: asyncio.Task[None] | None = None
         self._sampler_warned = False
         self._sampler_finalizer: _weakref.finalize | None = None
+        self._pool_keepalive_enabled = pool_keepalive_enabled
+        self._pool_keepalive_interval_ms = max(50, min(60_000, pool_keepalive_interval_ms))
+        self._keepalive_task: asyncio.Task[None] | None = None
+        self._keepalive_warned = False
+        self._keepalive_finalizer: _weakref.finalize | None = None
         self._relationship_source_document_ids_max = relationship_source_document_ids_max
         self._relationship_source_chunk_ids_max = relationship_source_chunk_ids_max
         self._entity_source_document_ids_max = entity_source_document_ids_max
@@ -507,6 +539,17 @@ class Neo4jBackend(GraphBackendBase):
         self._sampled_utilization_histogram = metric_histogram(
             "khora.neo4j.pool.sampled.utilization",
             description="Neo4j pool utilization (0.0-1.0), high-frequency sample.",
+        )
+        # Keepalive counters (opt-in). ``pings`` counts every RETURN 1 attempt
+        # the keepalive loop fires; ``failures`` counts those that raised. A
+        # non-zero failure rate is the expected self-heal canary, not an error.
+        self._keepalive_pings_counter = metric_counter(
+            "khora.neo4j.pool.keepalive.pings",
+            description="Neo4j keepalive RETURN 1 pings attempted on idle pooled connections.",
+        )
+        self._keepalive_failures_counter = metric_counter(
+            "khora.neo4j.pool.keepalive.failures",
+            description="Neo4j keepalive pings that raised (expected dead-connection self-heal canary).",
         )
         # Provenance-list truncation counter (#737). Incremented whenever a
         # relationship MERGE's (existing + incoming) union exceeds the
@@ -626,6 +669,8 @@ class Neo4jBackend(GraphBackendBase):
             ),
             pool_sampler_enabled=getattr(config, "pool_sampler_enabled", False),
             pool_sampler_interval_ms=getattr(config, "pool_sampler_interval_ms", 500),
+            pool_keepalive_enabled=getattr(config, "pool_keepalive_enabled", False),
+            pool_keepalive_interval_ms=getattr(config, "pool_keepalive_interval_ms", 15000),
             relationship_source_document_ids_max=getattr(config, "relationship_source_document_ids_max", 100),
             relationship_source_chunk_ids_max=getattr(config, "relationship_source_chunk_ids_max", 250),
             entity_source_document_ids_max=getattr(config, "entity_source_document_ids_max", 100),
@@ -643,6 +688,8 @@ class Neo4jBackend(GraphBackendBase):
         query_timeout: float | None = 5.0,
         pool_sampler_enabled: bool = False,
         pool_sampler_interval_ms: int = 500,
+        pool_keepalive_enabled: bool = False,
+        pool_keepalive_interval_ms: int = 15000,
     ) -> Neo4jBackend:
         """Create a Neo4jBackend from an existing AsyncDriver.
 
@@ -657,6 +704,12 @@ class Neo4jBackend(GraphBackendBase):
         driver's real ``_pool.pool_config.max_connection_pool_size`` so it
         matches the sampler's observations.
 
+        The pool keepalive is honored on this path too: pass
+        ``pool_keepalive_enabled=True`` (with an optional
+        ``pool_keepalive_interval_ms``) and ``connect()`` starts the keepalive
+        loop against the shared driver's pool, just as the standard
+        constructor does.
+
         Args:
             driver: An existing Neo4j async driver
             database: Database name
@@ -665,6 +718,8 @@ class Neo4jBackend(GraphBackendBase):
             query_timeout: Per-transaction timeout in seconds for bounded read queries (None disables)
             pool_sampler_enabled: Start the high-frequency pool sampler on connect
             pool_sampler_interval_ms: Sampler cadence in milliseconds when enabled
+            pool_keepalive_enabled: Start the connection-pool keepalive on connect
+            pool_keepalive_interval_ms: Keepalive ping cadence in milliseconds when enabled
 
         Returns:
             Neo4jBackend wrapping the shared driver
@@ -697,6 +752,11 @@ class Neo4jBackend(GraphBackendBase):
         instance._sampler_task = None
         instance._sampler_warned = False
         instance._sampler_finalizer = None
+        instance._pool_keepalive_enabled = pool_keepalive_enabled
+        instance._pool_keepalive_interval_ms = pool_keepalive_interval_ms
+        instance._keepalive_task = None
+        instance._keepalive_warned = False
+        instance._keepalive_finalizer = None
         # Relationship provenance caps (#737) — defaults mirror the public
         # constructor; callers building backends via from_driver typically
         # set these on the instance directly post-construction.
@@ -714,6 +774,7 @@ class Neo4jBackend(GraphBackendBase):
             await self._create_indexes()
             self._register_pool_metrics()
             self._start_pool_sampler()
+            self._start_pool_keepalive()
             return
 
         logger.info("Connecting to Neo4j at {url}...", url=_safe_url_for_log(self._url))
@@ -734,11 +795,13 @@ class Neo4jBackend(GraphBackendBase):
         await self._create_indexes()
         self._register_pool_metrics()
         self._start_pool_sampler()
+        self._start_pool_keepalive()
         logger.info("Connected to Neo4j")
 
     async def disconnect(self) -> None:
         """Close Neo4j connections."""
         await self._stop_pool_sampler()
+        await self._stop_pool_keepalive()
         if self._driver is not None:
             if self._owns_driver:
                 logger.info("Disconnecting from Neo4j...")
@@ -1236,6 +1299,166 @@ class Neo4jBackend(GraphBackendBase):
         except Exception as exc:
             # Sampler is instrumentation-only; never propagate cleanup errors.
             logger.debug(f"Neo4j pool sampler shutdown raised: {exc}")
+
+    # =========================================================================
+    # Connection-pool keepalive
+    # =========================================================================
+
+    def _count_free_connections(self) -> int:
+        """Return the count of idle (free) pooled connections, or 0 on failure.
+
+        Reads ``driver._pool`` under a brief ``pool.lock`` critical section —
+        no ``await`` while the lock is held — mirroring ``_sample_pool_once``'s
+        getattr-guarded read pattern (``idle = max(0, total - active)``).
+        Returns 0 (warning once via ``self._keepalive_warned``) if the driver
+        internals are unavailable or shaped unexpectedly.
+        """
+        driver = self._driver
+        if driver is None:
+            return 0
+        pool = getattr(driver, "_pool", None)
+        if pool is None:
+            return 0
+        try:
+            in_use_fn = getattr(pool, "in_use_connection_count", None)
+            pool_lock = getattr(pool, "lock", None)
+
+            # Short critical section — snapshot the (address, deque) pairs and
+            # per-address in_use counts. No await inside the lock.
+            if pool_lock is not None:
+                with pool_lock:
+                    conns_snapshot: list[tuple[Any, list[Any]]] = [
+                        (addr, list(deq)) for addr, deq in getattr(pool, "connections", {}).items()
+                    ]
+                    in_use_counts: dict[Any, int] | None = None
+                    if in_use_fn is not None:
+                        in_use_counts = {}
+                        for addr, _deq in conns_snapshot:
+                            try:
+                                in_use_counts[addr] = int(in_use_fn(addr))
+                            except Exception:
+                                in_use_counts[addr] = -1  # sentinel → fall back below
+            else:
+                # Best-effort read without a lock (driver shape changed).
+                conns_snapshot = [(addr, list(deq)) for addr, deq in (getattr(pool, "connections", {}) or {}).items()]
+                in_use_counts = None
+                if in_use_fn is not None:
+                    in_use_counts = {}
+                    for addr, _deq in conns_snapshot:
+                        try:
+                            in_use_counts[addr] = int(in_use_fn(addr))
+                        except Exception:
+                            in_use_counts[addr] = -1
+
+            active = 0
+            total = 0
+            for address, deq in conns_snapshot:
+                total += len(deq)
+                if in_use_counts is not None and in_use_counts.get(address, -1) >= 0:
+                    active += in_use_counts[address]
+                else:
+                    active += sum(1 for c in deq if getattr(c, "in_use", False))
+            # Clamp: driver state can be transiently inconsistent during churn.
+            idle = max(0, total - active)
+        except Exception as exc:
+            if not self._keepalive_warned:
+                logger.warning(
+                    "Neo4j pool keepalive read failed; disabling further warnings: {error}",
+                    error=exc,
+                )
+                self._keepalive_warned = True
+            return 0
+        return idle
+
+    async def _run_keepalive(self) -> None:
+        """Fire keepalive pings on idle pooled connections at configured cadence.
+
+        Each cycle reads the free-connection count and fires up to 16 detached
+        (non-awaited) ping tasks, then sleeps. Hard refs to the in-flight pings
+        are held so they are not GC'd mid-flight; a done-callback discards each
+        ref when it finishes. Returns on cancellation.
+        """
+        interval_s = self._pool_keepalive_interval_ms / 1000.0
+        pings: set[asyncio.Task[None]] = set()
+        try:
+            while True:
+                free = self._count_free_connections()
+                # Cap per-cycle fan-out: warming any idle connection resets the
+                # network idle timer, so a small fixed cap suffices even on a
+                # large idle pool and bounds the concurrent-session burst.
+                n = min(free, 16)
+                for _ in range(n):
+                    ping = asyncio.create_task(self._keepalive_ping_once())
+                    pings.add(ping)
+                    ping.add_done_callback(pings.discard)
+                await asyncio.sleep(interval_s)
+        except asyncio.CancelledError:
+            return
+
+    async def _keepalive_ping_once(self) -> None:
+        """Run a single ``RETURN 1`` on a raw session to exercise one connection.
+
+        Opens a **raw** ``driver.session(...)`` — never ``self._session()`` —
+        so the keepalive does not pollute ``acquire_duration`` /
+        ``session.duration`` / the timeout counter with synthetic traffic.
+
+        Never wrapped in ``asyncio.wait_for``: cancelling mid-teardown would
+        strand a half-closed connection. The whole point is to let a
+        dead-connection close run to completion in the background, which is
+        what self-heals the pool. A failure here is the expected canary, not an
+        error — counted on the failures counter and logged at DEBUG.
+        """
+        driver = self._driver
+        if driver is None:
+            return
+        self._keepalive_pings_counter.add(1)
+        try:
+            session = driver.session(database=self._database)
+            try:
+                await session.execute_read(lambda tx: tx.run("RETURN 1"))
+            finally:
+                await session.close()
+        except Exception as exc:
+            self._keepalive_failures_counter.add(1)
+            logger.debug("Neo4j keepalive ping failed (expected self-heal canary): {error}", error=exc)
+
+    def _start_pool_keepalive(self) -> None:
+        """Start the background keepalive task if enabled and not already running.
+
+        Idempotent — calling ``connect()`` twice (or ``_start_pool_keepalive``
+        directly) will not spawn a second task.
+        """
+        if not self._pool_keepalive_enabled:
+            return
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            return
+        task = asyncio.create_task(self._run_keepalive())
+        self._keepalive_task = task
+        # Register a GC-triggered finalizer that cancels the task if the
+        # backend is dropped without an awaited ``disconnect()`` (crash path,
+        # test teardown). ``_cancel_keepalive_task_on_gc`` swallows
+        # loop-closed / no-loop errors — it is defense in depth only.
+        if self._keepalive_finalizer is not None:
+            self._keepalive_finalizer.detach()
+        self._keepalive_finalizer = _weakref.finalize(self, _cancel_keepalive_task_on_gc, task)
+
+    async def _stop_pool_keepalive(self) -> None:
+        """Cancel and await the keepalive task, if any."""
+        task = self._keepalive_task
+        if task is None:
+            return
+        self._keepalive_task = None
+        if self._keepalive_finalizer is not None:
+            self._keepalive_finalizer.detach()
+            self._keepalive_finalizer = None
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            # Keepalive is best-effort; never propagate cleanup errors.
+            logger.debug("Neo4j pool keepalive shutdown raised: {error}", error=exc)
 
     # =========================================================================
     # Entity operations

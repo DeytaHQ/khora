@@ -112,9 +112,12 @@ class TestNeo4jBackendFromConfig:
         config.entity_write_concurrency = 16
         config.relationship_write_concurrency = 8
         # Additions: prevent MagicMock auto-attrs from leaking into
-        # the ``max(50, min(60_000, ...))`` clamp on pool_sampler_interval_ms.
+        # the ``max(50, min(60_000, ...))`` clamp on pool_sampler_interval_ms
+        # and pool_keepalive_interval_ms.
         config.pool_sampler_enabled = False
         config.pool_sampler_interval_ms = 500
+        config.pool_keepalive_enabled = False
+        config.pool_keepalive_interval_ms = 15000
 
         backend = Neo4jBackend.from_config(config)
         assert backend._query_timeout == 3.5
