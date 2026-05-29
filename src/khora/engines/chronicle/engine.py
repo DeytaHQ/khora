@@ -51,7 +51,7 @@ from khora.engines.chronicle.compression import (
     MemoryFact,
 )
 from khora.engines.chronicle.events import ChronicleEvent, EventExtractor
-from khora.exceptions import EngineCapabilityError
+from khora.exceptions import ConfigurationError, EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
@@ -86,6 +86,25 @@ _ABSTENTION_COMBINED_SCORE_HISTOGRAM = metric_histogram(
     "khora.chronicle.abstention_combined_score",
     unit="1",
     description="Chronicle abstention combined-score (0.0=confident, 1.0=should-abstain).",
+)
+
+# --- Reinforcement-on-recall metrics (#855) ---
+# Each successful UPDATE batch increments ``updates_total``; each UPDATE that
+# raised increments ``failures_total``; ``duration`` measures the wall-clock
+# time from task schedule to UPDATE completion (or failure). Aggregate-only -
+# no namespace label per the cardinality rule.
+_REINFORCE_UPDATES_COUNTER = metric_counter(
+    "khora.chronicle.reinforce.updates_total",
+    description="Chronicle reinforcement UPDATE batches that completed successfully.",
+)
+_REINFORCE_FAILURES_COUNTER = metric_counter(
+    "khora.chronicle.reinforce.failures_total",
+    description="Chronicle reinforcement UPDATE batches that raised an exception.",
+)
+_REINFORCE_DURATION_HISTOGRAM = metric_histogram(
+    "khora.chronicle.reinforce.duration",
+    unit="s",
+    description="Chronicle reinforcement task wall-clock duration, schedule to UPDATE completion.",
 )
 
 
@@ -141,6 +160,7 @@ def _apply_temporal_decay(
     decay_weight: float = DEFAULT_CHRONICLE_DECAY_WEIGHT,
     half_life_hours: float = DEFAULT_CHRONICLE_HALF_LIFE_HOURS,
     reference_time: datetime | None = None,
+    enable_reinforcement: bool = False,
 ) -> list[tuple[Chunk, float]]:
     """Re-score chunks by blending relevance score with temporal decay.
 
@@ -158,6 +178,12 @@ def _apply_temporal_decay(
     (#848). This prevents a 6-month-old conversation from being treated as
     "fresh" because it was just ingested.
 
+    When ``enable_reinforcement`` is True (#855), the effective event time
+    is ``max(source_timestamp, last_accessed_at)`` and falls back to
+    ``created_at`` only when both are NULL. This keeps frequently-recalled
+    chunks fresh even as their ``source_timestamp`` ages, matching the
+    Stanford generative-agents reinforcement pattern.
+
     Uses Rust-accelerated ``batch_recency_scores`` from ``khora._accel``
     when available (~10x faster than per-item Python loop for large batches).
     Falls back to per-item computation otherwise.
@@ -172,9 +198,17 @@ def _apply_temporal_decay(
     # Collect timestamps: prefer source_timestamp (event time) over created_at
     # (ingest time). This matters for backfilled / batched ingest where every
     # chunk's created_at is "now" but the events happened months ago (#848).
+    # With reinforcement (#855), the effective time is the most recent of
+    # source_timestamp and last_accessed_at.
     timestamps: list[float] = []
     for chunk, _score in chunks_with_scores:
-        ts = chunk.source_timestamp or chunk.created_at
+        if enable_reinforcement:
+            candidates = [
+                ts for ts in (chunk.source_timestamp, getattr(chunk, "last_accessed_at", None)) if ts is not None
+            ]
+            ts = max(candidates) if candidates else chunk.created_at
+        else:
+            ts = chunk.source_timestamp or chunk.created_at
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC)
         timestamps.append(ts.timestamp())
@@ -577,6 +611,13 @@ class ChronicleEngine:
         # provider as a single resource pool.
         self._max_concurrent_extractions: int = 10
         self._connected = False
+        # Live references to in-flight reinforcement-on-recall tasks (#855).
+        # Python's GC may collect a task with no live reference mid-flight;
+        # holding the set keeps the task alive and gives ``disconnect()`` a
+        # handle to cancel + drain on shutdown. The ``add_done_callback``
+        # registered at the spawn site discards entries when each task
+        # finishes so the set never grows unbounded.
+        self._reinforce_tasks: set[asyncio.Task[None]] = set()
 
     @staticmethod
     def _build_lancedb_storage_config(
@@ -630,6 +671,26 @@ class ChronicleEngine:
         self._storage = create_storage_coordinator(self._storage_config)
         await self._storage.connect()
 
+        # Reinforcement-on-recall capability check (#855).
+        # Vector backends that don't implement ``update_last_accessed`` would
+        # silently no-op the UPDATE - users on those backends would see a
+        # config flag with no effect. Fail loudly at connect time instead so
+        # the operator knows reinforcement is unavailable on this stack.
+        # Currently supported: pgvector, sqlite_lance. NOT supported: surrealdb
+        # (chunk schema lacks a last_accessed_at field).
+        qs = self._config.query
+        reinforcement_on = getattr(qs, "chronicle_enable_recall_reinforcement", False) if qs else False
+        if reinforcement_on:
+            vector = self._storage._vector
+            if vector is not None and not hasattr(vector, "update_last_accessed"):
+                backend_name = type(vector).__name__
+                raise ConfigurationError(
+                    "Chronicle reinforcement-on-recall "
+                    "(KHORA_QUERY_CHRONICLE_ENABLE_RECALL_REINFORCEMENT=true) "
+                    f"requires the vector backend to implement update_last_accessed; "
+                    f"{backend_name} does not. Supported backends: pgvector, sqlite_lance."
+                )
+
         # Create embedder
         llm_config = LiteLLMConfig(
             model=self._config.llm.model,
@@ -659,6 +720,16 @@ class ChronicleEngine:
             return
 
         logger.info("Disconnecting Chronicle engine...")
+
+        # Cancel and drain any in-flight reinforcement-on-recall tasks (#855)
+        # BEFORE tearing down the storage coordinator they write to. Otherwise
+        # a task can race the coordinator disconnect and try to UPDATE against
+        # a closed pool.
+        if self._reinforce_tasks:
+            for task in list(self._reinforce_tasks):
+                task.cancel()
+            await asyncio.gather(*self._reinforce_tasks, return_exceptions=True)
+            self._reinforce_tasks.clear()
 
         # Shutdown telemetry
         from khora.telemetry import shutdown_telemetry
@@ -1268,6 +1339,7 @@ class ChronicleEngine:
             if qs
             else DEFAULT_CHRONICLE_HALF_LIFE_HOURS
         )
+        _enable_reinforcement = getattr(qs, "chronicle_enable_recall_reinforcement", False) if qs else False
         overfetch_limit = limit * _overfetch
 
         # Resolve temporal references from query (fast dateparser, ~0.25ms)
@@ -1507,6 +1579,7 @@ class ChronicleEngine:
             chunks_with_scores,
             decay_weight=decay_weight,
             half_life_hours=_cfg_half_life,
+            enable_reinforcement=_enable_reinforcement,
         )
         timings["decay_ms"] = (time.perf_counter() - start) * 1000
 
@@ -1650,6 +1723,24 @@ class ChronicleEngine:
                         source_type="library",
                     )
                 )
+
+        # ── Reinforcement on recall (#855) ──────────────────────────────
+        # Fire-and-forget: stamp ``last_accessed_at = now`` on the chunks
+        # we're about to return so the next decay pass treats them as
+        # fresh. Wrapped in a task so the recall response returns
+        # immediately; failures log a warning but never fail recall.
+        if _enable_reinforcement and chunks_with_scores:
+            reinforce_ids = [c.id for c, _ in chunks_with_scores]
+            reinforce_ts = datetime.now(UTC)
+            task = asyncio.create_task(
+                self._reinforce_last_accessed(storage, namespace_id, reinforce_ids, reinforce_ts)
+            )
+            # Hold a live reference so the GC can't drop the task mid-flight
+            # (CPython collects asyncio tasks with no strong reference -
+            # see https://docs.python.org/3/library/asyncio-task.html#creating-tasks).
+            self._reinforce_tasks.add(task)
+            task.add_done_callback(self._reinforce_tasks.discard)
+
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
@@ -1672,6 +1763,38 @@ class ChronicleEngine:
                 "timings": timings,
             },
         )
+
+    async def _reinforce_last_accessed(
+        self,
+        storage: StorageCoordinator,
+        namespace_id: UUID,
+        chunk_ids: list[UUID],
+        ts: datetime,
+    ) -> None:
+        """Best-effort UPDATE of ``last_accessed_at`` for the given chunks (#855).
+
+        Runs in a fire-and-forget task spawned by ``recall``. Logs a
+        warning on failure (DB down, network blip) but never raises -
+        reinforcement loss is acceptable; breaking recall is not.
+        Emits ``updates_total`` / ``failures_total`` / ``duration`` metrics
+        so operators can see whether reinforcement is actually landing.
+        """
+        started = time.monotonic()
+        try:
+            await storage.update_last_accessed(namespace_id, chunk_ids, ts)
+            _REINFORCE_UPDATES_COUNTER.add(1)
+        except asyncio.CancelledError:
+            # disconnect() cancelled us - don't count as a failure, just exit.
+            raise
+        except Exception as exc:
+            _REINFORCE_FAILURES_COUNTER.add(1)
+            logger.warning(
+                "Chronicle reinforcement update failed for {} chunks: {}",
+                len(chunk_ids),
+                exc,
+            )
+        finally:
+            _REINFORCE_DURATION_HISTOGRAM.record(time.monotonic() - started)
 
     def _compute_abstention_signals(
         self,

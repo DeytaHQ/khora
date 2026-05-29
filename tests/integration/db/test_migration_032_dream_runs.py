@@ -297,7 +297,7 @@ class TestMigration032OnSqlite:
                 async with engine.connect() as conn:
                     # Chain reached head (sanity).
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "039_khora_chunks_content_tsv_gin"
+                    assert result.scalar() == "040_chunks_last_accessed_at"
 
                     # khora_dream_runs MUST NOT exist on SQLite — embedded path
                     # mirrors checkpoint state via a JSONL file sink.

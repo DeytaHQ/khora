@@ -167,6 +167,9 @@ class Chunk:
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     source_timestamp: datetime | None = None
+    # Reinforcement-on-recall (#855). NULL until the chunk is first
+    # returned by a recall path that has reinforcement enabled.
+    last_accessed_at: datetime | None = None
 
     # Session attribution propagated from the parent document (#620).
     # Stable public API — coordinate changes with khora-cli, khora-explorer.

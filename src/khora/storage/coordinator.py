@@ -943,6 +943,28 @@ class StorageCoordinator:
             raise RuntimeError("Vector backend not configured")
         return await self._vector.count_chunks(namespace_id)
 
+    async def update_last_accessed(
+        self,
+        namespace_id: UUID,
+        chunk_ids: list[UUID],
+        ts: datetime,
+    ) -> int:
+        """Stamp ``last_accessed_at = ts`` on chunks scoped to a namespace (#855).
+
+        Delegates to the vector backend's single-UPDATE implementation.
+        Returns the number of rows affected. Backends that don't implement
+        the method (older third-party adapters) silently return 0 so the
+        reinforcement path never crashes recall.
+        """
+        if not chunk_ids:
+            return 0
+        if not self._vector:
+            raise RuntimeError("Vector backend not configured")
+        impl = getattr(self._vector, "update_last_accessed", None)
+        if impl is None:
+            return 0
+        return await impl(namespace_id, chunk_ids, ts)
+
     async def list_chunks(
         self,
         namespace_id: UUID,
