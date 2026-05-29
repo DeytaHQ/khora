@@ -2375,9 +2375,51 @@ class VectorCypherRetriever:
                 reported_vector_count = len(results)
                 reported_bm25_count = simple_bm25_count
 
+            # #857: project entities + relationships from storage when the
+            # simple (graph-less) path produced chunks. Prior to this fix the
+            # return value hardcoded ``entities=[]`` and ``relationships=[]``,
+            # so backends without a Neo4j driver (sqlite_lance, surrealdb,
+            # postgres-only) surfaced empty entity lists from ``recall()``
+            # even when the graph was populated. We fetch all entities /
+            # relationships in the namespace (capped at 1000) and filter by
+            # overlap with the recalled chunk ids.
+            # TODO: replace the namespace-wide list + Python filter with a
+            #       per-backend ``list_entities_by_chunk_ids`` query method
+            #       once it lands across sqlite_lance / surrealdb / pgvector
+            #       (perf follow-up to #857).
+            entities_with_scores: list[tuple[Entity, float]] = []
+            relationships_with_scores: list[tuple[Relationship, float]] = []
+            if chunk_results and self._storage is not None:
+                recalled_chunk_ids = {c.id for c, _ in chunk_results}
+                try:
+                    all_entities = await self._storage.list_entities(namespace_id, limit=1000)
+                except Exception as e:
+                    logger.warning(f"#857 simple-path entity projection failed: {e}")
+                    all_entities = []
+                for entity in all_entities:
+                    src_chunks = entity.source_chunk_ids or []
+                    overlap = sum(1 for cid in src_chunks if cid in recalled_chunk_ids)
+                    if overlap > 0:
+                        # Score by mention overlap fraction - entities mentioned
+                        # in more recalled chunks rank higher.
+                        score = overlap / max(1, len(src_chunks))
+                        entities_with_scores.append((entity, score))
+
+                if entities_with_scores:
+                    try:
+                        all_relationships = await self._storage.list_relationships(namespace_id, limit=1000)
+                    except Exception as e:
+                        logger.warning(f"#857 simple-path relationship projection failed: {e}")
+                        all_relationships = []
+                    recalled_entity_ids = {e.id for e, _ in entities_with_scores}
+                    for rel in all_relationships:
+                        if rel.source_entity_id in recalled_entity_ids and rel.target_entity_id in recalled_entity_ids:
+                            relationships_with_scores.append((rel, 1.0))
+
             return VectorCypherResult(
                 chunks=chunk_results,
-                entities=[],
+                entities=entities_with_scores,
+                relationships=relationships_with_scores,
                 routing_decision=routing,
                 metadata={
                     "search_mode": "simple_vector" if not simple_bm25_count else "simple_vector_bm25",
