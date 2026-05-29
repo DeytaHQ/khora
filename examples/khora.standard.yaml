@@ -1,0 +1,117 @@
+# Khora — Standard Configuration (PostgreSQL + pgvector + Neo4j)
+#
+# Production-grade stack: PostgreSQL for relational + pgvector for vectors +
+# Neo4j for graph traversal. Matches the v0.9.0 production-ready combination
+# (see docs/engines/engine-comparison.md). This is what `make dev` brings up.
+#
+# Bring the stack up before running an example:
+#   make dev                              # docker compose: postgres + neo4j
+#   uv run alembic upgrade head           # apply schema migrations
+#
+# Load and use:
+#   from khora import Khora
+#   from khora.config import KhoraConfig
+#
+#   config = KhoraConfig.from_yaml("examples/khora.standard.yaml")
+#   async with Khora(config=config) as kb:
+#       ns = await kb.create_namespace("demo")
+#       await kb.remember("hello world", namespace=ns.namespace_id)
+#
+# Override URLs without editing the file by exporting env vars before running:
+#   export KHORA_DATABASE_URL=postgresql://...
+#   export KHORA_NEO4J_URL=bolt://user:pass@host:7687
+#   export OPENAI_API_KEY=sk-...
+
+app_name: khora
+environment: development
+debug: false
+auth_enabled: true
+
+# =============================================================================
+# Database shortcuts — URLs propagate to storage.{postgresql_url, graph.*}
+# via StorageSettings._migrate_legacy_fields. Embed credentials in the URLs.
+# =============================================================================
+database_url: postgresql://khora:khora@localhost:5432/khora
+neo4j_url: bolt://neo4j:password@localhost:7687
+
+# =============================================================================
+# Storage — PG+pgvector+Neo4j (the default `postgres` strategy)
+# =============================================================================
+storage:
+  backend: postgres
+  embedding_dimension: 1536              # must match llm.embedding_dimension
+  postgresql_pool_size: 50
+  postgresql_max_overflow: 30
+  postgresql_pool_pre_ping: false
+
+  # HNSW tuning (pgvector). use_halfvec requires pgvector >= 0.7.0.
+  hnsw_m: 24
+  hnsw_ef_construction: 128
+  hnsw_ef_search: 100
+  use_halfvec: true
+
+# =============================================================================
+# LLM
+# =============================================================================
+llm:
+  model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY            # env-var **name**, not the key value
+  temperature: 0.7
+  max_tokens: 2000
+  timeout: 30
+  max_retries: 3
+  max_concurrent_llm_calls: 10
+
+  embedding_model: text-embedding-3-small
+  embedding_dimension: 1536              # must equal storage.embedding_dimension
+
+# =============================================================================
+# Pipeline — chunking + extraction
+# =============================================================================
+pipelines:
+  chunking_strategy: semantic            # fixed | semantic | recursive
+  chunk_size: 512
+  chunk_overlap: 50
+
+  extract_entities: true
+  entity_types:
+    - PERSON
+    - ORGANIZATION
+    - CONCEPT
+    - LOCATION
+    - EVENT
+    - PRODUCT
+    - TECHNOLOGY
+
+  # KET-RAG selective extraction: top-K chunks get full LLM extraction;
+  # the rest get lightweight co-occurrence edges. Set extraction_importance_ratio
+  # to 1.0 for the legacy "extract everything" behavior (replaces the removed
+  # graphrag engine — see docs/engines/engine-comparison.md#replacing-graphrag).
+  selective_extraction: true
+  extraction_importance_ratio: 0.7
+  extraction_min_importance: 0.2
+
+# =============================================================================
+# Query
+# =============================================================================
+query:
+  default_mode: hybrid                   # vector | graph | hybrid | all
+  min_chunk_similarity: 0.05
+  min_entity_similarity: 0.05
+
+  # Fusion weights (RRF channels)
+  vector_weight: 0.5
+  graph_weight: 0.3
+  keyword_weight: 0.2
+
+  # Recency / temporal
+  apply_recency_bias: false
+  recency_weight: 0.2
+  recency_decay_days: 30.0
+
+# =============================================================================
+# Tenancy
+# =============================================================================
+tenancy:
+  default_mode: shared
+  enforce_namespace: true

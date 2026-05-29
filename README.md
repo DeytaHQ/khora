@@ -66,8 +66,7 @@ See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md) for t
 pip install khora                 # core (PostgreSQL + pgvector)
 pip install khora[neo4j]          # + Neo4j for VectorCypher
 pip install khora[sqlite-lance]   # [experimental] embedded SQLite + LanceDB
-pip install khora[surrealdb]      # [experimental] unified SurrealDB (single store)
-pip install khora[all-backends]   # everything: Neo4j, SurrealDB, SQLite+LanceDB, Weaviate, AGE
+pip install khora[all-backends]   # everything: Neo4j, SQLite+LanceDB, Weaviate, AGE
 ```
 
 See [docs/configuration.md](docs/configuration.md) for the full extras list.
@@ -114,14 +113,13 @@ async with Khora() as kb:
     await handle.wait()
 ```
 
-## Embedded options (experimental)
+## Embedded option (experimental)
 
-Khora ships two zero-infrastructure paths. Both are marked **experimental** - fine for demos, evaluation, tests, and small single-user CLIs; not yet stamped as a deployment story.
+Khora ships a zero-infrastructure embedded path - fine for demos, evaluation, tests, and small single-user CLIs; not yet stamped as a deployment story.
 
-- **SQLite + LanceDB** (`pip install khora[sqlite-lance]`, set `KHORA_STORAGE_BACKEND=sqlite_lance`) - recommended embedded stack. Covers VectorCypher, Skeleton, and Chronicle via dialect-aware Alembic migrations and LanceDB-backed vector search. Documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. Known gaps: no point-in-time queries, partial atomicity in `coordinator.transaction()`, FTS on chunks only. See [configuration.md](docs/configuration.md#embedded-backends-experimental).
-- **SurrealDB** (`pip install khora[surrealdb]`) - unified relational + vector + graph in one store. Python SDK is on the alpha track (`>=2.0.0a1`), and KNN (`<|K|>`) is unreliable in embedded mode (uses brute-force cosine + HNSW fallback). Remote (WebSocket) mode supports atomic multi-statement transactions via `conn.transaction()` (v0.12.0); embedded / memory modes still operate per-statement-atomic. Suitable for experimentation; not recommended for production.
+- **SQLite + LanceDB** (`pip install khora[sqlite-lance]`, set `KHORA_STORAGE_BACKEND=sqlite_lance`) - covers VectorCypher, Skeleton, and Chronicle via dialect-aware Alembic migrations and LanceDB-backed vector search. Documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. Known gaps: no point-in-time queries, partial atomicity in `coordinator.transaction()`, FTS on chunks only. See [configuration.md](docs/configuration.md#embedded-backends-experimental).
 
-> **Quickstart caveat.** A literal `Khora("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector - there is no `memory://` URL scheme parsed by khora itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` (or `surrealdb`) and the corresponding `db_path` / connection settings.
+> **Quickstart caveat.** A literal `Khora("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector - there is no `memory://` URL scheme parsed by khora itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` and the corresponding `db_path` / connection settings.
 
 ## Integrations
 
@@ -137,9 +135,20 @@ Khora ships ready-made adapters for the major agentic frameworks. Each adapter i
 
 See [docs/integrations/](docs/integrations/index.md) for the full per-adapter docs and the "write your own" Protocol surface.
 
+## Examples
+
+A tiered gallery of runnable demos lives under `examples/`. Each demo is self-contained - the docstring explains the pedagogy, a `Run it` block shows the exact command. Start at the tier matching your intent:
+
+- **`examples/00_quickstart/`** - minimal demos to verify your setup: remember + recall, grounded answers, forget, namespaces.
+- **`examples/10_core_apis/`** - what the public API does: batch ingest, recall filters, ontology config, entities + relationships, graph traversal.
+- **`examples/20_integrations/`** - adapters for LangGraph, OpenAI Agents SDK, CrewAI.
+- **`examples/30_workloads/`** - production-shaped use cases: per-user preferences with temporal decay, document Q&A with multi-signal abstention, support-ticket knowledge graphs, agent chat memory, dream-phase consolidation, namespace versioning, temporal range queries, resume search with cross-document entity resolution, bulk archive, tool-router learning.
+
+Run any demo from the repo root (e.g. `uv run python examples/30_workloads/01_per_user_preferences.py`). The embedded backend (`examples/khora.embedded.yaml`) needs no external services; pass `--config examples/khora.standard.yaml` to target PostgreSQL + Neo4j.
+
 ## Maintenance: dream phase
 
-Khora ships an **offline maintenance pass** ("dream phase") that audits an accumulated namespace and plans consolidation work - entity dedupe, fact compaction, event clustering. Run it on a schedule (cron, Temporal, k8s CronJob) and consume the structured reports through three independently-togglable sinks: file, semantic-event, or telemetry collector.
+Khora ships an **offline maintenance pass** ("dream phase") that audits an accumulated namespace and plans consolidation work - entity dedupe, fact compaction, event clustering.
 
 ```python
 from khora import Khora, KhoraConfig, DreamConfig
