@@ -4,6 +4,22 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.17.4] - VectorCypher entity projection on graph-less backends
+
+Patch release on top of v0.17.3. One bug fix from Damir Krstanovic.
+
+### Fixed
+
+- **VectorCypher `recall()` now populates `result.entities` and `result.relationships` on sqlite_lance and other graph-less backends** (#857). Previously `_simple_retrieve` (the fallback used when Neo4j is unavailable or the storage backend has no graph driver) returned `entities=[]` hardcoded - so `kb.recall()` on `vectorcypher + sqlite_lance` returned chunks correctly but always empty entities and relationships, even though the graph was correctly populated at ingest time (`kb.list_entities()` and `kb.find_related_entities()` worked fine on the same backend). Fix: in `_simple_retrieve`, after building `chunk_results`, fetch entities via `storage.list_entities(namespace_id, limit=1000)` and filter Python-side to those whose `source_chunk_ids` overlap the recalled chunk set. Relationships are filtered to those where both endpoints are in the recalled entity set. Scoring is `overlap_count / len(source_chunk_ids)` for entities, `1.0` constant for relationships (no traversal-derived weight available without a graph driver). Storage failures degrade to empty lists with a warning, matching the surrounding defensive style.
+
+### Behavior change
+
+- On production `postgres + neo4j` deployments, the `_vector_only_fallback` path (used when Neo4j is unavailable) previously returned `entities=[]`. After this patch, it returns the entities-via-relational-storage projection. The existing `engine_info["graph_unavailable"]=True` flag still surfaces the degradation. This is the intended product behavior - degraded > empty.
+
+### Migration
+
+- **No migration required.** The fix only affects callers using `engine="vectorcypher"` with a graph-less storage backend (sqlite_lance), or a postgres deployment when Neo4j is temporarily unavailable. Production `postgres + neo4j` callers in steady state are unaffected.
+
 ## [0.17.3] - Chronicle bi-temporal + Skeleton source_timestamp + decay-default unification
 
 Patch release on top of v0.17.2. Six bug reports from Damir Krstanovic - one of them critical to Chronicle's bi-temporal promise. The Chronicle temporal-decay code path was reading ingest time instead of user-supplied event time, the half-life default disagreed in three places (24h field default vs 168h function defaults vs 168h docs), the canonical formula was written one way in the docstring and another in the implementation, and Skeleton silently dropped `source_timestamp` on the way to `chunk.occurred_at`. Plus a tuning bump on the chronicle decay weight default.
