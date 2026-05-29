@@ -19,7 +19,7 @@ That route is end-to-end private, assigns a CVE if warranted, and gives
 us a coordinated-disclosure track.
 
 If for any reason you can't use the GitHub route, email
-[security@deytahq.com](mailto:security@deytahq.com) with the subject
+[security@deyta.ai](mailto:security@deyta.ai) with the subject
 line `[khora security]` and a short description; we'll move the
 discussion to a private channel.
 
