@@ -32,7 +32,7 @@ from khora.core.models import (
 from khora.core.models.document import DocumentSource
 from khora.core.models.recall import DocumentProjection
 from khora.storage.backends.base import PaginatedResult
-from khora.telemetry import get_collector, trace_span
+from khora.telemetry import get_collector, metric_counter, trace_span
 
 if TYPE_CHECKING:
     from .backends.base import (
@@ -1160,6 +1160,20 @@ class StorageCoordinator:
         Uses MERGE semantics: creates new entities, updates existing ones
         matched by (namespace_id, name, entity_type).
 
+        Write ordering (issue #868): vector backend commits first, then the
+        graph backend.  The prior implementation raced both writes via
+        ``asyncio.gather`` with no exception handling.  When the vector
+        write raised after the graph had already committed (Neo4j
+        ``session.execute_write`` commits on coroutine return), the graph
+        was left with orphan nodes that the read path could not see.
+
+        Sequencing vector first inverts the failure asymmetry: a graph
+        failure after a successful vector write leaves vector rows that the
+        next upsert reconciles via MERGE (entity uniqueness keyed on
+        ``(namespace_id, name, entity_type)``), and the
+        ``khora.storage.upsert_entities_batch.partial_failure`` counter
+        increments so operators can monitor the rate.
+
         Args:
             bulk_mode: When True, skip prefetch/versioning and bypass the
                 entity key gate.  Used for --rewrite (new namespace) where
@@ -1189,16 +1203,32 @@ class StorageCoordinator:
                     bulk_mode=bulk_mode,
                 )
             else:
-                graph_results, _ = await asyncio.gather(
-                    self._graph.upsert_entities_batch(
+                # Vector first, then graph (issue #868). See method
+                # docstring for the failure-mode rationale. A graph
+                # exception after a successful vector commit raises and
+                # bumps the partial_failure counter; the next upsert MERGE
+                # reconciles the vector-side rows.
+                await self._vector.upsert_entities_batch(  # type: ignore[unresolved-attribute]
+                    namespace_id, entities, batch_size=batch_size
+                )
+                try:
+                    results = await self._graph.upsert_entities_batch(
                         namespace_id,
                         entities,
                         batch_size=batch_size,
                         bulk_mode=bulk_mode,
-                    ),
-                    self._vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size),  # type: ignore[unresolved-attribute]
-                )
-                results = graph_results
+                    )
+                except Exception:
+                    metric_counter(
+                        "khora.storage.upsert_entities_batch.partial_failure",
+                        unit="1",
+                        description=(
+                            "Vector commit succeeded but graph upsert "
+                            "raised; vector rows are reconciled by the "
+                            "next MERGE."
+                        ),
+                    ).add(1)
+                    raise
         elif has_graph:
             assert self._graph is not None
             results = await self._graph.upsert_entities_batch(

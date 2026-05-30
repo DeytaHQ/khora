@@ -1308,6 +1308,14 @@
         {"name": "tool", "values": ["memory_search", "memory_recall", "unknown"], "_comment": "Which tool the LLM called."}
       ],
       "_comment": "Issue #628. NO namespace_id label — cardinality rule."
+    },
+    {
+      "name": "khora.storage.upsert_entities_batch.partial_failure",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "Vector commit succeeded but the graph upsert raised. Vector rows are reconciled by the next upsert MERGE; operators monitor this counter to detect graph-side dropouts.",
+      "_comment": "Issue #868. Vector-first ordering in StorageCoordinator.upsert_entities_batch. NO namespace_id label - cardinality rule."
     }
   ]
 }
