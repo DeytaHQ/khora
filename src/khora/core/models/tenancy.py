@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 class TenancyMode(str, Enum):
     """Tenancy isolation mode."""
 
-    SHARED = "shared"  # Shared database with namespace_id filtering + row-level security
+    SHARED = "shared"  # Shared database with query-layer namespace_id filtering
     ISOLATED = "isolated"  # Separate database instances per tenant
 
 
