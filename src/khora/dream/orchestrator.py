@@ -58,7 +58,11 @@ from khora.dream.events import (
     DreamRunFailed,
     DreamRunStarted,
 )
-from khora.dream.exceptions import DreamApplyDisabled, DreamForbiddenOpError
+from khora.dream.exceptions import (
+    DreamApplyDisabled,
+    DreamBackendUnsupported,
+    DreamForbiddenOpError,
+)
 from khora.dream.locks import acquire_namespace_dream_lock
 from khora.dream.plan import DreamOp, DreamPlan, DreamScope, OpKind
 from khora.dream.report import DreamCollectorSink, DreamEventSink, DreamFileSink, ReportSink
@@ -94,6 +98,22 @@ _CANCEL_FLAGS_LOCK = asyncio.Lock()
 # orchestrators carry the value they were built with.
 _APPLY_DISABLED_ENV_VAR = "KHORA_DREAM_DISABLE_APPLY"
 _APPLY_DISABLED_FALSEY: frozenset[str] = frozenset({"", "0", "false", "False", "FALSE", "no", "No", "NO"})
+
+
+# Apply handlers that bind raw uuid.UUID values into session.execute and
+# therefore require a PostgreSQL session. On any other dialect (notably
+# SQLite via the sqlite_lance test stack) the bind raises
+# ``sqlite3.ProgrammingError: type 'UUID' is not supported``; the
+# orchestrator catches that at the dialect gate below and skips the op
+# instead of crashing the run. See #875.
+_POSTGRES_ONLY_OP_KINDS: frozenset[str] = frozenset(
+    {
+        "vectorcypher_dedupe_entities",
+        "vectorcypher_centroid_recompute",
+        "vectorcypher_prune_edges",
+        "vectorcypher_source_chunk_ids_gc",
+    }
+)
 
 
 def _is_apply_disabled_via_env() -> bool:
@@ -456,6 +476,7 @@ class DreamOrchestrator:
         last_committed = await self._read_last_committed(run_id)
         undo_records: list[UndoRecord] = []
         file_sink = self._file_sink()
+        skipped_by_op_type: dict[str, int] = {}
 
         for seq, op in enumerate(plan.ops):
             if cancel_flag.is_set():
@@ -476,7 +497,25 @@ class DreamOrchestrator:
             # Mutation op — run inside its own coordinator transaction so
             # the apply handler's writes commit/rollback together with
             # the checkpoint update.
-            undo = await self._apply_one_op(run_id=run_id, seq=seq, op=op, handler=handler)
+            try:
+                undo = await self._apply_one_op(run_id=run_id, seq=seq, op=op, handler=handler)
+            except DreamBackendUnsupported as exc:
+                # Dialect gate (#875): handler requires Postgres but the
+                # active session speaks SQLite (sqlite_lance) or another
+                # dialect. Log a warning, advance the checkpoint so a
+                # resume doesn't re-attempt the same impossible apply,
+                # and record the op as skipped.
+                from loguru import logger
+
+                logger.warning(
+                    "dream apply op {op_type!s} skipped: {reason}",
+                    op_type=op.op_type,
+                    reason=str(exc),
+                )
+                await self._record_committed(run_id, seq)
+                skipped_by_op_type[str(op.op_type)] = skipped_by_op_type.get(str(op.op_type), 0) + 1
+                self._fire_progress(on_progress, run_id, plan, seq, op, "apply")
+                continue
             _assert_no_chunk_id_mutation(undo)
             undo_records.append(undo)
 
@@ -506,7 +545,13 @@ class DreamOrchestrator:
             )
         )
 
-        return _build_result(run_id=run_id, namespace_id=plan.namespace_id, plan=plan, mode="apply")
+        return _build_result(
+            run_id=run_id,
+            namespace_id=plan.namespace_id,
+            plan=plan,
+            mode="apply",
+            skipped_by_op_type=skipped_by_op_type,
+        )
 
     async def _apply_one_op(
         self,
@@ -535,6 +580,8 @@ class DreamOrchestrator:
         try:
             async with coordinator.transaction() as txn:
                 session = txn.session
+                _assert_backend_supported(session, op.op_type)
+                _warn_graph_divergence(coordinator, op.op_type)
                 undo = await self._invoke_handler(handler, op, coordinator=coordinator, session=session)
                 await self._record_committed_in_session(session, run_id, seq)
                 return undo
@@ -852,17 +899,32 @@ class DreamOrchestrator:
 # ---------------------------------------------------------------------------
 
 
-def _build_result(*, run_id: UUID, namespace_id: UUID, plan: DreamPlan, mode: str) -> DreamResult:
+def _build_result(
+    *,
+    run_id: UUID,
+    namespace_id: UUID,
+    plan: DreamPlan,
+    mode: str,
+    skipped_by_op_type: dict[str, int] | None = None,
+) -> DreamResult:
     now = datetime.now(UTC)
+    skipped_remaining = dict(skipped_by_op_type or {})
     summaries: dict[str, OpSummary] = {}
     for op in plan.ops:
         key = str(op.op_type)
         cur = summaries.get(key) or OpSummary(op_type=key)
+        # Apply mode increments ``applied`` for every planned op except
+        # those the dialect gate / runtime declared "skipped". The skip
+        # budget is drained in plan order so the counts match the number
+        # of ``DreamBackendUnsupported`` catches during the apply loop.
+        was_skipped = mode == "apply" and skipped_remaining.get(key, 0) > 0
+        if was_skipped:
+            skipped_remaining[key] -= 1
         summaries[key] = OpSummary(
             op_type=key,
             planned=cur.planned + 1,
-            applied=cur.applied + 1 if mode == "apply" else cur.applied,
-            skipped=cur.skipped,
+            applied=cur.applied + (1 if mode == "apply" and not was_skipped else 0),
+            skipped=cur.skipped + (1 if was_skipped else 0),
             failed=cur.failed,
         )
     info = DreamRunInfo(
@@ -898,6 +960,76 @@ def _elapsed_ms(start: datetime) -> float:
 def _is_postgres(session: Any) -> bool:
     return getattr(getattr(session, "bind", None), "dialect", None) is not None and (
         session.bind.dialect.name == "postgresql"
+    )
+
+
+def _session_dialect(session: Any) -> str | None:
+    """Best-effort read of ``session.bind.dialect.name`` for the gate."""
+    bind = getattr(session, "bind", None)
+    if bind is None:
+        return None
+    dialect = getattr(bind, "dialect", None)
+    if dialect is None:
+        return None
+    name = getattr(dialect, "name", None)
+    return str(name) if name is not None else None
+
+
+def _assert_backend_supported(session: Any, op_type: Any) -> None:
+    """Raise :class:`DreamBackendUnsupported` when the dialect can't carry the op.
+
+    The vectorcypher apply handlers bind raw ``uuid.UUID`` values into
+    ``session.execute``; only PostgreSQL handles those natively. On any
+    other dialect the bind raises ``sqlite3.ProgrammingError`` (or the
+    moral equivalent on a different driver). We refuse cleanly up front
+    rather than letting that opaque driver error abort the run.
+
+    Sessions whose dialect can't be read (test stubs with no ``bind``,
+    embedded fallback paths) are treated as Postgres-equivalent - they
+    are either the real production session or a test stub that has
+    opted in to the apply path.
+    """
+    op_type_str = str(op_type)
+    if op_type_str not in _POSTGRES_ONLY_OP_KINDS:
+        return
+    dialect = _session_dialect(session)
+    if dialect is None or dialect == "postgresql":
+        return
+    raise DreamBackendUnsupported(
+        f"dream apply op {op_type_str!r} requires postgresql; "
+        f"active session dialect is {dialect!r}. See docs/dream-phase.md."
+    )
+
+
+def _warn_graph_divergence(coordinator: Any, op_type: Any) -> None:
+    """Log a one-shot warning when an SQL-only apply will leave Neo4j stale.
+
+    The four vectorcypher apply handlers mutate the relational store
+    through ``session.execute`` only - none of them touch the graph
+    backend. When the coordinator does carry a graph backend (Neo4j /
+    Memgraph / Neptune / AGE), the post-apply state will diverge: the
+    SQL row is soft-deleted / rewritten but the graph mirror still
+    reflects the pre-apply shape. The actual graph write is deferred to
+    a future PR (see the in-source TODOs in ``prune_edges.py`` and
+    ``source_chunk_ids_gc.py``); this warning is the honest signal that
+    operators get today.
+
+    Reads ``coordinator._graph`` (the internal backend slot) so the
+    namespace-required proxy doesn't fire deprecation warnings during a
+    dream run.
+    """
+    op_type_str = str(op_type)
+    if op_type_str not in _POSTGRES_ONLY_OP_KINDS:
+        return
+    graph = getattr(coordinator, "_graph", None)
+    if graph is None:
+        return
+    from loguru import logger
+
+    logger.warning(
+        "dream apply {op_type} mutates the relational store only; "
+        "graph store will not reflect this change until a future release",
+        op_type=op_type_str,
     )
 
 
