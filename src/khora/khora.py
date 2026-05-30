@@ -709,7 +709,43 @@ class Khora:
                 try:
                     await self._process_pending_item(item)
                 except Exception as exc:
-                    logger.error(f"pending_processor: unhandled error processing doc: {exc}")
+                    # Defense in depth for #869: ``_process_pending_item_impl``
+                    # has pre-try work (engine resolution, ``getattr`` calls,
+                    # pre-FAILED state cleanup, ``parse_dt``,
+                    # ``start_usage_collection``) that runs before its own
+                    # ``try``. If any of that raises, the inner block never
+                    # fires ``batch_reg.fire_result`` and ``BatchHandle.wait``
+                    # blocks forever - ``_remaining`` is only decremented by
+                    # ``fire_result``. Fall back here: deliver a failure
+                    # result so the batch's ``_done_event`` can fire, and
+                    # flip the doc to FAILED so it doesn't linger in
+                    # PROCESSING. Both side effects are best-effort and
+                    # guarded - we must never re-raise into the worker loop.
+                    safe_err = _safe_exc_summary(exc)
+                    logger.error(f"pending_processor: unhandled error processing doc {item.doc.id}: {safe_err}")
+                    batch_reg = item.batch_reg
+                    if batch_reg is not None:
+                        try:
+                            item.doc.mark_failed(str(exc))
+                            await self.storage.update_document(item.doc)
+                        except Exception as upd_exc:
+                            logger.warning(
+                                f"pending_processor: could not update document status after pre-try fault: {_safe_exc_summary(upd_exc)}"
+                            )
+                        try:
+                            batch_reg.fire_result(
+                                DocumentResult(
+                                    document_id=item.doc.id,
+                                    namespace_id=batch_reg.namespace_id,
+                                    success=False,
+                                    error=safe_err,
+                                    external_id=item.doc.external_id,
+                                )
+                            )
+                        except Exception as fire_exc:
+                            logger.error(
+                                f"pending_processor: fire_result failed in fallback for doc {item.doc.id}: {_safe_exc_summary(fire_exc)}"
+                            )
                 finally:
                     self._processor_queue.task_done()
 
