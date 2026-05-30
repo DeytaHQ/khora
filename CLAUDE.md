@@ -157,6 +157,9 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 
 ## Gotchas
 
+### Failure observability (ADR-001)
+- **Functions that catch exceptions and return defaults MUST record a `Degradation` / `ErrorRecord` / `SkipReason` per ADR-001 convention.** TypedDicts live in `khora.core.diagnostics`; the convention doc with reference impls (`#871` storage partial-failure counter, `#880` `DreamResult.metadata["skip_reasons"]`, `#901` + `#906` chronicle channel degradations) is `docs/architecture/failure-observability-contract.md`. Attach the list to whichever observability dict the result already carries (`metadata` for `DreamResult` / `RememberResult`, `engine_info` for `RecallResult`). Log levels: `WARNING` for degradation (with `exc_info=True` when triggered by a caught exception), `ERROR` for unrecoverable, `INFO` (or `DEBUG` on cold-start) for skip. Emit `khora.{engine}.{component}.degraded_total{channel, reason}` - no `namespace_id` label (cardinality rule). Tests can guard happy paths with `tests/test_helpers/diagnostics.py::assert_no_silent_degradation(result)`.
+
 ### Migrations & Schema
 - **Never use `create_tables()`** - deprecated, bypasses Alembic. Use `run_migrations()` or `Khora(run_migrations=True)`. Create new migrations with `uv run alembic revision --autogenerate -m "desc"`
 - **Version table:** `khora_alembic_version` (not `alembic_version`) - avoids conflicts with downstream apps

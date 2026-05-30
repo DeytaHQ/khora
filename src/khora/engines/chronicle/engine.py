@@ -35,6 +35,7 @@ from uuid import UUID
 from loguru import logger
 
 from khora.config import KhoraConfig, LiteLLMConfig
+from khora.core.diagnostics import Degradation
 from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.core.models.recall import (
     DocumentProjection,
@@ -106,6 +107,45 @@ _REINFORCE_DURATION_HISTOGRAM = metric_histogram(
     unit="s",
     description="Chronicle reinforcement task wall-clock duration, schedule to UPDATE completion.",
 )
+
+# --- Channel-degradation metric (PR #901, #906; ADR-001) ---
+# Increments once per silent channel failure / fallback path the
+# convention covers - see docs/architecture/failure-observability-contract.md.
+# Reason is a low-cardinality label; channel is the BM25/semantic/temporal/entity
+# bucket. NO namespace label - cardinality rule.
+_CHANNEL_DEGRADED_COUNTER = metric_counter(
+    "khora.chronicle.channel.degraded_total",
+    description=(
+        "Chronicle retrieval channel degradations (silent fallbacks, swallowed exceptions). "
+        "Labels: channel, reason. No namespace label (cardinality rule)."
+    ),
+)
+
+
+def _record_channel_degradation(
+    degradations: list[Degradation],
+    *,
+    component: str,
+    reason: str,
+    detail: str | None = None,
+    exc: BaseException | None = None,
+) -> None:
+    """Append a ``Degradation`` entry and bump the channel-degraded counter.
+
+    Helper for the ADR-001 convention - the chronicle engine has several
+    silent-fallback sites and we want one place that does both the
+    metadata mutation and the metric emission.
+    """
+    entry: Degradation = {
+        "component": component,
+        "reason": reason,
+        "detail": detail,
+        "exception": type(exc).__name__ if exc is not None else None,
+    }
+    degradations.append(entry)
+    # Label channel as the trailing token of component ("chronicle.bm25" -> "bm25").
+    channel = component.rsplit(".", 1)[-1]
+    _CHANNEL_DEGRADED_COUNTER.add(1, attributes={"channel": channel, "reason": reason})
 
 
 # ---------------------------------------------------------------------------
@@ -1367,6 +1407,9 @@ class ChronicleEngine:
         storage = self._get_storage()
         embedder = self._get_embedder()
         timings: dict[str, float] = {}
+        # ADR-001: silent channel failures / fallbacks are appended here and
+        # surfaced on the response under ``engine_info["degradations"]``.
+        degradations: list[Degradation] = []
         total_start = time.perf_counter()
 
         # Read Chronicle-specific config from QuerySettings (with safe defaults)
@@ -1484,10 +1527,30 @@ class ChronicleEngine:
             start = time.perf_counter()
             try:
                 bm25_results = await bm25_task
-            except RuntimeError:
-                logger.debug("Fulltext backend not available for BM25 search")
-            except Exception:
-                logger.debug("BM25 channel failed")
+            except RuntimeError as exc:
+                # Fulltext backend not configured - the channel is opted out,
+                # not failing. Still surface as a degradation so callers can
+                # see why BM25 contributed nothing.
+                logger.warning(
+                    "Chronicle BM25 channel unavailable: fulltext backend not configured ({})",
+                    exc,
+                )
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.bm25",
+                    reason="fulltext_backend_unavailable",
+                    detail=str(exc),
+                    exc=exc,
+                )
+            except Exception as exc:
+                logger.warning("Chronicle BM25 channel failed: {}", exc, exc_info=True)
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.bm25",
+                    reason="channel_exception",
+                    detail=str(exc),
+                    exc=exc,
+                )
             timings["bm25_ms"] = (time.perf_counter() - start) * 1000
 
         # ── Phase 2: Semantic + Temporal + Entity in parallel ───────────
@@ -1541,6 +1604,7 @@ class ChronicleEngine:
                         overfetch_limit,
                         temporal_filter,
                         subject_scores=temporal_subject_scores,
+                        degradations=degradations,
                     ),
                 )
             )
@@ -1571,7 +1635,19 @@ class ChronicleEngine:
 
             for (name, _coro), result in zip(channel_coros, gathered):
                 if isinstance(result, BaseException):
-                    logger.debug(f"{name.capitalize()} channel failed: {result}")
+                    logger.warning(
+                        "Chronicle {} channel failed: {}",
+                        name,
+                        result,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+                    _record_channel_degradation(
+                        degradations,
+                        component=f"chronicle.{name}",
+                        reason="channel_exception",
+                        detail=str(result),
+                        exc=result,
+                    )
                     timings[f"{name}_ms"] = elapsed
                     continue
                 timings[f"{name}_ms"] = elapsed
@@ -1827,6 +1903,9 @@ class ChronicleEngine:
                 "max_raw_vector_score": max_raw_cosine,
                 "abstention_signals": abstention_signals,
                 "timings": timings,
+                # ADR-001: callers can detect silent channel failures /
+                # fallbacks via this list. Empty when nothing degraded.
+                "degradations": degradations,
             },
         )
 
@@ -1912,6 +1991,7 @@ class ChronicleEngine:
         limit: int,
         temporal_filter: Any | None,
         subject_scores: dict[str, float] | None = None,
+        degradations: list[Degradation] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Channel 3: Time-scoped chunk retrieval.
 
@@ -1949,7 +2029,11 @@ class ChronicleEngine:
                 self._temporal_use_events,
                 has_signal,
             )
-            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+            # No degradation: this is the declared default routing (no temporal
+            # signal in query, or events path disabled by config) - not a failure.
+            return await self._temporal_channel_chunks_fallback(
+                namespace_id, query_embedding, limit, temporal_filter, degradations=degradations
+            )
 
         storage = self._get_storage()
 
@@ -1962,12 +2046,34 @@ class ChronicleEngine:
                 limit=max(limit * 4, 1),
             )
         except Exception as exc:
-            logger.debug("temporal channel: query_events failed ({}); falling back to chunks", exc)
-            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+            # The events path is the chronicle differentiator; falling back
+            # to chunk-similarity here materially changes the result set
+            # ordering (no SVO scoring, no referenced_date proximity). Surface
+            # the demotion via the ADR-001 convention.
+            logger.warning(
+                "Chronicle temporal channel: query_events failed ({}); falling back to chunks",
+                exc,
+                exc_info=True,
+            )
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.temporal_channel",
+                    reason="events_query_failed",
+                    detail=str(exc),
+                    exc=exc,
+                )
+            return await self._temporal_channel_chunks_fallback(
+                namespace_id, query_embedding, limit, temporal_filter, degradations=degradations
+            )
 
         if not events:
+            # No events ever ingested for this namespace - expected on
+            # cold-start; do NOT record a degradation (false positive churn).
             logger.debug("temporal channel: no events for namespace; falling back to chunks")
-            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+            return await self._temporal_channel_chunks_fallback(
+                namespace_id, query_embedding, limit, temporal_filter, degradations=degradations
+            )
 
         logger.debug("temporal channel: events ({} candidates in scope)", len(events))
 
@@ -1990,7 +2096,21 @@ class ChronicleEngine:
                         original_idx = indexed_embeddings[local_idx][0]
                         cosine_by_index[original_idx] = float(score)
                 except Exception as exc:
-                    logger.debug("temporal channel: cosine batch failed ({}); falling back to no-cosine", exc)
+                    # No-cosine path materially changes scoring: events fall
+                    # back to proximity-only ranking. Surface via ADR-001.
+                    logger.warning(
+                        "Chronicle temporal channel: cosine batch failed ({}); falling back to proximity-only scoring",
+                        exc,
+                        exc_info=True,
+                    )
+                    if degradations is not None:
+                        _record_channel_degradation(
+                            degradations,
+                            component="chronicle.temporal_channel",
+                            reason="cosine_batch_failed",
+                            detail=str(exc),
+                            exc=exc,
+                        )
 
         cw = self._temporal_event_cosine_weight
         tw = 1.0 - cw
@@ -2036,15 +2156,45 @@ class ChronicleEngine:
                         subject_scores[subject] = combined
 
         if not per_chunk_score:
-            logger.debug("temporal channel: events produced no usable scores; falling back to chunks")
-            return await self._temporal_channel_chunks_fallback(namespace_id, query_embedding, limit, temporal_filter)
+            # Events exist but none had usable signals (no embedding, no
+            # referenced_date). Fallback materially changes the result set:
+            # surface as a degradation.
+            logger.warning(
+                "Chronicle temporal channel: {} events produced no usable scores; falling back to chunks",
+                len(events),
+            )
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.temporal_channel",
+                    reason="events_no_usable_signal",
+                    detail=f"event_count={len(events)}",
+                )
+            return await self._temporal_channel_chunks_fallback(
+                namespace_id, query_embedding, limit, temporal_filter, degradations=degradations
+            )
 
         # Hydrate the top-scoring chunks. We only need ``limit`` of them.
         top_chunk_ids = sorted(per_chunk_score, key=lambda cid: per_chunk_score[cid], reverse=True)[:limit]
         try:
             chunks_map = await storage.get_chunks_batch(top_chunk_ids, namespace_id=namespace_id)
         except Exception as exc:
-            logger.debug("temporal channel: get_chunks_batch failed ({})", exc)
+            # Hard failure: events scored, but we cannot hydrate the chunks.
+            # Channel returns [] - the fused result loses the temporal signal
+            # entirely. Surface via ADR-001.
+            logger.warning(
+                "Chronicle temporal channel: get_chunks_batch failed ({}); channel returns empty",
+                exc,
+                exc_info=True,
+            )
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.temporal_channel",
+                    reason="chunk_fetch_failed",
+                    detail=str(exc),
+                    exc=exc,
+                )
             return []
 
         scored: list[tuple[Chunk, float]] = [
@@ -2060,6 +2210,7 @@ class ChronicleEngine:
         query_embedding: list[float] | None,
         limit: int,
         temporal_filter: Any | None,
+        degradations: list[Degradation] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Legacy temporal channel: chunks scoped by ``created_at`` + Ebbinghaus decay.
 
@@ -2106,7 +2257,22 @@ class ChronicleEngine:
                 created_after=created_after,
                 created_before=created_before,
             )
-        except Exception:
+        except Exception as exc:
+            # Chunk-fallback path failed too. The temporal channel returns
+            # nothing - fused result loses the entire temporal signal.
+            logger.warning(
+                "Chronicle temporal channel (chunk fallback): search_similar_chunks failed ({}); returning empty",
+                exc,
+                exc_info=True,
+            )
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.temporal_channel",
+                    reason="chunk_fallback_failed",
+                    detail=str(exc),
+                    exc=exc,
+                )
             return []
 
         # Detect timestamp collapse: if all chunks were created within ~1 hour
