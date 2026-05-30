@@ -231,6 +231,53 @@ def _apply_temporal_decay(
     return rescored
 
 
+def _compute_recency_multipliers(
+    chunks: list[Chunk],
+    *,
+    decay_weight: float = DEFAULT_CHRONICLE_DECAY_WEIGHT,
+    half_life_hours: float = DEFAULT_CHRONICLE_HALF_LIFE_HOURS,
+    reference_time: datetime | None = None,
+    enable_reinforcement: bool = False,
+) -> dict[UUID, float]:
+    """Compute per-chunk recency multiplier without applying it to scores (#866).
+
+    The cross-encoder reranker is timestamp-blind by construction; without
+    a way to reapply decay AFTER the rerank, ``chronicle_decay_weight`` has
+    no user-visible effect when ``enable_reranking`` is True. This helper
+    returns the same multipliers ``_apply_temporal_decay`` uses internally
+    so the recall pipeline can stash them pre-rerank and multiply them back
+    onto rerank-output scores. Pattern matches Qdrant's decay re-scorer,
+    Vespa's global-phase, and Elasticsearch's function_score with decay.
+
+    Returns an empty dict when ``chunks`` is empty or ``decay_weight <= 0``;
+    callers should treat a missing key as multiplier 1.0.
+    """
+    if not chunks or decay_weight <= 0:
+        return {}
+
+    now = reference_time or datetime.now(UTC)
+    now_secs = now.timestamp()
+    decay_days = half_life_hours / 24.0
+
+    timestamps: list[float] = []
+    for chunk in chunks:
+        if enable_reinforcement:
+            candidates = [
+                ts for ts in (chunk.source_timestamp, getattr(chunk, "last_accessed_at", None)) if ts is not None
+            ]
+            ts = max(candidates) if candidates else chunk.created_at
+        else:
+            ts = chunk.source_timestamp or chunk.created_at
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+        timestamps.append(ts.timestamp())
+
+    from khora._accel import batch_recency_scores
+
+    multipliers = batch_recency_scores(timestamps, now_secs, decay_days, decay_weight)
+    return {chunk.id: float(mult) for chunk, mult in zip(chunks, multipliers)}
+
+
 # ---------------------------------------------------------------------------
 # Temporal-channel helpers (Chronicle #4)
 # ---------------------------------------------------------------------------
@@ -1597,6 +1644,19 @@ class ChronicleEngine:
             start = time.perf_counter()
             _reranking_model = getattr(qs, "reranking_model", None) if qs else None
             _reranking_top_n = getattr(qs, "reranking_top_n", 30) if qs else 30
+
+            # #866: capture per-chunk recency multipliers so we can reapply
+            # decay AFTER rerank. The cross-encoder is timestamp-blind by
+            # construction; without this reapplication the user-visible
+            # ``chronicle_decay_weight`` knob has no effect on rerank-driven
+            # ordering. Pattern matches Qdrant / Vespa / Elasticsearch.
+            _recency_multipliers = _compute_recency_multipliers(
+                [c for c, _ in chunks_with_scores],
+                decay_weight=decay_weight,
+                half_life_hours=_cfg_half_life,
+                enable_reinforcement=_enable_reinforcement,
+            )
+
             try:
                 from khora.query.reranking import rerank_chunks
 
@@ -1607,7 +1667,13 @@ class ChronicleEngine:
                     top_k=limit,
                     model=_reranking_model,
                 )
-                chunks_with_scores = reranked
+                # Reapply decay multiplier on top of rerank output. The
+                # reranker decides which chunks are on-topic; the decay
+                # multiplier discounts older ones. Missing-key default of
+                # 1.0 covers the ``decay_weight <= 0`` case (multipliers
+                # dict is empty by design then).
+                chunks_with_scores = [(c, score * _recency_multipliers.get(c.id, 1.0)) for c, score in reranked]
+                chunks_with_scores.sort(key=lambda pair: pair[1], reverse=True)
             except Exception as e:
                 logger.warning("Chronicle cross-encoder reranking failed: {}", e)
             timings["reranking_ms"] = (time.perf_counter() - start) * 1000
