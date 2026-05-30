@@ -104,8 +104,31 @@ class DreamRunInfo:
 class DreamResult:
     """Top-level return of :meth:`khora.Khora.dream`.
 
-    Phase 0 keeps the schema deliberately flat — richer relationship
+    Phase 0 keeps the schema deliberately flat - richer relationship
     metadata lands in #666 (reports) and #661 (orchestrator).
+
+    ``metadata`` is the observability side channel for empty / partial
+    runs. Always carries ``plan_hash`` + ``plan_payload``; additionally
+    carries ``skip_reasons`` (a list, possibly empty) when the
+    orchestrator detected requested ops that were dropped or
+    short-circuited. Each ``skip_reasons`` entry is a dict shaped
+    ``{"op_kind": str, "reason": str, "detail": str | None}``. Reasons
+    are a small machine-readable enum-ish set:
+
+    - ``"op_not_supported_by_engine"`` - requested op kind is not in
+      the active engine plugin's ``dream_capabilities``; the registry
+      silently dropped it from the resolved scope.
+    - ``"no_candidates"`` - planner ran but its source query returned
+      no rows, so no ops were produced.
+    - ``"op_disabled_at_runtime"`` - planner ran but a runtime config
+      flag (e.g. ``DreamConfig.community_summary_enabled``) gated the
+      op out.
+    - ``"guardrail_tripped:<which>"`` - safety guardrail short-circuited
+      the op (forbidden op kind, kill-switch, etc.).
+    - ``"backend_unsupported"`` - the active storage backend cannot
+      satisfy the op (e.g. embedded path lacks the column the op writes).
+
+    The list is empty when every requested op produced work.
     """
 
     run: DreamRunInfo

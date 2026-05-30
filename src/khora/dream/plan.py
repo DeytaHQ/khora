@@ -88,11 +88,20 @@ class DreamOp:
 
 @dataclass(slots=True, frozen=True)
 class DreamPlan:
-    """An ordered list of :class:`DreamOp` instances for a single run."""
+    """An ordered list of :class:`DreamOp` instances for a single run.
+
+    ``metadata`` carries planner-side observability signals (skip
+    reasons, dropped op kinds, etc.) that the orchestrator forwards onto
+    :class:`khora.dream.result.DreamResult`. Defaults to an empty dict
+    so existing call sites stay byte-identical; populated entries are
+    additive and machine-readable. See ``skip_reasons`` for the
+    documented schema.
+    """
 
     plan_id: UUID
     namespace_id: UUID
     ops: tuple[DreamOp, ...] = field(default_factory=tuple)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)
