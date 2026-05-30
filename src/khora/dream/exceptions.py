@@ -67,8 +67,24 @@ class DreamApplyDisabled(KhoraError):
     """
 
 
+class DreamBackendUnsupported(KhoraError):
+    """Raised when an apply handler requires a backend the active session lacks.
+
+    The vectorcypher mutation handlers (``apply_vectorcypher_dedupe_entities``
+    and siblings) bind raw ``uuid.UUID`` values into ``session.execute``;
+    PostgreSQL's ``UUID`` adapter handles those natively, but SQLite (the
+    ``sqlite_lance`` test stack) raises ``sqlite3.ProgrammingError`` on the
+    first parameter bind. Rather than crashing with that opaque error, the
+    orchestrator raises this exception, logs a warning, and marks the op
+    as skipped so the run completes cleanly.
+
+    See ``docs/dream-phase.md`` for the list of Postgres-only ops.
+    """
+
+
 __all__ = [
     "DreamApplyDisabled",
+    "DreamBackendUnsupported",
     "DreamDisabledError",
     "DreamForbiddenOpError",
     "DreamRunStuckError",

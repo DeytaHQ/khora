@@ -1,11 +1,11 @@
 # Dream phase
 
-`khora.dream` is an **offline maintenance pass** for accumulated agentic memory. It runs against a single namespace on a schedule - cron, Temporal, k8s CronJob - auditing the graph, planning consolidation work, and (when called with `mode="apply"`) executing the plan with bi-temporal soft-delete + per-op snapshots written to `undo.json`.
+`khora.dream` is an **offline maintenance pass** for accumulated agentic memory. It runs against a single namespace on a schedule - cron, Temporal, k8s CronJob - auditing the graph, planning consolidation work, and (when called with `mode="apply"`) executing the plan with bi-temporal soft-delete + per-op snapshots written to `undo.json`. Apply currently mutates the relational store (PostgreSQL) only; the graph-store mirror lands in a future release (see [Postgres-only apply ops](#postgres-only-apply-ops)).
 
 The naming follows the complementary learning systems framework from neuroscience: ingestion is the fast, episodic path (`Khora.remember`), dream phase is the slow, reorganizing path. Same store, different access regime, different objective function. See [Research & Prior Art](#research--prior-art) for the lineage.
 
 > **Status - read this once before scheduling anything in prod.**
-> Ten ops are live: five Phase-1 audits (read-only, no side effects) and five Phase-2 planners (planning + apply). Apply mode mutates your graph through bi-temporal soft-delete and one hard-delete path (`fact_compaction` on already-tombstoned rows past retention). Five guardrails protect the apply path: hard 7-day retention floor, `KHORA_DREAM_DISABLE_APPLY` env-var kill-switch, advisory-lock-held-through-apply, `chunk_id` runtime assertion, snapshot-before-mutate undo records. Default config is `enabled=False`; nothing happens until you opt in.
+> Ten ops are live: five Phase-1 audits (read-only, no side effects) and five Phase-2 planners (planning + apply). Apply mode mutates the relational store through bi-temporal soft-delete and one hard-delete path (`fact_compaction` on already-tombstoned rows past retention); the graph-store mirror for the four vectorcypher mutation ops is deferred to a future release. Five guardrails protect the apply path: hard 7-day retention floor, `KHORA_DREAM_DISABLE_APPLY` env-var kill-switch, advisory-lock-held-through-apply, `chunk_id` runtime assertion, snapshot-before-mutate undo records. Default config is `enabled=False`; nothing happens until you opt in.
 
 ## When to use it
 
@@ -252,6 +252,21 @@ Functional equivalents live at `khora.dream.api.{dream, dream_status, dream_hist
 | `CHRONICLE_FACT_COMPACTION` | `chronicle_fact_compaction` | 2 (planner) | `apply_chronicle_fact_compaction` - **only hard-delete op**. Snapshots full rows into undo.json before DELETE. 7-day retention floor. |
 | `CHRONICLE_EVENT_CLUSTERING` | `chronicle_event_clustering` | 2 (planner) | `apply_chronicle_event_clustering` - bi-temporal soft-merge via `merged_into_event_id` (migration 034). |
 | `VECTORCYPHER_NORMALIZE_SCHEMA` | `vectorcypher_normalize_schema` | 5.4 (planner + apply) | `apply_vectorcypher_normalize_schema` - operator-supplied `old_type -> new_type` mapping; rewrites `entity_type` / `relationship_type` and emits one `ENTITY_UPDATED` / `RELATIONSHIP_UPDATED` event per row. Refuses to run on empty mapping. **Consumer-contract impact:** type names are part of the public stability contract - see [consumers.md](consumers.md). |
+
+#### Postgres-only apply ops
+
+Four vectorcypher mutation handlers bind raw `uuid.UUID` values into `session.execute`, which only PostgreSQL handles natively. On any other dialect (notably SQLite via the `sqlite_lance` test stack) the bind raises `sqlite3.ProgrammingError: type 'UUID' is not supported`. The orchestrator catches this up front via a dialect gate in `_apply_one_op`: if `session.bind.dialect.name != "postgresql"` for one of the listed op kinds, it raises `DreamBackendUnsupported`, logs a warning, advances the run checkpoint, and continues. The op is reported as `skipped` in `DreamResult.ops`; no `sqlite3.ProgrammingError` leaks.
+
+The four gated op kinds are:
+
+- `vectorcypher_dedupe_entities`
+- `vectorcypher_centroid_recompute`
+- `vectorcypher_prune_edges`
+- `vectorcypher_source_chunk_ids_gc`
+
+`vectorcypher_source_chunk_ids_gc` has a dialect-aware planner that supports SQLite for the read side, but the apply handler still binds UUIDs and is therefore gated here.
+
+These same handlers mutate the relational store only. When the coordinator carries a graph backend (Neo4j / Memgraph / Neptune / AGE), the apply leaves the graph mirror stale: the SQL row is soft-deleted / rewritten but the graph still reflects the pre-apply shape. The orchestrator logs a `WARNING` from `_warn_graph_divergence` on each such apply. Writing the graph-mirror side is deferred to a future release - the in-source TODOs in `prune_edges.py` and `source_chunk_ids_gc.py` confirm this was always the plan.
 
 ### Plan / scope / result dataclasses
 
