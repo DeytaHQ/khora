@@ -784,14 +784,20 @@ class VectorCypherEngine:
         storage = self._get_storage()
 
         # Resolve occurred_at: explicit kwarg wins, then metadata["occurred_at"]
-        # (parity with remember_batch), finally fall back to now().
+        # (parity with remember_batch), then the user-supplied source_timestamp
+        # (parity with the relational Document.source_timestamp field), finally
+        # fall back to now(). Fixes #859 - source_timestamp was previously
+        # ignored on the chunk side even though it was persisted on Document.
         if occurred_at is None:
-            occurred_at = datetime.now(UTC)
             if metadata and "occurred_at" in metadata:
                 try:
                     occurred_at = self._parse_datetime(metadata["occurred_at"])
                 except ValueError:
                     pass
+            if occurred_at is None and source_timestamp is not None:
+                occurred_at = source_timestamp
+            if occurred_at is None:
+                occurred_at = datetime.now(UTC)
 
         # external_id dispatch — route to replace_document_extraction
         # when the caller supplied an external_id that already exists in the
