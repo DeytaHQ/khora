@@ -105,7 +105,7 @@ def _decode_chunker_info(value: Any) -> dict[str, Any]:
     Neo4j serializes ``chunker_info`` as a JSON string at write time (see
     ``dual_nodes.create_chunk_nodes_batch``); other graph stores return
     a native dict. A corrupted persisted value (direct DB tampering, a
-    half-finished migration) must not crash ``recall()`` — fall back to
+    half-finished migration) must not crash ``recall()`` - fall back to
     an empty dict on ``json.JSONDecodeError``.
     """
     if isinstance(value, str):
@@ -117,6 +117,29 @@ def _decode_chunker_info(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+def _coerce_occurred_at(value: Any) -> datetime | None:
+    """Coerce a persisted ``occurred_at`` value to a ``datetime``.
+
+    Neo4j returns ``occurred_at`` as an ISO-8601 string (see
+    ``dual_nodes.create_chunk_nodes_batch``). The SurrealDB fallback
+    forwards the native ``datetime`` from ``Chunk.source_timestamp``.
+    Used by Chunk-construction sites that need to populate the
+    ``source_timestamp`` field so the recall projection in
+    ``engine._build_recall_result`` reads back the persisted value
+    instead of ``None`` (fixes #859).
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
 
 
 @dataclass
@@ -937,6 +960,11 @@ class VectorCypherRetriever:
                         content=c_data.get("content", ""),
                         metadata={"occurred_at": c_data.get("occurred_at")},
                         chunker_info=_decode_chunker_info(c_data.get("chunker_info")),
+                        # #859: surface persisted occurred_at to the recall
+                        # projection (engine._build_recall_result reads
+                        # chunk.source_timestamp). Neo4j stores occurred_at
+                        # as an ISO-8601 string; coerce to datetime.
+                        source_timestamp=_coerce_occurred_at(c_data.get("occurred_at")),
                     )
                     chunks.append((chunk, rank_score))
 
@@ -2193,6 +2221,11 @@ class VectorCypherRetriever:
                     },
                     chunker_info=r.chunk.chunker_info or {},
                     created_at=r.chunk.created_at or r.chunk.occurred_at,
+                    # #859: surface persisted occurred_at to the recall
+                    # projection (engine._build_recall_result reads
+                    # chunk.source_timestamp). TemporalChunk.occurred_at
+                    # is already datetime|None.
+                    source_timestamp=r.chunk.occurred_at,
                 )
                 chunk_results.append((chunk, r.combined_score or r.similarity))
 
@@ -2840,6 +2873,12 @@ class VectorCypherRetriever:
                         **(record.get("metadata") or {}),
                     },
                     chunker_info=_decode_chunker_info(record.get("chunker_info")),
+                    # #859: surface persisted occurred_at to the recall
+                    # projection (engine._build_recall_result reads
+                    # chunk.source_timestamp). record["occurred_at"] is
+                    # an ISO-8601 string from Neo4j or a datetime from
+                    # the SurrealDB fallback above (chunk.source_timestamp).
+                    source_timestamp=_coerce_occurred_at(record.get("occurred_at")),
                 )
                 results.append((chunk_id, score, chunk))
 
