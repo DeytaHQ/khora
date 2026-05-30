@@ -1061,3 +1061,58 @@ class TestReplaceDocumentExtraction:
         assert result.entities_created == 1
         assert result.entities_updated == 0
         assert result.entities_retired == 0
+
+
+class TestUpsertEntitiesBatchOrdering:
+    """Regression for issue #868: vector-first ordering + partial-failure metric."""
+
+    @pytest.mark.asyncio
+    async def test_vector_runs_before_graph_and_graph_failure_is_observable(self) -> None:
+        """When graph raises after vector succeeds, the graph exception
+        propagates AND the partial_failure counter increments exactly once.
+
+        Locks in the vector-first ordering and the observability hook the
+        fix for #868 introduced. The previous gather-based implementation
+        could commit graph nodes before vector raised, leaving orphan
+        graph rows the read path could not see.
+        """
+        ns_id = uuid4()
+        entity = Entity(namespace_id=ns_id, name="alice", entity_type="PERSON")
+
+        call_order: list[str] = []
+
+        async def vector_upsert(*args, **kwargs):
+            call_order.append("vector")
+            return [(entity, True)]
+
+        async def graph_upsert(*args, **kwargs):
+            call_order.append("graph")
+            raise RuntimeError("neo4j boom")
+
+        vec = MagicMock()
+        vec.upsert_entities_batch = AsyncMock(side_effect=vector_upsert)
+        graph = MagicMock()
+        graph.upsert_entities_batch = AsyncMock(side_effect=graph_upsert)
+        # Force the dual-backend (non-unified) branch.
+        # __post_init__ probes ``_conn`` on both backends; leaving them as
+        # MagicMock attributes makes the probe yield distinct objects, so
+        # _is_unified_backend stays False.
+
+        coord = StorageCoordinator(vector=vec, graph=graph)
+        assert coord._is_unified_backend is False  # sanity
+
+        counter_mock = MagicMock()
+        with patch("khora.storage.coordinator.metric_counter", return_value=counter_mock) as metric_counter_patched:
+            with pytest.raises(RuntimeError, match="neo4j boom"):
+                await coord.upsert_entities_batch(ns_id, [entity])
+
+        # 1. Vector ran before graph.
+        assert call_order == ["vector", "graph"], call_order
+        # 2. Both backends were called once with the same entity batch.
+        vec.upsert_entities_batch.assert_awaited_once()
+        graph.upsert_entities_batch.assert_awaited_once()
+        # 3. The partial_failure counter was created with the documented
+        #    name and incremented exactly once.
+        metric_counter_patched.assert_called_once()
+        assert metric_counter_patched.call_args.args[0] == "khora.storage.upsert_entities_batch.partial_failure"
+        counter_mock.add.assert_called_once_with(1)
