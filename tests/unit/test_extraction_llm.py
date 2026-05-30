@@ -112,17 +112,24 @@ class TestParseResponse:
         assert result.events[0].event_type == "MEETING"
 
     def test_null_safe_parsing(self) -> None:
-        """JSON null values for name/type are handled (the staged bugfix)."""
+        """JSON null values for name/source/target are skipped, not persisted (#894).
+
+        Prior to #894 the parser silently materialised entities with name=""
+        and relationships with source="" / target="". The parser now drops
+        these and tracks the count via ExtractionResult.metadata.
+        """
         extractor = self._make_extractor()
         data = {
             "entities": [{"name": None, "entity_type": None, "description": None}],
             "relationships": [{"source_entity": None, "target_entity": None, "relationship_type": None}],
         }
         result = extractor._parse_response(json.dumps(data))
-        assert result.entities[0].name == ""
-        assert result.entities[0].entity_type == "CONCEPT"
-        assert result.relationships[0].source_entity == ""
-        assert result.relationships[0].relationship_type == "RELATES_TO"
+        # Empty-name entity / relationship are dropped.
+        assert result.entities == []
+        assert result.relationships == []
+        # Count surfaced for downstream degradation reporting.
+        assert result.metadata["skipped_entities_empty_name"] == 1
+        assert result.metadata["skipped_relationships_empty_endpoint"] == 1
 
     def test_attributes_non_dict(self) -> None:
         """Non-dict attributes are replaced with empty dict."""
