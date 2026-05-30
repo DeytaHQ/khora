@@ -21,8 +21,10 @@ import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+from loguru import logger
 
 from khora.dream.engines.chronicle import (
     plan_chronicle_abstention_drift,
@@ -261,13 +263,19 @@ class _ChroniclePlugin:
     ) -> DreamPlan:
         del expertise  # chronicle audits don't consult expertise in Phase 1
         ops: list[DreamOp] = []
-        wanted = _resolved_scope(scope, self.dream_capabilities)
+        skip_reasons: list[dict[str, Any]] = []
+        wanted = _resolved_scope(
+            scope,
+            self.dream_capabilities,
+            skip_reasons=skip_reasons,
+            engine_name="chronicle",
+        )
 
         if OpKind.CHRONICLE_ABSTENTION_DRIFT_REPORT in wanted:
             engine = kb._get_engine()
             # The op only reads three threshold attrs. The
             # vectorcypher engine doesn't have them; if the orchestrator
-            # routed an abstention-drift op to it, that's a misconfig —
+            # routed an abstention-drift op to it, that's a misconfig -
             # raise rather than silently produce a meaningless report.
             if not hasattr(engine, "_abstention_min_top_score"):
                 raise KhoraError("chronicle abstention drift requested but active engine is not a ChronicleEngine")
@@ -284,6 +292,7 @@ class _ChroniclePlugin:
             plan_id=uuid4(),
             namespace_id=namespace_id,
             ops=tuple(ops),
+            metadata={"skip_reasons": skip_reasons} if skip_reasons else {},
         )
 
     async def apply_dream(
@@ -325,7 +334,13 @@ class _VectorCypherPlugin:
         expertise: ExpertiseConfig | None = None,
     ) -> DreamPlan:
         ops: list[DreamOp] = []
-        wanted = _resolved_scope(scope, self.dream_capabilities)
+        skip_reasons: list[dict[str, Any]] = []
+        wanted = _resolved_scope(
+            scope,
+            self.dream_capabilities,
+            skip_reasons=skip_reasons,
+            engine_name="vectorcypher",
+        )
         coordinator = kb.storage
 
         if OpKind.VECTORCYPHER_SCHEMA_DRIFT_REPORT in wanted:
@@ -392,6 +407,7 @@ class _VectorCypherPlugin:
             plan_id=uuid4(),
             namespace_id=namespace_id,
             ops=tuple(ops),
+            metadata={"skip_reasons": skip_reasons} if skip_reasons else {},
         )
 
     async def apply_dream(
@@ -411,12 +427,46 @@ class _VectorCypherPlugin:
 # ---------------------------------------------------------------------------
 
 
-def _resolved_scope(scope: DreamScope, capabilities: frozenset[OpKind]) -> frozenset[OpKind]:
-    """Intersect requested op_kinds with the plugin's capabilities."""
+def _resolved_scope(
+    scope: DreamScope,
+    capabilities: frozenset[OpKind],
+    *,
+    skip_reasons: list[dict[str, Any]] | None = None,
+    engine_name: str | None = None,
+) -> frozenset[OpKind]:
+    """Intersect requested op_kinds with the plugin's capabilities.
+
+    When ``skip_reasons`` is supplied, every requested op kind that the
+    plugin does not own is appended as
+    ``{"op_kind": str, "reason": "op_not_supported_by_engine", "detail": ...}``
+    and a single ``logger.warning`` is emitted naming the dropped kinds.
+    This is the observability fix for #876: callers were previously
+    unable to distinguish "no work needed" from "your op silently fell
+    off the floor".
+    """
     if scope.op_kinds is None:
         return capabilities
     requested = frozenset(scope.op_kinds)
-    return requested & capabilities
+    resolved = requested & capabilities
+    if skip_reasons is not None:
+        dropped = requested - capabilities
+        if dropped:
+            dropped_names = sorted(str(op) for op in dropped)
+            engine_label = engine_name or "<unknown>"
+            logger.warning(
+                "dream: dropping op_kinds not supported by engine {engine}: {ops}",
+                engine=engine_label,
+                ops=dropped_names,
+            )
+            for op_kind in dropped:
+                skip_reasons.append(
+                    {
+                        "op_kind": str(op_kind),
+                        "reason": "op_not_supported_by_engine",
+                        "detail": (f"engine={engine_label!r} does not list this op kind in dream_capabilities"),
+                    }
+                )
+    return resolved
 
 
 def _build_pass_through_result(plan: DreamPlan, *, mode: str) -> DreamResult:
@@ -424,7 +474,10 @@ def _build_pass_through_result(plan: DreamPlan, *, mode: str) -> DreamResult:
 
     Phase 1 ops carry their decision and outputs from the plan call
     itself (they're pure observation), so the apply pass just re-shapes
-    the plan into a result.
+    the plan into a result. ``skip_reasons`` attached to
+    :attr:`DreamPlan.metadata` are forwarded onto the result so callers
+    can distinguish empty outcomes (no candidates, op not supported,
+    guardrail tripped) from work that simply happened to be empty.
     """
     now = datetime.now(UTC)
     summaries: dict[str, OpSummary] = {}
@@ -447,10 +500,12 @@ def _build_pass_through_result(plan: DreamPlan, *, mode: str) -> DreamResult:
         finished_at=now,
         duration_ms=0.0,
     )
+    skip_reasons = list(plan.metadata.get("skip_reasons", ()))
     return DreamResult(
         run=info,
         diff=DreamDiff(),
         ops=tuple(summaries.values()),
+        metadata={"skip_reasons": skip_reasons},
     )
 
 

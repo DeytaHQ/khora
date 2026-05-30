@@ -68,17 +68,27 @@ async def plan_chronicle_event_clustering(
     *,
     session: AsyncSession,
     config: DreamConfig,
+    _skip_reasons: list[dict[str, Any]] | None = None,
 ) -> tuple[DreamOp, ...]:
     """Plan near-duplicate clustering of ``chronicle_events``.
 
     Returns one :class:`DreamOp` per cluster found. When no clusters
-    form, the return value is an empty tuple — the orchestrator records
+    form, the return value is an empty tuple - the orchestrator records
     the planner ran but produced nothing to apply.
 
     The planner is pure SELECT; it never inserts, updates, or deletes a
     row. Cosine similarity is evaluated only within
     ``(namespace_id, subject)`` buckets so the O(N^2) inner loop stays
     bounded by per-subject event volume.
+
+    When ``_skip_reasons`` is supplied (callers wiring the planner into
+    the chronicle plugin's ``plan_dream`` so result observability survives
+    an empty plan, see #876), this function appends a single
+    ``{"op_kind": "chronicle_event_clustering", "reason": "no_candidates",
+    "detail": ...}`` entry when ``_fetch_events`` returned no rows. The
+    underscore prefix marks the kwarg as orchestrator-internal: existing
+    test call sites that don't pass it observe the unchanged
+    ``tuple[DreamOp, ...]`` return shape.
     """
     threshold = float(config.event_clustering_cosine_threshold)
     window_days = int(config.event_clustering_window_days)
@@ -97,6 +107,23 @@ async def plan_chronicle_event_clustering(
     ops: list[DreamOp] = []
     for cluster in clusters:
         ops.append(_build_op(cluster, namespace_id=namespace_id))
+    if _skip_reasons is not None and not ops:
+        # Distinguish "no rows at fetch time" from "rows existed but no
+        # cluster of >=2 formed within threshold + window". Both surface
+        # as no_candidates for the caller - the detail string carries the
+        # finer-grained signal.
+        detail = (
+            "no chronicle_events rows with embedding + referenced_date"
+            if not rows
+            else "no near-duplicate clusters of size >= 2 within threshold + window"
+        )
+        _skip_reasons.append(
+            {
+                "op_kind": OpKind.CHRONICLE_EVENT_CLUSTERING.value,
+                "reason": "no_candidates",
+                "detail": detail,
+            }
+        )
     return tuple(ops)
 
 

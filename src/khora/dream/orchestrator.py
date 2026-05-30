@@ -873,11 +873,21 @@ def _build_result(*, run_id: UUID, namespace_id: UUID, plan: DreamPlan, mode: st
         finished_at=now,
         duration_ms=0.0,
     )
+    # ``skip_reasons`` is the #876 observability fix: planners attach
+    # entries to ``plan.metadata["skip_reasons"]`` when an op was
+    # requested but produced no work (op not supported by the active
+    # engine, no candidate rows, runtime flag off, guardrail tripped).
+    # An empty list signals "every requested op did work".
+    skip_reasons = list(plan.metadata.get("skip_reasons", ()))
     return DreamResult(
         run=info,
         diff=DreamDiff(),
         ops=tuple(summaries.values()),
-        metadata={"plan_hash": plan_hash(plan), "plan_payload": canonical_plan_payload(plan)},
+        metadata={
+            "plan_hash": plan_hash(plan),
+            "plan_payload": canonical_plan_payload(plan),
+            "skip_reasons": skip_reasons,
+        },
     )
 
 
