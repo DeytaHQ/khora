@@ -143,6 +143,16 @@ class StorageConfig:
         | None
     ) = field(default=None, repr=False)
 
+    # Caller-opted-out sentinels. When True, the corresponding
+    # ``create_*`` method returns None silently (no WARNING) instead of
+    # logging a misleading "URL not configured" message. Engines that do
+    # not use a graph backend (skeleton, chronicle) or an event store set
+    # these in ``khora.engines._storage_config.build_storage_config``.
+    # The legitimate operator-misconfiguration warning still fires when
+    # the URL is missing AND the sentinel is False. See #877.
+    graph_skipped: bool = False
+    event_store_skipped: bool = False
+
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> StorageConfig:
         """Create configuration from a dictionary."""
@@ -342,7 +352,8 @@ class StorageFactory:
 
         # Legacy Neo4j path
         if not self.config.neo4j_url:
-            logger.warning("Neo4j URL not configured, graph backend disabled")
+            if not self.config.graph_skipped:
+                logger.warning("Neo4j URL not configured, graph backend disabled")
             return None
 
         try:
@@ -406,7 +417,8 @@ class StorageFactory:
     def create_event_store(self) -> EventStoreProtocol | None:
         """Create the event store backend."""
         if not self.config.event_store_url:
-            logger.warning("Event store URL not configured, event store disabled")
+            if not self.config.event_store_skipped:
+                logger.warning("Event store URL not configured, event store disabled")
             return None
 
         # Import here to avoid circular dependency

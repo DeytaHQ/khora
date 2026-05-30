@@ -64,6 +64,15 @@ def build_storage_config(config: KhoraConfig, *, skip_graph: bool = False) -> St
         "pgvector_use_halfvec": config.storage.use_halfvec,
         "graph_config": graph_config,
         "vector_config": config.get_vector_config(),
+        # Sentinels for #877: silence misleading "URL not configured" WARNINGs
+        # on engines that intentionally opt out of graph / event store. The
+        # legitimate operator-misconfiguration warning still fires when the
+        # caller did NOT skip and the URL is genuinely missing.
+        "graph_skipped": skip_graph,
+        # No engine wires the legacy PostgreSQL event store through this
+        # builder today (chronicle uses sqlite_lance; vectorcypher /
+        # skeleton don't use an event store). Always opt out here.
+        "event_store_skipped": True,
     }
 
     if graph_config is not None:
