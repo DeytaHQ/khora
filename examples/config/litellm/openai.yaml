@@ -1,21 +1,22 @@
-# OpenAI GPT Configuration for Khora
-# Uses GPT-4o-mini for cost-effective general use
+# OpenAI configuration for Khora — the contents of the `llm:` block.
+#
+# These are fields of KhoraConfig.llm (LLMSettings). Drop this under `llm:` in
+# your khora.yaml and load with KhoraConfig.from_yaml(...), or validate it on
+# its own:  from khora.config import LLMSettings; LLMSettings.model_validate(<this>)
+#
+# Requires: export OPENAI_API_KEY=...
 
-model: "gpt-4o-mini"
-api_key_env: "OPENAI_API_KEY"
+model: gpt-4o-mini
+api_key_env: OPENAI_API_KEY
 
-# Model parameters
 temperature: 0.7
 max_tokens: 8192
-
-# Request configuration
 timeout: 120
 max_retries: 3
-retry_wait: 2
-
-# Concurrency
 max_concurrent_llm_calls: 20
 
-# Embedding configuration
-embedding_model: "text-embedding-3-small"
+# Embeddings. embedding_dimension must match your storage's vector column —
+# Postgres ships a 1536-wide column, so text-embedding-3-small (1536) is the
+# safe default.
+embedding_model: text-embedding-3-small
 embedding_dimension: 1536

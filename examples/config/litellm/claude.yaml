@@ -1,37 +1,21 @@
-# Anthropic Claude Configuration for Khora
-# Uses Claude Sonnet for high-quality extraction and reasoning
+# Anthropic Claude configuration for Khora — the contents of the `llm:` block.
+#
+# Anthropic has no embedding model, so embeddings run on OpenAI. Khora resolves
+# each provider's key from the environment per call, so export BOTH:
+#     export ANTHROPIC_API_KEY=...   # the chat/extraction model below
+#     export OPENAI_API_KEY=...      # the embedding model below
+# `api_key_env` names the key for the chat model; the embedding provider's key
+# is read from the environment.
 
-model: "claude-sonnet-4-20250514"
-api_key_env: "ANTHROPIC_API_KEY"
+model: claude-sonnet-4-20250514
+api_key_env: ANTHROPIC_API_KEY
 
-# Model parameters
 temperature: 0.7
 max_tokens: 8192
-
-# Request configuration
 timeout: 180
 max_retries: 3
-retry_wait: 2
+max_concurrent_llm_calls: 10  # Anthropic rate limits are tighter than OpenAI's
 
-# Concurrency - lower for Claude due to rate limits
-max_concurrent_llm_calls: 10
-
-# Embedding configuration (using OpenAI for embeddings)
-embedding_model: "text-embedding-3-small"
-embedding_api_key_env: "OPENAI_API_KEY"
+# Embeddings on OpenAI (1536-wide, matches the Postgres vector column).
+embedding_model: text-embedding-3-small
 embedding_dimension: 1536
-
-# Router configuration with fallbacks
-model_list:
-  - model_name: "claude-sonnet"
-    litellm_params:
-      model: "claude-sonnet-4-20250514"
-      api_key: "os.environ/ANTHROPIC_API_KEY"
-  - model_name: "claude-sonnet"
-    litellm_params:
-      model: "claude-3-5-sonnet-20241022"
-      api_key: "os.environ/ANTHROPIC_API_KEY"
-
-router_settings:
-  routing_strategy: "simple-shuffle"
-  num_retries: 2
