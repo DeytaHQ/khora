@@ -999,6 +999,14 @@
       "description": "Issue #855. Chronicle reinforcement-on-recall task wall-clock duration from create_task schedule through UPDATE completion (or failure). Recorded in the task's finally block so both success and failure paths emit."
     },
     {
+      "name": "khora.chronicle.reconcile.failures_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "chronicle",
+      "description": "Issue #892. MemoryCompressor.reconcile_fact() calls where the contradiction-check LLM call raised a transient error (rate limit, timeout, connection error, JSON parse error). The fact is skipped (NOT added) to prevent silent contradiction accumulation - previously the broad except Exception silently fell back to ADD on every LLM error, breaking fact supersession integrity. NO namespace_id label - cardinality rule."
+    },
+    {
       "name": "khora.vectorcypher.abstention_signal",
       "type": "counter",
       "stability": "public",
