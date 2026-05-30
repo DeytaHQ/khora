@@ -226,6 +226,8 @@ async def unify_entities(
     expertise: ExpertiseConfig | str | None = None,
     max_entities: int = 1000,
     store_results: bool = True,
+    embedding_threshold: float | None = None,
+    fuzzy_threshold: float | None = None,
     **kwargs,
 ) -> dict[str, Any]:
     """Unify entities across tools without relationship inference.
@@ -233,15 +235,32 @@ async def unify_entities(
     A lighter-weight expansion that only runs cross-tool entity unification
     to merge duplicate entities.
 
+    Strategies 2-4 (exact-name, embedding, fuzzy) require entities to share
+    ``entity_type``; cross-type collapse such as "the gambler" (ROLE) ->
+    "John Oakhurst" (PERSON) is NOT performed by design. Use a
+    ``CorrelationRule`` in ``expertise`` when cross-type unification is
+    required.
+
     Args:
         namespace_id: Target namespace
         storage: StorageCoordinator instance
         expertise: ExpertiseConfig with correlation rules
         max_entities: Maximum entities to process
         store_results: Whether to persist results to storage
+        embedding_threshold: Override the default cosine-similarity threshold
+            for the embedding strategy. Defaults to ``None`` (use
+            ``CrossToolUnifier`` default of 0.85). Lower values relax the
+            gate; this does NOT change behavior for existing callers.
+        fuzzy_threshold: Override the default Levenshtein-similarity
+            threshold for the fuzzy strategy. Defaults to ``None`` (use
+            ``CrossToolUnifier`` default of 0.85). Lower values relax the
+            gate; this does NOT change behavior for existing callers.
 
     Returns:
-        Summary of unification results
+        Summary of unification results, including per-strategy diagnostic
+        counters ``candidates_evaluated`` and ``pairs_above_threshold``
+        (keys: ``correlation``, ``exact_name``, ``embedding``, ``fuzzy``)
+        so callers can tell which gate rejected an expected merge (#865).
     """
     if storage is None:
         raise ValueError("storage is required")
@@ -272,12 +291,22 @@ async def unify_entities(
             "unified_entities": 0,
             "merged_count": 0,
             "stored": False,
+            "candidates_evaluated": {"correlation": 0, "exact_name": 0, "embedding": 0, "fuzzy": 0},
+            "pairs_above_threshold": {"correlation": 0, "exact_name": 0, "embedding": 0, "fuzzy": 0},
         }
 
-    # Run unification only
+    # Run unification only. Forward optional threshold overrides to
+    # CrossToolUnifier only when explicitly set; otherwise its own defaults
+    # apply (preserves existing behavior).
     from khora.extraction.expansion import CrossToolUnifier
 
-    unifier = CrossToolUnifier(expertise=resolved_expertise)
+    unifier_kwargs: dict[str, Any] = {}
+    if embedding_threshold is not None:
+        unifier_kwargs["embedding_threshold"] = embedding_threshold
+    if fuzzy_threshold is not None:
+        unifier_kwargs["fuzzy_threshold"] = fuzzy_threshold
+
+    unifier = CrossToolUnifier(expertise=resolved_expertise, **unifier_kwargs)
     result = await unifier.unify(entities, relationships, storage=storage)
 
     logger.info(f"Unification complete: {len(result.unified_entities)} entities ({result.entities_merged} merged)")
@@ -302,4 +331,6 @@ async def unify_entities(
         "merged_count": result.entities_merged,
         "merge_groups": len(result.merge_groups),
         "stored": stored,
+        "candidates_evaluated": dict(result.candidates_evaluated),
+        "pairs_above_threshold": dict(result.pairs_above_threshold),
     }

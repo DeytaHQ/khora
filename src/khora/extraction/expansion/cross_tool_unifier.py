@@ -23,6 +23,13 @@ if TYPE_CHECKING:
     from .entity_index import EntityIndex
 
 
+_STRATEGY_KEYS = ("correlation", "exact_name", "embedding", "fuzzy")
+
+
+def _zero_counters() -> dict[str, int]:
+    return dict.fromkeys(_STRATEGY_KEYS, 0)
+
+
 @dataclass
 class UnificationResult:
     """Result of cross-tool entity unification."""
@@ -43,6 +50,16 @@ class UnificationResult:
     entities_merged: int = 0
     merge_groups: list[list[UUID]] = field(default_factory=list)  # Groups of merged entity IDs
 
+    # Per-strategy diagnostics (#865). Keys: correlation, exact_name,
+    # embedding, fuzzy. ``candidates_evaluated`` counts pairs considered by
+    # each strategy after type / blocking filters; ``pairs_above_threshold``
+    # counts pairs that the strategy proposed for merging (deduped per
+    # strategy, before union-find collapses transitively). These do NOT
+    # change merge behavior - they exist so callers can tell which gate
+    # rejected an expected merge.
+    candidates_evaluated: dict[str, int] = field(default_factory=_zero_counters)
+    pairs_above_threshold: dict[str, int] = field(default_factory=_zero_counters)
+
 
 class CrossToolUnifier:
     """Unifies entities across different tools and sources.
@@ -53,6 +70,12 @@ class CrossToolUnifier:
     - Domain matching for companies
     - Pattern matching for references (e.g., JIRA-123)
     - Embedding similarity for fuzzy matching
+
+    Note: strategies 2-4 (exact-name, embedding, fuzzy) require entities to
+    share ``entity_type``; cross-type collapse such as "the gambler" (ROLE)
+    -> "John Oakhurst" (PERSON) is NOT performed by design. Use a
+    ``CorrelationRule`` with the appropriate ``entity_types`` if cross-type
+    unification is required for a specific attribute.
     """
 
     def __init__(
@@ -73,6 +96,12 @@ class CrossToolUnifier:
         self._embedding_threshold = embedding_threshold
         self._fuzzy_threshold = fuzzy_threshold
         self._rule_engine = RuleEngine(expertise)
+        # Per-strategy diagnostic counters (#865). Reset on every ``unify``
+        # call. ``_candidates_evaluated`` counts pairs considered by each
+        # strategy after type / blocking filters; ``_pairs_above_threshold``
+        # counts pairs that met the strategy's gate.
+        self._candidates_evaluated: dict[str, int] = _zero_counters()
+        self._pairs_above_threshold: dict[str, int] = _zero_counters()
 
     async def unify(
         self,
@@ -98,9 +127,17 @@ class CrossToolUnifier:
         Returns:
             UnificationResult with unified entities and updated relationships
         """
+        # Reset diagnostic counters for this run (#865).
+        self._candidates_evaluated = _zero_counters()
+        self._pairs_above_threshold = _zero_counters()
+
         result = UnificationResult()
 
         if not entities:
+            # Still surface the (zeroed) counters so the result shape is
+            # consistent for callers.
+            result.candidates_evaluated = dict(self._candidates_evaluated)
+            result.pairs_above_threshold = dict(self._pairs_above_threshold)
             return result
 
         # Build evaluation context
@@ -124,6 +161,8 @@ class CrossToolUnifier:
             # No merging needed
             result.unified_entities = entities.copy()
             result.updated_relationships = relationships.copy()
+            result.candidates_evaluated = dict(self._candidates_evaluated)
+            result.pairs_above_threshold = dict(self._pairs_above_threshold)
             return result
 
         # Merge entities in each group
@@ -177,6 +216,10 @@ class CrossToolUnifier:
         # absorbed >=1 others. Hook failures must never break the unifier.
         if storage is not None and group_meta:
             await self._dispatch_merge_events(storage, group_meta, strategy_by_pair)
+
+        # Surface diagnostic counters on the result (#865).
+        result.candidates_evaluated = dict(self._candidates_evaluated)
+        result.pairs_above_threshold = dict(self._pairs_above_threshold)
 
         return result
 
@@ -341,12 +384,15 @@ class CrossToolUnifier:
                         field_groups[field_value] = []
                     field_groups[field_value].append(entity)
 
-            # Create pairs from groups
+            # Create pairs from groups. For the correlation strategy, every
+            # within-group pair is both "evaluated" and "above threshold"
+            # since field-equality is a hard gate (#865).
             for group_entities in field_groups.values():
                 if len(group_entities) > 1:
-                    # Add pairs for all combinations in group
                     for i, e1 in enumerate(group_entities):
                         for e2 in group_entities[i + 1 :]:
+                            self._candidates_evaluated["correlation"] += 1
+                            self._pairs_above_threshold["correlation"] += 1
                             pairs.append((e1.id, e2.id))
 
         return pairs
@@ -370,11 +416,15 @@ class CrossToolUnifier:
                 name_type_groups[key] = []
             name_type_groups[key].append(entity)
 
-        # Union entities in each group
+        # Union entities in each group. For the exact-name strategy the
+        # match is a hard gate (same normalized name + same type), so every
+        # pair we union is both "evaluated" and "above threshold" (#865).
         for group in name_type_groups.values():
             if len(group) > 1:
                 first = group[0]
                 for entity in group[1:]:
+                    self._candidates_evaluated["exact_name"] += 1
+                    self._pairs_above_threshold["exact_name"] += 1
                     union(first.id, entity.id)
                     if strategy_by_pair is not None and first.id != entity.id:
                         pair = (min(first.id, entity.id), max(first.id, entity.id))
@@ -405,6 +455,10 @@ class CrossToolUnifier:
         if entity_index is not None:
             # Blocked matching: O(n*k) via entity_index.
             # Pass processed_ids to skip reverse comparisons (A→B and B→A).
+            # The index only returns candidates that already meet the
+            # threshold, so every emitted pair is also an "evaluated" pair.
+            # We can't see candidates filtered out by token-blocking from
+            # this layer; the counter is a lower bound (#865).
             seen: set[tuple[UUID, UUID]] = set()
             processed_ids: set[UUID] = set()
             for entity in with_embeddings:
@@ -414,6 +468,8 @@ class CrossToolUnifier:
                     pair = (min(entity.id, candidate.id), max(entity.id, candidate.id))
                     if pair not in seen:
                         seen.add(pair)
+                        self._candidates_evaluated["embedding"] += 1
+                        self._pairs_above_threshold["embedding"] += 1
                         pairs.append((entity.id, candidate.id))
                 processed_ids.add(entity.id)
             return pairs
@@ -425,8 +481,10 @@ class CrossToolUnifier:
                 if e1.entity_type != e2.entity_type:
                     continue
 
+                self._candidates_evaluated["embedding"] += 1
                 similarity = cosine_similarity(e1.embedding, e2.embedding)
                 if similarity >= self._embedding_threshold:
+                    self._pairs_above_threshold["embedding"] += 1
                     pairs.append((e1.id, e2.id))
 
         return pairs
@@ -446,7 +504,10 @@ class CrossToolUnifier:
 
         if entity_index is not None:
             # Blocked matching: O(n*k) with batch_levenshtein.
-            # Pass processed_ids to skip reverse comparisons.
+            # Pass processed_ids to skip reverse comparisons. The index
+            # already gates on threshold, so every emitted pair is also an
+            # "evaluated" pair; pre-threshold token-blocked candidates are
+            # not visible here (#865).
             seen: set[tuple[UUID, UUID]] = set()
             processed_ids: set[UUID] = set()
             for entity in entities:
@@ -456,6 +517,8 @@ class CrossToolUnifier:
                     pair = (min(entity.id, candidate.id), max(entity.id, candidate.id))
                     if pair not in seen:
                         seen.add(pair)
+                        self._candidates_evaluated["fuzzy"] += 1
+                        self._pairs_above_threshold["fuzzy"] += 1
                         pairs.append((entity.id, candidate.id))
                 processed_ids.add(entity.id)
             return pairs
@@ -474,8 +537,10 @@ class CrossToolUnifier:
 
             for i, e1 in enumerate(group):
                 for e2 in group[i + 1 :]:
+                    self._candidates_evaluated["fuzzy"] += 1
                     similarity = levenshtein_similarity(e1.name, e2.name)
                     if similarity >= self._fuzzy_threshold:
+                        self._pairs_above_threshold["fuzzy"] += 1
                         pairs.append((e1.id, e2.id))
 
         return pairs
