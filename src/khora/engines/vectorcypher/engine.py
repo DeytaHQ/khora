@@ -43,6 +43,7 @@ from khora.core.models.recall import (
     RecallRelationship,
 )
 from khora.core.recall_abstention import compute_abstention_signals
+from khora.engines._stats import gather_counts
 from khora.engines._storage_config import build_storage_config
 from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
 from khora.engines.skeleton.skeleton import SkeletonIndexer
@@ -3462,8 +3463,6 @@ class VectorCypherEngine:
         storage = self._get_storage()
 
         doc_count = 0
-        entity_count = 0
-        relationship_count = 0
         last_activity_at = None
 
         try:
@@ -3471,22 +3470,9 @@ class VectorCypherEngine:
         except (AttributeError, NotImplementedError):
             pass
 
-        # Run independent counts in parallel
-        chunk_result, entity_result, rel_result = await asyncio.gather(
-            storage.count_chunks(namespace_id),
-            storage.count_entities(namespace_id),
-            storage.count_relationships(namespace_id),
-            return_exceptions=True,
+        chunk_count, entity_count, relationship_count, metadata = await gather_counts(
+            storage, namespace_id, engine="vectorcypher"
         )
-
-        # Degrade any failure to 0 — one broken counter must not block the rest
-        for name, result in [("chunks", chunk_result), ("entities", entity_result), ("relationships", rel_result)]:
-            if isinstance(result, Exception) and not isinstance(result, (AttributeError, NotImplementedError)):
-                logger.warning("stats: count_{} failed, degrading to 0: {}", name, result)
-
-        chunk_count = chunk_result if isinstance(chunk_result, int) else 0
-        entity_count = entity_result if isinstance(entity_result, int) else 0
-        relationship_count = rel_result if isinstance(rel_result, int) else 0
 
         return Stats(
             documents=doc_count,
@@ -3494,6 +3480,7 @@ class VectorCypherEngine:
             entities=entity_count,
             relationships=relationship_count,
             last_activity_at=last_activity_at,
+            metadata=metadata,
         )
 
     async def health_check(self) -> dict[str, Any]:

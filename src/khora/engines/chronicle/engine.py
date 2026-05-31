@@ -44,6 +44,7 @@ from khora.core.models.recall import (
 )
 from khora.core.recall_abstention import compute_abstention_signals
 from khora.core.recall_scoring import min_max_normalize
+from khora.engines._stats import gather_counts
 from khora.engines._storage_config import build_storage_config
 from khora.engines.chronicle.compression import (
     FactExtractor,
@@ -3068,9 +3069,6 @@ class ChronicleEngine:
         storage = self._get_storage()
 
         doc_count = 0
-        chunk_count = 0
-        entity_count = 0
-        relationship_count = 0
         last_activity_at = None
 
         try:
@@ -3078,20 +3076,9 @@ class ChronicleEngine:
         except (AttributeError, NotImplementedError):
             pass
 
-        try:
-            chunk_count = await storage.count_chunks(namespace_id)
-        except (AttributeError, NotImplementedError):
-            pass
-
-        try:
-            entity_count = await storage.count_entities(namespace_id)
-        except (AttributeError, NotImplementedError):
-            pass
-
-        try:
-            relationship_count = await storage.count_relationships(namespace_id)
-        except (AttributeError, NotImplementedError):
-            pass
+        chunk_count, entity_count, relationship_count, metadata = await gather_counts(
+            storage, namespace_id, engine="chronicle"
+        )
 
         return Stats(
             documents=doc_count,
@@ -3099,6 +3086,7 @@ class ChronicleEngine:
             entities=entity_count,
             relationships=relationship_count,
             last_activity_at=last_activity_at,
+            metadata=metadata,
         )
 
     async def health_check(self) -> dict[str, Any]:

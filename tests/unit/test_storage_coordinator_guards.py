@@ -331,14 +331,15 @@ class TestEntityCounts:
         assert await empty_coord.count_relationships(uuid4()) == 0
 
     @pytest.mark.asyncio
-    async def test_count_entities_prefers_vector(self) -> None:
+    async def test_count_entities_prefers_graph(self) -> None:
+        """Entities are owned by the graph backend; count from the owner (#878)."""
         vec = AsyncMock()
         vec.count_entities = AsyncMock(return_value=42)
         gph = AsyncMock()
         gph.count_entities = AsyncMock(return_value=99)
         coord = StorageCoordinator(vector=vec, graph=gph)
-        assert await coord.count_entities(uuid4()) == 42
-        gph.count_entities.assert_not_called()
+        assert await coord.count_entities(uuid4()) == 99
+        vec.count_entities.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_count_entities_falls_back_to_graph(self) -> None:

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from loguru import logger as loguru_logger
 
 from khora.khora import Stats
 
@@ -325,3 +327,95 @@ class TestStatsDataclass:
         stats = Stats(documents=1, chunks=2, entities=3, relationships=4)
         with pytest.raises(AttributeError):
             stats.documents = 10  # type: ignore[misc]
+
+    def test_metadata_default_empty(self) -> None:
+        """metadata defaults to an empty dict."""
+        stats = Stats(documents=1, chunks=2, entities=3, relationships=4)
+        assert stats.metadata == {}
+
+
+# =========================================================================
+# ADR-001: stats() counter failures are surfaced, not silently zeroed (#878)
+# =========================================================================
+
+
+class TestStatsCounterFailureObservability:
+    """A counter that raises must NOT be indistinguishable from a count of 0.
+
+    Per ADR-001: log at WARNING, append an ErrorRecord to Stats.metadata
+    ['errors'], bump khora.stats.counter_failed_total{engine, counter}, and
+    do NOT raise.
+    """
+
+    @pytest.mark.asyncio
+    async def test_vectorcypher_counter_failure_surfaced(self) -> None:
+        storage = _make_mock_storage()
+        storage.count_entities = AsyncMock(side_effect=AttributeError("no count_entities"))
+        engine = TestVectorCypherStats()._make_engine(storage)
+
+        with patch("khora.engines._stats._STATS_COUNTER_FAILED") as mock_counter:
+            result = await engine.stats(uuid4())
+
+        # (a) does not raise; int stays 0
+        assert result.entities == 0
+        # other counters still ran
+        assert result.chunks == 20
+        assert result.relationships == 8
+        # (c) ErrorRecord attached
+        errors = result.metadata["errors"]
+        assert len(errors) == 1
+        assert errors[0]["component"] == "vectorcypher.stats.count_entities"
+        assert errors[0]["reason"] == "counter_unavailable"
+        assert errors[0]["exception"] == "AttributeError"
+        # (d) metric incremented with engine + counter labels
+        assert mock_counter.add.called
+        args, kwargs = mock_counter.add.call_args_list[0]
+        assert args[0] == 1
+        assert kwargs["attributes"] == {"engine": "vectorcypher", "counter": "entities"}
+
+    @pytest.mark.asyncio
+    async def test_vectorcypher_counter_failure_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        storage = _make_mock_storage()
+        storage.count_entities = AsyncMock(side_effect=RuntimeError("pool exhausted"))
+        engine = TestVectorCypherStats()._make_engine(storage)
+
+        # Bridge loguru -> stdlib so caplog sees the WARNING.
+        sink_id = loguru_logger.add(
+            lambda m: logging.getLogger("khora.engines._stats").log(m.record["level"].no, m.record["message"]),
+            level="WARNING",
+            format="{message}",
+        )
+        try:
+            with caplog.at_level(logging.WARNING, logger="khora.engines._stats"):
+                result = await engine.stats(uuid4())
+        finally:
+            loguru_logger.remove(sink_id)
+
+        assert result.entities == 0
+        assert any("count_entities failed" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_chronicle_counter_failure_surfaced(self) -> None:
+        storage = _make_mock_storage()
+        storage.count_relationships = AsyncMock(side_effect=NotImplementedError)
+        engine = TestChronicleStats()._make_engine(storage)
+
+        with patch("khora.engines._stats._STATS_COUNTER_FAILED") as mock_counter:
+            result = await engine.stats(uuid4())
+
+        assert result.relationships == 0
+        assert result.entities == 10
+        errors = result.metadata["errors"]
+        assert errors[0]["component"] == "chronicle.stats.count_relationships"
+        assert errors[0]["exception"] == "NotImplementedError"
+        assert mock_counter.add.called
+        _, kwargs = mock_counter.add.call_args_list[0]
+        assert kwargs["attributes"] == {"engine": "chronicle", "counter": "relationships"}
+
+    @pytest.mark.asyncio
+    async def test_all_counters_succeed_no_errors_key(self) -> None:
+        """Happy path: metadata has no 'errors' key when every counter succeeds."""
+        storage = _make_mock_storage()
+        engine = TestVectorCypherStats()._make_engine(storage)
+        result = await engine.stats(uuid4())
+        assert "errors" not in result.metadata
