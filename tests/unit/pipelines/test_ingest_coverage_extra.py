@@ -75,7 +75,9 @@ def _make_expertise() -> ExpertiseConfig:
 @pytest.mark.unit
 @pytest.mark.asyncio
 class TestCreateSessionEpisodesExtras:
-    async def test_skips_exception_results(self) -> None:
+    async def test_skips_docs_with_no_successful_result(self) -> None:
+        # A doc whose processing failed has no entry in ``successful_results``
+        # (exceptions are filtered out upstream), so it is skipped (#929).
         ns = uuid4()
         storage = _make_storage()
         doc = Document(namespace_id=ns, content="x")
@@ -86,7 +88,7 @@ class TestCreateSessionEpisodesExtras:
             namespace_id=ns,
             documents=[{}],
             staged_docs=[doc],
-            successful_results=[RuntimeError("failure")],
+            successful_results=[],
             storage=storage,
         )
         assert created == 0
@@ -100,7 +102,7 @@ class TestCreateSessionEpisodesExtras:
         doc_a.source_timestamp = None  # fall through to created_at
         doc_a.created_at = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
 
-        results = [{"entity_ids": [uuid4()], "chunk_ids": [uuid4()]}]
+        results = [{"document_id": str(doc_a.id), "entity_ids": [uuid4()], "chunk_ids": [uuid4()]}]
         created = await _create_session_episodes(
             namespace_id=ns,
             documents=[{}],
@@ -117,7 +119,7 @@ class TestCreateSessionEpisodesExtras:
         doc.metadata = {"thread_id": "thr-x"}
         doc.source_timestamp = datetime(2026, 5, 13, tzinfo=UTC)
 
-        results = [{"entity_ids": [uuid4()], "chunk_ids": [uuid4()]}]
+        results = [{"document_id": str(doc.id), "entity_ids": [uuid4()], "chunk_ids": [uuid4()]}]
         # Should swallow the exception and return 0
         created = await _create_session_episodes(
             namespace_id=ns,

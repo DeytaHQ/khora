@@ -568,7 +568,7 @@ class TestCreateSessionEpisodes:
         ns = uuid4()
         storage = _make_storage()
         doc = Document(namespace_id=ns, content="x")
-        result = {"entity_ids": [uuid4()], "chunk_ids": [uuid4()]}
+        result = {"document_id": str(doc.id), "entity_ids": [uuid4()], "chunk_ids": [uuid4()]}
         created = await _create_session_episodes(
             namespace_id=ns,
             documents=[{"metadata": {}}],
@@ -597,9 +597,9 @@ class TestCreateSessionEpisodes:
 
         eid1, eid2, cid = uuid4(), uuid4(), uuid4()
         results = [
-            {"entity_ids": [eid1], "chunk_ids": [cid]},
-            {"entity_ids": [eid1, eid2], "chunk_ids": [cid]},
-            {"entity_ids": [], "chunk_ids": []},
+            {"document_id": str(doc_a.id), "entity_ids": [eid1], "chunk_ids": [cid]},
+            {"document_id": str(doc_b.id), "entity_ids": [eid1, eid2], "chunk_ids": [cid]},
+            {"document_id": str(doc_c.id), "entity_ids": [], "chunk_ids": []},
         ]
         created = await _create_session_episodes(
             namespace_id=ns,
@@ -624,7 +624,7 @@ class TestCreateSessionEpisodes:
         doc = Document(namespace_id=ns, content="x")
         doc.metadata = {"thread_id": "tx"}
         doc.source_timestamp = datetime.now(UTC)
-        result = {"entity_ids": [uuid4()], "chunk_ids": []}
+        result = {"document_id": str(doc.id), "entity_ids": [uuid4()], "chunk_ids": []}
         # Must not raise.
         created = await _create_session_episodes(
             namespace_id=ns,
@@ -643,7 +643,7 @@ class TestCreateSessionEpisodes:
         # Force both timestamp fields to None
         doc.source_timestamp = None
         doc.created_at = None
-        result = {"entity_ids": [uuid4()], "chunk_ids": []}
+        result = {"document_id": str(doc.id), "entity_ids": [uuid4()], "chunk_ids": []}
         created = await _create_session_episodes(
             namespace_id=ns,
             documents=[{}],
@@ -653,6 +653,70 @@ class TestCreateSessionEpisodes:
         )
         assert created == 0
         storage.create_episode.assert_not_called()
+
+    async def test_failed_doc_does_not_misattribute_or_drop_tail(self):
+        """Regression for #929.
+
+        When an earlier document fails, ``successful_results`` is shorter
+        than ``staged_docs``. Pairing by list position would (a) attach the
+        wrong document's entities/chunks to each surviving episode and
+        (b) drop the final surviving document entirely. Pairing by
+        ``document_id`` must keep each episode attached to its own doc and
+        retain the tail.
+        """
+        ns = uuid4()
+        thread = "thr-1"
+
+        # Three docs in one session; the FIRST one fails (no result).
+        doc_a = Document(namespace_id=ns, content="a")
+        doc_a.metadata = {"thread_id": thread}
+        doc_a.source_timestamp = datetime(2026, 5, 13, 10, 0, tzinfo=UTC)
+
+        doc_b = Document(namespace_id=ns, content="b")
+        doc_b.metadata = {"thread_id": thread}
+        doc_b.source_timestamp = datetime(2026, 5, 13, 11, 0, tzinfo=UTC)
+
+        doc_c = Document(namespace_id=ns, content="c")
+        doc_c.metadata = {"thread_id": thread}
+        doc_c.source_timestamp = datetime(2026, 5, 13, 12, 0, tzinfo=UTC)
+
+        eid_b, cid_b = uuid4(), uuid4()
+        eid_c, cid_c = uuid4(), uuid4()
+
+        # doc_a raised, so it is absent from successful_results. The surviving
+        # results carry their own document_id (set in process_document).
+        results = [
+            {"document_id": str(doc_b.id), "entity_ids": [eid_b], "chunk_ids": [cid_b]},
+            {"document_id": str(doc_c.id), "entity_ids": [eid_c], "chunk_ids": [cid_c]},
+        ]
+
+        captured = {}
+
+        async def _capture(ep):
+            captured["ep"] = ep
+            return ep
+
+        storage = _make_storage(create_episode=AsyncMock(side_effect=_capture))
+
+        created = await _create_session_episodes(
+            namespace_id=ns,
+            documents=[{}] * 3,
+            staged_docs=[doc_a, doc_b, doc_c],
+            successful_results=results,
+            storage=storage,
+        )
+
+        assert created == 1
+        ep = captured["ep"]
+        # Only the two surviving docs are in the episode (doc_a failed).
+        assert set(ep.source_document_ids) == {doc_b.id, doc_c.id}
+        # doc_c (the tail) is NOT dropped: its entity/chunk are present.
+        assert eid_c in ep.entity_ids
+        assert cid_c in ep.source_chunk_ids
+        # doc_b's entity/chunk are present and not swapped with a neighbor's.
+        assert eid_b in ep.entity_ids
+        assert cid_b in ep.source_chunk_ids
+        assert ep.metadata["message_count"] == 2
 
 
 # ---------------------------------------------------------------------------
