@@ -112,6 +112,10 @@ def test_storage_vector_embedding_dimension_single_underscore(
     ``storage.vector.embedding_dimension``.
     """
     monkeypatch.setenv("KHORA_STORAGE_VECTOR_EMBEDDING_DIMENSION", "768")
+    # Non-1536 dims are rejected on the postgres backend (#925 guard); use a
+    # backend without the Vector(1536) hardcode so the alias plumbing is the
+    # only thing under test.
+    monkeypatch.setenv("KHORA_STORAGE_BACKEND", "surrealdb")
 
     config = KhoraConfig()
     assert config.storage.vector.embedding_dimension == 768
@@ -122,6 +126,10 @@ def test_storage_vector_embedding_dimension_double_underscore_legacy(
 ) -> None:
     """Legacy double-underscore spelling must keep working for vector embed dim."""
     monkeypatch.setenv("KHORA_STORAGE__VECTOR__EMBEDDING_DIMENSION", "1024")
+    # Non-1536 dims are rejected on the postgres backend (#925 guard); use a
+    # backend without the Vector(1536) hardcode so the alias plumbing is the
+    # only thing under test.
+    monkeypatch.setenv("KHORA_STORAGE_BACKEND", "surrealdb")
 
     config = KhoraConfig()
     assert config.storage.vector.embedding_dimension == 1024

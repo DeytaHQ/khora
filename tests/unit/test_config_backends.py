@@ -36,11 +36,11 @@ class TestStorageSettingsBackwardsCompat:
     def test_legacy_pgvector_fields_migrated(self):
         settings = StorageSettings(
             pgvector_url="postgresql://localhost:5432/vectors",
-            embedding_dimension=768,
+            embedding_dimension=1536,
         )
         assert isinstance(settings.vector, PgVectorConfig)
         assert settings.vector.url.get_secret_value() == "postgresql://localhost:5432/vectors"
-        assert settings.vector.embedding_dimension == 768
+        assert settings.vector.embedding_dimension == 1536
 
     def test_new_style_graph_config_takes_precedence(self):
         settings = StorageSettings(
@@ -56,6 +56,59 @@ class TestStorageSettingsBackwardsCompat:
         assert settings.graph is None
         assert isinstance(settings.vector, PgVectorConfig)
         assert settings.vector.url is None
+
+
+@pytest.mark.unit
+class TestPostgresEmbeddingDimensionGuard:
+    """#925 guard: Postgres backend supports only embedding_dimension=1536.
+
+    The pgvector schema hardcodes ``Vector(1536)`` columns, so a non-1536
+    dimension must be rejected at config time (Postgres path only). The
+    full parameterized migration is deferred to a future release.
+    """
+
+    def test_postgres_non_1536_raises(self):
+        with pytest.raises(ValidationError, match="embedding_dimension=1536"):
+            KhoraConfig(
+                storage={
+                    "backend": "postgres",
+                    "vector": {"backend": "pgvector", "embedding_dimension": 1024},
+                }
+            )
+
+    def test_postgres_1536_is_fine(self):
+        config = KhoraConfig(
+            storage={
+                "backend": "postgres",
+                "vector": {"backend": "pgvector", "embedding_dimension": 1536},
+            }
+        )
+        assert config.storage.vector.embedding_dimension == 1536
+
+    def test_postgres_legacy_flat_non_1536_raises(self):
+        with pytest.raises(ValidationError, match="embedding_dimension=1536"):
+            KhoraConfig(storage={"backend": "postgres", "embedding_dimension": 1024})
+
+    def test_sqlite_lance_non_1536_is_fine(self):
+        # sqlite_lance sizes its vector column from config and supports
+        # arbitrary dimensions - the guard must NOT fire here.
+        config = KhoraConfig(
+            storage={
+                "backend": "sqlite_lance",
+                "sqlite_lance": {"backend": "sqlite_lance", "embedding_dimension": 1024},
+            }
+        )
+        assert config.storage.backend == "sqlite_lance"
+
+    def test_surrealdb_non_1536_is_fine(self):
+        # surrealdb sizes its vector column from config too - guard is PG-only.
+        config = KhoraConfig(
+            storage={
+                "backend": "surrealdb",
+                "vector": {"backend": "pgvector", "embedding_dimension": 1024},
+            }
+        )
+        assert config.storage.backend == "surrealdb"
 
 
 @pytest.mark.unit

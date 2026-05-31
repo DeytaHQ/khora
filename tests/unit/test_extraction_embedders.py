@@ -111,7 +111,7 @@ class TestEmbed:
     @pytest.mark.asyncio
     async def test_single_text(self) -> None:
         """embed delegates to embed_batch."""
-        embedder = LiteLLMEmbedder(model="test-model", max_retries=1)
+        embedder = LiteLLMEmbedder(model="test-model", dimension=3, max_retries=1)
         # Use a pre-normalized vector so L2-normalization is a no-op
         expected = [0.0, 0.0, 1.0]
 
@@ -150,7 +150,7 @@ class TestEmbedBatch:
     @pytest.mark.asyncio
     async def test_small_batch(self) -> None:
         """Small batch (no chunking needed) calls API once."""
-        embedder = LiteLLMEmbedder(model="test-model", batch_size=100, max_retries=1)
+        embedder = LiteLLMEmbedder(model="test-model", dimension=2, batch_size=100, max_retries=1)
 
         mock_response = MagicMock()
         # Use pre-normalized vectors so L2-normalization is a no-op
@@ -173,7 +173,7 @@ class TestEmbedBatch:
     @pytest.mark.asyncio
     async def test_caching_integration(self) -> None:
         """Previously cached texts are not re-embedded."""
-        embedder = LiteLLMEmbedder(model="test-model", batch_size=100, max_retries=1)
+        embedder = LiteLLMEmbedder(model="test-model", dimension=2, batch_size=100, max_retries=1)
         # Cached values are already normalized (stored post-normalization)
         embedder._cache_put("cached", [1.0, 0.0])
 
@@ -199,7 +199,7 @@ class TestEmbedBatchInternal:
     @pytest.mark.asyncio
     async def test_sanitizes_empty_inputs(self) -> None:
         """Empty/None inputs are replaced with space placeholder."""
-        embedder = LiteLLMEmbedder(model="test-model", max_retries=1)
+        embedder = LiteLLMEmbedder(model="test-model", dimension=1, max_retries=1)
 
         mock_response = MagicMock()
         mock_response.data = [
@@ -223,7 +223,7 @@ class TestEmbedBatchInternal:
     @pytest.mark.asyncio
     async def test_retry_on_failure(self) -> None:
         """Retries on transient failure."""
-        embedder = LiteLLMEmbedder(model="test-model", max_retries=2)
+        embedder = LiteLLMEmbedder(model="test-model", dimension=1, max_retries=2)
 
         mock_response = MagicMock()
         mock_response.data = [{"embedding": [0.1]}]
@@ -257,11 +257,17 @@ class TestEmbedBatchInternal:
 
 
 class TestDimensionValidation:
-    """Tests for embedding dimension validation (M-2)."""
+    """Tests for embedding dimension validation (#931).
+
+    The embedder now RAISES on a returned-dim mismatch instead of
+    silently overwriting ``self._dimension``. A silent overwrite turned a
+    config error into a downstream store-time crash (e.g. Postgres
+    Vector(1536) columns, #925).
+    """
 
     @pytest.mark.asyncio
-    async def test_matching_dimension_no_warning(self) -> None:
-        """No warning when actual dimension matches configured."""
+    async def test_matching_dimension_returns_fine(self) -> None:
+        """No error when actual dimension matches configured."""
         embedder = LiteLLMEmbedder(model="test-model", dimension=3, max_retries=1)
 
         mock_response = MagicMock()
@@ -271,19 +277,18 @@ class TestDimensionValidation:
         with (
             patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response),
             patch("khora.telemetry.get_collector") as mock_telem,
-            patch("khora.extraction.embedders.litellm.logger") as mock_logger,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
             result = await embedder._embed_batch_internal(["hello"])
 
         assert result == [[0.1, 0.2, 0.3]]
-        assert embedder.dimension == 3
-        assert embedder._dimension_validated is True
-        mock_logger.warning.assert_not_called()
+        assert embedder.dimension == 3  # Unchanged
 
     @pytest.mark.asyncio
-    async def test_mismatched_dimension_warns_and_updates(self) -> None:
-        """Warning logged and dimension updated when mismatch detected."""
+    async def test_mismatched_dimension_raises(self) -> None:
+        """EmbeddingError raised (not silent overwrite) when mismatch detected."""
+        from khora.exceptions import EmbeddingError
+
         embedder = LiteLLMEmbedder(model="test-model", dimension=1536, max_retries=1)
 
         mock_response = MagicMock()
@@ -293,21 +298,23 @@ class TestDimensionValidation:
         with (
             patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response),
             patch("khora.telemetry.get_collector") as mock_telem,
-            patch("khora.extraction.embedders.litellm.logger") as mock_logger,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
-            result = await embedder._embed_batch_internal(["hello"])
+            with pytest.raises(EmbeddingError, match="dimension mismatch"):
+                await embedder._embed_batch_internal(["hello"])
 
-        assert result == [[0.1, 0.2, 0.3]]
-        assert embedder.dimension == 3  # Updated to actual
-        assert embedder._dimension_validated is True
-        mock_logger.warning.assert_called_once()
-        warning_msg = mock_logger.warning.call_args[0][0]
-        assert "dimension mismatch" in warning_msg.lower()
+        # Dimension must NOT be mutated by the failed call
+        assert embedder.dimension == 1536
 
     @pytest.mark.asyncio
-    async def test_dimension_validated_only_once(self) -> None:
-        """Dimension validation only runs on first call."""
+    async def test_mismatch_raises_every_batch_no_oneshot_gate(self) -> None:
+        """The removed one-shot gate no longer suppresses a later mismatch.
+
+        First a matching batch succeeds; a subsequent mismatched batch must
+        still raise rather than being silently accepted.
+        """
+        from khora.exceptions import EmbeddingError
+
         embedder = LiteLLMEmbedder(model="test-model", dimension=3, max_retries=1)
 
         mock_response = MagicMock()
@@ -320,18 +327,17 @@ class TestDimensionValidation:
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
             await embedder._embed_batch_internal(["hello"])
-            assert embedder._dimension_validated is True
 
-            # Second call: change response dimension — should NOT trigger re-validation
+            # Second call: returns a wrong dimension — must still raise.
             mock_response2 = MagicMock()
             mock_response2.data = [{"embedding": [0.1, 0.2]}]  # dim=2
             mock_response2.usage = MagicMock(prompt_tokens=10, total_tokens=10)
 
             with patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response2):
-                await embedder._embed_batch_internal(["world"])
+                with pytest.raises(EmbeddingError, match="dimension mismatch"):
+                    await embedder._embed_batch_internal(["world"])
 
-            # Dimension should still be 3 (not updated to 2)
-            assert embedder.dimension == 3
+        assert embedder.dimension == 3
 
 
 class TestCacheTTL:

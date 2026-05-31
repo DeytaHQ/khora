@@ -247,7 +247,7 @@ class TestB11CacheKeyOptimization:
     @pytest.mark.asyncio
     async def test_embed_batch_uses_precomputed_keys(self) -> None:
         """embed_batch should compute keys once (verified by cache working correctly)."""
-        embedder = LiteLLMEmbedder(model="test-model", max_retries=1)
+        embedder = LiteLLMEmbedder(model="test-model", dimension=2, max_retries=1)
 
         mock_response = MagicMock()
         # Use pre-normalized vector so L2-normalization is a no-op
@@ -330,7 +330,7 @@ class TestB10EmbeddingDeduplication:
     @pytest.mark.asyncio
     async def test_duplicate_texts_single_api_call(self) -> None:
         """Same text appearing multiple times only gets embedded once."""
-        embedder = LiteLLMEmbedder(model="test-model", batch_size=100, max_retries=1)
+        embedder = LiteLLMEmbedder(model="test-model", dimension=2, batch_size=100, max_retries=1)
 
         mock_response = MagicMock()
         # Only ONE embedding returned because dedup reduces to 1 unique text
@@ -358,7 +358,7 @@ class TestB10EmbeddingDeduplication:
     @pytest.mark.asyncio
     async def test_mixed_unique_and_duplicate(self) -> None:
         """Mix of unique and duplicate texts deduplicates correctly."""
-        embedder = LiteLLMEmbedder(model="test-model", batch_size=100, max_retries=1)
+        embedder = LiteLLMEmbedder(model="test-model", dimension=2, batch_size=100, max_retries=1)
 
         mock_response = MagicMock()
         # 2 unique texts → 2 pre-normalized embeddings
@@ -387,7 +387,7 @@ class TestB10EmbeddingDeduplication:
     @pytest.mark.asyncio
     async def test_dedup_with_cache(self) -> None:
         """Deduplication works alongside cache."""
-        embedder = LiteLLMEmbedder(model="test-model", batch_size=100, max_retries=1)
+        embedder = LiteLLMEmbedder(model="test-model", dimension=2, batch_size=100, max_retries=1)
         # Cached value is already normalized
         embedder._cache_put("cached", [1.0, 0.0])
 
@@ -681,7 +681,7 @@ class TestEmbeddingBatchDedup:
     @pytest.mark.asyncio
     async def test_large_batch_with_duplicates(self) -> None:
         """Large batch with duplicates: dedup reduces API calls."""
-        embedder = LiteLLMEmbedder(model="test-model", batch_size=2, max_retries=1, embed_concurrency=2)
+        embedder = LiteLLMEmbedder(model="test-model", dimension=1, batch_size=2, max_retries=1, embed_concurrency=2)
 
         # 4 texts, but only 2 unique after dedup
         texts = ["alpha", "beta", "alpha", "beta"]

@@ -1077,6 +1077,30 @@ class StorageSettings(BaseSettings):
 
         return data
 
+    @model_validator(mode="after")
+    def _guard_postgres_embedding_dimension(self) -> StorageSettings:
+        """Reject non-1536 embedding dimensions on the Postgres backend.
+
+        The Postgres / pgvector schema hardcodes ``Vector(1536)`` columns
+        (#925), so a configured dimension other than 1536 would pass
+        through the embedder (#926) and then crash at store time. Until the
+        parameterized migration lands (tracked in #925 for a future
+        release) we fail fast at config time on the Postgres path only.
+        sqlite_lance and surrealdb size their vector columns from config
+        and support arbitrary dimensions, so this guard does not apply to
+        them.
+        """
+        if self.backend != "postgres":
+            return self
+        pgvector_dim = self.vector.embedding_dimension if isinstance(self.vector, PgVectorConfig) else 1536
+        if pgvector_dim != 1536 or self.embedding_dimension != 1536:
+            raise ValueError(
+                "Postgres backend currently supports only embedding_dimension=1536; "
+                "arbitrary dimensions are tracked in #925 for a future release. "
+                "Use sqlite_lance for other dimensions, or set embedding_dimension=1536."
+            )
+        return self
+
 
 class LLMSettings(BaseSettings):
     """LLM configuration settings.
