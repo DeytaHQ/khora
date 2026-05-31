@@ -146,6 +146,29 @@ class RelationalBackendProtocol(Protocol):
         ...
 
     @abstractmethod
+    async def claim_orphaned_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        pending_before: datetime,
+        processing_before: datetime,
+        limit: int = 100,
+    ) -> list[Document]:
+        """Atomically claim stale orphaned documents for crash recovery.
+
+        Selects documents that are either ``pending`` and older than
+        ``pending_before`` OR ``processing`` and older than
+        ``processing_before``, flips the claimed rows to ``processing`` (with a
+        fresh ``updated_at``), and returns them. On PostgreSQL the claim is
+        serialized with ``FOR UPDATE SKIP LOCKED`` so concurrent recovery loops
+        never claim the same document. SQLite (single-writer) and SurrealDB
+        perform the same claim without row locking.
+
+        Unlike :meth:`list_documents` (a pure read), this method mutates state.
+        """
+        ...
+
+    @abstractmethod
     async def update_document(self, document: Document) -> Document:
         """Update a document."""
         ...

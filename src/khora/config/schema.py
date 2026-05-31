@@ -1214,6 +1214,12 @@ class PipelineSettings(BaseSettings):
         description="Minimum age (minutes) a PENDING document must have before it is eligible for "
         "crash-recovery processing. Avoids racing with in-flight writes.",
     )
+    pending_processor_orphan_stale_after_seconds: int = Field(
+        default=900,
+        description="Minimum age (seconds) a PROCESSING document must have before it is reclaimed as an "
+        "orphan (a worker that crashed mid-process). Default 900s (15 min) is generous to avoid "
+        "preempting a slow-but-alive worker.",
+    )
 
     # Deprecated aliases — kept for backwards compat with existing env vars.
     pending_recovery_enabled: bool | None = Field(

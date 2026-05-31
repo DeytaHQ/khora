@@ -99,6 +99,11 @@ class Document:
     # Maximum length for external_id (matches DB column String(512))
     _EXTERNAL_ID_MAX_LEN: int = field(default=512, init=False, repr=False, compare=False)
 
+    # Transient: prior status of a doc reclaimed by claim_orphaned_documents,
+    # set by the storage layer so the recovery loop can label the
+    # khora.documents.orphans_reclaimed_total metric. Not persisted.
+    orphan_prior_status: str | None = field(default=None, init=False, repr=False, compare=False)
+
     def __post_init__(self) -> None:
         if self.external_id is not None:
             if not self.external_id.strip():

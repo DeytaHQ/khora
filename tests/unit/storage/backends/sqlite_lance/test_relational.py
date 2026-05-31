@@ -231,6 +231,56 @@ async def test_update_document(adapter, namespace):
     assert fetched.status == DocumentStatus.COMPLETED
 
 
+async def test_claim_orphaned_documents_claims_pending_and_processing(adapter, namespace):
+    from datetime import UTC, timedelta
+
+    now = datetime.now(UTC)
+
+    pending = _make_document(namespace.id, checksum="p", title="P")
+    processing = _make_document(namespace.id, checksum="proc", title="PROC")
+    processing.status = DocumentStatus.PROCESSING
+    completed = _make_document(namespace.id, checksum="c", title="C")
+    completed.status = DocumentStatus.COMPLETED
+    for d in (pending, processing, completed):
+        await adapter.create_document(d)
+
+    # Cutoffs in the future: both pending + processing match; completed never matches.
+    claimed = await adapter.claim_orphaned_documents(
+        namespace.id,
+        pending_before=now + timedelta(hours=1),
+        processing_before=now + timedelta(hours=1),
+        limit=100,
+    )
+    titles = {c.title for c in claimed}
+    assert titles == {"P", "PROC"}
+    # All claimed docs are flipped to PROCESSING and carry their prior status.
+    for c in claimed:
+        assert c.status == DocumentStatus.PROCESSING
+    prior = {c.title: c.orphan_prior_status for c in claimed}
+    assert prior == {"P": "pending", "PROC": "processing"}
+
+    # The completed doc was never touched.
+    fetched = await adapter.get_document(completed.id, namespace_id=namespace.id)
+    assert fetched.status == DocumentStatus.COMPLETED
+
+
+async def test_claim_orphaned_documents_respects_cutoffs(adapter, namespace):
+    from datetime import UTC, timedelta
+
+    now = datetime.now(UTC)
+    fresh = _make_document(namespace.id, checksum="fresh", title="FRESH")
+    await adapter.create_document(fresh)
+
+    # Cutoffs in the past: a freshly-created doc is too new to be reclaimed.
+    claimed = await adapter.claim_orphaned_documents(
+        namespace.id,
+        pending_before=now - timedelta(hours=1),
+        processing_before=now - timedelta(hours=1),
+        limit=100,
+    )
+    assert claimed == []
+
+
 async def test_delete_document(adapter, namespace):
     doc = _make_document(namespace.id)
     await adapter.create_document(doc)

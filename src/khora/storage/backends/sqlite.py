@@ -448,6 +448,46 @@ class SQLiteRelationalBackend:
         rows = await cursor.fetchall()
         return [self._row_to_document(r) for r in rows]
 
+    async def claim_orphaned_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        pending_before: datetime,
+        processing_before: datetime,
+        limit: int = 100,
+    ) -> list[Document]:
+        """Claim stale orphaned documents (no row locking - SQLite is single-writer)."""
+        ns = str(namespace_id)
+        cursor = await self._conn.execute(
+            "SELECT * FROM documents WHERE namespace_id = ? AND ("
+            "(status = ? AND updated_at < ?) OR (status = ? AND updated_at < ?)"
+            ") ORDER BY updated_at LIMIT ?",
+            (
+                ns,
+                DocumentStatus.PENDING.value,
+                pending_before.isoformat(),
+                DocumentStatus.PROCESSING.value,
+                processing_before.isoformat(),
+                limit,
+            ),
+        )
+        rows = await cursor.fetchall()
+        docs = [self._row_to_document(r) for r in rows]
+        if not docs:
+            return []
+        prior_status = {d.id: (d.status.value if isinstance(d.status, DocumentStatus) else d.status) for d in docs}
+        now = _now_iso()
+        placeholders = ",".join("?" for _ in docs)
+        await self._conn.execute(
+            f"UPDATE documents SET status = ?, updated_at = ? WHERE id IN ({placeholders})",  # noqa: S608
+            [DocumentStatus.PROCESSING.value, now, *[str(d.id) for d in docs]],
+        )
+        await self._conn.commit()
+        for d in docs:
+            d.orphan_prior_status = prior_status[d.id]
+            d.status = DocumentStatus.PROCESSING
+        return docs
+
     async def update_document(self, document: Document) -> Document:
         now = _now_iso()
         status = document.status.value if isinstance(document.status, DocumentStatus) else document.status
