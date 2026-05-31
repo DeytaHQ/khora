@@ -2,17 +2,16 @@
 
 The dream-phase orchestrator (#649 / #651) checkpoints per-namespace run
 state into ``khora_dream_runs`` so a crashed APPLY pass can be resumed
-at the last committed op-seq. The migration is Postgres-only via the
-same dialect gate as 029; on SQLite-backed sqlite_lance stacks the
-embedded path mirrors state to a ``dream_runs.jsonl`` file sink and
-the migration must be a clean no-op.
+at the last committed op-seq. Since #896 the table is created on BOTH
+dialects (the DDL is dialect-portable) so ``dream_history`` /
+``dream_status`` work on the embedded sqlite_lance stack.
 
 Tests pin:
 
 1. Fresh PG: ``alembic upgrade head`` creates the table, its 16 columns
    with correct types, and the ``(namespace_id, started_at DESC)``
    composite index.
-2. SQLite: upgrading head does NOT create the table (dialect gate).
+2. SQLite: upgrading head creates the table too (#896).
 3. Postgres downgrade -1 reverses cleanly (index dropped first, then
    table).
 4. Skip-ahead: when the DB advertises an unknown future revision,
@@ -286,8 +285,8 @@ class TestMigration032OnPostgres:
 
 
 class TestMigration032OnSqlite:
-    def test_migration_032_idempotent_on_sqlite(self, sqlite_url: str) -> None:
-        """Dialect gate: SQLite path runs the chain without creating the table."""
+    def test_migration_032_creates_table_on_sqlite(self, sqlite_url: str) -> None:
+        """#896: the SQLite path now creates ``khora_dream_runs`` too."""
         cfg = _make_config(sqlite_url)
         command.upgrade(cfg, "head")
 
@@ -299,12 +298,21 @@ class TestMigration032OnSqlite:
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
                     assert result.scalar() == "040_chunks_last_accessed_at"
 
-                    # khora_dream_runs MUST NOT exist on SQLite — embedded path
-                    # mirrors checkpoint state via a JSONL file sink.
+                    # khora_dream_runs exists on SQLite (#896) so dream_history /
+                    # dream_status work on the embedded sqlite_lance stack.
                     result = await conn.execute(
                         sa.text("SELECT name FROM sqlite_master WHERE type='table' AND name='khora_dream_runs'")
                     )
-                    assert result.fetchone() is None
+                    assert result.fetchone() is not None
+
+                    # The composite index is created on SQLite too.
+                    result = await conn.execute(
+                        sa.text(
+                            "SELECT name FROM sqlite_master WHERE type='index' "
+                            "AND name='ix_khora_dream_runs_namespace_started'"
+                        )
+                    )
+                    assert result.fetchone() is not None
             finally:
                 await engine.dispose()
 
