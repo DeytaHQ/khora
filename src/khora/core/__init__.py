@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .diagnostics import Degradation, ErrorRecord, SkipReason
 from .models.document import Chunk, Document
 from .models.entity import Entity, Episode, Relationship
 from .models.event import EventType, MemoryEvent
@@ -24,4 +25,8 @@ __all__ = [
     "EventType",
     # Recall helpers
     "compute_abstention_signals",
+    # Failure-observability TypedDicts (ADR-001)
+    "Degradation",
+    "ErrorRecord",
+    "SkipReason",
 ]
