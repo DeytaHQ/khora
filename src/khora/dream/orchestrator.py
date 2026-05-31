@@ -270,28 +270,27 @@ class DreamOrchestrator:
         try:
             async with coordinator.transaction() as txn:
                 session = txn.session
-                if not _is_postgres(session):
-                    return None
                 row = (
                     await session.execute(
                         text(
                             "SELECT run_id, namespace_id, mode, started_at, finished_at "
                             "FROM khora_dream_runs WHERE run_id = :rid"
                         ),
-                        {"rid": run_id},
+                        {"rid": _uuid_param(session, run_id)},
                     )
                 ).first()
         except RuntimeError:
             return None
         if row is None:
             return None
-        finished_at = row.finished_at
-        duration_ms = (finished_at - row.started_at).total_seconds() * 1000.0 if finished_at is not None else None
+        started_at = _coerce_dt(row.started_at)
+        finished_at = _coerce_dt(row.finished_at)
+        duration_ms = (finished_at - started_at).total_seconds() * 1000.0 if finished_at is not None else None
         return DreamRunInfo(
-            run_id=row.run_id,
-            namespace_id=row.namespace_id,
+            run_id=_coerce_uuid(row.run_id),
+            namespace_id=_coerce_uuid(row.namespace_id),
             mode=row.mode,
-            started_at=row.started_at,
+            started_at=started_at,
             finished_at=finished_at,
             duration_ms=duration_ms,
         )
@@ -302,8 +301,6 @@ class DreamOrchestrator:
         try:
             async with coordinator.transaction() as txn:
                 session = txn.session
-                if not _is_postgres(session):
-                    return []
                 rows = (
                     await session.execute(
                         text(
@@ -312,21 +309,22 @@ class DreamOrchestrator:
                             "WHERE namespace_id = :ns "
                             "ORDER BY started_at DESC LIMIT :lim"
                         ),
-                        {"ns": namespace_id, "lim": int(limit)},
+                        {"ns": _uuid_param(session, namespace_id), "lim": int(limit)},
                     )
                 ).all()
         except RuntimeError:
             return []
         out: list[DreamRunInfo] = []
         for row in rows:
-            finished_at = row.finished_at
-            duration_ms = (finished_at - row.started_at).total_seconds() * 1000.0 if finished_at is not None else None
+            started_at = _coerce_dt(row.started_at)
+            finished_at = _coerce_dt(row.finished_at)
+            duration_ms = (finished_at - started_at).total_seconds() * 1000.0 if finished_at is not None else None
             out.append(
                 DreamRunInfo(
-                    run_id=row.run_id,
-                    namespace_id=row.namespace_id,
+                    run_id=_coerce_uuid(row.run_id),
+                    namespace_id=_coerce_uuid(row.namespace_id),
                     mode=row.mode,
-                    started_at=row.started_at,
+                    started_at=started_at,
                     finished_at=finished_at,
                     duration_ms=duration_ms,
                 )
@@ -650,8 +648,6 @@ class DreamOrchestrator:
         try:
             async with coordinator.transaction() as txn:
                 session = txn.session
-                if not _is_postgres(session):
-                    return
                 now = datetime.now(UTC)
                 await session.execute(
                     text(
@@ -662,12 +658,12 @@ class DreamOrchestrator:
                         "ON CONFLICT (run_id) DO UPDATE SET heartbeat_at = :ts"
                     ),
                     {
-                        "rid": run_id,
-                        "ns": namespace_id,
+                        "rid": _uuid_param(session, run_id),
+                        "ns": _uuid_param(session, namespace_id),
                         "trg": "manual",
                         "mode": mode,
                         "state": "planning",
-                        "ts": now,
+                        "ts": _ts_param(session, now),
                     },
                 )
         except RuntimeError:
@@ -961,6 +957,47 @@ def _is_postgres(session: Any) -> bool:
     return getattr(getattr(session, "bind", None), "dialect", None) is not None and (
         session.bind.dialect.name == "postgresql"
     )
+
+
+def _uuid_param(session: Any, value: UUID) -> Any:
+    """Bind a UUID for a raw ``text()`` query, per-dialect (#896).
+
+    Postgres binds ``uuid.UUID`` natively. SQLite's DBAPI raises
+    ``type 'UUID' is not supported`` for a raw bind (the column type's
+    converter isn't applied to ``text()`` params - same surface as #875),
+    so bind the string form. ``khora_dream_runs`` is written and read
+    exclusively through these helpers, so the stored form round-trips.
+    """
+    return value if _is_postgres(session) else str(value)
+
+
+def _ts_param(session: Any, value: datetime) -> Any:
+    """Bind a ``datetime`` for a raw ``text()`` query, per-dialect (#896).
+
+    Postgres binds ``datetime`` natively. Binding a bare ``datetime`` into
+    a SQLite ``text()`` param trips the deprecated default datetime adapter
+    (removed in a future Python), so bind the ISO-8601 string; ``_coerce_dt``
+    reads it back into a ``datetime``.
+    """
+    return value if _is_postgres(session) else value.isoformat()
+
+
+def _coerce_uuid(value: Any) -> UUID:
+    """Coerce a raw ``text()`` result column back to ``UUID`` (#896).
+
+    Postgres returns ``uuid.UUID``; SQLite returns the stored TEXT.
+    """
+    return value if isinstance(value, UUID) else UUID(str(value))
+
+
+def _coerce_dt(value: Any) -> datetime | None:
+    """Coerce a raw ``text()`` timestamp column back to ``datetime`` (#896).
+
+    Postgres returns ``datetime``; SQLite returns an ISO-8601 TEXT value.
+    """
+    if value is None or isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value))
 
 
 def _session_dialect(session: Any) -> str | None:

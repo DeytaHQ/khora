@@ -65,6 +65,8 @@ class TestSqliteMigrations:
                         # Chronicle engine tables (024)
                         "chronicle_events",
                         "memory_facts",
+                        # Dream-run checkpoint table, now created on SQLite too (032, #896)
+                        "khora_dream_runs",
                         # FTS5 virtual table from migration 002
                         "chunks_fts",
                         # Alembic version table
