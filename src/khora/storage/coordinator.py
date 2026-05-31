@@ -1177,10 +1177,22 @@ class StorageCoordinator:
         return entity
 
     async def delete_entity(self, entity_id: UUID, *, namespace_id: UUID) -> bool:
-        """Delete an entity, scoped to ``namespace_id`` (IDOR family)."""
+        """Delete an entity from both graph and vector stores, scoped to ``namespace_id`` (IDOR family).
+
+        On a split stack (e.g. pg + neo4j) entities are dual-written to both the
+        graph node and the pgvector ``entities`` row (#928). Deleting only the
+        graph node left the vector row as an orphan that kept surfacing via
+        similarity search. Mirror the forget-cascade pattern: delete the graph
+        node, then the vector mirror. The vector delete is skipped on a unified
+        backend (SurrealDB), where the graph adapter owns the single row.
+        """
+        deleted = False
         if self._graph:
-            return await self._graph.delete_entity(entity_id, namespace_id=namespace_id)
-        return False
+            deleted = await self._graph.delete_entity(entity_id, namespace_id=namespace_id)
+        if self._vector is not None and not self._is_unified_backend and hasattr(self._vector, "delete_entities_batch"):
+            count = await self._vector.delete_entities_batch([entity_id], namespace_id=namespace_id)
+            deleted = deleted or count > 0
+        return deleted
 
     async def list_entities(
         self,
