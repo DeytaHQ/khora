@@ -31,6 +31,7 @@ from khora.core.models import (
 )
 from khora.core.models.document import DocumentSource
 from khora.core.models.recall import DocumentProjection
+from khora.exceptions import GraphMirrorFailedAfterPGCommitError
 from khora.storage.backends.base import PaginatedResult
 from khora.telemetry import get_collector, metric_counter, trace_span
 
@@ -536,11 +537,15 @@ class StorageCoordinator:
         3. The document is marked ``COMPLETED`` inside the PG transaction
            (chunk + entity counts; relationship_count left at 0 - see #884
            follow-up). If the PG tx fails, the rollback also reverts the
-           status stamp. If the post-tx graph phase fails, the document row
-           remains ``COMPLETED`` (PG data is durable and consistent) and
-           the exception is re-raised unwrapped after a logged warning
-           (#887). A future PR will introduce a partial-state status for
-           the graph-pending case.
+           status stamp. If the post-tx graph phase fails (#884), the
+           document row remains ``COMPLETED`` (PG data is durable and
+           consistent), ``khora.storage.replace_document.partial_failure``
+           is incremented, and the original exception is wrapped in
+           ``GraphMirrorFailedAfterPGCommitError`` so the caller can
+           record the divergence on its user-facing result instead of
+           presenting the failure as a full rollback. A future PR will
+           introduce a partial-state status + reconciler for the
+           graph-pending case.
 
         Args:
             namespace_id: Namespace owning the document.
@@ -681,52 +686,86 @@ class StorageCoordinator:
             #    swaps old->new on survivors before upsert would append
             #    new_doc_id a second time.  Net-new entities/relationships
             #    are those with keys absent from the old extraction.
-            entities_retired = 0
-            if entity_retirement_rows:
-                entities_retired = await self._graph.retire_orphaned_entities_batch(  # type: ignore[unresolved-attribute]
-                    entity_retirement_rows
-                )
+            #
+            #    Fix for #884: this phase runs OUTSIDE the PG transaction
+            #    that just committed at line 670. Any exception here leaves
+            #    PG durable (chunks + COMPLETED stamp) but the graph in a
+            #    partial-mirror state. We catch, increment a partial-failure
+            #    counter so operators can monitor the rate, and re-raise
+            #    wrapped in GraphMirrorFailedAfterPGCommitError so the
+            #    caller (engine layer) can record the divergence on the
+            #    user-facing RememberResult instead of presenting the
+            #    failure as if PG also rolled back.
+            try:
+                entities_retired = 0
+                if entity_retirement_rows:
+                    entities_retired = await self._graph.retire_orphaned_entities_batch(  # type: ignore[unresolved-attribute]
+                        entity_retirement_rows
+                    )
 
-            relationships_retired = 0
-            if relationship_retirement_rows:
-                relationships_retired = await self._graph.retire_orphaned_relationships_batch(  # type: ignore[unresolved-attribute]
-                    relationship_retirement_rows, namespace_id=namespace_id
-                )
+                relationships_retired = 0
+                if relationship_retirement_rows:
+                    relationships_retired = await self._graph.retire_orphaned_relationships_batch(  # type: ignore[unresolved-attribute]
+                        relationship_retirement_rows, namespace_id=namespace_id
+                    )
 
-            if entity_survivor_remap_rows or relationship_survivor_remap_rows:
-                await self._graph.remap_source_document_ids_batch(  # type: ignore[unresolved-attribute]
-                    entity_survivors=entity_survivor_remap_rows,
-                    relationship_survivors=relationship_survivor_remap_rows,
+                if entity_survivor_remap_rows or relationship_survivor_remap_rows:
+                    await self._graph.remap_source_document_ids_batch(  # type: ignore[unresolved-attribute]
+                        entity_survivors=entity_survivor_remap_rows,
+                        relationship_survivors=relationship_survivor_remap_rows,
+                        namespace_id=namespace_id,
+                    )
+
+                net_new_entities = [e for e in new_entities if (e.name, e.entity_type) not in entity_survivor_keys]
+                entities_created = 0
+                entities_updated = len(entity_survivor_remap_rows)
+                if net_new_entities:
+                    upsert_results = await self.upsert_entities_batch(namespace_id, net_new_entities)
+                    entities_created = sum(1 for _, is_new in upsert_results if is_new)
+                    entities_updated += sum(1 for _, is_new in upsert_results if not is_new)
+
+                old_relationship_keys = {
+                    (
+                        UUID(rec["source_entity_id"]),
+                        UUID(rec["target_entity_id"]),
+                        rec["relationship_type"],
+                    )
+                    for rec in old_relationship_records
+                }
+                net_new_relationships = [
+                    r
+                    for r in new_relationships
+                    if (r.source_entity_id, r.target_entity_id, _sanitize_neo4j_label(r.relationship_type))
+                    not in old_relationship_keys
+                ]
+                relationships_created = 0
+                if net_new_relationships:
+                    relationships_created = await self.create_relationships_batch(net_new_relationships)
+                # Survivor relationships are accounted for implicitly via remap;
+                # their id is preserved from the old graph state.
+            except Exception as graph_exc:
+                # PG already committed (chunks + COMPLETED stamp are durable).
+                # Increment the partial-failure counter so operators can
+                # monitor graph-mirror dropouts, then re-raise wrapped so
+                # the caller can distinguish "graph mirror partial" from
+                # a full-rollback failure. No namespace_id label - cardinality
+                # rule (see CLAUDE.md).
+                metric_counter(
+                    "khora.storage.replace_document.partial_failure",
+                    unit="1",
+                    description=(
+                        "PG transaction committed (chunks + COMPLETED) but "
+                        "the post-commit graph-mirror phase of "
+                        "replace_document_extraction raised. The graph is "
+                        "now in a partial-mirror state; the next "
+                        "successful replace heals via MERGE / retire."
+                    ),
+                ).add(1)
+                raise GraphMirrorFailedAfterPGCommitError(
+                    document_id=new_document.id,
                     namespace_id=namespace_id,
-                )
-
-            net_new_entities = [e for e in new_entities if (e.name, e.entity_type) not in entity_survivor_keys]
-            entities_created = 0
-            entities_updated = len(entity_survivor_remap_rows)
-            if net_new_entities:
-                upsert_results = await self.upsert_entities_batch(namespace_id, net_new_entities)
-                entities_created = sum(1 for _, is_new in upsert_results if is_new)
-                entities_updated += sum(1 for _, is_new in upsert_results if not is_new)
-
-            old_relationship_keys = {
-                (
-                    UUID(rec["source_entity_id"]),
-                    UUID(rec["target_entity_id"]),
-                    rec["relationship_type"],
-                )
-                for rec in old_relationship_records
-            }
-            net_new_relationships = [
-                r
-                for r in new_relationships
-                if (r.source_entity_id, r.target_entity_id, _sanitize_neo4j_label(r.relationship_type))
-                not in old_relationship_keys
-            ]
-            relationships_created = 0
-            if net_new_relationships:
-                relationships_created = await self.create_relationships_batch(net_new_relationships)
-            # Survivor relationships are accounted for implicitly via remap;
-            # their id is preserved from the old graph state.
+                    original=graph_exc,
+                ) from graph_exc
 
             return ReplaceResult(
                 document_id=new_document.id,
@@ -752,13 +791,15 @@ class StorageCoordinator:
             #   - Graph step failed AFTER PG committed -> chunks, entities
             #     and the COMPLETED status stamp are all durable in PG.
             #     Marking the doc FAILED would diverge status from the
-            #     fully-written data (#887 reproducer). A follow-up PR
-            #     (#884) will introduce a partial-state status for this
-            #     case; until then COMPLETED + a logged warning is the
-            #     least-wrong observable state.
+            #     fully-written data (#887 reproducer). The graph-fail-
+            #     after-pg-commit case is now wrapped in
+            #     GraphMirrorFailedAfterPGCommitError inside the inner
+            #     try/except above so the caller can attach a degradation
+            #     to its user-facing result (#884).
             #
-            # The exception is re-raised unwrapped so callers see the
-            # original error.
+            # The exception is re-raised unwrapped (or wrapped, when it
+            # comes from the inner graph-phase try/except) so callers see
+            # the original error or a typed signal.
             logger.warning(
                 "replace_document_extraction failed for document {} in namespace {}; "
                 "re-raising without restamping document status (#887)",
