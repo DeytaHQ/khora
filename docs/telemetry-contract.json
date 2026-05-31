@@ -1011,6 +1011,14 @@
       "description": "Issues #901, #906. Chronicle retrieval channel degradations recorded under ADR-001 (silent-failure observability). Incremented once per channel-failure or silent-fallback site in chronicle.recall(). The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.chronicle.reconcile.failures_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "chronicle",
+      "description": "Issue #892. MemoryCompressor.reconcile_fact() calls where the contradiction-check LLM call raised a transient error (rate limit, timeout, connection error, JSON parse error). The fact is skipped (NOT added) to prevent silent contradiction accumulation - previously the broad except Exception silently fell back to ADD on every LLM error, breaking fact supersession integrity. NO namespace_id label - cardinality rule."
+    },
+    {
       "name": "khora.vectorcypher.abstention_signal",
       "type": "counter",
       "stability": "public",

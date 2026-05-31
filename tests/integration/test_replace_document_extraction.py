@@ -609,11 +609,14 @@ class TestReplaceViaRememberIntegration:
         chunks_after = await kb.storage.get_chunks_by_document(v1.document_id, namespace_id=namespace_id)
         assert len(chunks_after) == len(chunks_before)
 
-        # Document status is FAILED (coordinator's error path marks the row
-        # on exception).
-        failed = await kb.get_document(v1.document_id)
-        assert failed is not None
-        assert failed.status == DocumentStatus.FAILED
+        # Document status: per #887, the coordinator no longer issues an
+        # out-of-band mark_failed write after a rolled-back PG tx.  The
+        # rolled-back transaction also reverts the in-tx status stamp, so
+        # the row keeps its prior (v1) COMPLETED status.  The exception
+        # still propagates to the caller.
+        post_rollback = await kb.get_document(v1.document_id)
+        assert post_rollback is not None
+        assert post_rollback.status != DocumentStatus.FAILED
 
         # Graph: alice must not be retired. No :EntityVersion snapshot,
         # valid_until still NULL on the current row. Retirement runs
@@ -626,17 +629,19 @@ class TestReplaceViaRememberIntegration:
         assert alice_row["valid_until"] is None
 
     # ------------------------------------------------------------------
-    # 5. Graph failure marks FAILED and the next replace self-heals
+    # 5. Graph failure leaves the doc COMPLETED (#887); next replace works
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_graph_failure_marks_failed_then_heals(
+    async def test_graph_failure_keeps_completed_then_next_replace_succeeds(
         self,
         kb: Khora,
         namespace_id: UUID,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Inject a retire failure, observe FAILED, then let a retry succeed and heal to COMPLETED."""
+        """Inject a retire failure - per #887 the doc stays COMPLETED (PG data
+        is durable); a follow-up replace runs cleanly to a fresh COMPLETED.
+        """
         ext = f"heal-{uuid4().hex[:8]}"
         doomed = f"doomed-{uuid4().hex[:6]}"
 
@@ -679,12 +684,15 @@ class TestReplaceViaRememberIntegration:
                 external_id=ext,
             )
 
-        failed = await kb.get_document(v1.document_id)
-        assert failed is not None
-        assert failed.status == DocumentStatus.FAILED
+        # #887: PG tx committed (chunks + status stamp persisted), so the
+        # document stays COMPLETED even though the graph-side retire raised.
+        post_graph_fail = await kb.get_document(v1.document_id)
+        assert post_graph_fail is not None
+        assert post_graph_fail.status == DocumentStatus.COMPLETED
+        assert post_graph_fail.error_message is None
 
-        # v3 retirement succeeds (second call delegates to original) →
-        # document self-heals back to COMPLETED.
+        # v3 retirement succeeds (second call delegates to original) - the
+        # follow-up replace runs cleanly and leaves the row COMPLETED.
         plan_extraction(
             "heal-v3",
             entities=[],
@@ -700,9 +708,6 @@ class TestReplaceViaRememberIntegration:
         healed = await kb.get_document(v1.document_id)
         assert healed is not None
         assert healed.status == DocumentStatus.COMPLETED
-        # mark_completed() must also null out the stale error_message from
-        # the prior FAILED state; detect regressions where healing leaves
-        # the old message behind.
         assert healed.error_message is None
 
     # ------------------------------------------------------------------

@@ -8,6 +8,7 @@
 //! - `resolve_entities_enhanced` — Jaro-Winkler + token overlap + per-type thresholds
 
 use hashbrown::HashMap;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use strsim::{jaro_winkler, normalized_levenshtein};
@@ -149,7 +150,36 @@ pub fn resolve_entities_enhanced(
     type_thresholds_keys: Vec<String>,
     type_thresholds_vals: Vec<f64>,
     default_threshold: f64,
-) -> Vec<Option<(usize, f64, String)>> {
+) -> PyResult<Vec<Option<(usize, f64, String)>>> {
+    if new_names.len() != new_types.len() {
+        return Err(PyValueError::new_err(format!(
+            "new_names length {} does not match new_types length {}",
+            new_names.len(),
+            new_types.len()
+        )));
+    }
+    if existing_aliases.len() != existing_names.len() {
+        return Err(PyValueError::new_err(format!(
+            "existing_aliases length {} does not match existing_names length {}",
+            existing_aliases.len(),
+            existing_names.len()
+        )));
+    }
+    if existing_types.len() != existing_names.len() {
+        return Err(PyValueError::new_err(format!(
+            "existing_types length {} does not match existing_names length {}",
+            existing_types.len(),
+            existing_names.len()
+        )));
+    }
+    if type_thresholds_keys.len() != type_thresholds_vals.len() {
+        return Err(PyValueError::new_err(format!(
+            "type_thresholds_keys length {} does not match type_thresholds_vals length {}",
+            type_thresholds_keys.len(),
+            type_thresholds_vals.len()
+        )));
+    }
+
     // Build per-type threshold map
     let type_thresholds: HashMap<String, f64> = type_thresholds_keys
         .into_iter()
@@ -181,7 +211,7 @@ pub fn resolve_entities_enhanced(
         }
     }
 
-    py.detach(|| {
+    Ok(py.detach(|| {
         new_names
             .par_iter()
             .zip(new_types.par_iter())
@@ -230,7 +260,7 @@ pub fn resolve_entities_enhanced(
                 best_idx.map(|idx| (idx, best_score, "fuzzy".to_string()))
             })
             .collect()
-    })
+    }))
 }
 
 #[cfg(test)]

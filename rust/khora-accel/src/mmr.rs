@@ -5,12 +5,13 @@
 //! Embeddings are assumed to be pre-normalized so dot product = cosine sim.
 
 use numpy::PyReadonlyArray2;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 /// Greedy MMR diversity selection.
 ///
 /// Args:
-///   embeddings: (N, D) matrix — one row per candidate, pre-normalized.
+///   embeddings: (N, D) matrix - one row per candidate, pre-normalized.
 ///   scores: relevance score per candidate (length N).
 ///   lambda_param: tradeoff (0 = pure diversity, 1 = pure relevance).
 ///   k: number of items to select.
@@ -25,11 +26,18 @@ pub fn mmr_diversity_select(
     scores: Vec<f32>,
     lambda_param: f32,
     k: usize,
-) -> Vec<usize> {
+) -> PyResult<Vec<usize>> {
     let e_array = embeddings.as_array();
+    if scores.len() != e_array.nrows() {
+        return Err(PyValueError::new_err(format!(
+            "scores length {} does not match embeddings rows {}",
+            scores.len(),
+            e_array.nrows()
+        )));
+    }
     let e_owned = e_array.to_owned();
 
-    py.detach(|| {
+    Ok(py.detach(|| {
         let n = e_owned.nrows();
         if n == 0 || k == 0 {
             return Vec::new();
@@ -116,7 +124,7 @@ pub fn mmr_diversity_select(
         }
 
         selected
-    })
+    }))
 }
 
 /// Fast f32 dot product.  Compiler auto-vectorises this on x86-64 with SSE/AVX.

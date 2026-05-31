@@ -195,10 +195,12 @@ class TestReplaceDocumentExtractionIntegration:
         assert knows[0].valid_until is not None
 
     @pytest.mark.asyncio
-    async def test_graph_failure_marks_document_failed_then_heals(
+    async def test_graph_failure_keeps_document_completed_then_next_replace_succeeds(
         self, coord: StorageCoordinator, namespace_id, monkeypatch
     ) -> None:
-        """Graph-side failure → FAILED; next successful replace → COMPLETED (self-heal)."""
+        """Graph-side failure -> doc stays COMPLETED (PG data is durable, #887);
+        next successful replace overwrites cleanly.
+        """
         old_doc = Document(
             namespace_id=namespace_id,
             content="seed",
@@ -245,7 +247,10 @@ class TestReplaceDocumentExtractionIntegration:
             flaky_retire,
         )
 
-        # First replace fails; document lands in FAILED
+        # First replace: PG tx commits (chunks + status stamp persisted), then
+        # graph retire raises.  Per #887, the document row remains COMPLETED -
+        # PG data is durable, so marking FAILED would diverge status from the
+        # fully-written data.  The exception still propagates.
         with pytest.raises(RuntimeError, match="injected graph failure"):
             await coord.replace_document_extraction(
                 namespace_id=namespace_id,
@@ -256,12 +261,13 @@ class TestReplaceDocumentExtractionIntegration:
                 new_relationships=[],
             )
 
-        failed = await coord.get_document(new_doc.id)
-        assert failed is not None
-        assert failed.status == DocumentStatus.FAILED
-        assert failed.error_message == "injected graph failure"
+        after_graph_fail = await coord.get_document(new_doc.id)
+        assert after_graph_fail is not None
+        assert after_graph_fail.status == DocumentStatus.COMPLETED
+        assert after_graph_fail.error_message is None
 
-        # Second replace (retire will succeed this time) heals to COMPLETED
+        # Second replace (retire will succeed this time) - document stays
+        # COMPLETED with the fresh extraction footprint.
         new_doc2 = Document(
             id=new_doc.id,
             namespace_id=namespace_id,
