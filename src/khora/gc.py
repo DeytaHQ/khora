@@ -7,7 +7,7 @@ Adapters and downstream services that want session-scoped retention call
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -46,6 +46,12 @@ async def expire_sessions(
         Count of sessions expired (each may have spanned multiple documents).
     """
     storage = kb.storage
+
+    # Callers may pass a naive datetime (the docs show ``datetime.utcnow()``).
+    # DB timestamps are tz-aware UTC, so normalize before any comparison to
+    # avoid ``TypeError: can't compare offset-naive and offset-aware``.
+    if before.tzinfo is None:
+        before = before.replace(tzinfo=UTC)
 
     with trace_span(
         "khora.gc.expire_sessions",
