@@ -24,6 +24,14 @@ store exposes the list + delete + source-strip primitives as the authoritative
 store, compute the orphan/survivor split there, then opportunistically mirror
 the deletes to the other store (e.g. Neo4j nodes alongside pgvector rows) so
 the graph stays consistent.
+
+Selecting the candidate set: when the primary store exposes a
+source-document-scoped lookup (``list_entities_by_source_document`` /
+``list_relationships_by_source_document`` on pgvector and Neo4j) we prefer it -
+it returns exactly the records that reference the forgotten document. Backends
+without that lookup fall back to a bounded full-namespace scan + Python filter;
+if that scan hits ``_SCAN_LIMIT`` we emit a ``Degradation`` so a possible
+un-cleaned-orphan tail is never a silent miss.
 """
 
 from __future__ import annotations
@@ -46,7 +54,8 @@ _FORGET_DEGRADED_COUNTER = metric_counter(
 )
 
 # Cap how many rows we scan per namespace when splitting orphans from
-# survivors. Mirrors the list_* limits used by the coordinator fallback path.
+# survivors on backends without a source-document-scoped lookup. Mirrors the
+# list_* limits used by the coordinator fallback path.
 _SCAN_LIMIT = 100_000
 
 
@@ -68,8 +77,8 @@ async def cascade_forget_extraction(
     """Drop / decrement entities and relationships extracted from a document.
 
     Returns a list of ``Degradation`` records. An empty list means cleanup
-    ran (or there was simply nothing to clean). A non-empty list means no
-    configured store could perform the cleanup - the caller should treat the
+    ran (or there was simply nothing to clean). A non-empty list means the
+    cleanup could not be performed in full - the caller should treat the
     forget as partially degraded rather than silently successful.
     """
     # Prefer the vector store (pgvector) as the authoritative refcount holder
@@ -100,8 +109,12 @@ async def cascade_forget_extraction(
             )
         ]
 
-    entities = await primary.list_entities(namespace_id, limit=_SCAN_LIMIT)
-    relationships = await primary.list_relationships(namespace_id, limit=_SCAN_LIMIT)
+    degradations: list[Degradation] = []
+
+    entities, ent_deg = await _candidate_entities(primary, document_id, namespace_id, engine)
+    relationships, rel_deg = await _candidate_relationships(primary, document_id, namespace_id, engine)
+    degradations.extend(ent_deg)
+    degradations.extend(rel_deg)
 
     orphan_ent_ids = [e.id for e in entities if _is_orphan(e, document_id)]
     survive_ent_ids = [e.id for e in entities if _is_survivor(e, document_id)]
@@ -116,11 +129,11 @@ async def cascade_forget_extraction(
         await _delete_relationships(mirror, orphan_rel_ids, namespace_id)
 
     if survive_ent_ids:
-        await _strip_entities(primary, survive_ent_ids, document_id, namespace_id)
-        await _strip_entities(mirror, survive_ent_ids, document_id, namespace_id)
+        degradations.extend(await _strip_entities(primary, survive_ent_ids, document_id, namespace_id, engine))
+        degradations.extend(await _strip_entities(mirror, survive_ent_ids, document_id, namespace_id, engine))
     if survive_rel_ids:
-        await _strip_relationships(primary, survive_rel_ids, document_id, namespace_id)
-        await _strip_relationships(mirror, survive_rel_ids, document_id, namespace_id)
+        degradations.extend(await _strip_relationships(primary, survive_rel_ids, document_id, namespace_id, engine))
+        degradations.extend(await _strip_relationships(mirror, survive_rel_ids, document_id, namespace_id, engine))
 
     logger.debug(
         "{}: forget cascade for document {} removed {} orphan entities / {} orphan relationships, "
@@ -132,7 +145,52 @@ async def cascade_forget_extraction(
         len(survive_ent_ids),
         len(survive_rel_ids),
     )
-    return []
+    return degradations
+
+
+async def _candidate_entities(
+    primary: Any, document_id: UUID, namespace_id: UUID, engine: str
+) -> tuple[list[Any], list[Degradation]]:
+    """Entities referencing ``document_id``, preferring a source-scoped lookup."""
+    fn = getattr(primary, "list_entities_by_source_document", None)
+    if callable(fn):
+        return await fn(namespace_id, document_id), []
+    results = await primary.list_entities(namespace_id, limit=_SCAN_LIMIT)
+    return results, _scan_cap_degradation(results, "entities", document_id, engine)
+
+
+async def _candidate_relationships(
+    primary: Any, document_id: UUID, namespace_id: UUID, engine: str
+) -> tuple[list[Any], list[Degradation]]:
+    """Relationships referencing ``document_id``, preferring a source-scoped lookup."""
+    fn = getattr(primary, "list_relationships_by_source_document", None)
+    if callable(fn):
+        return await fn(namespace_id, document_id), []
+    results = await primary.list_relationships(namespace_id, limit=_SCAN_LIMIT)
+    return results, _scan_cap_degradation(results, "relationships", document_id, engine)
+
+
+def _scan_cap_degradation(results: list[Any], kind: str, document_id: UUID, engine: str) -> list[Degradation]:
+    if len(results) < _SCAN_LIMIT:
+        return []
+    _FORGET_DEGRADED_COUNTER.add(1, {"reason": "scan_cap_hit"})
+    logger.warning(
+        "{}: forget cascade {} scan hit the {}-row cap for document {} - orphans beyond the cap may be left behind",
+        engine,
+        kind,
+        _SCAN_LIMIT,
+        document_id,
+    )
+    return [
+        Degradation(
+            component="forget_cascade",
+            reason="scan_cap_hit",
+            detail=(
+                f"The {kind} scan hit the {_SCAN_LIMIT}-row cap; the primary store has no "
+                "source-document-scoped lookup so orphans beyond the cap may be left behind."
+            ),
+        )
+    ]
 
 
 def _is_orphan(record: Any, document_id: UUID) -> bool:
@@ -147,7 +205,7 @@ def _is_survivor(record: Any, document_id: UUID) -> bool:
 
 # The cleanup primitives have three method-name / signature shapes across
 # stores; these adapters dispatch to whichever the store exposes:
-#   - pgvector:        delete_entities_batch / remove_document_from_entity_sources(ids, doc)
+#   - pgvector:        delete_entities_batch / remove_document_from_entity_sources(ids, doc, ns)
 #   - Neo4j:           delete_entities_batch / remove_document_from_entity_sources_batch(ids, doc, ns)
 #   - GraphBackendBase fallback (SurrealDB/Memgraph/Neptune/AGE/sqlite_lance):
 #                      delete_entities_batch / strip_document_from_entities(ids, doc, namespace_id=ns)
@@ -165,25 +223,85 @@ async def _delete_relationships(store: Any, ids: list[UUID], namespace_id: UUID)
         await fn(ids, namespace_id=namespace_id)
 
 
-async def _strip_entities(store: Any, ids: list[UUID], document_id: UUID, namespace_id: UUID) -> None:
+async def _strip_entities(
+    store: Any, ids: list[UUID], document_id: UUID, namespace_id: UUID, engine: str
+) -> list[Degradation]:
     # Prefer native bulk methods (pgvector / Neo4j) over the per-record
     # GraphBackendBase fallback, which every graph backend also inherits.
     if store is None:
-        return
-    if callable(getattr(store, "remove_document_from_entity_sources_batch", None)):
-        await store.remove_document_from_entity_sources_batch(ids, document_id, namespace_id)
-    elif callable(getattr(store, "remove_document_from_entity_sources", None)):
-        await store.remove_document_from_entity_sources(ids, document_id)
-    elif callable(getattr(store, "strip_document_from_entities", None)):
-        await store.strip_document_from_entities(ids, document_id, namespace_id=namespace_id)
+        return []
+    try:
+        if callable(getattr(store, "remove_document_from_entity_sources_batch", None)):
+            await store.remove_document_from_entity_sources_batch(ids, document_id, namespace_id)
+        elif callable(getattr(store, "remove_document_from_entity_sources", None)):
+            await store.remove_document_from_entity_sources(ids, document_id, namespace_id)
+        elif callable(getattr(store, "strip_document_from_entities", None)):
+            await store.strip_document_from_entities(ids, document_id, namespace_id=namespace_id)
+        elif callable(getattr(store, "delete_entities_batch", None)):
+            # Store can list+delete but has no source-strip primitive. Do NOT
+            # silently skip - surface a degradation so the survivor's stale
+            # source_document_ids is a tracked gap, not an invisible one.
+            return _strip_unsupported("entities", document_id, engine)
+    except Exception as exc:  # noqa: BLE001
+        return _strip_failed("entities", document_id, engine, exc)
+    return []
 
 
-async def _strip_relationships(store: Any, ids: list[UUID], document_id: UUID, namespace_id: UUID) -> None:
+async def _strip_relationships(
+    store: Any, ids: list[UUID], document_id: UUID, namespace_id: UUID, engine: str
+) -> list[Degradation]:
     if store is None:
-        return
-    if callable(getattr(store, "remove_document_from_relationship_sources_batch", None)):
-        await store.remove_document_from_relationship_sources_batch(ids, document_id)
-    elif callable(getattr(store, "remove_document_from_relationship_sources", None)):
-        await store.remove_document_from_relationship_sources(ids, document_id)
-    elif callable(getattr(store, "strip_document_from_relationships", None)):
-        await store.strip_document_from_relationships(ids, document_id, namespace_id=namespace_id)
+        return []
+    try:
+        if callable(getattr(store, "remove_document_from_relationship_sources_batch", None)):
+            await store.remove_document_from_relationship_sources_batch(ids, document_id, namespace_id)
+        elif callable(getattr(store, "remove_document_from_relationship_sources", None)):
+            await store.remove_document_from_relationship_sources(ids, document_id, namespace_id)
+        elif callable(getattr(store, "strip_document_from_relationships", None)):
+            await store.strip_document_from_relationships(ids, document_id, namespace_id=namespace_id)
+        elif callable(getattr(store, "delete_relationships_batch", None)):
+            return _strip_unsupported("relationships", document_id, engine)
+    except Exception as exc:  # noqa: BLE001
+        return _strip_failed("relationships", document_id, engine, exc)
+    return []
+
+
+def _strip_unsupported(kind: str, document_id: UUID, engine: str) -> list[Degradation]:
+    _FORGET_DEGRADED_COUNTER.add(1, {"reason": "strip_unsupported"})
+    logger.warning(
+        "{}: forget cascade cannot strip document {} from survivor {} - "
+        "store exposes list/delete but no source-strip primitive",
+        engine,
+        document_id,
+        kind,
+    )
+    return [
+        Degradation(
+            component="forget_cascade",
+            reason="strip_unsupported",
+            detail=(
+                f"Store can delete {kind} but exposes no source-strip primitive; "
+                "survivors keep a stale source_document_ids entry for the forgotten document."
+            ),
+        )
+    ]
+
+
+def _strip_failed(kind: str, document_id: UUID, engine: str, exc: Exception) -> list[Degradation]:
+    _FORGET_DEGRADED_COUNTER.add(1, {"reason": "strip_failed"})
+    logger.error(
+        "{}: forget cascade failed to strip document {} from survivor {}: {}",
+        engine,
+        document_id,
+        kind,
+        exc,
+        exc_info=True,
+    )
+    return [
+        Degradation(
+            component="forget_cascade",
+            reason="strip_failed",
+            detail=f"Stripping document {document_id} from survivor {kind} raised.",
+            exception=str(exc),
+        )
+    ]

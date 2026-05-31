@@ -129,6 +129,31 @@ Each site also bumps `khora.chronicle.channel.degraded_total{channel, reason}`.
 The "no events yet" path is deliberately NOT recorded - that is the
 expected cold-start condition for a namespace, not a degradation.
 
+### #923 - forget-cascade cleanup degradations
+
+`khora.engines._forget_cascade.cascade_forget_extraction()` returns a
+`list[Degradation]` rather than swallowing partial-cleanup failures. The
+engine `forget()` call sites (`vectorcypher`, `chronicle`) capture the list
+and `logger.warning("forget cascade degraded: {}", degradations)` when it is
+non-empty - the public `Khora.forget()` bool return type is unchanged, so the
+signal surfaces via logging + metric for now. Each entry also bumps
+`khora.forget.cascade.degraded_total{reason}`.
+
+| Site                                          | `component`       | `reason`                   |
+| --------------------------------------------- | ----------------- | -------------------------- |
+| Neither store exposes list/delete             | `forget_cascade`  | `no_store_with_primitives` |
+| Bounded scan hit `_SCAN_LIMIT`                | `forget_cascade`  | `scan_cap_hit`             |
+| Store can delete but has no source-strip       | `forget_cascade`  | `strip_unsupported`        |
+| A source-strip call raised                    | `forget_cascade`  | `strip_failed`             |
+
+The `scan_cap_hit` path only fires on a primary store with no
+`list_entities_by_source_document` / `list_relationships_by_source_document`
+lookup - pgvector and Neo4j ship the source-scoped lookups, so they avoid the
+cap entirely. The `strip_failed` path covers the delete+recreate survivor-loss
+case in `GraphBackendBase.strip_document_from_relationships`, which attempts a
+restore from the pre-strip snapshot and re-raises on unrecoverable loss so the
+cascade can record the degradation instead of silently dropping a survivor edge.
+
 ## Where to attach the list
 
 | Result type                                   | Container               |

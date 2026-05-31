@@ -2226,7 +2226,9 @@ class VectorCypherEngine:
         if document is None:
             return False
 
-        await self._cascade_forget_extraction(document_id, namespace_id)
+        degradations = await self._cascade_forget_extraction(document_id, namespace_id)
+        if degradations:
+            logger.warning("forget cascade degraded: {}", degradations)
 
         # Delete from Neo4j (Chunk nodes and relationships)
         if dual_nodes is not None:

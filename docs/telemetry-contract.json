@@ -1052,9 +1052,9 @@
       "unit": "1",
       "owner": "engines",
       "labels": [
-        {"name": "reason", "values": ["no_store_with_primitives"], "_comment": "Low-cardinality enum; extend when adding new forget-cascade fallback paths."}
+        {"name": "reason", "values": ["no_store_with_primitives", "scan_cap_hit", "strip_unsupported", "strip_failed"], "_comment": "Low-cardinality enum; extend when adding new forget-cascade fallback paths. no_store_with_primitives: neither store exposes list/delete. scan_cap_hit: bounded full-namespace scan hit _SCAN_LIMIT (no source-document-scoped lookup) so orphans beyond the cap may be left. strip_unsupported: store can delete but has no source-strip primitive so survivors keep a stale source_document_ids entry. strip_failed: a source-strip call raised."}
       ],
-      "description": "Issue #923 (ADR-001). Forget-cascade entity/relationship cleanup could not run because no configured store (vector or graph) exposes the list/delete primitives. The forget still deletes the document + chunks but orphan entities may be left behind; a Degradation is returned from _cascade_forget_extraction. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+      "description": "Issue #923 (ADR-001). Forget-cascade entity/relationship cleanup could not run in full. The forget still deletes the document + chunks but orphan entities may be left behind or survivors keep a stale source ref; a Degradation is returned from _cascade_forget_extraction. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
       "name": "khora.ingest.relationships_skipped_total",

@@ -478,12 +478,12 @@ class TestEmptyShortCircuits:
     @pytest.mark.asyncio
     async def test_remove_document_from_entity_sources_empty(self) -> None:
         b = _backend()
-        assert await b.remove_document_from_entity_sources([], uuid4()) == 0
+        assert await b.remove_document_from_entity_sources([], uuid4(), uuid4()) == 0
 
     @pytest.mark.asyncio
     async def test_remove_document_from_relationship_sources_empty(self) -> None:
         b = _backend()
-        assert await b.remove_document_from_relationship_sources([], uuid4()) == 0
+        assert await b.remove_document_from_relationship_sources([], uuid4(), uuid4()) == 0
 
     @pytest.mark.asyncio
     async def test_get_entities_batch_empty(self) -> None:
@@ -561,7 +561,7 @@ class TestSessionBackedDeletes:
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
         b = _backend_with_session(session)
-        out = await b.remove_document_from_entity_sources([uuid4()], uuid4())
+        out = await b.remove_document_from_entity_sources([uuid4()], uuid4(), uuid4())
         assert out == 2
 
     @pytest.mark.asyncio
@@ -571,7 +571,7 @@ class TestSessionBackedDeletes:
         session = AsyncMock()
         session.execute = AsyncMock(return_value=result)
         b = _backend_with_session(session)
-        out = await b.remove_document_from_relationship_sources([uuid4()], uuid4())
+        out = await b.remove_document_from_relationship_sources([uuid4()], uuid4(), uuid4())
         assert out == 1
 
 

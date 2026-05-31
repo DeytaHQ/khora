@@ -113,7 +113,7 @@ class TestChronicleEngineForget:
         await connected_engine.forget(doc_id, namespace_id)
 
         connected_engine._storage.vector.remove_document_from_entity_sources.assert_awaited_once_with(
-            [survivor_ent_id], doc_id
+            [survivor_ent_id], doc_id, namespace_id
         )
         connected_engine._storage.graph.remove_document_from_entity_sources_batch.assert_awaited_once_with(
             [survivor_ent_id], doc_id, namespace_id
@@ -165,10 +165,10 @@ class TestChronicleEngineForget:
         await connected_engine.forget(doc_id, namespace_id)
 
         connected_engine._storage.vector.remove_document_from_relationship_sources.assert_awaited_once_with(
-            [survivor_rel_id], doc_id
+            [survivor_rel_id], doc_id, namespace_id
         )
         connected_engine._storage.graph.remove_document_from_relationship_sources_batch.assert_awaited_once_with(
-            [survivor_rel_id], doc_id
+            [survivor_rel_id], doc_id, namespace_id
         )
         connected_engine._storage.vector.delete_relationships_batch.assert_not_called()
 

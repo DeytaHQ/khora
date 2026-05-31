@@ -2843,6 +2843,59 @@ RETURN count(r) AS updated
                 for r in records
             ]
 
+    async def list_entities_by_source_document(
+        self,
+        namespace_id: UUID,
+        document_id: UUID,
+    ) -> list[Entity]:
+        """List entities whose ``source_document_ids`` contains ``document_id``.
+
+        Source-document-scoped lookup used by the forget cascade so it does
+        not have to scan the whole namespace (and silently drop orphans
+        beyond the scan cap). Scoped to ``namespace_id`` (IDOR family).
+        """
+        query = """
+        MATCH (e:Entity {namespace_id: $namespace_id})
+        WHERE $doc_id IN coalesce(e.source_document_ids, [])
+        RETURN e
+        """
+        async with self._session() as session:
+            result = await session.run(
+                query,
+                namespace_id=str(namespace_id),
+                doc_id=str(document_id),
+            )
+            records = await result.data()
+            return [self._record_to_entity(r["e"]) for r in records]
+
+    async def list_relationships_by_source_document(
+        self,
+        namespace_id: UUID,
+        document_id: UUID,
+    ) -> list[Relationship]:
+        """List relationships whose ``source_document_ids`` contains ``document_id``.
+
+        Sibling to :meth:`list_entities_by_source_document` for the edge side
+        of the forget cascade. Scoped to ``namespace_id`` (IDOR family).
+        """
+        query = """
+        MATCH (source)-[r]->(target)
+        WHERE r.namespace_id = $namespace_id
+          AND $doc_id IN coalesce(r.source_document_ids, [])
+        RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
+        """
+        async with self._session() as session:
+            result = await session.run(
+                query,
+                namespace_id=str(namespace_id),
+                doc_id=str(document_id),
+            )
+            records = await result.data()
+            return [
+                self._record_to_relationship(r["rel_props"], r["source_id"], r["target_id"], r["rel_type"])
+                for r in records
+            ]
+
     # =========================================================================
     # Episode operations
     # =========================================================================
@@ -3588,11 +3641,14 @@ RETURN count(r) AS updated
         self,
         relationship_ids: list[UUID],
         document_id: UUID,
+        namespace_id: UUID,
     ) -> int:
         """Strip ``document_id`` from survivor relationships' source arrays.
 
         Sibling to :meth:`remove_document_from_entity_sources_batch` for
-        the edge side of the cascade.
+        the edge side of the cascade. Scoped to ``namespace_id`` to prevent
+        cross-tenant writes through forged ids (IDOR family), matching
+        :meth:`delete_relationships_batch`.
 
         Returns the number of relationships updated.
         """
@@ -3603,13 +3659,14 @@ RETURN count(r) AS updated
             result = await tx.run(
                 """
                 UNWIND $relationship_ids AS rid
-                MATCH ()-[r {id: rid}]-()
+                MATCH ()-[r {id: rid, namespace_id: $namespace_id}]-()
                 WITH DISTINCT r
                 SET r.source_document_ids =
                         [d IN coalesce(r.source_document_ids, []) WHERE d <> $doc_id]
                 RETURN count(r) AS updated
                 """,
                 relationship_ids=[str(rid) for rid in relationship_ids],
+                namespace_id=str(namespace_id),
                 doc_id=str(document_id),
             )
             record = await result.single()

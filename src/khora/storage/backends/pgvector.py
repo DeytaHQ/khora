@@ -533,14 +533,22 @@ class PgVectorBackend(AsyncSessionMixin):
         self,
         entity_ids: list[UUID],
         document_id: UUID,
+        namespace_id: UUID,
     ) -> int:
-        """Strip ``document_id`` from survivor entities' ``source_document_ids``."""
+        """Strip ``document_id`` from survivor entities' ``source_document_ids``.
+
+        Scoped to ``namespace_id`` to prevent cross-tenant writes through
+        forged ids (IDOR family), matching ``delete_entities_batch``.
+        """
         if not entity_ids:
             return 0
         async with self._get_session() as session:
             result = await session.execute(
                 update(EntityModel)
-                .where(EntityModel.id.in_(entity_ids))
+                .where(
+                    EntityModel.id.in_(entity_ids),
+                    EntityModel.namespace_id == namespace_id,
+                )
                 .values(source_document_ids=func.array_remove(EntityModel.source_document_ids, document_id))
             )
             await session.commit()
@@ -550,14 +558,22 @@ class PgVectorBackend(AsyncSessionMixin):
         self,
         relationship_ids: list[UUID],
         document_id: UUID,
+        namespace_id: UUID,
     ) -> int:
-        """Strip ``document_id`` from survivor relationships' ``source_document_ids``."""
+        """Strip ``document_id`` from survivor relationships' ``source_document_ids``.
+
+        Scoped to ``namespace_id`` to prevent cross-tenant writes through
+        forged ids (IDOR family), matching ``delete_relationships_batch``.
+        """
         if not relationship_ids:
             return 0
         async with self._get_session() as session:
             result = await session.execute(
                 update(RelationshipModel)
-                .where(RelationshipModel.id.in_(relationship_ids))
+                .where(
+                    RelationshipModel.id.in_(relationship_ids),
+                    RelationshipModel.namespace_id == namespace_id,
+                )
                 .values(source_document_ids=func.array_remove(RelationshipModel.source_document_ids, document_id))
             )
             await session.commit()
@@ -1292,6 +1308,66 @@ class PgVectorBackend(AsyncSessionMixin):
             stmt = stmt.order_by(EntityModel.name).limit(limit).offset(offset)
             result = await session.execute(stmt)
             return [self._entity_model_to_domain(model) for model in result.scalars()]
+
+    async def list_entities_by_source_document(
+        self,
+        namespace_id: UUID,
+        document_id: UUID,
+    ) -> list:
+        """List entities whose ``source_document_ids`` contains ``document_id``.
+
+        Source-document-scoped lookup used by the forget cascade so it does
+        not have to scan + Python-filter the whole namespace (and silently
+        drop orphans beyond the scan cap). Scoped to ``namespace_id`` (IDOR
+        family).
+        """
+        async with self._get_session() as session:
+            stmt = select(EntityModel).where(
+                EntityModel.namespace_id == namespace_id,
+                EntityModel.source_document_ids.any(document_id),
+            )
+            result = await session.execute(stmt)
+            return [self._entity_model_to_domain(model) for model in result.scalars()]
+
+    async def list_relationships_by_source_document(
+        self,
+        namespace_id: UUID,
+        document_id: UUID,
+    ) -> list:
+        """List relationships whose ``source_document_ids`` contains ``document_id``.
+
+        Sibling to :meth:`list_entities_by_source_document` for the edge side
+        of the forget cascade. Scoped to ``namespace_id`` (IDOR family).
+        """
+        from khora.core.models import Relationship
+
+        async with self._get_session() as session:
+            stmt = select(RelationshipModel).where(
+                RelationshipModel.namespace_id == namespace_id,
+                RelationshipModel.source_document_ids.any(document_id),
+            )
+            result = await session.execute(stmt)
+            return [
+                Relationship(
+                    id=m.id,
+                    namespace_id=m.namespace_id,
+                    source_entity_id=m.source_entity_id,
+                    target_entity_id=m.target_entity_id,
+                    relationship_type=m.relationship_type,
+                    description=m.description,
+                    properties=m.properties or {},
+                    source_document_ids=m.source_document_ids or [],
+                    source_chunk_ids=m.source_chunk_ids or [],
+                    valid_from=m.valid_from,
+                    valid_until=m.valid_until,
+                    confidence=m.confidence,
+                    weight=m.weight,
+                    metadata=m.metadata_ or {},
+                    created_at=m.created_at,
+                    updated_at=m.updated_at,
+                )
+                for m in result.scalars()
+            ]
 
     async def list_relationships(
         self,

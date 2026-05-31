@@ -2694,7 +2694,9 @@ class ChronicleEngine:
             # namespace — either way, nothing to forget for this caller.
             return False
 
-        await self._cascade_forget_extraction(document_id, namespace_id)
+        degradations = await self._cascade_forget_extraction(document_id, namespace_id)
+        if degradations:
+            logger.warning("forget cascade degraded: {}", degradations)
 
         return await storage.delete_document(document_id, namespace_id=namespace_id)
 

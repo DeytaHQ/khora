@@ -681,6 +681,27 @@ Migrations 033 and 034 added bi-temporal columns to the PostgreSQL schema - `val
 
 Why no read filter yet: dream-apply tombstones rows on the PostgreSQL side only. There is no Neo4j tombstone-mirror, so adding a pg-side `WHERE invalidated_at IS NULL` read filter would make PostgreSQL reads diverge from graph reads of the same data - a row hidden in pg would still be returned from Neo4j. **Do NOT add a read-side `invalidated_at IS NULL` filter until the cross-store tombstone-mirror lands** (cross-store atomicity work). The full write/read contract is tracked in #888; a guard test (`tests/unit/test_bitemporal_columns_reserved.py`) trips CI if a premature read filter is added to a read path.
 
+## Forget cascade and `source_document_ids` refcounting (#923)
+
+`Khora.forget()` cleans up the entities and relationships a document
+contributed, not just its chunks. The cascade
+(`khora.engines._forget_cascade`) is anchored on each record's
+`source_document_ids` array: when a document is forgotten, the id is stripped
+from every entity/relationship that lists it; records whose only source was
+the forgotten document become orphans and are hard-deleted, while
+multi-source records survive with a shortened source list. The cascade runs on
+whichever store holds the entities (pgvector on PG stacks, the graph adapter
+table otherwise) and mirrors deletes to the other store.
+
+**SurrealDB data caveat:** entities and relationships ingested **before khora
+0.18.0** were persisted with an empty `source_document_ids` (the persistence
+bug fixed by #923). Because the forget cascade keys off that array, those
+pre-0.18.0 records carry no refcount and will **NOT** be cleaned up by
+`forget()` - they are neither stripped nor orphan-deleted. Only entities and
+relationships ingested on khora >=0.18.0 carry the refcount and participate in
+the cascade. There is no automatic backfill; if you need pre-0.18.0 SurrealDB
+entities cleaned up, re-ingest the affected documents on >=0.18.0 first.
+
 ### When to Use SurrealDB
 
 | Scenario | Recommendation |

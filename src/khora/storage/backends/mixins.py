@@ -272,17 +272,48 @@ class GraphBackendBase:
         No graph backend exposes a single-relationship update primitive, so
         this deletes the survivor and recreates it with the document id
         removed. Scoped to ``namespace_id`` (IDOR family).
+
+        The delete+recreate is not atomic: if ``create_relationship`` fails
+        after the delete, a SURVIVOR edge would be permanently lost. We guard
+        against that by snapshotting the original ``rel`` before the delete
+        and attempting to restore it on recreate failure. If the restore also
+        fails the edge is genuinely lost - we log ``ERROR`` and re-raise so
+        the forget cascade can record a ``Degradation`` rather than reporting
+        silent success.
         """
         updated = 0
         for rid in relationship_ids:
             rel = await self.get_relationship(rid, namespace_id=namespace_id)  # type: ignore[attr-defined]
             if rel is None:
                 continue
-            if document_id in (rel.source_document_ids or []):
-                rel.source_document_ids = [d for d in rel.source_document_ids if d != document_id]
-                await self.delete_relationship(rid, namespace_id=namespace_id)  # type: ignore[attr-defined]
+            if document_id not in (rel.source_document_ids or []):
+                continue
+            original_sources = list(rel.source_document_ids or [])
+            rel.source_document_ids = [d for d in original_sources if d != document_id]
+            await self.delete_relationship(rid, namespace_id=namespace_id)  # type: ignore[attr-defined]
+            try:
                 await self.create_relationship(rel)  # type: ignore[attr-defined]
-                updated += 1
+            except Exception:
+                # Recreate failed after the delete - the survivor is now
+                # missing. Try to restore the pre-strip snapshot.
+                rel.source_document_ids = original_sources
+                try:
+                    await self.create_relationship(rel)  # type: ignore[attr-defined]
+                except Exception:
+                    logger.error(
+                        "forget cascade: lost survivor relationship {} - delete succeeded "
+                        "but neither the stripped recreate nor the restore did",
+                        rid,
+                    )
+                    raise
+                logger.warning(
+                    "forget cascade: restored survivor relationship {} after stripped recreate "
+                    "failed; document {} not stripped from its sources",
+                    rid,
+                    document_id,
+                )
+                raise
+            updated += 1
         return updated
 
 
