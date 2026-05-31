@@ -114,12 +114,15 @@ async def test_recall_returns_chunks_after_remember_surrealdb_memory(
 
     async with Khora(config, engine=engine, run_migrations=False) as kb:
         ns = await kb.create_namespace()
-        # NOTE: entity_types/relationship_types are deliberately not passed because the
-        # skeleton parametrization rejects them (#890); vectorcypher does not need them
-        # for the round-trip assertion.
+        # NOTE: entity_types/relationship_types are required keyword-only args on
+        # Khora.remember(); pass empty lists since the skeleton parametrization
+        # rejects non-empty values (#890) and the vectorcypher round-trip
+        # assertion does not depend on extracted typed entities.
         rem = await kb.remember(
             "PagerDuty triggered for the payments service.",
             namespace=ns.namespace_id,
+            entity_types=[],
+            relationship_types=[],
         )
         assert rem.chunks_created >= 1, f"[{engine}] remember reported 0 chunks created — fixture pre-condition not met"
 
@@ -158,10 +161,14 @@ async def test_recall_namespace_isolation_surrealdb_memory(
         await kb.remember(
             "PagerDuty triggered for the payments service.",
             namespace=ns_a,
+            entity_types=[],
+            relationship_types=[],
         )
         await kb.remember(
             "An unrelated note that does not mention the keyword.",
             namespace=ns_b,
+            entity_types=[],
+            relationship_types=[],
         )
 
         result_a = await kb.recall("payments service", namespace=ns_a)
@@ -192,5 +199,7 @@ async def test_recall_with_legacy_double_underscore_env_vars(
         rem = await kb.remember(
             "PagerDuty triggered for the payments service.",
             namespace=ns.namespace_id,
+            entity_types=[],
+            relationship_types=[],
         )
         assert rem.chunks_created >= 1
