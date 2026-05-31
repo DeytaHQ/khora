@@ -13,6 +13,7 @@ Minor release. Adds Chronicle reinforcement-on-recall and a project-wide failure
 - **Skeleton `remember()` now raises `UnsupportedEngineKwargError` on non-empty `entity_types` / `relationship_types`** (#890, in #917). Previously a silent no-op - Skeleton does not extract entities, so the kwargs gave a false impression of graph extraction.
 - **Skeleton `recall(recency_bias=...)` now raises on a non-`None` value** (#891, in #917). Previously a silent no-op - Skeleton has no recency scoring.
 - **`auth_enabled` config field removed from `KhoraConfig`** (#908, in #941). The field was dead; with `extra='forbid'`, passing it now raises a Pydantic `ValidationError`.
+- **Postgres backend rejects `embedding_dimension != 1536`** (#925, guard). A config-time `ValidationError` now fires instead of silently writing wrong-width vectors into the hardcoded `Vector(1536)` columns. Arbitrary dimensions on Postgres require a parameterized migration (tracked in #925 for a future release); `sqlite_lance` already supports any dimension.
 
 ### Added
 
@@ -32,6 +33,7 @@ Minor release. Adds Chronicle reinforcement-on-recall and a project-wide failure
 - **`count_*` routing by data ownership** (#878): count calls route to the backend that owns the data rather than assuming a fixed backend.
 - **`from_yaml` now honors `KHORA_DATABASE_URL` / `KHORA_NEO4J_URL` env vars** with correct precedence (#897).
 - **Per-document batch progress callbacks** on Skeleton and Chronicle batch paths (#898).
+- **Embedding dimension is honored end-to-end and validated** (#926, #931): the ingest / batch paths now pass the configured `embedding_dimension` (they previously defaulted to 1536), and `LiteLLMEmbedder` raises `EmbeddingError` on a provider dimension mismatch instead of silently overwriting its configured dimension.
 
 ### Fixed
 
@@ -45,6 +47,10 @@ Minor release. Adds Chronicle reinforcement-on-recall and a project-wide failure
 - **Empty-name entities are skipped** rather than persisted (#894).
 - **`update_document` partial update preserves unset columns** instead of NULL-overwriting them (#895).
 - **Dialect-gated dream apply on sqlite_lance** plus a warning on Postgres + Neo4j divergence (#875).
+- **`gc.expire_sessions(before=...)` no longer crashes on a naive datetime** (#930): a naive `before` (e.g. `datetime.utcnow()`) is normalized to UTC instead of raising `TypeError` and aborting the sweep.
+- **`forget()` now cleans entities and relationships on all graph backends, not just Neo4j** (#923): the cascade is re-anchored on `source_document_ids` refcounting (orphans deleted, shared entities survive with the document id stripped), so SurrealDB / Memgraph / Neptune / AGE / sqlite_lance no longer silently retain orphaned entities while reporting success. Also fixes SurrealDB silently dropping `source_document_ids` (SCHEMAFULL array element field was undeclared).
+- **`delete_entity` removes the pgvector mirror, not just the graph node** (#928), so a deleted entity no longer keeps surfacing in vector entity search on Postgres + Neo4j.
+- **`remember_batch` session episodes are paired by document id** (#929), fixing episode misattribution and a dropped final document when one document in the batch fails.
 
 ## [0.17.4] - VectorCypher entity projection on graph-less backends
 
