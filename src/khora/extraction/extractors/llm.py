@@ -2003,17 +2003,29 @@ Return ONLY valid JSON, no other text."""
                 logger.warning(f"Response parsed but is not a dict: {type(data)}")
                 return ExtractionResult(metadata={"error": "invalid_response_type", "raw": str(data)[:500]})
 
-            # First pass: collect entity names for relationship confidence scoring
+            # First pass: collect entity names for relationship confidence scoring.
+            # Strip whitespace so " " (whitespace-only) is treated as empty.
             entity_names: set[str] = set()
             for e in data.get("entities", []):
-                if isinstance(e, dict) and e.get("name"):
-                    entity_names.add(e["name"])
+                if isinstance(e, dict):
+                    raw = e.get("name") or ""
+                    nm = raw.strip() if isinstance(raw, str) else ""
+                    if nm:
+                        entity_names.add(nm)
 
             entities = []
+            skipped_entities_empty_name = 0
             for e in data.get("entities", []):
                 # Skip malformed entities (LLM sometimes returns strings instead of dicts)
                 if not isinstance(e, dict):
                     logger.debug(f"Skipping malformed entity (not a dict): {type(e)}")
+                    continue
+
+                # Skip entities with empty / whitespace / missing / non-string name (#894).
+                raw_name = e.get("name") or ""
+                name = raw_name.strip() if isinstance(raw_name, str) else ""
+                if not name:
+                    skipped_entities_empty_name += 1
                     continue
 
                 # Parse temporal info if present
@@ -2037,7 +2049,7 @@ Return ONLY valid JSON, no other text."""
 
                 entities.append(
                     ExtractedEntity(
-                        name=e.get("name") or "",
+                        name=name,
                         entity_type=e.get("entity_type") or e.get("type") or "CONCEPT",
                         description=e.get("description") or "",
                         attributes=attrs,
@@ -2048,10 +2060,20 @@ Return ONLY valid JSON, no other text."""
                 )
 
             relationships = []
+            skipped_relationships_empty_endpoint = 0
             for r in data.get("relationships", []):
                 # Skip malformed relationships (LLM sometimes returns strings instead of dicts)
                 if not isinstance(r, dict):
                     logger.debug(f"Skipping malformed relationship (not a dict): {type(r)}")
+                    continue
+
+                # Skip relationships with empty / whitespace / missing source or target name (#894).
+                raw_src = r.get("source_entity") or r.get("source") or ""
+                raw_tgt = r.get("target_entity") or r.get("target") or ""
+                src = raw_src.strip() if isinstance(raw_src, str) else ""
+                tgt = raw_tgt.strip() if isinstance(raw_tgt, str) else ""
+                if not src or not tgt:
+                    skipped_relationships_empty_endpoint += 1
                     continue
 
                 # Parse temporal info if present
@@ -2070,8 +2092,8 @@ Return ONLY valid JSON, no other text."""
 
                 relationships.append(
                     ExtractedRelationship(
-                        source_entity=r.get("source_entity") or r.get("source") or "",
-                        target_entity=r.get("target_entity") or r.get("target") or "",
+                        source_entity=src,
+                        target_entity=tgt,
                         relationship_type=r.get("relationship_type") or r.get("type") or "RELATES_TO",
                         description=r.get("description") or "",
                         properties=r.get("properties") or {},
@@ -2100,10 +2122,32 @@ Return ONLY valid JSON, no other text."""
                     )
                 )
 
+            # Track empty-name skips (#894). Surface counts and a forward-compatible
+            # degradation entry on ExtractionResult.metadata so the call stack can
+            # propagate them to RememberResult.metadata["degradations"].
+            metadata: dict[str, Any] = {}
+            if skipped_entities_empty_name or skipped_relationships_empty_endpoint:
+                logger.debug(
+                    "llm.entity_parser: skipped {ents} entities and {rels} relationships with empty/missing name",
+                    ents=skipped_entities_empty_name,
+                    rels=skipped_relationships_empty_endpoint,
+                )
+                metadata["skipped_entities_empty_name"] = skipped_entities_empty_name
+                metadata["skipped_relationships_empty_endpoint"] = skipped_relationships_empty_endpoint
+                metadata["degradations"] = [
+                    {
+                        "component": "llm.entity_parser",
+                        "reason": "empty_name",
+                        "skipped_entities": skipped_entities_empty_name,
+                        "skipped_relationships": skipped_relationships_empty_endpoint,
+                    }
+                ]
+
             return ExtractionResult(
                 entities=entities,
                 relationships=relationships,
                 events=events,
+                metadata=metadata,
             )
 
         except json.JSONDecodeError as e:

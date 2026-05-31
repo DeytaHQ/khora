@@ -461,6 +461,97 @@ class PostgreSQLBackend(AsyncSessionMixin):
             await session.commit()
         return document
 
+    # Whitelist of columns partial_update_document accepts. The list mirrors the
+    # mutable columns enumerated in _update_document_with (#895) and is intentionally
+    # narrower than DocumentModel.__table__.columns - id, namespace_id, created_at
+    # must never be patched. metadata is exposed as "metadata" (caller-facing) but
+    # maps to "metadata_" on the ORM model.
+    _PARTIAL_UPDATE_ALLOWED: frozenset[str] = frozenset(
+        {
+            "content",
+            "status",
+            "source",
+            "source_type",
+            "source_name",
+            "source_url",
+            "content_type",
+            "title",
+            "author",
+            "language",
+            "checksum",
+            "size_bytes",
+            "metadata",
+            "chunk_count",
+            "entity_count",
+            "relationship_count",
+            "error_message",
+            "extraction_config_hash",
+            "extraction_params",
+            "external_id",
+            "processed_at",
+            "source_timestamp",
+            "session_id",
+        }
+    )
+
+    @retry_on_deadlock
+    async def partial_update_document(
+        self,
+        document_id: UUID,
+        *,
+        namespace_id: UUID,
+        session: AsyncSession | None = None,
+        **fields: object,
+    ) -> int:
+        """Update only the explicitly-supplied columns of a document (#895).
+
+        Unlike update_document(document) - which sets all 22 mutable columns on
+        every call and can NULL-overwrite columns the caller never intended to
+        touch - this helper sends a SQL UPDATE that only mentions the columns
+        the caller passed in. Unspecified columns are preserved by Postgres.
+
+        ``updated_at`` is always refreshed.
+
+        Args:
+            document_id: Primary key of the document to patch.
+            namespace_id: Tenant scope. Acts as an IDOR guard - a row with the
+                given id but a different namespace is treated as not-found
+                (returns 0).
+            session: Optional session for cross-store transactions. When None
+                a private session is opened and committed.
+            **fields: Columns to update. Unknown keys raise ValueError.
+
+        Returns:
+            Number of rows affected (0 if document_id / namespace_id miss).
+        """
+        unknown = set(fields) - self._PARTIAL_UPDATE_ALLOWED
+        if unknown:
+            raise ValueError(f"partial_update_document: unknown column(s): {sorted(unknown)}")
+
+        if not fields:
+            # Nothing to patch and no implicit "touch updated_at" semantics.
+            return 0
+
+        # Map caller-facing key "metadata" to ORM attribute "metadata_".
+        values: dict[str, object] = {("metadata_" if k == "metadata" else k): v for k, v in fields.items()}
+        values["updated_at"] = datetime.now(UTC)
+
+        stmt = (
+            update(DocumentModel)
+            .where(DocumentModel.id == document_id)
+            .where(DocumentModel.namespace_id == namespace_id)
+            .values(**values)
+        )
+
+        if session is not None:
+            result = await session.execute(stmt)
+            return result.rowcount or 0
+
+        async with self._get_session() as own_session:
+            result = await own_session.execute(stmt)
+            await own_session.commit()
+            return result.rowcount or 0
+
     @retry_on_deadlock
     async def delete_document(self, document_id: UUID, *, namespace_id: UUID) -> bool:
         """Delete a document, scoped to ``namespace_id``.
