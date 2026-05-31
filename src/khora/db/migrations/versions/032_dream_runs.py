@@ -9,10 +9,12 @@ dream orchestrator needs a per-namespace audit/checkpoint table so a
 crashed APPLY pass can be resumed against the last committed op-seq
 rather than restarted from scratch.
 
-Postgres-only via the same dialect gate as migration 029. The embedded
-``sqlite_lance`` stack mirrors checkpoint state to a ``dream_runs.jsonl``
-file sink (tracked separately) instead of this table — running the
-chain against SQLite must remain a clean no-op.
+Created on BOTH dialects (#896). The table DDL is dialect-portable, so
+the embedded ``sqlite_lance`` stack now persists run rows here too -
+``Khora.dream_history`` / ``Khora.dream(...).status`` return real rows
+on SQLite instead of ``[]``. UUID columns follow migration 030's
+dialect helper (native ``UUID`` on Postgres, ``sa.Uuid`` TEXT on
+SQLite); ``error`` is ``JSONB`` on Postgres and ``sa.JSON`` on SQLite.
 
 Schema (16 columns):
 
@@ -63,30 +65,44 @@ def _is_postgres() -> bool:
     return op.get_bind().dialect.name == "postgresql"
 
 
+def _uuid_type() -> sa.types.TypeEngine:
+    """UUID column type appropriate for the current dialect (mirrors 030)."""
+    if _is_postgres():
+        return PG_UUID(as_uuid=True)
+    return sa.Uuid(as_uuid=True)
+
+
+def _timestamp_type() -> sa.types.TypeEngine:
+    if _is_postgres():
+        return TIMESTAMP(timezone=True)
+    return sa.DateTime(timezone=True)
+
+
+def _json_type() -> sa.types.TypeEngine:
+    return JSONB() if _is_postgres() else sa.JSON()
+
+
 def upgrade() -> None:
-    # Dream-phase checkpoint table is Postgres-only. The sqlite_lance test
-    # fixtures run the full Alembic chain against SQLite; mirror migration
-    # 029's pattern and skip silently so the embedded path stays clean.
-    if not _is_postgres():
-        return
+    uuid_type = _uuid_type()
+    ts_type = _timestamp_type()
 
     op.create_table(
         TABLE_NAME,
-        sa.Column("run_id", PG_UUID(as_uuid=True), primary_key=True),
-        sa.Column("namespace_id", PG_UUID(as_uuid=True), nullable=False),
+        sa.Column("run_id", uuid_type, primary_key=True),
+        sa.Column("namespace_id", uuid_type, nullable=False),
         sa.Column("trigger", sa.String(length=32), nullable=False),
         sa.Column("mode", sa.String(length=16), nullable=False),
         sa.Column("state", sa.String(length=32), nullable=False),
         sa.Column("plan_hash", sa.String(length=64), nullable=True),
-        sa.Column("started_at", TIMESTAMP(timezone=True), nullable=False),
-        sa.Column("finished_at", TIMESTAMP(timezone=True), nullable=True),
+        sa.Column("started_at", ts_type, nullable=False),
+        sa.Column("finished_at", ts_type, nullable=True),
         sa.Column(
             "last_committed_op_seq",
             sa.Integer(),
             nullable=True,
             server_default=sa.text("-1"),
         ),
-        sa.Column("heartbeat_at", TIMESTAMP(timezone=True), nullable=False),
+        sa.Column("heartbeat_at", ts_type, nullable=False),
         sa.Column(
             "total_ops",
             sa.Integer(),
@@ -102,7 +118,7 @@ def upgrade() -> None:
         sa.Column("report_path", sa.Text(), nullable=True),
         sa.Column("manifest_sha256", sa.String(length=64), nullable=True),
         sa.Column("config_fingerprint", sa.String(length=64), nullable=True),
-        sa.Column("error", JSONB(), nullable=True),
+        sa.Column("error", _json_type(), nullable=True),
     )
 
     op.create_index(
@@ -113,10 +129,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if not _is_postgres():
-        return
     # IF EXISTS so a downgrade against a partial-state DB (e.g., the table
     # was DROPped out-of-band, leaving the alembic_version row pointing at
     # this revision) is idempotent rather than crashing.
     op.execute(f"DROP INDEX IF EXISTS {INDEX_NAME}")
-    op.execute(f"DROP TABLE IF EXISTS {TABLE_NAME} CASCADE")
+    if _is_postgres():
+        op.execute(f"DROP TABLE IF EXISTS {TABLE_NAME} CASCADE")
+    else:
+        op.execute(f"DROP TABLE IF EXISTS {TABLE_NAME}")

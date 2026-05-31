@@ -53,16 +53,24 @@ class _CapturingSink(ReportSink):
 
 
 class _SqliteSession:
-    """Session stub whose dialect reports as sqlite. Any execute() call would crash."""
+    """Session stub whose dialect reports as sqlite.
+
+    ``execute`` is a no-op: since #896 the orchestrator's run-row
+    persistence (``_init_run_row`` / ``history`` / ``status``) runs on
+    SQLite too, so a raising stub would trip on the run-row INSERT. The
+    apply-handler dialect gate is asserted via op-summary counts (the
+    gated handlers are :func:`_exploding_handler`, which would raise if
+    ever invoked) and the unit-level ``test_assert_backend_supported_*``
+    cases.
+    """
 
     def __init__(self) -> None:
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
         self.execute_called = False
 
     async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
-        # This simulates the real sqlite3.ProgrammingError surface area.
         self.execute_called = True
-        raise AssertionError("execute() must not be reached: dialect gate should fire first")
+        return SimpleNamespace(first=lambda: None, all=lambda: [])
 
 
 class _SqliteTxnCtx:
@@ -203,8 +211,6 @@ async def test_apply_phase_marks_op_skipped_on_sqlite(monkeypatch: pytest.Monkey
 
     result = await orch.run(uuid4(), mode="apply")
 
-    # No execute() call leaked through the gate.
-    assert coordinator.session.execute_called is False
     # The op was counted as skipped, not applied.
     summaries = {s.op_type: s for s in result.ops}
     summary = summaries[str(OpKind.VECTORCYPHER_DEDUPE_ENTITIES)]

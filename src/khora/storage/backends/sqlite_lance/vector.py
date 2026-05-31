@@ -276,7 +276,56 @@ class SQLiteLanceVectorAdapter:
             (uuid_to_text(document_id), uuid_to_text(namespace_id)),
         )
         rows = await cur.fetchall()
-        return [self._row_to_chunk(r) for r in rows]
+        if rows:
+            return [self._row_to_chunk(r) for r in rows]
+        # Fallback for the temporal engines (skeleton / vectorcypher), which
+        # write chunks to ``khora_chunks`` rather than ``chunks`` (#905).  The
+        # chronicle engine writes ``chunks`` and never reaches here.  A
+        # chronicle-only stack has no ``khora_chunks`` table, so swallow the
+        # missing-table error and return [] instead of crashing.
+        return await self._get_chunks_by_document_temporal(document_id, namespace_id=namespace_id)
+
+    async def _get_chunks_by_document_temporal(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
+        try:
+            cur = await self._sqlite.execute(
+                "SELECT * FROM khora_chunks WHERE document_id = ? AND namespace_id = ?",
+                (uuid_to_text(document_id), uuid_to_text(namespace_id)),
+            )
+            rows = await cur.fetchall()
+        except Exception:
+            # Table absent on a chronicle-only stack — no temporal chunks.
+            return []
+        return [self._temporal_row_to_chunk(r) for r in rows]
+
+    @staticmethod
+    def _temporal_row_to_chunk(row: Any) -> Chunk:
+        # ``khora_chunks`` mirrors ``TemporalChunk``: chunk_index / start_char /
+        # end_char / token_count / embedding_model live inside the JSON
+        # ``metadata`` column (see ``temporal_chunk_to_chunk``).
+        md = from_json_text(row["metadata"]) if row["metadata"] else {}
+        chunker_info = from_json_text(row["chunker_info"]) if row["chunker_info"] else {}
+        sid_raw = md.get("session_id")
+        try:
+            session_id = UUID(str(sid_raw)) if sid_raw else None
+        except (TypeError, ValueError):
+            session_id = None
+        return Chunk(
+            id=UUID(row["id"]),
+            namespace_id=UUID(row["namespace_id"]),
+            document_id=UUID(row["document_id"]),
+            content=row["content"] or "",
+            chunk_index=int(md.get("chunk_index", 0) or 0),
+            start_char=int(md.get("start_char", 0) or 0),
+            end_char=int(md.get("end_char", 0) or 0),
+            token_count=int(md.get("token_count", 0) or 0),
+            metadata=md,
+            chunker_info=chunker_info,
+            embedding=None,
+            embedding_model=str(md.get("embedding_model", "") or ""),
+            created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
+            source_timestamp=_parse_dt(row["occurred_at"]),
+            session_id=session_id,
+        )
 
     async def delete_chunks_by_document(
         self,

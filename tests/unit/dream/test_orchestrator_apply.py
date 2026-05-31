@@ -76,6 +76,22 @@ class _StubPlugin:
         raise NotImplementedError
 
 
+class _NoopSession:
+    """Session stub with a no-op ``execute``.
+
+    ``bind=None`` keeps the orchestrator's ``_is_postgres`` check treating
+    this as Postgres-equivalent. ``_init_run_row`` (ungated since #896)
+    now issues a run-row INSERT through any session, so the stub must
+    accept ``execute`` calls without touching real SQL.
+    """
+
+    def __init__(self) -> None:
+        self.bind = None
+
+    async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(first=lambda: None, all=lambda: [])
+
+
 class _FakeCoordinator:
     """Coordinator stub that surfaces sessions to per-op handlers.
 
@@ -99,7 +115,7 @@ class _FakeTxnCtx:
 
     async def __aenter__(self) -> Any:
         self._coordinator.tx_open_count += 1
-        return SimpleNamespace(session=SimpleNamespace(bind=None))
+        return SimpleNamespace(session=_NoopSession())
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self._coordinator.tx_close_count += 1
