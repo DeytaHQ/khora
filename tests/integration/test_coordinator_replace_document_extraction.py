@@ -250,8 +250,13 @@ class TestReplaceDocumentExtractionIntegration:
         # First replace: PG tx commits (chunks + status stamp persisted), then
         # graph retire raises.  Per #887, the document row remains COMPLETED -
         # PG data is durable, so marking FAILED would diverge status from the
-        # fully-written data.  The exception still propagates.
-        with pytest.raises(RuntimeError, match="injected graph failure"):
+        # fully-written data.  Per #884, the underlying graph exception is
+        # wrapped in GraphMirrorFailedAfterPGCommitError so the caller can
+        # record the divergence on a user-facing result; the original
+        # exception is preserved via __cause__.
+        from khora.exceptions import GraphMirrorFailedAfterPGCommitError
+
+        with pytest.raises(GraphMirrorFailedAfterPGCommitError) as exc_info:
             await coord.replace_document_extraction(
                 namespace_id=namespace_id,
                 old_document_id=old_doc.id,
@@ -260,6 +265,8 @@ class TestReplaceDocumentExtractionIntegration:
                 new_entities=[],  # orphans the sole entity
                 new_relationships=[],
             )
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert "injected graph failure" in str(exc_info.value.__cause__)
 
         after_graph_fail = await coord.get_document(new_doc.id)
         assert after_graph_fail is not None
