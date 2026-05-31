@@ -1,22 +1,20 @@
-# Google Gemini Configuration for Khora
-# Uses Gemini 2.0 Flash for fast, cost-effective processing
+# Google Gemini configuration for Khora — the contents of the `llm:` block.
+#
+# Gemini's key resolves through LiteLLM, which reads GEMINI_API_KEY; Google's
+# client libraries also look for GOOGLE_API_KEY, so export both to the same
+# value. Embeddings run on OpenAI, so export its key too:
+#     export GEMINI_API_KEY=...   GOOGLE_API_KEY=$GEMINI_API_KEY
+#     export OPENAI_API_KEY=...   # the embedding model below
 
-model: "gemini/gemini-2.0-flash"
-api_key_env: "GOOGLE_API_KEY"
+model: gemini/gemini-2.0-flash
+api_key_env: GEMINI_API_KEY
 
-# Model parameters
 temperature: 0.7
 max_tokens: 8192
-
-# Request configuration
 timeout: 120
 max_retries: 3
-retry_wait: 2
-
-# Concurrency
 max_concurrent_llm_calls: 15
 
-# Embedding configuration (using OpenAI for embeddings)
-embedding_model: "text-embedding-3-small"
-embedding_api_key_env: "OPENAI_API_KEY"
+# Embeddings on OpenAI (1536-wide, matches the Postgres vector column).
+embedding_model: text-embedding-3-small
 embedding_dimension: 1536

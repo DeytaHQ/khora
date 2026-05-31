@@ -1084,8 +1084,8 @@ class ChronicleEngine:
         new_facts: list[MemoryFact],
         namespace_id: UUID,
         expertise: ExpertiseConfig | None,
-    ) -> int:
-        """Apply ADD/UPDATE/DELETE/NOOP reconciliation and persist results.
+    ) -> tuple[int, int]:
+        """Apply ADD/UPDATE/DELETE/NOOP/SKIP reconciliation and persist results.
 
         Strategy:
           1. Group new facts by subject.
@@ -1094,16 +1094,20 @@ class ChronicleEngine:
              - ADD     → queue for write
              - UPDATE  → queue for write + supersede the target
              - DELETE  → supersede only (no write)
-             - NOOP    → skip
+             - NOOP    → skip (duplicate)
+             - SKIP    → drop fact, bump reconcile-error counter (issue #892)
           4. After processing a subject, append accepted facts to its in-memory
              cache so subsequent new facts about the same subject reconcile
              against everything we just decided to keep — prevents within-batch
              thrashing when two sentences contain the same fact.
 
-        Returns the number of new facts effectively persisted (ADD + UPDATE).
+        Returns ``(facts_persisted, reconcile_errors)`` where ``reconcile_errors``
+        is the number of facts dropped because the contradiction-check LLM call
+        failed transiently. Issue #892 - previously these errors were swallowed
+        and the fact was silently ADDed, accumulating contradictions.
         """
         if not new_facts:
-            return 0
+            return 0, 0
 
         compressor = self._get_compressor(expertise)
         storage = self._get_storage()
@@ -1118,6 +1122,9 @@ class ChronicleEngine:
         # DELETE only — supersede pointing at *no* new fact (NULL) — done now
         # because no write is needed.
         deletes: list[UUID] = []
+        # Issue #892: count facts dropped due to transient LLM failures in
+        # the contradiction check.
+        reconcile_errors = 0
 
         for new_fact in new_facts:
             subject = new_fact.subject
@@ -1151,6 +1158,8 @@ class ChronicleEngine:
                 if action.target is not None:
                     deletes.append(action.target.id)
                     active_by_subject[subject] = [f for f in active_by_subject[subject] if f.id != action.target.id]
+            elif action.op is FactOperation.SKIP:
+                reconcile_errors += 1
             # NOOP: skip — nothing to do.
 
         # Persist new ADDs/UPDATEs first so we have stable IDs to point at.
@@ -1159,7 +1168,7 @@ class ChronicleEngine:
                 await storage.write_facts(facts_to_write, namespace_id=namespace_id)
             except Exception as exc:
                 logger.warning("write_facts failed during reconciliation: {}", exc)
-                return 0
+                return 0, reconcile_errors
 
         # Supersede old → new for UPDATEs.
         for old_id, new_fact in pending_supersedes:
@@ -1178,7 +1187,7 @@ class ChronicleEngine:
             except Exception as exc:
                 logger.warning("supersede_fact (delete) failed for {}: {}", old_id, exc)
 
-        return len(facts_to_write)
+        return len(facts_to_write), reconcile_errors
 
     async def _extract_and_persist_facts(
         self,
@@ -1186,15 +1195,18 @@ class ChronicleEngine:
         namespace_id: UUID,
         expertise: ExpertiseConfig | None,
         errors_out: list[ErrorRecord] | None = None,
-    ) -> int:
+    ) -> tuple[int, int]:
         """Extract facts from chunks, reconcile, persist, and return count.
 
-        Returns the number of facts effectively persisted (ADD + UPDATE).
-        Resolution of the ``facts.enabled`` flag is the caller's responsibility.
-        Issue #903: transient extractor failures are forwarded to ``errors_out``.
+        Returns ``(facts_persisted, reconcile_errors)`` where ``reconcile_errors``
+        is the number of facts dropped because the contradiction-check LLM call
+        failed transiently (issue #892). The non-reconcile fast path always
+        reports zero reconcile errors. Resolution of the ``facts.enabled``
+        flag is the caller's responsibility. Issue #903: transient extractor
+        failures are forwarded to ``errors_out``.
         """
         if not chunks:
-            return 0
+            return 0, 0
         extractor = self._get_fact_extractor(expertise)
         sem = asyncio.Semaphore(self._max_concurrent_extractions)
         per_chunk = await asyncio.gather(
@@ -1203,7 +1215,7 @@ class ChronicleEngine:
         )
         new_facts: list[MemoryFact] = [f for sub in per_chunk for f in sub]
         if not new_facts:
-            return 0
+            return 0, 0
 
         reconcile = expertise.facts.reconcile if expertise is not None else True
         if reconcile:
@@ -1214,9 +1226,9 @@ class ChronicleEngine:
             await self._get_storage().write_facts(new_facts, namespace_id=namespace_id)
         except Exception as exc:
             logger.warning("write_facts failed (skipping fact persistence): {}", exc)
-            return 0
+            return 0, 0
         logger.debug("Persisted {} memory facts across {} chunks (no reconcile)", len(new_facts), len(chunks))
-        return len(new_facts)
+        return len(new_facts), 0
 
     # =========================================================================
     # Core API: remember, recall, forget
@@ -1336,6 +1348,7 @@ class ChronicleEngine:
         # Both share the same chunk fetch and per-chunk semaphore.
         events_extracted = 0
         facts_extracted = 0
+        reconcile_errors = 0
         # Issue #903 (ADR-001): transient extractor failures are appended here
         # and surfaced on the response under ``metadata["errors"]``.
         extraction_errors: list[ErrorRecord] = []
@@ -1360,7 +1373,7 @@ class ChronicleEngine:
                     timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
                 if run_facts:
                     start = time.perf_counter()
-                    facts_extracted = await self._extract_and_persist_facts(
+                    facts_extracted, reconcile_errors = await self._extract_and_persist_facts(
                         chunks, namespace_id, expertise, errors_out=extraction_errors
                     )
                     timings["fact_extraction_ms"] = (time.perf_counter() - start) * 1000
@@ -1394,6 +1407,9 @@ class ChronicleEngine:
             "timings": timings,
             "events_extracted": events_extracted,
             "facts_extracted": facts_extracted,
+            # Issue #892: per-call signal that fact reconciliation dropped
+            # facts due to transient LLM failures. 0 on the happy path.
+            "reconcile_errors": reconcile_errors,
         }
         if extraction_errors:
             metadata["errors"] = list(extraction_errors)
@@ -2863,6 +2879,7 @@ class ChronicleEngine:
         # extraction semaphore.
         events_extracted = 0
         facts_extracted = 0
+        reconcile_errors = 0
         try:
             namespace = await self._get_storage().get_namespace(namespace_id)
         except Exception:
@@ -2884,7 +2901,9 @@ class ChronicleEngine:
                     timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
                 if run_facts:
                     start = time.perf_counter()
-                    facts_extracted = await self._extract_and_persist_facts(chunks, namespace_id, expertise)
+                    facts_extracted, reconcile_errors = await self._extract_and_persist_facts(
+                        chunks, namespace_id, expertise
+                    )
                     timings["fact_extraction_ms"] = (time.perf_counter() - start) * 1000
 
         timings["total_ms"] = (time.perf_counter() - total_start) * 1000
@@ -2919,6 +2938,10 @@ class ChronicleEngine:
                 "timings": timings,
                 "events_extracted": events_extracted,
                 "facts_extracted": facts_extracted,
+                # Issue #892: per-batch count of facts dropped because the
+                # contradiction-check LLM call failed transiently. 0 on
+                # the happy path.
+                "reconcile_errors": reconcile_errors,
             },
         )
 

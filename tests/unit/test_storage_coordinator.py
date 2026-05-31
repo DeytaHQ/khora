@@ -829,8 +829,14 @@ class TestReplaceDocumentExtraction:
         assert new_doc.status == DocumentStatus.COMPLETED
 
     @pytest.mark.asyncio
-    async def test_graph_side_failure_marks_document_failed_and_reraises(self) -> None:
-        """On graph-side failure: PG is committed, doc is marked FAILED, exception is re-raised unwrapped."""
+    async def test_graph_failure_after_pg_commit_keeps_completed_and_reraises(self) -> None:
+        """Fix for #887 (refined by #884): when PG commits and the graph phase
+        fails, the document stays COMPLETED (data is fully written), a WARNING
+        is logged, and a typed exception wraps the original so the caller can
+        record the divergence.
+        """
+        from khora.exceptions import GraphMirrorFailedAfterPGCommitError
+
         namespace_id = uuid4()
         old_doc_id = uuid4()
         new_doc = Document(namespace_id=namespace_id, content="new body")
@@ -869,37 +875,61 @@ class TestReplaceDocumentExtraction:
             relational=rel_backend, vector=vec_backend, graph=graph_backend
         )
 
-        with pytest.raises(RuntimeError, match="neo4j down"):
-            await coord.replace_document_extraction(
-                namespace_id=namespace_id,
-                old_document_id=old_doc_id,
-                new_document=new_doc,
-                new_chunks=new_chunks,
-                new_entities=[],
-                new_relationships=[],
-            )
+        # Capture loguru WARNING by patching the module-bound logger.
+        with patch("khora.storage.coordinator.logger") as mock_logger:
+            with pytest.raises(GraphMirrorFailedAfterPGCommitError) as exc_info:
+                await coord.replace_document_extraction(
+                    namespace_id=namespace_id,
+                    old_document_id=old_doc_id,
+                    new_document=new_doc,
+                    new_chunks=new_chunks,
+                    new_entities=[],
+                    new_relationships=[],
+                )
 
-        # PG is committed even though the graph step raised
+        # The original exception is preserved via __cause__ (raise ... from).
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert str(exc_info.value.__cause__) == "neo4j down"
+        assert exc_info.value.document_id == new_doc.id
+        assert exc_info.value.namespace_id == namespace_id
+        assert exc_info.value.original_exception_type == "RuntimeError"
+
+        # PG is committed even though the graph step raised.
         assert session.committed is True
-        # Document was marked FAILED with the error string
-        assert new_doc.status == DocumentStatus.FAILED
-        assert new_doc.error_message == "neo4j down"
-        # update_document was called at least twice — once in txn, once to persist FAILED
-        assert rel_backend.update_document.await_count >= 2
+        assert session.rolled_back is False
+        # #887: document stays COMPLETED. The fully-written chunks + entity
+        # counts must not be contradicted by a FAILED status.
+        assert new_doc.status == DocumentStatus.COMPLETED
+        assert new_doc.error_message is None
+        assert new_doc.chunk_count == len(new_chunks)
+        assert new_doc.entity_count == 0
+        # update_document was called exactly once (in-tx status stamp) -
+        # the buggy post-tx mark_failed write has been removed.
+        assert rel_backend.update_document.await_count == 1
+        # A WARNING was logged about the graph-phase failure (#887).
+        mock_logger.warning.assert_called_once()
+        warn_args = mock_logger.warning.call_args
+        assert "#887" in warn_args.args[0]
 
     @pytest.mark.asyncio
-    async def test_pg_failure_rolls_back_and_skips_graph(self) -> None:
-        """If the PG transaction raises, graph-side work is skipped and the exception is re-raised."""
+    async def test_pg_failure_rolls_back_and_does_not_mark_failed(self) -> None:
+        """Fix for #887: if the PG transaction raises, the rollback reverts
+        the in-tx status stamp; the coordinator no longer issues an
+        out-of-band ``mark_failed`` update against the rolled-back row.
+        """
         namespace_id = uuid4()
         old_doc_id = uuid4()
         new_doc = Document(namespace_id=namespace_id, content="new body")
+        # Caller-set pre-replace status (typical: PROCESSING from the
+        # ingest pipeline).
+        new_doc.mark_processing()
 
         rel_backend = MagicMock()
         pg_error = RuntimeError("pg-constraint-violation")
         rel_backend.update_document = AsyncMock(side_effect=pg_error)
 
         vec_backend = MagicMock()
-        vec_backend.delete_chunks_by_document = AsyncMock()
+        vec_backend.delete_chunks_by_document = AsyncMock(return_value=0)
         vec_backend.create_chunks_batch = AsyncMock()
 
         graph_backend = MagicMock()
@@ -926,14 +956,19 @@ class TestReplaceDocumentExtraction:
 
         assert session.committed is False
         assert session.rolled_back is True
-        # Graph work was never issued
+        # Graph work was never issued.
         graph_backend.retire_orphaned_entities_batch.assert_not_awaited()
         graph_backend.retire_orphaned_relationships_batch.assert_not_awaited()
         graph_backend.remap_source_document_ids_batch.assert_not_awaited()
         graph_backend.upsert_entities_batch.assert_not_awaited()
-        # Document was still marked FAILED (persisted via fallback update_document call)
-        assert new_doc.status == DocumentStatus.FAILED
-        assert new_doc.error_message == "pg-constraint-violation"
+        # In the rolled-back-tx case, the only update_document call is the
+        # in-tx attempt that raised.  The buggy post-tx mark_failed update
+        # has been removed (#887), so no second write happens.
+        assert rel_backend.update_document.await_count == 1
+        # Document was NOT marked FAILED post-tx; the PG row keeps its
+        # pre-replace status because the SQL tx rolled back.
+        assert new_doc.status != DocumentStatus.FAILED
+        assert new_doc.error_message is None
 
     @pytest.mark.asyncio
     async def test_relationship_type_sanitization_classifies_survivor_correctly(self) -> None:
@@ -1061,6 +1096,139 @@ class TestReplaceDocumentExtraction:
         assert result.entities_created == 1
         assert result.entities_updated == 0
         assert result.entities_retired == 0
+
+
+class TestReplaceDocumentPartialFailureObservability:
+    """Regression for issue #884: graph-mirror failure after PG commit must
+    increment ``khora.storage.replace_document.partial_failure`` exactly once,
+    leave PG state durable (chunks + COMPLETED), and surface as a typed
+    ``GraphMirrorFailedAfterPGCommitError`` so the caller can record the
+    divergence on its user-facing result (ADR-001 degradation convention).
+    """
+
+    @pytest.mark.asyncio
+    async def test_graph_failure_after_pg_commit_increments_counter_and_raises_typed(
+        self,
+    ) -> None:
+        """When the graph-mirror phase of ``replace_document_extraction`` raises
+        AFTER the PG transaction commits, the coordinator must:
+
+        1. Leave PG durable: chunks created, document marked COMPLETED.
+        2. Increment ``khora.storage.replace_document.partial_failure`` exactly
+           once with the documented metric name and unit.
+        3. Wrap the underlying exception in ``GraphMirrorFailedAfterPGCommitError``
+           so the caller can distinguish "graph mirror partial" from
+           "full rollback" and record a degradation on the user-facing result.
+        """
+        from khora.exceptions import GraphMirrorFailedAfterPGCommitError
+
+        namespace_id = uuid4()
+        old_doc_id = uuid4()
+        new_doc = Document(namespace_id=namespace_id, content="new body")
+        new_chunks = [
+            Chunk(namespace_id=namespace_id, document_id=new_doc.id, content="c1"),
+            Chunk(namespace_id=namespace_id, document_id=new_doc.id, content="c2"),
+        ]
+
+        rel_backend = MagicMock()
+        rel_backend.update_document = AsyncMock(return_value=new_doc)
+
+        vec_backend = MagicMock()
+        vec_backend.delete_chunks_by_document = AsyncMock(return_value=3)
+        vec_backend.create_chunks_batch = AsyncMock(return_value=new_chunks)
+        # Strip the optional vector-side entity writer so the coordinator's
+        # upsert_entities_batch routes through the graph-only branch and the
+        # net-new entity below tries the graph adapter.
+        del vec_backend.upsert_entities_batch
+
+        graph_backend = MagicMock()
+        graph_backend.fetch_document_extraction_state = AsyncMock(
+            return_value=(
+                [
+                    {
+                        "id": str(uuid4()),
+                        "name": "alice",
+                        "entity_type": "PERSON",
+                        "namespace_id": str(namespace_id),
+                        "source_document_count": 1,
+                    }
+                ],
+                [],
+            )
+        )
+        # First post-PG graph op blows up.
+        boom = RuntimeError("neo4j unreachable")
+        graph_backend.retire_orphaned_entities_batch = AsyncMock(side_effect=boom)
+        graph_backend.retire_orphaned_relationships_batch = AsyncMock()
+        graph_backend.remap_source_document_ids_batch = AsyncMock()
+        graph_backend.upsert_entities_batch = AsyncMock(return_value=[])
+        graph_backend.create_relationships_batch = AsyncMock(return_value=0)
+
+        coord, session = _make_coordinator_with_fake_txn(
+            relational=rel_backend, vector=vec_backend, graph=graph_backend
+        )
+
+        counter_mock = MagicMock()
+        with patch("khora.storage.coordinator.metric_counter", return_value=counter_mock) as metric_counter_patched:
+            with pytest.raises(GraphMirrorFailedAfterPGCommitError) as exc_info:
+                await coord.replace_document_extraction(
+                    namespace_id=namespace_id,
+                    old_document_id=old_doc_id,
+                    new_document=new_doc,
+                    new_chunks=new_chunks,
+                    new_entities=[],
+                    new_relationships=[],
+                )
+
+        # --- Assert PG state is durable (caller can see PG committed) ------
+        assert session.committed is True
+        assert session.rolled_back is False
+        # Doc row is COMPLETED with chunk count stamped in-tx.
+        assert new_doc.status == DocumentStatus.COMPLETED
+        assert new_doc.chunk_count == len(new_chunks)
+        assert new_doc.error_message is None
+        # update_document was issued exactly once (the in-tx status stamp).
+        assert rel_backend.update_document.await_count == 1
+        # Chunks were inserted within the PG transaction.
+        vec_backend.create_chunks_batch.assert_awaited_once()
+
+        # --- Assert partial_failure counter incremented exactly once -------
+        # The contract for this metric: name + unit must match the
+        # docs/telemetry-contract.json entry (issue #884).
+        partial_failure_calls = [
+            c
+            for c in metric_counter_patched.call_args_list
+            if c.args and c.args[0] == "khora.storage.replace_document.partial_failure"
+        ]
+        assert len(partial_failure_calls) == 1, (
+            f"expected exactly one partial_failure counter creation, got "
+            f"{len(partial_failure_calls)}: {metric_counter_patched.call_args_list}"
+        )
+        assert partial_failure_calls[0].kwargs["unit"] == "1"
+        # The counter object's .add was called exactly once with delta=1.
+        counter_mock.add.assert_called_once_with(1)
+
+        # --- Assert the failure propagates to the caller observably -------
+        # The typed exception preserves the original via __cause__ and
+        # surfaces the document/namespace identity so the caller can record
+        # an ADR-001 degradation on the user-facing result.
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert str(exc_info.value.__cause__) == "neo4j unreachable"
+        assert exc_info.value.document_id == new_doc.id
+        assert exc_info.value.namespace_id == namespace_id
+        assert exc_info.value.original_exception_type == "RuntimeError"
+
+        # --- Assert no data divergence wrt to what the caller sees --------
+        # PG-side state is fully consistent (caller sees "PG is good"):
+        # chunks present, status COMPLETED, no FAILED stamp.
+        assert new_doc.status != DocumentStatus.FAILED
+        # Graph-side state is partial (caller sees "graph is partial"):
+        # the first graph op raised; the later ones (remap, upsert,
+        # create_relationships) were never reached.
+        graph_backend.retire_orphaned_entities_batch.assert_awaited_once()
+        graph_backend.remap_source_document_ids_batch.assert_not_awaited()
+        graph_backend.upsert_entities_batch.assert_not_awaited()
+        graph_backend.create_relationships_batch.assert_not_awaited()
 
 
 class TestUpsertEntitiesBatchOrdering:

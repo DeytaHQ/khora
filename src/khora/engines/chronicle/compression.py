@@ -11,6 +11,7 @@ operations (Mem0 pattern, 66.9% LoCoMo) to maintain memory consistency.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -29,6 +30,37 @@ from khora.engines.chronicle.events import (
 from khora.engines.chronicle.events import (
     _TRANSIENT_LLM_ERRORS as _CHRONICLE_TRANSIENT_LLM_ERRORS,
 )
+from khora.telemetry import metric_counter
+
+# Counter for reconcile_fact LLM failures. Issue #892: previously the broad
+# ``except Exception`` silently fell back to ADD on every LLM error,
+# accumulating contradictory facts. Now narrowed to transient errors; the
+# fact is skipped and this counter is the operator's only signal that
+# reconciliation is degrading. NO namespace_id label - cardinality rule.
+_RECONCILE_FAILURES = metric_counter(
+    "khora.chronicle.reconcile.failures_total",
+    unit="1",
+    description=(
+        "Issue #892. reconcile_fact() calls where the LLM contradiction-check "
+        "raised a transient error (rate limit, timeout, connection error, "
+        "JSON parse error). The fact is skipped (NOT added) to prevent silent "
+        "contradiction accumulation. NO namespace_id label - cardinality rule."
+    ),
+)
+
+# Transient LLM-side failures we accept as "model never answered" and
+# treat as a skip. Real bugs (AttributeError, TypeError, KeyError on a
+# logic path) must propagate so they get noticed.
+_TRANSIENT_LLM_ERRORS: tuple[type[BaseException], ...] = (
+    litellm.exceptions.RateLimitError,
+    litellm.exceptions.Timeout,
+    litellm.exceptions.APIConnectionError,
+    litellm.exceptions.APIError,
+    litellm.exceptions.ServiceUnavailableError,
+    litellm.exceptions.InternalServerError,
+    asyncio.TimeoutError,
+    json.JSONDecodeError,
+)
 
 # ---------------------------------------------------------------------------
 # Memory fact model
@@ -42,6 +74,11 @@ class FactOperation(str, Enum):
     UPDATE = "update"
     DELETE = "delete"
     NOOP = "noop"
+    # Issue #892: the contradiction-check LLM call failed transiently (rate
+    # limit, timeout, connection error, malformed JSON). The caller MUST
+    # treat this as "do not persist this fact" - skipping is safer than
+    # fail-open to ADD, which silently accumulates contradictory facts.
+    SKIP = "skip"
 
 
 @dataclass(slots=True)
@@ -405,9 +442,23 @@ class MemoryCompressor:
             )
             content = response.choices[0].message.content or "{}"
             result = _parse_json_object(content)
-        except Exception:
-            logger.debug("Contradiction check failed, defaulting to ADD")
-            return ReconcileAction(op=FactOperation.ADD)
+        except _TRANSIENT_LLM_ERRORS as exc:
+            # Issue #892: NEVER fail open to ADD here. The old behavior
+            # silently accumulated contradictory facts whenever the LLM
+            # was unavailable. Skip the fact instead and bump a counter
+            # so operators can see reconciliation degrading.
+            logger.warning(
+                "reconcile_fact transient LLM failure - skipping fact "
+                "(subject={subject!r}, predicate={predicate!r}, "
+                "namespace_id={namespace_id}): {exc_type}: {exc}",
+                subject=new_fact.subject,
+                predicate=new_fact.predicate,
+                namespace_id=new_fact.namespace_id,
+                exc_type=type(exc).__name__,
+                exc=exc,
+            )
+            _RECONCILE_FAILURES.add(1)
+            return ReconcileAction(op=FactOperation.SKIP)
 
         _latency = (_time.perf_counter() - _t0) * 1000
         usage = getattr(response, "usage", None)
@@ -424,6 +475,11 @@ class MemoryCompressor:
         try:
             operation = FactOperation(op_str)
         except ValueError:
+            operation = FactOperation.ADD
+        # SKIP is reserved for the transient-error path; if the LLM ever
+        # returns "skip", treat it as ADD so we don't accidentally drop
+        # legitimate facts.
+        if operation is FactOperation.SKIP:
             operation = FactOperation.ADD
 
         target: MemoryFact | None = None

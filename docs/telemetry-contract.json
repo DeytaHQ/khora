@@ -1045,6 +1045,14 @@
       "description": "Issue #907 (ADR-001). Number of relationships dropped by the shared ingest pipeline because the source / target entity id could not be remapped to a canonical entity (LLM-extracted endpoint not in the upsert batch and no (name, type) match in the namespace). Surfaced on RememberResult.relationships_skipped and as a Degradation entry under RememberResult.metadata['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.chronicle.reconcile.failures_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "chronicle",
+      "description": "Issue #892. MemoryCompressor.reconcile_fact() calls where the contradiction-check LLM call raised a transient error (rate limit, timeout, connection error, JSON parse error). The fact is skipped (NOT added) to prevent silent contradiction accumulation - previously the broad except Exception silently fell back to ADD on every LLM error, breaking fact supersession integrity. NO namespace_id label - cardinality rule."
+    },
+    {
       "name": "khora.vectorcypher.abstention_signal",
       "type": "counter",
       "stability": "public",
@@ -1362,6 +1370,14 @@
       "unit": "1",
       "description": "Vector commit succeeded but the graph upsert raised. Vector rows are reconciled by the next upsert MERGE; operators monitor this counter to detect graph-side dropouts.",
       "_comment": "Issue #868. Vector-first ordering in StorageCoordinator.upsert_entities_batch. NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.storage.replace_document.partial_failure",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "description": "PG transaction committed (chunks + COMPLETED status stamp) but the post-commit graph-mirror phase of StorageCoordinator.replace_document_extraction raised. The graph backend is in a partial-mirror state; the next successful replace for the same external_id heals via MERGE / retire. Caller surfaces a degradation on RememberResult.metadata so downstream consumers can act on the divergence.",
+      "_comment": "Issue #884. NO namespace_id label - cardinality rule."
     }
   ]
 }
