@@ -345,6 +345,41 @@ class TestEntityOps:
         vec.update_entity.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_delete_entity_removes_graph_and_vector(self) -> None:
+        """delete_entity drops both the graph node and the pgvector mirror (#928)."""
+        ns_id = uuid4()
+        entity_id = uuid4()
+        graph = MagicMock()
+        graph.delete_entity = AsyncMock(return_value=True)
+        vec = MagicMock()
+        vec.delete_entities_batch = AsyncMock(return_value=1)
+
+        coord = StorageCoordinator(graph=graph, vector=vec)
+        result = await coord.delete_entity(entity_id, namespace_id=ns_id)
+
+        assert result is True
+        graph.delete_entity.assert_awaited_once_with(entity_id, namespace_id=ns_id)
+        vec.delete_entities_batch.assert_awaited_once_with([entity_id], namespace_id=ns_id)
+
+    @pytest.mark.asyncio
+    async def test_delete_entity_skips_vector_on_unified_backend(self) -> None:
+        """delete_entity does not double-delete on a unified backend (#928)."""
+        ns_id = uuid4()
+        entity_id = uuid4()
+        graph = MagicMock()
+        graph.delete_entity = AsyncMock(return_value=True)
+        vec = MagicMock()
+        vec.delete_entities_batch = AsyncMock(return_value=1)
+
+        coord = StorageCoordinator(graph=graph, vector=vec)
+        coord._is_unified_backend = True
+        result = await coord.delete_entity(entity_id, namespace_id=ns_id)
+
+        assert result is True
+        graph.delete_entity.assert_awaited_once_with(entity_id, namespace_id=ns_id)
+        vec.delete_entities_batch.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_get_entity_by_name(self) -> None:
         """get_entity_by_name delegates to graph."""
         ns_id = uuid4()
