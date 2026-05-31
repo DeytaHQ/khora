@@ -672,6 +672,15 @@ async with conn.transaction():
 
 The coordinator's `StorageCoordinator.transaction()` remains session-shaped (SQLAlchemy `AsyncSession`) and does not yet route to SurrealDB transactions - that integration is a follow-up. For atomic SurrealDB-only multi-statement operations on remote stacks today, use the `conn.transaction()` primitive directly.
 
+## Bi-temporal columns are RESERVED (#888)
+
+Migrations 033 and 034 added bi-temporal columns to the PostgreSQL schema - `valid_to`, `invalidated_at`, `invalidated_by` on `entities`, `relationships`, `memory_facts`, and `chronicle_events` - plus partial indexes `WHERE invalidated_at IS NULL`. These columns are **reserved scaffolding**, not a live read/write contract:
+
+- **Written only by dream-apply, pg-side.** The sole writer is the dream phase (`src/khora/dream/`, see #875): dedupe, fact compaction, and event clustering set `invalidated_at` / `invalidated_by` to soft-delete superseded rows on the PostgreSQL side. The ingest path never writes them.
+- **Never filtered on read.** The ingest and recall read paths (`engines/`, `storage/backends/`) do NOT add `WHERE invalidated_at IS NULL` to entity / relationship / fact / event queries. Reads return both live and invalidated rows.
+
+Why no read filter yet: dream-apply tombstones rows on the PostgreSQL side only. There is no Neo4j tombstone-mirror, so adding a pg-side `WHERE invalidated_at IS NULL` read filter would make PostgreSQL reads diverge from graph reads of the same data - a row hidden in pg would still be returned from Neo4j. **Do NOT add a read-side `invalidated_at IS NULL` filter until the cross-store tombstone-mirror lands** (cross-store atomicity work). The full write/read contract is tracked in #888; a guard test (`tests/unit/test_bitemporal_columns_reserved.py`) trips CI if a premature read filter is added to a read path.
+
 ### When to Use SurrealDB
 
 | Scenario | Recommendation |
