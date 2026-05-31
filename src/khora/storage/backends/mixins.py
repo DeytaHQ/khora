@@ -220,6 +220,71 @@ class GraphBackendBase:
         """Default — subclasses should override."""
         raise NotImplementedError
 
+    # -- Forget-cascade cleanup (#923) --------------------------------------
+    # Default implementations built on the per-record CRUD primitives every
+    # graph backend already provides. They let the forget cascade clean up
+    # orphaned entities/relationships on backends that do not (yet) ship a
+    # native batch delete or source-strip (SurrealDB, Memgraph, Neptune, AGE,
+    # sqlite_lance). Backends with a native batch path (Neo4j, pgvector)
+    # override these. Signatures mirror pgvector's so the cascade can call
+    # either store uniformly.
+
+    async def delete_entities_batch(self, entity_ids: list[UUID], *, namespace_id: UUID) -> int:
+        """Hard-delete entities by id, scoped to ``namespace_id`` (IDOR family)."""
+        deleted = 0
+        for eid in entity_ids:
+            if await self.delete_entity(eid, namespace_id=namespace_id):  # type: ignore[attr-defined]
+                deleted += 1
+        return deleted
+
+    async def delete_relationships_batch(self, relationship_ids: list[UUID], *, namespace_id: UUID) -> int:
+        """Hard-delete relationships by id, scoped to ``namespace_id`` (IDOR family)."""
+        deleted = 0
+        for rid in relationship_ids:
+            if await self.delete_relationship(rid, namespace_id=namespace_id):  # type: ignore[attr-defined]
+                deleted += 1
+        return deleted
+
+    async def strip_document_from_entities(
+        self, entity_ids: list[UUID], document_id: UUID, *, namespace_id: UUID
+    ) -> int:
+        """Strip ``document_id`` from survivor entities' ``source_document_ids``.
+
+        Per-record read-modify-write fallback scoped to ``namespace_id``
+        (IDOR family). Backends with a native bulk update override this.
+        """
+        updated = 0
+        for eid in entity_ids:
+            entity = await self.get_entity(eid, namespace_id=namespace_id)  # type: ignore[attr-defined]
+            if entity is None:
+                continue
+            if document_id in (entity.source_document_ids or []):
+                entity.source_document_ids = [d for d in entity.source_document_ids if d != document_id]
+                await self.update_entity(entity, namespace_id=namespace_id)  # type: ignore[attr-defined]
+                updated += 1
+        return updated
+
+    async def strip_document_from_relationships(
+        self, relationship_ids: list[UUID], document_id: UUID, *, namespace_id: UUID
+    ) -> int:
+        """Strip ``document_id`` from survivor relationships' ``source_document_ids``.
+
+        No graph backend exposes a single-relationship update primitive, so
+        this deletes the survivor and recreates it with the document id
+        removed. Scoped to ``namespace_id`` (IDOR family).
+        """
+        updated = 0
+        for rid in relationship_ids:
+            rel = await self.get_relationship(rid, namespace_id=namespace_id)  # type: ignore[attr-defined]
+            if rel is None:
+                continue
+            if document_id in (rel.source_document_ids or []):
+                rel.source_document_ids = [d for d in rel.source_document_ids if d != document_id]
+                await self.delete_relationship(rid, namespace_id=namespace_id)  # type: ignore[attr-defined]
+                await self.create_relationship(rel)  # type: ignore[attr-defined]
+                updated += 1
+        return updated
+
 
 # ---------------------------------------------------------------------------
 # VectorBackendBase

@@ -120,7 +120,12 @@ DEFINE FIELD IF NOT EXISTS entity_type ON entity TYPE string;
 DEFINE FIELD IF NOT EXISTS description ON entity TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS attributes ON entity FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS source_document_ids ON entity TYPE option<array>;
+-- SCHEMAFULL silently strips array CONTENTS unless the element field is
+-- defined (#923). Without these the source-document refcount used by the
+-- forget cascade never persists and orphan entities can never be cleaned.
+DEFINE FIELD IF NOT EXISTS source_document_ids[*] ON entity TYPE string;
 DEFINE FIELD IF NOT EXISTS source_chunk_ids ON entity TYPE option<array>;
+DEFINE FIELD IF NOT EXISTS source_chunk_ids[*] ON entity TYPE string;
 DEFINE FIELD IF NOT EXISTS source_tool ON entity TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS embedding ON entity TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS embedding_model ON entity TYPE option<string>;
@@ -147,7 +152,10 @@ DEFINE FIELD IF NOT EXISTS weight ON relates_to TYPE float DEFAULT 1.0;
 DEFINE FIELD IF NOT EXISTS description ON relates_to TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS properties ON relates_to FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS source_document_ids ON relates_to TYPE option<array>;
+-- See entity note above (#923): element field required for array contents.
+DEFINE FIELD IF NOT EXISTS source_document_ids[*] ON relates_to TYPE string;
 DEFINE FIELD IF NOT EXISTS source_chunk_ids ON relates_to TYPE option<array>;
+DEFINE FIELD IF NOT EXISTS source_chunk_ids[*] ON relates_to TYPE string;
 DEFINE FIELD IF NOT EXISTS valid_from ON relates_to TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS valid_until ON relates_to TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS confidence ON relates_to TYPE float DEFAULT 1.0;
