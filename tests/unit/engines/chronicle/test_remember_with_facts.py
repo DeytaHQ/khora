@@ -256,7 +256,14 @@ class TestRememberWithFacts:
         _stub_remember_doc_helpers(coord)
         _stub_pipeline(monkeypatch, [chunk.id])
 
-        async def fake_extract(text: str, *, chunk_id: UUID, namespace_id: UUID) -> list[MemoryFact]:
+        async def fake_extract(
+            text: str,
+            *,
+            chunk_id: UUID,
+            namespace_id: UUID,
+            errors_out: list | None = None,
+        ) -> list[MemoryFact]:
+            del text, chunk_id, namespace_id, errors_out
             return [_make_fact()]
 
         extractor = AsyncMock()
@@ -519,7 +526,14 @@ class TestResilienceAndFastPath:
 
         good_fact = _make_fact()
 
-        async def flaky_extract(text: str, *, chunk_id: UUID, namespace_id: UUID) -> list[MemoryFact]:
+        async def flaky_extract(
+            text: str,
+            *,
+            chunk_id: UUID,
+            namespace_id: UUID,
+            errors_out: list | None = None,
+        ) -> list[MemoryFact]:
+            del text, namespace_id, errors_out
             if chunk_id == bad.id:
                 raise RuntimeError("LLM is on fire")
             return [good_fact]
@@ -604,7 +618,14 @@ class TestRememberBatchWithFacts:
         chunks = [_make_chunk(f"doc {i} content", ns_id) for i in range(5)]
         coord = _RecordingCoordinator(namespace, chunks)
 
-        async def fake_extract(text: str, *, chunk_id: UUID, namespace_id: UUID) -> list[MemoryFact]:
+        async def fake_extract(
+            text: str,
+            *,
+            chunk_id: UUID,
+            namespace_id: UUID,
+            errors_out: list | None = None,
+        ) -> list[MemoryFact]:
+            del namespace_id, errors_out
             # Each chunk yields one unique fact to keep ADDs distinct.
             return [
                 _make_fact(

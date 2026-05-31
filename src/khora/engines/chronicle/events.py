@@ -8,6 +8,7 @@ Based on Chronos (95.6% LongMemEval) event calendar architecture.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -17,6 +18,39 @@ from uuid import UUID, uuid4
 
 import litellm
 from loguru import logger
+
+from khora.core.diagnostics import ErrorRecord
+from khora.telemetry.metrics import metric_counter
+
+# Counter for chronicle extraction LLM failures (issue #903, ADR-001).
+# Previously the broad ``except Exception`` swallowed the error at DEBUG and
+# returned [], leaving operators with no signal that event extraction was
+# silently degraded. NO namespace_id label - cardinality rule.
+_EXTRACTION_FAILED_COUNTER = metric_counter(
+    "khora.chronicle.extraction.failed_total",
+    unit="1",
+    description=(
+        "Issue #903. Chronicle event/fact extraction LLM calls that raised a "
+        "transient error (rate limit, timeout, connection error, JSON parse "
+        "error). The extractor returns [] and the error is appended to "
+        "RememberResult.metadata['errors']. Labels: kind (events|facts), "
+        "reason (llm_transient_failure). NO namespace_id label - cardinality rule."
+    ),
+)
+
+# Transient LLM-side failures we accept as "model never answered" and
+# treat as an empty extraction. Real parser bugs (AttributeError, KeyError,
+# TypeError on a logic path) MUST propagate so they get noticed.
+_TRANSIENT_LLM_ERRORS: tuple[type[BaseException], ...] = (
+    litellm.exceptions.RateLimitError,
+    litellm.exceptions.Timeout,
+    litellm.exceptions.APIConnectionError,
+    litellm.exceptions.APIError,
+    litellm.exceptions.ServiceUnavailableError,
+    litellm.exceptions.InternalServerError,
+    asyncio.TimeoutError,
+    json.JSONDecodeError,
+)
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -125,6 +159,7 @@ class EventExtractor:
         *,
         chunk_id: UUID | None = None,
         namespace_id: UUID | None = None,
+        errors_out: list[ErrorRecord] | None = None,
     ) -> list[ChronicleEvent]:
         """Extract events from a text chunk.
 
@@ -132,9 +167,15 @@ class EventExtractor:
             text: Source text to extract events from.
             chunk_id: Optional chunk ID for linking.
             namespace_id: Optional namespace for scoping.
+            errors_out: Optional sink for ADR-001 ``ErrorRecord`` entries.
+                When the LLM raises a transient error, an entry is appended
+                so the caller can surface it on
+                ``RememberResult.metadata['errors']``. Real parser bugs are
+                not appended - they propagate.
 
         Returns:
-            List of extracted ChronicleEvent objects.
+            List of extracted ChronicleEvent objects. Returns [] on
+            transient LLM failure (issue #903).
         """
         if not text.strip():
             return []
@@ -158,8 +199,32 @@ class EventExtractor:
             )
             content = response.choices[0].message.content or "[]"
             raw_events = self._parse_events(content)
-        except Exception:
-            logger.debug("Event extraction failed, returning empty")
+        except _TRANSIENT_LLM_ERRORS as exc:
+            # Issue #903: narrow the except clause to transient LLM errors;
+            # real parser bugs (AttributeError, KeyError) propagate. Promote
+            # the log to WARNING with exc_info so the traceback survives.
+            logger.warning(
+                "Event extraction transient LLM failure "
+                "(chunk_id={chunk_id}, namespace_id={namespace_id}): {exc_type}: {exc}",
+                chunk_id=chunk_id,
+                namespace_id=namespace_id,
+                exc_type=type(exc).__name__,
+                exc=exc,
+                exc_info=True,
+            )
+            _EXTRACTION_FAILED_COUNTER.add(
+                1,
+                attributes={"kind": "events", "reason": "llm_transient_failure"},
+            )
+            if errors_out is not None:
+                errors_out.append(
+                    ErrorRecord(
+                        component="chronicle.events_extractor",
+                        reason="llm_transient_failure",
+                        exception=type(exc).__name__,
+                        detail=str(exc)[:200] or None,
+                    )
+                )
             return []
 
         _latency = (_time.perf_counter() - _t0) * 1000

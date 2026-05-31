@@ -18,8 +18,26 @@ from loguru import logger
 
 from khora._accel import normalize_entity_names_batch
 from khora.core.models.event import EventType, MemoryEvent
+from khora.telemetry.metrics import metric_counter
 
 from ..registry import pipeline
+
+# ADR-001 (issue #907): the ingest pipeline drops relationships when their
+# source / target entity cannot be remapped to a canonical id. Previously
+# the only signal was a WARN log; this counter is the operator-facing
+# metric tied to the Degradation entry on RememberResult.metadata.
+# NO namespace_id label - cardinality rule.
+_RELATIONSHIPS_SKIPPED_COUNTER = metric_counter(
+    "khora.ingest.relationships_skipped_total",
+    unit="1",
+    description=(
+        "Issue #907. Number of relationships the ingest pipeline dropped "
+        "because source / target entity ids could not be remapped to "
+        "canonical entities. Surfaced on RememberResult.relationships_skipped "
+        "and RememberResult.metadata['degradations']. Labels: reason "
+        "(unremappable). NO namespace_id label - cardinality rule."
+    ),
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -1509,6 +1527,15 @@ async def process_document(
             _timed_embed_entities(),
             _timed_store_relationships(),
         )
+        # Issue #907: hoist the per-doc skipped count so the return dict can
+        # surface it. The local ``_skipped`` is created inside the gather
+        # tuple destructure; pin it under a stable name for the return.
+        relationships_skipped = int(_skipped or 0)
+        if relationships_skipped > 0:
+            _RELATIONSHIPS_SKIPPED_COUNTER.add(
+                relationships_skipped,
+                attributes={"reason": "unremappable"},
+            )
         _phase_times["entity_embed+rel_storage"] = _time.perf_counter() - _t0
 
         # Dispatch entity events now that embeddings (if any) are populated.
@@ -1586,6 +1613,11 @@ async def process_document(
             "chunks": len(chunks),
             "entities": len(entities),
             "relationships": stored_count,
+            # Issue #907 (ADR-001): un-remappable relationships dropped by
+            # ``_store_relationships``. The caller is responsible for
+            # surfacing this on RememberResult.relationships_skipped and as
+            # a Degradation under metadata["degradations"].
+            "relationships_skipped": relationships_skipped,
             "extracted_relationships": len(relationships),
             "inferred_relationships": len(inferred_relationships),
             "entity_ids": [e.id for e in entities],

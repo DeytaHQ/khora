@@ -154,7 +154,14 @@ class TestRememberWithEvents:
         chunk_b = _make_chunk("carol greeted dan", ns_id)
         coord = _RecordingCoordinator(namespace, [chunk_a, chunk_b])
 
-        async def fake_extract(text: str, *, chunk_id: UUID, namespace_id: UUID) -> list[ChronicleEvent]:
+        async def fake_extract(
+            text: str,
+            *,
+            chunk_id: UUID,
+            namespace_id: UUID,
+            errors_out: list | None = None,
+        ) -> list[ChronicleEvent]:
+            del chunk_id, namespace_id, errors_out  # signature-shape only
             return [_make_event(text)]
 
         extractor = AsyncMock()
@@ -335,7 +342,14 @@ class TestRememberWithEvents:
         bad_chunk = _make_chunk("trigger boom", ns_id)
         coord = _RecordingCoordinator(namespace, [good_chunk, bad_chunk])
 
-        async def flaky_extract(text: str, *, chunk_id: UUID, namespace_id: UUID) -> list[ChronicleEvent]:
+        async def flaky_extract(
+            text: str,
+            *,
+            chunk_id: UUID,
+            namespace_id: UUID,
+            errors_out: list | None = None,
+        ) -> list[ChronicleEvent]:
+            del namespace_id, errors_out
             if chunk_id == bad_chunk.id:
                 raise RuntimeError("LLM is on fire")
             return [_make_event(text)]
@@ -405,7 +419,14 @@ class TestRememberBatchWithEvents:
         chunks = [_make_chunk(f"doc {i} content", ns_id) for i in range(5)]
         coord = _RecordingCoordinator(namespace, chunks)
 
-        async def fake_extract(text: str, *, chunk_id: UUID, namespace_id: UUID) -> list[ChronicleEvent]:
+        async def fake_extract(
+            text: str,
+            *,
+            chunk_id: UUID,
+            namespace_id: UUID,
+            errors_out: list | None = None,
+        ) -> list[ChronicleEvent]:
+            del errors_out
             ev = _make_event(text)
             ev.chunk_id = chunk_id
             ev.namespace_id = namespace_id

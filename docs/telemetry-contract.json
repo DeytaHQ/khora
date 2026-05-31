@@ -1011,6 +1011,40 @@
       "description": "Issues #901, #906. Chronicle retrieval channel degradations recorded under ADR-001 (silent-failure observability). Incremented once per channel-failure or silent-fallback site in chronicle.recall(). The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.chronicle.extraction.failed_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "chronicle",
+      "labels": [
+        {"name": "kind", "values": ["events", "facts"], "_comment": "Which chronicle extractor failed."},
+        {"name": "reason", "values": ["llm_transient_failure"], "_comment": "Low-cardinality enum; extend if a non-LLM failure mode is observed."}
+      ],
+      "description": "Issue #903 (ADR-001). Chronicle event / fact extraction LLM calls that raised a transient error (rate limit, timeout, connection error, JSON parse error). The extractor returns [] and an ErrorRecord is appended to RememberResult.metadata['errors']. Real parser bugs (AttributeError, KeyError) propagate and do NOT increment this counter. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
+      "name": "khora.vectorcypher.rel_fetch.degraded_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "vectorcypher",
+      "labels": [
+        {"name": "reason", "values": ["fetch_failed"], "_comment": "Low-cardinality enum; extend when adding new relationship-fetch fallback paths."}
+      ],
+      "description": "Issue #904 (ADR-001). VectorCypher relationship-fetch silent fallback - incremented when the parallel rels_task raises and the retrieve path continues without relationships. The same event is also appended to RecallResult.engine_info['degradations']. Asymmetric prior art: _cypher_expand failure already sets engine_info['graph_fallback'] / 'graph_error'; this counter closes the rel-fetch gap. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
+      "name": "khora.ingest.relationships_skipped_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "pipelines.ingest",
+      "labels": [
+        {"name": "reason", "values": ["unremappable"], "_comment": "Why the relationship was dropped. Low-cardinality enum."}
+      ],
+      "description": "Issue #907 (ADR-001). Number of relationships dropped by the shared ingest pipeline because the source / target entity id could not be remapped to a canonical entity (LLM-extracted endpoint not in the upsert batch and no (name, type) match in the namespace). Surfaced on RememberResult.relationships_skipped and as a Degradation entry under RememberResult.metadata['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
       "name": "khora.vectorcypher.abstention_signal",
       "type": "counter",
       "stability": "public",
