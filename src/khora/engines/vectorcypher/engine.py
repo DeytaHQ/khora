@@ -1717,14 +1717,59 @@ class VectorCypherEngine:
 
         # 5. Hand off to the coordinator — it owns the Postgres transaction,
         #    graph retire / remap / upsert, and FAILED-on-exception handling.
-        replace_result = await storage.replace_document_extraction(
-            namespace_id=namespace_id,
-            old_document_id=existing.id,
-            new_document=new_document,
-            new_chunks=new_chunks,
-            new_entities=new_entities,
-            new_relationships=new_relationships,
-        )
+        #
+        #    #884: catch the typed signal for "PG committed, graph mirror
+        #    partial" so we can record the divergence on the user-facing
+        #    RememberResult instead of presenting the failure as if PG
+        #    also rolled back. Skipping steps 6-8 (MENTIONED_IN linking,
+        #    source_chunk_ids reset) is intentional: those also touch the
+        #    graph backend, and re-attempting them now would either raise
+        #    again or write against the partial graph state. A future
+        #    reconciler will replay the missing graph work.
+        from khora.exceptions import GraphMirrorFailedAfterPGCommitError
+
+        try:
+            replace_result = await storage.replace_document_extraction(
+                namespace_id=namespace_id,
+                old_document_id=existing.id,
+                new_document=new_document,
+                new_chunks=new_chunks,
+                new_entities=new_entities,
+                new_relationships=new_relationships,
+            )
+        except GraphMirrorFailedAfterPGCommitError as graph_mirror_err:
+            logger.warning(
+                "replace_document_extraction graph-mirror phase failed after "
+                "PG commit for document {} in namespace {}: {}. Returning "
+                "RememberResult with degradation; the next successful "
+                "replace heals the graph (#884).",
+                new_document.id,
+                namespace_id,
+                graph_mirror_err.original_exception_type,
+            )
+            return RememberResult(
+                document_id=new_document.id,
+                namespace_id=namespace_id,
+                chunks_created=len(new_chunks),
+                # entities_extracted reflects what was extracted, not what
+                # made it into the graph - PG-side entity counts are stamped
+                # but graph state is partial. Operators see the divergence
+                # via the metadata.degradations entry below.
+                entities_extracted=len(new_entities),
+                relationships_created=0,
+                metadata={
+                    "replaced": True,
+                    "old_document_id": str(existing.id),
+                    "degradations": [
+                        {
+                            "component": "coordinator.replace_document_extraction",
+                            "reason": "graph_mirror_failed_after_pg_commit",
+                            "exception": graph_mirror_err.original_exception_type,
+                            "issue": "884",
+                        }
+                    ],
+                },
+            )
 
         # 6. After the coordinator has (re)written graph entities (retire /
         #    remap / upsert), relink entities → chunks via MENTIONED_IN for

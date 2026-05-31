@@ -1066,6 +1066,77 @@ class TestVectorCypherEngineRemember:
         assert "pg down" in (failed_doc.error_message or "")
 
     @pytest.mark.asyncio
+    async def test_remember_via_replace_surfaces_graph_mirror_degradation(
+        self, connected_engine: VectorCypherEngine
+    ) -> None:
+        """Issue #884: when the coordinator raises GraphMirrorFailedAfterPGCommitError
+        (PG committed, graph mirror partial), ``_remember_via_replace`` must
+        return a RememberResult carrying a degradation in metadata rather
+        than propagating the exception, so the caller has an observable
+        signal that PG state is durable but graph is partial.
+        """
+        from khora.exceptions import GraphMirrorFailedAfterPGCommitError
+
+        namespace_id = uuid4()
+        old_doc_id = uuid4()
+
+        existing = MagicMock()
+        existing.id = old_doc_id
+        existing.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+        connected_engine._storage.get_document_by_external_id = AsyncMock(return_value=existing)
+        connected_engine._storage.get_document_by_checksum = AsyncMock()
+        connected_engine._storage.update_document = AsyncMock()
+
+        # The coordinator raises the typed signal AFTER stamping PG durable.
+        # Both document_id and namespace_id round-trip into the user-facing
+        # degradation entry.
+        original = RuntimeError("neo4j unreachable")
+        mirror_err = GraphMirrorFailedAfterPGCommitError(
+            document_id=old_doc_id,
+            namespace_id=namespace_id,
+            original=original,
+        )
+        connected_engine._storage.replace_document_extraction = AsyncMock(side_effect=mirror_err)
+
+        with (
+            patch("khora.extraction.chunkers.create_chunker") as mock_chunker_factory,
+            patch("khora.pipelines.tasks.extract.extract_entities", new_callable=AsyncMock, return_value=([], [])),
+        ):
+            mock_chunker = MagicMock()
+            mock_chunker.chunk.return_value = []  # no raw chunks -> no embed/extract needed
+            mock_chunker_factory.return_value = mock_chunker
+
+            result = await connected_engine.remember(
+                "new content",
+                namespace_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                external_id="ext-1",
+            )
+
+        # No exception leaked out - the engine produced a RememberResult.
+        assert result.document_id == old_doc_id
+        assert result.namespace_id == namespace_id
+        # The replace flag is still set (caller's contract: an external_id
+        # match routed to the replace path).
+        assert result.metadata["replaced"] is True
+        assert result.metadata["old_document_id"] == str(old_doc_id)
+
+        # The degradation entry encodes the ADR-001 convention: a component
+        # tag, a machine-readable reason, the original exception type, and
+        # the issue link so a future reconciler can identify the failure
+        # mode without parsing log lines.
+        degradations = result.metadata.get("degradations")
+        assert isinstance(degradations, list)
+        assert len(degradations) == 1
+        entry = degradations[0]
+        assert entry["component"] == "coordinator.replace_document_extraction"
+        assert entry["reason"] == "graph_mirror_failed_after_pg_commit"
+        assert entry["exception"] == "RuntimeError"
+        assert entry["issue"] == "884"
+
+    @pytest.mark.asyncio
     async def test_remember_batch_routes_mixed_external_ids(self, connected_engine: VectorCypherEngine) -> None:
         """remember_batch dispatches matched external_id docs to replace path."""
         from khora.khora import RememberResult
