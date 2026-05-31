@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from loguru import logger
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from khora.core.models import Document, MemoryNamespace, TenancyMode
@@ -415,6 +415,56 @@ class PostgreSQLBackend(AsyncSessionMixin):
             query = query.limit(limit).offset(offset).order_by(DocumentModel.created_at.desc())
             result = await session.execute(query)
             return [self._document_model_to_domain(m) for m in result.scalars().all()]
+
+    async def claim_orphaned_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        pending_before: datetime,
+        processing_before: datetime,
+        limit: int = 100,
+    ) -> list[Document]:
+        """Atomically claim stale orphaned documents (FOR UPDATE SKIP LOCKED)."""
+        async with self._get_session() as session:
+            query = (
+                select(DocumentModel)
+                .where(
+                    DocumentModel.namespace_id == namespace_id,
+                    or_(
+                        and_(
+                            DocumentModel.status == DocumentStatus.PENDING.value,
+                            DocumentModel.updated_at < pending_before,
+                        ),
+                        and_(
+                            DocumentModel.status == DocumentStatus.PROCESSING.value,
+                            DocumentModel.updated_at < processing_before,
+                        ),
+                    ),
+                )
+                .order_by(DocumentModel.updated_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )
+            result = await session.execute(query)
+            models = list(result.scalars().all())
+            if not models:
+                return []
+            prior_status = {
+                m.id: (m.status.value if isinstance(m.status, DocumentStatus) else m.status) for m in models
+            }
+            claimed_ids = [m.id for m in models]
+            await session.execute(
+                update(DocumentModel)
+                .where(DocumentModel.id.in_(claimed_ids))
+                .values(status=DocumentStatus.PROCESSING.value, updated_at=datetime.now(UTC))
+            )
+            await session.commit()
+            for m in models:
+                await session.refresh(m)
+            docs = [self._document_model_to_domain(m) for m in models]
+            for doc in docs:
+                doc.orphan_prior_status = prior_status[doc.id]
+            return docs
 
     @retry_on_deadlock
     async def update_document(self, document: Document, *, session: AsyncSession | None = None) -> Document:

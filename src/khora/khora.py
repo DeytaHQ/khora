@@ -36,6 +36,13 @@ _RECALL_DANGLING_REF_COUNTER = metric_counter(
     description="Dangling document references in recall results, by referrer kind.",
 )
 
+_ORPHANS_RECLAIMED_COUNTER = metric_counter(
+    "khora.documents.orphans_reclaimed_total",
+    unit="1",
+    description="Stale orphaned documents reclaimed by the pending processor's crash-recovery scan, "
+    "by their prior status (pending or processing).",
+)
+
 
 def _coerce_session_id_from_dict(metadata: dict[str, Any] | None) -> UUID | None:
     """Pull ``session_id`` out of a metadata dict and coerce to UUID (#620).
@@ -766,17 +773,24 @@ class Khora:
             raise
 
     async def _enqueue_orphaned_pending_docs(self) -> None:
-        """Scan for stale PENDING documents and enqueue them for processing.
+        """Scan for stale orphaned documents and enqueue them for processing.
 
-        Uses the configured grace period to avoid racing with in-flight writes.
-        Extraction parameters are read from the document's ``extraction_params``
-        column; if absent, falls back to config defaults.
+        Covers both PENDING documents (never picked up) and PROCESSING documents
+        left behind by a crashed worker (#885). Claims are atomic via
+        ``claim_orphaned_documents`` - on PostgreSQL it uses ``FOR UPDATE SKIP
+        LOCKED`` so two concurrent instances never claim the same doc (#886).
+        Each claimed doc is already flipped to PROCESSING by the claim, so it is
+        enqueued directly. Extraction parameters are read from the document's
+        ``extraction_params`` column; if absent, falls back to config defaults.
         """
         grace_minutes = self._config.pipelines.pending_processor_grace_period_minutes
         # Backwards compat: honour deprecated field if the new one wasn't explicitly set.
         if self._config.pipelines.pending_recovery_grace_period_minutes is not None:
             grace_minutes = self._config.pipelines.pending_recovery_grace_period_minutes
-        stale_before = datetime.now(UTC) - timedelta(minutes=grace_minutes)
+        now = datetime.now(UTC)
+        pending_before = now - timedelta(minutes=grace_minutes)
+        processing_stale_seconds = self._config.pipelines.pending_processor_orphan_stale_after_seconds
+        processing_before = now - timedelta(seconds=processing_stale_seconds)
 
         storage = getattr(self._engine, "_storage", None)
         if storage is None:
@@ -798,23 +812,24 @@ class Khora:
                 break
 
             for ns in namespaces:
-                attempted_ids: set[UUID] = set()
                 while True:
-                    all_docs = await storage.list_documents(
+                    docs = await storage.claim_orphaned_documents(
                         ns.id,
-                        status="pending",
-                        updated_before=stale_before,
+                        pending_before=pending_before,
+                        processing_before=processing_before,
                         limit=100,
-                        offset=0,
                     )
-                    docs = [d for d in all_docs if d.id not in attempted_ids]
                     if not docs:
                         break
 
                     for doc in docs:
-                        attempted_ids.add(doc.id)
+                        prior_status = doc.orphan_prior_status or "pending"
+                        _ORPHANS_RECLAIMED_COUNTER.add(1, attributes={"prior_status": prior_status})
                         self._processor_queue.put_nowait(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
                         total_enqueued += 1
+
+                    if len(docs) < 100:
+                        break
 
             offset += len(namespaces)
             if len(namespaces) < 100:
@@ -822,11 +837,14 @@ class Khora:
 
         if total_enqueued:
             logger.info(
-                f"pending_processor: enqueued {total_enqueued} orphaned PENDING documents "
-                f"for recovery (grace_period={grace_minutes}m)"
+                f"pending_processor: reclaimed {total_enqueued} orphaned documents "
+                f"for recovery (pending_grace={grace_minutes}m, processing_stale={processing_stale_seconds}s)"
             )
         else:
-            logger.debug(f"pending_processor: no orphaned PENDING documents found (grace_period={grace_minutes}m)")
+            logger.debug(
+                f"pending_processor: no orphaned documents found "
+                f"(pending_grace={grace_minutes}m, processing_stale={processing_stale_seconds}s)"
+            )
 
     async def _process_pending_item(self, item: _ProcessorItem) -> None:
         """Process a single PENDING document, gated by the per-batch semaphore.

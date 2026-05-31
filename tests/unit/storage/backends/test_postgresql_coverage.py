@@ -479,6 +479,48 @@ async def test_list_documents_applies_filters() -> None:
 
 
 @pytest.mark.unit
+async def test_claim_orphaned_documents_uses_for_update_skip_locked() -> None:
+    """The PG claim SELECT must compile to FOR UPDATE SKIP LOCKED (#886)."""
+    from datetime import timedelta
+
+    from sqlalchemy.dialects import postgresql
+
+    ns_id = uuid4()
+    model = _make_document_model(ns_id)
+    model.status = DocumentStatus.PROCESSING.value
+    session = AsyncMock()
+    captured: list = []
+
+    select_result = MagicMock()
+    scalars = MagicMock()
+    scalars.all = MagicMock(return_value=[model])
+    select_result.scalars = MagicMock(return_value=scalars)
+
+    async def _execute(stmt, *a, **k):
+        captured.append(stmt)
+        return select_result if len(captured) == 1 else MagicMock()
+
+    session.execute = AsyncMock(side_effect=_execute)
+    session.commit = AsyncMock()
+    session.refresh = AsyncMock()
+    b = _make_backend_with_session(session)
+
+    now = datetime.now(UTC)
+    out = await b.claim_orphaned_documents(
+        ns_id,
+        pending_before=now - timedelta(minutes=5),
+        processing_before=now - timedelta(seconds=900),
+        limit=50,
+    )
+    assert len(out) == 1
+    assert out[0].orphan_prior_status == DocumentStatus.PROCESSING.value
+
+    select_sql = str(captured[0].compile(dialect=postgresql.dialect())).upper()
+    assert "FOR UPDATE" in select_sql
+    assert "SKIP LOCKED" in select_sql
+
+
+@pytest.mark.unit
 async def test_count_documents_returns_int() -> None:
     session = AsyncMock()
     result = MagicMock()

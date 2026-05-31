@@ -383,6 +383,47 @@ class SurrealDBRelationalAdapter:
         )
         return [self._row_to_document(r) for r in rows]
 
+    async def claim_orphaned_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        pending_before: datetime,
+        processing_before: datetime,
+        limit: int = 100,
+    ) -> list[Document]:
+        """Claim stale orphaned documents (no row locking - SurrealDB plain claim)."""
+        ns_str = str(namespace_id)
+        rows = await self._conn.query(
+            "SELECT * FROM document WHERE namespace_id = $ns AND ("
+            "(status = $pending AND updated_at < $pending_before) OR "
+            "(status = $processing AND updated_at < $processing_before)"
+            ") ORDER BY updated_at LIMIT $lim",
+            {
+                "ns": ns_str,
+                "pending": DocumentStatus.PENDING.value,
+                "processing": DocumentStatus.PROCESSING.value,
+                "pending_before": pending_before.isoformat(),
+                "processing_before": processing_before.isoformat(),
+                "lim": limit,
+            },
+        )
+        docs = [self._row_to_document(r) for r in rows]
+        if not docs:
+            return []
+        now_iso = datetime.now(UTC).isoformat()
+        for doc in docs:
+            doc.orphan_prior_status = doc.status.value if isinstance(doc.status, DocumentStatus) else doc.status
+            await self._conn.query(
+                "UPDATE $rid SET status = $status, updated_at = $updated_at",
+                {
+                    "rid": _record_id("document", doc.id),
+                    "status": DocumentStatus.PROCESSING.value,
+                    "updated_at": now_iso,
+                },
+            )
+            doc.status = DocumentStatus.PROCESSING
+        return docs
+
     async def update_document(self, document: Document) -> Document:
         """Update a document's mutable fields."""
         rid = _record_id("document", document.id)

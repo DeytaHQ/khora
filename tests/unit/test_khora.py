@@ -3486,6 +3486,7 @@ class TestPendingProcessor:
         cfg.pipelines.pending_processor_enabled = True
         cfg.pipelines.pending_processor_max_concurrent = 20
         cfg.pipelines.pending_processor_grace_period_minutes = 5
+        cfg.pipelines.pending_processor_orphan_stale_after_seconds = 900
         cfg.pipelines.entity_types = ["PERSON", "ORGANIZATION"]
         with patch("khora.khora.load_config", return_value=cfg):
             kb = Khora()
@@ -3576,8 +3577,8 @@ class TestPendingProcessor:
         await kb._enqueue_orphaned_pending_docs()  # Should not raise
 
     @pytest.mark.asyncio
-    async def test_orphan_recovery_enqueues_stale_docs(self) -> None:
-        """Stale PENDING documents are enqueued and processed by the processor."""
+    async def test_orphan_recovery_claims_stale_docs(self) -> None:
+        """Stale orphaned documents are claimed (both cutoffs) and enqueued."""
         from datetime import UTC, timedelta
 
         from khora.core.models import MemoryNamespace
@@ -3596,7 +3597,7 @@ class TestPendingProcessor:
                 PaginatedResult(items=[], total=0, limit=100, offset=100),
             ]
         )
-        kb._engine._storage.list_documents = AsyncMock(
+        kb._engine._storage.claim_orphaned_documents = AsyncMock(
             side_effect=[
                 [stale_doc],
                 [],
@@ -3605,16 +3606,50 @@ class TestPendingProcessor:
 
         await kb._enqueue_orphaned_pending_docs()
 
-        # Verify the grace-period filter is applied correctly.
-        list_docs_call = kb._engine._storage.list_documents.call_args_list[0]
-        assert list_docs_call.kwargs["status"] == "pending"
-        assert list_docs_call.kwargs["updated_before"] <= datetime.now(UTC) - timedelta(minutes=5)
+        # Recovery uses the atomic claim, not the pure-read list_documents.
+        claim_call = kb._engine._storage.claim_orphaned_documents.call_args_list[0]
+        # pending_before honours the 5-minute grace period.
+        assert claim_call.kwargs["pending_before"] <= datetime.now(UTC) - timedelta(minutes=5)
+        # processing_before honours the 900-second orphan-stale cutoff.
+        assert claim_call.kwargs["processing_before"] <= datetime.now(UTC) - timedelta(seconds=900)
 
         # Verify doc was enqueued.
         assert kb._processor_queue.qsize() == 1
         item = kb._processor_queue.get_nowait()
         assert item.doc is stale_doc
         assert item.batch_reg is None  # orphan — no batch registration
+
+    @pytest.mark.asyncio
+    async def test_orphan_recovery_emits_metric_per_prior_status(self) -> None:
+        """Each reclaimed doc emits the orphans_reclaimed metric labelled by prior status."""
+        from unittest.mock import patch
+
+        from khora.core.models import MemoryNamespace
+        from khora.core.models.document import Document
+        from khora.storage.backends.base import PaginatedResult
+
+        kb = self._make_kb_with_processor()
+
+        ns_id = uuid4()
+        ns = MemoryNamespace(id=ns_id, namespace_id=ns_id)
+        pending_doc = Document(namespace_id=ns_id, content="pending")
+        pending_doc.orphan_prior_status = "pending"
+        processing_doc = Document(namespace_id=ns_id, content="processing")
+        processing_doc.orphan_prior_status = "processing"
+
+        kb._engine._storage.list_namespaces = AsyncMock(
+            side_effect=[
+                PaginatedResult(items=[ns], total=1, limit=100, offset=0),
+                PaginatedResult(items=[], total=0, limit=100, offset=100),
+            ]
+        )
+        kb._engine._storage.claim_orphaned_documents = AsyncMock(side_effect=[[pending_doc, processing_doc], []])
+
+        with patch("khora.khora._ORPHANS_RECLAIMED_COUNTER") as counter:
+            await kb._enqueue_orphaned_pending_docs()
+
+        prior = [c.kwargs["attributes"]["prior_status"] for c in counter.add.call_args_list]
+        assert prior == ["pending", "processing"]
 
     @pytest.mark.asyncio
     async def test_orphan_recovery_processes_with_stored_params(self) -> None:

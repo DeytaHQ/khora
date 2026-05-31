@@ -492,6 +492,25 @@ class StorageCoordinator:
             namespace_id, status=status, updated_before=updated_before, limit=limit, offset=offset
         )
 
+    @_record_storage_op("claim_orphaned_documents", "postgresql")
+    async def claim_orphaned_documents(
+        self,
+        namespace_id: UUID,
+        *,
+        pending_before: datetime,
+        processing_before: datetime,
+        limit: int = 100,
+    ) -> list[Document]:
+        """Atomically claim stale orphaned documents for crash recovery."""
+        if not self._relational:
+            raise RuntimeError("Relational backend not configured")
+        return await self._relational.claim_orphaned_documents(
+            namespace_id,
+            pending_before=pending_before,
+            processing_before=processing_before,
+            limit=limit,
+        )
+
     async def update_document(self, document: Document) -> Document:
         """Update a document."""
         if not self._relational:

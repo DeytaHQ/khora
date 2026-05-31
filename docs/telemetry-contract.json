@@ -1389,6 +1389,24 @@
       "unit": "1",
       "description": "PG transaction committed (chunks + COMPLETED status stamp) but the post-commit graph-mirror phase of StorageCoordinator.replace_document_extraction raised. The graph backend is in a partial-mirror state; the next successful replace for the same external_id heals via MERGE / retire. Caller surfaces a degradation on RememberResult.metadata so downstream consumers can act on the divergence.",
       "_comment": "Issue #884. NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.documents.orphans_reclaimed_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "labels": [
+        {
+          "name": "prior_status",
+          "values": [
+            "pending",
+            "processing"
+          ],
+          "_comment": "Status the reclaimed document held before the claim flipped it to processing. Low-cardinality enum."
+        }
+      ],
+      "description": "Issues #885, #886. Stale orphaned documents reclaimed by the pending processor's crash-recovery scan (Khora._enqueue_orphaned_pending_docs). A 'pending' prior status is a doc that was never picked up; 'processing' is a doc left behind by a crashed worker. Claims are atomic via StorageCoordinator.claim_orphaned_documents (FOR UPDATE SKIP LOCKED on PostgreSQL). NO namespace_id label - cardinality rule.",
+      "_comment": "Issues #885, #886. NO namespace_id label - cardinality rule."
     }
   ]
 }
