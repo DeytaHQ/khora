@@ -201,14 +201,25 @@ async def test_remember_source_timestamp_round_trips_to_recall(kb: Khora) -> Non
     intended = datetime.now(UTC) - timedelta(days=30)
     content = "Marie Curie won the Nobel Prize in Physics in 1903 for her work on radioactivity."
 
+    # #890: Skeleton refuses non-empty entity_types / relationship_types
+    # because it has no entity extraction. VectorCypher and Chronicle
+    # still use the typed extraction whitelist.
+    engine_name: str = kb._engine_name  # type: ignore[attr-defined]
+    if engine_name == "skeleton":
+        entity_types_for_engine: list[str] = []
+        relationship_types_for_engine: list[str] = []
+    else:
+        entity_types_for_engine = ["PERSON", "CONCEPT"]
+        relationship_types_for_engine = ["RELATES_TO"]
+
     await kb.remember(
         content=content,
         namespace=namespace_id,
         title="curie-1903",
         source_timestamp=intended,
-        entity_types=["PERSON", "CONCEPT"],
-        relationship_types=["RELATES_TO"],
-        expertise=_expertise_for(kb._engine_name),  # type: ignore[attr-defined]
+        entity_types=entity_types_for_engine,
+        relationship_types=relationship_types_for_engine,
+        expertise=_expertise_for(engine_name),
     )
 
     result = await kb.recall(

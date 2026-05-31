@@ -1372,6 +1372,17 @@
       "_comment": "Issue #868. Vector-first ordering in StorageCoordinator.upsert_entities_batch. NO namespace_id label - cardinality rule."
     },
     {
+      "name": "khora.extraction.errors_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "extraction",
+      "labels": [
+        {"name": "reason", "values": ["extraction_failed"], "_comment": "Low-cardinality enum; extend when adding new failure categories. ``extraction_failed`` covers truncated LLM responses, parse failures, and retry exhaustion - the per-chunk reason lives on the ADR-001 degradation entry in RememberResult.metadata['degradations']."}
+      ],
+      "description": "Issue #889. LLM extraction failures per chunk: incremented once per chunk where ``LLMEntityExtractor`` returned an ``ExtractionResult`` with an ``error`` metadata key (truncated response, parse error, retry exhaustion). The same event is also appended to ``RememberResult.metadata['degradations']`` as an ADR-001 ``Degradation`` entry with ``component='extraction.llm'``. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
       "name": "khora.storage.replace_document.partial_failure",
       "type": "counter",
       "stability": "internal",

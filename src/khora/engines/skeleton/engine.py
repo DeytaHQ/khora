@@ -29,7 +29,7 @@ from khora.core.models import (
 from khora.core.models.recall import DocumentProjection, RecallChunk
 from khora.core.recall_scoring import min_max_normalize
 from khora.engines._storage_config import build_storage_config
-from khora.exceptions import EngineCapabilityError
+from khora.exceptions import EngineCapabilityError, UnsupportedEngineKwargError
 from khora.extraction.embedders import LiteLLMEmbedder
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
@@ -276,7 +276,34 @@ class SkeletonConstructionEngine:
 
         Returns:
             RememberResult with document_id and counts
+
+        Raises:
+            UnsupportedEngineKwargError: When ``entity_types`` or
+                ``relationship_types`` is non-empty. The Skeleton engine
+                deliberately skips typed entity / relationship extraction
+                for cost efficiency; silently dropping these kwargs would
+                hide a caller bug (#890). Pass empty lists when targeting
+                Skeleton.
         """
+        # #890: Skeleton does not extract typed entities or relationships.
+        # Silently dropping the kwargs would mislead callers into thinking
+        # the engine respected the type whitelist. Refuse non-empty values
+        # so the caller picks a different engine or drops the kwargs.
+        if entity_types:
+            raise UnsupportedEngineKwargError(
+                "skeleton",
+                "entity_types",
+                "Skeleton engine does not extract typed entities. "
+                "Use VectorCypher or Chronicle for typed entity extraction.",
+            )
+        if relationship_types:
+            raise UnsupportedEngineKwargError(
+                "skeleton",
+                "relationship_types",
+                "Skeleton engine does not extract typed relationships. "
+                "Use VectorCypher or Chronicle for typed relationship extraction.",
+            )
+
         # Compute checksum
         checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -479,13 +506,37 @@ class SkeletonConstructionEngine:
             temporal_reference: Reference point for relative time (e.g., message timestamp)
             hybrid_alpha: Blend factor for hybrid search (0=BM25, 1=vector)
             filters: Additional structured filters (converted to TemporalFilter)
+            recency_bias: Accepted only as ``None`` for protocol parity.
+                Skeleton does not implement temporal decay on the recall
+                path; passing a non-None value silently no-ops in pre-fix
+                builds. Now raises ``UnsupportedEngineKwargError`` so the
+                caller routes to an engine that honors decay (Chronicle).
 
         Returns:
             RecallResult with chunks and context
+
+        Raises:
+            EngineCapabilityError: When ``mode`` is not in
+                ``supported_modes``.
+            UnsupportedEngineKwargError: When ``recency_bias`` is non-None.
+                Skeleton does not apply temporal decay at recall time
+                (#891).
         """
         # #833: validate the mode contract before doing any storage work.
         if mode not in self.supported_modes:
             raise EngineCapabilityError("skeleton", mode, self.supported_modes)
+
+        # #891: Skeleton does not implement recency decay on recall.
+        # Accepting recency_bias silently misleads callers into thinking
+        # the engine applied a decay function. None is a no-op (accepted
+        # for protocol parity); any concrete value must route to an engine
+        # that actually applies decay (e.g. Chronicle).
+        if recency_bias is not None:
+            raise UnsupportedEngineKwargError(
+                "skeleton",
+                "recency_bias",
+                "Skeleton engine does not apply temporal decay on recall. Use Chronicle for recency-weighted recall.",
+            )
 
         embedder = self._get_embedder()
         temporal_store = self._get_temporal_store()

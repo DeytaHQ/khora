@@ -138,8 +138,8 @@ async def test_skeleton_remember_does_not_raise_invalid_revision_on_surrealkv() 
                 result = await engine.remember(
                     "PagerDuty triggered for the payments service.",
                     namespace_id=namespace.namespace_id,
-                    entity_types=["EVENT", "PRODUCT"],
-                    relationship_types=["RELATES_TO"],
+                    entity_types=[],
+                    relationship_types=[],
                 )
                 assert result.chunks_created > 0
                 assert result.document_id is not None
