@@ -1023,6 +1023,18 @@
       "description": "Issue #903 (ADR-001). Chronicle event / fact extraction LLM calls that raised a transient error (rate limit, timeout, connection error, JSON parse error). The extractor returns [] and an ErrorRecord is appended to RememberResult.metadata['errors']. Real parser bugs (AttributeError, KeyError) propagate and do NOT increment this counter. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.stats.counter_failed_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "engines",
+      "labels": [
+        {"name": "engine", "values": ["vectorcypher", "chronicle", "skeleton"], "_comment": "Which engine's stats() the failing counter belongs to."},
+        {"name": "counter", "values": ["chunks", "entities", "relationships"], "_comment": "Which count_* counter could not run."}
+      ],
+      "description": "Issue #878 (ADR-001). A stats() counter (count_chunks / count_entities / count_relationships) could not run because the routed backend lacks the method or it raised. The int field stays 0 and an ErrorRecord is appended to Stats.metadata['errors'] so 'couldn't count' is distinguishable from 'counted zero'. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
       "name": "khora.vectorcypher.rel_fetch.degraded_total",
       "type": "counter",
       "stability": "public",

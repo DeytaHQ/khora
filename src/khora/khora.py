@@ -222,13 +222,21 @@ class BatchResult:
 
 @dataclass(slots=True, frozen=True)
 class Stats:
-    """Namespace statistics."""
+    """Namespace statistics.
+
+    ``metadata`` carries ADR-001 failure-observability records. When a
+    counter could not run (backend lacks the method, or it raised), the
+    int field stays ``0`` but ``metadata['errors']`` holds an ``ErrorRecord``
+    so callers can distinguish "couldn't count" from "counted zero".
+    See ``docs/architecture/failure-observability-contract.md``.
+    """
 
     documents: int
     chunks: int
     entities: int
     relationships: int
     last_activity_at: datetime | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True, frozen=True)

@@ -370,11 +370,17 @@ class TestEntityOps:
 
 
 class TestCountEntities:
-    """Tests for count_entities fallback order."""
+    """Tests for count_entities ownership-based routing (#878).
+
+    Entities are owned by the graph backend; the vector backend holds a
+    denormalized mirror that may not implement ``count_entities`` (e.g.
+    sqlite_lance / SurrealDB). count_entities must therefore prefer the
+    graph backend and only fall back to vector when no graph exists.
+    """
 
     @pytest.mark.asyncio
-    async def test_count_entities_prefers_vector(self) -> None:
-        """count_entities uses vector backend when it has count_entities."""
+    async def test_count_entities_prefers_graph(self) -> None:
+        """count_entities uses graph (owner) even when vector also has it (pg shape)."""
         ns_id = uuid4()
         vec = MagicMock()
         vec.count_entities = AsyncMock(return_value=42)
@@ -382,20 +388,45 @@ class TestCountEntities:
         graph.count_entities = AsyncMock(return_value=99)
         coord = StorageCoordinator(vector=vec, graph=graph)
         result = await coord.count_entities(ns_id)
-        assert result == 42
-        vec.count_entities.assert_awaited_once_with(ns_id)
-        graph.count_entities.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_count_entities_falls_back_to_graph(self) -> None:
-        """count_entities uses graph when no vector backend configured."""
-        ns_id = uuid4()
-        graph = MagicMock()
-        graph.count_entities = AsyncMock(return_value=99)
-        coord = StorageCoordinator(graph=graph)
-        result = await coord.count_entities(ns_id)
         assert result == 99
         graph.count_entities.assert_awaited_once_with(ns_id)
+        vec.count_entities.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_count_entities_sqlite_lance_shape(self) -> None:
+        """count_entities counts from graph when the vector adapter lacks the method.
+
+        This is the sqlite_lance / SurrealDB topology: the vector adapter has
+        no ``count_entities``. Before #878 this raised AttributeError; now it
+        routes to the graph backend that owns entities.
+        """
+        ns_id = uuid4()
+        # spec= so the mock does NOT auto-create a count_entities attribute.
+        vec = MagicMock(spec=["count_chunks"])
+        graph = MagicMock()
+        graph.count_entities = AsyncMock(return_value=7)
+        coord = StorageCoordinator(vector=vec, graph=graph)
+        result = await coord.count_entities(ns_id)
+        assert result == 7
+        graph.count_entities.assert_awaited_once_with(ns_id)
+        assert not hasattr(vec, "count_entities")
+
+    @pytest.mark.asyncio
+    async def test_count_entities_falls_back_to_vector_when_no_graph(self) -> None:
+        """count_entities uses vector when no graph backend configured (PG-only chronicle)."""
+        ns_id = uuid4()
+        vec = MagicMock()
+        vec.count_entities = AsyncMock(return_value=42)
+        coord = StorageCoordinator(vector=vec)
+        result = await coord.count_entities(ns_id)
+        assert result == 42
+        vec.count_entities.assert_awaited_once_with(ns_id)
+
+    @pytest.mark.asyncio
+    async def test_count_entities_no_backends_returns_zero(self) -> None:
+        """count_entities returns 0 when neither backend is configured."""
+        coord = StorageCoordinator()
+        assert await coord.count_entities(uuid4()) == 0
 
     @pytest.mark.asyncio
     async def test_count_entities_vector_raises(self) -> None:

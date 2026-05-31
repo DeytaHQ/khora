@@ -1005,10 +1005,19 @@ class StorageCoordinator:
         )
 
     async def count_chunks(self, namespace_id: UUID) -> int:
-        """Count chunks in a namespace."""
+        """Count chunks in a namespace.
+
+        Chunks live in the vector backend on every topology (sqlite_lance
+        writes chunk metadata to the SQLite ``chunks`` table too). A backend
+        missing the method raises ``NotImplementedError`` so callers can
+        record the gap instead of seeing a confusing ``AttributeError``.
+        """
         if not self._vector:
             raise RuntimeError("Vector backend not configured")
-        return await self._vector.count_chunks(namespace_id)
+        impl = getattr(self._vector, "count_chunks", None)
+        if impl is None:
+            raise NotImplementedError("Vector backend has no count_chunks")
+        return await impl(namespace_id)
 
     async def update_last_accessed(
         self,
@@ -1054,11 +1063,21 @@ class StorageCoordinator:
         return await self._vector.list_chunks(namespace_id, limit=limit, offset=offset)
 
     async def count_entities(self, namespace_id: UUID) -> int:
-        """Count entities in a namespace. Best-effort during active ingestion (non-atomic dual-write)."""
-        if self._vector:
-            return await self._vector.count_entities(namespace_id)
-        if self._graph:
-            return await self._graph.count_entities(namespace_id)
+        """Count entities in a namespace. Best-effort during active ingestion (non-atomic dual-write).
+
+        Entities are owned by the graph backend when present (the vector
+        backend holds a denormalized mirror). Counting from the owner avoids
+        topologies where the vector adapter lacks ``count_entities`` (e.g.
+        sqlite_lance / SurrealDB), which previously raised ``AttributeError``.
+        Falls back to the vector backend only when no graph backend exists
+        (PostgreSQL-only chronicle stacks).
+        """
+        graph_impl = getattr(self._graph, "count_entities", None) if self._graph else None
+        if graph_impl is not None:
+            return await graph_impl(namespace_id)
+        vector_impl = getattr(self._vector, "count_entities", None) if self._vector else None
+        if vector_impl is not None:
+            return await vector_impl(namespace_id)
         return 0
 
     async def count_relationships(self, namespace_id: UUID) -> int:
