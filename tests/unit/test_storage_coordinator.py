@@ -829,8 +829,11 @@ class TestReplaceDocumentExtraction:
         assert new_doc.status == DocumentStatus.COMPLETED
 
     @pytest.mark.asyncio
-    async def test_graph_side_failure_marks_document_failed_and_reraises(self) -> None:
-        """On graph-side failure: PG is committed, doc is marked FAILED, exception is re-raised unwrapped."""
+    async def test_graph_failure_after_pg_commit_keeps_completed_and_reraises(self) -> None:
+        """Fix for #887: when PG commits and the graph phase fails, the document
+        stays COMPLETED (data is fully written), a WARNING is logged, and the
+        original exception propagates unwrapped.
+        """
         namespace_id = uuid4()
         old_doc_id = uuid4()
         new_doc = Document(namespace_id=namespace_id, content="new body")
@@ -869,37 +872,54 @@ class TestReplaceDocumentExtraction:
             relational=rel_backend, vector=vec_backend, graph=graph_backend
         )
 
-        with pytest.raises(RuntimeError, match="neo4j down"):
-            await coord.replace_document_extraction(
-                namespace_id=namespace_id,
-                old_document_id=old_doc_id,
-                new_document=new_doc,
-                new_chunks=new_chunks,
-                new_entities=[],
-                new_relationships=[],
-            )
+        # Capture loguru WARNING by patching the module-bound logger.
+        with patch("khora.storage.coordinator.logger") as mock_logger:
+            with pytest.raises(RuntimeError, match="neo4j down"):
+                await coord.replace_document_extraction(
+                    namespace_id=namespace_id,
+                    old_document_id=old_doc_id,
+                    new_document=new_doc,
+                    new_chunks=new_chunks,
+                    new_entities=[],
+                    new_relationships=[],
+                )
 
-        # PG is committed even though the graph step raised
+        # PG is committed even though the graph step raised.
         assert session.committed is True
-        # Document was marked FAILED with the error string
-        assert new_doc.status == DocumentStatus.FAILED
-        assert new_doc.error_message == "neo4j down"
-        # update_document was called at least twice — once in txn, once to persist FAILED
-        assert rel_backend.update_document.await_count >= 2
+        assert session.rolled_back is False
+        # #887: document stays COMPLETED. The fully-written chunks + entity
+        # counts must not be contradicted by a FAILED status.
+        assert new_doc.status == DocumentStatus.COMPLETED
+        assert new_doc.error_message is None
+        assert new_doc.chunk_count == len(new_chunks)
+        assert new_doc.entity_count == 0
+        # update_document was called exactly once (in-tx status stamp) -
+        # the buggy post-tx mark_failed write has been removed.
+        assert rel_backend.update_document.await_count == 1
+        # A WARNING was logged about the graph-phase failure (#887).
+        mock_logger.warning.assert_called_once()
+        warn_args = mock_logger.warning.call_args
+        assert "#887" in warn_args.args[0]
 
     @pytest.mark.asyncio
-    async def test_pg_failure_rolls_back_and_skips_graph(self) -> None:
-        """If the PG transaction raises, graph-side work is skipped and the exception is re-raised."""
+    async def test_pg_failure_rolls_back_and_does_not_mark_failed(self) -> None:
+        """Fix for #887: if the PG transaction raises, the rollback reverts
+        the in-tx status stamp; the coordinator no longer issues an
+        out-of-band ``mark_failed`` update against the rolled-back row.
+        """
         namespace_id = uuid4()
         old_doc_id = uuid4()
         new_doc = Document(namespace_id=namespace_id, content="new body")
+        # Caller-set pre-replace status (typical: PROCESSING from the
+        # ingest pipeline).
+        new_doc.mark_processing()
 
         rel_backend = MagicMock()
         pg_error = RuntimeError("pg-constraint-violation")
         rel_backend.update_document = AsyncMock(side_effect=pg_error)
 
         vec_backend = MagicMock()
-        vec_backend.delete_chunks_by_document = AsyncMock()
+        vec_backend.delete_chunks_by_document = AsyncMock(return_value=0)
         vec_backend.create_chunks_batch = AsyncMock()
 
         graph_backend = MagicMock()
@@ -926,14 +946,19 @@ class TestReplaceDocumentExtraction:
 
         assert session.committed is False
         assert session.rolled_back is True
-        # Graph work was never issued
+        # Graph work was never issued.
         graph_backend.retire_orphaned_entities_batch.assert_not_awaited()
         graph_backend.retire_orphaned_relationships_batch.assert_not_awaited()
         graph_backend.remap_source_document_ids_batch.assert_not_awaited()
         graph_backend.upsert_entities_batch.assert_not_awaited()
-        # Document was still marked FAILED (persisted via fallback update_document call)
-        assert new_doc.status == DocumentStatus.FAILED
-        assert new_doc.error_message == "pg-constraint-violation"
+        # In the rolled-back-tx case, the only update_document call is the
+        # in-tx attempt that raised.  The buggy post-tx mark_failed update
+        # has been removed (#887), so no second write happens.
+        assert rel_backend.update_document.await_count == 1
+        # Document was NOT marked FAILED post-tx; the PG row keeps its
+        # pre-replace status because the SQL tx rolled back.
+        assert new_doc.status != DocumentStatus.FAILED
+        assert new_doc.error_message is None
 
     @pytest.mark.asyncio
     async def test_relationship_type_sanitization_classifies_survivor_correctly(self) -> None:

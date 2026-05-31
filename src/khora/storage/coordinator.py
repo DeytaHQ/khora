@@ -533,11 +533,14 @@ class StorageCoordinator:
            their ``source_document_ids`` arrays swapped from old to new doc
            UUID. Net-new entities and relationships are upserted/created via
            the existing MERGE paths.
-        3. On success the document is marked ``COMPLETED``; on any exception
-           it is marked ``FAILED`` with the error string and the exception is
-           re-raised unwrapped, mirroring ``remember()`` (``ingest.py:1356``).
-           A ``FAILED`` document self-heals on the next successful replace
-           against the same ``external_id``.
+        3. The document is marked ``COMPLETED`` inside the PG transaction
+           (chunk + entity counts; relationship_count left at 0 - see #884
+           follow-up). If the PG tx fails, the rollback also reverts the
+           status stamp. If the post-tx graph phase fails, the document row
+           remains ``COMPLETED`` (PG data is durable and consistent) and
+           the exception is re-raised unwrapped after a logged warning
+           (#887). A future PR will introduce a partial-state status for
+           the graph-pending case.
 
         Args:
             namespace_id: Namespace owning the document.
@@ -651,14 +654,26 @@ class StorageCoordinator:
                     )
 
             # 2. Postgres transaction: atomic chunk hard-replace.
-            #    Embedding (OpenAI roundtrip) happened before this block — the
+            #    Embedding (OpenAI roundtrip) happened before this block - the
             #    transaction deliberately wraps only DB work (ADR §Performance).
+            #
+            #    Status stamp is split (fix for #887, ADR-002 Layer 1):
+            #      - In-tx: mark COMPLETED with chunk + entity counts so the
+            #        document row's status moves atomically with the
+            #        fully-written data. If PG rolls back, the row keeps its
+            #        pre-replace status.
+            #      - Relationship count is left at 0 here; the graph phase
+            #        runs after PG commits and is not part of the SQL tx, so
+            #        we do not undercount silently. A follow-up PR (#884)
+            #        will introduce a partial-state status for the
+            #        graph-pending case.
             async with self.transaction() as txn:
-                await self._relational.update_document(new_document, session=txn.session)  # type: ignore[unresolved-attribute]
                 chunks_deleted = await self._vector.delete_chunks_by_document(
                     old_document_id, namespace_id=namespace_id, session=txn.session
                 )
                 await self._vector.create_chunks_batch(new_chunks, session=txn.session)  # type: ignore[unresolved-attribute]
+                new_document.mark_completed(len(new_chunks), len(new_entities), 0)
+                await self._relational.update_document(new_document, session=txn.session)  # type: ignore[unresolved-attribute]
 
             # 3. Graph-side retirement / remap (after PG commits).  Order:
             #    retire -> remap -> upsert.  Retirement snapshots the current
@@ -713,9 +728,6 @@ class StorageCoordinator:
             # Survivor relationships are accounted for implicitly via remap;
             # their id is preserved from the old graph state.
 
-            new_document.mark_completed(len(new_chunks), len(new_entities), relationships_created)
-            await self._relational.update_document(new_document)
-
             return ReplaceResult(
                 document_id=new_document.id,
                 chunks_deleted=chunks_deleted,
@@ -727,18 +739,32 @@ class StorageCoordinator:
                 relationships_retired=relationships_retired,
             )
 
-        except Exception as e:
-            # Mirrors remember() (pipelines/flows/ingest.py:1356-1359):
-            # mark FAILED with error string and re-raise unwrapped so the
-            # caller observes the original exception and the next successful
-            # replace can self-heal the row (ADR §Decision #8).
-            new_document.mark_failed(str(e))
-            try:
-                await self._relational.update_document(new_document)
-            except Exception as persist_error:
-                logger.error(
-                    f"Failed to persist FAILED status after replace_document_extraction error: {persist_error}"
-                )
+        except Exception:
+            # Fix for #887 (same family as #884): do NOT stamp the document
+            # row FAILED here. There are two distinct failure modes and the
+            # old code mishandled both:
+            #
+            #   - PG transaction failed -> the `async with self.transaction()`
+            #     block already rolled back the document row to its
+            #     pre-replace state. Writing FAILED post-tx would corrupt
+            #     status of a row whose data is otherwise consistent.
+            #
+            #   - Graph step failed AFTER PG committed -> chunks, entities
+            #     and the COMPLETED status stamp are all durable in PG.
+            #     Marking the doc FAILED would diverge status from the
+            #     fully-written data (#887 reproducer). A follow-up PR
+            #     (#884) will introduce a partial-state status for this
+            #     case; until then COMPLETED + a logged warning is the
+            #     least-wrong observable state.
+            #
+            # The exception is re-raised unwrapped so callers see the
+            # original error.
+            logger.warning(
+                "replace_document_extraction failed for document {} in namespace {}; "
+                "re-raising without restamping document status (#887)",
+                new_document.id,
+                namespace_id,
+            )
             raise
 
     async def count_documents(self, namespace_id: UUID) -> int:
