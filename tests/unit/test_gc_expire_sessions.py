@@ -153,6 +153,26 @@ async def test_forget_session_failure_does_not_abort_run() -> None:
     assert kb.forget_session.await_count == 2
 
 
+async def test_naive_before_matches_tz_aware_path() -> None:
+    """A naive ``before`` (e.g. ``datetime.utcnow()``) must not raise and must
+    expire the same sessions as the tz-aware path (#930)."""
+    ns_id = uuid4()
+    sid = uuid4()
+    long_ago = datetime.now(UTC) - timedelta(days=30)
+    docs = [_make_doc(ns_id, sid, ts=long_ago)]
+
+    # tz-aware reference run.
+    kb_aware = _fake_kb(docs, [ns_id])
+    aware_count = await expire_sessions(kb=kb_aware, before=datetime.now(UTC))
+
+    # naive run — must behave identically, not raise.
+    kb_naive = _fake_kb(docs, [ns_id])
+    naive_count = await expire_sessions(kb=kb_naive, before=datetime.utcnow())  # noqa: DTZ003
+
+    assert naive_count == aware_count == 1
+    kb_naive.forget_session.assert_awaited_once_with(ns_id, sid)
+
+
 async def test_source_timestamp_preferred_over_created_at() -> None:
     """source_timestamp wins so back-fills don't reset the TTL clock."""
     ns_id = uuid4()
