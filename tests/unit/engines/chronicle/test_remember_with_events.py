@@ -496,3 +496,60 @@ class TestRememberBatchWithEvents:
         assert len(events) == 5
         assert {ev.chunk_id for ev in events} == {c.id for c in chunks}
         assert result.metadata["events_extracted"] == 5
+
+
+# ---------------------------------------------------------------------------
+# #898: remember_batch fires on_progress per-document, not once at (total, total)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRememberBatchProgress:
+    @pytest.mark.asyncio
+    async def test_progress_fires_per_document(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        ns_id = uuid4()
+        namespace = MemoryNamespace(
+            namespace_id=ns_id,
+            config_overrides={"events": {"enabled": False}, "facts": {"enabled": False}},
+        )
+        coord = _RecordingCoordinator(namespace, [])
+
+        engine = _bare_engine()
+        engine._storage = coord  # type: ignore[assignment]
+
+        async def fake_ingest_documents(
+            namespace_id: UUID,
+            doc_inputs: list[dict[str, Any]],
+            storage: Any,
+            **_kw: Any,
+        ) -> dict[str, Any]:
+            return {
+                "total_documents": len(doc_inputs),
+                "processed_documents": len(doc_inputs),
+                "skipped_documents": 0,
+                "failed_documents": 0,
+                "total_chunks": 0,
+                "total_entities": 0,
+                "total_relationships": 0,
+                "total_inferred_relationships": 0,
+                "episodes_created": 0,
+                "per_document_results": [{"chunk_ids": [], "phase_times": {}} for _ in doc_inputs],
+                "timing": {"staging_s": 0.0, "processing_s": 0.0, "phase_totals": {}},
+            }
+
+        monkeypatch.setattr(
+            "khora.pipelines.flows.ingest.ingest_documents",
+            fake_ingest_documents,
+        )
+
+        progress: list[tuple[int, int]] = []
+        await engine.remember_batch(
+            [{"content": f"doc {i}"} for i in range(4)],
+            ns_id,
+            entity_types=[],
+            relationship_types=[],
+            deduplicate=False,
+            on_progress=lambda c, t: progress.append((c, t)),
+        )
+
+        assert progress == [(1, 4), (2, 4), (3, 4), (4, 4)]

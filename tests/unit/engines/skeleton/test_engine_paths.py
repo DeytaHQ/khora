@@ -444,5 +444,6 @@ class TestRememberBatchEarlyReturns:
         assert result.total == 2
         assert result.processed == 0
         assert result.skipped == 2
-        # on_progress called once for the early-return summary
-        on_progress.assert_called_once_with(2, 2)
+        # #898: on_progress fires once per (skipped) document with an
+        # incrementing count, not a single (total, total) summary call.
+        assert [c.args for c in on_progress.call_args_list] == [(1, 2), (2, 2)]

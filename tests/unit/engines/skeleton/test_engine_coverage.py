@@ -228,6 +228,42 @@ class TestRememberBatch:
             )
         assert progress == [(1, 1)]
 
+    @pytest.mark.asyncio
+    async def test_progress_fires_per_document_not_once_at_end(self) -> None:
+        """#898: on_progress fires once per document with incrementing count,
+        not a single (total, total) call at the end."""
+        eng = _connected()
+        eng._storage.get_documents_by_checksums = AsyncMock(return_value={})
+
+        def _make_doc(content: str) -> MagicMock:
+            doc = MagicMock()
+            doc.id = uuid4()
+            doc.namespace_id = uuid4()
+            doc.content = content
+            doc.mark_completed = MagicMock()
+            return doc
+
+        eng._storage.create_document = AsyncMock(side_effect=lambda d: _make_doc(d.content))
+        eng._storage.update_document = AsyncMock()
+
+        raw = SimpleNamespace(content="chunk text", start_char=0, end_char=10)
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = [raw]
+        eng._embedder.embed_batch = AsyncMock(return_value=[[0.1, 0.2], [0.1, 0.2], [0.1, 0.2]])
+        eng._temporal_store.create_chunks_batch = AsyncMock(return_value=[object(), object(), object()])
+
+        progress: list[tuple[int, int]] = []
+        with patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker):
+            await eng.remember_batch(
+                [{"content": "a"}, {"content": "b"}, {"content": "c"}],
+                uuid4(),
+                entity_types=[],
+                relationship_types=[],
+                on_progress=lambda c, t: progress.append((c, t)),
+            )
+
+        assert progress == [(1, 3), (2, 3), (3, 3)]
+
 
 # ---------------------------------------------------------------------------
 # stats() — partial failures degrade gracefully

@@ -49,7 +49,6 @@ class TestPipelineAttributeName:
             app_name="khora-test",
             environment="test",
             debug=True,
-            auth_enabled=False,
         )
 
         assert hasattr(config, "pipeline"), (
@@ -67,7 +66,6 @@ class TestPipelineAttributeName:
             app_name="khora-test",
             environment="test",
             debug=True,
-            auth_enabled=False,
         )
 
         # These are the three fields read by _process_document and

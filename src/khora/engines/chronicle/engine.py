@@ -2920,11 +2920,23 @@ class ChronicleEngine:
             f"({timings.get('docs_per_second', 0):.1f} docs/sec)"
         )
 
+        # Emit per-document progress. Chronicle delegates the batch to the
+        # shared ``ingest_documents`` pipeline, which is batch-shaped (one
+        # embed_batch, one extraction call across all docs), so the callbacks
+        # all arrive here after the pipeline returns rather than strictly
+        # one-at-a-time during processing. Still, fire once per accounted
+        # document with an incrementing count instead of a single
+        # ``(total, total)`` call (#898). See the ``Khora.remember_batch``
+        # docstring for the batched-progress caveat.
         if on_progress:
-            on_progress(
-                result.get("processed_documents", 0),
-                result.get("total_documents", len(documents)),
+            total_documents = result.get("total_documents", len(documents))
+            accounted = (
+                result.get("processed_documents", 0)
+                + result.get("skipped_documents", 0)
+                + result.get("failed_documents", 0)
             )
+            for completed in range(1, min(accounted, total_documents) + 1):
+                on_progress(completed, total_documents)
 
         return BatchResult(
             total=result.get("total_documents", len(documents)),

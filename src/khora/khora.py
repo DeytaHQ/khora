@@ -1338,7 +1338,16 @@ class Khora:
             max_concurrent: Maximum concurrent document processing
             deduplicate: Deduplicate entities across documents (default: True)
             infer_relationships: Infer relationships after ingestion (default: True)
-            on_progress: Callback(processed_count, total_count) for progress updates
+            on_progress: Callback(completed_count, total_count) for progress updates.
+                Fired once per document with an incrementing ``completed_count``.
+                Note the batched-progress caveat: VectorCypher and Chronicle run
+                most work (embedding, entity extraction) as batched stages across
+                all documents at once, so the per-document callbacks do not arrive
+                strictly one-at-a-time during processing - they arrive in bursts at
+                stage / window completion. Streaming per-document progress before a
+                stage completes is not possible without restructuring the batched
+                pipeline. For more granular progress, set ``max_chunks_in_flight``
+                smaller so windows close more often.
             entity_types: Required entity types to extract
             relationship_types: Required relationship types to extract
             expertise: Optional expertise config for domain-specific extraction

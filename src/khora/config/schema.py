@@ -1689,12 +1689,6 @@ class KhoraConfig(BaseSettings):
         description="Enable debug mode",
     )
 
-    # Authentication settings
-    auth_enabled: bool = Field(
-        default=True,
-        description="Enable authentication (set to False for local development)",
-    )
-
     # Database for Khora internal state (shortcuts for storage.* URLs)
     # These can be set via KHORA_DATABASE_URL and KHORA_NEO4J_URL environment variables
     # Programmatic values take priority over environment variables
@@ -1811,7 +1805,17 @@ class KhoraConfig(BaseSettings):
         path = Path(path)
         with path.open() as f:
             data = yaml.safe_load(f)
-        return cls.model_validate(data or {})
+        data = data or {}
+        # model_validate bypasses pydantic-settings env sourcing, so the
+        # documented KHORA_DATABASE_URL / KHORA_NEO4J_URL overrides (advertised
+        # in the example YAML headers and the field docstrings above) would be
+        # silently ignored. Merge them over the YAML dict so env wins over YAML
+        # for these top-level shortcuts. Precedence: env > yaml > defaults.
+        for env_name, key in (("KHORA_DATABASE_URL", "database_url"), ("KHORA_NEO4J_URL", "neo4j_url")):
+            env_value = os.environ.get(env_name)
+            if env_value:
+                data[key] = env_value
+        return cls.model_validate(data)
 
     def get_postgresql_url(self) -> str | None:
         """Get PostgreSQL URL from config (plaintext, for driver consumption).

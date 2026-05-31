@@ -33,7 +33,6 @@
 app_name: khora
 environment: development
 debug: false
-auth_enabled: false  # local-only; no auth on the embedded path
 
 # =============================================================================
 # Storage — SQLite (relational + graph) + LanceDB (vectors), both in-process
