@@ -248,9 +248,16 @@ async def test_migration_033_downgrade_reverses(pg_engine: AsyncEngine) -> None:
     # Sanity: columns and indexes exist after upgrade.
     assert await _column_info(pg_engine, "relationships", "valid_to") is not None
 
-    # Drive a single-step downgrade programmatically. Wrap in to_thread
-    # because Alembic's env.py calls asyncio.run() internally, which can't
-    # nest inside the @pytest.mark.asyncio loop we're already running in.
+    # Drive the downgrade programmatically. Wrap in to_thread because
+    # Alembic's env.py calls asyncio.run() internally, which can't nest
+    # inside the @pytest.mark.asyncio loop we're already running in.
+    #
+    # Downgrade to an explicit target revision (the revision immediately
+    # before the migration under test), not a "-1" step count. The
+    # pg_engine fixture upgrades to the current head, which is now several
+    # revisions past 033, so "-1" would only revert head, not 033. Pinning
+    # to the predecessor revision (032_dream_runs) is robust as the chain
+    # grows.
     import asyncio
 
     from alembic import command
@@ -263,7 +270,7 @@ async def test_migration_033_downgrade_reverses(pg_engine: AsyncEngine) -> None:
     cfg.set_main_option("sqlalchemy.url", sync_url)
     cfg.set_main_option("version_table", "khora_alembic_version")
     cfg.set_main_option("version_table_schema", "public")
-    await asyncio.to_thread(command.downgrade, cfg, "-1")
+    await asyncio.to_thread(command.downgrade, cfg, "032_dream_runs")
 
     # Columns gone from both tables.
     for table in ("relationships", "memory_facts"):
