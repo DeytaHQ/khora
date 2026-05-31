@@ -18,7 +18,7 @@ from uuid import UUID
 from loguru import logger
 
 from khora.core.models import Entity, Episode, Relationship
-from khora.storage.backends.mixins import sanitize_cypher_label
+from khora.storage.backends.mixins import GraphBackendBase, sanitize_cypher_label
 from khora.storage.backends.surrealdb._helpers import (
     _entity_to_bindings,
     _parse_dt,
@@ -200,7 +200,7 @@ def _relationship_to_bindings(rel: Relationship) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-class SurrealDBGraphAdapter:
+class SurrealDBGraphAdapter(GraphBackendBase):
     """Graph backend backed by SurrealDB.
 
     Uses SurrealDB ``RELATE`` statements for edges, record-link IDs for

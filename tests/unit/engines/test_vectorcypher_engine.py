@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -15,6 +16,11 @@ from khora.engines.vectorcypher.engine import (
     VectorCypherEngine,
 )
 from khora.khora import RecallResult
+
+
+def _ent(entity_id, source_document_ids):
+    """Minimal entity/relationship stand-in for the vector-anchored cascade."""
+    return SimpleNamespace(id=entity_id, source_document_ids=list(source_document_ids))
 
 
 class TestVectorCypherConfig:
@@ -1405,7 +1411,31 @@ class TestVectorCypherEngineForget:
         engine = VectorCypherEngine(config)
         engine._connected = True
         engine._storage = AsyncMock()
-        engine._storage.graph.fetch_document_extraction_state = AsyncMock(return_value=([], []))
+        # #923: cleanup is vector-anchored. The vector backend (pgvector) is
+        # the authoritative refcount store; spec it to the pgvector surface so
+        # the cascade dispatches to the real method names. The Neo4j graph
+        # backend is mirrored opportunistically.
+        engine._storage.vector = MagicMock(
+            spec=[
+                "list_entities",
+                "list_relationships",
+                "delete_entities_batch",
+                "delete_relationships_batch",
+                "remove_document_from_entity_sources",
+                "remove_document_from_relationship_sources",
+            ]
+        )
+        engine._storage.vector.list_entities = AsyncMock(return_value=[])
+        engine._storage.vector.list_relationships = AsyncMock(return_value=[])
+        engine._storage.vector.delete_entities_batch = AsyncMock()
+        engine._storage.vector.delete_relationships_batch = AsyncMock()
+        engine._storage.vector.remove_document_from_entity_sources = AsyncMock()
+        engine._storage.vector.remove_document_from_relationship_sources = AsyncMock()
+        engine._storage.graph = MagicMock()
+        engine._storage.graph.delete_entities_batch = AsyncMock()
+        engine._storage.graph.delete_relationships_batch = AsyncMock()
+        engine._storage.graph.remove_document_from_entity_sources_batch = AsyncMock()
+        engine._storage.graph.remove_document_from_relationship_sources_batch = AsyncMock()
         engine._temporal_store = AsyncMock()
         engine._dual_nodes = AsyncMock()
         engine._neo4j_driver = AsyncMock()
@@ -1476,7 +1506,7 @@ class TestVectorCypherEngineForget:
 
     @pytest.mark.asyncio
     async def test_forget_cascade_deletes_orphan_entity(self, connected_engine: VectorCypherEngine) -> None:
-        """Orphan entity (source_document_count=1) is hard-deleted in both backends."""
+        """Orphan entity (sole source = forgotten doc) is hard-deleted in both backends."""
         doc_id = uuid4()
         namespace_id = uuid4()
         orphan_ent_id = uuid4()
@@ -1485,19 +1515,14 @@ class TestVectorCypherEngineForget:
         doc_mock.namespace_id = namespace_id
         connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
         connected_engine._storage.delete_document = AsyncMock(return_value=True)
-        connected_engine._storage.graph.fetch_document_extraction_state = AsyncMock(
-            return_value=(
-                [{"id": str(orphan_ent_id), "source_document_count": 1}],
-                [],
-            )
-        )
+        connected_engine._storage.vector.list_entities = AsyncMock(return_value=[_ent(orphan_ent_id, [doc_id])])
 
         await connected_engine.forget(doc_id, namespace_id)
 
-        connected_engine._storage.graph.delete_entities_batch.assert_awaited_once_with(
+        connected_engine._storage.vector.delete_entities_batch.assert_awaited_once_with(
             [orphan_ent_id], namespace_id=namespace_id
         )
-        connected_engine._storage.vector.delete_entities_batch.assert_awaited_once_with(
+        connected_engine._storage.graph.delete_entities_batch.assert_awaited_once_with(
             [orphan_ent_id], namespace_id=namespace_id
         )
         connected_engine._storage.graph.remove_document_from_entity_sources_batch.assert_not_called()
@@ -1505,29 +1530,27 @@ class TestVectorCypherEngineForget:
 
     @pytest.mark.asyncio
     async def test_forget_cascade_updates_survivor_entity_sources(self, connected_engine: VectorCypherEngine) -> None:
-        """Survivor entity (source_document_count>1) has doc_id stripped, not deleted."""
+        """Survivor entity (multi-source) has doc_id stripped, not deleted."""
         doc_id = uuid4()
         namespace_id = uuid4()
         survivor_ent_id = uuid4()
+        other_doc = uuid4()
 
         doc_mock = MagicMock()
         doc_mock.namespace_id = namespace_id
         connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
         connected_engine._storage.delete_document = AsyncMock(return_value=True)
-        connected_engine._storage.graph.fetch_document_extraction_state = AsyncMock(
-            return_value=(
-                [{"id": str(survivor_ent_id), "source_document_count": 3}],
-                [],
-            )
+        connected_engine._storage.vector.list_entities = AsyncMock(
+            return_value=[_ent(survivor_ent_id, [doc_id, other_doc])]
         )
 
         await connected_engine.forget(doc_id, namespace_id)
 
-        connected_engine._storage.graph.remove_document_from_entity_sources_batch.assert_awaited_once_with(
-            [survivor_ent_id], doc_id, namespace_id
-        )
         connected_engine._storage.vector.remove_document_from_entity_sources.assert_awaited_once_with(
             [survivor_ent_id], doc_id
+        )
+        connected_engine._storage.graph.remove_document_from_entity_sources_batch.assert_awaited_once_with(
+            [survivor_ent_id], doc_id, namespace_id
         )
         connected_engine._storage.graph.delete_entities_batch.assert_not_called()
         connected_engine._storage.vector.delete_entities_batch.assert_not_called()
@@ -1543,19 +1566,14 @@ class TestVectorCypherEngineForget:
         doc_mock.namespace_id = namespace_id
         connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
         connected_engine._storage.delete_document = AsyncMock(return_value=True)
-        connected_engine._storage.graph.fetch_document_extraction_state = AsyncMock(
-            return_value=(
-                [],
-                [{"id": str(orphan_rel_id), "source_document_count": 1}],
-            )
-        )
+        connected_engine._storage.vector.list_relationships = AsyncMock(return_value=[_ent(orphan_rel_id, [doc_id])])
 
         await connected_engine.forget(doc_id, namespace_id)
 
-        connected_engine._storage.graph.delete_relationships_batch.assert_awaited_once_with(
+        connected_engine._storage.vector.delete_relationships_batch.assert_awaited_once_with(
             [orphan_rel_id], namespace_id=namespace_id
         )
-        connected_engine._storage.vector.delete_relationships_batch.assert_awaited_once_with(
+        connected_engine._storage.graph.delete_relationships_batch.assert_awaited_once_with(
             [orphan_rel_id], namespace_id=namespace_id
         )
         connected_engine._storage.graph.remove_document_from_relationship_sources_batch.assert_not_called()
@@ -1569,24 +1587,22 @@ class TestVectorCypherEngineForget:
         doc_id = uuid4()
         namespace_id = uuid4()
         survivor_rel_id = uuid4()
+        other_doc = uuid4()
 
         doc_mock = MagicMock()
         doc_mock.namespace_id = namespace_id
         connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
         connected_engine._storage.delete_document = AsyncMock(return_value=True)
-        connected_engine._storage.graph.fetch_document_extraction_state = AsyncMock(
-            return_value=(
-                [],
-                [{"id": str(survivor_rel_id), "source_document_count": 2}],
-            )
+        connected_engine._storage.vector.list_relationships = AsyncMock(
+            return_value=[_ent(survivor_rel_id, [doc_id, other_doc])]
         )
 
         await connected_engine.forget(doc_id, namespace_id)
 
-        connected_engine._storage.graph.remove_document_from_relationship_sources_batch.assert_awaited_once_with(
+        connected_engine._storage.vector.remove_document_from_relationship_sources.assert_awaited_once_with(
             [survivor_rel_id], doc_id
         )
-        connected_engine._storage.vector.remove_document_from_relationship_sources.assert_awaited_once_with(
+        connected_engine._storage.graph.remove_document_from_relationship_sources_batch.assert_awaited_once_with(
             [survivor_rel_id], doc_id
         )
         connected_engine._storage.graph.delete_relationships_batch.assert_not_called()
@@ -1605,7 +1621,7 @@ class TestVectorCypherEngineForget:
         doc_mock.namespace_id = namespace_id
         connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
         connected_engine._storage.delete_document = AsyncMock(return_value=True)
-        # default fixture already stubs fetch_document_extraction_state -> ([], [])
+        # default fixture already stubs vector.list_entities / list_relationships -> []
 
         result = await connected_engine.forget(doc_id, namespace_id)
 
@@ -1634,19 +1650,14 @@ class TestVectorCypherEngineForget:
         doc_mock.namespace_id = namespace_id
         connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
         connected_engine._storage.delete_document = AsyncMock(return_value=True)
-        connected_engine._storage.graph.fetch_document_extraction_state = AsyncMock(
-            return_value=(
-                [{"id": str(orphan_ent_id), "source_document_count": 1}],
-                [],
-            )
-        )
+        connected_engine._storage.vector.list_entities = AsyncMock(return_value=[_ent(orphan_ent_id, [doc_id])])
 
         call_order: list[str] = []
-        connected_engine._storage.graph.delete_entities_batch.side_effect = lambda *a, **kw: call_order.append(
-            "cascade_graph_delete"
-        )
         connected_engine._storage.vector.delete_entities_batch.side_effect = lambda *a, **kw: call_order.append(
             "cascade_vector_delete"
+        )
+        connected_engine._storage.graph.delete_entities_batch.side_effect = lambda *a, **kw: call_order.append(
+            "cascade_graph_delete"
         )
         connected_engine._dual_nodes.delete_chunks_by_document.side_effect = lambda *a, **kw: call_order.append(
             "delete_chunks_neo4j"
@@ -1661,7 +1672,7 @@ class TestVectorCypherEngineForget:
         await connected_engine.forget(doc_id, namespace_id)
 
         # Cascade fires before any chunk/doc delete.
-        cascade_idx = call_order.index("cascade_graph_delete")
+        cascade_idx = call_order.index("cascade_vector_delete")
         assert cascade_idx < call_order.index("delete_chunks_neo4j")
         assert cascade_idx < call_order.index("delete_chunks_pgvector")
         assert cascade_idx < call_order.index("delete_document")
