@@ -36,6 +36,8 @@ Minor release. Adds Chronicle reinforcement-on-recall and a project-wide failure
 ### Fixed
 
 - **`BatchHandle.wait()` no longer hangs on a pre-try fault**; worker-level fallback handles faults raised before the per-item try block (#869).
+- **`replace_document_extraction` stamps status inside the SQL transaction** and no longer marks a document FAILED when Postgres committed but the graph-mirror phase raised (#887).
+- **VectorCypher `remember()` no longer reports a document as completed on total LLM extraction failure** (#889); extraction errors now surface on `RememberResult.metadata`.
 - **Chronicle fact-reconcile no longer fails open to ADD on an LLM error** (#892); an LLM failure no longer silently appends a duplicate fact.
 - **Chronicle extraction, VectorCypher relationship fetch, and ingest relationship-drop silent failures** now surface via ADR-001 degradations (#903, #904, #907).
 - **Rust accel raises `ValueError` instead of `PanicException`** on mismatched array lengths in MMR and entity resolution (#902).
