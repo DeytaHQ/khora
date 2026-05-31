@@ -36,6 +36,7 @@ except ImportError:
     ConnectionAcquisitionTimeoutError = ServiceUnavailable  # type: ignore[misc,assignment]
     ConnectionPoolError = ServiceUnavailable  # type: ignore[misc,assignment]
 
+from khora.core.diagnostics import Degradation
 from khora.core.models import Chunk, Entity, Relationship
 from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
@@ -95,6 +96,24 @@ _LLM_RERANKING_SKIPPED_COUNTER = metric_counter(
     description=(
         "Number of times the VectorCypher LLM rerank step was skipped, "
         "by reason (not_temporal / no_version_metadata / decisive_winner)."
+    ),
+)
+
+# Relationship-fetch degradation counter (issue #904, ADR-001). The
+# vectorcypher rel-fetch arm silently resets to ``raw_rels = []`` on any
+# exception; previously this was asymmetric with the cypher-expand fallback
+# (which sets ``graph_fallback`` / ``graph_error``) and callers had no
+# machine-readable signal that relationships were missing from the response.
+# NO namespace_id label - cardinality rule.
+_REL_FETCH_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.rel_fetch.degraded_total",
+    unit="1",
+    description=(
+        "Issue #904. VectorCypher relationship-fetch silent fallbacks. "
+        "Incremented when the parallel ``rels_task`` raises and the retrieve "
+        "path continues without relationships. The same event is also "
+        "appended to RecallResult.engine_info['degradations']. Labels: "
+        "reason (fetch_failed). NO namespace_id label - cardinality rule."
     ),
 )
 
@@ -1012,6 +1031,12 @@ class VectorCypherRetriever:
         base_depth = graph_depth or routing.graph_depth
         entry_limit = routing.suggested_entry_limit
 
+        # ADR-001 (issue #904): silent fallback paths append ``Degradation``
+        # entries here; the list is surfaced on the response under
+        # ``engine_info["degradations"]`` so callers can detect partial
+        # failures without changing signatures.
+        degradations: list[Degradation] = []
+
         # #833 channel-skip: GRAPH mode drops vector + BM25 chunk channels
         # (entry entities still come from the entity-level vector index,
         # since the cypher expansion needs seeds).
@@ -1726,9 +1751,23 @@ class VectorCypherRetriever:
         # Await the parallel relationship fetch
         try:
             raw_rels = await rels_task
-        except Exception:
+        except Exception as exc:
             logger.warning("Relationship fetch failed, continuing without relationships", exc_info=True)
             raw_rels = []
+            # ADR-001 (issue #904): record the silent fallback so callers
+            # can see that relationships are missing from the response.
+            # Asymmetric with the _cypher_expand fallback above which sets
+            # graph_fallback/graph_error - this site previously left no
+            # machine-readable signal at all.
+            degradations.append(
+                Degradation(
+                    component="vectorcypher.relationship_fetch",
+                    reason="fetch_failed",
+                    detail=str(exc)[:200] or None,
+                    exception=type(exc).__name__,
+                )
+            )
+            _REL_FETCH_DEGRADED_COUNTER.add(1, attributes={"reason": "fetch_failed"})
         entity_scores_by_id: dict[UUID, float] = {entity.id: score for entity, score in entity_results}
         entity_names_by_id: dict[UUID, str] = {entity.id: entity.name for entity, _ in entity_results}
         relationships: list[tuple[Relationship, float]] = []
@@ -1784,6 +1823,11 @@ class VectorCypherRetriever:
                 "search_methods": search_methods,
                 "graph_fallback": graph_fallback,
                 **({"graph_error": graph_error_msg} if graph_error_msg else {}),
+                # ADR-001 (issue #904): silent-failure entries from this path
+                # (currently: relationship-fetch failure). Forwarded onto
+                # ``RecallResult.engine_info["degradations"]`` by the engine
+                # via the ``**result.metadata`` spread.
+                "degradations": degradations,
                 # Issue #542 — PPR retrieval (HippoRAG 2). Surfaced for
                 # benchmark scoring and operator dashboards. False when
                 # the flag is off or when the path fell back to vector-only.

@@ -193,6 +193,14 @@ class RememberResult:
     chunks_created: int
     entities_extracted: int
     relationships_created: int
+    # Issue #907 (ADR-001): un-remappable relationships that the ingest
+    # pipeline dropped because the source / target entity could not be
+    # resolved to a canonical id. ``relationships_created`` counts what
+    # was actually persisted; this counts what was silently discarded so
+    # callers can detect partial success. Always 0 on engines that do
+    # not run the shared ingest pipeline. Also reflected as a Degradation
+    # entry under ``metadata["degradations"]`` when non-zero.
+    relationships_skipped: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
     llm_usage: list[LLMUsage] = field(default_factory=list)
 

@@ -23,6 +23,13 @@ from uuid import UUID, uuid4
 import litellm
 from loguru import logger
 
+from khora.core.diagnostics import ErrorRecord
+from khora.engines.chronicle.events import (
+    _EXTRACTION_FAILED_COUNTER as _CHRONICLE_EXTRACTION_FAILED_COUNTER,
+)
+from khora.engines.chronicle.events import (
+    _TRANSIENT_LLM_ERRORS as _CHRONICLE_TRANSIENT_LLM_ERRORS,
+)
 from khora.telemetry import metric_counter
 
 # Counter for reconcile_fact LLM failures. Issue #892: previously the broad
@@ -210,6 +217,7 @@ class FactExtractor:
         *,
         chunk_id: UUID | None = None,
         namespace_id: UUID | None = None,
+        errors_out: list[ErrorRecord] | None = None,
     ) -> list[MemoryFact]:
         """Extract atomic facts from text.
 
@@ -217,9 +225,15 @@ class FactExtractor:
             text: Source text to extract facts from.
             chunk_id: Optional chunk ID — recorded in ``source_chunk_ids``.
             namespace_id: Optional namespace for scoping.
+            errors_out: Optional sink for ADR-001 ``ErrorRecord`` entries.
+                When the LLM raises a transient error, an entry is appended
+                so the caller can surface it on
+                ``RememberResult.metadata['errors']``. Real parser bugs are
+                not appended - they propagate.
 
         Returns:
-            List of MemoryFact objects. Returns [] on LLM failure.
+            List of MemoryFact objects. Returns [] on transient LLM failure
+            (issue #903).
         """
         if not text.strip():
             return []
@@ -241,8 +255,32 @@ class FactExtractor:
             )
             content = response.choices[0].message.content or "[]"
             raw_facts = _parse_json_array(content)
-        except Exception:
-            logger.debug("Fact extraction failed, returning empty")
+        except _CHRONICLE_TRANSIENT_LLM_ERRORS as exc:
+            # Issue #903: narrow the except clause to transient LLM errors;
+            # real parser bugs (AttributeError, KeyError) propagate. Promote
+            # the log to WARNING with exc_info so the traceback survives.
+            logger.warning(
+                "Fact extraction transient LLM failure "
+                "(chunk_id={chunk_id}, namespace_id={namespace_id}): {exc_type}: {exc}",
+                chunk_id=chunk_id,
+                namespace_id=namespace_id,
+                exc_type=type(exc).__name__,
+                exc=exc,
+                exc_info=True,
+            )
+            _CHRONICLE_EXTRACTION_FAILED_COUNTER.add(
+                1,
+                attributes={"kind": "facts", "reason": "llm_transient_failure"},
+            )
+            if errors_out is not None:
+                errors_out.append(
+                    ErrorRecord(
+                        component="chronicle.facts_extractor",
+                        reason="llm_transient_failure",
+                        exception=type(exc).__name__,
+                        detail=str(exc)[:200] or None,
+                    )
+                )
             return []
 
         _latency = (_time.perf_counter() - _t0) * 1000

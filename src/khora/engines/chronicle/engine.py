@@ -35,7 +35,7 @@ from uuid import UUID
 from loguru import logger
 
 from khora.config import KhoraConfig, LiteLLMConfig
-from khora.core.diagnostics import Degradation
+from khora.core.diagnostics import Degradation, ErrorRecord
 from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.core.models.recall import (
     DocumentProjection,
@@ -910,13 +910,16 @@ class ChronicleEngine:
         namespace_id: UUID,
         extractor: EventExtractor,
         sem: asyncio.Semaphore,
+        errors_out: list[ErrorRecord] | None = None,
     ) -> list[ChronicleEvent]:
         """Run the extractor on a single chunk, swallowing per-chunk failures.
 
         Returns an empty list if extraction raises so a single bad LLM call
         cannot fail the whole ``remember()``. The chunk_id and namespace_id
         are stamped onto every returned event so callers can pass the list
-        straight to ``coordinator.write_events``.
+        straight to ``coordinator.write_events``. Issue #903: transient
+        extractor failures are forwarded to ``errors_out`` so the caller
+        can surface them on ``RememberResult.metadata['errors']``.
         """
         async with sem:
             try:
@@ -924,6 +927,7 @@ class ChronicleEngine:
                     chunk.content,
                     chunk_id=chunk.id,
                     namespace_id=namespace_id,
+                    errors_out=errors_out,
                 )
             except Exception as exc:
                 logger.warning(
@@ -965,18 +969,20 @@ class ChronicleEngine:
         chunks: list[Chunk],
         namespace_id: UUID,
         expertise: ExpertiseConfig | None,
+        errors_out: list[ErrorRecord] | None = None,
     ) -> int:
         """Extract events from chunks, embed summaries, persist, and return count.
 
         Resolution of the enable flag is the caller's responsibility — this
         helper assumes events are already enabled and unconditionally runs.
+        Issue #903: transient extractor failures are forwarded to ``errors_out``.
         """
         if not chunks:
             return 0
         extractor = self._get_event_extractor(expertise)
         sem = asyncio.Semaphore(self._max_concurrent_extractions)
         per_chunk = await asyncio.gather(
-            *(self._extract_events_for_chunk(c, namespace_id, extractor, sem) for c in chunks),
+            *(self._extract_events_for_chunk(c, namespace_id, extractor, sem, errors_out=errors_out) for c in chunks),
             return_exceptions=False,
         )
         events: list[ChronicleEvent] = [ev for sub in per_chunk for ev in sub]
@@ -1043,14 +1049,20 @@ class ChronicleEngine:
         namespace_id: UUID,
         extractor: FactExtractor,
         sem: asyncio.Semaphore,
+        errors_out: list[ErrorRecord] | None = None,
     ) -> list[MemoryFact]:
-        """Run the fact extractor on a single chunk, swallowing per-chunk failures."""
+        """Run the fact extractor on a single chunk, swallowing per-chunk failures.
+
+        Issue #903: transient extractor failures are forwarded to ``errors_out``
+        so the caller can surface them on ``RememberResult.metadata['errors']``.
+        """
         async with sem:
             try:
                 facts = await extractor.extract_facts(
                     chunk.content,
                     chunk_id=chunk.id,
                     namespace_id=namespace_id,
+                    errors_out=errors_out,
                 )
             except Exception as exc:
                 logger.warning(
@@ -1182,6 +1194,7 @@ class ChronicleEngine:
         chunks: list[Chunk],
         namespace_id: UUID,
         expertise: ExpertiseConfig | None,
+        errors_out: list[ErrorRecord] | None = None,
     ) -> tuple[int, int]:
         """Extract facts from chunks, reconcile, persist, and return count.
 
@@ -1189,14 +1202,15 @@ class ChronicleEngine:
         is the number of facts dropped because the contradiction-check LLM call
         failed transiently (issue #892). The non-reconcile fast path always
         reports zero reconcile errors. Resolution of the ``facts.enabled``
-        flag is the caller's responsibility.
+        flag is the caller's responsibility. Issue #903: transient extractor
+        failures are forwarded to ``errors_out``.
         """
         if not chunks:
             return 0, 0
         extractor = self._get_fact_extractor(expertise)
         sem = asyncio.Semaphore(self._max_concurrent_extractions)
         per_chunk = await asyncio.gather(
-            *(self._extract_facts_for_chunk(c, namespace_id, extractor, sem) for c in chunks),
+            *(self._extract_facts_for_chunk(c, namespace_id, extractor, sem, errors_out=errors_out) for c in chunks),
             return_exceptions=False,
         )
         new_facts: list[MemoryFact] = [f for sub in per_chunk for f in sub]
@@ -1335,6 +1349,9 @@ class ChronicleEngine:
         events_extracted = 0
         facts_extracted = 0
         reconcile_errors = 0
+        # Issue #903 (ADR-001): transient extractor failures are appended here
+        # and surfaced on the response under ``metadata["errors"]``.
+        extraction_errors: list[ErrorRecord] = []
         try:
             namespace = await storage.get_namespace(namespace_id)
         except Exception:
@@ -1350,12 +1367,14 @@ class ChronicleEngine:
                 chunks = [chunks_map[cid] for cid in chunk_ids if cid in chunks_map]
                 if run_events:
                     start = time.perf_counter()
-                    events_extracted = await self._extract_and_persist_events(chunks, namespace_id, expertise)
+                    events_extracted = await self._extract_and_persist_events(
+                        chunks, namespace_id, expertise, errors_out=extraction_errors
+                    )
                     timings["event_extraction_ms"] = (time.perf_counter() - start) * 1000
                 if run_facts:
                     start = time.perf_counter()
                     facts_extracted, reconcile_errors = await self._extract_and_persist_facts(
-                        chunks, namespace_id, expertise
+                        chunks, namespace_id, expertise, errors_out=extraction_errors
                     )
                     timings["fact_extraction_ms"] = (time.perf_counter() - start) * 1000
 
@@ -1367,20 +1386,44 @@ class ChronicleEngine:
             f"{facts_extracted} facts in {timings['total_ms']:.1f}ms"
         )
 
+        # Issue #907: surface unremappable-relationship drops from the
+        # shared ingest pipeline. ``process_document`` returns
+        # ``relationships_skipped`` as a top-level key; we propagate it to
+        # RememberResult and append a Degradation entry under ADR-001 so
+        # callers can detect partial success without changing the signature.
+        rels_skipped = int(result.get("relationships_skipped", 0) or 0)
+        ingest_degradations: list[Degradation] = []
+        if rels_skipped > 0:
+            ingest_degradations.append(
+                Degradation(
+                    component="ingest.relationships",
+                    reason="unremappable",
+                    detail=f"{rels_skipped} relationship(s) dropped due to missing entity mappings",
+                    exception=None,
+                )
+            )
+
+        metadata: dict[str, Any] = {
+            "timings": timings,
+            "events_extracted": events_extracted,
+            "facts_extracted": facts_extracted,
+            # Issue #892: per-call signal that fact reconciliation dropped
+            # facts due to transient LLM failures. 0 on the happy path.
+            "reconcile_errors": reconcile_errors,
+        }
+        if extraction_errors:
+            metadata["errors"] = list(extraction_errors)
+        if ingest_degradations:
+            metadata["degradations"] = ingest_degradations
+
         return RememberResult(
             document_id=document.id,
             namespace_id=namespace_id,
             chunks_created=result["chunks"],
             entities_extracted=result["entities"],
             relationships_created=result["relationships"],
-            metadata={
-                "timings": timings,
-                "events_extracted": events_extracted,
-                "facts_extracted": facts_extracted,
-                # Issue #892: per-call signal that fact reconciliation dropped
-                # facts due to transient LLM failures. 0 on the happy path.
-                "reconcile_errors": reconcile_errors,
-            },
+            relationships_skipped=rels_skipped,
+            metadata=metadata,
         )
 
     @trace("khora.chronicle.recall")
