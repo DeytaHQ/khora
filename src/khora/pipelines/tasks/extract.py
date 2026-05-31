@@ -5,9 +5,21 @@ from __future__ import annotations
 import time as _time
 from typing import TYPE_CHECKING, Any
 
+from khora.telemetry import metric_counter
+
 if TYPE_CHECKING:
     from khora.core.models import Chunk, Entity, Relationship
     from khora.extraction.skills import ExpertiseConfig
+
+# #889: count chunks where LLM extraction returned an error metadata
+# (truncated response, parse failure, retry exhaustion). The counter is
+# bumped once per failed chunk. Caller-side ADR-001 ``degradations``
+# entries carry the per-chunk reason; this metric is the aggregate
+# operator-facing signal. NO ``namespace_id`` label - cardinality rule.
+_EXTRACTION_ERRORS_COUNTER = metric_counter(
+    "khora.extraction.errors_total",
+    description=("LLM extraction failures per chunk (truncated, parse error, retry exhausted). Labels: reason."),
+)
 
 
 async def extract_entities(
@@ -30,6 +42,7 @@ async def extract_entities(
     extraction_importance_ratio: float = 0.7,
     extraction_min_importance: float = 0.2,
     shared_extractor: Any | None = None,
+    out_diagnostics: dict[str, Any] | None = None,
 ) -> tuple[list[Entity], list[Relationship]]:
     """Extract entities and relationships from chunks.
 
@@ -61,6 +74,21 @@ async def extract_entities(
         extraction_min_importance: Minimum importance score threshold
         shared_extractor: Optional pre-initialized LLMEntityExtractor to reuse
             across documents (shares semaphore for cross-document concurrency control)
+        out_diagnostics: Optional dict the function populates with ADR-001
+            failure-observability fields when one or more chunks return an
+            ``ExtractionResult`` with an ``error`` metadata key. Keys written:
+
+            - ``extraction_errors`` (int): count of chunks where LLM
+              extraction failed (truncated response, parse error, request
+              error, ...). Always written when the dict is supplied.
+            - ``llm_chunks`` (int): count of chunks routed to the LLM (the
+              denominator for ``extraction_errors``).
+            - ``degradations`` (list[Degradation]): one entry per failed
+              chunk, ``component="extraction.llm"``, ``reason`` taken from
+              ``result.metadata["error"]`` (truncated where helpful).
+
+            Caller is expected to forward these into a result-level
+            ``metadata`` dict (e.g. ``RememberResult.metadata``). #889.
 
     Returns:
         Tuple of (entities, relationships)
@@ -164,8 +192,40 @@ async def extract_entities(
     all_entities: dict[str, Entity] = {}  # name -> entity (for dedup)
     all_relationships: list[Relationship] = []
     events_converted = 0
+    # #889: Track per-chunk extraction errors so callers can surface them
+    # on RememberResult.metadata. ``LLMEntityExtractor`` returns an empty
+    # ``ExtractionResult`` with a populated ``metadata["error"]`` on
+    # truncated responses and on retry exhaustion; before this PR the
+    # caller could not tell extraction failed from "the chunk had no
+    # entities". We accumulate a count + ADR-001 ``degradations`` list
+    # when ``out_diagnostics`` is supplied.
+    extraction_error_count = 0
+    extraction_degradations: list[dict[str, Any]] = []
 
     for chunk, result in zip(llm_chunks, results):
+        # #889: detect failed extraction (truncated / parse error / request
+        # error) before processing entities so we can surface it on the
+        # result. The error metadata is set by ``LLMEntityExtractor`` -
+        # see ``llm.py`` lines 859 (truncation) and 885 (post-retry).
+        result_meta = getattr(result, "metadata", None) or {}
+        if isinstance(result_meta, dict) and "error" in result_meta:
+            extraction_error_count += 1
+            if out_diagnostics is not None:
+                error_value = result_meta.get("error")
+                error_text = str(error_value) if error_value is not None else "unknown"
+                # Cap detail length - some raw_response errors carry a
+                # full HTTP body. Bounded text keeps the diagnostic
+                # log-friendly.
+                detail = error_text if len(error_text) <= 200 else error_text[:197] + "..."
+                extraction_degradations.append(
+                    {
+                        "component": "extraction.llm",
+                        "reason": "extraction_failed",
+                        "detail": detail,
+                        "exception": None,
+                    }
+                )
+
         # Process entities
         for extracted in result.entities:
             if extracted.confidence < min_entity_confidence:
@@ -414,6 +474,26 @@ async def extract_entities(
                 f"from {len(lightweight_chunks)} skipped chunks"
             )
 
+    # #889: bump the extraction-errors counter and surface diagnostics
+    # on the caller-supplied dict before the span closes so the span
+    # attributes reflect the same view.
+    if extraction_error_count > 0:
+        _EXTRACTION_ERRORS_COUNTER.add(
+            extraction_error_count,
+            attributes={"reason": "extraction_failed"},
+        )
+        logger.warning(
+            f"LLM extraction failed on {extraction_error_count}/{len(llm_chunks)} chunks "
+            f"(see degradations metadata for per-chunk reason)"
+        )
+    if out_diagnostics is not None:
+        out_diagnostics["extraction_errors"] = extraction_error_count
+        out_diagnostics["llm_chunks"] = len(llm_chunks)
+        if extraction_degradations:
+            existing = out_diagnostics.setdefault("degradations", [])
+            if isinstance(existing, list):
+                existing.extend(extraction_degradations)
+
     from khora.telemetry import trace_span
 
     with trace_span(
@@ -428,6 +508,7 @@ async def extract_entities(
         relationships_extracted=len(all_relationships),
         events_converted=events_converted,
         state_changes_applied=state_changes_applied,
+        extraction_errors=extraction_error_count,
     ):
         pass
 

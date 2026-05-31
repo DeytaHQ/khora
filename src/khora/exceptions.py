@@ -28,6 +28,7 @@ __all__ = [
     "QueryError",
     "RelationalError",
     "StorageError",
+    "UnsupportedEngineKwargError",
     "VectorError",
 ]
 
@@ -120,3 +121,30 @@ class EngineCapabilityError(KhoraError):
         super().__init__(
             f"Engine {engine_name!r} does not support SearchMode.{mode.name}. Supported modes: {supported_names}"
         )
+
+
+class UnsupportedEngineKwargError(KhoraError):
+    """Raised when a caller passes a kwarg the engine cannot honor.
+
+    Several engines declare kwargs on ``remember`` / ``recall`` to match
+    the cross-engine protocol but cannot implement them (e.g. Skeleton has
+    no entity extraction, so ``entity_types`` / ``relationship_types`` are
+    no-ops; Skeleton has no temporal decay, so ``recency_bias`` is a
+    no-op). Silently accepting these kwargs misleads callers into thinking
+    the engine respected them, which hides real correctness bugs (issues
+    #890 and #891).
+
+    The exception carries the engine name, the offending kwarg, and a
+    short reason so the caller sees which engine refused which kwarg.
+    """
+
+    def __init__(
+        self,
+        engine_name: str,
+        kwarg: str,
+        reason: str,
+    ) -> None:
+        self.engine_name = engine_name
+        self.kwarg = kwarg
+        self.reason = reason
+        super().__init__(f"Engine {engine_name!r} does not support kwarg {kwarg!r}: {reason}")

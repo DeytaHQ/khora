@@ -1199,7 +1199,17 @@ class Khora:
                 Raises ValueError if constraints are violated.
 
         Returns:
-            RememberResult with details
+            RememberResult with details. ``metadata["extraction_errors"]``
+            (int) and ``metadata["degradations"]`` (ADR-001 list) are
+            present only when one or more chunks failed LLM extraction
+            (#889); on the happy path ``metadata`` stays empty.
+
+        Raises:
+            UnsupportedEngineKwargError: When the configured engine
+                cannot honor a kwarg. The Skeleton engine raises this
+                for non-empty ``entity_types`` / ``relationship_types``
+                (it does not perform typed entity extraction - #890);
+                see each engine's docstring for the full contract.
         """
         import time as _time
 

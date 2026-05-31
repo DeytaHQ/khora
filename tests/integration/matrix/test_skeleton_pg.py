@@ -256,9 +256,12 @@ async def _remember(
         namespace=namespace_id,
         title=title,
         metadata=metadata,
-        # Skeleton accepts these for protocol compliance but doesn't use them.
-        entity_types=["PERSON", "CONCEPT"],
-        relationship_types=["RELATES_TO"],
+        # #890: Skeleton refuses non-empty entity_types / relationship_types
+        # because it has no entity extraction. Pass empty lists rather than
+        # the previously-silent no-op shape (["PERSON", "CONCEPT"] /
+        # ["RELATES_TO"]) that the engine used to swallow.
+        entity_types=[],
+        relationship_types=[],
     )
 
 

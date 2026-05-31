@@ -116,6 +116,28 @@ def _coerce_session_id_from_metadata(metadata: dict[str, Any] | None) -> UUID | 
         return None
 
 
+def _build_remember_metadata(extraction_diagnostics: dict[str, Any] | None) -> dict[str, Any]:
+    """Project extraction diagnostics onto a ``RememberResult.metadata`` payload.
+
+    #889: surface ``extraction_errors`` (count) and any ADR-001
+    ``degradations`` list collected by ``extract_entities``. Returns an
+    empty dict when no errors were observed so the happy path leaves
+    ``RememberResult.metadata`` empty (matching pre-fix behavior).
+    """
+    if not extraction_diagnostics:
+        return {}
+    errors = extraction_diagnostics.get("extraction_errors", 0)
+    degradations = extraction_diagnostics.get("degradations") or []
+    if not errors and not degradations:
+        return {}
+    metadata: dict[str, Any] = {}
+    if errors:
+        metadata["extraction_errors"] = int(errors)
+    if degradations:
+        metadata["degradations"] = list(degradations)
+    return metadata
+
+
 _MAX_COOCCURRENCE_PER_CHUNK = 15
 
 
@@ -893,6 +915,11 @@ class VectorCypherEngine:
                 external_id=external_id,
             )
 
+        # #889: collect ADR-001 diagnostics from extraction so failures
+        # are visible on RememberResult.metadata instead of looking
+        # successful with entities_extracted=0.
+        extraction_diagnostics: dict[str, Any] = {}
+
         # Process document
         chunks_created, entities_extracted, relationships_created = await self._process_document(
             document,
@@ -903,14 +930,17 @@ class VectorCypherEngine:
             entity_types=entity_types,
             relationship_types=relationship_types,
             chunk_strategy=chunk_strategy,
+            out_diagnostics=extraction_diagnostics,
         )
 
+        result_metadata = _build_remember_metadata(extraction_diagnostics)
         return RememberResult(
             document_id=document.id,
             namespace_id=namespace_id,
             chunks_created=chunks_created,
             entities_extracted=entities_extracted,
             relationships_created=relationships_created,
+            metadata=result_metadata,
         )
 
     async def _process_document(
@@ -926,6 +956,7 @@ class VectorCypherEngine:
         chunk_strategy: ChunkStrategy | None = None,
         max_chunks_in_flight: int | None = None,
         chunk_semaphore: _GlobalChunkSemaphore | None = None,
+        out_diagnostics: dict[str, Any] | None = None,
     ) -> tuple[int, int, int]:
         """Process a document into chunks with skeleton-based entity extraction.
 
@@ -1049,6 +1080,7 @@ class VectorCypherEngine:
                             extraction_model=extraction_model,
                             entity_types=entity_types,
                             relationship_types=relationship_types,
+                            out_diagnostics=out_diagnostics,
                         )
                         entities_extracted += ents
                         relationships_created += rels
@@ -1159,6 +1191,7 @@ class VectorCypherEngine:
         extraction_model: str | None = None,
         entity_types: list[str],
         relationship_types: list[str],
+        out_diagnostics: dict[str, Any] | None = None,
     ) -> tuple[int, int]:
         """Run skeleton-based entity extraction on core chunks only.
 
@@ -1236,6 +1269,7 @@ class VectorCypherEngine:
                 entity_types=entity_types,
                 relationship_types=relationship_types,
                 store_events=self._vc_config.store_events,
+                out_diagnostics=out_diagnostics,
             )
 
             if not entities:
