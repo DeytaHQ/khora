@@ -338,6 +338,12 @@ async def test_migration_034_downgrade_reverses(pg_engine: AsyncEngine) -> None:
     from alembic import command
     from alembic.config import Config
 
+    # Downgrade to an explicit target revision (the revision immediately
+    # before the migration under test), not a "-1" step count. The
+    # pg_engine fixture upgrades to the current head, which is now several
+    # revisions past 034, so "-1" would only revert head, not 034. Pinning
+    # to the predecessor revision (033_bitemporal_columns) is robust as the
+    # chain grows.
     sync_url = DATABASE_URL.replace("+asyncpg", "")
     migrations_dir = Path(_MIGRATION_034.__file__).resolve().parents[0].parent
     cfg = Config()
@@ -345,7 +351,7 @@ async def test_migration_034_downgrade_reverses(pg_engine: AsyncEngine) -> None:
     cfg.set_main_option("sqlalchemy.url", sync_url)
     cfg.set_main_option("version_table", "khora_alembic_version")
     cfg.set_main_option("version_table_schema", "public")
-    await asyncio.to_thread(command.downgrade, cfg, "-1")
+    await asyncio.to_thread(command.downgrade, cfg, "033_bitemporal_columns")
 
     for col in ("invalidated_at", "invalidated_by", "merged_into_event_id"):
         info = await _column_info(pg_engine, "chronicle_events", col)
