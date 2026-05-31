@@ -4,6 +4,46 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.18.0] - Chronicle reinforcement-on-recall + silent-failure observability + breaking Skeleton/config changes
+
+Minor release. Adds Chronicle reinforcement-on-recall and a project-wide failure-observability convention (ADR-001), with a large batch of silent-failure and partial-failure fixes. Contains breaking changes: Skeleton now rejects unsupported kwargs instead of silently ignoring them, and the dead `auth_enabled` config field is removed.
+
+### Breaking changes
+
+- **Skeleton `remember()` now raises `UnsupportedEngineKwargError` on non-empty `entity_types` / `relationship_types`** (#890, in #917). Previously a silent no-op - Skeleton does not extract entities, so the kwargs gave a false impression of graph extraction.
+- **Skeleton `recall(recency_bias=...)` now raises on a non-`None` value** (#891, in #917). Previously a silent no-op - Skeleton has no recency scoring.
+- **`auth_enabled` config field removed from `KhoraConfig`** (#908, in #941). The field was dead; with `extra='forbid'`, passing it now raises a Pydantic `ValidationError`.
+
+### Added
+
+- **Chronicle reinforcement-on-recall** (#855): recalling a chunk stamps `chunk.last_accessed_at`, so frequently-accessed memories resist temporal decay. Schema + storage round-trip plus telemetry and task tracking.
+- **Failure-observability convention (ADR-001)** (#912, #916): `Degradation` / `ErrorRecord` / `SkipReason` TypedDicts surfaced on result objects, plus `khora.*.degraded_total{channel, reason}` metrics. Reference impl is the chronicle channel degradations.
+- **Claim-based orphan recovery** (#885, #886): recovery now covers `PROCESSING` rows and uses `FOR UPDATE SKIP LOCKED` so concurrent workers do not double-claim.
+- **sqlite_lance parity** (#896, #905): `dream_history` persistence and `get_chunks_by_document` now behave the same on sqlite_lance as on Postgres.
+- **`source_timestamp` propagation through VectorCypher** ingest and recall paths (#859).
+- **`unify_entities` threshold kwargs + per-strategy candidate counters** (#865).
+- **Dream skip-reasons** exposed on `DreamResult.metadata["skip_reasons"]` for empty results (#876).
+- **Vector-first dual-write ordering + partial-failure counters** for `upsert_entities_batch` and `replace_document` (#868, #884, #915).
+- **Stats counter-failure surfacing** via ADR-001 degradations (#878).
+
+### Changed
+
+- **Chronicle temporal decay is now applied AFTER cross-encoder rerank** so `chronicle_decay_weight` is actually honored (#866). Previously rerank ran last and overwrote the decay-adjusted ordering.
+- **`count_*` routing by data ownership** (#878): count calls route to the backend that owns the data rather than assuming a fixed backend.
+- **`from_yaml` now honors `KHORA_DATABASE_URL` / `KHORA_NEO4J_URL` env vars** with correct precedence (#897).
+- **Per-document batch progress callbacks** on Skeleton and Chronicle batch paths (#898).
+
+### Fixed
+
+- **`BatchHandle.wait()` no longer hangs on a pre-try fault**; worker-level fallback handles faults raised before the per-item try block (#869).
+- **Chronicle fact-reconcile no longer fails open to ADD on an LLM error** (#892); an LLM failure no longer silently appends a duplicate fact.
+- **Chronicle extraction, VectorCypher relationship fetch, and ingest relationship-drop silent failures** now surface via ADR-001 degradations (#903, #904, #907).
+- **Rust accel raises `ValueError` instead of `PanicException`** on mismatched array lengths in MMR and entity resolution (#902).
+- **Misleading Neo4j / event-store WARNINGs suppressed** when an engine has opted out of the graph / event store (#877).
+- **Empty-name entities are skipped** rather than persisted (#894).
+- **`update_document` partial update preserves unset columns** instead of NULL-overwriting them (#895).
+- **Dialect-gated dream apply on sqlite_lance** plus a warning on Postgres + Neo4j divergence (#875).
+
 ## [0.17.4] - VectorCypher entity projection on graph-less backends
 
 Patch release on top of v0.17.3. One bug fix from Damir Krstanovic.
