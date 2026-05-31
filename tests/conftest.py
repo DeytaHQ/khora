@@ -25,5 +25,4 @@ def test_config() -> KhoraConfig:
         app_name="khora-test",
         environment="test",
         debug=True,
-        auth_enabled=False,  # Disable authentication for tests
     )

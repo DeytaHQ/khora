@@ -25,7 +25,6 @@
 app_name: khora
 environment: development
 debug: false
-auth_enabled: true
 
 # =============================================================================
 # Database shortcuts — URLs propagate to storage.{postgresql_url, graph.*}

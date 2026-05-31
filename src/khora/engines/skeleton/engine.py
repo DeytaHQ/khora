@@ -825,6 +825,14 @@ class SkeletonConstructionEngine:
         temporal_store = self._get_temporal_store()
         total = len(documents)
 
+        progress_count = 0
+
+        def _report_progress(n: int = 1) -> None:
+            nonlocal progress_count
+            if on_progress:
+                progress_count += n
+                on_progress(progress_count, total)
+
         if bulk_mode:
             from khora.storage.optimize import prepare_for_bulk_load
 
@@ -853,9 +861,11 @@ class SkeletonConstructionEngine:
             for i, checksum in enumerate(doc_checksums):
                 if deduplicate and checksum in existing_docs:
                     skipped += 1
+                    _report_progress()
                     continue
                 if checksum in checksums_in_flight:
                     skipped += 1
+                    _report_progress()
                     continue
                 checksums_in_flight.add(checksum)
                 new_indices.append(i)
@@ -865,8 +875,6 @@ class SkeletonConstructionEngine:
 
             if not new_indices:
                 timings["total_ms"] = (time.perf_counter() - total_start) * 1000
-                if on_progress:
-                    on_progress(total, total)
                 return BatchResult(
                     total=total,
                     processed=0,
@@ -940,6 +948,7 @@ class SkeletonConstructionEngine:
                 except Exception as e:
                     logger.error(f"Failed to create document: {e}")
                     failed += 1
+                    _report_progress()
 
             # Chunk all documents in parallel (CPU-bound tiktoken runs in threads)
             with trace_span("khora.skeleton.batch_chunk") as span:
@@ -957,6 +966,7 @@ class SkeletonConstructionEngine:
                 if isinstance(raw_result, BaseException):
                     logger.error(f"Chunking failed for doc {created_docs[doc_idx].id}: {raw_result}")
                     failed += 1
+                    _report_progress()
                     per_doc_chunks.append([])
                 else:
                     per_doc_chunks.append(raw_result)
@@ -1044,6 +1054,7 @@ class SkeletonConstructionEngine:
                 except Exception as e:
                     logger.error(f"Failed to update document {doc.id}: {e}")
                     failed += 1
+                _report_progress()
 
             timings["status_update_ms"] = (time.perf_counter() - start) * 1000
             timings["total_ms"] = (time.perf_counter() - total_start) * 1000
@@ -1061,9 +1072,6 @@ class SkeletonConstructionEngine:
                 f"{total_chunks} chunks in {timings['total_ms']:.1f}ms "
                 f"({timings.get('docs_per_second', 0):.1f} docs/sec)"
             )
-
-            if on_progress:
-                on_progress(total, total)
 
             return BatchResult(
                 total=total,
