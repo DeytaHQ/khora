@@ -485,7 +485,7 @@ class TestCreateSessionEpisodesExtraBranches:
         doc.source_timestamp = None
         doc.created_at = None
 
-        results = [{"entity_ids": [uuid4()], "chunk_ids": [uuid4()]}]
+        results = [{"document_id": str(doc.id), "entity_ids": [uuid4()], "chunk_ids": [uuid4()]}]
         created = await _create_session_episodes(
             namespace_id=ns,
             documents=[{}],
@@ -506,7 +506,7 @@ class TestCreateSessionEpisodesExtraBranches:
         doc.metadata = {}
         doc.source_timestamp = datetime(2026, 5, 13, tzinfo=UTC)
 
-        results = [{"entity_ids": [uuid4()], "chunk_ids": [uuid4()]}]
+        results = [{"document_id": str(doc.id), "entity_ids": [uuid4()], "chunk_ids": [uuid4()]}]
         created = await _create_session_episodes(
             namespace_id=ns,
             documents=[{}],
@@ -538,8 +538,8 @@ class TestCreateSessionEpisodesExtraBranches:
         doc2.source_timestamp = datetime(2026, 5, 13, 11, tzinfo=UTC)
 
         results = [
-            {"entity_ids": [shared_eid, uuid4()], "chunk_ids": [shared_cid]},
-            {"entity_ids": [shared_eid], "chunk_ids": [shared_cid, uuid4()]},
+            {"document_id": str(doc1.id), "entity_ids": [shared_eid, uuid4()], "chunk_ids": [shared_cid]},
+            {"document_id": str(doc2.id), "entity_ids": [shared_eid], "chunk_ids": [shared_cid, uuid4()]},
         ]
         created = await _create_session_episodes(
             namespace_id=ns,

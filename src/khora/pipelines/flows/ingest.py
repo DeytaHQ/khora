@@ -1932,10 +1932,18 @@ async def _create_session_episodes(
 
     from khora.core.models import Episode
 
+    # Pair each staged doc with its OWN result by document_id, not by list
+    # position. ``successful_results`` has exceptions filtered out, so it is
+    # shorter than ``staged_docs`` whenever a document failed; zipping by
+    # position would misattribute surviving docs to a later document's result
+    # and silently drop the tail (issue #929).
+    result_by_doc_id = {r["document_id"]: r for r in successful_results}
+
     # Build thread_id → list of (doc, result) mapping
     sessions: dict[str, list[tuple[Any, dict[str, Any]]]] = defaultdict(list)
-    for doc, result in zip(staged_docs, successful_results):
-        if isinstance(result, Exception):
+    for doc in staged_docs:
+        result = result_by_doc_id.get(str(doc.id))
+        if result is None:
             continue
         # Get thread_id from original doc metadata
         meta = getattr(doc, "metadata", None) or {}
