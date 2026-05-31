@@ -880,6 +880,7 @@ async def process_document(
     chunk_strategy: str = "semantic",
     chunk_size: int = 512,
     embedding_model: str = "text-embedding-3-small",
+    embedding_dimension: int = 1536,
     extraction_model: str = "gpt-4o-mini",
     skill_name: str = "general_entities",
     expertise: ExpertiseConfig | str | None = None,
@@ -924,6 +925,7 @@ async def process_document(
         chunk_strategy: Chunking strategy
         chunk_size: Target chunk size
         embedding_model: Model for embeddings
+        embedding_dimension: Embedding vector dimension
         extraction_model: Model for extraction
         skill_name: Legacy skill name (ignored if expertise provided)
         expertise: ExpertiseConfig, expertise name, or file path
@@ -1001,7 +1003,9 @@ async def process_document(
             async with pipeline_stage(
                 "ingestion", "embedding", _run_id, namespace_id=_ns_id, extra_metadata={"chunk_count": len(chunks)}
             ):
-                return await embed_chunks(chunks, model=embedding_model, shared_embedder=shared_embedder)
+                return await embed_chunks(
+                    chunks, model=embedding_model, dimension=embedding_dimension, shared_embedder=shared_embedder
+                )
 
         async def _extract_with_telemetry():
             async with pipeline_stage(
@@ -1403,7 +1407,7 @@ async def process_document(
             ) as _ee_ctx:
                 from khora.extraction.embedders import LiteLLMEmbedder
 
-                embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model)
+                embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model, dimension=embedding_dimension)
                 entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in embeddable]
                 entity_embeddings = await embedder.embed_batch(entity_texts)
                 updates = [
@@ -1642,6 +1646,7 @@ async def ingest_documents(
     chunk_strategy: str = "semantic",
     chunk_size: int = 512,
     embedding_model: str = "text-embedding-3-small",
+    embedding_dimension: int = 1536,
     extraction_model: str = "gpt-4o-mini",
     max_concurrent_documents: int = 10,
     max_concurrent_extractions: int = 20,
@@ -1682,6 +1687,7 @@ async def ingest_documents(
         chunk_strategy: Chunking strategy
         chunk_size: Target chunk size
         embedding_model: Model for embeddings
+        embedding_dimension: Embedding vector dimension
         extraction_model: Model for extraction
         max_concurrent_documents: Maximum documents to process in parallel
         max_concurrent_extractions: Maximum concurrent LLM extractions per document
@@ -1769,7 +1775,7 @@ async def ingest_documents(
     if shared_embedder is None:
         from khora.extraction.embedders import LiteLLMEmbedder
 
-        shared_embedder = LiteLLMEmbedder(model=embedding_model)
+        shared_embedder = LiteLLMEmbedder(model=embedding_model, dimension=embedding_dimension)
 
     # Share a single extractor across all documents so the semaphore controls
     # cross-document LLM concurrency (prevents thundering herd on the API)
@@ -1803,6 +1809,7 @@ async def ingest_documents(
                 chunk_strategy=chunk_strategy,
                 chunk_size=chunk_size,
                 embedding_model=embedding_model,
+                embedding_dimension=embedding_dimension,
                 extraction_model=doc_model,
                 skill_name=doc_skill,
                 expertise=expertise,
@@ -1862,6 +1869,7 @@ async def ingest_documents(
             shared_entity_index,
             resolved_expertise,
             embedding_model=embedding_model,
+            embedding_dimension=embedding_dimension,
             shared_embedder=shared_embedder,
         )
         total_entities = smart_resolution_result.get("entities_resolved", total_entities)
@@ -2016,6 +2024,7 @@ async def run_smart_resolution(
     expertise: ExpertiseConfig,
     *,
     embedding_model: str = "text-embedding-3-small",
+    embedding_dimension: int = 1536,
     shared_embedder: Any | None = None,
 ) -> dict[str, Any]:
     """Post-ingestion cross-document entity resolution and relationship inference.
@@ -2088,7 +2097,7 @@ async def run_smart_resolution(
     if entities_needing_embeddings:
         from khora.extraction.embedders import LiteLLMEmbedder
 
-        embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model)
+        embedder = shared_embedder or LiteLLMEmbedder(model=embedding_model, dimension=embedding_dimension)
         entity_texts = [f"{e.name}: {e.description}" if e.description else e.name for e in entities_needing_embeddings]
         entity_embeddings = await embedder.embed_batch(entity_texts)
         updates = [
@@ -2272,6 +2281,7 @@ async def backfill_entity_embeddings(
     storage: StorageCoordinator,
     *,
     embedding_model: str = "text-embedding-3-small",
+    embedding_dimension: int = 1536,
     batch_size: int = 100,
     max_entities: int = 50000,
 ) -> dict[str, Any]:
@@ -2285,6 +2295,7 @@ async def backfill_entity_embeddings(
         namespace_id: Namespace to process
         storage: Storage coordinator
         embedding_model: Model to use for embeddings
+        embedding_dimension: Embedding vector dimension
         batch_size: Batch size for embedding generation
         max_entities: Maximum entities to process
 
@@ -2321,7 +2332,7 @@ async def backfill_entity_embeddings(
         return {"total_entities": len(entities), "entities_updated": 0}
 
     # Create embedder
-    embedder = LiteLLMEmbedder(model=embedding_model, batch_size=batch_size)
+    embedder = LiteLLMEmbedder(model=embedding_model, dimension=embedding_dimension, batch_size=batch_size)
 
     # Process in batches
     total_updated = 0

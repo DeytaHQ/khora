@@ -469,7 +469,7 @@ async def test_embedder_sets_rate_limit_and_connector_attrs_on_span(monkeypatch)
     fake_connector = _FakeConnector(acquired=["c1", "c2"], conns={"k": [1]}, waiters={}, limit=64)
     fake_session = _FakeSession(fake_connector)
 
-    embedder = LiteLLMEmbedder(model="test-model", batch_size=100, max_retries=1)
+    embedder = LiteLLMEmbedder(model="test-model", dimension=2, batch_size=100, max_retries=1)
 
     with (
         monkeypatch.context() as m,

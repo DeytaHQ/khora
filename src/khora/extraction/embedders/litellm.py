@@ -13,6 +13,7 @@ from loguru import logger
 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
 
 from khora.config.llm import get_shared_session
+from khora.exceptions import EmbeddingError
 from khora.telemetry import trace_span
 
 from ._request_telemetry import set_connector_attributes, set_rate_limit_attributes
@@ -140,7 +141,6 @@ class LiteLLMEmbedder(Embedder):
         self._cache_ttl_seconds: float | None = cache_ttl_hours * 3600.0 if cache_ttl_hours is not None else None
         self._cache_hits = 0
         self._cache_misses = 0
-        self._dimension_validated = False
         # Resolve per-text token limit from model name or explicit override
         if max_token_limit is not None:
             self._max_token_limit = max_token_limit
@@ -462,17 +462,21 @@ class LiteLLMEmbedder(Embedder):
 
                 result = [item["embedding"] for item in response.data]
 
-                # Validate embedding dimension on first successful call
-                if not self._dimension_validated and result:
+                # Validate the returned embedding dimension on every batch.
+                # A mismatch means the model returned a different dimension
+                # than the one configured (and requested via dimensions=).
+                # Raise rather than silently mutating self._dimension - a
+                # silent overwrite turns a config error into a downstream
+                # store-time crash (e.g. Postgres Vector(1536) columns).
+                if result:
                     actual_dim = len(result[0])
                     if actual_dim != self._dimension:
-                        logger.warning(
-                            "Embedding dimension mismatch: configured=%d, actual=%d. Using actual dimension.",
-                            self._dimension,
-                            actual_dim,
+                        raise EmbeddingError(
+                            f"Embedding dimension mismatch: configured={self._dimension}, "
+                            f"actual={actual_dim} (model {self._model!r}). The model returned a "
+                            f"different dimension than requested; set the embedder dimension to "
+                            f"match the model, or use a model that honors dimensions={self._dimension}."
                         )
-                        self._dimension = actual_dim
-                    self._dimension_validated = True
 
                 return result
 

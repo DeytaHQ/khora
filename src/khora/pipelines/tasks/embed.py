@@ -12,6 +12,7 @@ async def embed_chunks(
     chunks: list[Chunk],
     *,
     model: str = "text-embedding-3-small",
+    dimension: int = 1536,
     batch_size: int = 100,
     shared_embedder: Any | None = None,
 ) -> list[Chunk]:
@@ -20,6 +21,7 @@ async def embed_chunks(
     Args:
         chunks: Chunks to embed
         model: Embedding model to use
+        dimension: Embedding vector dimension
         batch_size: Batch size for embedding
         shared_embedder: Optional shared embedder instance (preserves LRU cache across calls)
 
@@ -32,7 +34,7 @@ async def embed_chunks(
         return []
 
     # Use shared embedder if provided, otherwise create a fresh one
-    embedder = shared_embedder or LiteLLMEmbedder(model=model, batch_size=batch_size)
+    embedder = shared_embedder or LiteLLMEmbedder(model=model, dimension=dimension, batch_size=batch_size)
 
     # Extract texts
     texts = [chunk.content for chunk in chunks]

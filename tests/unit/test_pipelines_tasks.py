@@ -262,7 +262,7 @@ class TestEmbedChunks:
             patch("khora.telemetry.get_collector") as mock_telem,
         ):
             mock_telem.return_value.record_llm_call = MagicMock()
-            embedder = LiteLLMEmbedder(model="test-model", batch_size=100)
+            embedder = LiteLLMEmbedder(model="test-model", dimension=2, batch_size=100)
             texts = [c.content for c in chunks]
             embeddings = await embedder.embed_batch(texts)
             for chunk, emb in zip(chunks, embeddings):
@@ -272,6 +272,32 @@ class TestEmbedChunks:
         assert len(chunks) == 2
         assert chunks[0].embedding == [1.0, 0.0]
         assert chunks[0].embedding_model == "test-model"
+
+    @pytest.mark.asyncio
+    async def test_embed_chunks_honors_configured_dimension(self) -> None:
+        """#926: embed_chunks builds the embedder with the configured dimension.
+
+        Without an explicit shared_embedder, the constructed embedder must
+        carry the dimension passed in (not the 1536 default).
+        """
+        from khora.pipelines.tasks.embed import embed_chunks
+
+        chunks = [_make_chunk("text1")]
+
+        mock_response = MagicMock()
+        mock_response.data = [{"embedding": [1.0, 0.0, 0.0, 0.0]}]  # dim=4
+        mock_response.usage = MagicMock(prompt_tokens=10, total_tokens=10)
+
+        with (
+            patch("litellm.aembedding", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            # dimension=4 matches the mocked response; a wrong default (1536)
+            # would now raise EmbeddingError (#931) instead of silently coping.
+            result = await embed_chunks(chunks, model="test-model", dimension=4)
+
+        assert result[0].embedding == [1.0, 0.0, 0.0, 0.0]
 
 
 # ---------------------------------------------------------------------------

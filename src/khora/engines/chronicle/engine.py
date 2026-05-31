@@ -1333,6 +1333,7 @@ class ChronicleEngine:
         kwargs: dict[str, Any] = dict(
             skill_name=skill_name,
             embedding_model=self._config.llm.embedding_model,
+            embedding_dimension=self._config.llm.embedding_dimension,
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
             entity_types=entity_types,
             relationship_types=relationship_types,
@@ -2828,7 +2829,10 @@ class ChronicleEngine:
         from khora.pipelines.flows.ingest import ingest_documents
 
         # Create shared embedder
-        shared_embedder = LiteLLMEmbedder(model=self._config.llm.embedding_model)
+        shared_embedder = LiteLLMEmbedder(
+            model=self._config.llm.embedding_model,
+            dimension=self._config.llm.embedding_dimension,
+        )
 
         # Optional cross-document entity deduplication
         shared_entity_index = None
@@ -2855,6 +2859,7 @@ class ChronicleEngine:
         ingest_kwargs: dict[str, Any] = dict(
             skill_name=skill_name,
             embedding_model=self._config.llm.embedding_model,
+            embedding_dimension=self._config.llm.embedding_dimension,
             extraction_model=self._config.llm.extraction_model or self._config.llm.model,
             extraction_timeout=self._config.llm.timeout,
             max_concurrent_documents=max_concurrent,
