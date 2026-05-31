@@ -273,7 +273,7 @@ async def test_chronicle_events_and_facts_persist_via_engine(
     captured_facts: list[MemoryFact] = []
 
     async def _stub_extract_events(
-        self: Any, text: str, *, chunk_id: Any = None, namespace_id: Any = None
+        self: Any, text: str, *, chunk_id: Any = None, namespace_id: Any = None, **_kwargs: Any
     ) -> list[ChronicleEvent]:
         ev = ChronicleEvent(
             id=uuid4(),
@@ -291,7 +291,7 @@ async def test_chronicle_events_and_facts_persist_via_engine(
         return [ev]
 
     async def _stub_extract_facts(
-        self: Any, text: str, *, chunk_id: Any = None, namespace_id: Any = None
+        self: Any, text: str, *, chunk_id: Any = None, namespace_id: Any = None, **_kwargs: Any
     ) -> list[MemoryFact]:
         fact = MemoryFact(
             id=uuid4(),
