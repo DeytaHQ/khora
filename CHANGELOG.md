@@ -4,6 +4,18 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.18.1] - silent-config and observability fixes
+
+Patch release. Fixes a batch of "accepted but silently ignored / silently dropped" config and observability gaps from Damir Krstanovic's reports. No breaking changes.
+
+### Fixed
+
+- **Chronicle surfaces dropped per-namespace event/fact overrides when `get_namespace` fails** (#893): a transient error fetching the namespace previously fell back to defaults silently (re-enabling events/facts a namespace had disabled). It now logs a WARNING and records a `Degradation` on the result.
+- **`pending_processor_max_concurrent` rejects non-positive values** (#933): `0` or a negative value previously started a processor that drained nothing; it now raises a `ValidationError` (mirrors the `ge=1` convention used by other concurrency settings).
+- **Skeleton `remember_batch(max_concurrent=...)` is honored** (#935): the kwarg was declared but ignored; Skeleton now bounds its batch fan-out with a semaphore, matching VectorCypher.
+- **`linked_entity_boost` config is applied** (#918): the knob was loaded but never read; query scoring now uses the configured value instead of a hardcoded `1.5`.
+- **Telemetry buffer flushes when `flush_threshold` is reached** (#934): the threshold was stored but never triggered a flush, so the buffer only drained on the timer; it now schedules a flush once the buffer hits the threshold.
+
 ## [0.18.0] - Chronicle reinforcement-on-recall + silent-failure observability + breaking Skeleton/config changes
 
 Minor release. Adds Chronicle reinforcement-on-recall and a project-wide failure-observability convention (ADR-001), with a large batch of silent-failure and partial-failure fixes. Contains breaking changes: Skeleton now rejects unsupported kwargs instead of silently ignoring them, and the dead `auth_enabled` config field is removed.
