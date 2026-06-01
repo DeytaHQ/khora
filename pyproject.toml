@@ -147,7 +147,8 @@ rust = [
 ]
 # SurrealDB unified backend (graph + vector + relational in one DB)
 surrealdb = ["surrealdb>=2.0.0,<3.0"]
-embedded = ["surrealdb>=2.0.0,<3.0"]
+# Zero-infrastructure embedded stack — alias for `sqlite-lance` (SQLite + LanceDB).
+embedded = ["khora[sqlite-lance]"]
 # SQLite embedded backend (zero-infrastructure relational + vector)
 sqlite = ["aiosqlite>=0.21.0"]
 # LanceDB embedded vector store (Chronicle engine, zero-infrastructure)
