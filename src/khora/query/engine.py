@@ -902,10 +902,11 @@ class HybridQueryEngine:
 
             # Boost linked entities
             if linked_entity_ids and fused_entities:
+                boost = cfg.linked_entity_boost
                 boosted_entities = []
                 for entity, score in fused_entities:
                     if entity.id in linked_entity_ids:
-                        boosted_entities.append((entity, score * 1.5))  # 50% boost
+                        boosted_entities.append((entity, score * boost))  # configurable boost (default 50%)
                     else:
                         boosted_entities.append((entity, score))
                 fused_entities = sorted(boosted_entities, key=lambda x: x[1], reverse=True)
@@ -1212,10 +1213,11 @@ class HybridQueryEngine:
 
             # Boost linked entities
             if linked_entity_ids:
+                boost = cfg.linked_entity_boost
                 boosted_entities = []
                 for entity, score in fused_entities:
                     if entity.id in linked_entity_ids:
-                        boosted_entities.append((entity, score * 1.5))  # 50% boost
+                        boosted_entities.append((entity, score * boost))  # configurable boost (default 50%)
                     else:
                         boosted_entities.append((entity, score))
                 fused_entities = sorted(boosted_entities, key=lambda x: x[1], reverse=True)

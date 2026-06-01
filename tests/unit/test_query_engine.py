@@ -60,6 +60,11 @@ class TestQueryConfig:
         assert config.enable_query_understanding is True
         assert config.enable_entity_linking is True
 
+    def test_linked_entity_boost_default_and_custom(self) -> None:
+        """linked_entity_boost defaults to 1.5 and is configurable."""
+        assert QueryConfig().linked_entity_boost == 1.5
+        assert QueryConfig(linked_entity_boost=3.0).linked_entity_boost == 3.0
+
     def test_custom_config(self) -> None:
         """Custom config values."""
         config = QueryConfig(
@@ -107,9 +112,11 @@ class TestQueryConfig:
         settings.stage4_rerank_limit = 40
         settings.enable_diversity = True
         settings.diversity_lambda = 0.7
+        settings.linked_entity_boost = 2.5
 
         config = QueryConfig.from_settings(settings)
         assert config.mode == SearchMode.ALL
+        assert config.linked_entity_boost == 2.5
         assert config.vector_weight == 0.6
         assert config.apply_recency_bias is True
         assert config.enable_query_understanding is False
