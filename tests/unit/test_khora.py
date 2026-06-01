@@ -2090,7 +2090,7 @@ class TestSubmitBatch:
 
         original_impl = kb._process_pending_item_impl
 
-        async def _slow_impl(item):
+        async def _slow_impl(item, doc):
             nonlocal in_flight, peak
             async with lock:
                 in_flight += 1
@@ -2098,7 +2098,7 @@ class TestSubmitBatch:
                     peak = in_flight
             try:
                 await asyncio.sleep(0.05)
-                await original_impl(item)
+                await original_impl(item, doc)
             finally:
                 async with lock:
                     in_flight -= 1
@@ -2133,7 +2133,7 @@ class TestSubmitBatch:
 
         original_impl = kb._process_pending_item_impl
 
-        async def _slow_impl(item):
+        async def _slow_impl(item, doc):
             key = id(item.batch_reg)
             async with lock:
                 in_flight[key] = in_flight.get(key, 0) + 1
@@ -2141,7 +2141,7 @@ class TestSubmitBatch:
                     peak[key] = in_flight[key]
             try:
                 await asyncio.sleep(0.05)
-                await original_impl(item)
+                await original_impl(item, doc)
             finally:
                 async with lock:
                     in_flight[key] -= 1
@@ -3616,7 +3616,10 @@ class TestPendingProcessor:
         # Verify doc was enqueued.
         assert kb._processor_queue.qsize() == 1
         item = kb._processor_queue.get_nowait()
-        assert item.doc is stale_doc
+        # #932: the queued item carries an identity, not the Document.
+        assert item.doc_id == stale_doc.id
+        assert item.namespace_id == stale_doc.namespace_id
+        assert not hasattr(item, "doc")
         assert item.batch_reg is None  # orphan — no batch registration
 
     @pytest.mark.asyncio
@@ -3678,7 +3681,9 @@ class TestPendingProcessor:
         process_fn = AsyncMock(return_value=(1, 0, 0))
         kb._engine.process_staged_document = process_fn
 
-        await kb._process_pending_item(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
+        await kb._process_pending_item(
+            _ProcessorItem(doc_id=doc.id, namespace_id=doc.namespace_id, batch_reg=None), doc
+        )
 
         process_fn.assert_awaited_once()
         _, call_kwargs = process_fn.call_args
@@ -3702,7 +3707,9 @@ class TestPendingProcessor:
         process_fn = AsyncMock(return_value=(1, 0, 0))
         kb._engine.process_staged_document = process_fn
 
-        await kb._process_pending_item(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
+        await kb._process_pending_item(
+            _ProcessorItem(doc_id=doc.id, namespace_id=doc.namespace_id, batch_reg=None), doc
+        )
 
         _, call_kwargs = process_fn.call_args
         assert call_kwargs["skill_name"] == "general_entities"
@@ -3721,7 +3728,9 @@ class TestPendingProcessor:
         process_fn = AsyncMock(side_effect=RuntimeError("boom"))
         kb._engine.process_staged_document = process_fn
 
-        await kb._process_pending_item(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
+        await kb._process_pending_item(
+            _ProcessorItem(doc_id=doc.id, namespace_id=doc.namespace_id, batch_reg=None), doc
+        )
 
         # Doc should be marked FAILED.
         assert doc.status == DocumentStatus.FAILED

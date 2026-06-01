@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 from loguru import logger
 
 from khora.config import KhoraConfig, load_config
+from khora.core.diagnostics import SkipReason
 from khora.core.models import Chunk, Document, Entity, MemoryNamespace
 from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
@@ -41,6 +42,16 @@ _ORPHANS_RECLAIMED_COUNTER = metric_counter(
     unit="1",
     description="Stale orphaned documents reclaimed by the pending processor's crash-recovery scan, "
     "by their prior status (pending or processing).",
+)
+
+# #932: a queued document identity could not be re-loaded at dequeue time
+# (the row was deleted / forgotten between enqueue and dequeue). No
+# namespace_id label by cardinality contract (see CLAUDE.md).
+_PROCESSOR_DOC_MISSING_COUNTER = metric_counter(
+    "khora.documents.processor.degraded_total",
+    unit="1",
+    description="Queued documents skipped by the pending processor because the row was gone at dequeue time, "
+    "by reason.",
 )
 
 
@@ -357,10 +368,19 @@ class _BatchRegistration:
 
 @dataclass(slots=True, frozen=True)
 class _ProcessorItem:
-    """Work item for the unified pending processor."""
+    """Work item for the unified pending processor.
 
-    doc: Document
-    doc_data: dict[str, Any] | None  # None for orphaned docs recovered from DB
+    Carries a document *identity* (``doc_id`` + ``namespace_id``), not the
+    full :class:`Document`. The document is already persisted as PENDING
+    before it is enqueued, so the worker re-loads it from storage at
+    dequeue time (#932). This keeps each queued item ~100 bytes regardless
+    of document size, so the unbounded queue holding a large backlog is no
+    longer a memory problem - peak content RAM is bounded by the number of
+    concurrently-draining workers, each holding one re-fetched Document.
+    """
+
+    doc_id: UUID
+    namespace_id: UUID
     batch_reg: _BatchRegistration | None  # None for orphaned docs
 
 
@@ -730,45 +750,92 @@ class Khora:
             while True:
                 item = await self._processor_queue.get()
                 try:
-                    await self._process_pending_item(item)
-                except Exception as exc:
-                    # Defense in depth for #869: ``_process_pending_item_impl``
-                    # has pre-try work (engine resolution, ``getattr`` calls,
-                    # pre-FAILED state cleanup, ``parse_dt``,
-                    # ``start_usage_collection``) that runs before its own
-                    # ``try``. If any of that raises, the inner block never
-                    # fires ``batch_reg.fire_result`` and ``BatchHandle.wait``
-                    # blocks forever - ``_remaining`` is only decremented by
-                    # ``fire_result``. Fall back here: deliver a failure
-                    # result so the batch's ``_done_event`` can fire, and
-                    # flip the doc to FAILED so it doesn't linger in
-                    # PROCESSING. Both side effects are best-effort and
-                    # guarded - we must never re-raise into the worker loop.
-                    safe_err = _safe_exc_summary(exc)
-                    logger.error(f"pending_processor: unhandled error processing doc {item.doc.id}: {safe_err}")
-                    batch_reg = item.batch_reg
-                    if batch_reg is not None:
-                        try:
-                            item.doc.mark_failed(str(exc))
-                            await self.storage.update_document(item.doc)
-                        except Exception as upd_exc:
-                            logger.warning(
-                                f"pending_processor: could not update document status after pre-try fault: {_safe_exc_summary(upd_exc)}"
-                            )
-                        try:
-                            batch_reg.fire_result(
-                                DocumentResult(
-                                    document_id=item.doc.id,
-                                    namespace_id=batch_reg.namespace_id,
-                                    success=False,
-                                    error=safe_err,
-                                    external_id=item.doc.external_id,
+                    # #932: items carry only a document identity; re-load the
+                    # full Document (with content) from storage here so the
+                    # queue never holds content for the whole backlog. Peak
+                    # content RAM is bounded by the number of workers, each
+                    # holding one re-fetched Document. The load is its own try
+                    # so a load failure path can never reach the processing
+                    # error handler below - that would double-fire fire_result.
+                    try:
+                        doc = await self._load_pending_document(item)
+                    except Exception as load_exc:
+                        # Case 1: the load itself raised (transient DB error,
+                        # e.g. connection exhaustion). The row stays PROCESSING
+                        # for orphan recovery to retry. Fire exactly one
+                        # failure result for batch items so BatchHandle.wait()
+                        # can't hang, then move on - never re-raise into the
+                        # worker loop.
+                        safe_err = _safe_exc_summary(load_exc)
+                        logger.error(f"pending_processor: failed to load doc {item.doc_id} at dequeue: {safe_err}")
+                        batch_reg = item.batch_reg
+                        if batch_reg is not None:
+                            try:
+                                batch_reg.fire_result(
+                                    DocumentResult(
+                                        document_id=item.doc_id,
+                                        namespace_id=batch_reg.namespace_id,
+                                        success=False,
+                                        error=safe_err,
+                                    )
                                 )
-                            )
-                        except Exception as fire_exc:
-                            logger.error(
-                                f"pending_processor: fire_result failed in fallback for doc {item.doc.id}: {_safe_exc_summary(fire_exc)}"
-                            )
+                            except Exception as fire_exc:
+                                logger.error(
+                                    f"pending_processor: fire_result failed after load fault for doc "
+                                    f"{item.doc_id}: {_safe_exc_summary(fire_exc)}"
+                                )
+                        continue
+                    if doc is None:
+                        # Case 2: the row was deleted/forgotten between enqueue
+                        # and dequeue (ADR-001 skip). _load_pending_document
+                        # already logged it and fired the skip result for batch
+                        # items; nothing left to process.
+                        continue
+
+                    # Case 3: we have the document. Process it in its own try.
+                    try:
+                        await self._process_pending_item(item, doc)
+                    except Exception as exc:
+                        # Defense in depth for #869: ``_process_pending_item_impl``
+                        # has pre-try work (engine resolution, ``getattr`` calls,
+                        # pre-FAILED state cleanup, ``parse_dt``,
+                        # ``start_usage_collection``) that runs before its own
+                        # ``try``. If any of that raises, the inner block never
+                        # fires ``batch_reg.fire_result`` and ``BatchHandle.wait``
+                        # blocks forever - ``_remaining`` is only decremented by
+                        # ``fire_result``. Fall back here: deliver one failure
+                        # result so the batch's ``_done_event`` can fire, and
+                        # flip the doc to FAILED so it doesn't linger in
+                        # PROCESSING. ``doc`` is guaranteed non-None here (we
+                        # only reach this try after a successful load), so we
+                        # never re-load - that was the #932 double-fire source.
+                        # Both side effects are best-effort and guarded - we
+                        # must never re-raise into the worker loop.
+                        safe_err = _safe_exc_summary(exc)
+                        logger.error(f"pending_processor: unhandled error processing doc {item.doc_id}: {safe_err}")
+                        batch_reg = item.batch_reg
+                        if batch_reg is not None:
+                            try:
+                                doc.mark_failed(str(exc))
+                                await self.storage.update_document(doc)
+                            except Exception as upd_exc:
+                                logger.warning(
+                                    f"pending_processor: could not update document status after pre-try fault: {_safe_exc_summary(upd_exc)}"
+                                )
+                            try:
+                                batch_reg.fire_result(
+                                    DocumentResult(
+                                        document_id=item.doc_id,
+                                        namespace_id=batch_reg.namespace_id,
+                                        success=False,
+                                        error=safe_err,
+                                        external_id=doc.external_id,
+                                    )
+                                )
+                            except Exception as fire_exc:
+                                logger.error(
+                                    f"pending_processor: fire_result failed in fallback for doc {item.doc_id}: {_safe_exc_summary(fire_exc)}"
+                                )
                 finally:
                     self._processor_queue.task_done()
 
@@ -833,7 +900,9 @@ class Khora:
                     for doc in docs:
                         prior_status = doc.orphan_prior_status or "pending"
                         _ORPHANS_RECLAIMED_COUNTER.add(1, attributes={"prior_status": prior_status})
-                        self._processor_queue.put_nowait(_ProcessorItem(doc=doc, doc_data=None, batch_reg=None))
+                        self._processor_queue.put_nowait(
+                            _ProcessorItem(doc_id=doc.id, namespace_id=doc.namespace_id, batch_reg=None)
+                        )
                         total_enqueued += 1
 
                     if len(docs) < 100:
@@ -854,7 +923,50 @@ class Khora:
                 f"(pending_grace={grace_minutes}m, processing_stale={processing_stale_seconds}s)"
             )
 
-    async def _process_pending_item(self, item: _ProcessorItem) -> None:
+    async def _load_pending_document(self, item: _ProcessorItem) -> Document | None:
+        """Re-load the full Document for a queued item (#932).
+
+        The queue carries only a document identity, so the worker re-loads
+        the persisted PENDING/PROCESSING row (with content) here. Scoped to
+        ``item.namespace_id`` so the load can't reach across tenants.
+
+        Returns ``None`` when the row is gone (deleted / forgotten between
+        enqueue and dequeue). Per ADR-001 this is a deliberate skip, not a
+        crash: it is logged at INFO, counted, and - for batch items - the
+        batch registration is decremented (via a skipped failure result) so
+        a waiting ``BatchHandle.wait()`` can't hang on the missing doc.
+        """
+        doc = await self.storage.get_document(item.doc_id, namespace_id=item.namespace_id)
+        if doc is not None:
+            return doc
+
+        # SkipReason (docs/architecture/failure-observability-contract.md).
+        skip: SkipReason = {
+            "op_kind": "pending_processor.load_document",
+            "reason": "document_missing_at_dequeue",
+            "detail": f"doc_id={item.doc_id}",
+        }
+        _PROCESSOR_DOC_MISSING_COUNTER.add(1, attributes={"reason": skip["reason"]})
+        logger.info(
+            "pending_processor: skipping queued doc {} - row gone at dequeue (deleted/forgotten); {}",
+            item.doc_id,
+            skip,
+        )
+        batch_reg = item.batch_reg
+        if batch_reg is not None:
+            # Decrement the batch so BatchHandle.wait() can't hang. Reported
+            # as a skipped (non-error) result - the doc no longer exists.
+            batch_reg.fire_result(
+                DocumentResult(
+                    document_id=item.doc_id,
+                    namespace_id=batch_reg.namespace_id,
+                    success=True,
+                    skipped=True,
+                )
+            )
+        return None
+
+    async def _process_pending_item(self, item: _ProcessorItem, doc: Document) -> None:
         """Process a single PENDING document, gated by the per-batch semaphore.
 
         Acquires the batch's `concurrency_sem` (if set) around
@@ -868,19 +980,19 @@ class Khora:
         sem = item.batch_reg.concurrency_sem if item.batch_reg is not None else None
         if sem is not None:
             async with sem:
-                await self._process_pending_item_impl(item)
+                await self._process_pending_item_impl(item, doc)
         else:
-            await self._process_pending_item_impl(item)
+            await self._process_pending_item_impl(item, doc)
 
-    async def _process_pending_item_impl(self, item: _ProcessorItem) -> None:
+    async def _process_pending_item_impl(self, item: _ProcessorItem, doc: Document) -> None:
         """Process a single PENDING document through the engine pipeline.
 
         Handles both enqueued items (from submit_batch with batch_reg) and
-        orphaned items (from crash recovery with batch_reg=None).
+        orphaned items (from crash recovery with batch_reg=None). ``doc`` is
+        the full Document re-loaded by the worker (#932).
         """
         from khora.telemetry.context import collect_usage, start_usage_collection
 
-        doc = item.doc
         batch_reg = item.batch_reg
         namespace_id = batch_reg.namespace_id if batch_reg else doc.namespace_id
 
@@ -926,8 +1038,9 @@ class Khora:
                     logger.warning(f"pending_processor: could not clear extraction state for {doc.id}: {exc}")
 
         # Resolve extraction parameters.
-        # For enqueued items: use doc_data metadata for occurred_at, extraction_params from document.
-        # For orphaned items: use extraction_params stored on the document.
+        # extraction_params (and metadata, used below for occurred_at) come
+        # from the re-loaded document row for both enqueued and orphaned items
+        # (#932) - the item itself no longer carries a doc_data payload.
         params = doc.extraction_params or {}
         skill_name = params.get("skill_name", "general_entities")
         entity_types = params.get("entity_types", list(self._config.pipelines.entity_types))
@@ -948,8 +1061,10 @@ class Khora:
                 logger.warning(f"pending_processor: could not reconstruct ExpertiseConfig for doc {doc.id}")
 
         # Resolve occurred_at.
-        if item.doc_data is not None:
-            doc_metadata = item.doc_data.get("metadata") or {}
+        # #932: metadata is read off the re-loaded document row (it is
+        # persisted at submit time), not from a queued doc_data dict.
+        if batch_reg is not None:
+            doc_metadata = doc.metadata or {}
             occurred_at_raw = doc_metadata.get("occurred_at")
             parse_dt = getattr(engine, "_parse_datetime", None)
             if occurred_at_raw and parse_dt is not None:
@@ -1518,8 +1633,12 @@ class Khora:
             expertise: Optional domain-specific extraction config.
             extraction_config_hash: Optional hash for extraction config change detection.
             chunk_strategy: Override chunking strategy for this batch.
-            max_chunks_in_flight: Maximum chunks processed per window. Controls
-                memory usage during background processing. None = unbounded.
+            max_chunks_in_flight: Maximum chunks processed per window. Bounds
+                in-flight chunk processing *after* a document is dequeued; it
+                does NOT bound the staging-queue depth. Staging memory is
+                bounded separately by re-loading document content at dequeue
+                time (#932), so the queue itself holds only lightweight
+                identities. None = unbounded chunk window.
             max_concurrent: Maximum number of documents from THIS batch being
                 processed concurrently (default: 20). Bounded above by the
                 global processor pool size, which is set via
@@ -1583,7 +1702,6 @@ class Khora:
         #                reprocess_archived=True to re-activate explicitly
         #   PROCESSING → skip to avoid race with active worker (M1)
         pending_docs: list[Document] = []
-        pending_doc_data: list[dict[str, Any]] = []
         pre_failed_docs: list[tuple[Document, str]] = []
         pre_completed_docs: list[Document] = []
 
@@ -1704,7 +1822,6 @@ class Khora:
                 try:
                     await storage.update_document(existing)
                     pending_docs.append(existing)
-                    pending_doc_data.append(doc_data)
                 except Exception as exc:
                     # Never interpolate the raw exc repr — a SQLAlchemy DBAPIError
                     # embeds the failed statement + its bind-param tuple (= the
@@ -1738,7 +1855,6 @@ class Khora:
             try:
                 doc = await storage.create_document(doc)
                 pending_docs.append(doc)
-                pending_doc_data.append(doc_data)
             except Exception as exc:
                 # Never interpolate the raw exc repr — a SQLAlchemy DBAPIError
                 # embeds the failed INSERT + its bind-param tuple (= the full
@@ -1822,8 +1938,10 @@ class Khora:
                     "doc(s). Call start_pending_processor() before submitting documents that require "
                     "processing."
                 )
-            for doc, doc_data in zip(pending_docs, pending_doc_data):
-                self._processor_queue.put_nowait(_ProcessorItem(doc=doc, doc_data=doc_data, batch_reg=batch_reg))
+            for doc in pending_docs:
+                self._processor_queue.put_nowait(
+                    _ProcessorItem(doc_id=doc.id, namespace_id=doc.namespace_id, batch_reg=batch_reg)
+                )
 
         return handle
 
