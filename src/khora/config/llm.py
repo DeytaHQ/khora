@@ -376,6 +376,40 @@ def create_litellm_router(config: LiteLLMConfig) -> Any:
     return router
 
 
+# Cache of LiteLLM routers keyed by the model_list/router_settings configuration.
+# A router is built once per distinct (model_list, router_settings) pair and
+# reused across calls so we don't pay router construction on every completion.
+_router_cache: dict[str, Any] = {}
+
+
+def _router_cache_key(config: LiteLLMConfig) -> str:
+    """Stable key for caching a router built from this config's routing fields."""
+    import json
+
+    return json.dumps(
+        {"model_list": config.model_list, "router_settings": config.router_settings},
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _get_router(config: LiteLLMConfig) -> Any:
+    """Return a cached router for ``config`` when ``model_list`` is configured.
+
+    Returns ``None`` when no ``model_list`` is set (callers then use the direct
+    ``litellm.acompletion`` path, preserving default single-model behavior).
+    """
+    if not config.model_list:
+        return None
+    key = _router_cache_key(config)
+    router = _router_cache.get(key)
+    if router is None:
+        router = create_litellm_router(config)
+        if router is not None:
+            _router_cache[key] = router
+    return router
+
+
 async def acompletion(
     prompt: str,
     config: LiteLLMConfig | None = None,
@@ -412,16 +446,29 @@ async def acompletion(
     # Pop telemetry-only kwargs before forwarding to litellm so it never sees them.
     _operation = kwargs.pop("_telemetry_op", "completion")
 
-    _t0 = _time.perf_counter()
-    response = await litellm.acompletion(
-        model=config.model,
-        messages=messages,
-        temperature=kwargs.pop("temperature", config.temperature),
-        max_tokens=kwargs.pop("max_tokens", config.max_tokens),
-        timeout=kwargs.pop("timeout", config.timeout),
-        num_retries=kwargs.pop("num_retries", config.max_retries),
+    call_kwargs = {
+        "model": config.model,
+        "messages": messages,
+        "temperature": kwargs.pop("temperature", config.temperature),
+        "max_tokens": kwargs.pop("max_tokens", config.max_tokens),
+        "timeout": kwargs.pop("timeout", config.timeout),
+        "num_retries": kwargs.pop("num_retries", config.max_retries),
         **kwargs,
-    )
+    }
+
+    # When model_list/router_settings are configured, route through a LiteLLM
+    # Router so calls fail over across the listed deployments. Otherwise call
+    # litellm.acompletion directly (unchanged single-model behavior).
+    router = _get_router(config)
+
+    _t0 = _time.perf_counter()
+    if router is not None:
+        # The Router manages its own retries via router_settings; don't double
+        # up litellm's per-call num_retries on top of the router's.
+        call_kwargs.pop("num_retries", None)
+        response = await router.acompletion(**call_kwargs)
+    else:
+        response = await litellm.acompletion(**call_kwargs)
     _latency = (_time.perf_counter() - _t0) * 1000
 
     # Record telemetry
