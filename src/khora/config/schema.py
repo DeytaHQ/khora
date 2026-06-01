@@ -1231,6 +1231,7 @@ class PipelineSettings(BaseSettings):
     )
     pending_processor_max_concurrent: int = Field(
         default=20,
+        ge=1,
         description="Maximum documents to process concurrently in the unified pending processor.",
     )
     pending_processor_grace_period_minutes: int = Field(
