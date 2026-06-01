@@ -413,6 +413,53 @@ class TestEmbeddingFilter:
         passes, score = cache.passes_embedding_gate([-1.0, 0.0], f)
         assert passes is True  # gate disabled
 
+    def test_mixed_dim_filters_do_not_clobber_each_other(self) -> None:
+        # Regression for #927: registering a second filter at a different
+        # embedding dimension must not corrupt the first filter's pre-screen.
+        from khora.hooks.embedding_filter import EmbeddingFilterCache
+
+        cache = EmbeddingFilterCache(hamming_threshold=0.3)
+
+        big = SemanticFilter(
+            name="big",
+            embedding=[1.0, 0.5, -0.3, 0.8, -0.1, 0.9, -0.5, 0.2],
+            similarity_threshold=0.5,
+        )
+        small = SemanticFilter(
+            name="small",
+            embedding=[1.0, -1.0, 1.0, -1.0],
+            similarity_threshold=0.5,
+        )
+
+        cache.register_filter(big)
+        cache.register_filter(small)  # would clobber a shared bit count
+
+        # A clearly-similar 8-dim entity must still pass against the 8-dim
+        # filter, scored against the 8-dim filter's own bit count.
+        similar = [0.9, 0.4, -0.2, 0.7, -0.05, 0.85, -0.4, 0.15]
+        passes, score = cache.passes_embedding_gate(similar, big)
+        assert passes is True
+        assert score is not None
+        assert score > 0.5
+
+    def test_gate_rejects_dimension_mismatch(self) -> None:
+        # An entity embedded at a different dimension than the filter cannot
+        # be meaningfully compared; reject rather than produce a bogus score.
+        from khora.hooks.embedding_filter import EmbeddingFilterCache
+
+        cache = EmbeddingFilterCache(hamming_threshold=0.3)
+        f = SemanticFilter(
+            name="test",
+            embedding=[1.0, 0.5, -0.3, 0.8, -0.1, 0.9, -0.5, 0.2],
+            similarity_threshold=0.5,
+        )
+        cache.register_filter(f)
+
+        entity_wrong_dim = [1.0, 0.5, -0.3, 0.8]  # 4 dims vs filter's 8
+        passes, score = cache.passes_embedding_gate(entity_wrong_dim, f)
+        assert passes is False
+        assert score is None
+
 
 @pytest.mark.unit
 class TestDispatcherEmbeddingIntegration:
