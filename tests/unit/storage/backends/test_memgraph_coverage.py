@@ -504,10 +504,23 @@ async def test_count_entities_returns_zero_when_no_record() -> None:
 
 
 @pytest.mark.unit
-async def test_count_relationships_raises_not_implemented() -> None:
-    b = _connected_backend(_make_session_with_records())
-    with pytest.raises(NotImplementedError):
-        await b.count_relationships(uuid4())
+async def test_count_relationships_returns_value() -> None:
+    """#920: count_relationships counts edges instead of raising."""
+    session = _make_session_with_records(single={"cnt": 7})
+    b = _connected_backend(session)
+    ns = uuid4()
+    assert await b.count_relationships(ns) == 7
+    cypher = session.run.await_args.args[0]
+    assert "count(r)" in cypher
+    assert "r.namespace_id = $ns" in cypher
+    assert session.run.await_args.kwargs["ns"] == str(ns)
+
+
+@pytest.mark.unit
+async def test_count_relationships_returns_zero_when_no_record() -> None:
+    session = _make_session_with_records(single=None)
+    b = _connected_backend(session)
+    assert await b.count_relationships(uuid4()) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +538,21 @@ async def test_create_relationship_sanitizes_label() -> None:
     cypher = session.run.await_args.args[0]
     # ``sanitize_cypher_label`` UPPER_SNAKE_CASEs the label.
     assert "WORKS_AT_" in cypher
+
+
+@pytest.mark.unit
+async def test_create_relationship_uses_merge_not_create() -> None:
+    """#921: re-asserting an edge must be idempotent -> MERGE, not CREATE."""
+    session = _make_session_with_records()
+    b = _connected_backend(session)
+    rel = Relationship(relationship_type="WORKS_AT")
+    await b.create_relationship(rel)
+    cypher = session.run.await_args.args[0]
+    assert "MERGE (source)-[r:WORKS_AT {namespace_id: $namespace_id}]->(target)" in cypher
+    assert "ON CREATE SET" in cypher
+    assert "ON MATCH SET" in cypher
+    # The non-idempotent CREATE form must be gone.
+    assert "CREATE (source)-[r:" not in cypher
 
 
 @pytest.mark.unit
@@ -767,6 +795,126 @@ async def test_get_neighborhood_with_rel_types() -> None:
     await b.get_neighborhood(uuid4(), namespace_id=_NS, relationship_types=["likes"])
     cypher = session.run.await_args.args[0]
     assert ":LIKES" in cypher
+
+
+@pytest.mark.unit
+async def test_get_neighborhood_projects_relationship_type() -> None:
+    """#922: neighborhood query must ask for type(rel) so the dict carries it."""
+    session = _make_session_with_records(single={"nodes": [], "relationships": []})
+    b = _connected_backend(session)
+    await b.get_neighborhood(uuid4(), namespace_id=_NS)
+    cypher = session.run.await_args.args[0]
+    assert "type(rel)" in cypher
+    assert "properties(rel)" in cypher
+
+
+@pytest.mark.unit
+async def test_get_neighborhood_maps_relationship_type_onto_dict() -> None:
+    """#922: each returned relationship dict carries relationship_type."""
+    rel_props = {"id": str(uuid4()), "namespace_id": str(_NS), "weight": 1.0}
+    record = {
+        "nodes": [],
+        "relationships": [[{"props": rel_props, "type": "WORKS_AT"}]],
+    }
+    session = _make_session_with_records(single=record)
+    b = _connected_backend(session)
+    out = await b.get_neighborhood(uuid4(), namespace_id=_NS)
+    assert len(out["relationships"]) == 1
+    rel = out["relationships"][0]
+    assert rel["relationship_type"] == "WORKS_AT"
+    assert rel["weight"] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Batch writers (issue #919) — upsert_entities_batch / create_relationships_batch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_upsert_entities_batch_is_present() -> None:
+    """#919: the coordinator gates the graph write on this attribute existing."""
+    b = MemgraphBackend("bolt://h:7687")
+    assert hasattr(b, "upsert_entities_batch")
+    assert hasattr(b, "create_relationships_batch")
+
+
+@pytest.mark.unit
+async def test_upsert_entities_batch_empty_short_circuits() -> None:
+    session = _make_session_with_records()
+    b = _connected_backend(session)
+    assert await b.upsert_entities_batch(_NS, []) == []
+    session.run.assert_not_called()
+
+
+@pytest.mark.unit
+async def test_upsert_entities_batch_uses_unwind_merge() -> None:
+    e = Entity(namespace_id=_NS, name="Alice", entity_type="PERSON")
+    # stored_id == input_id -> is_new True
+    session = _make_session_with_records(records=[{"input_id": str(e.id), "stored_id": str(e.id)}])
+    b = _connected_backend(session)
+    out = await b.upsert_entities_batch(_NS, [e])
+    assert out == [(e, True)]
+    cypher = session.run.await_args.args[0]
+    assert "UNWIND $rows AS row" in cypher
+    assert "MERGE (e:Entity {namespace_id: row.namespace_id, name: row.name, entity_type: row.entity_type})" in cypher
+    rows = session.run.await_args.kwargs["rows"]
+    assert rows[0]["name"] == "Alice"
+    assert rows[0]["id"] == str(e.id)
+
+
+@pytest.mark.unit
+async def test_upsert_entities_batch_detects_existing_as_not_new() -> None:
+    e = Entity(namespace_id=_NS, name="Alice", entity_type="PERSON")
+    # stored_id differs -> entity already existed, is_new False
+    session = _make_session_with_records(records=[{"input_id": str(e.id), "stored_id": str(uuid4())}])
+    b = _connected_backend(session)
+    out = await b.upsert_entities_batch(_NS, [e])
+    assert out == [(e, False)]
+
+
+@pytest.mark.unit
+async def test_create_relationships_batch_empty_short_circuits() -> None:
+    session = _make_session_with_records()
+    b = _connected_backend(session)
+    assert await b.create_relationships_batch([]) == 0
+    session.run.assert_not_called()
+
+
+@pytest.mark.unit
+async def test_create_relationships_batch_uses_merge_and_returns_count() -> None:
+    r = Relationship(
+        namespace_id=_NS,
+        source_entity_id=uuid4(),
+        target_entity_id=uuid4(),
+        relationship_type="works at",
+    )
+    session = _make_session_with_records(single={"written": 1})
+    b = _connected_backend(session)
+    count = await b.create_relationships_batch([r])
+    assert count == 1
+    cypher = session.run.await_args.args[0]
+    assert "UNWIND $rows AS row" in cypher
+    assert "MERGE (source)-[r:WORKS_AT {namespace_id: row.namespace_id}]->(target)" in cypher
+    # Type normalised in place on the caller's object (#749).
+    assert r.relationship_type == "WORKS_AT"
+
+
+@pytest.mark.unit
+async def test_create_relationships_batch_groups_by_type() -> None:
+    rels = [
+        Relationship(namespace_id=_NS, source_entity_id=uuid4(), target_entity_id=uuid4(), relationship_type="KNOWS"),
+        Relationship(
+            namespace_id=_NS, source_entity_id=uuid4(), target_entity_id=uuid4(), relationship_type="WORKS_AT"
+        ),
+    ]
+    session = _make_session_with_records(single={"written": 1})
+    b = _connected_backend(session)
+    total = await b.create_relationships_batch(rels)
+    # Two distinct types -> two MERGE statements -> written counted per group.
+    assert total == 2
+    assert session.run.await_count == 2
+    labels = {c.args[0].split("MERGE (source)-[r:")[1].split(" ")[0] for c in session.run.await_args_list}
+    assert labels == {"KNOWS", "WORKS_AT"}
 
 
 # ---------------------------------------------------------------------------
