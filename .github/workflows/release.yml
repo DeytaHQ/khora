@@ -320,11 +320,12 @@ jobs:
 
                   async with Khora(cfg, engine="skeleton", run_migrations=True) as kb:
                       ns = await kb.create_namespace()
+                      # Skeleton does not extract typed entities/relationships and
+                      # rejects entity_types/relationship_types since 0.18.0 (#890).
+                      # The smoke only needs a remember + recall round-trip.
                       result = await kb.remember(
                           "Smoke-install end-to-end test from release.yml.",
                           namespace=ns.namespace_id,
-                          entity_types=["CONCEPT"],
-                          relationship_types=["RELATES_TO"],
                       )
                       assert result.chunks_created >= 1, "no chunks created"
                       recall = await kb.recall("smoke-install", namespace=ns.namespace_id, limit=3)
