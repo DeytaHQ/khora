@@ -1438,6 +1438,23 @@
       ],
       "description": "Issues #885, #886. Stale orphaned documents reclaimed by the pending processor's crash-recovery scan (Khora._enqueue_orphaned_pending_docs). A 'pending' prior status is a doc that was never picked up; 'processing' is a doc left behind by a crashed worker. Claims are atomic via StorageCoordinator.claim_orphaned_documents (FOR UPDATE SKIP LOCKED on PostgreSQL). NO namespace_id label - cardinality rule.",
       "_comment": "Issues #885, #886. NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.documents.processor.degraded_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "labels": [
+        {
+          "name": "reason",
+          "values": [
+            "document_missing_at_dequeue"
+          ],
+          "_comment": "Why the queued document could not be processed. Low-cardinality enum."
+        }
+      ],
+      "description": "Issue #932. A queued document identity could not be re-loaded at dequeue time because the row was deleted/forgotten between enqueue and dequeue. The pending processor carries lean items (doc_id + namespace_id) and re-loads the full Document in the worker; when the loader returns None the item is skipped per ADR-001 (logged INFO, batch registration decremented so BatchHandle.wait can't hang). NO namespace_id label - cardinality rule.",
+      "_comment": "Issue #932. NO namespace_id label - cardinality rule."
     }
   ]
 }

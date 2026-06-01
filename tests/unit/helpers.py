@@ -54,6 +54,36 @@ def mock_engine() -> MagicMock:
     # upgrade pass can override these per-test.
     mock_eng._storage.get_document_sources_batch = AsyncMock(return_value={})
     mock_eng._storage.get_document_projections_batch = AsyncMock(return_value={})
+
+    # #932: the pending processor re-loads the full Document by id at dequeue
+    # time. Default create_document/update_document to a tiny in-memory store
+    # keyed by doc id, and default get_document to answer from it - falling
+    # back to the recorded create_document/update_document call args so the
+    # worker's re-load still finds the row even when a test overrides
+    # create_document/update_document with its own AsyncMock. Tests can still
+    # override get_document explicitly.
+    _doc_store: dict = {}
+
+    async def _store_doc(doc):
+        _doc_store[doc.id] = doc
+        return doc
+
+    async def _load_doc(doc_id, *, namespace_id):
+        if doc_id in _doc_store:
+            return _doc_store[doc_id]
+        # Fall back to whatever was last passed to create/update_document,
+        # even if a test reassigned those mocks (call_args_list is read live).
+        for mock in (mock_eng._storage.create_document, mock_eng._storage.update_document):
+            call_args_list = getattr(mock, "call_args_list", [])
+            for call in reversed(call_args_list):
+                passed = call.args[0] if call.args else None
+                if passed is not None and getattr(passed, "id", None) == doc_id:
+                    return passed
+        return None
+
+    mock_eng._storage.create_document = AsyncMock(side_effect=_store_doc)
+    mock_eng._storage.update_document = AsyncMock(side_effect=_store_doc)
+    mock_eng._storage.get_document = AsyncMock(side_effect=_load_doc)
     mock_eng._embedder = MagicMock()
 
     # Lifecycle
