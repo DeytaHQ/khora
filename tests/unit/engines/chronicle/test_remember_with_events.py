@@ -499,8 +499,92 @@ class TestRememberBatchWithEvents:
 
 
 # ---------------------------------------------------------------------------
-# #898: remember_batch fires on_progress per-document, not once at (total, total)
+# #893: a failing get_namespace must not SILENTLY drop per-namespace overrides
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestGetNamespaceFailureIsObservable:
+    @pytest.mark.asyncio
+    async def test_remember_surfaces_degradation_when_get_namespace_raises(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """get_namespace raising must WARN + surface a degradation, not silently
+        revert a disabled namespace to default-on (#893)."""
+        from loguru import logger as loguru_logger
+
+        ns_id = uuid4()
+        # Namespace disables events + facts, but get_namespace will RAISE so the
+        # engine never sees this override.
+        namespace = MemoryNamespace(
+            namespace_id=ns_id,
+            config_overrides={"events": {"enabled": False}, "facts": {"enabled": False}},
+        )
+        chunk = _make_chunk("alice met bob", ns_id)
+        coord = _RecordingCoordinator(namespace, [chunk])
+
+        async def failing_get_namespace(_namespace_id: UUID) -> MemoryNamespace | None:
+            raise RuntimeError("INJECTED: get_namespace transient failure")
+
+        coord.get_namespace = failing_get_namespace  # type: ignore[assignment]
+
+        extractor = AsyncMock()
+        extractor.extract_events.side_effect = lambda text, **_kw: [_make_event(text)]
+
+        engine = _bare_engine()
+        _wire_engine(engine, coord, extractor)
+
+        async def fake_get_doc_by_checksum(*_a: Any, **_kw: Any) -> None:
+            return None
+
+        async def fake_create_document(doc: Any) -> Any:
+            return doc
+
+        coord.get_document_by_checksum = fake_get_doc_by_checksum  # type: ignore[attr-defined]
+        coord.create_document = fake_create_document  # type: ignore[attr-defined]
+
+        async def fake_process_document(*_a: Any, **_kw: Any) -> dict[str, Any]:
+            return {
+                "document_id": str(uuid4()),
+                "chunks": 1,
+                "entities": 0,
+                "relationships": 0,
+                "extracted_relationships": 0,
+                "inferred_relationships": 0,
+                "entity_ids": [],
+                "chunk_ids": [chunk.id],
+                "phase_times": {},
+            }
+
+        monkeypatch.setattr(
+            "khora.pipelines.flows.ingest.process_document",
+            fake_process_document,
+        )
+
+        # Bridge loguru -> caplog so we can assert on the WARNING.
+        handler_id = loguru_logger.add(caplog.handler, level="WARNING", format="{message}")
+        try:
+            with caplog.at_level("WARNING"):
+                result = await engine.remember(
+                    "alice met bob",
+                    ns_id,
+                    entity_types=[],
+                    relationship_types=[],
+                )
+        finally:
+            loguru_logger.remove(handler_id)
+
+        # 1. A WARNING about the failed namespace fetch was logged.
+        warned = [r for r in caplog.records if "get_namespace failed" in r.getMessage()]
+        assert warned, "expected a WARNING when get_namespace raises"
+        assert str(ns_id) in warned[0].getMessage()
+
+        # 2. The dropped override is surfaced on the result (not silently swallowed).
+        degradations = result.metadata.get("degradations", [])
+        assert any(
+            d["component"] == "chronicle.namespace_overrides" and d["reason"] == "get_namespace_failed"
+            for d in degradations
+        ), f"expected a namespace-override degradation, got {degradations!r}"
 
 
 @pytest.mark.unit
