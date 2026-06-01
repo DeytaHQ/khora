@@ -408,7 +408,105 @@ class MemgraphBackend(GraphBackendBase):
             return record["cnt"] if record else 0
 
     async def count_relationships(self, namespace_id: UUID) -> int:
-        raise NotImplementedError
+        driver = self._get_driver()
+
+        async with driver.session() as session:
+            result = await session.run(
+                "MATCH ()-[r]->() WHERE r.namespace_id = $ns RETURN count(r) AS cnt",
+                ns=str(namespace_id),
+            )
+            record = await result.single()
+            return record["cnt"] if record else 0
+
+    async def upsert_entities_batch(
+        self,
+        namespace_id: UUID,
+        entities: list[Entity],
+        *,
+        batch_size: int = 100,
+        bulk_mode: bool = False,
+    ) -> list[tuple[Entity, bool]]:
+        """Batch upsert entities using UNWIND + MERGE (issue #919).
+
+        Matches on ``(namespace_id, name, entity_type)``: creates the node if
+        new, updates it in place if it exists. Returns ``(entity, is_new)``
+        tuples. Pure Cypher (no APOC); unlike the Neo4j backend this path does
+        not write bi-temporal version snapshots, matching this backend's
+        singular ``create_entity``.
+
+        ``bulk_mode`` is accepted for signature parity with the coordinator /
+        Neo4j backend; this backend's MERGE is already safe for new namespaces
+        so the flag is a no-op.
+        """
+        if not entities:
+            return []
+
+        driver = self._get_driver()
+
+        # MERGE keeps the upsert idempotent on (namespace_id, name,
+        # entity_type). On create the supplied id is stored; on match the
+        # existing id is kept, so ``e.id = row.id`` distinguishes new rows.
+        query = """
+        UNWIND $rows AS row
+        MERGE (e:Entity {namespace_id: row.namespace_id, name: row.name, entity_type: row.entity_type})
+        ON CREATE SET
+            e.id = row.id,
+            e.description = row.description,
+            e.attributes = row.attributes,
+            e.source_document_ids = row.source_document_ids,
+            e.source_chunk_ids = row.source_chunk_ids,
+            e.mention_count = row.mention_count,
+            e.valid_from = row.valid_from,
+            e.valid_until = row.valid_until,
+            e.confidence = row.confidence,
+            e.metadata = row.metadata,
+            e.created_at = row.created_at,
+            e.updated_at = row.updated_at
+        ON MATCH SET
+            e.description = CASE WHEN size(row.description) > size(coalesce(e.description, ''))
+                THEN row.description ELSE e.description END,
+            e.source_document_ids = e.source_document_ids +
+                [x IN row.source_document_ids WHERE NOT x IN e.source_document_ids],
+            e.source_chunk_ids = e.source_chunk_ids +
+                [x IN row.source_chunk_ids WHERE NOT x IN e.source_chunk_ids],
+            e.mention_count = e.mention_count + row.mention_count,
+            e.confidence = CASE WHEN row.confidence > e.confidence THEN row.confidence ELSE e.confidence END,
+            e.attributes = row.attributes,
+            e.updated_at = row.updated_at
+        RETURN row.id AS input_id, e.id AS stored_id
+        """
+
+        results: list[tuple[Entity, bool]] = []
+        async with driver.session() as session:
+            for start in range(0, len(entities), batch_size):
+                batch = entities[start : start + batch_size]
+                rows = [
+                    {
+                        "id": str(e.id),
+                        "namespace_id": str(e.namespace_id),
+                        "name": e.name,
+                        "entity_type": e.entity_type,
+                        "description": e.description,
+                        "attributes": serialize_dict(e.attributes),
+                        "source_document_ids": [str(d) for d in e.source_document_ids],
+                        "source_chunk_ids": [str(c) for c in e.source_chunk_ids],
+                        "mention_count": e.mention_count,
+                        "valid_from": e.valid_from.isoformat() if e.valid_from else None,
+                        "valid_until": e.valid_until.isoformat() if e.valid_until else None,
+                        "confidence": e.confidence,
+                        "metadata": serialize_dict(e.metadata),
+                        "created_at": e.created_at.isoformat(),
+                        "updated_at": e.updated_at.isoformat(),
+                    }
+                    for e in batch
+                ]
+                result = await session.run(query, rows=rows)
+                records = await result.data()
+                # is_new when the stored id equals the id we tried to insert.
+                new_ids = {r["input_id"] for r in records if r["stored_id"] == r["input_id"]}
+                results.extend((e, str(e.id) in new_ids) for e in batch)
+
+        return results
 
     # ------------------------------------------------------------------
     # Relationship operations
@@ -423,25 +521,38 @@ class MemgraphBackend(GraphBackendBase):
         # do (issue #749).
         relationship.relationship_type = rel_type
 
-        # Dynamic relationship type via f-string (parameterized labels not supported in Cypher)
+        # Dynamic relationship type via f-string (parameterized labels not
+        # supported in Cypher). MERGE on (source, target, type, namespace_id)
+        # keeps the edge idempotent so re-asserting the same relationship
+        # updates the single existing edge in place rather than appending a
+        # duplicate, mirroring the Neo4j backend (issue #921).
         query = f"""
         MATCH (source:Entity {{id: $source_id}})
         MATCH (target:Entity {{id: $target_id}})
-        CREATE (source)-[r:{rel_type} {{
-            id: $id,
-            namespace_id: $namespace_id,
-            description: $description,
-            properties: $properties,
-            source_document_ids: $source_document_ids,
-            source_chunk_ids: $source_chunk_ids,
-            valid_from: $valid_from,
-            valid_until: $valid_until,
-            confidence: $confidence,
-            weight: $weight,
-            metadata: $metadata,
-            created_at: $created_at,
-            updated_at: $updated_at
-        }}]->(target)
+        MERGE (source)-[r:{rel_type} {{namespace_id: $namespace_id}}]->(target)
+        ON CREATE SET
+            r.id = $id,
+            r.description = $description,
+            r.properties = $properties,
+            r.source_document_ids = $source_document_ids,
+            r.source_chunk_ids = $source_chunk_ids,
+            r.valid_from = $valid_from,
+            r.valid_until = $valid_until,
+            r.confidence = $confidence,
+            r.weight = $weight,
+            r.metadata = $metadata,
+            r.created_at = $created_at,
+            r.updated_at = $updated_at
+        ON MATCH SET
+            r.description = CASE WHEN size($description) > size(coalesce(r.description, ''))
+                THEN $description ELSE r.description END,
+            r.source_document_ids = r.source_document_ids +
+                [x IN $source_document_ids WHERE NOT x IN r.source_document_ids],
+            r.source_chunk_ids = r.source_chunk_ids +
+                [x IN $source_chunk_ids WHERE NOT x IN r.source_chunk_ids],
+            r.confidence = CASE WHEN $confidence > r.confidence THEN $confidence ELSE r.confidence END,
+            r.weight = CASE WHEN $weight > r.weight THEN $weight ELSE r.weight END,
+            r.updated_at = $updated_at
         """
 
         async with driver.session() as session:
@@ -465,6 +576,93 @@ class MemgraphBackend(GraphBackendBase):
             )
 
         return relationship
+
+    async def create_relationships_batch(
+        self,
+        relationships: list[Relationship],
+        *,
+        batch_size: int = 100,
+    ) -> int:
+        """Batch create relationships using UNWIND + MERGE (issue #919).
+
+        Relationships are grouped by (sanitised) type because the edge label
+        cannot be parameterised in Cypher. Each group is MERGEd on
+        ``(source, target, type, namespace_id)`` so re-asserting an edge stays
+        idempotent (issue #921). Returns the number of input relationships
+        written. Pure Cypher (no APOC).
+        """
+        if not relationships:
+            return 0
+
+        driver = self._get_driver()
+
+        # Normalise types in place so the caller's objects match what is
+        # persisted (issue #749), then group by label for the dynamic MERGE.
+        type_groups: dict[str, list[Relationship]] = {}
+        for rel in relationships:
+            rel.relationship_type = sanitize_cypher_label(rel.relationship_type)
+            type_groups.setdefault(rel.relationship_type, []).append(rel)
+
+        total = 0
+        async with driver.session() as session:
+            for rel_type, rels in type_groups.items():
+                query = f"""
+                UNWIND $rows AS row
+                MATCH (source:Entity {{id: row.source_id}})
+                MATCH (target:Entity {{id: row.target_id}})
+                MERGE (source)-[r:{rel_type} {{namespace_id: row.namespace_id}}]->(target)
+                ON CREATE SET
+                    r.id = row.id,
+                    r.description = row.description,
+                    r.properties = row.properties,
+                    r.source_document_ids = row.source_document_ids,
+                    r.source_chunk_ids = row.source_chunk_ids,
+                    r.valid_from = row.valid_from,
+                    r.valid_until = row.valid_until,
+                    r.confidence = row.confidence,
+                    r.weight = row.weight,
+                    r.metadata = row.metadata,
+                    r.created_at = row.created_at,
+                    r.updated_at = row.updated_at
+                ON MATCH SET
+                    r.description = CASE WHEN size(row.description) > size(coalesce(r.description, ''))
+                        THEN row.description ELSE r.description END,
+                    r.source_document_ids = r.source_document_ids +
+                        [x IN row.source_document_ids WHERE NOT x IN r.source_document_ids],
+                    r.source_chunk_ids = r.source_chunk_ids +
+                        [x IN row.source_chunk_ids WHERE NOT x IN r.source_chunk_ids],
+                    r.confidence = CASE WHEN row.confidence > r.confidence THEN row.confidence ELSE r.confidence END,
+                    r.weight = CASE WHEN row.weight > r.weight THEN row.weight ELSE r.weight END,
+                    r.updated_at = row.updated_at
+                RETURN count(r) AS written
+                """
+                for start in range(0, len(rels), batch_size):
+                    batch = rels[start : start + batch_size]
+                    rows = [
+                        {
+                            "source_id": str(r.source_entity_id),
+                            "target_id": str(r.target_entity_id),
+                            "id": str(r.id),
+                            "namespace_id": str(r.namespace_id),
+                            "description": r.description,
+                            "properties": serialize_dict(r.properties),
+                            "source_document_ids": [str(d) for d in r.source_document_ids],
+                            "source_chunk_ids": [str(c) for c in r.source_chunk_ids],
+                            "valid_from": r.valid_from.isoformat() if r.valid_from else None,
+                            "valid_until": r.valid_until.isoformat() if r.valid_until else None,
+                            "confidence": r.confidence,
+                            "weight": r.weight,
+                            "metadata": serialize_dict(r.metadata),
+                            "created_at": r.created_at.isoformat(),
+                            "updated_at": r.updated_at.isoformat(),
+                        }
+                        for r in batch
+                    ]
+                    result = await session.run(query, rows=rows)
+                    record = await result.single()
+                    total += (record["written"] if record else 0) or 0
+
+        return total
 
     async def get_relationship(self, relationship_id: UUID, *, namespace_id: UUID) -> Relationship | None:
         """Get a relationship by ID, scoped to ``namespace_id`` (IDOR family)."""
@@ -762,10 +960,14 @@ class MemgraphBackend(GraphBackendBase):
             rel_filter = ":" + "|".join(sanitized)
 
         # Pure Cypher — no APOC needed. Center and every expanded node must
-        # share ``namespace_id``.
+        # share ``namespace_id``. Each edge is collected as
+        # ``{props, type}`` so the relationship type (stored only as the edge
+        # label, never as a property) survives onto the returned dict as
+        # ``relationship_type``, mirroring Neo4j (issue #922).
         query = f"""
         MATCH (center:Entity {{id: $entity_id, namespace_id: $namespace_id}})-[r{rel_filter}*1..{depth}]-(other:Entity {{namespace_id: $namespace_id}})
-        RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
+        RETURN collect(DISTINCT other) as nodes,
+               collect(DISTINCT [rel IN r | {{props: properties(rel), type: type(rel)}}]) as relationships
         LIMIT $limit
         """
 
@@ -782,12 +984,11 @@ class MemgraphBackend(GraphBackendBase):
                 nodes = [element_to_dict(n) for n in record.get("nodes", [])]
                 relationships = []
                 for rel_list in record.get("relationships", []):
-                    if isinstance(rel_list, list):
-                        for r in rel_list:
-                            if r:
-                                relationships.append(element_to_dict(r))
-                    elif rel_list:
-                        relationships.append(element_to_dict(rel_list))
+                    if not rel_list:
+                        continue
+                    for r in rel_list if isinstance(rel_list, list) else [rel_list]:
+                        if r:
+                            relationships.append({**r.get("props", {}), "relationship_type": r.get("type")})
                 return {"entities": nodes, "relationships": relationships}
 
             return {"entities": [], "relationships": []}
