@@ -1355,10 +1355,33 @@ class ChronicleEngine:
         # Issue #903 (ADR-001): transient extractor failures are appended here
         # and surfaced on the response under ``metadata["errors"]``.
         extraction_errors: list[ErrorRecord] = []
+        # Issue #907 / #893 (ADR-001): partial-failure degradations surfaced on
+        # ``metadata["degradations"]``. Initialized before the namespace fetch
+        # so a failed ``get_namespace`` can record a non-silent degradation.
+        ingest_degradations: list[Degradation] = []
+        # Issue #893: a transient ``get_namespace`` failure must NOT silently
+        # revert a namespace that set ``config_overrides["events"|"facts"]
+        # ["enabled"] = False`` back to default-on. We still soft-fall to the
+        # expertise/default path (default-on), but the dropped override is now
+        # observable: WARNING + a Degradation on the result.
         try:
             namespace = await storage.get_namespace(namespace_id)
-        except Exception:
+        except Exception as exc:
             namespace = None
+            logger.warning(
+                "get_namespace failed for namespace_id={}: {} - per-namespace "
+                "event/fact overrides may be dropped, falling back to default-on",
+                namespace_id,
+                exc,
+                exc_info=True,
+            )
+            _record_channel_degradation(
+                ingest_degradations,
+                component="chronicle.namespace_overrides",
+                reason="get_namespace_failed",
+                detail="per-namespace event/fact overrides could not be resolved; fell back to expertise/default (default-on)",
+                exc=exc,
+            )
 
         run_events = self._events_enabled(namespace, expertise)
         run_facts = self._facts_enabled(namespace, expertise)
@@ -1395,7 +1418,6 @@ class ChronicleEngine:
         # RememberResult and append a Degradation entry under ADR-001 so
         # callers can detect partial success without changing the signature.
         rels_skipped = int(result.get("relationships_skipped", 0) or 0)
-        ingest_degradations: list[Degradation] = []
         if rels_skipped > 0:
             ingest_degradations.append(
                 Degradation(
@@ -2861,10 +2883,28 @@ class ChronicleEngine:
         events_extracted = 0
         facts_extracted = 0
         reconcile_errors = 0
+        # Issue #893 (ADR-001): a transient ``get_namespace`` failure must not
+        # silently revert a namespace that disabled events/facts back to
+        # default-on. Surface the dropped override on the result.
+        batch_degradations: list[Degradation] = []
         try:
             namespace = await self._get_storage().get_namespace(namespace_id)
-        except Exception:
+        except Exception as exc:
             namespace = None
+            logger.warning(
+                "get_namespace failed for namespace_id={}: {} - per-namespace "
+                "event/fact overrides may be dropped, falling back to default-on",
+                namespace_id,
+                exc,
+                exc_info=True,
+            )
+            _record_channel_degradation(
+                batch_degradations,
+                component="chronicle.namespace_overrides",
+                reason="get_namespace_failed",
+                detail="per-namespace event/fact overrides could not be resolved; fell back to expertise/default (default-on)",
+                exc=exc,
+            )
 
         run_events = self._events_enabled(namespace, expertise)
         run_facts = self._facts_enabled(namespace, expertise)
@@ -2935,6 +2975,7 @@ class ChronicleEngine:
                 # contradiction-check LLM call failed transiently. 0 on
                 # the happy path.
                 "reconcile_errors": reconcile_errors,
+                **({"degradations": batch_degradations} if batch_degradations else {}),
             },
         )
 
