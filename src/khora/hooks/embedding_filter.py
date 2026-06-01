@@ -87,7 +87,7 @@ class EmbeddingFilterCache:
         """
         self._filter_embeddings: dict[str, list[float]] = {}  # filter_id → embedding
         self._filter_binary: dict[str, bytes] = {}  # filter_id → binary code
-        self._n_bits: int = 0
+        self._filter_n_bits: dict[str, int] = {}  # filter_id → embedding dimension
         self._hamming_threshold = hamming_threshold
 
     def register_filter(self, filter: SemanticFilter) -> None:
@@ -99,16 +99,18 @@ class EmbeddingFilterCache:
             return
 
         fid = str(filter.id)
+        n_bits = len(filter.embedding)
         self._filter_embeddings[fid] = filter.embedding
         self._filter_binary[fid] = _to_binary(filter.embedding)
-        self._n_bits = len(filter.embedding)
+        self._filter_n_bits[fid] = n_bits
 
-        logger.debug("Registered embedding filter: {} ({} dims)", filter.name, self._n_bits)
+        logger.debug("Registered embedding filter: {} ({} dims)", filter.name, n_bits)
 
     def unregister_filter(self, filter_id: str) -> None:
         """Remove a filter from the cache."""
         self._filter_embeddings.pop(filter_id, None)
         self._filter_binary.pop(filter_id, None)
+        self._filter_n_bits.pop(filter_id, None)
 
     def passes_embedding_gate(
         self,
@@ -138,12 +140,27 @@ class EmbeddingFilterCache:
         if threshold <= 0.0:
             return True, None  # Gate disabled
 
+        # Dimension mismatch between the entity and this filter is not a
+        # meaningful comparison (different embedding models / re-embed). Reject
+        # rather than score over a misaligned prefix or wrong bit count.
+        entity_n_bits = len(entity_embedding)
+        filter_n_bits = self._filter_n_bits.get(fid, len(filter.embedding))
+        if entity_n_bits != filter_n_bits:
+            logger.warning(
+                "Embedding dimension mismatch for filter {} "
+                "(entity {} dims vs filter {} dims); rejecting at pre-screen",
+                filter.name,
+                entity_n_bits,
+                filter_n_bits,
+            )
+            return False, None
+
         # Stage 1: Binary Hamming gate
         entity_binary = _to_binary(entity_embedding)
         filter_binary = self._filter_binary.get(fid)
 
-        if filter_binary is not None and self._n_bits > 0:
-            ham_sim = _hamming_similarity(entity_binary, filter_binary, self._n_bits)
+        if filter_binary is not None and filter_n_bits > 0:
+            ham_sim = _hamming_similarity(entity_binary, filter_binary, filter_n_bits)
             if ham_sim < self._hamming_threshold:
                 return False, None  # Fast reject
 
