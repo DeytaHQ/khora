@@ -951,9 +951,16 @@ class SkeletonConstructionEngine:
                     failed += 1
                     _report_progress()
 
-            # Chunk all documents in parallel (CPU-bound tiktoken runs in threads)
+            # Chunk all documents in parallel (CPU-bound tiktoken runs in threads),
+            # bounded by max_concurrent so the documented throttle is honored (#935).
+            chunk_sem = asyncio.Semaphore(max_concurrent)
+
+            async def _chunk_bounded(content: str) -> Any:
+                async with chunk_sem:
+                    return await asyncio.to_thread(chunker.chunk, content)
+
             with trace_span("khora.skeleton.batch_chunk") as span:
-                chunk_tasks = [asyncio.to_thread(chunker.chunk, doc.content) for doc in created_docs]
+                chunk_tasks = [_chunk_bounded(doc.content) for doc in created_docs]
                 all_raw_chunks = await asyncio.gather(*chunk_tasks, return_exceptions=True)
                 span.set_attribute("doc_count", len(created_docs))
 
