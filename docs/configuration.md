@@ -44,7 +44,7 @@ Programmatic values take priority over environment variables.
 |---|---|---|
 | *(default)* | Core: PostgreSQL + pgvector + Neo4j driver + litellm | - |
 | `surrealdb` | **[experimental]** Unified SurrealDB backend (embedded or remote). KNN unreliable in embedded mode | `surrealdb>=2.0.0,<3.0` |
-| `embedded` | Alias for `surrealdb` (zero-infrastructure path) - **experimental** | `surrealdb>=2.0.0,<3.0` |
+| `embedded` | Alias for `sqlite-lance` - the zero-infrastructure embedded stack. **[experimental]** | `lancedb>=0.30.0`, `aiosqlite>=0.21.0`, `pyarrow>=24.0.0` |
 | `memgraph` | Memgraph via Bolt | `neo4j>=6.2.0` |
 | `neptune` | AWS Neptune via Bolt | `neo4j>=6.2.0` |
 | `neptune-iam` | Neptune with IAM SigV4 | `neo4j>=6.2.0`, `boto3>=1.35.0` |
