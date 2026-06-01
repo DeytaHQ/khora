@@ -11,6 +11,7 @@ from .connector_metadata import (
     CANONICAL_TIMESTAMP_FIELDS,
     ConnectorMetadata,
     SourceSystem,
+    extract_source_timestamp,
     validate_connector_metadata,
 )
 from .manager import PipelineManager
@@ -22,6 +23,7 @@ __all__ = [
     "PipelineManager",
     "PipelineRegistry",
     "SourceSystem",
+    "extract_source_timestamp",
     "pipeline",
     "validate_connector_metadata",
 ]

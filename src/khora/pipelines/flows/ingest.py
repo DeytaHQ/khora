@@ -20,7 +20,13 @@ from khora._accel import normalize_entity_names_batch
 from khora.core.models.event import EventType, MemoryEvent
 from khora.telemetry.metrics import metric_counter
 
+from ..connector_metadata import coerce_source_timestamp, extract_source_timestamp
 from ..registry import pipeline
+
+# Back-compat alias: existing tests and ``khora.py`` import these names from
+# ``khora.pipelines.flows.ingest``. The implementations now live in
+# ``khora.pipelines.connector_metadata`` (one-way ingest -> connector_metadata).
+_extract_source_timestamp = extract_source_timestamp
 
 # ADR-001 (issue #907): the ingest pipeline drops relationships when their
 # source / target entity cannot be remapped to a canonical id. Previously
@@ -532,84 +538,6 @@ async def stream_extract_and_embed_entities(
 def compute_checksum(content: str) -> str:
     """Compute SHA-256 checksum of content."""
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def coerce_source_timestamp(value: datetime | str | None) -> datetime | None:
-    """Coerce a source-timestamp value to a ``datetime``.
-
-    Returns an existing ``datetime`` unchanged, parses ISO-8601 strings
-    (trailing ``Z``, explicit offset, or date-only ``YYYY-MM-DD``), and
-    returns ``None`` for ``None`` / empty / unparseable input *without*
-    raising. The public ``source_timestamp`` kwarg is typed ``datetime``,
-    but upstream connectors and adapters routinely hand us ISO strings;
-    coercing here keeps a stray string from crashing ingestion.
-
-    Accepted string forms (for adapter authors):
-
-    - ``"2026-01-15T10:30:00Z"``      — UTC, trailing ``Z``
-    - ``"2026-01-15T10:30:00+00:00"`` — explicit offset
-    - ``"2026-01-15"``                — date-only (parsed at midnight UTC)
-    """
-    from datetime import datetime
-
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    if not value:
-        return None
-    try:
-        if "T" in value:
-            # ISO format with or without timezone.
-            if value.endswith("Z"):
-                return datetime.fromisoformat(value.replace("Z", "+00:00"))
-            return datetime.fromisoformat(value)
-        # Date-only format.
-        return datetime.fromisoformat(value + "T00:00:00+00:00")
-    except (ValueError, TypeError):
-        return None
-
-
-def _extract_source_timestamp(metadata: dict[str, Any]) -> datetime | None:
-    """Extract the original timestamp from source metadata.
-
-    Looks for common timestamp fields and parses them. The priority list
-    is implementation-detail; the public contract is
-    ``khora.pipelines.ConnectorMetadata``.
-
-    For event-shaped sources (calendar/meeting/event) ``occurred_at`` is
-    preferred over ``sent_at`` since the event time, not the dispatch
-    time, is the meaningful temporal anchor.
-    """
-    source_type = metadata.get("source_type")
-    if source_type in {"calendar", "meeting", "event"}:
-        timestamp_fields = [
-            "occurred_at",
-            "started_at",
-            "sent_at",
-            "created_at",
-            "timestamp",
-            "date",
-        ]
-    else:
-        timestamp_fields = [
-            "sent_at",
-            "created_at",
-            "timestamp",
-            "date",
-            "occurred_at",
-            "started_at",
-        ]
-
-    for field in timestamp_fields:
-        if field in metadata and metadata[field]:
-            parsed = coerce_source_timestamp(metadata[field])
-            if parsed is not None:
-                return parsed
-    return None
 
 
 def _coerce_session_id(value: Any) -> UUID | None:

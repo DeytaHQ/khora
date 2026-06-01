@@ -4,6 +4,18 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.18.2] - tolerant source-timestamp key matching
+
+Patch release. Fixes silent source-timestamp loss when connectors emit timestamp keys in non-snake_case styles, and adds a public extractor helper. No breaking changes.
+
+### Fixed
+
+- **Silent `source_timestamp` loss for non-snake_case connector keys**: the ingestion extractor only matched exact snake_case keys (`occurred_at`, `sent_at`, …), so connectors emitting camelCase / kebab-case / SCREAMING_CASE / TitleCase variants (`occurredAt`, `occurred-at`, `OCCURRED_AT`, `OccurredAt`) silently fell back to ingest time, breaking recency scoring. Key matching is now case/separator-insensitive; an exact key still wins over a normalized variant when both are present. `updated_at` is now honored by the extractor (appended last in priority for both event and non-event sources).
+
+### Added
+
+- **Public `khora.pipelines.extract_source_timestamp(metadata)` helper**: the timestamp-extraction logic shared by the ingestion pipeline is now an importable public function (`khora.pipelines.extract_source_timestamp`).
+
 ## [0.18.1] - silent-config and observability fixes
 
 Patch release. Fixes a batch of "accepted but silently ignored / silently dropped" config and observability gaps from Damir Krstanovic's reports. No breaking changes.

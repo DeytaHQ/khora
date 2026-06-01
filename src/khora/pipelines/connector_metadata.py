@@ -14,6 +14,7 @@ mistakes before chunks reach khora.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Literal, NotRequired, TypedDict, get_args
@@ -22,6 +23,8 @@ __all__ = [
     "CANONICAL_TIMESTAMP_FIELDS",
     "ConnectorMetadata",
     "SourceSystem",
+    "coerce_source_timestamp",
+    "extract_source_timestamp",
     "validate_connector_metadata",
 ]
 
@@ -38,8 +41,11 @@ SourceSystem = Literal[
 ]
 
 # Timestamp field names recognized by the ingestion extractor, in priority
-# order. Kept in sync with ``_extract_source_timestamp`` in
-# ``khora.pipelines.flows.ingest``. Public so connector CIs can iterate.
+# order. ``extract_source_timestamp`` matches these against metadata keys
+# case/separator-insensitively, so connectors emitting ``occurredAt`` /
+# ``occurred-at`` / ``OCCURRED_AT`` / ``OccurredAt`` resolve to the same
+# canonical field; ``CANONICAL_TIMESTAMP_FIELDS`` remains the documented
+# canonical set. Public so connector CIs can iterate.
 CANONICAL_TIMESTAMP_FIELDS: tuple[str, ...] = (
     "sent_at",
     "occurred_at",
@@ -87,20 +93,110 @@ class ConnectorMetadata(TypedDict, total=False):
     tags: list[str]
 
 
-def _parse_iso_or_none(value: str) -> datetime | None:
-    """Return parsed datetime if value is ISO-8601, else None.
+def coerce_source_timestamp(value: datetime | str | None) -> datetime | None:
+    """Coerce a source-timestamp value to a ``datetime``.
 
-    Mirrors the parsing logic used by ``_extract_source_timestamp`` so the
-    validator catches exactly what the pipeline will reject.
+    Returns an existing ``datetime`` unchanged, parses ISO-8601 strings
+    (trailing ``Z``, explicit offset, or date-only ``YYYY-MM-DD``), and
+    returns ``None`` for ``None`` / empty / unparseable input *without*
+    raising. The public ``source_timestamp`` kwarg is typed ``datetime``,
+    but upstream connectors and adapters routinely hand us ISO strings;
+    coercing here keeps a stray string from crashing ingestion.
+
+    Accepted string forms (for adapter authors):
+
+    - ``"2026-01-15T10:30:00Z"``      — UTC, trailing ``Z``
+    - ``"2026-01-15T10:30:00+00:00"`` — explicit offset
+    - ``"2026-01-15"``                — date-only (parsed at midnight UTC)
     """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not value:
+        return None
     try:
         if "T" in value:
+            # ISO format with or without timezone.
             if value.endswith("Z"):
                 return datetime.fromisoformat(value.replace("Z", "+00:00"))
             return datetime.fromisoformat(value)
+        # Date-only format.
         return datetime.fromisoformat(value + "T00:00:00+00:00")
     except (ValueError, TypeError):
         return None
+
+
+def _normalize_ts_key(key: str) -> str:
+    return re.sub(r"[\s_\-]+", "", key.lower())
+
+
+def extract_source_timestamp(metadata: Mapping[str, Any]) -> datetime | None:
+    """Extract the original timestamp from source metadata.
+
+    Looks for common timestamp fields and parses them. The priority list
+    is implementation-detail; the public contract is
+    ``khora.pipelines.ConnectorMetadata``.
+
+    For event-shaped sources (calendar/meeting/event) ``occurred_at`` is
+    preferred over ``sent_at`` since the event time, not the dispatch
+    time, is the meaningful temporal anchor.
+
+    Key matching is case/separator-insensitive: a connector emitting
+    ``occurredAt`` / ``occurred-at`` / ``OCCURRED_AT`` resolves to the
+    canonical ``occurred_at`` field. An exact key match always wins over a
+    normalized variant when both are present.
+    """
+    source_type = metadata.get("source_type")
+    if source_type in {"calendar", "meeting", "event"}:
+        timestamp_fields = [
+            "occurred_at",
+            "started_at",
+            "sent_at",
+            "created_at",
+            "timestamp",
+            "date",
+            "updated_at",
+        ]
+    else:
+        timestamp_fields = [
+            "sent_at",
+            "created_at",
+            "timestamp",
+            "date",
+            "occurred_at",
+            "started_at",
+            "updated_at",
+        ]
+
+    # Normalized view of metadata, first occurrence wins on collision.
+    normalized_map: dict[str, Any] = {}
+    for key, value in metadata.items():
+        norm = _normalize_ts_key(key)
+        if norm not in normalized_map:
+            normalized_map[norm] = value
+
+    for field in timestamp_fields:
+        # Exact key match wins over a normalized variant.
+        if field in metadata and metadata[field]:
+            value = metadata[field]
+        else:
+            value = normalized_map.get(_normalize_ts_key(field))
+            if not value:
+                continue
+        parsed = coerce_source_timestamp(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+# Timestamp fields the extractor probes, in canonical-set order plus the two
+# extra implementation-detail keys (``timestamp`` / ``date``) the extractor
+# recognizes. Used by the validator to mirror extractor presence detection.
+_EXTRACTOR_TIMESTAMP_FIELDS: tuple[str, ...] = CANONICAL_TIMESTAMP_FIELDS + ("timestamp", "date")
 
 
 def validate_connector_metadata(
@@ -135,12 +231,31 @@ def validate_connector_metadata(
     """
     warnings: list[str] = []
 
-    # Track which timestamp fields are present with a non-empty string value.
+    # Honor ConnectorMetadata.source_type when not passed explicitly, so
+    # connector CI can hand the whole metadata dict in. Explicit param wins.
+    if source_type is None:
+        raw_source_type = metadata.get("source_type")
+        source_type = raw_source_type if isinstance(raw_source_type, str) else None
+
+    # Normalized view of metadata keys so case/separator-insensitive variants
+    # (camelCase/kebab/SCREAMING/TitleCase) count as present, mirroring the
+    # extractor. First occurrence wins on collision.
+    normalized_map: dict[str, Any] = {}
+    for key, value in metadata.items():
+        norm = _normalize_ts_key(key)
+        if norm not in normalized_map:
+            normalized_map[norm] = value
+
+    # Track which timestamp fields resolve to a non-empty, parseable value.
     present_timestamps: list[str] = []
-    for field_name in CANONICAL_TIMESTAMP_FIELDS:
-        if field_name not in metadata:
+    for field_name in _EXTRACTOR_TIMESTAMP_FIELDS:
+        # Exact key match wins over a normalized variant.
+        if field_name in metadata:
+            value = metadata[field_name]
+        elif _normalize_ts_key(field_name) in normalized_map:
+            value = normalized_map[_normalize_ts_key(field_name)]
+        else:
             continue
-        value = metadata[field_name]
         if isinstance(value, str) and value == "":
             warnings.append(
                 f"metadata field {field_name!r} is an empty string; "
@@ -148,7 +263,7 @@ def validate_connector_metadata(
             )
             continue
         if isinstance(value, str):
-            if _parse_iso_or_none(value) is None:
+            if coerce_source_timestamp(value) is None:
                 warnings.append(
                     f"metadata field {field_name!r} value {value!r} does not parse as "
                     "ISO-8601 — chunk will fall back to ingest time"
