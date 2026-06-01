@@ -35,6 +35,7 @@ class TelemetryCollector:
         self._flush_threshold = flush_threshold
         self._buffer: deque[tuple[str, dict[str, Any]]] = deque()
         self._flush_task: asyncio.Task[None] | None = None
+        self._threshold_flush_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -99,6 +100,15 @@ class TelemetryCollector:
             except asyncio.CancelledError:
                 pass
 
+        # Let any in-flight threshold flush finish before the final drain.
+        # _flush swallows its own errors, so the only thing to absorb here is
+        # cancellation.
+        if self._threshold_flush_task is not None and not self._threshold_flush_task.done():
+            try:
+                await self._threshold_flush_task
+            except asyncio.CancelledError:
+                pass
+
         # Final drain
         await self._flush()
 
@@ -119,6 +129,24 @@ class TelemetryCollector:
             kwargs["parent_event_id"] = get_parent_event_id()
         return kwargs
 
+    def _maybe_schedule_flush(self) -> None:
+        """Schedule an immediate flush when the buffer hits the threshold.
+
+        ``record_*`` methods are synchronous, so we never block here: a flush is
+        scheduled as a background task (the same primitive as the timer loop).
+        No-op when no event loop is running (the next timer tick flushes
+        instead) or when a threshold flush is already in flight.
+        """
+        if len(self._buffer) < self._flush_threshold:
+            return
+        if self._threshold_flush_task is not None and not self._threshold_flush_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._threshold_flush_task = loop.create_task(self._flush(), name="telemetry-threshold-flush")
+
     def record_llm_call(self, **kwargs: Any) -> None:
         # Capture cost_usd before LLMEvent strips unknown kwargs.
         cost_usd = kwargs.pop("cost_usd", None)
@@ -137,16 +165,19 @@ class TelemetryCollector:
             completion_tokens=event.completion_tokens,
             cost_usd=cost_usd,
         )
+        self._maybe_schedule_flush()
 
     def record_storage_op(self, **kwargs: Any) -> None:
         kwargs = self._inject_trace_context(kwargs)
         event = StorageEvent(service_name=self._service_name, **kwargs)
         self._buffer.append(("storage", event.model_dump()))
+        self._maybe_schedule_flush()
 
     def record_pipeline_stage(self, **kwargs: Any) -> None:
         kwargs = self._inject_trace_context(kwargs)
         event = PipelineEvent(service_name=self._service_name, **kwargs)
         self._buffer.append(("pipeline", event.model_dump()))
+        self._maybe_schedule_flush()
 
     # ------------------------------------------------------------------
     # Internal flush machinery
