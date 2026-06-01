@@ -2390,7 +2390,11 @@ dev = [
     { name = "ty" },
 ]
 embedded = [
-    { name = "surrealdb" },
+    { name = "aiosqlite", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
+    { name = "aiosqlite", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk' or extra != 'extra-5-khora-crewai'" },
+    { name = "lancedb", version = "0.30.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
+    { name = "lancedb", version = "0.30.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk' or extra != 'extra-5-khora-crewai'" },
+    { name = "pyarrow" },
 ]
 google-adk = [
     { name = "google-adk" },
@@ -2505,6 +2509,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", marker = "extra == 'all-backends'", specifier = ">=0.21.0" },
+    { name = "aiosqlite", marker = "extra == 'embedded'", specifier = ">=0.21.0" },
     { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.21.0" },
     { name = "aiosqlite", marker = "extra == 'sqlite-lance'", specifier = ">=0.21.0" },
     { name = "alembic", specifier = ">=1.18.4" },
@@ -2522,6 +2527,7 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "khora-accel", marker = "extra == 'rust'", editable = "rust/khora-accel" },
     { name = "lancedb", marker = "extra == 'all-backends'", specifier = ">=0.30.0" },
+    { name = "lancedb", marker = "extra == 'embedded'", specifier = ">=0.30.0" },
     { name = "lancedb", marker = "extra == 'lancedb'", specifier = ">=0.30.0" },
     { name = "lancedb", marker = "extra == 'sqlite-lance'", specifier = ">=0.30.0" },
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=1.0,<2.0" },
@@ -2549,6 +2555,7 @@ requires-dist = [
     { name = "pgvector", marker = "extra == 'postgres'", specifier = ">=0.4.2" },
     { name = "prek", marker = "extra == 'dev'", specifier = ">=0.3.13" },
     { name = "pyarrow", marker = "extra == 'all-backends'", specifier = ">=24.0.0" },
+    { name = "pyarrow", marker = "extra == 'embedded'", specifier = ">=24.0.0" },
     { name = "pyarrow", marker = "extra == 'lancedb'", specifier = ">=24.0.0" },
     { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=24.0.0" },
     { name = "pyarrow", marker = "extra == 'sqlite-lance'", specifier = ">=24.0.0" },
@@ -2568,7 +2575,6 @@ requires-dist = [
     { name = "spacy", marker = "extra == 'nlp'", specifier = ">=3.8.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.49" },
     { name = "surrealdb", marker = "extra == 'all-backends'", specifier = ">=2.0.0,<3.0" },
-    { name = "surrealdb", marker = "extra == 'embedded'", specifier = ">=2.0.0,<3.0" },
     { name = "surrealdb", marker = "extra == 'surrealdb'", specifier = ">=2.0.0,<3.0" },
     { name = "tenacity", specifier = ">=9.1.4" },
     { name = "tiktoken", specifier = ">=0.12.0" },
