@@ -134,10 +134,12 @@ class TestTelemetryCollector:
 
     @pytest.mark.asyncio
     async def test_flush_drains_buffer(self):
-        engine = AsyncMock()
+        engine = MagicMock()
         conn = AsyncMock()
-        engine.begin.return_value.__aenter__ = AsyncMock(return_value=conn)
-        engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=conn)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        engine.begin.return_value = cm
 
         collector = TelemetryCollector(engine, service_name="test")
         collector.record_llm_call(operation="test")
@@ -158,8 +160,71 @@ class TestTelemetryCollector:
 
         # Should not raise
         await collector._flush()
-        # Buffer is drained even on error (events are dropped)
+        # Events are retained (re-queued) on a transient error, not dropped (#924).
+        assert len(collector._buffer) == 1
+
+    @pytest.mark.asyncio
+    async def test_flush_failure_requeues_and_retries(self):
+        # First flush fails (transient error), second succeeds. Events recorded
+        # before the failed flush must survive and be written on the retry (#924).
+        engine = MagicMock()
+        engine.begin.side_effect = RuntimeError("transient DB error")
+
+        collector = TelemetryCollector(engine, service_name="test")
+        collector.record_storage_op(backend="pg", operation="upsert", record_count=3)
+        collector.record_llm_call(operation="extract", model="gpt-4o", prompt_tokens=10)
+
+        before = len(collector._buffer)
+        assert before == 2
+
+        from loguru import logger
+
+        warnings: list[str] = []
+        sink_id = logger.add(lambda m: warnings.append(m.record["message"]), level="WARNING")
+        try:
+            await collector._flush()
+        finally:
+            logger.remove(sink_id)
+
+        # Not lost: the failed batch is back on the buffer for the next tick.
+        assert len(collector._buffer) == before
+        assert any("re-queued" in w for w in warnings)
+
+        # Next flush succeeds and drains the retained events.
+        conn = AsyncMock()
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=conn)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        engine.begin.side_effect = None
+        engine.begin.return_value = cm
+        await collector._flush()
         assert len(collector._buffer) == 0
+
+    @pytest.mark.asyncio
+    async def test_flush_requeue_drops_oldest_when_buffer_full(self):
+        engine = AsyncMock()
+        engine.begin.side_effect = RuntimeError("transient DB error")
+
+        collector = TelemetryCollector(engine, service_name="test", max_buffer_size=2)
+        collector.record_storage_op(backend="pg", operation="op0")
+        collector.record_storage_op(backend="pg", operation="op1")
+        collector.record_storage_op(backend="pg", operation="op2")
+        assert len(collector._buffer) == 3
+
+        from loguru import logger
+
+        warnings: list[str] = []
+        sink_id = logger.add(lambda m: warnings.append(m.record["message"]), level="WARNING")
+        try:
+            await collector._flush()
+        finally:
+            logger.remove(sink_id)
+
+        # Capped at max_buffer_size; oldest dropped.
+        assert len(collector._buffer) == 2
+        ops = [data["operation"] for _, data in collector._buffer]
+        assert ops == ["op1", "op2"]
+        assert any("buffer full" in w for w in warnings)
 
 
 # ---------------------------------------------------------------------------
