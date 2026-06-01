@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import pytest
+
 from khora.pipelines import (
     CANONICAL_TIMESTAMP_FIELDS,
     ConnectorMetadata,
     SourceSystem,
+    extract_source_timestamp,
     validate_connector_metadata,
 )
 from khora.pipelines.flows.ingest import _extract_source_timestamp
+
+# Reuse the spelling matrix from the source-timestamp suite so the validator and
+# the extractor are exercised against the same case/separator-insensitive keys.
+from tests.unit.test_source_timestamp import CANONICAL, EXPECTED, ISO, VARIANTS, spelling
 
 
 def test_connector_metadata_typeddict_import_and_instance() -> None:
@@ -124,3 +131,25 @@ def test_extractor_default_priority_unchanged_for_non_event_sources() -> None:
     assert ts is not None
     # sent_at still wins for non-event sources.
     assert ts.isoformat() == "2026-05-13T14:00:00+00:00"
+
+
+@pytest.mark.parametrize("field", CANONICAL)
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_validator_accepts_any_spelling(field: str, variant: str) -> None:
+    # A timestamp present under any spelling counts as present, so the validator
+    # must NOT emit the "fall back to ingest time" no-timestamp warning. The
+    # validator now honors source_type from the metadata dict.
+    warnings = validate_connector_metadata({spelling(field, variant): ISO, "source_type": "slack"})
+    assert not any("has no sent_at" in w for w in warnings)
+
+
+def test_validator_warns_when_truly_absent() -> None:
+    warnings = validate_connector_metadata({"source_type": "slack"})
+    assert any("has no sent_at" in w for w in warnings)
+
+
+def test_public_helper_matches_internal_path() -> None:
+    # The public re-export and the internal alias resolve to the same behavior.
+    from khora.pipelines.flows.ingest import extract_source_timestamp as internal
+
+    assert extract_source_timestamp({"sentAt": ISO}) == internal({"sentAt": ISO}) == EXPECTED

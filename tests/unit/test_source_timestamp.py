@@ -6,7 +6,31 @@ from datetime import UTC, datetime
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
+
 from khora.core.models.document import Chunk, Document
+from khora.pipelines import extract_source_timestamp
+
+# Shared spelling generator + matrix. The connector-metadata test imports
+# CANONICAL / VARIANTS / ISO / spelling from this module so both suites exercise
+# the same case/separator-insensitive key resolution against the public helper.
+CANONICAL = ["sent_at", "occurred_at", "created_at", "updated_at", "started_at", "timestamp", "date"]
+VARIANTS = ["snake", "camel", "pascal", "kebab", "screaming", "title_space", "flat"]
+ISO = "2026-01-10T14:00:00Z"
+EXPECTED = datetime(2026, 1, 10, 14, 0, tzinfo=UTC)
+
+
+def spelling(snake: str, variant: str) -> str:
+    parts = snake.split("_")
+    return {
+        "snake": snake,
+        "camel": parts[0] + "".join(w.capitalize() for w in parts[1:]),
+        "pascal": "".join(w.capitalize() for w in parts),
+        "kebab": "-".join(parts),
+        "screaming": snake.upper(),
+        "title_space": " ".join(w.capitalize() for w in parts),
+        "flat": "".join(parts),
+    }[variant]
 
 
 class TestDocumentSourceTimestamp:
@@ -208,3 +232,42 @@ class TestSourceTimestampInTemporalFiltering:
         assert len(result) == 1
         # Score should be modified by recency
         assert result[0][1] != 0.9 or True  # May be close to 0.9 depending on age
+
+
+class TestExtractSourceTimestampSpellingMatrix:
+    """Case/separator-insensitive key resolution for the public extractor."""
+
+    @pytest.mark.parametrize("field", CANONICAL)
+    @pytest.mark.parametrize("variant", VARIANTS)
+    def test_variant_resolves_to_canonical_field(self, field: str, variant: str) -> None:
+        # Single-word fields (timestamp/date) collapse several variants to the
+        # same string — harmless, the extractor still resolves them.
+        assert extract_source_timestamp({spelling(field, variant): ISO}) == EXPECTED
+
+    def test_exact_wins_over_variant(self) -> None:
+        # An exact canonical key must beat a normalized variant of the same field.
+        result = extract_source_timestamp({"occurred_at": ISO, "occurredAt": "2030-01-01T00:00:00Z"})
+        assert result == EXPECTED
+
+    def test_priority_preserved_non_event(self) -> None:
+        # No source_type → default priority: sent_at outranks occurred_at, even
+        # when both are supplied as camelCase variants.
+        sent_iso = "2026-01-10T14:00:00Z"
+        occurred_iso = "2026-02-20T09:00:00Z"
+        result = extract_source_timestamp({"sentAt": sent_iso, "occurredAt": occurred_iso})
+        assert result == EXPECTED  # sent_at's ISO won
+
+    @pytest.mark.parametrize("source_type", ["calendar", "meeting", "event"])
+    def test_priority_preserved_event(self, source_type: str) -> None:
+        # Event-shaped sources prefer occurred_at over sent_at, variants and all.
+        sent_iso = "2026-01-10T14:00:00Z"
+        occurred_iso = "2026-02-20T09:00:00Z"
+        result = extract_source_timestamp({"sentAt": sent_iso, "occurredAt": occurred_iso, "source_type": source_type})
+        assert result == datetime(2026, 2, 20, 9, 0, tzinfo=UTC)  # occurred_at won
+
+    def test_unknown_key_ignored(self) -> None:
+        assert extract_source_timestamp({"randomFieldName": ISO}) is None
+
+    def test_empty_or_unparseable_variant(self) -> None:
+        assert extract_source_timestamp({"occurredAt": ""}) is None
+        assert extract_source_timestamp({"occurredAt": "not-a-date"}) is None
