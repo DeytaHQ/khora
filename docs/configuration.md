@@ -253,7 +253,7 @@ Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retr
 | `KHORA_QUERY_GRAPH_WEIGHT` | `0.3` | Fusion weight. |
 | `KHORA_QUERY_KEYWORD_WEIGHT` | `0.2` | Fusion weight. |
 | `KHORA_QUERY_APPLY_RECENCY_BIAS` | `false` | Bias scoring towards newer documents. |
-| `KHORA_QUERY_RECENCY_WEIGHT` | `0.2` | How strong the recency bias is. |
+| `KHORA_QUERY_RECENCY_WEIGHT` | `0.35` | How strong the recency bias is. |
 | `KHORA_QUERY_ENABLE_HYDE` | `auto` | HyDE query expansion: `auto` / `always` / `never` (legacy booleans normalize to `always` / `never`). RECENCY / STATE_QUERY / CHANGE queries automatically get a time-anchored prompt - see [temporal-queries.md](query-engine/temporal-queries.md#temporal-anchored-hyde). |
 | `KHORA_QUERY_HYDE_NUM_HYPOTHETICALS` | `1` | Number of hypothetical documents to generate (1–5). |
 | `KHORA_QUERY_ENABLE_HYDE_CYPHER` | `false` | **Opt-in.** Run LLM-picked parameterized Cypher templates as an extra retrieval channel for structured RECENCY queries. See [retrieval-tuning.md](query-engine/retrieval-tuning.md). |

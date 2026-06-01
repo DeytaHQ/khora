@@ -168,18 +168,16 @@ KHORA_QUERY_ENTITY_LINKING_FUZZY_THRESHOLD=0.6
 KHORA_QUERY_ENTITY_LINKING_EMBEDDING_THRESHOLD=0.4
 ```
 
-### Adaptive Top-K with "Very Focused" Tier
+### Adaptive Top-K for Focused Queries
 
-The query engine uses the `complexity_score` from query understanding to determine how many chunks to retrieve. A "very_focused" tier handles simple factual queries:
+The query engine uses the `complexity_score` from query understanding to trim the evidence set for focused queries. There are two reduction branches, and both only ever *lower* the limit - they never raise it, and they fire only when the configured `max_chunks` is above 8 and the query does not require multi-step reasoning:
 
-| Tier | Complexity | Chunk Limit | Use Case |
-|------|-----------|-------------|----------|
-| `very_focused` | < 0.3 | 3 | Simple factual lookups |
-| `focused` | 0.3–0.5 | 5 | Single-entity queries |
-| `moderate` | 0.5–0.7 | 10 | Multi-entity queries |
-| `broad` | > 0.7 | 15 | Complex multi-hop queries |
+| Reason | Condition | Effect |
+|------|-----------|--------|
+| `very_focused` | `complexity_score < 0.3` and not multi-step and `max_chunks > 8` | Caps `max_chunks` and `max_entities` at 8; raises the chunk/entity similarity floor to at least 0.25 |
+| `single_topic` | `complexity_score < 0.5` and not multi-step and `max_chunks > 8` | Caps `max_chunks` and `max_entities` at 8; raises the chunk/entity similarity floor to at least 0.15 |
 
-The very_focused tier reduces noise for straightforward questions where a single chunk is likely sufficient. The complexity score is computed during query understanding based on entity count, relationship complexity, and temporal references.
+Neither branch sets a 3/5/10/15 chunk ladder, and there is no tier that raises the limit for complex queries: a complex query keeps the configured `max_chunks` unchanged. At the default `max_chunks=10`, a focused query is reduced to 8. When the firing branch reduces the limit, it records `metadata["adaptive_top_k"] = {"reduced": True, "reason": ...}`. The complexity score is computed during query understanding based on entity count, relationship complexity, and temporal references.
 
 ### MMR Diversity Selection
 
@@ -195,14 +193,14 @@ Configuration:
 ```python
 config = QueryConfig(
     enable_diversity=True,    # default: True
-    diversity_lambda=0.7,     # balance: 1.0 = pure relevance, 0.0 = pure diversity
+    diversity_lambda=0.5,     # default; balance: 1.0 = pure relevance, 0.0 = pure diversity
 )
 ```
 
 Environment variable:
 ```bash
 KHORA_QUERY_ENABLE_DIVERSITY=true   # default
-KHORA_QUERY_DIVERSITY_LAMBDA=0.7
+KHORA_QUERY_DIVERSITY_LAMBDA=0.5    # default
 ```
 
 ### Coherence Scoring

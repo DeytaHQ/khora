@@ -241,14 +241,20 @@ def reciprocal_rank_fusion(
 
 ## Tracking Contributions
 
-After fusion, you can see where results came from:
+After fusion, you can see where results came from. The per-method
+contribution data is exposed on `result.engine_info["search_methods"]`
+(a dict), not on a `search_contributions` attribute:
 
 ```python
 result = await kb.recall("machine learning applications", namespace=ns_id)
 
-print(f"Vector contributed: {result.search_contributions.vector} results")
-print(f"Graph contributed: {result.search_contributions.graph} results")
-print(f"Keyword contributed: {result.search_contributions.keyword} results")
+by_method = result.engine_info.get("search_methods", {}).get("by_method", {})
+
+vector = by_method.get("vector", {}).get("count", 0)
+graph = by_method.get("graph", {}).get("count", 0)
+
+print(f"Vector contributed: {vector} chunks")
+print(f"Graph contributed: {graph} chunks")
 ```
 
 This helps you understand which search methods are working for your queries.
