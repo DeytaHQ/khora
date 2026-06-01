@@ -88,8 +88,8 @@ except ImportError:  # pragma: no cover
     _HAS_NUMPY = False
 
 try:
+    from rapidfuzz.distance import JaroWinkler as _rf_jw
     from rapidfuzz.distance import Levenshtein as _rf_lev
-    from rapidfuzz.fuzz import ratio as _rf_ratio
 
     _HAS_RAPIDFUZZ = True
 except ImportError:  # pragma: no cover
@@ -428,17 +428,17 @@ def sequence_match_ratio(s1: str, s2: str) -> float:
 
     Uses Rust > rapidfuzz > difflib, in order of preference.
 
-    Note: The Rust backend uses Jaro-Winkler similarity as an approximation.
-    This produces slightly different scores than difflib.SequenceMatcher.ratio()
-    (Jaro-Winkler weights character transpositions higher). For entity resolution
-    thresholds, this difference is calibrated: Rust thresholds are set assuming
-    Jaro-Winkler scores. If switching backends, thresholds may need adjustment.
+    All backends use Jaro-Winkler similarity so scores agree regardless of which
+    is active: entity-resolution thresholds are calibrated for Jaro-Winkler, and
+    the rapidfuzz fallback previously used fuzz.ratio (Indel/LCS), which scored
+    prefix-overlapping name variants lower and left them unmerged. The difflib
+    last resort still diverges slightly (no Jaro-Winkler in the stdlib).
     """
     if _HAS_RUST:
         return _rust_sequence_match(s1, s2)
 
     if _HAS_RAPIDFUZZ:
-        return _rf_ratio(s1, s2) / 100.0
+        return _rf_jw.similarity(s1, s2)
 
     from difflib import SequenceMatcher
 
