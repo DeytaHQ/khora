@@ -156,10 +156,10 @@ results = await kb.recall(
     mode=SearchMode.ALL,
 )
 
-# See what each method contributed
-print(f"Vector: {results.search_contributions.vector} results")
-print(f"Graph: {results.search_contributions.graph} results")
-print(f"Keyword: {results.search_contributions.keyword} results")
+# See what each method contributed (exposed on engine_info, not an attribute)
+by_method = results.engine_info.get("search_methods", {}).get("by_method", {})
+print(f"Vector: {by_method.get('vector', {}).get('count', 0)} chunks")
+print(f"Graph: {by_method.get('graph', {}).get('count', 0)} chunks")
 ```
 
 **The magic**: Some queries benefit from semantic understanding, others from relationships, others from exact terms. ALL mode lets each method contribute what it's good at.
