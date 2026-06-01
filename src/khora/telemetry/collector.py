@@ -28,11 +28,16 @@ class TelemetryCollector:
         service_name: str = "khora",
         flush_interval: float = 5.0,
         flush_threshold: int = 100,
+        max_buffer_size: int = 10_000,
     ) -> None:
         self._engine = engine
         self._service_name = service_name
         self._flush_interval = flush_interval
         self._flush_threshold = flush_threshold
+        # Cap the in-memory buffer so a sustained DB-write failure (events are
+        # re-enqueued on a failed flush, see _flush) can't grow it without
+        # bound. On overflow we drop the oldest events with a WARN + counter.
+        self._max_buffer_size = max_buffer_size
         self._buffer: deque[tuple[str, dict[str, Any]]] = deque()
         self._flush_task: asyncio.Task[None] | None = None
         self._threshold_flush_task: asyncio.Task[None] | None = None
@@ -194,17 +199,27 @@ class TelemetryCollector:
             return
 
     async def _flush(self) -> None:
-        """Batch-insert all buffered events.  Errors are logged, never raised."""
+        """Batch-insert all buffered events.  Errors are logged, never raised.
+
+        On a transient DB-write failure the drained events are re-enqueued at
+        the front of the buffer so the next flush tick retries them instead of
+        dropping them (issue #924).  The buffer is capped at *max_buffer_size*:
+        on overflow the oldest events are dropped with a WARN + counter so a
+        sustained failure can't grow memory without bound.
+        """
         if not self._buffer:
             return
 
-        # Drain the buffer into local lists
+        # Drain the buffer, keeping the original ordered tuples so we can
+        # re-enqueue them verbatim if the write fails.
+        drained: list[tuple[str, dict[str, Any]]] = []
+        while self._buffer:
+            drained.append(self._buffer.popleft())
+
         llm_rows: list[dict[str, Any]] = []
         storage_rows: list[dict[str, Any]] = []
         pipeline_rows: list[dict[str, Any]] = []
-
-        while self._buffer:
-            kind, data = self._buffer.popleft()
+        for kind, data in drained:
             row = dict(data)
             meta_value = row.pop("metadata", None)
             row["metadata"] = meta_value
@@ -215,7 +230,7 @@ class TelemetryCollector:
             elif kind == "pipeline":
                 pipeline_rows.append(row)
 
-        total = len(llm_rows) + len(storage_rows) + len(pipeline_rows)
+        total = len(drained)
         try:
             async with self._engine.begin() as conn:
                 if llm_rows:
@@ -230,4 +245,31 @@ class TelemetryCollector:
             err_str = str(exc)
             if len(err_str) > 300:
                 err_str = err_str[:300] + "..."
-            logger.warning(f"Telemetry flush failed ({total} events dropped): {err_str}")
+            self._requeue(drained)
+            logger.warning(f"Telemetry flush failed ({total} events re-queued for retry): {err_str}")
+
+    def _requeue(self, drained: list[tuple[str, dict[str, Any]]]) -> None:
+        """Put a failed batch back on the front of the buffer for retry.
+
+        Records appended since the flush started are kept (they're newer); when
+        re-enqueuing would exceed *max_buffer_size* the oldest events are
+        dropped with a WARN + ``khora.telemetry.flush.dropped_total`` counter.
+        """
+        # Newest-first reconstruction: failed batch first (oldest), then
+        # whatever was buffered while the flush was in flight.
+        combined = drained + list(self._buffer)
+        overflow = len(combined) - self._max_buffer_size
+        if overflow > 0:
+            combined = combined[overflow:]
+            from .metrics import metric_counter
+
+            metric_counter(
+                "khora.telemetry.flush.dropped_total",
+                unit="1",
+                description="Telemetry events dropped because the buffer hit max_buffer_size after a flush failure.",
+            ).add(overflow)
+            logger.warning(
+                f"Telemetry buffer full ({self._max_buffer_size}); dropped {overflow} oldest events after flush failure"
+            )
+        self._buffer.clear()
+        self._buffer.extend(combined)

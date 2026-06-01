@@ -1068,6 +1068,14 @@
       "description": "Issue #907 (ADR-001). Number of relationships dropped by the shared ingest pipeline because the source / target entity id could not be remapped to a canonical entity (LLM-extracted endpoint not in the upsert batch and no (name, type) match in the namespace). Surfaced on RememberResult.relationships_skipped and as a Degradation entry under RememberResult.metadata['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.telemetry.flush.dropped_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "telemetry",
+      "description": "Issue #924. Number of buffered telemetry events dropped because the in-memory buffer hit max_buffer_size (default 10000) while re-queuing a batch that failed to flush to the telemetry database. A failed flush re-enqueues its drained events for the next tick; only sustained DB-write failure (which fills the buffer) drops the oldest events, with a WARN. Zero unless DB telemetry is enabled AND flushes are persistently failing. NO namespace_id label - cardinality rule."
+    },
+    {
       "name": "khora.chronicle.reconcile.failures_total",
       "type": "counter",
       "stability": "internal",
