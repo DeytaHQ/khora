@@ -62,7 +62,7 @@ help:
 	@echo ""
 	@echo "Connection Strings (for .env):"
 	@echo "  KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5434/khora"
-	@echo "  KHORA_NEO4J_URL=bolt://neo4j:khora@localhost:7688"
+	@echo "  KHORA_NEO4J_URL=bolt://neo4j:pleaseletmein@localhost:7688"
 
 # ==============================================================================
 # Development Commands
@@ -89,7 +89,7 @@ dev:
 	@docker compose ps
 	@echo ""
 	@echo "PostgreSQL: localhost:5434 (user: khora, pass: khora)"
-	@echo "Neo4j:      http://localhost:7475 (user: neo4j, pass: khora)"
+	@echo "Neo4j:      http://localhost:7475 (user: neo4j, pass: pleaseletmein)"
 	@echo ""
 	@echo "Add to .env:"
 	@echo "  KHORA_DATABASE_URL=postgresql://khora:khora@localhost:5434/khora"
