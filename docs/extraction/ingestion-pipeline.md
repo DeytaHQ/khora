@@ -567,10 +567,17 @@ This is a one-time migration for existing data.
 ## Canonical metadata fields per source
 
 Connector authors should populate `metadata.custom` with the canonical
-fields below. The ingestion pipeline reads them in
-`_extract_source_timestamp` to build `TemporalChunk.occurred_at`, which
-drives temporal recency scoring + per-source decay. The shape is exported
-as `khora.pipelines.ConnectorMetadata` (a `TypedDict`).
+fields below. The ingestion pipeline reads them via the public
+`khora.pipelines.extract_source_timestamp()` helper to build
+`TemporalChunk.occurred_at`, which drives temporal recency scoring +
+per-source decay. The shape is exported as
+`khora.pipelines.ConnectorMetadata` (a `TypedDict`).
+
+Key matching is **case/separator-insensitive** (since 0.18.2): a connector
+emitting `occurredAt`, `occurred-at`, `OCCURRED_AT`, or `Occurred At` all
+resolve to the canonical `occurred_at` field, though an exact snake_case
+key still wins when both are present. `updated_at` is also honored as a
+lowest-priority fallback.
 
 | Source | Upstream field | Map to `metadata.custom` key | Notes |
 |---|---|---|---|

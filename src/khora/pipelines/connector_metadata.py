@@ -67,7 +67,7 @@ class ConnectorMetadata(TypedDict, total=False):
     per-source mapping.
     """
 
-    # Timestamp fields, in priority order matching _extract_source_timestamp.
+    # Timestamp fields, in priority order. See extract_source_timestamp() for matching.
     # For meetings/calendar, set occurred_at; for messages/email/Slack, sent_at.
     sent_at: str  # ISO-8601 UTC, e.g. "2026-05-13T14:00:00Z"
     occurred_at: str  # ISO-8601 UTC; for calendar events use start time
