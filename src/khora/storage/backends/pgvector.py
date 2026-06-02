@@ -767,8 +767,15 @@ class PgVectorBackend(AsyncSessionMixin):
         full-text matching.
         """
         async with self._get_session() as session:
-            tsquery = func.plainto_tsquery(language, query_text)
-            rank = func.ts_rank(ChunkModel.content_tsv, tsquery)
+            # OR the query terms instead of plainto_tsquery's implicit AND: a
+            # full-sentence question rarely has every content word in one chunk,
+            # so AND matched nothing (BM25 channel returned 0). ts_rank_cd ranks
+            # by how many query terms co-occur and how closely.
+            terms = "".join(c if c.isalnum() else " " for c in query_text).split()
+            if not terms:
+                return []
+            tsquery = func.to_tsquery(language, " | ".join(terms))
+            rank = func.ts_rank_cd(ChunkModel.content_tsv, tsquery)
 
             query = (
                 select(ChunkModel, rank.label("rank"))
