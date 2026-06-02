@@ -142,6 +142,11 @@ def _shutdown_for_tests() -> None:
     Production code never calls this — the daemon thread is meant to
     outlive every adapter. Tests use it to verify clean state between
     cases.
+
+    Cancels any in-flight tasks before stopping the loop so that
+    coroutines another test submitted via ``run_coroutine_threadsafe``
+    resolve as cancelled instead of leaving an orphaned future that
+    blocks ``run_sync``'s ``future.result()`` forever.
     """
     global _loop, _loop_thread
     with _loop_lock:
@@ -150,6 +155,28 @@ def _shutdown_for_tests() -> None:
         _loop = None
         _loop_thread = None
     if loop is not None and not loop.is_closed():
-        loop.call_soon_threadsafe(loop.stop)
+
+        async def _cancel_all() -> None:
+            # Runs on the loop thread. Cancel every other task and wait for
+            # the cancellation to settle — only then does the orphaned
+            # concurrent.futures.Future from run_coroutine_threadsafe
+            # transition to CANCELLED. Stopping the loop the instant we
+            # request cancellation would leave that future unresolved and
+            # wedge run_sync's future.result() forever.
+            #
+            # The wait is bounded: a misbehaving coroutine that swallows
+            # CancelledError must not be able to wedge teardown, so we stop
+            # the loop unconditionally after the timeout even if a task
+            # refused to die. ``run_forever`` then returns and the daemon
+            # thread exits — no zombie thread leaked into the next test.
+            current = asyncio.current_task()
+            others = [t for t in asyncio.all_tasks(loop) if t is not current]
+            for task in others:
+                task.cancel()
+            if others:
+                await asyncio.wait(others, timeout=2.0)
+            loop.stop()
+
+        loop.call_soon_threadsafe(lambda: loop.create_task(_cancel_all()))
     if thread is not None:
         thread.join(timeout=5.0)
