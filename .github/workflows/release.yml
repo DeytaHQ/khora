@@ -58,7 +58,7 @@ jobs:
   # ============================================================================
   verify-ci-green:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     permissions:
       contents: read
       actions: read   # required by `gh api .../actions/workflows/.../runs`
@@ -68,10 +68,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
-          # 10-minute poll window — long enough for the typical ~9 min main-CI
-          # run that may not have started yet when a tag is pushed seconds
-          # after the bump-PR merge (see #554). Tunable via repo variable.
-          POLL_TIMEOUT_SECONDS: ${{ vars.VERIFY_CI_GREEN_TIMEOUT_SECONDS || '600' }}
+          # 30-minute poll window. The tag is pushed seconds after the bump-PR
+          # merge, so main-CI on this SHA is usually still QUEUED, not just
+          # running: observed wall-clock is queue delay (can be 8-10 min) + the
+          # full suite incl. integration/weaviate/examples (~7-9 min) = ~17 min,
+          # and runner-queue contention pushes it higher. The previous 600s
+          # default gave up while CI was still queued (v0.18.2, #932-era). Keep
+          # generous headroom so a slow queue never fails a green release.
+          # Tunable via repo variable. (job timeout-minutes must exceed this.)
+          POLL_TIMEOUT_SECONDS: ${{ vars.VERIFY_CI_GREEN_TIMEOUT_SECONDS || '1800' }}
           POLL_INTERVAL_SECONDS: '20'
         run: |
           set -euo pipefail
