@@ -66,27 +66,27 @@ This catches duplicates even if the filename or metadata changed. Same content =
 
 ### Source Timestamps
 
-When did this content actually originate? Not when it was ingested - when was it created at the source?
+When did this content actually originate - not when it was ingested, but when it was created at the source? That instant becomes each chunk's `occurred_at` and drives temporal queries ("what was discussed last week?" should find content from last week, not content ingested last week about events from six months ago).
+
+**Recommended: pass it explicitly.** The connector knows its source's semantics, so resolve the one meaningful instant and hand it to `remember(..., source_timestamp=...)` (also accepted by `remember_batch` / `submit_batch`). An explicit value takes precedence over the metadata fallback below. ISO-8601 strings (trailing `Z`, explicit offset, or date-only `YYYY-MM-DD`) are coerced via `coerce_source_timestamp` (re-exported from `khora.pipelines`), so connectors don't need to parse upstream:
 
 ```python
-# We look for timestamps in the metadata, in priority order
-timestamp_fields = [
-    "sent_at",      # Emails
-    "created_at",   # General creation time
-    "timestamp",    # Generic
-    "date",
-    "occurred_at",  # Events
-]
-
-for field in timestamp_fields:
-    if field in metadata:
-        source_timestamp = parse_datetime(metadata[field])
-        break
+await kb.remember(content, namespace=ns_id, source_timestamp="2026-05-13T14:00:00Z", ...)
 ```
 
-This matters for temporal queries - "what was discussed last week?" should find content from last week, not content that was ingested last week about events from six months ago.
+**Fallback: metadata scan.** If `source_timestamp` is not passed, the public `extract_source_timestamp()` helper scans the document metadata and uses the first recognized field present, in priority order. The pipeline is source-agnostic here - it does not detect Slack vs. a calendar, it only maps field names - with one exception: when `metadata["source_type"]` is `calendar` / `meeting` / `event`, the order is flipped to prefer event time over dispatch time.
 
-ISO-8601 strings (trailing `Z`, explicit offset, or date-only `YYYY-MM-DD`) can be handed directly to `remember(..., source_timestamp=...)` / `remember_batch` / `submit_batch` - Khora coerces them via the internal `coerce_source_timestamp` helper, so connectors don't need to parse upstream.
+```python
+# Default order (messages, issues, most sources):
+["sent_at", "created_at", "timestamp", "date", "occurred_at", "started_at", "updated_at"]
+
+# When source_type in {"calendar", "meeting", "event"} (event time wins):
+["occurred_at", "started_at", "sent_at", "created_at", "timestamp", "date", "updated_at"]
+```
+
+Key matching is case/separator-insensitive (`occurredAt` / `occurred-at` / `OCCURRED_AT` all resolve to `occurred_at`), and an exact snake_case key wins over a normalized variant. Which field is "right" depends on the source's semantics, so if you rely on the scan, populate the canonical field for your source - see [Canonical metadata fields per source](#canonical-metadata-fields-per-source).
+
+This matters for temporal queries - "what was discussed last week?" should find content from last week, not content that was ingested last week about events from six months ago.
 
 ### Document Creation
 
