@@ -4,6 +4,16 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.18.3] - lexical-search recall fix
+
+Patch release. Revives the BM25 / lexical retrieval channel, which was effectively dead: `plainto_tsquery` ANDs every query term, so natural-language questions matched zero chunks and retrieval silently degraded to vector-only. Also hardens a test-only teardown path that could wedge the parallel test run, and corrects the source-timestamp ingestion docs.
+
+### Fixed
+
+- **Full-text (BM25) search returned zero chunks on nearly every query** (#976): `search_fulltext` built its tsquery with `plainto_tsquery`, which ANDs every content word, so a natural-language question almost never matched a single chunk - leaving the lexical channel that fusion weights (`bm25_weight`) silently dead and retrieval vector-only. Both full-text paths (the skeleton temporal-store path and the relational coordinator fallback) now tokenize the query and OR its terms via `to_tsquery`, ranking with `ts_rank_cd` (cover density) so chunks where more query terms co-occur, and closer together, rank highest. On a representative fact question the same query went from 0 to 302 matched chunks before ranking.
+- **Sync-bridge teardown could wedge the parallel test run** (#977): the test-only `khora.integrations._sync._shutdown_for_tests()` stopped the process-wide bridge loop without cancelling in-flight coroutines, so an orphaned `run_coroutine_threadsafe` future never resolved and the non-daemon executor thread kept the pytest-xdist worker alive until GitHub's 6-hour cap. Teardown now cancels in-flight tasks and waits (bounded, 2s) before stopping the loop. Production `run_sync` / `_ensure_loop` paths are untouched.
+- **Documentation** (#975): the ingestion docs now recommend passing `source_timestamp` explicitly and correct the metadata-key fallback priority list.
+
 ## [0.18.2] - Memgraph parity, telemetry durability, embedded-extra repoint, and silent-config fixes
 
 Patch release (with one packaging breaking change). A second batch of "accepted but silently ignored / silently diverging" fixes - backend parity (Memgraph, the rapidfuzz fallback), telemetry-flush durability, staging-queue memory bounding, tolerant source-timestamp key matching, and config knobs that were read but never applied. Also repoints the `khora[embedded]` install extra to SQLite + LanceDB.

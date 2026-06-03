@@ -42,6 +42,7 @@ jobs:
   # ============================================================================
   secret-typing:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -59,6 +60,7 @@ jobs:
   # ============================================================================
   no-agents-md:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -75,6 +77,7 @@ jobs:
   # ============================================================================
   install:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -109,6 +112,7 @@ jobs:
   security:
     needs: install
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -188,6 +192,7 @@ jobs:
   lint:
     needs: install
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -232,6 +237,7 @@ jobs:
   test:
     needs: install
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -260,7 +266,7 @@ jobs:
 
       - name: Run unit tests with coverage (parallel)
         run: |
-          uv run pytest tests/unit/ --cov=src/khora --cov-branch --cov-report=xml:coverage-unit.xml --cov-fail-under=0 -n auto
+          uv run pytest tests/unit/ --cov=src/khora --cov-branch --cov-report=xml:coverage-unit.xml --cov-fail-under=0 -n auto --timeout=120 --timeout-method=thread
 
       - name: Upload unit coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -281,7 +287,7 @@ jobs:
         # xdist via ``coverage.context = ...`` already set in pyproject.
         # Expected wall-time cut: ~50% (was ~160s serial).
         run: |
-          uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-report=xml:coverage-integration.xml --cov-fail-under=77 -m integration -n auto
+          uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-report=xml:coverage-integration.xml --cov-fail-under=77 -m integration -n auto --timeout=120 --timeout-method=thread
 
       - name: Generate JSON coverage for floor check
         run: uv run coverage json -o coverage.json
@@ -308,6 +314,7 @@ jobs:
   # venv with the google-adk combo and runs the adapter's unit tests only.
   test-google-adk:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -341,6 +348,7 @@ jobs:
   examples-smoke:
     needs: install
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -417,6 +425,7 @@ jobs:
   weaviate-integration:
     needs: install
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       weaviate:
         image: cr.weaviate.io/semitechnologies/weaviate:1.28.4

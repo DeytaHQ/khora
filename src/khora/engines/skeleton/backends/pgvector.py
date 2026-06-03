@@ -504,8 +504,14 @@ class PgVectorTemporalStore(TemporalVectorStore):
     ) -> list[TemporalSearchResult]:
         """Perform BM25-style full-text search using PostgreSQL ts_rank."""
         # Create tsquery from query text
-        tsquery = func.plainto_tsquery("english", query_text)
-        rank = func.ts_rank(khora_chunks_table.c.content_tsv, tsquery).label("bm25_score")
+        # OR the query terms instead of plainto_tsquery's implicit AND: a full
+        # sentence rarely has every content word in one chunk, so AND matched
+        # nothing. ts_rank_cd ranks by co-occurrence density.
+        terms = "".join(c if c.isalnum() else " " for c in query_text).split()
+        if not terms:
+            return []
+        tsquery = func.to_tsquery("english", " | ".join(terms))
+        rank = func.ts_rank_cd(khora_chunks_table.c.content_tsv, tsquery).label("bm25_score")
 
         _retrieval_cols_bm25 = [c for c in khora_chunks_table.c if c.name != "embedding"]
         stmt = (

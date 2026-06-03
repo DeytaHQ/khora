@@ -7,6 +7,7 @@ sync-bridge daemon-thread lifecycle.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import threading
 
 import pytest
@@ -106,6 +107,24 @@ def test_shutdown_for_tests_releases_loop():
     _sync._shutdown_for_tests()
     assert _sync._loop is None
     assert _sync._loop_thread is None
+
+
+def test_shutdown_for_tests_cancels_in_flight_coroutine():
+    # A coroutine still running on the bridge loop when _shutdown_for_tests
+    # fires must be cancelled, not orphaned. An orphaned future never
+    # resolves, so run_sync's future.result() blocks forever on a
+    # non-daemon thread and wedges the test worker. The future must resolve
+    # promptly as CANCELLED — a TimeoutError here means the wedge survives.
+    async def _slow() -> int:
+        await asyncio.sleep(30)
+        return 1
+
+    fut = asyncio.run_coroutine_threadsafe(_slow(), _sync._ensure_loop())
+    # Give the coroutine a beat to start running on the bridge loop.
+    asyncio.run(asyncio.sleep(0.1))
+    _sync._shutdown_for_tests()
+    with pytest.raises(concurrent.futures.CancelledError):
+        fut.result(timeout=2.0)
 
 
 def test_run_sync_recovers_after_shutdown():
