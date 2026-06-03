@@ -1,341 +1,188 @@
 # Khora examples
 
-Runnable tutorials for the public Khora API. Two styles:
+Runnable tutorials for the public Khora API, organized into four numbered
+tiers. Work through them in order, or jump to the tier that matches what
+you're building:
 
-- **Numbered tutorials (`01_*.py` through `08_*.py`)** — sequential
-  learning path. Start at `01` and progress; each builds on what came
-  before.
-- **Scenario tutorials** (e.g. `chat_agent_langgraph.py`,
-  `namespace_versioning.py`, `feedback_loop_promotion.py`) — focused on
-  one pattern. Pick whichever matches what you're trying to build.
+- **`00_quickstart/`** — the core loop (remember, recall, abstain, forget, isolate).
+- **`10_core_apis/`** — the API surface (batch ingest, recall filters, ontology config, graph reads).
+- **`20_integrations/`** — framework adapters (LangGraph, OpenAI Agents, CrewAI).
+- **`30_workloads/`** — end-to-end scenarios that compose the APIs into real apps.
 
 Plus per-adapter smoke tests under `integrations/<framework>/` (see
-`integrations/README.md` for the strict ≤80-LOC convention).
+[`integrations/README.md`](integrations/README.md) for the strict ≤80-LOC convention).
 
 ## Default: zero infrastructure
 
-Every example runs **without Postgres, Neo4j, or any external service**
-by default. The embedded backend (`sqlite_lance` — SQLite + LanceDB
-in-process) handles relational, vector, and graph storage in a single
-local directory. The numbered tutorials require `OPENAI_API_KEY` for
-real LLM extraction; integrations smoke tests use a deterministic mock.
+Every tutorial runs **without Postgres, Neo4j, or any external service** by
+default. The embedded backend (`sqlite_lance` — SQLite + LanceDB in-process)
+handles relational, vector, and graph storage in a single local directory. The
+numbered tutorials require `OPENAI_API_KEY` for real LLM extraction; the
+integration smoke tests use a deterministic mock.
 
 ```bash
 uv pip install -e ".[sqlite-lance]"  # or: pip install -e ".[sqlite-lance]"
 export OPENAI_API_KEY=sk-...
-uv run python examples/01_hello_memory.py
-# or, if you installed khora into the current venv:
-python examples/01_hello_memory.py
+uv run python examples/00_quickstart/01_remember_recall.py
+# or, if khora is installed into the current venv:
+python examples/00_quickstart/01_remember_recall.py
 ```
 
 That's it. No services, no setup.
 
-## Switching to PostgreSQL + pgvector + Neo4j or SurrealDB
+## Switching to PostgreSQL + pgvector + Neo4j
 
-Every tutorial uses the same switch: pass `--config <path>`. Three
-configs ship in this directory:
+Every tutorial takes the same switch: pass `--config <path>`. Two configs ship
+in this directory:
 
 | Config | Backend | When to use |
 |---|---|---|
 | `khora.embedded.yaml` (default) | SQLite + LanceDB | Zero-infrastructure runs, evaluation, CI |
 | `khora.standard.yaml` | PostgreSQL + pgvector + Neo4j | Production stack — needs `make dev` |
-| `khora.surrealdb.yaml` | SurrealDB (memory mode) | Single-store alternative; **Experimental** |
 
 ```bash
 # Embedded (default — no flag needed)
-uv run python examples/01_hello_memory.py
-python examples/01_hello_memory.py
+python examples/00_quickstart/01_remember_recall.py
 
 # Production stack
 make dev    # docker compose: postgres + neo4j
-uv run python examples/01_hello_memory.py --config examples/khora.standard.yaml
-python examples/01_hello_memory.py --config examples/khora.standard.yaml
-
-# SurrealDB unified store
-uv run python examples/01_hello_memory.py --config examples/khora.surrealdb.yaml
-python examples/01_hello_memory.py --config examples/khora.surrealdb.yaml
+python examples/00_quickstart/01_remember_recall.py --config examples/khora.standard.yaml
 ```
 
-For a tour of the three backends side-by-side, see
-**[`storage_backend_selector.py`](storage_backend_selector.py)** below.
-
 Any field in the YAML can be overridden via env vars (e.g.
-`KHORA_LLM_MODEL=gpt-4o`), so you can pin URLs in YAML and rotate
-credentials at run time.
+`KHORA_LLM_MODEL=gpt-4o`), so you can pin URLs in YAML and rotate credentials at
+run time.
 
 ---
 
-## The numbered tutorials — learn the API
+## `00_quickstart/` — the core loop
 
-Start here if Khora is new to you. Each tutorial is self-contained and
-under ~200 LOC.
+Start here if Khora is new to you. Each is self-contained and under ~150 LOC.
 
-### [`01_hello_memory.py`](01_hello_memory.py) — *VectorCypher (default)*
+- [`01_remember_recall.py`](00_quickstart/01_remember_recall.py) — *skeleton* —
+  Semantic recall vs. a naive keyword scan: create a namespace, remember a few
+  facts, recall them by meaning rather than shared words.
+- [`02_grounded_answers.py`](00_quickstart/02_grounded_answers.py) — *chronicle* —
+  Grounded answers and abstention. Use `max_raw_vector_score` /
+  `abstention_signals` to refuse when the corpus has nothing on-topic.
+- [`03_forget_what_was_wrong.py`](00_quickstart/03_forget_what_was_wrong.py) — *skeleton* —
+  Explicit unlearning: `forget()` a memory by `document_id`, then re-remember
+  the correction.
+- [`04_namespaces_for_users.py`](00_quickstart/04_namespaces_for_users.py) — *skeleton* —
+  Per-user isolation: bury a needle in one namespace and prove it never
+  surfaces from another.
 
-The smallest viable Khora program: create a namespace, remember one
-fact, recall it. Mirrors the "5-line hello" every memory library
-ships, translated to Khora's shape. Teaches the full default pipeline
-(chunking → embeddings → KET-RAG selective extraction → graph writes →
-hybrid retrieval) in 30 lines of demo code.
+## `10_core_apis/` — the API surface
 
-### [`02_per_user_preferences.py`](02_per_user_preferences.py) — *Chronicle*
+The everyday calls, one concept at a time. All run on VectorCypher (the default).
 
-The universal "user preferences" pattern with Ebbinghaus recency
-decay. Two users, contradictory statements, older ones fade naturally.
-Introduces Chronicle's abstention signals (`chunks_empty`,
-`top_score_low`, `should_abstain`) — the cheap way to keep an LLM
-from making things up about a namespace it doesn't have data on.
+- [`01_remember_batch.py`](10_core_apis/01_remember_batch.py) —
+  Bulk ingestion with `remember_batch` and `on_progress` (uses `data/support_tickets.jsonl`).
+- [`02_recall_with_filters.py`](10_core_apis/02_recall_with_filters.py) —
+  `recall()` with `limit`, `min_similarity`, and `mode` (the search channels).
+- [`03_ontology_config.py`](10_core_apis/03_ontology_config.py) —
+  Constrain extraction with `entity_types` / `relationship_types`.
+- [`04_recall_entities_and_relationships.py`](10_core_apis/04_recall_entities_and_relationships.py) —
+  Inspect the graph khora builds at `remember` time.
+- [`05_find_related_entities.py`](10_core_apis/05_find_related_entities.py) —
+  Explore the entity / relationship graph with `find_related_entities`.
 
-### [`03_document_qa_with_abstention.py`](03_document_qa_with_abstention.py) — *Chronicle*
+## `20_integrations/` — framework adapters
 
-Corpus Q&A. Ingest an HR policy corpus from JSONL; ask on-topic and
-off-topic questions; observe when abstention fires. Introduces
-abstention threshold tuning per corpus (the defaults are loose on
-purpose). Pairs with `examples/data/hr_policies.jsonl`.
+Full tutorials wiring Khora into an agent framework. (Minimal byte-identical
+smoke tests live under `integrations/<framework>/` — see its README.)
 
-### [`04_support_ticket_graph.py`](04_support_ticket_graph.py) — *VectorCypher*
+- [`01_langgraph.py`](20_integrations/01_langgraph.py) — *chronicle* —
+  Chat agent with long-term memory via the LangGraph `KhoraStore` adapter.
+- [`02_openai_agents.py`](20_integrations/02_openai_agents.py) — *chronicle* —
+  Resume a chat session days later with the OpenAI Agents SDK `KhoraSession`.
+- [`03_crewai_multi_agent.py`](20_integrations/03_crewai_multi_agent.py) — *vectorcypher* —
+  Multi-agent shared memory via the CrewAI `KhoraMemory` adapter.
 
-Multi-hop entity reasoning. Ingest ~100 support tickets, then run two
-query shapes side-by-side: (a) "tickets about X" (vector search alone
-wins), (b) "context around customer Y" (graph traversal wins). Shows
-`find_related_entities` and the cross-document entity dedup that
-VectorCypher's HippoRAG-style retrieval relies on.
+## `30_workloads/` — end-to-end scenarios
 
-### [`05_temporal_podcast.py`](05_temporal_podcast.py) — *Chronicle*
+Applications you'd actually ship. Each composes the core APIs around one shape.
 
-The Graphiti "Kendra loved Adidas then Nike" example, ported to
-Khora. Timestamped utterances, semantically similar but temporally
-ordered; recall picks the latest stance via Ebbinghaus decay without
-any explicit `forget()`. Then shows point-in-time recall
-(`start_time` / `end_time`) restricting the window before decay even
-fires.
+- [`01_per_user_preferences.py`](30_workloads/01_per_user_preferences.py) — *chronicle* —
+  Per-user preferences with temporal drift; recency decay surfaces the latest stance.
+- [`02_document_qa_with_abstention.py`](30_workloads/02_document_qa_with_abstention.py) — *chronicle* —
+  Document Q&A with multi-signal abstention (uses `data/hr_policies.jsonl`).
+- [`03_support_ticket_graph.py`](30_workloads/03_support_ticket_graph.py) — *vectorcypher* —
+  Support tickets → knowledge graph: when vector search wins vs. when multi-hop
+  traversal wins (uses `data/support_tickets.jsonl`).
+- [`04_agent_chat_with_memory.py`](30_workloads/04_agent_chat_with_memory.py) — *chronicle* —
+  Memory-as-a-tool: two tools (`remember` / `recall`), branch on `should_abstain`.
+- [`05_dream_phase_consolidation.py`](30_workloads/05_dream_phase_consolidation.py) — *chronicle* —
+  Offline dream-phase event clustering, walked through `dry-run` → `apply`.
+- [`06_namespace_versioning.py`](30_workloads/06_namespace_versioning.py) — *vectorcypher* —
+  Version a namespace via the storage API (the dual-UUID model).
+- [`07_temporal_range_query.py`](30_workloads/07_temporal_range_query.py) — *chronicle* —
+  Time-bounded recall with `start_time` / `end_time` and SQL pushdown.
+- [`08_resume_search.py`](30_workloads/08_resume_search.py) — *vectorcypher* —
+  Full extraction + cross-document entity resolution with an `ExpertiseConfig`
+  (uses `data/resumes.jsonl`).
+- [`09_bulk_archive.py`](30_workloads/09_bulk_archive.py) — *skeleton* —
+  Bulk Slack-archive ingest — the cost-story demo (~10% extraction).
+- [`10_tool_router_learning.py`](30_workloads/10_tool_router_learning.py) — *chronicle* —
+  Memory as a routing oracle: learn which tool resolves which request.
 
-### [`06_agent_memory_tool.py`](06_agent_memory_tool.py) — *Chronicle*
+## Operator helper
 
-Memory-as-a-tool pattern. Two bare async functions — `remember` and
-`recall` — that an agent can call. Three-turn loop: cold namespace
-(abstain), user supplies fact (store), user re-asks (answer from
-memory). Framework-agnostic; the framework chapters (LangGraph,
-CrewAI, OpenAI Agents) layer on top.
-
-### [`07_expertise_config_resumes.py`](07_expertise_config_resumes.py) — *VectorCypher (full-extraction lane)*
-
-Full-extraction lane — the replacement for the removed graphrag
-engine. Four CV blurbs, deliberate naming variants ("Stripe" vs
-"Stripe Inc."), domain-specific `ExpertiseConfig`. Shows
-`engine_kwargs={"skeleton_core_ratio": 1.0}` for "extract everything"
-on small dense corpora, plus how to canonicalize entities in the
-system prompt rather than via post-hoc dedup.
-
-> **Known issue.** The `unify_entities` pipeline helper that the demo
-> calls hits a method (`storage.graph.get_entities_by_namespace`) that
-> doesn't exist on any backend (Bug #9 in the repo audit). The demo
-> catches the AttributeError and continues — cross-document dedup is
-> currently degraded to whatever the LLM canonicalized via the system
-> prompt. Demo still runs end-to-end and shows the entity-centric APIs
-> correctly.
-
-### [`08_slack_archive_bulk.py`](08_slack_archive_bulk.py) — *Skeleton*
-
-Cost optimization. ~50 synthetic Slack messages (75% noise, 25%
-signal). Shows Skeleton's PageRank-style importance scorer picking
-~10% of chunks for full LLM extraction — and the napkin math: 5k LLM
-calls (Skeleton) vs ~35k (VectorCypher KET-RAG) vs 50k (full
-extraction) on 50k messages. Also demos `remember_batch` with
-`on_progress`, and time-filtered recall with SQL pushdown.
+- [`neo4j_debug_logging.py`](neo4j_debug_logging.py) — route the neo4j driver's
+  `DEBUG` logs through Khora's loguru sink to inspect Bolt traffic.
 
 ---
 
-## Scenario tutorials — one pattern each
+## Engine coverage
 
-Pick the ones that match what you're building.
-
-### Memory + agent frameworks
-
-#### [`chat_agent_langgraph.py`](chat_agent_langgraph.py) — *VectorCypher (default)*
-
-LangGraph integration via the `KhoraStore` adapter. Two-node
-StateGraph (recall → respond) backed by Khora memory. Drops the
-graph, rebuilds it with the same store, and the memory survives —
-demonstrating that memory belongs to the namespace, not the graph
-lifecycle.
-
-#### [`resume_session_openai_agents.py`](resume_session_openai_agents.py) — *Chronicle*
-
-OpenAI Agents SDK integration via `KhoraSession`. Two simulated
-sessions ("Monday", "Tuesday") on the same namespace, different
-session_ids. Shows session as a per-conversation handle, namespace as
-the actual isolation boundary, and `forget_session` for
-GDPR-friendly per-session cleanup.
-
-#### [`multi_agent_shared_memory_crewai.py`](multi_agent_shared_memory_crewai.py) — *VectorCypher (default)*
-
-CrewAI multi-agent pattern via the `KhoraMemory` adapter. Two agents
-(researcher, writer), three namespaces (one shared, two per-agent
-private). Shows the collaboration shape: researcher writes to shared,
-writer reads from shared and replies. Also verifies the isolation
-guarantee — writer's private namespace doesn't see researcher's
-TODOs.
-
-#### [`tool_router_learning_chronicle.py`](tool_router_learning_chronicle.py) — *Chronicle*
-
-Memory as a routing oracle. Two tools that look interchangeable;
-agent learns which one works for which request by recording
-outcomes. Recall-based route selection: find similar prior requests,
-tally tools that succeeded vs failed, pick the winner. Convergence
-visible across ~10 requests. The pattern transfers directly to
-"which RAG corpus", "which API endpoint", "which sub-agent".
-
-### Time and consolidation
-
-#### [`temporal_range_query_chronicle.py`](temporal_range_query_chronicle.py) — *Chronicle*
-
-Chronicle's killer demo. ~30 events spread over six simulated months
-across five narrative threads (postgres migration, deploy pipeline,
-security audit, rebrand, hiring). Five query shapes: unconstrained,
-single-month, quarter, anchored-by-event, negative (empty window).
-Shows SQL pushdown for the time filter — semantic ranking only runs
-on already-filtered candidates.
-
-#### [`dream_phase_rule_extraction_chronicle.py`](dream_phase_rule_extraction_chronicle.py) — *Chronicle*
-
-Offline maintenance — Khora's "dream phase". Ten observations,
-near-duplicates clustered into a representative "rule" event via
-`OpKind.CLUSTER_EVENTS`. Walks the `dry-run` → `apply` workflow with
-its bi-temporal soft-delete semantics. Shows the guardrails (7-day
-retention floor, kill-switch env var, advisory lock,
-snapshot-before-mutate) wired through a real op.
-
-#### [`feedback_loop_promotion.py`](feedback_loop_promotion.py) — *Chronicle*
-
-User feedback shifts memory ranking. Thumbs-up re-ingests with a
-fresh `occurred_at` to outrank older siblings; thumbs-down calls
-`forget(document_id, namespace=...)` to cascade-delete. Combines
-implicit decay with explicit gates on user signal — the operator
-feedback pattern wired end-to-end.
-
-### Storage and lifecycle (power-user)
-
-#### [`namespace_versioning.py`](namespace_versioning.py) — *VectorCypher (default)*
-
-Version a namespace end-to-end. Create v1, ingest data, cut v2 via
-`storage.create_namespace_version(previous_version=v1)`, ingest fresh
-data into v2. Then read either version's data via the storage layer
-using its row id (the "version handle"). Demonstrates the dual-UUID
-model on `MemoryNamespace` (`namespace_id` is stable; `id` is
-per-version) and the bridge `storage.resolve_namespace(stable_id)`.
-
-#### [`storage_backend_selector.py`](storage_backend_selector.py) — *VectorCypher (default)*
-
-The same Python code against three backends — `sqlite_lance` (default),
-`postgresql + neo4j`, and `surrealdb`. Pick by `--config`. Walks
-`create_namespace` → `remember` → `recall` → `list_entities` on each
-to show the API is backend-agnostic. Includes per-backend trade-offs
-and the SurrealDB v0.12.0 known-issues block.
-
-### Operator concerns
-
-#### [`neo4j_debug_logging.py`](neo4j_debug_logging.py) — *standalone*
-
-Routes neo4j Python driver `DEBUG` logs through the loguru sink Khora
-uses. Useful when a graph query is misbehaving and you want to see
-the actual Bolt traffic without losing Khora's own logs.
-
----
-
-## Engine coverage and when to pick each
+Each tutorial picks the engine that matches its scenario via
+`Khora(config, engine="…")` — read the docstring for the rationale.
 
 | Engine | Strengths | Examples |
 |---|---|---|
-| **VectorCypher** (default) | Multi-hop graph traversal, entity reasoning, query complexity routing, HippoRAG-style retrieval | `01_hello_memory`, `04_support_ticket_graph`, `07_expertise_config_resumes`, `chat_agent_langgraph`, `multi_agent_shared_memory_crewai`, `namespace_versioning`, `storage_backend_selector` |
-| **Chronicle** | Event streams, bi-temporal model, Ebbinghaus decay, abstention signals, time-bounded queries; no graph backend required | `02_per_user_preferences`, `03_document_qa_with_abstention`, `05_temporal_podcast`, `06_agent_memory_tool`, `temporal_range_query_chronicle`, `feedback_loop_promotion`, `resume_session_openai_agents`, `tool_router_learning_chronicle`, `dream_phase_rule_extraction_chronicle` |
-| **Skeleton** | Cost-efficient hybrid search; ~10% LLM extraction; long-form / large corpora | `08_slack_archive_bulk` |
+| **VectorCypher** (default) | Multi-hop graph traversal, entity reasoning, query-complexity routing, hybrid retrieval | all of `10_core_apis/`, `20_integrations/03`, `30_workloads/{03,06,08}` |
+| **Chronicle** | Event streams, bi-temporal model, Ebbinghaus decay, abstention signals, time-bounded queries; no graph backend required | `00_quickstart/02`, `20_integrations/{01,02}`, `30_workloads/{01,02,04,05,07,10}` |
+| **Skeleton** | Cost-efficient hybrid search; ~10% LLM extraction; long-form / large corpora | `00_quickstart/{01,03,04}`, `30_workloads/09` |
 
-### Current distribution and coverage gap
-
-Out of 18 tutorial files:
-
-- VectorCypher: **8 (44%)**
-- Chronicle: **9 (50%)**
-- Skeleton: **1 (6%)**
-
-The 60%-VectorCypher target isn't met yet — Chronicle is heavier than
-intended because the time / decay / abstention story is uniquely
-Chronicle's, and those scenarios mapped cleanly onto Chronicle-shaped
-demos. To rebalance to 60% VectorCypher we'd need three more
-VectorCypher-leaning tutorials. Candidates that would showcase
-strengths not yet demonstrated:
-
-- **Investigation / case-file workflow** — ingest case notes, query
-  "everyone connected to subject X within N hops" — uses
-  `find_related_entities`, graph depth tuning, query complexity routing.
-- **Knowledge graph QA over a corpus of papers / wiki** — multi-document
-  ingestion + entity-mediated cross-document retrieval. Shows the
-  `DualNodeManager` (Chunk + Entity nodes linked via `MENTIONED_IN`)
-  paying off for "which chunk supports which claim" answers.
-- **Comparison-shaped queries** — VectorCypher's
-  `QueryComplexityRouter` classifies queries as SIMPLE / MODERATE /
-  COMPLEX and changes the retrieval strategy. A demo that runs the
-  same corpus through all three shapes makes the router visible.
-
-These are listed for review, not committed work. Drop any of them in
-without disturbing the existing numbering.
-
-## Backend coverage
-
-Every tutorial above runs on both `sqlite_lance` (embedded, default)
-and `postgresql + neo4j` (standard). SurrealDB compatibility is
-partial — see the caveat block in `khora.surrealdb.yaml`. Known
-SurrealDB v0.12.0 limitations affect:
-
-- `find_related_entities` (demo 04) — SurrealQL parse error in
-  `get_neighborhood`.
-- `recall()` chunks=0 on the skeleton + vectorcypher engines (data IS
-  persisted; the search path filters them out).
-- `chunk.source_timestamp` returns `None` on recall — affects demos 05
-  and 08.
-- Chronicle event/fact persistence emits "No backend supports method
-  'write_events'" — affects demos 02, 03, 05, 06, and the four
-  scenario tutorials in the Chronicle column.
-
-`storage_backend_selector.py` runs cleanly on all three (it doesn't
-exercise the broken paths).
+Every tutorial runs on both `sqlite_lance` (embedded, default) and
+`postgresql + neo4j` (standard).
 
 ## File layout
 
 ```
 examples/
-├── 01_hello_memory.py                    # numbered tutorials — start here
-├── 02_per_user_preferences.py
-├── 03_document_qa_with_abstention.py
-├── 04_support_ticket_graph.py
-├── 05_temporal_podcast.py
-├── 06_agent_memory_tool.py
-├── 07_expertise_config_resumes.py
-├── 08_slack_archive_bulk.py
+├── 00_quickstart/                  # the core loop — start here
+│   ├── 01_remember_recall.py
+│   ├── 02_grounded_answers.py
+│   ├── 03_forget_what_was_wrong.py
+│   └── 04_namespaces_for_users.py
+├── 10_core_apis/                   # the API surface
+│   ├── 01_remember_batch.py
+│   ├── 02_recall_with_filters.py
+│   ├── 03_ontology_config.py
+│   ├── 04_recall_entities_and_relationships.py
+│   └── 05_find_related_entities.py
+├── 20_integrations/                # framework adapter tutorials
+│   ├── 01_langgraph.py
+│   ├── 02_openai_agents.py
+│   └── 03_crewai_multi_agent.py
+├── 30_workloads/                   # end-to-end scenarios (01–10)
+│   ├── 01_per_user_preferences.py
+│   ├── …
+│   └── 10_tool_router_learning.py
 │
-├── chat_agent_langgraph.py               # scenarios — one pattern each
-├── resume_session_openai_agents.py
-├── multi_agent_shared_memory_crewai.py
-├── tool_router_learning_chronicle.py
-├── temporal_range_query_chronicle.py
-├── dream_phase_rule_extraction_chronicle.py
-├── feedback_loop_promotion.py
-├── namespace_versioning.py
-├── storage_backend_selector.py
-├── neo4j_debug_logging.py                # operator helper
-│
-├── khora.embedded.yaml                   # configs — picks the backend
+├── khora.embedded.yaml             # configs — picks the backend
 ├── khora.standard.yaml
-├── khora.surrealdb.yaml
 │
-├── data/                                 # JSONL corpora
-│   ├── hr_policies.jsonl                 #   used by 03
-│   └── support_tickets.jsonl             #   used by 04
+├── data/                           # JSONL corpora
+│   ├── hr_policies.jsonl           #   used by 30_workloads/02
+│   ├── resumes.jsonl               #   used by 30_workloads/08
+│   └── support_tickets.jsonl       #   used by 10_core_apis/01 + 30_workloads/03
 │
-├── _helpers/                             # khora_for_examples + install_mock_llm
-├── config/                               # expertise + litellm sub-configs (used by 07)
-└── integrations/                         # per-adapter smoke tests (see its README)
+├── config/                         # expertise + litellm sub-configs
+├── _helpers/                       # shared khora fixtures + mock LLM
+├── integrations/                   # per-adapter smoke tests (see its README)
+└── neo4j_debug_logging.py          # operator helper
 ```
 
 ## Convention summary
@@ -343,8 +190,7 @@ examples/
 | Question | Answer |
 |---|---|
 | **Where do examples default?** | `sqlite_lance` (zero infra) via `khora.embedded.yaml`. |
-| **How to switch backend?** | `--config examples/khora.standard.yaml` (or `khora.surrealdb.yaml`) — every tutorial accepts the flag. |
+| **How to switch backend?** | `--config examples/khora.standard.yaml` — every tutorial accepts the flag. |
 | **How to switch engine?** | Each tutorial picks the engine that matches its scenario via `Khora(config, engine="…")`. Read the docstring for the rationale. |
 | **Do examples make real LLM calls?** | Yes — numbered tutorials require `OPENAI_API_KEY`. Integration smoke tests under `integrations/<framework>/` use the deterministic mock LLM. |
 | **Override individual fields without editing YAML?** | Export the matching `KHORA_*` env var (e.g. `KHORA_LLM_MODEL=gpt-4o`) — pydantic-settings overlays it onto the loaded config. |
-| **What if my example needs a SurrealDB-broken path?** | Mark the YAML with the affected demo and skip on SurrealDB — the caveat block in `khora.surrealdb.yaml` is the canonical list. |
