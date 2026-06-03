@@ -80,29 +80,58 @@ EXPERTISE = ExpertiseConfig(
         "employer a role belongs to."
     ),
     entity_types=[
-        EntityTypeConfig(name="CANDIDATE", description="A person applying for or sourced into a role.",
-                         identifiers=["email", "name"], aliases=["APPLICANT"]),
-        EntityTypeConfig(name="EMPLOYER", description="A company that posts roles.",
-                         identifiers=["name"], aliases=["COMPANY"]),
+        EntityTypeConfig(
+            name="CANDIDATE",
+            description="A person applying for or sourced into a role.",
+            identifiers=["email", "name"],
+            aliases=["APPLICANT"],
+        ),
+        EntityTypeConfig(
+            name="EMPLOYER", description="A company that posts roles.", identifiers=["name"], aliases=["COMPANY"]
+        ),
         EntityTypeConfig(name="ROLE", description="An open position.", identifiers=["name"]),
         EntityTypeConfig(name="SKILL", description="A technical or professional skill.", identifiers=["name"]),
-        EntityTypeConfig(name="HIRING_MANAGER", description="The person running the hiring process.", identifiers=["name"]),
+        EntityTypeConfig(
+            name="HIRING_MANAGER", description="The person running the hiring process.", identifiers=["name"]
+        ),
     ],
     relationship_types=[
-        RelationshipTypeConfig(name="APPLIED_TO", description="Candidate applied to a role.",
-                               source_types=["CANDIDATE"], target_types=["ROLE"]),
-        RelationshipTypeConfig(name="ROLE_AT", description="A role belongs to an employer.",
-                               source_types=["ROLE"], target_types=["EMPLOYER"]),
-        RelationshipTypeConfig(name="HAS_SKILL", description="Candidate has a skill.",
-                               source_types=["CANDIDATE"], target_types=["SKILL"]),
-        RelationshipTypeConfig(name="MANAGED_BY", description="A role is run by a hiring manager.",
-                               source_types=["ROLE"], target_types=["HIRING_MANAGER"]),
-        RelationshipTypeConfig(name="TARGETS", description="Candidate is pursuing an employer (derived).",
-                               source_types=["CANDIDATE"], target_types=["EMPLOYER"]),
+        RelationshipTypeConfig(
+            name="APPLIED_TO",
+            description="Candidate applied to a role.",
+            source_types=["CANDIDATE"],
+            target_types=["ROLE"],
+        ),
+        RelationshipTypeConfig(
+            name="ROLE_AT",
+            description="A role belongs to an employer.",
+            source_types=["ROLE"],
+            target_types=["EMPLOYER"],
+        ),
+        RelationshipTypeConfig(
+            name="HAS_SKILL", description="Candidate has a skill.", source_types=["CANDIDATE"], target_types=["SKILL"]
+        ),
+        RelationshipTypeConfig(
+            name="MANAGED_BY",
+            description="A role is run by a hiring manager.",
+            source_types=["ROLE"],
+            target_types=["HIRING_MANAGER"],
+        ),
+        RelationshipTypeConfig(
+            name="TARGETS",
+            description="Candidate is pursuing an employer (derived).",
+            source_types=["CANDIDATE"],
+            target_types=["EMPLOYER"],
+        ),
     ],
     correlation_rules=[
-        CorrelationRule(name="dedupe_candidates", description="Same candidate seen in more than one note.",
-                        match_fields=["email", "name"], entity_types=["CANDIDATE"], confidence=0.85),
+        CorrelationRule(
+            name="dedupe_candidates",
+            description="Same candidate seen in more than one note.",
+            match_fields=["email", "name"],
+            entity_types=["CANDIDATE"],
+            confidence=0.85,
+        ),
     ],
     inference_rules=[
         InferenceRule(
@@ -112,7 +141,9 @@ EXPERTISE = ExpertiseConfig(
                 InferenceCondition(relationship="APPLIED_TO", source_type="CANDIDATE", target_type="ROLE"),
                 InferenceCondition(relationship="ROLE_AT", source_type="ROLE", target_type="EMPLOYER"),
             ],
-            then_relationship="TARGETS", then_source="first.source", then_target="second.target",
+            then_relationship="TARGETS",
+            then_source="first.source",
+            then_target="second.target",
             confidence=0.6,
         ),
     ],
@@ -171,8 +202,7 @@ async def main() -> None:
             relationship_types=EXPERTISE.get_relationship_type_names(),
         )
         litellm.acompletion = _orig_acompletion  # ensure restored
-        print(f"\nextracted {result.entities_extracted} entities, "
-              f"{result.relationships_created} relationships")
+        print(f"\nextracted {result.entities_extracted} entities, {result.relationships_created} relationships")
 
         entities = await kb.list_entities(namespace=ns_id, limit=50)
         histogram = Counter(e.entity_type for e in entities)
@@ -198,9 +228,11 @@ async def main() -> None:
         #     here via VectorCypherConfig(store_events=False), so they won't appear.
         #   • co-occurrence → ASSOCIATED_WITH edges between entities sharing a chunk.
         #     NOT configurable in VectorCypher, so these still appear above.
-        print("\nNote: event extraction is OFF (store_events=False) — no EVENT / "
-              "PARTICIPATED_IN. The remaining ASSOCIATED_WITH edges are co-occurrence "
-              "links khora adds during expansion; they are not configurable in VectorCypher.")
+        print(
+            "\nNote: event extraction is OFF (store_events=False) — no EVENT / "
+            "PARTICIPATED_IN. The remaining ASSOCIATED_WITH edges are co-occurrence "
+            "links khora adds during expansion; they are not configurable in VectorCypher."
+        )
 
 
 if __name__ == "__main__":
