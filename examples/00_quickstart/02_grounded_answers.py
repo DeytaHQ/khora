@@ -2,7 +2,7 @@
 
 The most common failure mode in production RAG isn't bad answers — it's
 refusing answers when the corpus has nothing to say. This demo shows
-how khora's Chronicle engine surfaces abstention signals so your
+how khora's VectorCypher engine surfaces abstention signals so your
 application can refuse to answer when it should, without having to
 roll your own confidence threshold or trust the LLM to know what it
 doesn't know.
@@ -23,9 +23,9 @@ right signal lives in ``result.engine_info``:
 
 There is no need to use LLM for this - you can, but it consumes tokens and time.
 
-Engine choice: **chronicle** — abstention signals are only emitted by
-the Chronicle and VectorCypher engines. Chronicle is the lighter of the
-two (no graph extraction), which is what we want in a quickstart.
+Engine choice: **vectorcypher** — khora's default engine, and one of the
+two (with Chronicle) that emit abstention signals. It runs here on the
+embedded ``sqlite_lance`` backend.
 
 Run it
 ======
@@ -84,7 +84,7 @@ async def answer(kb, namespace, question: str) -> None:
 
 async def main() -> None:
     config = KhoraConfig.from_yaml(_CONFIG)
-    async with Khora(config, engine="chronicle", run_migrations=True) as kb:
+    async with Khora(config, engine="vectorcypher", run_migrations=True) as kb:
         namespace = await kb.create_namespace()
         ns_id = namespace.namespace_id
 

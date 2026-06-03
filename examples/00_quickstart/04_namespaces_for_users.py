@@ -13,8 +13,8 @@ surfaces from Bob's, regardless of how you query for it (by exact
 string, by semantic relative, by anchor noun). That's the same shape
 as a real cross-tenant leak audit.
 
-Engine choice: **skeleton** for simplicity, but namespace semantics
-are uniform across engines.
+Engine choice: **vectorcypher** — khora's default engine. Namespace
+semantics are uniform across every engine.
 
 Run it
 ======
@@ -97,7 +97,7 @@ async def needle_check(kb, bob_ns, query: str) -> bool:
 
 async def main() -> None:
     config = KhoraConfig.from_yaml(_CONFIG)
-    async with Khora(config, engine="skeleton", run_migrations=True) as kb:
+    async with Khora(config, engine="vectorcypher", run_migrations=True) as kb:
         alice_ns = (await kb.create_namespace()).namespace_id
         bob_ns = (await kb.create_namespace()).namespace_id
 
