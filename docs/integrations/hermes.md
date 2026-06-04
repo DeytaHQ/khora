@@ -39,7 +39,7 @@ entry-point group (factory: `KhoraMemoryProvider`), so
 
 If your project must enforce the CVE floor, vendor or fork
 `hermes-agent` to relax its pin; track upstream's progress on
-[the pin relaxation](https://github.com/hermes-agent/hermes-agent/issues)
+[the pin relaxation](https://github.com/nousresearch/hermes-agent/issues)
 before the adapter can move back to a single-line install.
 
 ## Quick start
