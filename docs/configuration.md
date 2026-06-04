@@ -304,7 +304,7 @@ Khora uses loguru. Call `khora.logging_config.setup_logging()` once per process 
 
 ## Secrets
 
-API keys (OpenAI, Anthropic, etc.) are read from the environment variable named by `KHORA_LLM_API_KEY_ENV` (default `OPENAI_API_KEY`). Khora never reads credentials from disk. Rotate at the environment level - no restart is required beyond whatever your process manager provides.
+API keys (OpenAI, Anthropic, etc.) are read from the environment variable named by `KHORA_LLM_API_KEY_ENV` (default `OPENAI_API_KEY`). Khora never reads credentials from disk — they come from the environment. Credentials are read once when `KhoraConfig` is constructed and bound into the connection pools and the LLM client at startup, so **rotating a secret takes effect on the next process start** (or whenever you rebuild the config and reconnect) — there's no in-process reload.
 
 ### SecretStr-typed credential fields
 
