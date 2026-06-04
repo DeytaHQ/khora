@@ -521,11 +521,18 @@ class VectorCypherRetriever:
         # Lazy entity expansion cache: chunk_id -> expansion_score (0 = no match)
         self._expansion_cache: dict[UUID, float] = {}
 
-        # Cached cross-encoder reranker (lazy-init on first use, reused across queries)
+        # Cached cross-encoder reranker (lazy-init on first use, reused across queries).
+        # An ``asyncio.Lock`` makes the check-then-set explicit even though today's
+        # ``CrossEncoderReranker()`` constructor is synchronous: it survives a future
+        # refactor that adds an ``await`` between the check and the assignment, and
+        # documents at the call site that this state is shared across concurrent
+        # recall tasks (see issue #985).
         self._reranker: CrossEncoderReranker | None = None
+        self._reranker_lock = asyncio.Lock()
 
-        # Cached LLM reranker for temporal queries (lazy-init on first use)
+        # Cached LLM reranker for temporal queries (lazy-init on first use, same guard).
         self._llm_reranker: LLMReranker | None = None
+        self._llm_reranker_lock = asyncio.Lock()
 
         # Issue #814 — one-time WARNING dedupe for LLM-rerank skip reasons.
         # Tuples are ``(namespace_id_or_None, skip_reason)``; once a tuple
@@ -1963,8 +1970,9 @@ class VectorCypherRetriever:
         )
 
         try:
-            if self._reranker is None:
-                self._reranker = CrossEncoderReranker(model_name=self._config.reranking_model)
+            async with self._reranker_lock:
+                if self._reranker is None:
+                    self._reranker = CrossEncoderReranker(model_name=self._config.reranking_model)
             results = await self._reranker.rerank(
                 query, candidates, top_k=top_n, blend_weight=self._config.reranking_blend_weight
             )
@@ -2159,8 +2167,9 @@ class VectorCypherRetriever:
         )
 
         try:
-            if self._llm_reranker is None:
-                self._llm_reranker = LLMReranker(model=self._config.llm_reranking_model)
+            async with self._llm_reranker_lock:
+                if self._llm_reranker is None:
+                    self._llm_reranker = LLMReranker(model=self._config.llm_reranking_model)
             results = await self._llm_reranker.rerank(query, candidates, top_k=top_n, blend_weight=0.7)
 
             reranked: list[FusedResult] = []
