@@ -283,10 +283,7 @@ class TestRerankerLazyInitRace:
         ns = uuid4()
         with patch("khora.query.reranking.CrossEncoderReranker", _FakeReranker):
             await _asyncio.gather(
-                *[
-                    retriever._apply_reranking("q", list(fused_results), limit=1, namespace_id=ns)
-                    for _ in range(5)
-                ]
+                *[retriever._apply_reranking("q", list(fused_results), limit=1, namespace_id=ns) for _ in range(5)]
             )
 
         assert call_count == 1, f"expected one CrossEncoderReranker construction, got {call_count}"
@@ -313,10 +310,7 @@ class TestRerankerLazyInitRace:
         ns = uuid4()
         with patch("khora.query.reranking.LLMReranker", _FakeLLMReranker):
             await _asyncio.gather(
-                *[
-                    retriever._apply_llm_reranking("q", list(fused_results), limit=1, namespace_id=ns)
-                    for _ in range(5)
-                ]
+                *[retriever._apply_llm_reranking("q", list(fused_results), limit=1, namespace_id=ns) for _ in range(5)]
             )
 
         assert call_count == 1, f"expected one LLMReranker construction, got {call_count}"
