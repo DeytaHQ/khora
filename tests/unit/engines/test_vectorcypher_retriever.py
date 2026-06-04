@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -218,6 +218,103 @@ class TestRetrieverInit:
 
         assert retriever._dual_nodes is not None
         assert retriever._dual_nodes._pool_backend is raw_graph
+
+
+@pytest.mark.unit
+class TestRerankerLazyInitRace:
+    """Tests for the reranker lazy-init guard (issue #985).
+
+    Background. Both ``_apply_reranking`` and ``_apply_llm_reranking`` lazily
+    construct their reranker on first use. The construction itself is a cheap
+    synchronous call (the expensive sentence-transformers model load is
+    deferred to ``_get_model()`` inside ``rerank()``), so today the event-loop
+    serialization is enough to prevent multiple constructions — but only
+    incidentally. Any future change that adds an ``await`` between the check
+    and the assignment would re-open a race that, on macOS arm64, drove
+    concurrent CrossEncoder loads into MPS and segfaulted the process.
+
+    The ``asyncio.Lock`` makes the guarantee explicit and refactor-stable.
+    These tests pin the expected behavior so a future regression is caught
+    early, even on Linux where the original symptom never reproduced.
+    """
+
+    @pytest.fixture
+    def retriever(self) -> VectorCypherRetriever:
+        return VectorCypherRetriever(
+            vector_store=AsyncMock(),
+            neo4j_driver=AsyncMock(),
+            embedder=AsyncMock(),
+            config=RetrieverConfig(),
+        )
+
+    @pytest.fixture
+    def fused_results(self) -> list[FusedResult]:
+        """A single non-empty fused result so ``_apply_*reranking`` doesn't early-return."""
+        chunk = Chunk(id=uuid4(), namespace_id=uuid4(), document_id=uuid4(), content="hello")
+        return [FusedResult(item_id=chunk.id, item=chunk, rrf_score=0.9)]
+
+    async def test_init_creates_reranker_locks(self, retriever: VectorCypherRetriever) -> None:
+        """The retriever exposes asyncio.Lock instances for both rerankers."""
+        import asyncio as _asyncio
+
+        assert isinstance(retriever._reranker_lock, _asyncio.Lock)
+        assert isinstance(retriever._llm_reranker_lock, _asyncio.Lock)
+        assert retriever._reranker is None
+        assert retriever._llm_reranker is None
+
+    async def test_concurrent_apply_reranking_constructs_cross_encoder_once(
+        self,
+        retriever: VectorCypherRetriever,
+        fused_results: list[FusedResult],
+    ) -> None:
+        """5 concurrent first-touch calls construct exactly one CrossEncoderReranker."""
+        import asyncio as _asyncio
+
+        call_count = 0
+
+        class _FakeReranker:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                nonlocal call_count
+                call_count += 1
+
+            async def rerank(self, *args: object, **kwargs: object) -> list[object]:
+                return []
+
+        ns = uuid4()
+        with patch("khora.query.reranking.CrossEncoderReranker", _FakeReranker):
+            await _asyncio.gather(
+                *[retriever._apply_reranking("q", list(fused_results), limit=1, namespace_id=ns) for _ in range(5)]
+            )
+
+        assert call_count == 1, f"expected one CrossEncoderReranker construction, got {call_count}"
+        assert retriever._reranker is not None
+
+    async def test_concurrent_apply_llm_reranking_constructs_llm_reranker_once(
+        self,
+        retriever: VectorCypherRetriever,
+        fused_results: list[FusedResult],
+    ) -> None:
+        """Same guarantee for the LLM-reranker path (temporal queries)."""
+        import asyncio as _asyncio
+
+        call_count = 0
+
+        class _FakeLLMReranker:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                nonlocal call_count
+                call_count += 1
+
+            async def rerank(self, *args: object, **kwargs: object) -> list[object]:
+                return []
+
+        ns = uuid4()
+        with patch("khora.query.reranking.LLMReranker", _FakeLLMReranker):
+            await _asyncio.gather(
+                *[retriever._apply_llm_reranking("q", list(fused_results), limit=1, namespace_id=ns) for _ in range(5)]
+            )
+
+        assert call_count == 1, f"expected one LLMReranker construction, got {call_count}"
+        assert retriever._llm_reranker is not None
 
 
 @pytest.mark.unit
