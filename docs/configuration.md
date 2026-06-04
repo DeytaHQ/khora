@@ -80,7 +80,6 @@ go.
 | `KHORA_LLM_EXTRACTION_MODEL` | str | - | Override extraction model (shortcut for `llm.extraction_model`). |
 | `KHORA_DEBUG` | bool | `false` | Enable debug-level logging. |
 | `KHORA_ENVIRONMENT` | str | `development` | `development`, `staging`, or `production`. |
-| `KHORA_AUTH_ENABLED` | bool | `true` | Disable for local experimentation. |
 | `KHORA_APP_NAME` | str | `khora` | Used in logs and telemetry. |
 
 ## Storage
