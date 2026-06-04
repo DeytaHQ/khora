@@ -2,8 +2,8 @@
 
 We are comparing pure text search with semantic similarity.
 
-Engine choice: **skeleton** — the simplest, no entity extraction, no
-graph writes. Just chunks + embeddings.
+Engine choice: **vectorcypher** — khora's default engine, running here on
+the embedded ``sqlite_lance`` backend (hybrid vector + graph retrieval).
 
 Run it
 ======
@@ -61,7 +61,7 @@ async def main() -> None:
 
     # ── khora ──────────────────────────────────────────────────────────
     print("\n[khora.recall, semantic]")
-    async with Khora(config, engine="skeleton", run_migrations=True) as kb:
+    async with Khora(config, engine="vectorcypher", run_migrations=True) as kb:
         namespace = await kb.create_namespace()
         ns_id = namespace.namespace_id
 

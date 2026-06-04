@@ -12,8 +12,8 @@ corrected version. The ``document_id`` is the only handle ``forget()``
 takes — there's no fuzzy "find the bad memory by content match," which
 is intentional: forgetting by content is racy and silently overshoots.
 
-Engine choice: **skeleton** — forget semantics are the same across all
-engines, but skeleton keeps the demo cheap.
+Engine choice: **vectorcypher** — khora's default engine. ``forget()``
+semantics are the same across every engine.
 
 Run it
 ======
@@ -51,7 +51,7 @@ async def show_top(kb, namespace, query: str, label: str) -> None:
 
 async def main() -> None:
     config = KhoraConfig.from_yaml(_CONFIG)
-    async with Khora(config, engine="skeleton", run_migrations=True) as kb:
+    async with Khora(config, engine="vectorcypher", run_migrations=True) as kb:
         namespace = await kb.create_namespace()
         ns_id = namespace.namespace_id
 
