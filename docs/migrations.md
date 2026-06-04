@@ -84,7 +84,7 @@ Current dialect-gated migrations:
 
 ## SurrealDB
 
-SurrealDB doesn't use Alembic. The schema is defined with idempotent `DEFINE … IF NOT EXISTS` statements that execute on `SurrealDBBackend.connect()`. There's no migration flag; the schema is always current. See [architecture/storage-backends.md](architecture/storage-backends.md#surrealdb) for the schema layout.
+SurrealDB doesn't use Alembic. The schema is defined with idempotent `DEFINE … IF NOT EXISTS` statements that execute on `SurrealDBBackend.connect()`. There's no migration flag; the schema is always current. See [architecture/storage-backends.md](architecture/storage-backends.md#surrealdb-the-unified-backend) for the schema layout.
 
 In v0.16.0 the SurrealDB schema gained `DEFINE FIELD rel_id ON relates_to TYPE string` plus a `UNIQUE INDEX` on it, as part of the `table:⟨$var⟩` interpolation repair (PR #770 / issue #750) - see the v0.16.0 entry in [CHANGELOG.md](../CHANGELOG.md) for the full surface. The schema is reapplied automatically on `connect()`; no action is required on existing SurrealDB stores.
 

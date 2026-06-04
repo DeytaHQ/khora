@@ -14,11 +14,11 @@ per-op toggles.
 
 ## Sections
 
-- [`KHORA_STORAGE_GRAPH_*` — graph backend](#khora_storage_graph_-graph-backend)
-- [`KHORA_STORAGE_VECTOR_*` — vector backend](#khora_storage_vector_-vector-backend)
-- [`KHORA_STORAGE_SURREALDB_*` — unified SurrealDB](#khora_storage_surrealdb_-unified-surrealdb)
-- [`KHORA_STORAGE_SQLITE_LANCE_*` — SQLite + LanceDB unified](#khora_storage_sqlite_lance_-sqlite--lancedb-unified)
-- [`KHORA_DREAM_OPS_*` — dream-phase per-op toggles](#khora_dream_ops_-dream-phase-per-op-toggles)
+- [`KHORA_STORAGE_GRAPH_*` — graph backend](#khora_storage_graph_--graph-backend)
+- [`KHORA_STORAGE_VECTOR_*` — vector backend](#khora_storage_vector_--vector-backend)
+- [`KHORA_STORAGE_SURREALDB_*` — unified SurrealDB](#khora_storage_surrealdb_--unified-surrealdb)
+- [`KHORA_STORAGE_SQLITE_LANCE_*` — SQLite + LanceDB unified](#khora_storage_sqlite_lance_--sqlite--lancedb-unified)
+- [`KHORA_DREAM_OPS_*` — dream-phase per-op toggles](#khora_dream_ops_--dream-phase-per-op-toggles)
 
 ---
 

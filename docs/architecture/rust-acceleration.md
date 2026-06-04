@@ -453,7 +453,7 @@ pip install khora-accel
 
 ### Benchmark Infrastructure
 
-Benchmarks use the [Criterion](https://github.com/bhavsec/criterion.rs)
+Benchmarks use the [Criterion](https://github.com/bheisler/criterion.rs)
 micro-benchmarking framework:
 
 ```bash

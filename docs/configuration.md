@@ -188,7 +188,7 @@ Known gaps and warts:
 - **Install footprint** is ~130–180 MB unpacked (pyarrow + lancedb native + Arrow C++ runtime). "Embedded" means "no server", not "no native deps".
 - **IVF-PQ retraining** is automatic when the corpus grows past `retrain_factor × (rows at last training)`. Tune via `KHORA_STORAGE_SQLITE_LANCE_RETRAIN_FACTOR`.
 
-Vector index tuning lives on the `sqlite_lance` storage sub-config — see the [`KHORA_STORAGE_SQLITE_LANCE_*` table in nested-env-vars.md](nested-env-vars.md#khora_storage_sqlite_lance_-sqlite--lancedb-unified) for `DB_PATH`, `LANCE_PATH`, `EMBEDDING_DIMENSION`, `USE_HALFVEC`, `LANCE_INDEX`, `IVF_PARTITIONS`, `HNSW_M`, and `RETRAIN_FACTOR` with defaults and tuning guidance.
+Vector index tuning lives on the `sqlite_lance` storage sub-config — see the [`KHORA_STORAGE_SQLITE_LANCE_*` table in nested-env-vars.md](nested-env-vars.md#khora_storage_sqlite_lance_--sqlite--lancedb-unified) for `DB_PATH`, `LANCE_PATH`, `EMBEDDING_DIMENSION`, `USE_HALFVEC`, `LANCE_INDEX`, `IVF_PARTITIONS`, `HNSW_M`, and `RETRAIN_FACTOR` with defaults and tuning guidance.
 
 ### SurrealDB (experimental, unified store)
 
@@ -201,7 +201,7 @@ The SurrealDB backend is feature-complete (relational + vector + graph + KV in a
 
 Connection schemes: `memory://` (in-process), `surrealkv://...` (embedded file), `ws://...` (remote). Note: `Khora("memory://")` does **not** route to SurrealDB today - the positional argument is treated as the PostgreSQL `database_url`. Set `KHORA_STORAGE_BACKEND=surrealdb` and the relevant `KHORA_STORAGE_SURREALDB_*` settings explicitly.
 
-Remote (`ws://`) mode supports atomic multi-statement transactions via `conn.transaction()`. Embedded (`surrealkv://`) and memory (`memory://`) modes are per-statement atomic only - `transaction()` is a no-op there, and multi-statement atomicity is approximated by `execute_batch()` (joins statements with `;`). See [architecture/storage-backends.md](architecture/storage-backends.md#surrealdb) for the capability matrix.
+Remote (`ws://`) mode supports atomic multi-statement transactions via `conn.transaction()`. Embedded (`surrealkv://`) and memory (`memory://`) modes are per-statement atomic only - `transaction()` is a no-op there, and multi-statement atomicity is approximated by `execute_batch()` (joins statements with `;`). See [architecture/storage-backends.md](architecture/storage-backends.md#surrealdb-the-unified-backend) for the capability matrix.
 
 ## LLM
 
