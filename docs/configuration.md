@@ -272,17 +272,27 @@ Prefix: `KHORA_TENANCY_`.
 
 ## Telemetry
 
+Khora has two **independent** telemetry paths.
+
+**Spans and metrics (OpenTelemetry).** Khora emits spans (`@trace`,
+`trace_span()`) and metrics through the OpenTelemetry API unconditionally.
+Whether they're *exported* depends only on which `TracerProvider` /
+`MeterProvider` is installed — not on any `KHORA_*` variable. Install the
+`[otel]` extra and call `configure_telemetry()` (honors `OTEL_*` env vars),
+or install `[logfire]` and run `logfire.configure()`, and khora's signals
+flow to your collector. With no provider configured, OTel returns a
+`NonRecordingSpan` and the helpers are near-free. See
+[observability.md](observability.md) for the full setup and the OTLP
+env-var contract.
+
+**Structured event log (PostgreSQL).** Separately, khora can write
+structured `LLMEvent` / `StorageEvent` / `PipelineEvent` rows to a
+PostgreSQL table. This is opt-in and independent of the OTel path above.
+
 | Variable | Default | Description |
 |---|---|---|
-| `KHORA_TELEMETRY_DATABASE_URL` | - | PostgreSQL URL for the telemetry collector. If unset, the no-op collector is used (zero cost). |
-| `KHORA_TELEMETRY_SERVICE_NAME` | `khora` | Service tag attached to events. |
-
-The `@trace` decorator and `trace_span()` context manager in
-`khora.telemetry` emit through the OpenTelemetry API. When no real
-`TracerProvider` is installed, OTel returns a `NonRecordingSpan` and
-the helpers are near-free. See [observability.md](observability.md)
-for `configure_telemetry()`, the `[otel]` and `[logfire]` extras, and
-the OTLP env-var contract.
+| `KHORA_TELEMETRY_DATABASE_URL` | - | PostgreSQL URL for the structured event collector. Unset → a zero-cost no-op collector. Does **not** affect OTel spans/metrics. |
+| `KHORA_TELEMETRY_SERVICE_NAME` | `khora` | Service tag attached to recorded events. |
 
 ## Logging
 
