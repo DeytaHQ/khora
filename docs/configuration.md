@@ -183,7 +183,7 @@ Documented scale ceiling - performance and recall degrade noticeably above these
 Known gaps and warts:
 
 - **Partial atomicity in `coordinator.transaction()`** - only the SQL session is enrolled; LanceDB writes happen post-commit with compensating-delete-on-failure. A crash between SQLite commit and Lance write can leave orphaned vectors or missing embeddings; reconciliation runs on the next ingest.
-- **Point-in-time queries are not supported** on the embedded stack. The CTE port does not expose the equivalent of pgvector's PIT semantics.
+- **Point-in-time queries are not supported** on the embedded stack — `target_date` queries raise `NotImplementedError`. The bi-temporal entity versioning that powers them lives in Neo4j (`version_valid_from` / `version_valid_to` on `:Entity` / `:EntityVersion` nodes), which `sqlite_lance` has no equivalent of.
 - **FTS5 covers chunks only** - entity-anchored recall falls back to `LIKE` / JSON-equality. Recommend the PostgreSQL stack for entity-heavy corpora.
 - **Install footprint** is ~130–180 MB unpacked (pyarrow + lancedb native + Arrow C++ runtime). "Embedded" means "no server", not "no native deps".
 - **IVF-PQ retraining** is automatic when the corpus grows past `retrain_factor × (rows at last training)`. Tune via `KHORA_STORAGE_SQLITE_LANCE_RETRAIN_FACTOR`.
