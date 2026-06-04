@@ -128,6 +128,58 @@ class TestCrossEncoderReranker:
         assert results[0].final_score == 0.9
 
 
+class TestCrossEncoderDeviceSelection:
+    """Tests for the device-selection policy (issue #985).
+
+    The cross-encoder's ``__init__`` resolves ``device=None`` to a concrete
+    string only on macOS arm64, where it pins to ``"cpu"`` to dodge the
+    torch-MPS thread-unsafety that segfaulted under concurrent
+    ``asyncio.to_thread(model.predict, ...)`` calls. On every other
+    platform — Linux, Intel Mac, Windows — the code path is dead and
+    ``device`` stays ``None`` (= sentence-transformers' auto-select).
+    """
+
+    def test_default_pinned_to_cpu_on_darwin_arm64(self) -> None:
+        """On Apple Silicon, ``device=None`` resolves to ``'cpu'``."""
+        with patch("khora.query.reranking.platform") as fake_platform:
+            fake_platform.system.return_value = "Darwin"
+            fake_platform.machine.return_value = "arm64"
+            r = CrossEncoderReranker()
+        assert r._device == "cpu"
+
+    def test_default_unchanged_on_linux_x86_64(self) -> None:
+        """On Linux, ``device=None`` stays None (sentence-transformers auto-selects)."""
+        with patch("khora.query.reranking.platform") as fake_platform:
+            fake_platform.system.return_value = "Linux"
+            fake_platform.machine.return_value = "x86_64"
+            r = CrossEncoderReranker()
+        assert r._device is None
+
+    def test_default_unchanged_on_linux_arm64(self) -> None:
+        """On Linux arm64 (e.g. Graviton), ``device=None`` stays None — only Darwin+arm64 hits the pin."""
+        with patch("khora.query.reranking.platform") as fake_platform:
+            fake_platform.system.return_value = "Linux"
+            fake_platform.machine.return_value = "aarch64"
+            r = CrossEncoderReranker()
+        assert r._device is None
+
+    def test_default_unchanged_on_intel_mac(self) -> None:
+        """On Intel Macs, ``device=None`` stays None — MPS isn't in the picture."""
+        with patch("khora.query.reranking.platform") as fake_platform:
+            fake_platform.system.return_value = "Darwin"
+            fake_platform.machine.return_value = "x86_64"
+            r = CrossEncoderReranker()
+        assert r._device is None
+
+    def test_explicit_device_overrides_darwin_arm64_pin(self) -> None:
+        """Passing ``device='mps'`` explicitly opts back in even on Apple Silicon."""
+        with patch("khora.query.reranking.platform") as fake_platform:
+            fake_platform.system.return_value = "Darwin"
+            fake_platform.machine.return_value = "arm64"
+            r = CrossEncoderReranker(device="mps")
+        assert r._device == "mps"
+
+
 class TestLLMReranker:
     """Tests for LLMReranker."""
 

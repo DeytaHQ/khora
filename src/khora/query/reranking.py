@@ -8,6 +8,7 @@ Provides neural re-ranking of search results using:
 from __future__ import annotations
 
 import asyncio
+import platform
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,6 +23,16 @@ if TYPE_CHECKING:
     from khora.storage.coordinator import StorageCoordinator
 
 T = TypeVar("T")
+
+
+def _is_darwin_arm64() -> bool:
+    """True on Apple Silicon Macs.
+
+    Used to pin the cross-encoder reranker to CPU because torch-MPS is
+    not thread-safe under concurrent ``.predict()`` calls dispatched
+    through ``asyncio.to_thread`` (see issue #985).
+    """
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
 
 
 @dataclass
@@ -173,7 +184,14 @@ class CrossEncoderReranker(Reranker):
 
         Args:
             model_name: Cross-encoder model name from sentence-transformers
-            device: Device to use (cuda, cpu, or None for auto)
+            device: Device to use (cuda, cpu, or None for auto). When ``None``
+                on macOS arm64, the device is pinned to ``cpu``: sentence-
+                transformers would otherwise default to the MPS backend, and
+                torch-MPS is not thread-safe under concurrent ``.predict()``
+                calls dispatched through ``asyncio.to_thread`` (see issue
+                #985). The CPU path is ~2-3x slower per rerank batch but
+                stable. Pass ``device="mps"`` explicitly to opt back in if
+                your call pattern is known-serialized.
             batch_size: Batch size for scoring
             include_date_prefix: When True, prepend ``[YYYY-MM-DD] `` to each
                 candidate's content using the source timestamp from
@@ -184,6 +202,13 @@ class CrossEncoderReranker(Reranker):
                 forward pass. Default OFF; flip after a positive A/B on
                 the corporate-shape benchmark. Issue #594 (Phase D5).
         """
+        if device is None and _is_darwin_arm64():
+            device = "cpu"
+            logger.debug(
+                "CrossEncoderReranker pinned to device='cpu' on macOS arm64 "
+                "(torch-MPS is not thread-safe under concurrent .predict() — issue #985). "
+                "Pass device='mps' explicitly to override."
+            )
         self._model_name = model_name
         self._device = device
         self._batch_size = batch_size
