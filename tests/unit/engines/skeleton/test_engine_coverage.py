@@ -160,6 +160,111 @@ class TestProcessDocument:
 
 
 # ---------------------------------------------------------------------------
+# Chunk metadata = document metadata merged with bookkeeping keys
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestChunkMetadataMerge:
+    """Document metadata is spread onto every chunk's ``metadata`` so
+    ``metadata.<path>`` filters can read it back, while the bookkeeping keys
+    (``chunk_index`` / ``start_char`` / ``end_char``) always win on collision."""
+
+    @pytest.mark.asyncio
+    async def test_process_document_merges_doc_metadata(self) -> None:
+        eng = _connected()
+
+        document = MagicMock()
+        document.id = uuid4()
+        document.namespace_id = uuid4()
+        document.content = "lorem ipsum"
+        # Real dict so the {**doc_metadata, ...} spread carries the keys; a
+        # colliding ``chunk_index`` proves the bookkeeping key wins.
+        document.metadata = {"tag": "release", "source_name": "linear", "chunk_index": 999}
+        document.mark_completed = MagicMock()
+
+        raw = SimpleNamespace(content="chunk text", start_char=3, end_char=13)
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = [raw]
+
+        eng._embedder.embed_batch = AsyncMock(return_value=[[0.1, 0.2]])
+        eng._temporal_store.create_chunks_batch = AsyncMock(return_value=[object()])
+
+        with patch(
+            "khora.extraction.chunkers.create_chunker",
+            return_value=mock_chunker,
+        ):
+            await eng._process_document(
+                document,
+                skill_name="general",
+                occurred_at=datetime(2024, 1, 1, tzinfo=UTC),
+            )
+
+        sent_chunks = eng._temporal_store.create_chunks_batch.call_args[0][0]
+        assert len(sent_chunks) == 1
+        md = sent_chunks[0].metadata
+        # Document keys propagated.
+        assert md["tag"] == "release"
+        assert md["source_name"] == "linear"
+        # Bookkeeping keys present and authoritative — the doc's colliding
+        # chunk_index=999 must NOT survive.
+        assert md["chunk_index"] == 0
+        assert md["start_char"] == 3
+        assert md["end_char"] == 13
+
+    @pytest.mark.asyncio
+    async def test_remember_batch_merges_doc_metadata(self) -> None:
+        eng = _connected()
+        eng._storage.get_documents_by_checksums = AsyncMock(return_value={})
+
+        ns = uuid4()
+
+        def _make_doc(content: str) -> MagicMock:
+            doc = MagicMock()
+            doc.id = uuid4()
+            doc.namespace_id = ns
+            doc.content = content
+            doc.mark_completed = MagicMock()
+            return doc
+
+        eng._storage.create_document = AsyncMock(side_effect=lambda d: _make_doc(d.content))
+        eng._storage.update_document = AsyncMock()
+
+        raw = SimpleNamespace(content="chunk text", start_char=3, end_char=13)
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = [raw]
+        eng._embedder.embed_batch = AsyncMock(return_value=[[0.1, 0.2]])
+        eng._temporal_store.create_chunks_batch = AsyncMock(return_value=[object()])
+
+        with patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker):
+            await eng.remember_batch(
+                [
+                    {
+                        "content": "a",
+                        "metadata": {
+                            "tag": "release",
+                            "source_name": "linear",
+                            "chunk_index": 999,
+                        },
+                    }
+                ],
+                ns,
+                entity_types=[],
+                relationship_types=[],
+            )
+
+        sent_chunks = eng._temporal_store.create_chunks_batch.call_args[0][0]
+        assert len(sent_chunks) == 1
+        md = sent_chunks[0].metadata
+        assert md["tag"] == "release"
+        assert md["source_name"] == "linear"
+        # Real chunk_index wins over the colliding doc-metadata value.
+        assert md["chunk_index"] == 0
+        assert md["start_char"] == 3
+        assert md["end_char"] == 13
+
+
+# ---------------------------------------------------------------------------
 # remember_batch() — empty + all-skipped
 # ---------------------------------------------------------------------------
 
