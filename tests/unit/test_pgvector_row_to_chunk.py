@@ -34,6 +34,14 @@ def _make_row(embedding=None, tags=None):
         confidence=0.95,
         metadata={"key": "value"},
         chunker_info={},
+        source_type="email",
+        source_name="inbox",
+        source_url="https://example.test/msg/1",
+        source_timestamp=datetime(2024, 6, 16, tzinfo=UTC),
+        external_id="ext-1",
+        content_type="text/plain",
+        source="mailbox",
+        title="Subject line",
     )
 
 

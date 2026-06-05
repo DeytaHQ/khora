@@ -37,7 +37,13 @@ from khora.query import SearchMode
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
 from khora.telemetry import trace, trace_span
 
-from .backends import TemporalChunk, TemporalFilter, TemporalVectorStore, create_temporal_store
+from .backends import (
+    TemporalChunk,
+    TemporalFilter,
+    TemporalVectorStore,
+    create_temporal_store,
+    document_denorm_fields,
+)
 
 if TYPE_CHECKING:
     from khora.extraction.chunkers import ChunkStrategy
@@ -465,6 +471,7 @@ class SkeletonConstructionEngine:
                     "start_char": raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0,
                     "end_char": raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content),
                 },
+                **document_denorm_fields(document),
             )
             temporal_chunks.append(temporal_chunk)
 
@@ -585,7 +592,8 @@ class SkeletonConstructionEngine:
                     **(result.chunk.metadata or {}),
                 },
                 created_at=result.chunk.created_at or result.chunk.occurred_at or datetime.now(UTC),
-                source_timestamp=result.chunk.occurred_at,
+                occurred_at=result.chunk.occurred_at,
+                source_timestamp=result.chunk.source_timestamp,
             )
             chunks_with_scores.append((chunk, result.combined_score or result.similarity))
 
@@ -601,7 +609,7 @@ class SkeletonConstructionEngine:
                 content=chunk.content,
                 score=score,
                 created_at=chunk.created_at,
-                occurred_at=chunk.source_timestamp,
+                occurred_at=(chunk.occurred_at if chunk.occurred_at is not None else chunk.source_timestamp),
                 chunker_info=chunk.chunker_info or {},
             )
             for (chunk, _), score in zip(chunks_with_scores, normalized_chunk_scores, strict=False)
@@ -1030,6 +1038,7 @@ class SkeletonConstructionEngine:
                         "start_char": (raw_chunk.start_char if hasattr(raw_chunk, "start_char") else 0),
                         "end_char": (raw_chunk.end_char if hasattr(raw_chunk, "end_char") else len(raw_chunk.content)),
                     },
+                    **document_denorm_fields(doc),
                 )
                 temporal_chunks.append(temporal_chunk)
 

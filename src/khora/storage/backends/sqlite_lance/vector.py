@@ -323,7 +323,8 @@ class SQLiteLanceVectorAdapter:
             embedding=None,
             embedding_model=str(md.get("embedding_model", "") or ""),
             created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
-            source_timestamp=_parse_dt(row["occurred_at"]),
+            occurred_at=_parse_dt(row["occurred_at"]),
+            source_timestamp=_parse_dt(row["source_timestamp"]),
             session_id=session_id,
         )
 

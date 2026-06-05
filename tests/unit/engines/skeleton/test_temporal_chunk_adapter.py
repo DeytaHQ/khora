@@ -9,8 +9,9 @@ adaptation:
 * ``created_at`` (GH #810) — drives temporal-decay reranking
 * ``session_id`` (GH #620) — pulled from ``TemporalChunk.metadata``
 
-``occurred_at`` maps to ``Chunk.source_timestamp`` so temporal boosts
-key on event time rather than ingest time.
+``occurred_at`` (chunk event-time) and ``source_timestamp`` (producer
+verbatim time) are surfaced as distinct fields; the recall projection
+applies the event-time-then-producer-time fallback downstream.
 """
 
 from __future__ import annotations
@@ -53,19 +54,23 @@ def test_preserves_created_at() -> None:
     assert c.created_at == ts
 
 
-def test_maps_occurred_at_to_source_timestamp() -> None:
+def test_surfaces_occurred_at_distinctly() -> None:
+    """The chunk event-time is surfaced on its own field, not collapsed."""
     ts = datetime(2024, 11, 20, 8, 0, tzinfo=UTC)
     c = temporal_chunk_to_chunk(_make_tc(occurred_at=ts))
-    assert c.source_timestamp == ts
+    assert c.occurred_at == ts
+    # No producer value supplied → source_timestamp stays unset; the
+    # event-time-then-producer-time fallback lives in the recall projection.
+    assert c.source_timestamp is None
 
 
 def test_source_timestamp_is_distinct_from_occurred_at() -> None:
-    """The producer ``source_timestamp`` survives as a value of its own.
+    """The producer ``source_timestamp`` and chunk ``occurred_at`` both survive.
 
     Tripwire for date-collapse: when a chunk carries BOTH a chunk event-time
     (``occurred_at``) and a distinct producer time (``source_timestamp``), the
-    adapter must surface the producer value — not silently collapse it onto
-    ``occurred_at``.
+    adapter must surface each as its own value — never collapse one onto the
+    other.
     """
     occurred = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
     produced = datetime(2024, 6, 15, 9, 30, tzinfo=UTC)
@@ -73,15 +78,22 @@ def test_source_timestamp_is_distinct_from_occurred_at() -> None:
 
     c = temporal_chunk_to_chunk(_make_tc(occurred_at=occurred, source_timestamp=produced))
 
+    assert c.occurred_at == occurred
     assert c.source_timestamp == produced
-    assert c.source_timestamp != occurred
+    assert c.source_timestamp != c.occurred_at
 
 
-def test_source_timestamp_falls_back_to_occurred_at_when_absent() -> None:
-    """No producer value → fall back to the chunk event-time."""
+def test_source_timestamp_not_derived_from_occurred_at() -> None:
+    """No producer value → source_timestamp stays None (no adapter fallback).
+
+    The event-time-then-producer-time fallback now lives in the recall
+    projection, so the adapter must not silently derive source_timestamp
+    from the chunk event-time.
+    """
     occurred = datetime(2024, 3, 10, 7, 0, tzinfo=UTC)
     c = temporal_chunk_to_chunk(_make_tc(occurred_at=occurred, source_timestamp=None))
-    assert c.source_timestamp == occurred
+    assert c.occurred_at == occurred
+    assert c.source_timestamp is None
 
 
 def test_source_timestamp_none_when_both_absent() -> None:
