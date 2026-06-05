@@ -182,7 +182,7 @@ Documented scale ceiling - performance and recall degrade noticeably above these
 Known gaps and warts:
 
 - **Partial atomicity in `coordinator.transaction()`** - only the SQL session is enrolled; LanceDB writes happen post-commit with compensating-delete-on-failure. A crash between SQLite commit and Lance write can leave orphaned vectors or missing embeddings; reconciliation runs on the next ingest.
-- **Point-in-time queries are not supported** on the embedded stack. The CTE port does not expose the equivalent of pgvector's PIT semantics.
+- **Point-in-time queries are not supported** on the embedded stack — `target_date` queries raise `NotImplementedError`. The bi-temporal entity versioning that powers them lives in Neo4j (`version_valid_from` / `version_valid_to` on `:Entity` / `:EntityVersion` nodes), which `sqlite_lance` has no equivalent of.
 - **FTS5 covers chunks only** - entity-anchored recall falls back to `LIKE` / JSON-equality. Recommend the PostgreSQL stack for entity-heavy corpora.
 - **Install footprint** is ~130–180 MB unpacked (pyarrow + lancedb native + Arrow C++ runtime). "Embedded" means "no server", not "no native deps".
 - **IVF-PQ retraining** is automatic when the corpus grows past `retrain_factor × (rows at last training)`. Tune via `KHORA_STORAGE_SQLITE_LANCE_RETRAIN_FACTOR`.
@@ -271,17 +271,27 @@ Prefix: `KHORA_TENANCY_`.
 
 ## Telemetry
 
+Khora has two **independent** telemetry paths.
+
+**Spans and metrics (OpenTelemetry).** Khora emits spans (`@trace`,
+`trace_span()`) and metrics through the OpenTelemetry API unconditionally.
+Whether they're *exported* depends only on which `TracerProvider` /
+`MeterProvider` is installed — not on any `KHORA_*` variable. Install the
+`[otel]` extra and call `configure_telemetry()` (honors `OTEL_*` env vars),
+or install `[logfire]` and run `logfire.configure()`, and khora's signals
+flow to your collector. With no provider configured, OTel returns a
+`NonRecordingSpan` and the helpers are near-free. See
+[observability.md](observability.md) for the full setup and the OTLP
+env-var contract.
+
+**Structured event log (PostgreSQL).** Separately, khora can write
+structured `LLMEvent` / `StorageEvent` / `PipelineEvent` rows to a
+PostgreSQL table. This is opt-in and independent of the OTel path above.
+
 | Variable | Default | Description |
 |---|---|---|
-| `KHORA_TELEMETRY_DATABASE_URL` | - | PostgreSQL URL for the telemetry collector. If unset, the no-op collector is used (zero cost). |
-| `KHORA_TELEMETRY_SERVICE_NAME` | `khora` | Service tag attached to events. |
-
-The `@trace` decorator and `trace_span()` context manager in
-`khora.telemetry` emit through the OpenTelemetry API. When no real
-`TracerProvider` is installed, OTel returns a `NonRecordingSpan` and
-the helpers are near-free. See [observability.md](observability.md)
-for `configure_telemetry()`, the `[otel]` and `[logfire]` extras, and
-the OTLP env-var contract.
+| `KHORA_TELEMETRY_DATABASE_URL` | - | PostgreSQL URL for the structured event collector. Unset → a zero-cost no-op collector. Does **not** affect OTel spans/metrics. |
+| `KHORA_TELEMETRY_SERVICE_NAME` | `khora` | Service tag attached to recorded events. |
 
 ## Logging
 
@@ -293,7 +303,7 @@ Khora uses loguru. Call `khora.logging_config.setup_logging()` once per process 
 
 ## Secrets
 
-API keys (OpenAI, Anthropic, etc.) are read from the environment variable named by `KHORA_LLM_API_KEY_ENV` (default `OPENAI_API_KEY`). Khora never reads credentials from disk. Rotate at the environment level - no restart is required beyond whatever your process manager provides.
+API keys (OpenAI, Anthropic, etc.) are read from the environment variable named by `KHORA_LLM_API_KEY_ENV` (default `OPENAI_API_KEY`). Khora never reads credentials from disk — they come from the environment. Credentials are read once when `KhoraConfig` is constructed and bound into the connection pools and the LLM client at startup, so **rotating a secret takes effect on the next process start** (or whenever you rebuild the config and reconnect) — there's no in-process reload.
 
 ### SecretStr-typed credential fields
 
