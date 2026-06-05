@@ -296,7 +296,7 @@ class TestMigration032OnSqlite:
                 async with engine.connect() as conn:
                     # Chain reached head (sanity).
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "043_khora_chunks_metadata_backfill"
+                    assert result.scalar() == "044_khora_chunks_backfill_denormalized"
 
                     # khora_dream_runs exists on SQLite (#896) so dream_history /
                     # dream_status work on the embedded sqlite_lance stack.
