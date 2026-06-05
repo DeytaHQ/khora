@@ -1323,6 +1323,23 @@ class VectorCypherRetriever:
         elif self._config.enable_ppr_retrieval and self._storage is not None:
             from khora.engines.vectorcypher.ppr_retrieval import ppr_retrieve_chunks
 
+            # Build a chunk_id -> cosine-similarity map from the vector channel so
+            # PPR can blend graph mass with query relevance (HippoRAG-2 style,
+            # mass * (1 + sim)) instead of ordering chunks query-agnostically by
+            # pure PR mass. The vector task is awaited here and again at Step 6;
+            # asyncio caches the result, so this peek is effectively free.
+            chunk_similarity: dict[UUID, float] = {}
+            try:
+                if _session_aware_chunks is not None:
+                    _vc_for_sim = _session_aware_chunks
+                elif vector_chunks_task is not None:
+                    _vc_for_sim = await vector_chunks_task
+                else:
+                    _vc_for_sim = []
+                chunk_similarity = {cid: score for cid, score, _ in _vc_for_sim}
+            except Exception:  # noqa: S110 - sim is optional; PPR still runs without it
+                chunk_similarity = {}
+
             ppr_chunks, ppr_entity_scores = await ppr_retrieve_chunks(
                 storage=self._storage,
                 namespace_id=namespace_id,
@@ -1331,6 +1348,7 @@ class VectorCypherRetriever:
                 max_iter=self._config.ppr_max_iter,
                 tol=self._config.ppr_tol,
                 top_entities=self._config.ppr_top_entities,
+                chunk_similarity=chunk_similarity,
                 limit=limit * 2,
             )
             graph_chunks = ppr_chunks
