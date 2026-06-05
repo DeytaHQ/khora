@@ -80,9 +80,9 @@ khora_chunks_table = Table(
     Column("source_name", String(255), nullable=True),
     Column("source_url", Text, nullable=True),
     Column("source_timestamp", DateTime(timezone=True), nullable=True),
-    Column("external_id", String(255), nullable=True),
+    Column("external_id", String(512), nullable=True),
     Column("content_type", String(128), nullable=True),
-    Column("source", String(255), nullable=True),
+    Column("source", Text, nullable=True),
     Column("title", Text, nullable=True),
     # Full-text search
     Column("content_tsv", TSVECTOR, nullable=True),
