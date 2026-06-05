@@ -895,3 +895,38 @@ def test_unsupported_error_is_khora_error() -> None:
     from khora.exceptions import KhoraError
 
     assert isinstance(RecallFilterUnsupportedError(path="p", reason="r"), KhoraError)
+
+
+# ---------------------------------------------------------------------------
+# Recursion-depth guard — over-deep filters fail cleanly, not as RecursionError
+# ---------------------------------------------------------------------------
+
+
+def test_excessively_deep_metadata_nesting_raises_clean_error() -> None:
+    # A pathologically deep equality operand must raise RecallFilterValidationError
+    # (code max_depth_exceeded) from the iterative depth guard — never an uncaught
+    # RecursionError from the recursive metadata-grammar walk.
+    deep: dict = {"$gt": 1}
+    for _ in range(400):
+        deep = {"a": deep}
+    with pytest.raises(RecallFilterValidationError) as exc:
+        RecallFilter.model_validate({"metadata.x": deep})
+    assert any(e.code == "max_depth_exceeded" for e in exc.value.errors)
+
+
+def test_excessively_deep_logical_nesting_raises_clean_error() -> None:
+    # Deeply nested $and must fail as RecallFilterValidationError before pydantic
+    # recurses the model that deep (which would otherwise hit RecursionError).
+    deep: dict = {"source_name": "linear"}
+    for _ in range(400):
+        deep = {"$and": [deep]}
+    with pytest.raises(RecallFilterValidationError):
+        RecallFilter.model_validate(deep)
+
+
+def test_reasonable_nesting_within_limit_passes() -> None:
+    # A moderately nested filter (well under the depth bound) validates fine.
+    deep: dict = {"source_name": "linear"}
+    for _ in range(8):
+        deep = {"$and": [deep]}
+    RecallFilter.model_validate(deep)

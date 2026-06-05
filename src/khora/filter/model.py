@@ -193,6 +193,38 @@ def _raise(path: str, code: str, message: str, *, allowed: list[str] | None = No
     raise RecallFilterValidationError([FieldError(path=path, code=code, message=message, allowed=allowed)])
 
 
+# Far above any legitimate filter (real filters nest only a few levels); well
+# below CPython's recursion limit, so deep input fails cleanly, not as a crash.
+_MAX_FILTER_DEPTH = 100
+
+
+def _check_depth(data: Any) -> None:
+    """Reject a filter nested beyond ``_MAX_FILTER_DEPTH`` before deep recursion.
+
+    Walks the raw filter iteratively (an explicit stack — never recursing) so an
+    adversarially deep filter raises a clean ``RecallFilterValidationError``
+    instead of an uncaught ``RecursionError`` from pydantic's recursive model
+    validation or the metadata-grammar walk.
+    """
+    if not isinstance(data, (dict, list)):
+        return
+    stack: list[tuple[Any, int]] = [(data, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > _MAX_FILTER_DEPTH:
+            _raise(
+                "/",
+                "max_depth_exceeded",
+                f"filter nesting exceeds the maximum depth of {_MAX_FILTER_DEPTH}",
+            )
+        if isinstance(node, dict):
+            for value in node.values():
+                stack.append((value, depth + 1))
+        elif isinstance(node, list):
+            for item in node:
+                stack.append((item, depth + 1))
+
+
 # --------------------------------------------------------------------------- #
 # Operator submodels for the typed system keys.
 #
@@ -331,7 +363,12 @@ class RecallFilter(BaseModel):
         shape) and re-raises it as ``RecallFilterValidationError``. Errors raised
         by the ``before`` fold and the ``after`` metadata walk are already the
         right type and propagate unconverted.
+
+        Runs the iterative depth guard first (this is the outermost validator),
+        so an over-deep filter fails as a ``RecallFilterValidationError`` before
+        pydantic or the metadata walk recurse into it.
         """
+        _check_depth(data)
         try:
             return handler(data)
         except pydantic.ValidationError as exc:
