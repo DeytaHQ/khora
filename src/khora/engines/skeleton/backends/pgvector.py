@@ -74,6 +74,16 @@ khora_chunks_table = Table(
         nullable=False,
         server_default=text("'{}'::jsonb"),
     ),
+    # Denormalized document-grained fields (copied from the parent document)
+    # for deterministic recall filters without a join. All nullable.
+    Column("source_type", String(64), nullable=True),
+    Column("source_name", String(255), nullable=True),
+    Column("source_url", Text, nullable=True),
+    Column("source_timestamp", DateTime(timezone=True), nullable=True),
+    Column("external_id", String(255), nullable=True),
+    Column("content_type", String(128), nullable=True),
+    Column("source", String(255), nullable=True),
+    Column("title", Text, nullable=True),
     # Full-text search
     Column("content_tsv", TSVECTOR, nullable=True),
     # Indexes are defined below
@@ -158,6 +168,42 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 text("""
                 CREATE INDEX IF NOT EXISTS ix_khora_chunks_content_tsv
                 ON khora_chunks USING GIN (content_tsv)
+                """)
+            )
+
+            # Indexes on the denormalized document-grained columns used by
+            # recall filters. Only the filterable subset is indexed;
+            # source_url / source / title are left unindexed. Each statement
+            # runs separately (asyncpg disallows multi-statement execute).
+            await conn.execute(
+                text("""
+                CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_source_type
+                ON khora_chunks (namespace_id, source_type)
+                """)
+            )
+            await conn.execute(
+                text("""
+                CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_source_name
+                ON khora_chunks (namespace_id, source_name)
+                """)
+            )
+            await conn.execute(
+                text("""
+                CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_source_timestamp
+                ON khora_chunks (namespace_id, source_timestamp)
+                WHERE source_timestamp IS NOT NULL
+                """)
+            )
+            await conn.execute(
+                text("""
+                CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_external_id
+                ON khora_chunks (namespace_id, external_id)
+                """)
+            )
+            await conn.execute(
+                text("""
+                CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_content_type
+                ON khora_chunks (namespace_id, content_type)
                 """)
             )
 
