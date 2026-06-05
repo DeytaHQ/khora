@@ -67,7 +67,7 @@ pytestmark = pytest.mark.integration
 
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
-_HEAD = "042_widen_khora_chunks_source_external_id"
+_HEAD = "043_khora_chunks_metadata_backfill"
 _PREV = "041_khora_chunks_denormalized_columns"
 
 
@@ -92,7 +92,8 @@ CREATE TABLE khora_chunks (
     document_id UUID NOT NULL,
     content TEXT NOT NULL,
     occurred_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ
+    created_at TIMESTAMPTZ,
+    metadata JSONB DEFAULT '{}'::jsonb
 )
 """
 

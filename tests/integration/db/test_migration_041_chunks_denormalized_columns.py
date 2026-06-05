@@ -99,6 +99,7 @@ CREATE TABLE khora_chunks (
     namespace_id UUID NOT NULL,
     document_id UUID NOT NULL,
     content TEXT NOT NULL,
+    metadata JSONB DEFAULT '{}'::jsonb,
     occurred_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ
 )
@@ -276,7 +277,7 @@ class TestMigration041OnPostgres:
                 async with engine.connect() as conn:
                     # Chain reached head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "042_widen_khora_chunks_source_external_id"
+                    assert result.scalar() == "043_khora_chunks_metadata_backfill"
 
                     # The migration did not create the table.
                     result = await conn.execute(
@@ -307,7 +308,7 @@ class TestMigration041OnSqlite:
             try:
                 async with engine.connect() as conn:
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "042_widen_khora_chunks_source_external_id"
+                    assert result.scalar() == "043_khora_chunks_metadata_backfill"
             finally:
                 await engine.dispose()
 
