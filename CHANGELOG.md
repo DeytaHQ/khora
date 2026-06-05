@@ -4,6 +4,22 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.18.5] - denormalized chunk columns and the RecallFilter foundation
+
+Patch release. Lays the schema, model, and ingest groundwork for selective recall filtering: `khora_chunks` rows now carry the parent document's eight provenance fields (`source_type`, `source_name`, `source_url`, `source_timestamp`, `external_id`, `content_type`, `source`, `title`) plus the document's free-form metadata, so a filter can be evaluated on the chunk row without a document join. Adds the typed `RecallFilter` model and its validator as public API. The query-side application of `RecallFilter` to `recall()` is not wired in this release - this ships the carrier columns, indexes, backfill, and the filter document it will consume.
+
+### Added
+
+- **`RecallFilter` typed filter model** (#1001): a deterministic, MongoDB-flavored filter document with a two-regime validator (structural funnel + dot-path fold, then operator validation), exported from the top-level package along with `RecallFilterValidationError` and `RecallFilterUnsupportedError`. Closed top-level key set (ten system keys, the bare `metadata` blob, `$and`/`$or`/`$nor`/`$not`, and flat `metadata.<path>` predicates); unknown keys and excessively nested filters raise a clean validation error.
+- **Eight denormalized document-grained columns on `khora_chunks`** (#1000): nullable `source_type`, `source_name`, `source_url`, `source_timestamp`, `external_id`, `content_type`, `source`, `title` added via a catalog-only Alembic migration (instant `ADD COLUMN`, no table rewrite, Postgres dialect-gated with a bounded `lock_timeout`). The runtime table definition gains `CREATE INDEX IF NOT EXISTS` for the filterable subset.
+- **Ingest populates the denormalized chunk columns** (#1003): a shared `document_denorm_fields()` helper copies the eight provenance fields from the typed `Document` onto every persisted chunk across the VectorCypher and Skeleton write paths and the ingest pipeline, persisted and read back on the pgvector and sqlite_lance temporal backends. `source_timestamp` (the producer's verbatim time) is now carried distinctly from `occurred_at` (the chunk event-time) - `occurred_at` is added to the public `Chunk` DTO and `RecallChunk.occurred_at` falls back to `source_timestamp` only when no chunk-level event-time exists.
+- **Skeleton chunks carry document metadata** (#1004): Skeleton ingest now spreads the parent document's free-form metadata onto each chunk's metadata dict (chunk bookkeeping keys take precedence), mirroring VectorCypher, so `metadata.<path>` filters can match on the Skeleton-pgvector backend.
+
+### Changed
+
+- **`khora_chunks.source` / `external_id` widened to the `documents` widths** (#1005): `source` → `TEXT`, `external_id` → `VARCHAR(512)` via a Postgres-only catalog migration (both columns empty today, so no rewrite), so the full producer value is copied down from `documents` and stays filterable instead of being truncated. NULL-safe downgrade guard.
+- **Backfill of existing chunks plus selective filter indexes** (#1002): migration 044 populates the denormalized columns on existing `khora_chunks` rows from the parent `documents` row, then builds five `CREATE INDEX CONCURRENTLY` filter indexes and reclaims churn with `VACUUM (ANALYZE)`. Postgres-only, autocommit, batched per namespace with per-batch commits (bounds MVCC bloat and advisory-lock hold time), idempotent via a `source_type IS NULL` sentinel; the `content_tsv` trigger is disabled around the metadata-only update so it is not re-fired on unchanged rows. A companion migration (#1004) backfills `documents.metadata` into existing chunk metadata under a JSONB-containment idempotency guard.
+
 ## [0.18.4] - retrieval correctness, reranker robustness, and aiohttp CVE fix
 
 Patch release. VectorCypher retrieval-channel correctness fixes (relationship ordering, multi-channel fusion weighting, query-aware PPR), reranker robustness (lazy-init locking, macOS CPU pinning), and a security bump of aiohttp. The retrieval fixes are benchmark-accuracy-neutral (a downstream cross-encoder reranker masks fusion/PPR ordering) and are shipped as correctness fixes, not benchmark improvements.
