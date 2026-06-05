@@ -76,6 +76,14 @@ def _row(**kwargs) -> SimpleNamespace:
         confidence=0.9,
         metadata={"chunk_index": 0},
         chunker_info={},
+        source_type="email",
+        source_name="inbox",
+        source_url="https://example.test/msg/1",
+        source_timestamp=datetime(2024, 1, 3, tzinfo=UTC),
+        external_id="ext-1",
+        content_type="text/plain",
+        source="mailbox",
+        title="Subject line",
     )
     base.update(kwargs)
     return SimpleNamespace(**base)

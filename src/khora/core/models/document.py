@@ -172,6 +172,9 @@ class Chunk:
     # Timestamps
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     source_timestamp: datetime | None = None
+    # Chunk event-time, distinct from source_timestamp (the producer's
+    # verbatim time). NULL when the chunk carries no event-time of its own.
+    occurred_at: datetime | None = None
     # Reinforcement-on-recall (#855). NULL until the chunk is first
     # returned by a recall path that has reinforcement enabled.
     last_accessed_at: datetime | None = None

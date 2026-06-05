@@ -67,7 +67,8 @@ class TestSimpleRetrieveSourceTimestamp:
 
     async def test_chunk_carries_source_timestamp_from_temporal_chunk(self) -> None:
         """The vector store returns ``TemporalChunk.occurred_at``; it must
-        round-trip onto the constructed ``Chunk.source_timestamp``."""
+        round-trip onto the constructed ``Chunk.occurred_at`` (the chunk
+        event-time), distinct from the producer ``source_timestamp``."""
         retriever = VectorCypherRetriever.__new__(VectorCypherRetriever)
         retriever._config = RetrieverConfig(enable_reranking=False, enable_bm25_channel=False)
         retriever._dual_nodes = None
@@ -115,8 +116,11 @@ class TestSimpleRetrieveSourceTimestamp:
 
         assert len(vc_result.chunks) == 1
         chunk, _score = vc_result.chunks[0]
-        # Before the fix this was None - the bug Damir reported.
-        assert chunk.source_timestamp == T_SOURCE
+        # The persisted chunk event-time round-trips onto Chunk.occurred_at.
+        # No producer value was supplied, so source_timestamp stays None;
+        # the recall projection applies the event-time-then-producer fallback.
+        assert chunk.occurred_at == T_SOURCE
+        assert chunk.source_timestamp is None
 
 
 @pytest.mark.unit

@@ -47,7 +47,12 @@ from khora.core.recall_abstention import compute_abstention_signals
 from khora.engines._forget_cascade import cascade_forget_extraction
 from khora.engines._stats import gather_counts
 from khora.engines._storage_config import build_storage_config
-from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter, create_temporal_store
+from khora.engines.skeleton.backends import (
+    TemporalChunk,
+    TemporalFilter,
+    create_temporal_store,
+    document_denorm_fields,
+)
 from khora.engines.skeleton.skeleton import SkeletonIndexer
 from khora.exceptions import EngineCapabilityError
 from khora.extraction.embedders import LiteLLMEmbedder
@@ -1059,6 +1064,7 @@ class VectorCypherEngine:
                                 else len(raw_chunk.content),
                             },
                             chunker_info=dict(raw_chunk.metadata),
+                            **document_denorm_fields(document),
                         )
                         temporal_chunks.append(temporal_chunk)
 
@@ -1685,6 +1691,7 @@ class VectorCypherEngine:
                         "end_char": c.end_char or len(c.content),
                     },
                     chunker_info=dict(c.chunker_info or {}),
+                    **document_denorm_fields(new_document),
                 )
             )
 
@@ -2067,7 +2074,7 @@ class VectorCypherEngine:
                 content=chunk.content,
                 score=score,
                 created_at=chunk.created_at,
-                occurred_at=chunk.source_timestamp,
+                occurred_at=(chunk.occurred_at if chunk.occurred_at is not None else chunk.source_timestamp),
                 chunker_info=chunk.chunker_info or {},
             )
             for chunk, score in validated_chunks
@@ -2750,6 +2757,7 @@ class VectorCypherEngine:
                             else len(raw_chunk.content),
                         },
                         chunker_info=dict(raw_chunk.metadata),
+                        **document_denorm_fields(doc),
                     )
                     all_temporal_chunks.append(tc)
 

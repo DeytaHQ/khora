@@ -267,6 +267,14 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 confidence=chunk.confidence,
                 metadata=chunk.metadata or {},
                 chunker_info=chunk.chunker_info or {},
+                source_type=chunk.source_type,
+                source_name=chunk.source_name,
+                source_url=chunk.source_url,
+                source_timestamp=chunk.source_timestamp,
+                external_id=chunk.external_id,
+                content_type=chunk.content_type,
+                source=chunk.source,
+                title=chunk.title,
             )
             await session.execute(stmt)
             await session.commit()
@@ -299,6 +307,14 @@ class PgVectorTemporalStore(TemporalVectorStore):
                     "confidence": chunk.confidence,
                     "metadata": chunk.metadata or {},
                     "chunker_info": chunk.chunker_info or {},
+                    "source_type": chunk.source_type,
+                    "source_name": chunk.source_name,
+                    "source_url": chunk.source_url,
+                    "source_timestamp": chunk.source_timestamp,
+                    "external_id": chunk.external_id,
+                    "content_type": chunk.content_type,
+                    "source": chunk.source,
+                    "title": chunk.title,
                 }
             )
 
@@ -707,6 +723,14 @@ class PgVectorTemporalStore(TemporalVectorStore):
             confidence=row.confidence or 1.0,
             metadata=row.metadata or {},
             chunker_info=dict(row.chunker_info) if row.chunker_info else {},
+            source_type=row.source_type,
+            source_name=row.source_name,
+            source_url=row.source_url,
+            source_timestamp=row.source_timestamp,
+            external_id=row.external_id,
+            content_type=row.content_type,
+            source=row.source,
+            title=row.title,
         )
 
     async def health_check(self) -> dict[str, Any]:

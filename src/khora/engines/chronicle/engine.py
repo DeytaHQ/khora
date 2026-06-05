@@ -1896,7 +1896,7 @@ class ChronicleEngine:
                 content=chunk.content,
                 score=score,
                 created_at=chunk.created_at,
-                occurred_at=chunk.source_timestamp,
+                occurred_at=(chunk.occurred_at if chunk.occurred_at is not None else chunk.source_timestamp),
                 chunker_info=chunk.chunker_info or {},
             )
             for (chunk, _), score in zip(chunks_with_scores, normalized_chunk_scores, strict=False)

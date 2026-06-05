@@ -73,7 +73,15 @@ _KHORA_CHUNKS_SCHEMA: tuple[str, ...] = (
         tags TEXT NOT NULL DEFAULT '[]',
         confidence REAL NOT NULL DEFAULT 1.0,
         metadata TEXT NOT NULL DEFAULT '{}',
-        chunker_info TEXT NOT NULL DEFAULT '{}'
+        chunker_info TEXT NOT NULL DEFAULT '{}',
+        source_type TEXT,
+        source_name TEXT,
+        source_url TEXT,
+        source_timestamp TEXT,
+        external_id TEXT,
+        content_type TEXT,
+        source TEXT,
+        title TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS ix_khora_chunks_namespace ON khora_chunks(namespace_id)",
@@ -242,6 +250,14 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                     float(c.confidence) if c.confidence is not None else 1.0,
                     to_json_text(c.metadata or {}),
                     to_json_text(c.chunker_info or {}),
+                    c.source_type,
+                    c.source_name,
+                    c.source_url,
+                    _dt_to_iso(c.source_timestamp),
+                    c.external_id,
+                    c.content_type,
+                    c.source,
+                    c.title,
                 )
             )
             if c.embedding:
@@ -258,8 +274,10 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         await self._sqlite.executemany(
             "INSERT INTO khora_chunks "
             "(id, namespace_id, document_id, content, occurred_at, created_at, "
-            "source_system, author, channel, tags, confidence, metadata, chunker_info) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_system, author, channel, tags, confidence, metadata, chunker_info, "
+            "source_type, source_name, source_url, source_timestamp, external_id, "
+            "content_type, source, title) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             sqlite_rows,
         )
         await self._sqlite.commit()
@@ -678,6 +696,14 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
             confidence=row["confidence"] if row["confidence"] is not None else 1.0,
             metadata=meta,
             chunker_info=chunker_info,
+            source_type=row["source_type"],
+            source_name=row["source_name"],
+            source_url=row["source_url"],
+            source_timestamp=_parse_dt(row["source_timestamp"]),
+            external_id=row["external_id"],
+            content_type=row["content_type"],
+            source=row["source"],
+            title=row["title"],
         )
 
     # ------------------------------------------------------------------

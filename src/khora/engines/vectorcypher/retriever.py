@@ -986,10 +986,12 @@ class VectorCypherRetriever:
                         content=c_data.get("content", ""),
                         metadata={"occurred_at": c_data.get("occurred_at")},
                         chunker_info=_decode_chunker_info(c_data.get("chunker_info")),
-                        # #859: surface persisted occurred_at to the recall
-                        # projection (engine._build_recall_result reads
-                        # chunk.source_timestamp). Neo4j stores occurred_at
-                        # as an ISO-8601 string; coerce to datetime.
+                        # The graph store carries only the chunk event-time;
+                        # surface it as occurred_at so the recall projection
+                        # uses it. Neo4j stores it as an ISO-8601 string;
+                        # coerce to datetime. source_timestamp mirrors it as
+                        # the projection fallback carrier.
+                        occurred_at=_coerce_occurred_at(c_data.get("occurred_at")),
                         source_timestamp=_coerce_occurred_at(c_data.get("occurred_at")),
                     )
                     chunks.append((chunk, rank_score))
@@ -2292,11 +2294,11 @@ class VectorCypherRetriever:
                     },
                     chunker_info=r.chunk.chunker_info or {},
                     created_at=r.chunk.created_at or r.chunk.occurred_at,
-                    # #859: surface persisted occurred_at to the recall
-                    # projection (engine._build_recall_result reads
-                    # chunk.source_timestamp). TemporalChunk.occurred_at
-                    # is already datetime|None.
-                    source_timestamp=r.chunk.occurred_at,
+                    # Carry the chunk event-time and the producer's verbatim
+                    # time as distinct values; the recall projection applies
+                    # the fallback.
+                    occurred_at=r.chunk.occurred_at,
+                    source_timestamp=r.chunk.source_timestamp,
                 )
                 chunk_results.append((chunk, r.combined_score or r.similarity))
 
@@ -2944,11 +2946,13 @@ class VectorCypherRetriever:
                         **(record.get("metadata") or {}),
                     },
                     chunker_info=_decode_chunker_info(record.get("chunker_info")),
-                    # #859: surface persisted occurred_at to the recall
-                    # projection (engine._build_recall_result reads
-                    # chunk.source_timestamp). record["occurred_at"] is
-                    # an ISO-8601 string from Neo4j or a datetime from
-                    # the SurrealDB fallback above (chunk.source_timestamp).
+                    # The graph store carries only the chunk event-time;
+                    # surface it as occurred_at so the recall projection uses
+                    # it. record["occurred_at"] is an ISO-8601 string from
+                    # Neo4j or a datetime from the SurrealDB fallback above.
+                    # source_timestamp mirrors it as the projection fallback
+                    # carrier.
+                    occurred_at=_coerce_occurred_at(record.get("occurred_at")),
                     source_timestamp=_coerce_occurred_at(record.get("occurred_at")),
                 )
                 results.append((chunk_id, score, chunk))
@@ -3012,6 +3016,8 @@ class VectorCypherRetriever:
                         },
                         chunker_info=r.chunk.chunker_info or {},
                         created_at=r.chunk.created_at or r.chunk.occurred_at,
+                        occurred_at=r.chunk.occurred_at,
+                        source_timestamp=r.chunk.source_timestamp,
                     ),
                 )
                 for r in results
@@ -3106,6 +3112,10 @@ class VectorCypherRetriever:
                             },
                             chunker_info=getattr(chunk, "chunker_info", None) or {},
                             created_at=getattr(chunk, "created_at", None) or getattr(chunk, "occurred_at", None),
+                            # Recency channel reads the main chunks table, which
+                            # carries the producer time but no chunk event-time;
+                            # the projection falls back to source_timestamp.
+                            source_timestamp=getattr(chunk, "source_timestamp", None),
                         ),
                     )
                 )

@@ -17,6 +17,7 @@ from khora.core.models.document import Chunk
 
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
+    from khora.core.models.document import Document
 
 
 @dataclass
@@ -53,6 +54,26 @@ class TemporalChunk:
     content_type: str | None = None
     source: str | None = None
     title: str | None = None
+
+
+def document_denorm_fields(document: Document) -> dict[str, Any]:
+    """Return the denormalized document-grained chunk fields from a Document.
+
+    Copies the eight provenance fields off the typed Document so chunk
+    builders can stamp them onto a :class:`TemporalChunk` without repeating
+    the mapping at every write site. ``source_timestamp`` is the producer's
+    verbatim time, kept distinct from the chunk event-time ``occurred_at``.
+    """
+    return {
+        "source_type": document.source_type,
+        "source_name": document.source_name,
+        "source_url": document.source_url,
+        "source_timestamp": document.source_timestamp,
+        "external_id": document.external_id,
+        "content_type": document.content_type,
+        "source": document.source,
+        "title": document.title,
+    }
 
 
 @dataclass
@@ -191,10 +212,9 @@ def temporal_chunk_to_chunk(tc: TemporalChunk) -> Chunk:
     Preserves fields the retriever and rerankers depend on:
     ``chunker_info`` (#800), ``created_at`` (#810), and ``session_id``
     (#620 — stamped into ``TemporalChunk.metadata`` by the engines).
-    Builds ``source_timestamp`` from the distinct producer value
-    (``tc.source_timestamp``), falling back to ``tc.occurred_at`` (the
-    chunk event-time) when the producer value is absent, so temporal-decay
-    boosts use the document time rather than the ingest time.
+    Surfaces ``occurred_at`` (the chunk event-time) and ``source_timestamp``
+    (the producer's verbatim time) as distinct values; the recall projection
+    applies the event-time-then-producer-time fallback downstream.
     """
     md = tc.metadata or {}
     sid_raw = md.get("session_id")
@@ -223,10 +243,10 @@ def temporal_chunk_to_chunk(tc: TemporalChunk) -> Chunk:
         embedding=tc.embedding,
         embedding_model=str(md.get("embedding_model", "") or ""),
         created_at=tc.created_at or datetime.now(UTC),
-        # Prefer the distinct producer value; fall back to the chunk
-        # event-time. The write-path will populate the verbatim producer
-        # value in a follow-up.
-        source_timestamp=tc.source_timestamp if tc.source_timestamp is not None else tc.occurred_at,
+        # Carry the chunk event-time and the producer's verbatim time as
+        # distinct values; the recall projection applies the fallback.
+        occurred_at=tc.occurred_at,
+        source_timestamp=tc.source_timestamp,
         session_id=session_id,
     )
 
@@ -316,5 +336,6 @@ __all__ = [
     "TemporalSearchResult",
     "TemporalVectorStore",
     "create_temporal_store",
+    "document_denorm_fields",
     "temporal_chunk_to_chunk",
 ]
