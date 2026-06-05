@@ -739,6 +739,8 @@ class DualNodeManager:
                r.confidence AS confidence, r.weight AS weight,
                r.source_document_ids AS source_document_ids,
                r.source_chunk_ids AS source_chunk_ids
+        ORDER BY (CASE WHEN relationship_type = 'ASSOCIATED_WITH' THEN 1 ELSE 0 END) ASC,
+                 coalesce(confidence, 0.0) DESC
         LIMIT $limit
         """
 
