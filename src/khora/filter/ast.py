@@ -302,8 +302,11 @@ def _normalize(node: FilterNode | FilterClause) -> FilterNode | FilterClause:
 
        * child is a **logical node** (``AND``/``OR``/``NOT``) → **collapse**:
          replace ``N`` with that child (the wrapper is redundant);
-       * child is a **leaf clause** → rewrite to ``AND([leaf])`` (the op is
-         normalized to ``AND``); **do not** collapse to a bare clause.
+       * child is a **leaf clause** → rewrite to ``AND([leaf])``. The operator
+         is normalized to ``AND`` **even when ``N`` was an ``OR``** — a lone
+         ``OR`` and a lone ``AND`` around a single clause are semantically
+         identical, so the original ``OR`` is intentionally dropped. **Do not**
+         collapse to a bare clause.
 
        An *empty* ``AND``/``OR`` is preserved (the empty ``AND`` is the
        match-everything root).
@@ -580,7 +583,14 @@ def canonical_hash(node: FilterNode | FilterClause) -> str:
       hash differently.
 
     Implementation: build a canonical, JSON-serializable representation, then
-    SHA-256 over a compact, sorted-where-safe JSON encoding.
+    SHA-256 over its compact JSON encoding. All ordering normalization happens
+    while building that representation, in two distinct places — commutative
+    ``$and`` / ``$or`` children are sorted by their own canonical serialization
+    in :func:`_canonicalize`, and dict-operand keys are sorted recursively in
+    :func:`_canonicalize_operand`. The final :func:`json.dumps` deliberately
+    uses ``sort_keys=False``: the representation's field order is already fixed
+    and the meaningful sorting is baked into the structure, so re-sorting the
+    encoding keys would be redundant (and must not be relied on for stability).
     """
     canonical = _canonicalize(node)
     encoded = json.dumps(canonical, separators=(",", ":"), ensure_ascii=False, sort_keys=False)
