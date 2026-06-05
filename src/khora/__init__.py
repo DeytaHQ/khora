@@ -51,6 +51,15 @@ from .dream import DreamConfig, DreamMode, DreamResult, DreamRunInfo, DreamScope
 from .engines import create_engine, list_engines, register_engine
 from .exceptions import EngineCapabilityError, KhoraError
 from .extraction.skills import EntityTypeConfig, ExpertiseConfig, RelationshipTypeConfig
+from .filter import (
+    SYSTEM_KEYS,
+    DateOps,
+    Op,
+    RecallFilter,
+    RecallFilterUnsupportedError,
+    RecallFilterValidationError,
+    StringOps,
+)
 from .hooks import SemanticFilter
 from .khora import (
     BatchHandle,
@@ -109,4 +118,12 @@ __all__ = [
     "DreamResult",
     "DreamRunInfo",
     "OpKind",
+    # Deterministic recall filter
+    "RecallFilter",
+    "StringOps",
+    "DateOps",
+    "RecallFilterValidationError",
+    "RecallFilterUnsupportedError",
+    "Op",
+    "SYSTEM_KEYS",
 ]
