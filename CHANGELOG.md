@@ -4,6 +4,23 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
+## [0.18.4] - retrieval correctness, reranker robustness, and aiohttp CVE fix
+
+Patch release. VectorCypher retrieval-channel correctness fixes (relationship ordering, multi-channel fusion weighting, query-aware PPR), reranker robustness (lazy-init locking, macOS CPU pinning), and a security bump of aiohttp. The retrieval fixes are benchmark-accuracy-neutral (a downstream cross-encoder reranker masks fusion/PPR ordering) and are shipped as correctness fixes, not benchmark improvements.
+
+### Fixed
+
+- **aiohttp upgraded to 3.14.0** (#986): resolves CVE-2026-34993 and CVE-2026-47265 (both fixed in 3.14.0). aiohttp is transitive (litellm, crewai, llama-index, surrealdb, turbopuffer); pulled in via an `aiohttp = "0 days"` `exclude-newer-package` override since 3.14.0 was newer than the 7-day staging window.
+- **Relationship channel is confidence-ordered before truncation** (#995): `get_relationships_between` applied a `LIMIT` with no `ORDER BY`, so on a dense graph (~60% low-confidence `ASSOCIATED_WITH` co-occurrence edges) the truncation routinely dropped high-signal typed edges (confidence 0.8-1.0) in favor of co-occurrence noise. Now orders co-occurrence edges last and by `confidence DESC` before the `LIMIT` - pure query-time ordering over existing data, no re-ingest.
+- **Multi-channel fusion honors configured weights** (#998, closes #996): RRF folded channels in pairwise and re-ranked the already-fused list with a hardcoded `vector_weight=1.0` per extra channel, so configured weights were ignored once a third channel (BM25) was present. New `weighted_rrf_nlist` accumulates `weight/(k+rank)` once per source in a single pass.
+- **PPR is query-aware** (#998, closes #997): `ppr_retrieve_chunks` accepted a `chunk_similarity` blend (`ppr_mass * (1 + sim)`, HippoRAG-2) but the caller never passed it, so PPR ordered chunks query-agnostically. The vector channel's cosine map (from an already-cached task) is now passed through.
+- **Cross-encoder reranker lazy init is concurrency-safe** (#988): the lazy model load is now guarded by an `asyncio.Lock` so concurrent first-use recalls don't race on initialization.
+- **Cross-encoder reranker pinned to CPU on macOS arm64** (#989): avoids an MPS-backend instability by forcing CPU execution on Apple Silicon.
+
+### Changed
+
+- **Documentation corrections** (#987, #990): dropped the removed `KHORA_AUTH_ENABLED` from the configuration reference; corrected the `configuration.md` point-in-time, telemetry (OTel spans/metrics vs the PostgreSQL event collector), and secret-rotation notes.
+
 ## [0.18.3] - lexical-search recall fix
 
 Patch release. Revives the BM25 / lexical retrieval channel, which was effectively dead: `plainto_tsquery` ANDs every query term, so natural-language questions matched zero chunks and retrieval silently degraded to vector-only. Also hardens a test-only teardown path that could wedge the parallel test run, and corrects the source-timestamp ingestion docs.
