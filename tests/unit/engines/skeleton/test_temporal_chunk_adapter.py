@@ -59,6 +59,37 @@ def test_maps_occurred_at_to_source_timestamp() -> None:
     assert c.source_timestamp == ts
 
 
+def test_source_timestamp_is_distinct_from_occurred_at() -> None:
+    """The producer ``source_timestamp`` survives as a value of its own.
+
+    Tripwire for date-collapse: when a chunk carries BOTH a chunk event-time
+    (``occurred_at``) and a distinct producer time (``source_timestamp``), the
+    adapter must surface the producer value — not silently collapse it onto
+    ``occurred_at``.
+    """
+    occurred = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
+    produced = datetime(2024, 6, 15, 9, 30, tzinfo=UTC)
+    assert occurred != produced
+
+    c = temporal_chunk_to_chunk(_make_tc(occurred_at=occurred, source_timestamp=produced))
+
+    assert c.source_timestamp == produced
+    assert c.source_timestamp != occurred
+
+
+def test_source_timestamp_falls_back_to_occurred_at_when_absent() -> None:
+    """No producer value → fall back to the chunk event-time."""
+    occurred = datetime(2024, 3, 10, 7, 0, tzinfo=UTC)
+    c = temporal_chunk_to_chunk(_make_tc(occurred_at=occurred, source_timestamp=None))
+    assert c.source_timestamp == occurred
+
+
+def test_source_timestamp_none_when_both_absent() -> None:
+    """Neither producer time nor chunk event-time → ``None``."""
+    c = temporal_chunk_to_chunk(_make_tc(occurred_at=None, source_timestamp=None))
+    assert c.source_timestamp is None
+
+
 def test_pulls_session_id_from_metadata_uuid_str() -> None:
     sid = uuid4()
     c = temporal_chunk_to_chunk(_make_tc(metadata={"session_id": str(sid)}))

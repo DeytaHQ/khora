@@ -42,6 +42,18 @@ class TemporalChunk:
     metadata: dict[str, Any] = field(default_factory=dict)
     chunker_info: dict[str, Any] = field(default_factory=dict)
 
+    # Denormalized document-grained fields (copied from the parent document)
+    # for deterministic recall filters. All nullable. ``source_timestamp`` is
+    # the producer's verbatim event time, distinct from ``occurred_at``.
+    source_type: str | None = None
+    source_name: str | None = None
+    source_url: str | None = None
+    source_timestamp: datetime | None = None
+    external_id: str | None = None
+    content_type: str | None = None
+    source: str | None = None
+    title: str | None = None
+
 
 @dataclass
 class TemporalSearchResult:
@@ -179,7 +191,9 @@ def temporal_chunk_to_chunk(tc: TemporalChunk) -> Chunk:
     Preserves fields the retriever and rerankers depend on:
     ``chunker_info`` (#800), ``created_at`` (#810), and ``session_id``
     (#620 — stamped into ``TemporalChunk.metadata`` by the engines).
-    Maps ``occurred_at`` to ``source_timestamp`` so temporal-decay
+    Builds ``source_timestamp`` from the distinct producer value
+    (``tc.source_timestamp``), falling back to ``tc.occurred_at`` (the
+    chunk event-time) when the producer value is absent, so temporal-decay
     boosts use the document time rather than the ingest time.
     """
     md = tc.metadata or {}
@@ -209,7 +223,10 @@ def temporal_chunk_to_chunk(tc: TemporalChunk) -> Chunk:
         embedding=tc.embedding,
         embedding_model=str(md.get("embedding_model", "") or ""),
         created_at=tc.created_at or datetime.now(UTC),
-        source_timestamp=tc.occurred_at,
+        # Prefer the distinct producer value; fall back to the chunk
+        # event-time. The write-path will populate the verbatim producer
+        # value in a follow-up.
+        source_timestamp=tc.source_timestamp if tc.source_timestamp is not None else tc.occurred_at,
         session_id=session_id,
     )
 
