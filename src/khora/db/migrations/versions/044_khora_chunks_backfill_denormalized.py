@@ -1,7 +1,7 @@
 """Backfill khora_chunks denormalized columns and build the filter indexes.
 
-Revision ID: 042_khora_chunks_backfill_denormalized
-Revises: 041_khora_chunks_denormalized_columns
+Revision ID: 044_khora_chunks_backfill_denormalized
+Revises: 043_khora_chunks_metadata_backfill
 Create Date: 2026-06-05
 
 Migration 041 *added* eight nullable denormalized document-grained columns
@@ -23,17 +23,10 @@ so recall filters resolve without a join. Three phases, in order:
   touches zero already-populated rows, because ``documents.source_type``
   is ``NOT NULL`` so a backfilled chunk is always non-NULL there.
 
-  Two target columns are narrower than their ``documents`` source:
-  ``source`` (1024→255) and ``external_id`` (512→255). Both are copied
-  with ``LEFT(col, 255)`` rather than a bare cast — a value over 255 chars
-  would raise SQLSTATE 22001 and abort the batch; ``LEFT`` is
-  deterministic and never errors. The denormalized chunk copy is a
-  best-effort filter hint; the authoritative ``documents`` values (wider,
-  uniquely indexed) are untouched, so callers needing exact external_id
-  correctness join to ``documents``. A guarded ``count(*)`` before the
-  loop counts rows that will be truncated and logs them at WARNING
-  (``truncated_external_id`` / ``truncated_source``) so the truncation is
-  auditable.
+  All eight columns are copied verbatim. The widen migration sized
+  ``khora_chunks.source`` and ``khora_chunks.external_id`` to the
+  ``documents`` widths, so the full producer values fit in their entirety
+  and every value stays filterable.
 
   The runtime ``BEFORE INSERT OR UPDATE`` trigger
   ``khora_chunks_content_tsv_update`` recomputes ``content_tsv`` on every
@@ -93,8 +86,8 @@ from alembic import op
 from loguru import logger
 from sqlalchemy.exc import OperationalError
 
-revision: str = "042_khora_chunks_backfill_denormalized"
-down_revision: str | Sequence[str] | None = "041_khora_chunks_denormalized_columns"
+revision: str = "044_khora_chunks_backfill_denormalized"
+down_revision: str | Sequence[str] | None = "043_khora_chunks_metadata_backfill"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -106,10 +99,10 @@ _PG_LOCK_NOT_AVAILABLE = "55P03"
 _TSV_TRIGGER = "khora_chunks_content_tsv_update"
 
 # Per-namespace backfill UPDATE. Copies the eight denormalized columns down
-# from the parent ``documents`` row. ``source`` / ``external_id`` are
-# truncated with LEFT(col, 255) because their target columns are narrower
-# than the source. ``AND kc.source_type IS NULL`` keeps the backfill
-# idempotent / restartable.
+# from the parent ``documents`` row verbatim — the widen migration sized
+# ``source`` and ``external_id`` to the ``documents`` widths, so the full
+# value fits in its entirety. ``AND kc.source_type IS NULL`` keeps the
+# backfill idempotent / restartable.
 _BACKFILL_SQL = sa.text(
     """
     UPDATE khora_chunks AS kc
@@ -117,27 +110,14 @@ _BACKFILL_SQL = sa.text(
         source_name      = d.source_name,
         source_url       = d.source_url,
         source_timestamp = d.source_timestamp,
-        external_id      = LEFT(d.external_id, 255),
+        external_id      = d.external_id,
         content_type     = d.content_type,
-        source           = LEFT(d.source, 255),
+        source           = d.source,
         title            = d.title
     FROM documents AS d
     WHERE kc.document_id = d.id
       AND kc.namespace_id = :ns
       AND kc.source_type IS NULL
-    """
-)
-
-# Count rows that the backfill will truncate (width over 255), among the
-# not-yet-backfilled set, so the truncation is auditable in the log.
-_TRUNCATION_COUNT_SQL = sa.text(
-    """
-    SELECT
-        count(*) FILTER (WHERE length(d.external_id) > 255) AS trunc_ext,
-        count(*) FILTER (WHERE length(d.source) > 255)      AS trunc_src
-    FROM khora_chunks AS kc
-    JOIN documents AS d ON kc.document_id = d.id
-    WHERE kc.source_type IS NULL
     """
 )
 
@@ -194,8 +174,8 @@ def _is_lock_timeout(exc: OperationalError) -> bool:
     return getattr(orig, "pgcode", None) == _PG_LOCK_NOT_AVAILABLE
 
 
-def _backfill() -> tuple[int, int]:
-    """Run the per-namespace backfill loop. Returns (trunc_ext, trunc_src).
+def _backfill() -> None:
+    """Run the per-namespace backfill loop.
 
     Runs entirely inside an autocommit block: each per-namespace UPDATE
     auto-commits independently, and the trigger DISABLE/ENABLE commit
@@ -211,9 +191,6 @@ def _backfill() -> tuple[int, int]:
 
         trigger_present = bind.execute(_TRIGGER_PRESENT_SQL, {"trigger": _TSV_TRIGGER}).scalar() is not None
 
-        # Pre-count rows the backfill will truncate (WARNING signal).
-        trunc_ext, trunc_src = bind.execute(_TRUNCATION_COUNT_SQL).one()
-
         try:
             if trigger_present:
                 op.execute(f"ALTER TABLE khora_chunks DISABLE TRIGGER {_TSV_TRIGGER}")
@@ -224,8 +201,6 @@ def _backfill() -> tuple[int, int]:
         finally:
             if trigger_present:
                 op.execute(f"ALTER TABLE khora_chunks ENABLE TRIGGER {_TSV_TRIGGER}")
-
-    return int(trunc_ext), int(trunc_src)
 
 
 def upgrade() -> None:
@@ -244,7 +219,7 @@ def upgrade() -> None:
     start = time.monotonic()
     try:
         # ---- PHASE 1: per-namespace batched backfill (autocommit) ----
-        trunc_ext, trunc_src = _backfill()
+        _backfill()
     except OperationalError as exc:
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.bind(
@@ -267,17 +242,11 @@ def upgrade() -> None:
         op.execute("VACUUM (ANALYZE) khora_chunks")
 
     duration_ms = int((time.monotonic() - start) * 1000)
-    log = logger.bind(
+    logger.bind(
         migration_id=revision,
         duration_ms=duration_ms,
         lock_timeout_tripped=False,
-        truncated_external_id=trunc_ext,
-        truncated_source=trunc_src,
-    )
-    if trunc_ext or trunc_src:
-        log.warning("khora.migration.applied")
-    else:
-        log.info("khora.migration.applied")
+    ).info("khora.migration.applied")
 
 
 def downgrade() -> None:
@@ -291,7 +260,7 @@ def downgrade() -> None:
     # is removed when 041's downgrade drops the columns themselves; nulling it
     # back out here would be pointless work and would itself fire the TSV
     # trigger / create more bloat. The natural rollback path is
-    # ``downgrade -> 042`` (drop indexes) then ``-> 041`` (drop columns).
+    # ``downgrade -> 044`` (drop indexes) then ``-> 041`` (drop columns).
     with op.get_context().autocommit_block():
         for stmt in _DROP_INDEX_SQL:
             op.execute(stmt)

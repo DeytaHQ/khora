@@ -1,7 +1,8 @@
-"""Coverage for migration ``042_khora_chunks_backfill_denormalized``.
+"""Coverage for migration ``044_khora_chunks_backfill_denormalized``.
 
 Migration 041 *added* eight nullable, denormalized document-grained columns
-to the runtime-managed ``khora_chunks`` temporal store. Migration 042
+to the runtime-managed ``khora_chunks`` temporal store (later widened so
+``source`` / ``external_id`` match the ``documents`` widths). Migration 044
 *populates* them on existing rows from the parent ``documents`` row and builds
 the five filterable-subset indexes so recall filters resolve without a join:
 
@@ -16,9 +17,9 @@ autocommit (per-namespace batched backfill → ``CREATE INDEX CONCURRENTLY`` →
 
 1. Postgres backfill happy path: a legacy ``khora_chunks`` (eight cols NULL) +
    a parent ``documents`` row with known values incl. a >255-char ``source``
-   and >255-char ``external_id``; step the version back to 041; ``upgrade
-   head``; assert each chunk col equals the document value, and the two wide
-   cols equal ``LEFT(doc_value, 255)``.
+   and >255-char ``external_id``; step the version back to 043; ``upgrade
+   head``; assert each chunk col equals the document value in full (the
+   widened columns hold the entire producer value verbatim).
 2. Multi-namespace batching: chunks across ≥2 distinct ``namespace_id``s, each
    with its own parent document — assert **all** namespaces are backfilled
    (proves the ``SELECT DISTINCT namespace_id`` loop covers every ns).
@@ -34,15 +35,15 @@ autocommit (per-namespace batched backfill → ``CREATE INDEX CONCURRENTLY`` →
    through the backfill (proves the trigger was disabled, so the backfill
    UPDATE did not recompute it).
 7. Missing-table no-op (fresh deploy): no ``khora_chunks`` → chain reaches head
-   042, table still absent.
+   044, table still absent.
 8. SQLite: the migration is a clean no-op; chain reaches head
-   ``042_khora_chunks_backfill_denormalized`` and downgrades to 041 cleanly.
+   ``044_khora_chunks_backfill_denormalized`` and downgrades to 043 cleanly.
 
 Run locally::
 
     make dev    # postgres on port 5434
     KHORA_DATABASE_URL=postgresql+asyncpg://khora:khora@localhost:5434/khora \
-        uv run pytest tests/integration/db/test_migration_042_chunks_backfill.py \
+        uv run pytest tests/integration/db/test_migration_044_chunks_backfill.py \
         -v -m integration --no-cov
 """
 
@@ -88,12 +89,12 @@ pytestmark = pytest.mark.integration
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
-_PREV_REVISION = "041_khora_chunks_denormalized_columns"
-_HEAD_REVISION = "042_khora_chunks_backfill_denormalized"
+_PREV_REVISION = "043_khora_chunks_metadata_backfill"
+_HEAD_REVISION = "044_khora_chunks_backfill_denormalized"
 
 _TSV_TRIGGER = "khora_chunks_content_tsv_update"
 
-# The five filter indexes 042 builds CONCURRENTLY — names byte-identical to the
+# The five filter indexes 044 builds CONCURRENTLY — names byte-identical to the
 # runtime ``PgVectorTemporalStore.connect()``.
 _FILTER_INDEXES = (
     "ix_khora_chunks_ns_source_type",
@@ -116,9 +117,10 @@ def _make_config(url: str) -> Config:
 
 # A runtime-shaped ``khora_chunks`` table: the identity/temporal/content
 # columns the runtime always creates, the eight denormalized columns 041 added
-# (present, NULL), plus ``content_tsv`` and the BEFORE INSERT OR UPDATE trigger
-# that recomputes it. Creating this before the upgrade exercises 042's
-# existing-deployment backfill path including the trigger DISABLE/ENABLE.
+# and the widen migration resized (present, NULL), plus ``content_tsv`` and the
+# BEFORE INSERT OR UPDATE trigger that recomputes it. Creating this before the
+# upgrade exercises 044's existing-deployment backfill path including the
+# trigger DISABLE/ENABLE.
 _RUNTIME_KHORA_CHUNKS_DDL = """
 CREATE TABLE khora_chunks (
     id UUID PRIMARY KEY,
@@ -131,9 +133,9 @@ CREATE TABLE khora_chunks (
     source_name VARCHAR(255),
     source_url TEXT,
     source_timestamp TIMESTAMPTZ,
-    external_id VARCHAR(255),
+    external_id VARCHAR(512),
     content_type VARCHAR(128),
-    source VARCHAR(255),
+    source TEXT,
     title TEXT,
     content_tsv TSVECTOR
 )
@@ -162,7 +164,7 @@ FOR EACH ROW EXECUTE FUNCTION khora_chunks_content_tsv_trigger()
 def pg_url() -> Iterator[str]:
     """Yield the base Postgres URL.
 
-    Resets the Alembic head to 041 and drops ``khora_chunks`` (+ its trigger
+    Resets the Alembic head to 043 and drops ``khora_chunks`` (+ its trigger
     function) on setup and teardown so the migration-test files can run in
     arbitrary order against shared PostgreSQL without leaking state.
     """
@@ -175,8 +177,8 @@ def pg_url() -> Iterator[str]:
             async with admin.connect() as conn:
                 await conn.execute(sa.text("DROP TABLE IF EXISTS khora_chunks CASCADE"))
                 await conn.execute(sa.text("DROP FUNCTION IF EXISTS khora_chunks_content_tsv_trigger() CASCADE"))
-                # Walk the version table back to 041 so the next upgrade re-runs
-                # 042 from a known baseline. Guarded on table existence so the
+                # Walk the version table back to 043 so the next upgrade re-runs
+                # 044 from a known baseline. Guarded on table existence so the
                 # fixture is also safe against a never-migrated DB (the version
                 # table is created by the first ``command.upgrade``).
                 table_exists = await conn.execute(
@@ -269,15 +271,17 @@ async def _install_chunks_table_and_trigger(conn: AsyncConnection) -> None:
 
 
 async def _step_version_back(conn: AsyncConnection) -> None:
-    """Step ``khora_alembic_version`` from head (042) back to 041 so the next
-    ``upgrade head`` re-runs 042 against the table we just seeded."""
+    """Step ``khora_alembic_version`` from head (044) back to 043 so the next
+    ``upgrade head`` re-runs 044 against the table we just seeded."""
     await conn.execute(
         sa.text("UPDATE khora_alembic_version SET version_num = :prev"),
         {"prev": _PREV_REVISION},
     )
 
 
-# A >255-char source and external_id force the LEFT(col, 255) truncation path.
+# A >255-char source and external_id: each fits in full now that the columns
+# are widened (source -> TEXT, external_id -> VARCHAR(512)), so the backfill
+# copies the whole value verbatim.
 _LONG_SOURCE = "src://" + ("x" * 400)
 _LONG_EXTERNAL_ID = "ext-" + ("y" * 400)
 
@@ -287,10 +291,11 @@ _LONG_EXTERNAL_ID = "ext-" + ("y" * 400)
 # ---------------------------------------------------------------------------
 
 
-class TestMigration042OnPostgres:
+class TestMigration044OnPostgres:
     def test_backfill_happy_path(self, pg_url: str) -> None:
-        """Each denormalized chunk col gets the parent document value; the two
-        narrow cols (``source``, ``external_id``) are LEFT(value, 255)."""
+        """Each denormalized chunk col gets the parent document value verbatim,
+        including the long ``source`` / ``external_id`` (widened columns hold
+        the full value)."""
         cfg = _make_config(pg_url)
         command.upgrade(cfg, "head")
 
@@ -322,7 +327,7 @@ class TestMigration042OnPostgres:
                 await engine.dispose()
 
         asyncio.run(_seed())
-        command.upgrade(cfg, "head")  # re-runs 042 → backfills
+        command.upgrade(cfg, "head")  # re-runs 044 → backfills
 
         async def _check() -> None:
             engine = create_async_engine(pg_url)
@@ -356,11 +361,12 @@ class TestMigration042OnPostgres:
                     assert content_type == doc_values["content_type"]
                     assert title == doc_values["title"]
 
-                    # The two narrow columns are truncated to LEFT(value, 255).
-                    assert external_id == _LONG_EXTERNAL_ID[:255]
-                    assert len(external_id) == 255
-                    assert source == _LONG_SOURCE[:255]
-                    assert len(source) == 255
+                    # The widened columns hold the full producer value now
+                    # that source is TEXT and external_id is VARCHAR(512).
+                    assert external_id == _LONG_EXTERNAL_ID
+                    assert len(external_id) == len(_LONG_EXTERNAL_ID)
+                    assert source == _LONG_SOURCE
+                    assert len(source) == len(_LONG_SOURCE)
             finally:
                 await engine.dispose()
 
@@ -725,7 +731,7 @@ class TestMigration042OnPostgres:
 
     def test_no_op_when_table_absent(self, pg_url: str) -> None:
         """Fresh DB with no ``khora_chunks``: the ``has_table`` guard
-        early-returns, the chain reaches head 042, and the migration does not
+        early-returns, the chain reaches head 044, and the migration does not
         create the runtime table."""
         cfg = _make_config(pg_url)
         # pg_url fixture already dropped khora_chunks; just upgrade.
@@ -755,9 +761,9 @@ class TestMigration042OnPostgres:
 # ---------------------------------------------------------------------------
 
 
-class TestMigration042OnSqlite:
+class TestMigration044OnSqlite:
     def test_chain_reaches_head_on_sqlite(self, sqlite_url: str) -> None:
-        """Migration 042 is a clean no-op on SQLite; chain reaches head 042."""
+        """Migration 044 is a clean no-op on SQLite; chain reaches head 044."""
         cfg = _make_config(sqlite_url)
         command.upgrade(cfg, "head")
 
@@ -773,7 +779,7 @@ class TestMigration042OnSqlite:
         asyncio.run(check())
 
     def test_downgrade_is_clean_on_sqlite(self, sqlite_url: str) -> None:
-        """upgrade head → downgrade to 041 is a clean no-op on SQLite."""
+        """upgrade head → downgrade to 043 is a clean no-op on SQLite."""
         cfg = _make_config(sqlite_url)
         command.upgrade(cfg, "head")
         command.downgrade(cfg, _PREV_REVISION)
