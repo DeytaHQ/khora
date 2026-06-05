@@ -290,6 +290,44 @@ def weighted_rrf_normalized(
     return fused
 
 
+def weighted_rrf_nlist(
+    sources: list[tuple[list[tuple[UUID, float, Any]], float]],
+    *,
+    k: int = 60,
+) -> list[FusedResult]:
+    """Weighted RRF over N sources in a single accumulation pass.
+
+    ``sources`` is a list of ``(results, weight)`` pairs. Unlike folding sources
+    in pairwise (which re-ranks an already-fused list and applies the wrong
+    weight to it), every source contributes ``weight / (k + rank)`` exactly once
+    into a shared accumulator, so the configured weights are honored. Each
+    source's scores are min-max normalized for a small tiebreak contribution,
+    matching :func:`weighted_rrf_normalized`.
+    """
+    rrf_scores: dict[UUID, float] = defaultdict(float)
+    score_contributions: dict[UUID, float] = defaultdict(float)
+    items: dict[UUID, Any] = {}
+
+    for results, weight in sources:
+        if not results:
+            continue
+        raw_scores = [score for _, score, _ in results]
+        normalized = _min_max_normalize(raw_scores)
+        for rank, ((item_id, _score, item), norm_score) in enumerate(zip(results, normalized), start=1):
+            rrf_scores[item_id] += weight / (k + rank)
+            score_contributions[item_id] += weight * norm_score * 0.01
+            if item_id not in items:
+                items[item_id] = item
+
+    final_scores = {item_id: rrf_scores[item_id] + score_contributions[item_id] for item_id in rrf_scores}
+    fused = [
+        FusedResult(item_id=item_id, item=items[item_id], rrf_score=final_score)
+        for item_id, final_score in final_scores.items()
+    ]
+    fused.sort(key=lambda x: x.rrf_score, reverse=True)
+    return fused
+
+
 def apply_recency_boost(
     results: list[FusedResult],
     recency_scores: dict[UUID, float],

@@ -67,8 +67,6 @@ def reciprocal_rank_fusion(
     else:
         normalized_weights = {s: weights.get(s, 1.0) / total_weight for s in ranked_lists}
 
-    from khora.engines.vectorcypher.fusion import weighted_rrf_normalized as _weighted_rrf_normalized
-
     # Assign stable synthetic UUIDs per item for deduplication and map
     # the generic (item, score) tuples into the vectorcypher format
     # (UUID, score, item).
@@ -91,43 +89,18 @@ def reciprocal_rank_fusion(
             converted.append((uid, score, item))
         all_converted.append(converted)
 
-    # Fuse pairwise: start with first source, merge subsequent sources
-    if len(all_converted) == 1:
-        source = source_names[0]
-        w = normalized_weights.get(source, 1.0)
-        fused = _weighted_rrf_normalized(
-            all_converted[0],
-            [],
-            k=k,
-            vector_weight=w,
-            graph_weight=0.0,
-        )
-    else:
-        # First pair
-        s0, s1 = source_names[0], source_names[1]
-        w0 = normalized_weights.get(s0, 1.0)
-        w1 = normalized_weights.get(s1, 1.0)
-        fused = _weighted_rrf_normalized(
-            all_converted[0],
-            all_converted[1],
-            k=k,
-            vector_weight=w0,
-            graph_weight=w1,
-        )
+    # Single-pass N-list weighted RRF. The previous implementation folded
+    # sources in pairwise, re-ranking the already-fused list and applying a
+    # hardcoded vector_weight=1.0 to it for each extra source - which distorted
+    # the configured weights once a third channel (e.g. BM25) was present. Here
+    # every source contributes weight/(k+rank) exactly once, so the weights are
+    # honored regardless of how many channels are fused.
+    from khora.engines.vectorcypher.fusion import weighted_rrf_nlist as _weighted_rrf_nlist
 
-        # Fold in additional sources (rare: most callers use 2 sources)
-        for i in range(2, len(all_converted)):
-            si = source_names[i]
-            wi = normalized_weights.get(si, 1.0)
-            # Convert current fused results back to list format
-            current = [(r.item_id, r.rrf_score, r.item) for r in fused]
-            fused = _weighted_rrf_normalized(
-                current,
-                all_converted[i],
-                k=k,
-                vector_weight=1.0,
-                graph_weight=wi,
-            )
+    weighted_sources = [
+        (all_converted[i], normalized_weights.get(source_names[i], 1.0)) for i in range(len(all_converted))
+    ]
+    fused = _weighted_rrf_nlist(weighted_sources, k=k)
 
     # Map back to (original_item, score) tuples
     return [(items_by_uuid[r.item_id], r.rrf_score) for r in fused]
