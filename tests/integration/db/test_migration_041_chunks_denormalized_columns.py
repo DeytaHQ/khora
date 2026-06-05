@@ -135,8 +135,8 @@ def pg_url() -> Iterator[str]:
                     await conn.execute(
                         sa.text(
                             "UPDATE khora_alembic_version SET version_num = "
-                            "'040_chunks_last_accessed_at' WHERE version_num = "
-                            "'041_khora_chunks_denormalized_columns'"
+                            "'040_chunks_last_accessed_at' WHERE version_num != "
+                            "'040_chunks_last_accessed_at'"
                         )
                     )
         finally:
@@ -205,16 +205,18 @@ class TestMigration041OnPostgres:
                         assert cols[name][1] == "YES", f"{name} should be nullable"
                         assert cols[name][2] is None, f"{name} should have no default"
 
-                    # Load-bearing types: source_timestamp is timestamptz,
-                    # source_url / title are text, the rest are varchar.
+                    # Load-bearing types after the chain reaches head:
+                    # source_timestamp is timestamptz; source_url / title / source
+                    # are text (migration 042 widens source varchar -> text); the
+                    # rest are varchar.
                     assert cols["source_timestamp"][0] == "timestamp with time zone"
                     assert cols["source_url"][0] == "text"
                     assert cols["title"][0] == "text"
+                    assert cols["source"][0] == "text"
                     assert cols["source_type"][0] == "character varying"
                     assert cols["source_name"][0] == "character varying"
                     assert cols["external_id"][0] == "character varying"
                     assert cols["content_type"][0] == "character varying"
-                    assert cols["source"][0] == "character varying"
             finally:
                 await engine.dispose()
 
@@ -274,7 +276,7 @@ class TestMigration041OnPostgres:
                 async with engine.connect() as conn:
                     # Chain reached head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "041_khora_chunks_denormalized_columns"
+                    assert result.scalar() == "042_widen_khora_chunks_source_external_id"
 
                     # The migration did not create the table.
                     result = await conn.execute(
@@ -296,7 +298,7 @@ class TestMigration041OnPostgres:
 
 class TestMigration041OnSqlite:
     def test_chain_reaches_head_on_sqlite(self, sqlite_url: str) -> None:
-        """Migration 041 is a clean no-op on SQLite; chain reaches head 041."""
+        """Migration 041 is a clean no-op on SQLite; chain reaches head."""
         cfg = _make_config(sqlite_url)
         command.upgrade(cfg, "head")
 
@@ -305,7 +307,7 @@ class TestMigration041OnSqlite:
             try:
                 async with engine.connect() as conn:
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "041_khora_chunks_denormalized_columns"
+                    assert result.scalar() == "042_widen_khora_chunks_source_external_id"
             finally:
                 await engine.dispose()
 
