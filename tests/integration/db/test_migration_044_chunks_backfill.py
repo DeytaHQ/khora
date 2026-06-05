@@ -90,7 +90,7 @@ pytestmark = pytest.mark.integration
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
 _PREV_REVISION = "043_khora_chunks_metadata_backfill"
-_HEAD_REVISION = "044_khora_chunks_backfill_denormalized"
+_HEAD_REVISION = "045_khora_try_timestamptz"
 
 _TSV_TRIGGER = "khora_chunks_content_tsv_update"
 
@@ -189,8 +189,8 @@ def pg_url() -> Iterator[str]:
                 )
                 if table_exists.scalar():
                     await conn.execute(
-                        sa.text("UPDATE khora_alembic_version SET version_num = :prev WHERE version_num = :head"),
-                        {"prev": _PREV_REVISION, "head": _HEAD_REVISION},
+                        sa.text("UPDATE khora_alembic_version SET version_num = :prev WHERE version_num != :prev"),
+                        {"prev": _PREV_REVISION},
                     )
         finally:
             await admin.dispose()
@@ -731,7 +731,7 @@ class TestMigration044OnPostgres:
 
     def test_no_op_when_table_absent(self, pg_url: str) -> None:
         """Fresh DB with no ``khora_chunks``: the ``has_table`` guard
-        early-returns, the chain reaches head 044, and the migration does not
+        early-returns, the chain reaches head, and the migration does not
         create the runtime table."""
         cfg = _make_config(pg_url)
         # pg_url fixture already dropped khora_chunks; just upgrade.
@@ -763,7 +763,7 @@ class TestMigration044OnPostgres:
 
 class TestMigration044OnSqlite:
     def test_chain_reaches_head_on_sqlite(self, sqlite_url: str) -> None:
-        """Migration 044 is a clean no-op on SQLite; chain reaches head 044."""
+        """Migration 044 is a clean no-op on SQLite; chain reaches head."""
         cfg = _make_config(sqlite_url)
         command.upgrade(cfg, "head")
 

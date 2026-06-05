@@ -42,10 +42,12 @@ from khora.engines.skeleton.backends import (
     TemporalVectorStore,
     temporal_chunk_to_chunk,
 )
+from khora.filter.model import Op
 from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
+    from khora.filter.ast import FilterNode
 
 # Table definition for khora_chunks (separate from existing chunks table)
 metadata = MetaData()
@@ -88,6 +90,16 @@ khora_chunks_table = Table(
     Column("content_tsv", TSVECTOR, nullable=True),
     # Indexes are defined below
 )
+
+
+# Legacy ``TemporalFilter.additional`` range-op names → the canonical filter Op,
+# so the deterministic-filter compiler can build a type-gated metadata compare.
+_LEGACY_RANGE_OPS: dict[str, Op] = {
+    "gt": Op.GT,
+    "gte": Op.GTE,
+    "lt": Op.LT,
+    "lte": Op.LTE,
+}
 
 
 class PgVectorTemporalStore(TemporalVectorStore):
@@ -139,7 +151,18 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 database_url,
                 pool_size=pool_size,
                 max_overflow=max_overflow,
-                connect_args={"server_settings": {"hnsw.ef_search": str(self._hnsw_ef_search)}},
+                # Pin the session TimeZone to UTC so a zoneless metadata date
+                # string read by ``khora_try_timestamptz`` (the $date recall
+                # filter) is interpreted as UTC, matching the UTC-normalized
+                # comparison value the compiler binds. (Only the engine the store
+                # creates itself; an injected shared engine keeps its own pool
+                # default.)
+                connect_args={
+                    "server_settings": {
+                        "hnsw.ef_search": str(self._hnsw_ef_search),
+                        "TimeZone": "UTC",
+                    }
+                },
             )
 
         # Create tables if they don't exist
@@ -373,6 +396,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         temporal_filter: TemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -383,6 +407,11 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
         QUALITY FIX: When vector search returns insufficient results, automatically
         falls back to keyword search to improve recall on non-core chunks.
+
+        ``filter_ast`` is the deterministic recall-filter AST. When
+        provided it is compiled to a single-table ``khora_chunks`` WHERE predicate
+        and AND-ed alongside the legacy ``temporal_filter`` conditions. The two
+        coexist during the ``TemporalFilter`` deprecation window.
         """
         with trace_span(
             "khora.temporal_store.search",
@@ -398,6 +427,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 temporal_filter=temporal_filter,
                 hybrid_alpha=hybrid_alpha,
                 query_text=query_text,
+                filter_ast=filter_ast,
             )
             _search_span.set_attribute("result_count", len(results))
             return results
@@ -412,6 +442,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         temporal_filter: TemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
         async with self._get_session() as session:
             # Build base conditions
@@ -420,6 +451,20 @@ class PgVectorTemporalStore(TemporalVectorStore):
             # Add temporal filters
             if temporal_filter:
                 conditions.extend(self._build_filter_conditions(temporal_filter))
+
+            # Deterministic recall-filter AST: compile to a single
+            # khora_chunks WHERE predicate and AND it into the conditions. The
+            # compiler aliases nothing here (the store queries the base table),
+            # so ``table_alias`` stays None.
+            if filter_ast is not None:
+                from khora.filter import CompileContext
+                from khora.filter.compilers.postgres import compile_postgres
+
+                compiled = compile_postgres(
+                    filter_ast,
+                    CompileContext(backend_target="khora_chunks", on_unsupported="raise"),
+                )
+                conditions.append(compiled.predicate)
 
             # Vector search
             vector_results = await self._vector_search(
@@ -685,26 +730,41 @@ class PgVectorTemporalStore(TemporalVectorStore):
             # so we cast the literal to ``varchar[]`` explicitly to match.
             conditions.append(khora_chunks_table.c.tags.contains(cast(f.tags, ARRAY(String))))
 
-        # Handle additional filters
+        # Handle additional metadata filters. Range comparisons go through the
+        # deterministic-filter compiler's type-gated JSONB path rather than the
+        # old ``.astext`` lexicographic compare, which mis-ordered numbers (the
+        # "10" < "2" bug). Equality keeps the text-equality semantics callers
+        # already depend on.
         for key, value in f.additional.items():
             if isinstance(value, dict):
-                # Operator-style filter
                 for op, val in value.items():
                     if op == "eq":
                         conditions.append(khora_chunks_table.c.metadata[key].astext == str(val))
-                    elif op == "gte":
-                        conditions.append(khora_chunks_table.c.metadata[key].astext >= str(val))
-                    elif op == "lte":
-                        conditions.append(khora_chunks_table.c.metadata[key].astext <= str(val))
-                    elif op == "gt":
-                        conditions.append(khora_chunks_table.c.metadata[key].astext > str(val))
-                    elif op == "lt":
-                        conditions.append(khora_chunks_table.c.metadata[key].astext < str(val))
+                    elif op in _LEGACY_RANGE_OPS:
+                        conditions.append(self._legacy_metadata_range(key, op, val))
             else:
                 # Simple equality
                 conditions.append(khora_chunks_table.c.metadata[key].astext == str(value))
 
         return conditions
+
+    @staticmethod
+    def _legacy_metadata_range(key: str, op: str, val: Any):
+        """Type-gated metadata range compare for the legacy ``additional`` dict.
+
+        Reuses the deterministic-filter Postgres compiler so a numeric metadata
+        value orders numerically (not lexicographically). ``key`` is a top-level
+        metadata key, ``op`` one of ``gt``/``gte``/``lt``/``lte`` and ``val`` the
+        comparison operand (numeric values compare numerically; strings fall back
+        to a gated lexicographic compare).
+        """
+        from khora.filter.ast import FilterClause
+        from khora.filter.compilers.postgres import _Builder
+        from khora.filter.context import CompileContext
+
+        builder = _Builder(ctx=CompileContext(backend_target="khora_chunks"), consumed=set())
+        clause = FilterClause(path=("metadata", key), op=_LEGACY_RANGE_OPS[op], operand=val)
+        return builder.compile_clause(clause)
 
     def _row_to_chunk(self, row) -> TemporalChunk:
         """Convert a database row to a TemporalChunk."""
@@ -747,3 +807,14 @@ class PgVectorTemporalStore(TemporalVectorStore):
 
 
 __all__ = ["PgVectorTemporalStore"]
+
+
+# Register the deterministic recall-filter compiler for this engine/target at
+# import time (idempotent — same function object). ``pgvector.py`` is imported
+# lazily by ``create_temporal_store("pgvector", ...)``, so registration happens
+# exactly when the pgvector backend is first constructed — no eager cost, and no
+# registration when the backend is unused.
+from khora.filter import CompilerRegistry  # noqa: E402
+from khora.filter.compilers.postgres import compile_postgres  # noqa: E402
+
+CompilerRegistry.register("skeleton.pgvector", "khora_chunks", compile_postgres)

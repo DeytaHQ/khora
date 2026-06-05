@@ -277,7 +277,7 @@ class TestMigration041OnPostgres:
                 async with engine.connect() as conn:
                     # Chain reached head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "044_khora_chunks_backfill_denormalized"
+                    assert result.scalar() == "045_khora_try_timestamptz"
 
                     # The migration did not create the table.
                     result = await conn.execute(
@@ -308,7 +308,7 @@ class TestMigration041OnSqlite:
             try:
                 async with engine.connect() as conn:
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "044_khora_chunks_backfill_denormalized"
+                    assert result.scalar() == "045_khora_try_timestamptz"
             finally:
                 await engine.dispose()
 
