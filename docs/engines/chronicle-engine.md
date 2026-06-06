@@ -1,5 +1,7 @@
 # Chronicle Engine
 
+> **Status: experimental.** Chronicle is not yet stamped production-ready on any stack - it is suitable for evaluation, prototypes, and benchmarks. For production, use [VectorCypher](vectorcypher-engine.md), the only production-ready engine today. See [engine-comparison.md](engine-comparison.md#production-readiness-by-stack).
+
 The Chronicle engine is Khora's memory engine designed for **temporal and conversational memory**. It targets high scores on benchmarks like LongMemEval, LoCoMo, and BEAM by combining semantic search with temporal reasoning.
 
 Unlike VectorCypher, Chronicle requires **no graph database** - it runs on PostgreSQL + pgvector only, with an optional embedded LanceDB store for zero-infrastructure deployments.

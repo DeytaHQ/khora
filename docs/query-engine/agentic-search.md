@@ -51,11 +51,11 @@ Run the original query across all sources:
 
 ```
 Query: "What is our product strategy?"
-         |
-    +----+----+----+
-    |    |    |    |
-    v    v    v    v
- Vector Graph Keyword  → RRF Fusion → Initial Results
+            |
+     +------+------+
+     |      |      |
+     v      v      v
+  Vector  Graph  Keyword   → RRF Fusion → Initial Results
 ```
 
 Analyze what came back:

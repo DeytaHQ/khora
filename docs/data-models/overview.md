@@ -24,12 +24,12 @@ Everything in Khora fits into one of three layers:
 |                      CONTENT LAYER                        |
 |                                                           |
 |   Document ----+---- Chunk ----+---- Entity               |
-|   (the source) |    (pieces)   |    (concepts)            |
-|                |               |         |                |
-|                +---- Chunk     |    Relationship          |
-|                      |         |    (connections)         |
-|                      +-------- +                          |
-|                                      Episode              |
+|   (the source) |    (pieces)   |       (concepts)         |
+|                |               |                          |
+|                +---- Chunk     +---- Relationship         |
+|                      |               (connections)        |
+|                      +---- Chunk                          |
+|                                +---- Episode              |
 |                                      (events)             |
 +-----------------------------------------------------------+
                             |

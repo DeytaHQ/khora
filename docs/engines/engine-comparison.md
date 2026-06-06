@@ -4,12 +4,12 @@ Khora supports three pluggable engines with different strengths. This guide help
 
 ## Production-readiness by stack
 
-Production-readiness is **per (engine × stack)**, not per engine. The same engine can be production-ready on one storage stack and experimental on another.
+Production-readiness is **per (engine × stack)**, not per engine. The same engine can be production-ready on one storage stack and experimental on another. Today **only VectorCypher on PostgreSQL + pgvector + Neo4j is stamped production-ready**; Chronicle and Skeleton are not production-stamped on any stack.
 
 | Engine        | PostgreSQL + pgvector + Neo4j  | PostgreSQL + pgvector (no graph) | SQLite + LanceDB (embedded) | SurrealDB (unified)        |
 |---------------|--------------------------------|----------------------------------|-----------------------------|----------------------------|
 | VectorCypher  | **Production-ready**           | n/a (graph required)             | Experimental     | Experimental               |
-| Chronicle     | n/a (graph not required)       | **Production-ready**             | Experimental                | Experimental               |
+| Chronicle     | n/a (graph not required)       | Experimental                     | Experimental                | Experimental               |
 | Skeleton      | n/a (graph not required)       | Available                        | Experimental     | Experimental               |
 
 - **Production-ready** - qualified for production deployment; covered by integration and e2e tests; documented gotchas have known mitigations.

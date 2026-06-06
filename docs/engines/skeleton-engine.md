@@ -366,7 +366,7 @@ tenants (useful for cross-tenant audit + GDPR delete-by-tenant).
 **Hybrid search is client-side RRF.** turbopuffer doesn't expose a
 server-blended linear alpha score; it offers a multi-query batch that
 the client fuses with Reciprocal Rank Fusion. Consequence: the
-`hybrid_alpha` parameter is a **no-op** on this backend — the fusion is
+`hybrid_alpha` parameter is a **no-op** on this backend - the fusion is
 rank-based, not score-weighted. If you need true server-blended linear
 alpha scores, stay on Weaviate.
 
@@ -390,11 +390,11 @@ to turbopuffer's filter DSL (`Eq`, `Gte`, `Lte`, `Lt`, `In`, `Contains`,
 
 **Crossover guidance.** At a 1 GB namespace and 1M queries/month
 turbopuffer runs roughly ~$8 (queries) + ~$0.33 (storage) + write
-amortisation — call it ~$25/month. The same workload on
+amortisation - call it ~$25/month. The same workload on
 self-hosted Postgres+pgvector is ~$30-50/month in VM + storage cost
 plus ops overhead. Crossover lands somewhere around 50M chunks
 with sustained query volume; below that pgvector wins, above that
-turbopuffer wins. Numbers as of 2026-05-24 — re-check
+turbopuffer wins. Numbers as of 2026-05-24 - re-check
 [pricing](https://turbopuffer.com/pricing) before adopting.
 
 **Install:** `pip install khora[turbopuffer]`.
@@ -508,7 +508,7 @@ KHORA_DATABASE_URL=postgresql://localhost/khora
 KHORA_QUERY_RECENCY_DECAY_DAYS=30
 ```
 
-Engine and backend selection are constructor-only — pass
+Engine and backend selection are constructor-only - pass
 `engine="skeleton"` and `engine_kwargs={"backend": "pgvector"}` to
 `Khora(...)`. The `hybrid_alpha` blend weight is a per-call argument
 to `kb.recall(...)` and has no env-var equivalent.

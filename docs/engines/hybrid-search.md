@@ -6,10 +6,10 @@ The Skeleton Construction engine implements hybrid search combining vector simil
 
 ```
 Query
-  │
-  ├──────────────────────────────────┐
-  │                                  │
-  ▼                                  ▼
+                       │
+         ┌─────────────┴─────────────┐
+         │                           │
+         ▼                           ▼
 ┌─────────────────┐         ┌─────────────────┐
 │  Vector Search  │         │   BM25 Search   │
 │  (Embeddings)   │         │  (Full-text)    │
@@ -442,7 +442,7 @@ KHORA_QUERY_MIN_CHUNK_SIMILARITY=0.0
 KHORA_QUERY_MIN_ENTITY_SIMILARITY=0.0
 ```
 
-`hybrid_alpha` is a per-call argument to `kb.recall(...)` only — there
+`hybrid_alpha` is a per-call argument to `kb.recall(...)` only - there
 is no global env-var equivalent. The vector/keyword channel weights
 above (`KHORA_QUERY_VECTOR_WEIGHT` / `KHORA_QUERY_KEYWORD_WEIGHT`) are
 the closest tunable defaults. The per-call `limit` argument likewise

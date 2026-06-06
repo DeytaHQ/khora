@@ -1,12 +1,12 @@
 # Nested env vars
 
 Reference for every Khora environment variable that lives on a **sub-object**
-attached to a sub-settings class — graph backend, vector backend, the unified
+attached to a sub-settings class - graph backend, vector backend, the unified
 SurrealDB store, the SQLite+LanceDB embedded stack, and the dream-phase
 per-op toggles.
 
 > **Spelling.** All env vars in this document use **single underscore** between
-> every level — `KHORA_STORAGE_GRAPH_URL`, not `KHORA_STORAGE__GRAPH__URL`.
+> every level - `KHORA_STORAGE_GRAPH_URL`, not `KHORA_STORAGE__GRAPH__URL`.
 > The legacy double-underscore form (`KHORA_STORAGE__GRAPH__URL`) continues to
 > work as a backwards-compatible alias on every nested-config field; it is no
 > longer documented. New code and `.env` files should use the single-underscore
@@ -14,15 +14,15 @@ per-op toggles.
 
 ## Sections
 
-- [`KHORA_STORAGE_GRAPH_*` — graph backend](#khora_storage_graph_--graph-backend)
-- [`KHORA_STORAGE_VECTOR_*` — vector backend](#khora_storage_vector_--vector-backend)
-- [`KHORA_STORAGE_SURREALDB_*` — unified SurrealDB](#khora_storage_surrealdb_--unified-surrealdb)
-- [`KHORA_STORAGE_SQLITE_LANCE_*` — SQLite + LanceDB unified](#khora_storage_sqlite_lance_--sqlite--lancedb-unified)
-- [`KHORA_DREAM_OPS_*` — dream-phase per-op toggles](#khora_dream_ops_--dream-phase-per-op-toggles)
+- [`KHORA_STORAGE_GRAPH_*` - graph backend](#khora_storage_graph_--graph-backend)
+- [`KHORA_STORAGE_VECTOR_*` - vector backend](#khora_storage_vector_--vector-backend)
+- [`KHORA_STORAGE_SURREALDB_*` - unified SurrealDB](#khora_storage_surrealdb_--unified-surrealdb)
+- [`KHORA_STORAGE_SQLITE_LANCE_*` - SQLite + LanceDB unified](#khora_storage_sqlite_lance_--sqlite--lancedb-unified)
+- [`KHORA_DREAM_OPS_*` - dream-phase per-op toggles](#khora_dream_ops_--dream-phase-per-op-toggles)
 
 ---
 
-## `KHORA_STORAGE_GRAPH_*` — graph backend
+## `KHORA_STORAGE_GRAPH_*` - graph backend
 
 Discriminated union over `Neo4jConfig | MemgraphConfig | NeptuneConfig | SurrealDBConfig | AGEConfig`, keyed by the `backend` field. The set of available fields depends on which backend you select.
 
@@ -31,7 +31,7 @@ Discriminated union over `Neo4jConfig | MemgraphConfig | NeptuneConfig | Surreal
 | Variable | Default | Why change it |
 |---|---|---|
 | `KHORA_STORAGE_GRAPH_BACKEND` | `neo4j` | Pick the graph adapter: `neo4j` / `memgraph` / `neptune` / `surrealdb` / `age`. |
-| `KHORA_STORAGE_GRAPH_URL` | — | Bolt / connection URL. `SecretStr`. |
+| `KHORA_STORAGE_GRAPH_URL` | - | Bolt / connection URL. `SecretStr`. |
 
 ### Neo4j (`backend=neo4j`, the default)
 
@@ -59,12 +59,12 @@ Discriminated union over `Neo4jConfig | MemgraphConfig | NeptuneConfig | Surreal
 
 | Variable | Default | Why change it |
 |---|---|---|
-| `KHORA_STORAGE_GRAPH_BACKEND` | — | Set to `memgraph`. |
-| `KHORA_STORAGE_GRAPH_URL` | — | Bolt URL. `SecretStr`. |
+| `KHORA_STORAGE_GRAPH_BACKEND` | - | Set to `memgraph`. |
+| `KHORA_STORAGE_GRAPH_URL` | - | Bolt URL. `SecretStr`. |
 | `KHORA_STORAGE_GRAPH_USER` | `memgraph` | Username. |
 | `KHORA_STORAGE_GRAPH_PASSWORD` | empty | Password. `SecretStr`. |
 
-Memgraph speaks Bolt via the Neo4j driver, but its config model exposes only the four fields above — none of the pool / timeout / provenance-cap knobs from the Neo4j section apply.
+Memgraph speaks Bolt via the Neo4j driver, but its config model exposes only the four fields above - none of the pool / timeout / provenance-cap knobs from the Neo4j section apply.
 
 ### Neptune (`backend=neptune`)
 
@@ -81,7 +81,7 @@ Memgraph speaks Bolt via the Neo4j driver, but its config model exposes only the
 | Variable | Default | Why change it |
 |---|---|---|
 | `KHORA_STORAGE_GRAPH_MODE` | `memory` | `memory` / `embedded` / `remote`. Pick `remote` for multi-process deployments. |
-| `KHORA_STORAGE_GRAPH_PATH` | — | On-disk SurrealKV file (embedded mode only). |
+| `KHORA_STORAGE_GRAPH_PATH` | - | On-disk SurrealKV file (embedded mode only). |
 | `KHORA_STORAGE_GRAPH_NAMESPACE` | `khora` | SurrealDB namespace. Vary to multiplex tenants in one instance. |
 | `KHORA_STORAGE_GRAPH_DATABASE` | `default` | SurrealDB database. |
 | `KHORA_STORAGE_GRAPH_USER` | `root` | Username. |
@@ -93,23 +93,23 @@ Memgraph speaks Bolt via the Neo4j driver, but its config model exposes only the
 
 | Variable | Default | Why change it |
 |---|---|---|
-| `KHORA_STORAGE_GRAPH_GRAPH_NAME` | `khora_graph` | Name of the AGE graph object inside Postgres. The doubled `GRAPH` is not a typo — `GRAPH` comes from the sub-object name (`storage.graph`) and `GRAPH_NAME` from the field name (`AGEConfig.graph_name`). |
+| `KHORA_STORAGE_GRAPH_GRAPH_NAME` | `khora_graph` | Name of the AGE graph object inside Postgres. The doubled `GRAPH` is not a typo - `GRAPH` comes from the sub-object name (`storage.graph`) and `GRAPH_NAME` from the field name (`AGEConfig.graph_name`). |
 | `KHORA_STORAGE_GRAPH_POOL_SIZE` | `10` | asyncpg pool size dedicated to the graph layer. |
 | `KHORA_STORAGE_GRAPH_MAX_OVERFLOW` | `20` | Max overflow connections beyond `pool_size`. |
 
 ---
 
-## `KHORA_STORAGE_VECTOR_*` — vector backend
+## `KHORA_STORAGE_VECTOR_*` - vector backend
 
 Discriminated union over `PgVectorConfig | SurrealDBVectorConfig | SQLiteVectorConfig`, keyed by `backend`. Default is `pgvector` via `default_factory=PgVectorConfig`.
 
 | Variable | Default | Applies when | Why change it |
 |---|---|---|---|
 | `KHORA_STORAGE_VECTOR_BACKEND` | `pgvector` | always | `pgvector` / `surrealdb` / `sqlite`. |
-| `KHORA_STORAGE_VECTOR_URL` | — | pgvector / sqlite | Connection URL. |
+| `KHORA_STORAGE_VECTOR_URL` | - | pgvector / sqlite | Connection URL. |
 | `KHORA_STORAGE_VECTOR_EMBEDDING_DIMENSION` | `1536` | always | Must match the LLM embedding model. Changing requires a schema migration. |
 | `KHORA_STORAGE_VECTOR_MODE` | `memory` | SurrealDB vector | `memory` / `embedded` / `remote`. |
-| `KHORA_STORAGE_VECTOR_PATH` | — | SurrealDB vector (embedded) | On-disk SurrealKV file. |
+| `KHORA_STORAGE_VECTOR_PATH` | - | SurrealDB vector (embedded) | On-disk SurrealKV file. |
 | `KHORA_STORAGE_VECTOR_NAMESPACE` | `khora` | SurrealDB vector | SurrealDB namespace. |
 | `KHORA_STORAGE_VECTOR_DATABASE` | `default` | SurrealDB vector | SurrealDB database. |
 | `KHORA_STORAGE_VECTOR_USER` | `root` | SurrealDB vector | Username. |
@@ -119,7 +119,7 @@ For `backend=sqlite`, only `BACKEND` / `URL` / `EMBEDDING_DIMENSION` are model-e
 
 ---
 
-## `KHORA_STORAGE_SURREALDB_*` — unified SurrealDB
+## `KHORA_STORAGE_SURREALDB_*` - unified SurrealDB
 
 Used when `KHORA_STORAGE_BACKEND=surrealdb` routes **both** graph and vector
 roles to the same SurrealDB instance. Same fields as the graph-role config
@@ -128,8 +128,8 @@ above, attached at a different point on `StorageSettings`.
 | Variable | Default | Why change it |
 |---|---|---|
 | `KHORA_STORAGE_SURREALDB_MODE` | `memory` | `memory` / `embedded` / `remote`. Pick `remote` for production. |
-| `KHORA_STORAGE_SURREALDB_URL` | — | `ws://...` WebSocket URL (remote mode). |
-| `KHORA_STORAGE_SURREALDB_PATH` | — | On-disk SurrealKV file (embedded mode). |
+| `KHORA_STORAGE_SURREALDB_URL` | - | `ws://...` WebSocket URL (remote mode). |
+| `KHORA_STORAGE_SURREALDB_PATH` | - | On-disk SurrealKV file (embedded mode). |
 | `KHORA_STORAGE_SURREALDB_NAMESPACE` | `khora` | SurrealDB namespace. |
 | `KHORA_STORAGE_SURREALDB_DATABASE` | `default` | SurrealDB database. |
 | `KHORA_STORAGE_SURREALDB_USER` | `root` | Username. |
@@ -139,11 +139,11 @@ above, attached at a different point on `StorageSettings`.
 
 ---
 
-## `KHORA_STORAGE_SQLITE_LANCE_*` — SQLite + LanceDB unified
+## `KHORA_STORAGE_SQLITE_LANCE_*` - SQLite + LanceDB unified
 
 Used when `KHORA_STORAGE_BACKEND=sqlite_lance`. Pairs an on-disk SQLite
 database (graph + relational + event store) with a sibling LanceDB
-directory (vector search). Zero infrastructure — both backends run
+directory (vector search). Zero infrastructure - both backends run
 in-process.
 
 | Variable | Default | Why change it |
@@ -151,7 +151,7 @@ in-process.
 | `KHORA_STORAGE_SQLITE_LANCE_DB_PATH` | `./khora.db` | SQLite file path. Move to faster storage or a backup-friendly location. |
 | `KHORA_STORAGE_SQLITE_LANCE_LANCE_PATH` | sibling `.lance` dir | Explicit LanceDB directory. Override to put vectors on different storage (e.g. SSD) than chunk metadata. |
 | `KHORA_STORAGE_SQLITE_LANCE_EMBEDDING_DIMENSION` | `1536` | Must match LLM embedding model. |
-| `KHORA_STORAGE_SQLITE_LANCE_USE_HALFVEC` | `false` | Float16 storage — halves index size with minor recall loss. Enable on memory-constrained boxes. |
+| `KHORA_STORAGE_SQLITE_LANCE_USE_HALFVEC` | `false` | Float16 storage - halves index size with minor recall loss. Enable on memory-constrained boxes. |
 | `KHORA_STORAGE_SQLITE_LANCE_LANCE_INDEX` | `auto` | `auto` / `ivf_pq` / `hnsw` / `brute`. Force `ivf_pq` above ~1M rows; `hnsw` for low-latency under ~1M; `brute` for tiny corpora. |
 | `KHORA_STORAGE_SQLITE_LANCE_IVF_PARTITIONS` | `null` (auto) | Hand-tuned IVF partition count (`lance_index=ivf_pq` only). Override only if profiling shows recall miss. |
 | `KHORA_STORAGE_SQLITE_LANCE_HNSW_M` | `16` | HNSW max connections per layer (`lance_index=hnsw` only). Raise for recall; linear memory cost. |
@@ -159,10 +159,10 @@ in-process.
 
 ---
 
-## `KHORA_DREAM_OPS_*` — dream-phase per-op toggles
+## `KHORA_DREAM_OPS_*` - dream-phase per-op toggles
 
 `DreamConfig.ops: DreamOpsConfig` carries per-operation enable flags. Every
-destructive op defaults to `false` — `KHORA_DREAM_ENABLED=true` alone runs
+destructive op defaults to `false` - `KHORA_DREAM_ENABLED=true` alone runs
 no destructive work; each op must be flipped explicitly.
 
 See [dream-phase.md](dream-phase.md) for operational guidance, retention
@@ -172,7 +172,7 @@ floors, and the kill-switch (`KHORA_DREAM_DISABLE_APPLY`).
 |---|---|---|
 | `KHORA_DREAM_OPS_DEDUPE_ENTITIES` | `false` | Enable cross-batch entity dedupe (cosine-merge with verifier). Turn on after validating planner output in dry-run. |
 | `KHORA_DREAM_OPS_PRUNE_EDGES` | `false` | Remove low-confidence / orphaned edges (default targets `ASSOCIATED_WITH` co-occurrence). Turn on when edge soup degrades retrieval. |
-| `KHORA_DREAM_OPS_COMPACT_FACTS` | `false` | Hard-delete tombstoned `memory_facts` rows past the 7-day retention floor. **The only hard-delete op** — flip with care. |
+| `KHORA_DREAM_OPS_COMPACT_FACTS` | `false` | Hard-delete tombstoned `memory_facts` rows past the 7-day retention floor. **The only hard-delete op** - flip with care. |
 | `KHORA_DREAM_OPS_CLUSTER_EVENTS` | `false` | Merge near-duplicate Chronicle events (cosine ≥ 0.95 within a 7-day window). |
 | `KHORA_DREAM_OPS_RECOMPUTE_CENTROIDS` | `false` | Recompute entity / cluster centroid embeddings after dedupe. Pair with `DEDUPE_ENTITIES`. |
 
@@ -181,19 +181,19 @@ floors, and the kill-switch (`KHORA_DREAM_DISABLE_APPLY`).
 ## Not on this list
 
 These env vars reach top-level fields of each sub-settings class via the
-sub-class's own `env_prefix` — there is no sub-object hop. See
+sub-class's own `env_prefix` - there is no sub-object hop. See
 [configuration.md](configuration.md) for full coverage.
 
-- `KHORA_STORAGE_BACKEND`, `KHORA_STORAGE_POSTGRESQL_*`, `KHORA_STORAGE_HNSW_*`, `KHORA_STORAGE_USE_HALFVEC` — flat on `StorageSettings`.
-- `KHORA_LLM_*` — every field on `LLMSettings` is top-level (no sub-objects).
-- `KHORA_PIPELINES_*` — every field on `PipelineSettings` is top-level.
-- `KHORA_QUERY_*` — every field on `QuerySettings` is top-level, including the Chronicle-specific `KHORA_QUERY_CHRONICLE_*` family.
-- `KHORA_TENANCY_*`, `KHORA_TELEMETRY_*` — both flat.
-- `KHORA_DREAM_*` (e.g. `KHORA_DREAM_ENABLED`, `KHORA_DREAM_DEFAULT_MODE`, `KHORA_DREAM_LLM_MAX_TOKENS_PER_RUN`) — flat on `DreamConfig`. Only the per-op toggles under the `ops:` sub-object are listed above.
+- `KHORA_STORAGE_BACKEND`, `KHORA_STORAGE_POSTGRESQL_*`, `KHORA_STORAGE_HNSW_*`, `KHORA_STORAGE_USE_HALFVEC` - flat on `StorageSettings`.
+- `KHORA_LLM_*` - every field on `LLMSettings` is top-level (no sub-objects).
+- `KHORA_PIPELINES_*` - every field on `PipelineSettings` is top-level.
+- `KHORA_QUERY_*` - every field on `QuerySettings` is top-level, including the Chronicle-specific `KHORA_QUERY_CHRONICLE_*` family.
+- `KHORA_TENANCY_*`, `KHORA_TELEMETRY_*` - both flat.
+- `KHORA_DREAM_*` (e.g. `KHORA_DREAM_ENABLED`, `KHORA_DREAM_DEFAULT_MODE`, `KHORA_DREAM_LLM_MAX_TOKENS_PER_RUN`) - flat on `DreamConfig`. Only the per-op toggles under the `ops:` sub-object are listed above.
 
 ## Related
 
-- [configuration.md](configuration.md) — the full env-var surface (flat + nested) with section-by-section coverage.
-- [architecture/multi-tenancy.md](architecture/multi-tenancy.md) — namespace isolation is enforced at the storage Protocol layer; `TenancyMode.ISOLATED` is reserved but not yet wired.
-- [architecture/storage-backends.md](architecture/storage-backends.md) — per-backend deployment recipes.
-- [dream-phase.md](dream-phase.md) — dream-phase operational guidance.
+- [configuration.md](configuration.md) - the full env-var surface (flat + nested) with section-by-section coverage.
+- [architecture/multi-tenancy.md](architecture/multi-tenancy.md) - namespace isolation is enforced at the storage Protocol layer; `TenancyMode.ISOLATED` is reserved but not yet wired.
+- [architecture/storage-backends.md](architecture/storage-backends.md) - per-backend deployment recipes.
+- [dream-phase.md](dream-phase.md) - dream-phase operational guidance.

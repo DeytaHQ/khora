@@ -294,7 +294,7 @@ All result types are frozen slotted dataclasses.
 
 ### `BatchHandle`
 
-Returned by `kb.submit_batch(...)` (the async-staging path that returns immediately and is processed by the pending-processor task — which must already be running via `kb.start_pending_processor()`; `submit_batch` raises otherwise). Use `await handle.wait()` to block until all documents finish. `submit_batch` also accepts an optional `session_id: UUID | None = None` kwarg that is stamped onto every staged document (per-document `metadata["session_id"]` wins if both are set) - see #620 and the [`session_id` column](migrations.md) for retention/forget semantics.
+Returned by `kb.submit_batch(...)` (the async-staging path that returns immediately and is processed by the pending-processor task - which must already be running via `kb.start_pending_processor()`; `submit_batch` raises otherwise). Use `await handle.wait()` to block until all documents finish. `submit_batch` also accepts an optional `session_id: UUID | None = None` kwarg that is stamped onto every staged document (per-document `metadata["session_id"]` wins if both are set) - see #620 and the [`session_id` column](migrations.md) for retention/forget semantics.
 
 | Field / method | Type | Description |
 |---|---|---|

@@ -499,7 +499,7 @@ kwargs on `kb.remember()`. Configure them at construction time via
 and `KhoraConfig.llm.model` (or the corresponding env vars
 `KHORA_PIPELINES_CHUNK_SIZE`, `KHORA_LLM_EMBEDDING_MODEL`,
 `KHORA_LLM_MODEL`). The `expertise` kwarg on `kb.remember` accepts an
-`ExpertiseConfig` instance, not a string — for ad-hoc per-call
+`ExpertiseConfig` instance, not a string - for ad-hoc per-call
 expertise without setting up the config object, use the lower-level
 `ingest_documents()` direct path shown below, which accepts the
 string form.
