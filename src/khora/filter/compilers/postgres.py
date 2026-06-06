@@ -262,6 +262,14 @@ class _Builder:
             return present if operand else sa.not_(present)
 
         if op in (Op.IN, Op.NIN):
+            if not operand:
+                # An empty operand list is a valid filter with a defined row-set
+                # (the validator accepts it). Positive $in over ∅ matches nothing;
+                # $nin over ∅ matches everything. Guard before building the OR
+                # chain: sa.or_() with no clauses vanishes from the enclosing AND
+                # (so $in would wrongly match all), and sa.not_() of that empty
+                # chain is invalid SQL (so $nin would error at execute time).
+                return sa.false() if op == Op.IN else sa.true()
             chain = sa.or_(*(self._md_containment(segs, v) for v in operand))
             return chain if op == Op.IN else sa.not_(chain)
 

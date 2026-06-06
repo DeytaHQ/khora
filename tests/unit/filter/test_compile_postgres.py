@@ -294,6 +294,23 @@ def test_metadata_in_is_or_of_containments_or_overlap() -> None:
     assert "@>" in sql or "?|" in sql
 
 
+def test_metadata_empty_in_is_constant_false() -> None:
+    # An empty $in operand list is a valid filter (the validator accepts it) with
+    # a defined row-set: a positive membership over ∅ matches nothing. It must
+    # render as a constant FALSE — never a vanishing sa.or_() that the enclosing
+    # AND would drop (which would wrongly match every row).
+    sql = _sql_norm(_ast({"metadata.tier": {"$in": []}}))
+    assert sql == "false"
+
+
+def test_metadata_empty_nin_is_constant_true() -> None:
+    # An empty $nin operand list matches everything (negation over ∅). It must
+    # render as a constant TRUE — never sa.not_() of an empty OR chain, which is
+    # invalid SQL that would error at execute time.
+    sql = _sql_norm(_ast({"metadata.tier": {"$nin": []}}))
+    assert sql == "true"
+
+
 def test_metadata_array_operand_eq_is_exact_jsonb_match() -> None:
     # A bare list on a metadata path is $eq EXACT-ARRAY: the field must equal the
     # whole JSON array, emitted as #> = <jsonb array> (NOT containment, NOT $in).

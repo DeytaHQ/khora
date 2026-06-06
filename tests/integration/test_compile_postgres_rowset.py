@@ -308,6 +308,25 @@ async def test_metadata_in_multiple_values(seeded) -> None:
     assert labels == {"num2", "baddate", "numstr", "arr"}
 
 
+async def test_metadata_empty_in_matches_nothing(seeded) -> None:
+    # An empty $in operand is a valid filter (the validator accepts it): positive
+    # membership over ∅ matches NO row. Regression guard for the bug where the
+    # empty sa.or_() vanished from the AND and the filter matched every row.
+    # ``score`` is absent on `missing`, so this also exercises the absent-key row.
+    labels = await _matching_labels(seeded, {"metadata.score": {"$in": []}})
+    assert labels == set()
+
+
+async def test_metadata_empty_nin_matches_everything(seeded) -> None:
+    # An empty $nin operand matches EVERY row (negation over ∅) — including the
+    # `missing` row whose `score` key is absent and the `sysnull` row whose system
+    # column is NULL. This MUST execute against Postgres: the original bug emitted
+    # NOT(<empty or>), invalid SQL that errored at execute time; a render-only
+    # assertion would not catch it.
+    labels = await _matching_labels(seeded, {"metadata.score": {"$nin": []}})
+    assert labels == _ALL_IDS
+
+
 # ===========================================================================
 # $date — excludes malformed via khora_try_timestamptz.
 # ===========================================================================
