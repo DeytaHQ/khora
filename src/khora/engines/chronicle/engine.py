@@ -66,6 +66,7 @@ from khora.telemetry.metrics import metric_counter, metric_histogram
 if TYPE_CHECKING:
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
+    from khora.filter import FilterNode
 
 ChronicleStorageBackend = Literal["pgvector", "lancedb"]
 
@@ -1462,6 +1463,7 @@ class ChronicleEngine:
         min_similarity: float = 0.0,
         temporal_filter: Any | None = None,
         recency_bias: float | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> RecallResult:
         """Recall memories using 4-channel parallel retrieval with RRF fusion.
 
@@ -1482,6 +1484,8 @@ class ChronicleEngine:
             min_similarity: Minimum similarity threshold
             temporal_filter: Reserved for Phase 2 temporal filtering
             recency_bias: Override temporal decay weight (0.0-1.0)
+            filter_ast: Canonical recall-filter AST. Accepted for protocol
+                parity; Chronicle does not push filters down yet (ignored).
 
         Returns:
             RecallResult with fused and decay-scored chunks
