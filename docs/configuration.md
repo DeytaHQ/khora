@@ -182,12 +182,12 @@ Documented scale ceiling - performance and recall degrade noticeably above these
 Known gaps and warts:
 
 - **Partial atomicity in `coordinator.transaction()`** - only the SQL session is enrolled; LanceDB writes happen post-commit with compensating-delete-on-failure. A crash between SQLite commit and Lance write can leave orphaned vectors or missing embeddings; reconciliation runs on the next ingest.
-- **Point-in-time queries are not supported** on the embedded stack — `target_date` queries raise `NotImplementedError`. The bi-temporal entity versioning that powers them lives in Neo4j (`version_valid_from` / `version_valid_to` on `:Entity` / `:EntityVersion` nodes), which `sqlite_lance` has no equivalent of.
+- **Point-in-time queries are not supported** on the embedded stack - `target_date` queries raise `NotImplementedError`. The bi-temporal entity versioning that powers them lives in Neo4j (`version_valid_from` / `version_valid_to` on `:Entity` / `:EntityVersion` nodes), which `sqlite_lance` has no equivalent of.
 - **FTS5 covers chunks only** - entity-anchored recall falls back to `LIKE` / JSON-equality. Recommend the PostgreSQL stack for entity-heavy corpora.
 - **Install footprint** is ~130–180 MB unpacked (pyarrow + lancedb native + Arrow C++ runtime). "Embedded" means "no server", not "no native deps".
 - **IVF-PQ retraining** is automatic when the corpus grows past `retrain_factor × (rows at last training)`. Tune via `KHORA_STORAGE_SQLITE_LANCE_RETRAIN_FACTOR`.
 
-Vector index tuning lives on the `sqlite_lance` storage sub-config — see the [`KHORA_STORAGE_SQLITE_LANCE_*` table in nested-env-vars.md](nested-env-vars.md#khora_storage_sqlite_lance_--sqlite--lancedb-unified) for `DB_PATH`, `LANCE_PATH`, `EMBEDDING_DIMENSION`, `USE_HALFVEC`, `LANCE_INDEX`, `IVF_PARTITIONS`, `HNSW_M`, and `RETRAIN_FACTOR` with defaults and tuning guidance.
+Vector index tuning lives on the `sqlite_lance` storage sub-config - see the [`KHORA_STORAGE_SQLITE_LANCE_*` table in nested-env-vars.md](nested-env-vars.md#khora_storage_sqlite_lance_--sqlite--lancedb-unified) for `DB_PATH`, `LANCE_PATH`, `EMBEDDING_DIMENSION`, `USE_HALFVEC`, `LANCE_INDEX`, `IVF_PARTITIONS`, `HNSW_M`, and `RETRAIN_FACTOR` with defaults and tuning guidance.
 
 ### SurrealDB (experimental, unified store)
 
@@ -276,7 +276,7 @@ Khora has two **independent** telemetry paths.
 **Spans and metrics (OpenTelemetry).** Khora emits spans (`@trace`,
 `trace_span()`) and metrics through the OpenTelemetry API unconditionally.
 Whether they're *exported* depends only on which `TracerProvider` /
-`MeterProvider` is installed — not on any `KHORA_*` variable. Install the
+`MeterProvider` is installed - not on any `KHORA_*` variable. Install the
 `[otel]` extra and call `configure_telemetry()` (honors `OTEL_*` env vars),
 or install `[logfire]` and run `logfire.configure()`, and khora's signals
 flow to your collector. With no provider configured, OTel returns a
@@ -303,7 +303,7 @@ Khora uses loguru. Call `khora.logging_config.setup_logging()` once per process 
 
 ## Secrets
 
-API keys (OpenAI, Anthropic, etc.) are read from the environment variable named by `KHORA_LLM_API_KEY_ENV` (default `OPENAI_API_KEY`). Khora never reads credentials from disk — they come from the environment. Credentials are read once when `KhoraConfig` is constructed and bound into the connection pools and the LLM client at startup, so **rotating a secret takes effect on the next process start** (or whenever you rebuild the config and reconnect) — there's no in-process reload.
+API keys (OpenAI, Anthropic, etc.) are read from the environment variable named by `KHORA_LLM_API_KEY_ENV` (default `OPENAI_API_KEY`). Khora never reads credentials from disk - they come from the environment. Credentials are read once when `KhoraConfig` is constructed and bound into the connection pools and the LLM client at startup, so **rotating a secret takes effect on the next process start** (or whenever you rebuild the config and reconnect) - there's no in-process reload.
 
 ### SecretStr-typed credential fields
 

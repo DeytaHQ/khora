@@ -175,13 +175,13 @@ Document 2: "Microsoft"
 Document 3: "MSFT"
                 |
                 v
-    +-------------------------+
-    |  Cross-Tool Unifier     |
-    |                         |
-    |  Exact:  "Microsoft" == "Microsoft"
-    |  Fuzzy:  "Microsft" ~= "Microsoft"
-    |  Embed:  "the Redmond giant" ≈ "Microsoft"
-    +-------------------------+
+    +---------------------------------------------+
+    |             Cross-Tool Unifier              |
+    |                                             |
+    |  Exact:  "Microsoft" == "Microsoft"         |
+    |  Fuzzy:  "Microsft" ~= "Microsoft"          |
+    |  Embed:  "the Redmond giant" ≈ "Microsoft"  |
+    +---------------------------------------------+
                 |
                 v
     Single unified "Microsoft" entity

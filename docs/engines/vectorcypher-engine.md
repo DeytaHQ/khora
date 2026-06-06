@@ -483,7 +483,7 @@ KHORA_STORAGE_NEO4J_USER=neo4j
 KHORA_STORAGE_NEO4J_PASSWORD=password
 ```
 
-Engine selection is constructor-only — pass `engine="vectorcypher"` to
+Engine selection is constructor-only - pass `engine="vectorcypher"` to
 `Khora(...)` (it is also the default).
 
 ### Via YAML

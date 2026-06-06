@@ -25,7 +25,7 @@ Khora's bet: instead of one opinionated memory model, ship **pluggable engines**
 
 ## Engines
 
-Khora ships **two production engines** and one experimental one. They share the storage substrate (PostgreSQL + pgvector, optionally Neo4j) and the ingest pipeline - pick by access pattern.
+Khora ships **one production-ready engine** (VectorCypher) and two experimental ones (Chronicle, Skeleton). They share the storage substrate (PostgreSQL + pgvector, optionally Neo4j) and the ingest pipeline - pick by access pattern.
 
 ### VectorCypher (default) - hybrid graph + vector recall
 
@@ -37,16 +37,16 @@ The right choice for **knowledge-graph-shaped data**: documents that reference e
 - **Best for:** Multi-hop reasoning, entity-rich corpora, knowledge bases, "who knows whom"-style queries, anything where graph structure adds signal that flat embeddings miss.
 - **Status:** Production-ready on PostgreSQL + Neo4j. Experimental on embedded backends.
 
-### Chronicle - temporal-first, no graph DB
+### Chronicle (experimental) - temporal-first, no graph DB
 
-The right choice for **chat-shaped or event-stream data**: conversational memory, support tickets, meeting transcripts, anything where "when" is as important as "what".
+For **chat-shaped or event-stream data**: conversational memory, support tickets, meeting transcripts, anything where "when" is as important as "what". **Experimental** - not yet production-stamped on any stack; use it for evaluation and prototypes, and reach for VectorCypher in production.
 
 - **Storage:** PostgreSQL + pgvector. **No graph database required.**
 - **Retrieval:** 4-channel parallel - semantic vector + BM25 keyword + temporal + entity - fused with abstention signals that flag low-confidence answers before they reach your LLM.
 - **Extraction:** SVO events (subject-verb-object), entities, and facts via the same shared ingest pipeline.
 - **Time model:** Triple timestamps (`valid_from` / `valid_to` / `recorded_at`) + Ebbinghaus forgetting-curve decay applied to relevance scores.
 - **Best for:** Long conversations across sessions, recency-sensitive recall ("what did Alice say last week?"), benchmark-optimized retrieval (LongMemEval, LoCoMo, BEAM), deployments without a graph DB.
-- **Status:** Production-ready on PostgreSQL + pgvector. Experimental on embedded backends.
+- **Status:** Experimental on all stacks - not yet production-stamped.
 
 ### Skeleton (experimental) - minimal-LLM ingestion
 
@@ -55,7 +55,7 @@ Lazy-extraction engine that runs LLM-based entity extraction only on ~10% of chu
 | Engine | Multi-hop entity recall | Temporal recall | Graph DB needed | LLM cost (1k docs) | Status |
 |---|---|---|---|---|---|
 | **VectorCypher** | ✓ Native via Cypher | ✓ Temporal detection + reranking | ✓ Required | ~$0.10–0.20 | Production |
-| **Chronicle** | Limited (entity channel only) | ✓ Native bi-temporal + Ebbinghaus decay | - Not required | ~$0.15–0.30 | Production |
+| **Chronicle** | Limited (entity channel only) | ✓ Native bi-temporal + Ebbinghaus decay | - Not required | ~$0.15–0.30 | Experimental |
 | **Skeleton** | Limited (lazy expansion) | ✓ Bi-temporal | - Not required | ~$0.02–0.05 | Experimental |
 
 See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md) for the detailed comparison: full feature matrix, cost analysis per workload, hybrid-engine patterns, and migration recipes.
@@ -73,7 +73,7 @@ See [docs/configuration.md](docs/configuration.md) for the full extras list.
 
 ## Production stack
 
-The recommended production stack is **PostgreSQL + pgvector + Neo4j** - runs VectorCypher (default) and Chronicle from the same database. Set `KHORA_DATABASE_URL` and `KHORA_NEO4J_URL`, run `uv run alembic upgrade head`, then instantiate `Khora()` with no arguments:
+The recommended production stack is **PostgreSQL + pgvector + Neo4j** - runs the production VectorCypher engine (default), with the experimental Chronicle engine available on the same database. Set `KHORA_DATABASE_URL` and `KHORA_NEO4J_URL`, run `uv run alembic upgrade head`, then instantiate `Khora()` with no arguments:
 
 ```python
 import asyncio
@@ -232,7 +232,7 @@ your own loguru sinks with `enqueue=True` explicitly.
 
 ## Documentation
 
-Start at [docs/README.md](docs/README.md). Key entry points:
+Full documentation is hosted at **[docs.deyta.ai/khora](https://docs.deyta.ai/khora)**. In-repo entry points:
 
 - [API reference](docs/api-reference.md) - public `Khora` surface.
 - [Configuration](docs/configuration.md) - `KHORA_*` env vars and `KhoraConfig`.

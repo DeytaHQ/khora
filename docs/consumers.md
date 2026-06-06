@@ -4,7 +4,7 @@ Khora is a library. Its stable public API is consumed by services and notebooks.
 
 ## No in-library CLI
 
-The CLI commands (`khora extract`, `khora search`, `khora ontology …`) were removed from the `khora` package so the library has no CLI dependencies. The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseConfig`, etc.) are unchanged — call them directly from your service or notebook. See [migrations.md](migrations.md#v080---cli-extraction) for the removal notice.
+The CLI commands (`khora extract`, `khora search`, `khora ontology …`) were removed from the `khora` package so the library has no CLI dependencies. The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseConfig`, etc.) are unchanged - call them directly from your service or notebook. See [migrations.md](migrations.md#v080---cli-extraction) for the removal notice.
 
 The one piece of CLI-flavoured functionality available inside the library is binary-document text extraction. Install with `pip install khora[binary-readers]` and import directly:
 

@@ -572,7 +572,7 @@ export KHORA_STORAGE_GRAPH_BACKEND=age
 export KHORA_STORAGE_GRAPH_GRAPH_NAME=khora  # default: khora_graph
 ```
 
-The doubled `GRAPH` in `KHORA_STORAGE_GRAPH_GRAPH_NAME` is not a typo — the first `GRAPH` comes from the sub-object name (`storage.graph`), and the second `GRAPH_NAME` is the field name on `AGEConfig`.
+The doubled `GRAPH` in `KHORA_STORAGE_GRAPH_GRAPH_NAME` is not a typo - the first `GRAPH` comes from the sub-object name (`storage.graph`), and the second `GRAPH_NAME` is the field name on `AGEConfig`.
 
 **When to use:** When you want graph queries without adding another database to your stack. AGE runs inside PostgreSQL, so there is no extra infrastructure to manage.
 

@@ -11,7 +11,7 @@ At its heart, Khora combines three different ways of storing and finding informa
                                |
                                v
                     +-------------------+
-                    |    Khora     |
+                    |       Khora       |
                     |                   |
                     |  remember()       |  <- Store new knowledge
                     |  recall()         |  <- Find what you need

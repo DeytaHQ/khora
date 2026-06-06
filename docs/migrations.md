@@ -77,10 +77,10 @@ Current dialect-gated migrations:
 - **`033_bitemporal_columns`** - Adds nullable `valid_to`, `invalidated_at`, `invalidated_by` to `relationships` and `memory_facts`. The column adds run on both dialects (columns are portable); the partial indexes `ix_relationships_live` and `ix_memory_facts_live` (`WHERE invalidated_at IS NULL`) are Postgres-only via `CREATE INDEX CONCURRENTLY` inside an autocommit block. Existing rows backfill to all-NULL (= "still valid"). See Issue #653 (dream Phase 0.3).
 - **`034_chronicle_events_bitemporal`** - Adds `invalidated_at`, `invalidated_by`, and `merged_into_event_id` (self-FK with `ON DELETE SET NULL`, created via `use_alter=True` mirroring migration 004) to `chronicle_events`. The partial composite index `ix_chronicle_events_live` on `(namespace_id, occurred_at) WHERE invalidated_at IS NULL` is Postgres-only. See Issue #669 (dream Phase 4 event clustering).
 - **`035_dream_communities`** - Postgres-only via the dialect gate. Adds `khora_dream_communities` for community-summary persistence with bi-temporal validity; the apply path writes grounded LLM summaries (uncited claims dropped before INSERT). The `sqlite_lance` stack mirrors community state to the JSONL undo sink instead. See Issue #670 (dream Phase 5.1).
-- **`036_dream_conflicts`** - Postgres-only via the dialect gate. Adds `dream_conflicts` for the vectorcypher contradiction-detection op's report-only findings (the op never mutates `relationships` — Phase 5.4 / Issue #673 will own that). See Issue #672 (dream Phase 5.3).
+- **`036_dream_conflicts`** - Postgres-only via the dialect gate. Adds `dream_conflicts` for the vectorcypher contradiction-detection op's report-only findings (the op never mutates `relationships` - Phase 5.4 / Issue #673 will own that). See Issue #672 (dream Phase 5.3).
 - **`037_recall_response_format`** - Cross-dialect. Adds `documents.source_name VARCHAR(64)` (backfilled from `nango://<provider>/...` patterns in `source`), `documents.source_url VARCHAR(2048)`, and `chunks.chunker_info JSONB NOT NULL DEFAULT '{}'::jsonb`. Also flips six `documents` columns (`source`, `content_type`, `title`, `author`, `language`, `checksum`) to nullable-with-no-default; legacy `create_tables()`-created rows that were `NOT NULL DEFAULT ''` need their `NOT NULL` dropped before the empty-string normalisation runs (see PR #819).
 - **`038_khora_chunks_chunker_info`** - Mirrors 037's `chunker_info` onto the vectorcypher temporal-store table `khora_chunks`. Postgres-specific: asserts `server_version_num >= 110000` so the fast `ADD COLUMN NOT NULL DEFAULT` path is available (avoids a multi-hour table rewrite on PG < 11), and issues `SET lock_timeout = '5s'` before DDL so the `AccessExclusiveLock` acquisition is bounded; on lock-timeout, logs `khora.migration.applied` with `lock_timeout_tripped=True` and SQLSTATE `55P03` for dashboard correlation.
-- **`039_khora_chunks_content_tsv_gin`** - Postgres-only. Adds a GIN index on `khora_chunks.content_tsv` (BM25 / `ts_rank` queries against vectorcypher's temporal-store chunks) via `CREATE INDEX CONCURRENTLY ... IF NOT EXISTS` in an autocommit block. Converges cleanly with the runtime `CREATE INDEX IF NOT EXISTS` in `PgVectorTemporalStore.connect()` — whichever runs first wins. SQLite uses an FTS5 virtual table instead.
+- **`039_khora_chunks_content_tsv_gin`** - Postgres-only. Adds a GIN index on `khora_chunks.content_tsv` (BM25 / `ts_rank` queries against vectorcypher's temporal-store chunks) via `CREATE INDEX CONCURRENTLY ... IF NOT EXISTS` in an autocommit block. Converges cleanly with the runtime `CREATE INDEX IF NOT EXISTS` in `PgVectorTemporalStore.connect()` - whichever runs first wins. SQLite uses an FTS5 virtual table instead.
 
 ## SurrealDB
 
@@ -155,7 +155,7 @@ Existing graphrag-ingested data remains queryable via `vectorcypher` against the
 
 ## v0.8.0 - CLI extraction
 
-The CLI commands (`khora extract`, `khora search`, `khora ontology …`) were removed from the `khora` package so the library has no CLI dependencies (no `click`, no `rich`, no PDF / Excel readers by default). The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseConfig`, etc.) are unchanged — call them directly from your service or notebook.
+The CLI commands (`khora extract`, `khora search`, `khora ontology …`) were removed from the `khora` package so the library has no CLI dependencies (no `click`, no `rich`, no PDF / Excel readers by default). The `khora` top-level imports (`Khora`, `KhoraConfig`, `SearchMode`, `ExpertiseConfig`, etc.) are unchanged - call them directly from your service or notebook.
 
 Companion CLI packages (`khora-cli`, `khora-explorer`) are planned for a later release and are not available today. Until they ship, there is no in-library CLI replacement.
 
@@ -165,4 +165,4 @@ The one piece of CLI functionality available inside the library today is binary-
 from khora.extraction.binary_readers import extract_if_needed
 ```
 
-Old `from khora.discovery …` and `from khora.cli …` imports have no in-library replacement — call the public `khora` API instead.
+Old `from khora.discovery …` and `from khora.cli …` imports have no in-library replacement - call the public `khora` API instead.
