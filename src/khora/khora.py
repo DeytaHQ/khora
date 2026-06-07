@@ -2019,7 +2019,7 @@ class Khora:
         _t0 = _time.perf_counter()
         _status = "success"
         _recall_id = uuid4()
-        from khora.filter import RecallFilter, parse_to_ast
+        from khora.filter import RecallFilter, canonical_hash, parse_to_ast
 
         try:
             # Resolve the recall filter once, at the facade. Two inputs feed the
@@ -2106,7 +2106,11 @@ class Khora:
                 namespace_id=str(namespace_id),
                 query_hash=bounded_text_hash(query),
                 query_length=len(query),
-            ):
+            ) as _recall_span:
+                # Tag the canonical filter hash only when a filter is present, so
+                # the common no-filter recall does not carry a meaningless attribute.
+                if filter_ast is not None:
+                    _recall_span.set_attribute("filter.canonical_hash", canonical_hash(filter_ast))
                 result = await self._get_engine().recall(
                     query,
                     namespace_id,

@@ -1455,6 +1455,33 @@
       ],
       "description": "Issue #932. A queued document identity could not be re-loaded at dequeue time because the row was deleted/forgotten between enqueue and dequeue. The pending processor carries lean items (doc_id + namespace_id) and re-loads the full Document in the worker; when the loader returns None the item is skipped per ADR-001 (logged INFO, batch registration decremented so BatchHandle.wait can't hang). NO namespace_id label - cardinality rule.",
       "_comment": "Issue #932. NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.recall.filter.unindexed_metadata",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "filter",
+      "labels": [
+        {"name": "op", "values": ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$exists"], "_comment": "The metadata leaf's comparison operator (Op enum wire literal). Logical operators ($and/$or/$not) are nodes, not leaves, so they never appear here. Bounded by the closed Op enum."}
+      ],
+      "description": "Metadata leaves in a deterministic recall filter that compile to an unindexed JSONB column access. Incremented once per metadata leaf at compile time (a filter with N metadata predicates emits N times); compile runs once per recall, so the hybrid vector+bm25 path does not double-count. NO namespace_id label - cardinality rule. The metadata key-path is also unbounded and never a label."
+    },
+    {
+      "name": "khora.recall.filter.under_filled",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "filter",
+      "description": "Filtered recalls that returned fewer results than the requested limit (the deterministic recall filter narrowed the candidate set below the requested k). NO namespace_id label - cardinality rule."
+    },
+    {
+      "name": "khora.recall.filter.graph_channel_empty",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "filter",
+      "description": "Filtered recalls whose graph channel returned no candidates because the deterministic recall filter narrowed the graph side to empty. NO namespace_id label - cardinality rule."
     }
   ]
 }
