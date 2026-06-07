@@ -58,6 +58,7 @@ from khora.filter.ast import (
     canonical_hash,
 )
 from khora.filter.model import SYSTEM_KEYS, Op
+from khora.filter.telemetry import record_unindexed_metadata
 
 __all__ = ["compile_postgres"]
 
@@ -177,6 +178,13 @@ class _Builder:
             expr = self._compile_system_clause(clause)
         elif path and path[0] == "metadata":
             expr = self._compile_metadata_clause(clause)
+            # A metadata leaf compiles to an unindexed JSONB column access.
+            # Emit once per metadata leaf (a filter with N metadata predicates
+            # emits N times) — each leaf is a separate unindexed-column access.
+            # compile_postgres runs once per recall (the compiled predicate is
+            # reused across the vector + bm25 channels), so this does not
+            # double-count on the hybrid path.
+            record_unindexed_metadata(op=clause.op.value)
         else:
             return self._unsupported(clause, "path is neither a system key nor a metadata path")
         self._consumed.add(_path_str(path))
