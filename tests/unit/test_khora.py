@@ -783,14 +783,27 @@ class TestRecallTemporalBounds:
         assert ops == {Op.GTE, Op.LT}
 
     @pytest.mark.asyncio
-    async def test_inverted_range_folds_to_empty(self) -> None:
-        """start > end → empty filter: no occurred_at clause, no window, no error."""
+    async def test_inverted_range_folds_to_empty_matching_filter(self) -> None:
+        """start > end → a real, empty-MATCHING filter (not an unfiltered recall).
+
+        An inverted range flows through the same fold as any other bounds rather
+        than being special-cased away. It yields ``occurred_at >= t1 AND
+        occurred_at < t2`` with t1 > t2 — a predicate nothing can satisfy — so
+        the recall returns zero rows, giving parity with the equivalent
+        ``filter={'occurred_at': {...}}``. The legacy window is built from the
+        same (inverted, empty-matching) bounds, so the two stay consistent.
+
+        This is a unit assertion on the synthesized ``filter_ast`` shape; the
+        zero-row recall behavior follows from the empty-matching predicate.
+        """
         from datetime import UTC, datetime
+
+        from khora.filter import Op
 
         kb = _make_kb(connected=True)
         ns_id = uuid4()
-        start = datetime(2024, 12, 31, tzinfo=UTC)
-        end = datetime(2024, 1, 1, tzinfo=UTC)
+        start = datetime(2024, 12, 31, tzinfo=UTC)  # t1
+        end = datetime(2024, 1, 1, tzinfo=UTC)  # t2 (t1 > t2 → inverted)
 
         kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
 
@@ -798,8 +811,21 @@ class TestRecallTemporalBounds:
             await self._async_recall(kb, "q", namespace=ns_id, start_time=start, end_time=end)
 
         call_kwargs = kb._engine.recall.call_args
-        assert call_kwargs.kwargs.get("temporal_filter") is None
-        assert call_kwargs.kwargs.get("filter_ast") is None
+
+        # The folded AST is a real empty-matching predicate, NOT None.
+        clauses = self._occurred_at_clauses(call_kwargs.kwargs.get("filter_ast"))
+        by_op = {c.op: c.operand for c in clauses}  # type: ignore[attr-defined]
+        assert set(by_op) == {Op.GTE, Op.LT}
+        assert by_op[Op.GTE] == start  # lower bound t1
+        assert by_op[Op.LT] == end  # upper bound t2 (< t1 → no row matches)
+
+        # The legacy window is built from the same inverted bounds (also
+        # empty-matching), so it agrees with the folded AST instead of being
+        # nulled out.
+        temporal_filter = call_kwargs.kwargs.get("temporal_filter")
+        assert temporal_filter is not None
+        assert temporal_filter.occurred_after == start
+        assert temporal_filter.occurred_before == end
 
     @pytest.mark.asyncio
     async def test_mixed_timezone_normalizes_to_utc(self) -> None:

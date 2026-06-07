@@ -2051,30 +2051,35 @@ class Khora:
                 # Normalize tz: naive → UTC, aware → UTC.
                 norm_start = _normalize_recall_bound(start_time)
                 norm_end = _normalize_recall_bound(end_time)
-                # Inverted range folds to an empty filter (no temporal predicate
-                # and no engine window) rather than raising.
-                inverted = norm_start is not None and norm_end is not None and norm_start > norm_end
-                if not inverted:
-                    from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
+                from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
 
-                    temporal_filter = SkeletonTemporalFilter(
-                        occurred_after=norm_start,
-                        occurred_before=norm_end,
-                    )
-                    # Mirror the legacy ``TemporalFilter`` boundary semantics
-                    # exactly so the folded AST and the window agree when both
-                    # are AND-ed: lower bound inclusive (``occurred_at >=``),
-                    # upper bound EXCLUSIVE (``occurred_at <``) — see
-                    # ``pgvector._build_filter_conditions``. Using ``$lte`` here
-                    # would drop boundary rows once an engine applies both.
-                    ops: dict[str, Any] = {}
-                    if norm_start is not None:
-                        ops["$gte"] = norm_start
-                    if norm_end is not None:
-                        ops["$lt"] = norm_end
-                    # Route the folded bounds through the same single validation
-                    # path as the public filter= kwarg.
-                    filter_ast = parse_to_ast(RecallFilter.model_validate({"occurred_at": ops}))
+                temporal_filter = SkeletonTemporalFilter(
+                    occurred_after=norm_start,
+                    occurred_before=norm_end,
+                )
+                # Mirror the legacy ``TemporalFilter`` boundary semantics
+                # exactly so the folded AST and the window agree when both
+                # are AND-ed: lower bound inclusive (``occurred_at >=``),
+                # upper bound EXCLUSIVE (``occurred_at <``) — see
+                # ``pgvector._build_filter_conditions``. Using ``$lte`` here
+                # would drop boundary rows once an engine applies both.
+                #
+                # An inverted range (start > end) flows through this same fold
+                # rather than being special-cased: it yields
+                # ``{occurred_at: {$gte: t1, $lt: t2}}``, which is
+                # empty-MATCHING (no row satisfies ``>= t1 AND < t2`` when
+                # t1 > t2), so the recall returns nothing — parity with the
+                # equivalent ``filter=`` predicate rather than an unfiltered
+                # recall. The legacy window is empty-matching for an inverted
+                # pair too, so the two stay consistent.
+                ops: dict[str, Any] = {}
+                if norm_start is not None:
+                    ops["$gte"] = norm_start
+                if norm_end is not None:
+                    ops["$lt"] = norm_end
+                # Route the folded bounds through the same single validation
+                # path as the public filter= kwarg.
+                filter_ast = parse_to_ast(RecallFilter.model_validate({"occurred_at": ops}))
             namespace_id = await self._resolve_namespace(namespace)
 
             # Emit RECALL_REQUESTED before any embedding/retrieval work.
