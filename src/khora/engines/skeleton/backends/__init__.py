@@ -18,6 +18,7 @@ from khora.core.models.document import Chunk
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
     from khora.core.models.document import Document
+    from khora.filter.ast import FilterNode
 
 
 @dataclass
@@ -162,6 +163,7 @@ class TemporalVectorStore(Protocol):
         temporal_filter: TemporalFilter | None = None,
         hybrid_alpha: float | None = None,  # None = vector only, 0-1 = blend
         query_text: str | None = None,  # Required for hybrid search
+        filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -173,6 +175,9 @@ class TemporalVectorStore(Protocol):
             temporal_filter: Structured temporal and metadata filters
             hybrid_alpha: Blend factor for hybrid search (0=BM25 only, 1=vector only)
             query_text: Original query text for BM25 (required if hybrid_alpha is set)
+            filter_ast: Canonical recall-filter AST. The pgvector backend
+                compiles it to a WHERE predicate; the other backends accept
+                it for protocol parity and ignore it (no compilation yet).
 
         Returns:
             List of matching chunks with similarity scores
