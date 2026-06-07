@@ -105,8 +105,11 @@ dev-down:
 test: test-unit test-integration
 
 # Run unit tests parallel; clear report so coverage is finalized by test-integration.
+# tests/recall/ holds the recall-filter suite (validator, AST, compiler-dispatch,
+# plus the skeleton-pgvector integration test which self-skips when Postgres is
+# unreachable and runs under ``make dev``); collect it here so the filter tests gate.
 test-unit:
-	uv run pytest tests/unit/ --cov=src/khora --cov-branch --cov-report= --cov-fail-under=0 -n auto
+	uv run pytest tests/unit/ tests/recall/ --cov=src/khora --cov-branch --cov-report= --cov-fail-under=0 -n auto
 
 # Run integration tests serial; appends to .coverage from test-unit and emits the report.
 test-integration:
