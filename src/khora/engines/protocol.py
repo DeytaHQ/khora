@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from khora.core.models import Document, Entity, MemoryNamespace
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
+    from khora.filter import FilterNode
     from khora.khora import BatchResult, RecallResult, RememberResult, Stats
     from khora.query import SearchMode
 
@@ -114,6 +115,7 @@ class MemoryEngineProtocol(Protocol):
         # Temporal parameters (optional — engines may ignore these)
         temporal_filter: Any | None = None,
         recency_bias: float | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> RecallResult:
         """Recall memories relevant to a query.
 
@@ -128,6 +130,8 @@ class MemoryEngineProtocol(Protocol):
                 Engines that do not support temporal filtering may ignore this.
             recency_bias: Optional recency bias weight (0.0–1.0).
                 Engines that do not support recency biasing may ignore this.
+            filter_ast: Optional canonical recall-filter AST. Engines that do
+                not filter may ignore it.
 
         Returns:
             RecallResult with matched memories

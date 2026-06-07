@@ -629,7 +629,12 @@ class TestRecall:
 
 
 class TestRecallTemporalBounds:
-    """Tests for start_time/end_time parameters on recall()."""
+    """Tests for the deprecated start_time/end_time bounds on recall().
+
+    The deprecated bounds now fold to a canonical filter AST (passed to the
+    engine as ``filter_ast``) while still building the legacy ``temporal_filter``
+    window for the engines that already consume it.
+    """
 
     # Shared helper: make a minimal RecallResult mock return value
     @staticmethod
@@ -643,10 +648,30 @@ class TestRecallTemporalBounds:
             relationships=[],
         )
 
+    @staticmethod
+    def _occurred_at_clauses(filter_ast: object) -> list[object]:
+        """Collect every ``occurred_at`` leaf clause from a folded filter AST."""
+        from khora.filter import FilterClause, FilterNode
+
+        if filter_ast is None:
+            return []
+        out: list[object] = []
+        stack: list[object] = [filter_ast]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, FilterClause):
+                if node.path == ("occurred_at",):
+                    out.append(node)
+            elif isinstance(node, FilterNode):
+                stack.extend(node.children)
+        return out
+
     @pytest.mark.asyncio
-    async def test_start_time_only_constructs_filter(self) -> None:
-        """start_time only → SkeletonTemporalFilter with occurred_after set, occurred_before None."""
+    async def test_start_time_only_folds_to_gte(self) -> None:
+        """start_time only → temporal_filter window + a single $gte occurred_at clause."""
         from datetime import UTC, datetime
+
+        from khora.filter import Op
 
         kb = _make_kb(connected=True)
         ns_id = uuid4()
@@ -654,11 +679,8 @@ class TestRecallTemporalBounds:
 
         kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
 
-        with (
-            patch("khora.telemetry.context.ensure_trace_id"),
-            patch("khora.telemetry.context.clear_trace_id"),
-        ):
-            await kb.recall("q", namespace=ns_id, start_time=start)
+        with pytest.warns(DeprecationWarning):
+            await self._async_recall(kb, "q", namespace=ns_id, start_time=start)
 
         call_kwargs = kb._engine.recall.call_args
         temporal_filter = call_kwargs.kwargs.get("temporal_filter")
@@ -666,10 +688,21 @@ class TestRecallTemporalBounds:
         assert temporal_filter.occurred_after == start
         assert temporal_filter.occurred_before is None
 
+        clauses = self._occurred_at_clauses(call_kwargs.kwargs.get("filter_ast"))
+        assert [c.op for c in clauses] == [Op.GTE]  # type: ignore[attr-defined]
+        assert clauses[0].operand == start  # type: ignore[attr-defined]
+
     @pytest.mark.asyncio
-    async def test_end_time_only_constructs_filter(self) -> None:
-        """end_time only → SkeletonTemporalFilter with occurred_before set, occurred_after None."""
+    async def test_end_time_only_folds_to_lt(self) -> None:
+        """end_time only → temporal_filter window + a single $lt occurred_at clause.
+
+        The upper bound is EXCLUSIVE to mirror the legacy ``TemporalFilter``
+        window (``occurred_at < occurred_before``), so the folded AST and the
+        window agree at the boundary.
+        """
         from datetime import UTC, datetime
+
+        from khora.filter import Op
 
         kb = _make_kb(connected=True)
         ns_id = uuid4()
@@ -677,11 +710,8 @@ class TestRecallTemporalBounds:
 
         kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
 
-        with (
-            patch("khora.telemetry.context.ensure_trace_id"),
-            patch("khora.telemetry.context.clear_trace_id"),
-        ):
-            await kb.recall("q", namespace=ns_id, end_time=end)
+        with pytest.warns(DeprecationWarning):
+            await self._async_recall(kb, "q", namespace=ns_id, end_time=end)
 
         call_kwargs = kb._engine.recall.call_args
         temporal_filter = call_kwargs.kwargs.get("temporal_filter")
@@ -689,10 +719,16 @@ class TestRecallTemporalBounds:
         assert temporal_filter.occurred_before == end
         assert temporal_filter.occurred_after is None
 
+        clauses = self._occurred_at_clauses(call_kwargs.kwargs.get("filter_ast"))
+        assert [c.op for c in clauses] == [Op.LT]  # type: ignore[attr-defined]
+        assert clauses[0].operand == end  # type: ignore[attr-defined]
+
     @pytest.mark.asyncio
-    async def test_both_bounds_valid(self) -> None:
-        """Both bounds provided (start < end) → filter constructed correctly."""
+    async def test_both_bounds_fold_to_gte_and_lt(self) -> None:
+        """Both bounds (start < end) → $gte (inclusive) and $lt (exclusive) clauses."""
         from datetime import UTC, datetime
+
+        from khora.filter import Op
 
         kb = _make_kb(connected=True)
         ns_id = uuid4()
@@ -701,11 +737,8 @@ class TestRecallTemporalBounds:
 
         kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
 
-        with (
-            patch("khora.telemetry.context.ensure_trace_id"),
-            patch("khora.telemetry.context.clear_trace_id"),
-        ):
-            await kb.recall("q", namespace=ns_id, start_time=start, end_time=end)
+        with pytest.warns(DeprecationWarning):
+            await self._async_recall(kb, "q", namespace=ns_id, start_time=start, end_time=end)
 
         call_kwargs = kb._engine.recall.call_args
         temporal_filter = call_kwargs.kwargs.get("temporal_filter")
@@ -713,53 +746,288 @@ class TestRecallTemporalBounds:
         assert temporal_filter.occurred_after == start
         assert temporal_filter.occurred_before == end
 
+        clauses = self._occurred_at_clauses(call_kwargs.kwargs.get("filter_ast"))
+        ops = {c.op for c in clauses}  # type: ignore[attr-defined]
+        assert ops == {Op.GTE, Op.LT}
+
+    @pytest.mark.asyncio
+    async def test_equal_bounds_fold_to_gte_and_lt(self) -> None:
+        """start == end → both $gte and $lt clauses (equal is not inverted).
+
+        Equal bounds yield a degenerate empty range (``occurred_at >= bound AND
+        occurred_at < bound``) — but that is exactly what the legacy
+        ``TemporalFilter`` window also yields, so the folded AST stays consistent
+        with the window rather than disagreeing at the boundary.
+        """
+        from datetime import UTC, datetime
+
+        from khora.filter import Op
+
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        bound = datetime(2024, 6, 1, tzinfo=UTC)
+
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        with pytest.warns(DeprecationWarning):
+            await self._async_recall(kb, "q", namespace=ns_id, start_time=bound, end_time=bound)
+
+        call_kwargs = kb._engine.recall.call_args
+        temporal_filter = call_kwargs.kwargs.get("temporal_filter")
+        assert temporal_filter is not None
+        assert temporal_filter.occurred_after == bound
+        assert temporal_filter.occurred_before == bound
+
+        clauses = self._occurred_at_clauses(call_kwargs.kwargs.get("filter_ast"))
+        ops = {c.op for c in clauses}  # type: ignore[attr-defined]
+        assert ops == {Op.GTE, Op.LT}
+
+    @pytest.mark.asyncio
+    async def test_inverted_range_folds_to_empty_matching_filter(self) -> None:
+        """start > end → a real, empty-MATCHING filter (not an unfiltered recall).
+
+        An inverted range flows through the same fold as any other bounds rather
+        than being special-cased away. It yields ``occurred_at >= t1 AND
+        occurred_at < t2`` with t1 > t2 — a predicate nothing can satisfy — so
+        the recall returns zero rows, giving parity with the equivalent
+        ``filter={'occurred_at': {...}}``. The legacy window is built from the
+        same (inverted, empty-matching) bounds, so the two stay consistent.
+
+        This is a unit assertion on the synthesized ``filter_ast`` shape; the
+        zero-row recall behavior follows from the empty-matching predicate.
+        """
+        from datetime import UTC, datetime
+
+        from khora.filter import Op
+
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        start = datetime(2024, 12, 31, tzinfo=UTC)  # t1
+        end = datetime(2024, 1, 1, tzinfo=UTC)  # t2 (t1 > t2 → inverted)
+
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        with pytest.warns(DeprecationWarning):
+            await self._async_recall(kb, "q", namespace=ns_id, start_time=start, end_time=end)
+
+        call_kwargs = kb._engine.recall.call_args
+
+        # The folded AST is a real empty-matching predicate, NOT None.
+        clauses = self._occurred_at_clauses(call_kwargs.kwargs.get("filter_ast"))
+        by_op = {c.op: c.operand for c in clauses}  # type: ignore[attr-defined]
+        assert set(by_op) == {Op.GTE, Op.LT}
+        assert by_op[Op.GTE] == start  # lower bound t1
+        assert by_op[Op.LT] == end  # upper bound t2 (< t1 → no row matches)
+
+        # The legacy window is built from the same inverted bounds (also
+        # empty-matching), so it agrees with the folded AST instead of being
+        # nulled out.
+        temporal_filter = call_kwargs.kwargs.get("temporal_filter")
+        assert temporal_filter is not None
+        assert temporal_filter.occurred_after == start
+        assert temporal_filter.occurred_before == end
+
+    @pytest.mark.asyncio
+    async def test_mixed_timezone_normalizes_to_utc(self) -> None:
+        """naive start_time with aware end_time → UTC-normalized, no error."""
+        from datetime import UTC, datetime
+
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        start = datetime(2024, 1, 1)  # naive → assumed UTC
+        end = datetime(2024, 12, 31, tzinfo=UTC)  # aware
+
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        with pytest.warns(DeprecationWarning):
+            await self._async_recall(kb, "q", namespace=ns_id, start_time=start, end_time=end)
+
+        call_kwargs = kb._engine.recall.call_args
+        temporal_filter = call_kwargs.kwargs.get("temporal_filter")
+        assert temporal_filter is not None
+        assert temporal_filter.occurred_after == start.replace(tzinfo=UTC)
+        assert temporal_filter.occurred_before == end
+
     @pytest.mark.asyncio
     async def test_no_bounds_passes_none_filter(self) -> None:
-        """Neither bound → temporal_filter=None passed to engine."""
+        """Neither bound → temporal_filter=None and filter_ast=None passed to engine."""
         kb = _make_kb(connected=True)
         ns_id = uuid4()
 
         kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
 
+        await self._async_recall(kb, "q", namespace=ns_id)
+
+        call_kwargs = kb._engine.recall.call_args
+        assert call_kwargs.kwargs.get("temporal_filter") is None
+        assert call_kwargs.kwargs.get("filter_ast") is None
+
+    @pytest.mark.asyncio
+    async def test_deprecation_warning_fires_once(self) -> None:
+        """The deprecated bounds emit exactly one DeprecationWarning per call."""
+        from datetime import UTC, datetime
+
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        start = datetime(2024, 1, 1, tzinfo=UTC)
+
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            await self._async_recall(kb, "q", namespace=ns_id, start_time=start)
+
+        deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert len(deprecations) == 1
+
+    async def _async_recall(self, kb: Khora, *args: object, **kwargs: object) -> RecallResult:
         with (
             patch("khora.telemetry.context.ensure_trace_id"),
             patch("khora.telemetry.context.clear_trace_id"),
         ):
-            await kb.recall("q", namespace=ns_id)
+            return await kb.recall(*args, **kwargs)  # type: ignore[arg-type]
 
-        call_kwargs = kb._engine.recall.call_args
-        temporal_filter = call_kwargs.kwargs.get("temporal_filter")
-        assert temporal_filter is None
+
+class TestRecallFilterKwarg:
+    """Tests for the public ``filter=`` kwarg on recall()."""
+
+    @staticmethod
+    def _mock_result(ns_id: object) -> RecallResult:
+        return RecallResult(
+            query="q",
+            namespace_id=ns_id,  # type: ignore[arg-type]
+            documents=[],
+            chunks=[],
+            entities=[],
+            relationships=[],
+        )
+
+    async def _async_recall(self, kb: Khora, *args: object, **kwargs: object) -> RecallResult:
+        with (
+            patch("khora.telemetry.context.ensure_trace_id"),
+            patch("khora.telemetry.context.clear_trace_id"),
+        ):
+            return await kb.recall(*args, **kwargs)  # type: ignore[arg-type]
 
     @pytest.mark.asyncio
-    async def test_start_after_end_raises_valueerror(self) -> None:
-        """start_time > end_time → ValueError before engine is called."""
-        from datetime import UTC, datetime
+    async def test_dict_filter_lowers_to_ast(self) -> None:
+        """A dict filter is validated and lowered to a FilterNode reaching the engine."""
+        from khora.filter import FilterNode
 
         kb = _make_kb(connected=True)
         ns_id = uuid4()
-        start = datetime(2024, 12, 31, tzinfo=UTC)
-        end = datetime(2024, 1, 1, tzinfo=UTC)
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
 
-        with pytest.raises(ValueError, match="start_time must be <= end_time"):
-            await kb.recall("q", namespace=ns_id, start_time=start, end_time=end)
+        await self._async_recall(kb, "q", namespace=ns_id, filter={"source_name": "linear"})
+
+        filter_ast = kb._engine.recall.call_args.kwargs.get("filter_ast")
+        assert isinstance(filter_ast, FilterNode)
+
+    @pytest.mark.asyncio
+    async def test_instance_filter_lowers_to_ast(self) -> None:
+        """A RecallFilter instance is lowered to a FilterNode reaching the engine."""
+        from khora.filter import FilterNode, RecallFilter
+
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        await self._async_recall(kb, "q", namespace=ns_id, filter=RecallFilter(source_name="linear"))
+
+        filter_ast = kb._engine.recall.call_args.kwargs.get("filter_ast")
+        assert isinstance(filter_ast, FilterNode)
+
+    @pytest.mark.asyncio
+    async def test_invalid_filter_dict_raises_validation_error(self) -> None:
+        """An invalid filter dict raises RecallFilterValidationError before the engine call."""
+        from khora.filter import RecallFilterValidationError
+
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        with pytest.raises(RecallFilterValidationError):
+            await self._async_recall(kb, "q", namespace=ns_id, filter={"not_a_real_key": "x"})
 
         kb._engine.recall.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_mixed_timezone_raises_valueerror(self) -> None:
-        """naive start_time with aware end_time → ValueError."""
+    async def test_filter_and_temporal_bounds_conflict_raises(self) -> None:
+        """Passing both filter= and the deprecated bounds raises ValueError."""
         from datetime import UTC, datetime
 
         kb = _make_kb(connected=True)
         ns_id = uuid4()
-        start = datetime(2024, 1, 1)  # naive
-        end = datetime(2024, 12, 31, tzinfo=UTC)  # aware
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
 
-        with pytest.raises(ValueError, match="timezone-aware or both naive"):
-            await kb.recall("q", namespace=ns_id, start_time=start, end_time=end)
+        with pytest.raises(ValueError, match="filter= or the deprecated start_time/end_time"):
+            await self._async_recall(
+                kb,
+                "q",
+                namespace=ns_id,
+                filter={"source_name": "linear"},
+                start_time=datetime(2024, 1, 1, tzinfo=UTC),
+            )
 
         kb._engine.recall.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_engine_info_filter_present_with_filter(self) -> None:
+        """engine_info['filter'] is populated on the result when filter= is passed."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        result = await self._async_recall(kb, "q", namespace=ns_id, filter={"source_name": "linear"})
+
+        info = result.engine_info.get("filter")
+        assert info is not None
+        assert info["engine"] == "vectorcypher"
+        assert info["pushed_down"] is False
+        assert info["supported"] is False
+
+    @pytest.mark.asyncio
+    async def test_engine_info_filter_present_without_filter(self) -> None:
+        """engine_info['filter'] is populated on every call, even with no filter."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        result = await self._async_recall(kb, "q", namespace=ns_id)
+
+        info = result.engine_info.get("filter")
+        assert info is not None
+        assert info["pushed_down"] is False
+
+    @pytest.mark.asyncio
+    async def test_no_filter_no_bounds_passes_none_ast_and_records_info(self) -> None:
+        """filter=None with no bounds → filter_ast=None to engine, engine_info still populated."""
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        result = await self._async_recall(kb, "q", namespace=ns_id, filter=None)
+
+        assert kb._engine.recall.call_args.kwargs.get("filter_ast") is None
+        info = result.engine_info.get("filter")
+        assert info is not None
+        assert info["pushed_down"] is False
+
+    @pytest.mark.asyncio
+    async def test_engine_info_filter_supported_for_skeleton(self) -> None:
+        """The skeleton engine is the planned pushdown target → supported=True (still not pushed down)."""
+        kb = _make_kb(connected=True)
+        kb._engine_name = "skeleton"
+        ns_id = uuid4()
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        result = await self._async_recall(kb, "q", namespace=ns_id, filter={"source_name": "linear"})
+
+        info = result.engine_info.get("filter")
+        assert info is not None
+        assert info["engine"] == "skeleton"
+        assert info["supported"] is True
+        assert info["pushed_down"] is False
 
 
 # ---------------------------------------------------------------------------

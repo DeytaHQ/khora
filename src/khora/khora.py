@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import warnings
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -73,6 +74,15 @@ def _coerce_session_id_from_dict(metadata: dict[str, Any] | None) -> UUID | None
         return UUID(str(value))
     except (ValueError, TypeError, AttributeError):
         return None
+
+
+def _normalize_recall_bound(value: datetime | None) -> datetime | None:
+    """Normalize a deprecated recall bound to UTC (naive → UTC, aware → UTC)."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _safe_exc_summary(exc: BaseException, *, max_len: int = 200) -> str:
@@ -177,6 +187,7 @@ if TYPE_CHECKING:
     from khora.engines.protocol import MemoryEngineProtocol
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
+    from khora.filter import RecallFilter
     from khora.storage import StorageConfig, StorageCoordinator
 
 
@@ -1955,6 +1966,7 @@ class Khora:
         min_similarity: float = 0.0,
         start_time: datetime | None = None,
         end_time: datetime | None = None,
+        filter: RecallFilter | dict[str, Any] | None = None,
     ) -> RecallResult:
         """Recall memories relevant to a query.
 
@@ -1970,11 +1982,16 @@ class Khora:
             limit: Maximum results to return
             mode: Search mode (VECTOR, GRAPH, HYBRID, ALL)
             min_similarity: Minimum similarity threshold
-            start_time: Optional lower bound (inclusive) for memory time.
-                Timezone-aware datetimes are recommended; naive datetimes are
-                assumed UTC. When provided, bypasses NLP temporal detection.
-            end_time: Optional upper bound (inclusive) for memory time.
-                Same timezone semantics as start_time.
+            start_time: Deprecated. Optional lower bound (inclusive) for memory
+                time. Timezone-aware datetimes are recommended; naive datetimes
+                are assumed UTC. Prefer ``filter={"occurred_at": {"$gte": ...}}``.
+            end_time: Deprecated. Optional upper bound (EXCLUSIVE — matches the
+                legacy temporal window) for memory time. Same timezone semantics
+                as start_time. Prefer ``filter={"occurred_at": {"$lt": ...}}``.
+            filter: Optional deterministic recall filter — a
+                :class:`~khora.filter.RecallFilter` instance or its dict/wire
+                form (validated here). Cannot be combined with the deprecated
+                ``start_time``/``end_time`` bounds.
 
         Returns:
             RecallResult with matched memories.  When using the VectorCypher
@@ -1983,8 +2000,8 @@ class Khora:
             relationships as a formatted LLM context string.
 
         Raises:
-            ValueError: If both ``start_time`` and ``end_time`` are provided
-                and ``start_time > end_time``.
+            ValueError: If ``filter`` is combined with ``start_time``/``end_time``.
+            RecallFilterValidationError: If ``filter`` fails validation.
         """
         import time as _time
 
@@ -2002,22 +2019,67 @@ class Khora:
         _t0 = _time.perf_counter()
         _status = "success"
         _recall_id = uuid4()
+        from khora.filter import RecallFilter, parse_to_ast
+
         try:
-            if start_time is not None or end_time is not None:
-                if start_time is not None and end_time is not None:
-                    try:
-                        if start_time > end_time:
-                            raise ValueError("start_time must be <= end_time")
-                    except TypeError as e:
-                        raise ValueError("start_time and end_time must both be timezone-aware or both naive") from e
+            # Resolve the recall filter once, at the facade. Two inputs feed the
+            # single canonical AST: the public ``filter=`` kwarg and the
+            # deprecated ``start_time``/``end_time`` bounds. They are mutually
+            # exclusive. ``temporal_filter`` is still built from the deprecated
+            # bounds so the engines' existing temporal behavior (recency
+            # weighting, version filter) is unchanged. No engine threads
+            # ``filter_ast`` to its backend on the recall path yet (the pgvector
+            # backend can compile it, but the skeleton engine does not pass it
+            # through), so the two cannot currently double-filter; the folded
+            # bounds below still mirror ``temporal_filter``'s boundary semantics
+            # so they stay consistent if/when an engine AND-s both.
+            temporal_filter: Any = None
+            filter_ast: Any = None
+            if filter is not None and (start_time is not None or end_time is not None):
+                raise ValueError("Pass either filter= or the deprecated start_time/end_time, not both")
+            if filter is not None:
+                # Validate once: dict → model_validate, instance → use as-is.
+                # RecallFilterValidationError propagates unwrapped.
+                recall_filter = filter if isinstance(filter, RecallFilter) else RecallFilter.model_validate(filter)
+                filter_ast = parse_to_ast(recall_filter)
+            elif start_time is not None or end_time is not None:
+                warnings.warn(
+                    "start_time/end_time are deprecated; use filter={'occurred_at': {...}}",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                # Normalize tz: naive → UTC, aware → UTC.
+                norm_start = _normalize_recall_bound(start_time)
+                norm_end = _normalize_recall_bound(end_time)
                 from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
 
-                temporal_filter: Any = SkeletonTemporalFilter(
-                    occurred_after=start_time,
-                    occurred_before=end_time,
+                temporal_filter = SkeletonTemporalFilter(
+                    occurred_after=norm_start,
+                    occurred_before=norm_end,
                 )
-            else:
-                temporal_filter = None
+                # Mirror the legacy ``TemporalFilter`` boundary semantics
+                # exactly so the folded AST and the window agree when both
+                # are AND-ed: lower bound inclusive (``occurred_at >=``),
+                # upper bound EXCLUSIVE (``occurred_at <``) — see
+                # ``pgvector._build_filter_conditions``. Using ``$lte`` here
+                # would drop boundary rows once an engine applies both.
+                #
+                # An inverted range (start > end) flows through this same fold
+                # rather than being special-cased: it yields
+                # ``{occurred_at: {$gte: t1, $lt: t2}}``, which is
+                # empty-MATCHING (no row satisfies ``>= t1 AND < t2`` when
+                # t1 > t2), so the recall returns nothing — parity with the
+                # equivalent ``filter=`` predicate rather than an unfiltered
+                # recall. The legacy window is empty-matching for an inverted
+                # pair too, so the two stay consistent.
+                ops: dict[str, Any] = {}
+                if norm_start is not None:
+                    ops["$gte"] = norm_start
+                if norm_end is not None:
+                    ops["$lt"] = norm_end
+                # Route the folded bounds through the same single validation
+                # path as the public filter= kwarg.
+                filter_ast = parse_to_ast(RecallFilter.model_validate({"occurred_at": ops}))
             namespace_id = await self._resolve_namespace(namespace)
 
             # Emit RECALL_REQUESTED before any embedding/retrieval work.
@@ -2052,11 +2114,25 @@ class Khora:
                     mode=mode,
                     min_similarity=min_similarity,
                     temporal_filter=temporal_filter,
+                    filter_ast=filter_ast,
                 )
                 # Engines return DocumentProjection stubs (id + bare
                 # essentials). Batch-fetch full source metadata, derive
                 # per-chunk entity linkage, and emit a new RecallResult.
                 result = await self._upgrade_recall_documents(result, namespace_id)
+
+                # Record an honest filter-handling summary on every call. No
+                # engine pushes filters down in this revision, so ``pushed_down``
+                # is always False; ``supported`` is True only for the skeleton
+                # engine (the planned pushdown target). The engine name prefers
+                # whatever the engine already reported.
+                _engine_name = (result.engine_info or {}).get("engine", self._engine_name)
+                _filter_info = {
+                    "engine": _engine_name,
+                    "supported": _engine_name == "skeleton",
+                    "pushed_down": False,
+                }
+                result = replace(result, engine_info={**(result.engine_info or {}), "filter": _filter_info})
 
                 # Emit RECALL_RESULTS_READY after engine returns, before packaging.
                 try:

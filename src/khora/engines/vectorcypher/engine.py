@@ -72,6 +72,7 @@ if TYPE_CHECKING:
 
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
+    from khora.filter import FilterNode
     from khora.khora import _GlobalChunkSemaphore
     from khora.storage import StorageCoordinator
 
@@ -1950,6 +1951,7 @@ class VectorCypherEngine:
         temporal_filter: TemporalFilter | None = None,
         graph_depth: int | None = None,
         hybrid_alpha: float | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> RecallResult:
         """Recall memories relevant to a query using VectorCypher.
 
@@ -1967,6 +1969,8 @@ class VectorCypherEngine:
             temporal_filter: Temporal constraints
             graph_depth: Override graph traversal depth
             hybrid_alpha: Blend factor (0=graph, 1=vector)
+            filter_ast: Canonical recall-filter AST. Accepted for protocol
+                parity; VectorCypher does not push filters down yet (ignored).
 
         Returns:
             RecallResult with chunks, entities, and context

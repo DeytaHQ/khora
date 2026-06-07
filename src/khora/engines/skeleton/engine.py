@@ -48,6 +48,7 @@ from .backends import (
 if TYPE_CHECKING:
     from khora.extraction.chunkers import ChunkStrategy
     from khora.extraction.skills import ExpertiseConfig
+    from khora.filter import FilterNode
 
 
 class SkeletonConstructionEngine:
@@ -502,6 +503,7 @@ class SkeletonConstructionEngine:
         hybrid_alpha: float | None = None,
         filters: dict[str, Any] | None = None,
         recency_bias: float | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> RecallResult:
         """Recall memories relevant to a query.
 
@@ -515,6 +517,8 @@ class SkeletonConstructionEngine:
             temporal_reference: Reference point for relative time (e.g., message timestamp)
             hybrid_alpha: Blend factor for hybrid search (0=BM25, 1=vector)
             filters: Additional structured filters (converted to TemporalFilter)
+            filter_ast: Canonical recall-filter AST. Accepted for protocol
+                parity; skeleton does not push it down yet (ignored).
             recency_bias: Accepted only as ``None`` for protocol parity.
                 Skeleton does not implement temporal decay on the recall
                 path; passing a non-None value silently no-ops in pre-fix
