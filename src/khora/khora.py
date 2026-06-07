@@ -2027,12 +2027,14 @@ class Khora:
             # deprecated ``start_time``/``end_time`` bounds. They are mutually
             # exclusive. ``temporal_filter`` is still built from the deprecated
             # bounds so the engines' existing temporal behavior (recency
-            # weighting, version filter) is unchanged. No engine threads
-            # ``filter_ast`` to its backend on the recall path yet (the pgvector
-            # backend can compile it, but the skeleton engine does not pass it
-            # through), so the two cannot currently double-filter; the folded
-            # bounds below still mirror ``temporal_filter``'s boundary semantics
-            # so they stay consistent if/when an engine AND-s both.
+            # weighting, version filter) is unchanged. The skeleton engine now
+            # threads ``filter_ast`` through to its temporal store, where the
+            # pgvector backend compiles it to a WHERE predicate (the other
+            # backends accept-and-ignore it). When the deprecated bounds are
+            # used, both ``temporal_filter`` and the folded AST are AND-ed on
+            # the pgvector path, so the folded bounds below mirror
+            # ``temporal_filter``'s boundary semantics exactly to stay
+            # consistent and avoid dropping boundary rows.
             temporal_filter: Any = None
             filter_ast: Any = None
             if filter is not None and (start_time is not None or end_time is not None):

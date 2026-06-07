@@ -49,6 +49,7 @@ from khora.storage.backends.sqlite_lance._helpers import (
 from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
+    from khora.filter.ast import FilterNode
     from khora.storage.backends.sqlite_lance.connection import EmbeddedStorageHandle
 
 
@@ -368,7 +369,10 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         temporal_filter: TemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
+        # ``filter_ast`` is accepted for protocol parity; this backend does not
+        # compile the recall-filter AST yet, so it is ignored.
         with trace_span(
             "khora.temporal_store.search",
             namespace_id=str(namespace_id),

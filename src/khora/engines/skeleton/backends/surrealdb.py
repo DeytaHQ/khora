@@ -34,6 +34,7 @@ from khora.telemetry import trace, trace_span
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
     from khora.config.schema import SurrealDBConfig
+    from khora.filter.ast import FilterNode
 
 
 def _ensure_list(value: Any) -> list:
@@ -315,8 +316,13 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         temporal_filter: TemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
-        """Search temporal chunks with optional hybrid (vector + BM25) ranking."""
+        """Search temporal chunks with optional hybrid (vector + BM25) ranking.
+
+        ``filter_ast`` is accepted for protocol parity; this backend does not
+        compile the recall-filter AST yet, so it is ignored.
+        """
         with trace_span(
             "khora.temporal_store.search",
             namespace_id=str(namespace_id),

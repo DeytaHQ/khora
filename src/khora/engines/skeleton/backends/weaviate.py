@@ -52,6 +52,7 @@ from khora.storage._log_safe import _safe_url_for_log
 
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
+    from khora.filter.ast import FilterNode
 
 # Collection name for temporal chunks
 COLLECTION_NAME = "KhoraChunk"
@@ -389,6 +390,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
         temporal_filter: TemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -396,6 +398,9 @@ class WeaviateTemporalStore(TemporalVectorStore):
         - alpha=1: Pure vector search
         - alpha=0: Pure BM25 search
         - 0 < alpha < 1: Blend of both
+
+        ``filter_ast`` is accepted for protocol parity; this backend does not
+        compile the recall-filter AST yet, so it is ignored.
         """
         from weaviate.classes.query import HybridFusion, MetadataQuery
 

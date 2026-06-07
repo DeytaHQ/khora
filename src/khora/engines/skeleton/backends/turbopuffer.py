@@ -55,6 +55,7 @@ from khora.engines.skeleton.backends import (
 
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
+    from khora.filter.ast import FilterNode
 
 
 # Distance metric we always use - matches our pre-normalized embeddings
@@ -326,6 +327,7 @@ class TurbopufferTemporalStore(TemporalVectorStore):
         temporal_filter: TemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
         """Vector or hybrid (vector + BM25) search.
 
@@ -336,6 +338,9 @@ class TurbopufferTemporalStore(TemporalVectorStore):
             blend is rank-based, not score-weighted. Document this in
             the operator docs so users picking turbopuffer know
             ``hybrid_alpha`` is a no-op on this backend.
+
+        ``filter_ast`` is accepted for protocol parity; this backend does not
+        compile the recall-filter AST yet, so it is ignored.
         """
         ns = self._namespace(namespace_id)
         tp_filter = _build_turbopuffer_filter(temporal_filter)

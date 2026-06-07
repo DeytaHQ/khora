@@ -517,8 +517,9 @@ class SkeletonConstructionEngine:
             temporal_reference: Reference point for relative time (e.g., message timestamp)
             hybrid_alpha: Blend factor for hybrid search (0=BM25, 1=vector)
             filters: Additional structured filters (converted to TemporalFilter)
-            filter_ast: Canonical recall-filter AST. Accepted for protocol
-                parity; skeleton does not push it down yet (ignored).
+            filter_ast: Canonical recall-filter AST. Threaded through to the
+                temporal store's ``search``; the pgvector backend compiles it
+                to a WHERE predicate, the other backends accept-and-ignore it.
             recency_bias: Accepted only as ``None`` for protocol parity.
                 Skeleton does not implement temporal decay on the recall
                 path; passing a non-None value silently no-ops in pre-fix
@@ -583,6 +584,7 @@ class SkeletonConstructionEngine:
             temporal_filter=temporal_filter,
             hybrid_alpha=hybrid_alpha,
             query_text=query,
+            filter_ast=filter_ast,
         )
 
         chunks_with_scores: list[tuple[Chunk, float]] = []
