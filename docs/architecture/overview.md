@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Khora is a knowledge-memory system that remembers everything you tell it and helps you find what you need later. Unlike a simple database or search engine, Khora understands your content at multiple levels: the literal words, the concepts and meanings, and the relationships between things.
+Khora is our open source python library for creating knowledge repositories that ingest unstructured and structured multi-source data and expose a single query substrate, built for integrating into long-horizon AI agents.
 
 ## The Big Picture
 
