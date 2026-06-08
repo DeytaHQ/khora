@@ -1,6 +1,6 @@
 # Storage Backends
 
-Khora doesn't use one database - it uses three, each chosen for what it does best. Each backend is chosen because it excels at queries the others handle less well.
+Khora doesn't use one database - it uses three, each chosen for what it does best. Each backend is chosen because it performs queries the others cannot do or handle less well.
 
 ## The Three Musketeers
 
