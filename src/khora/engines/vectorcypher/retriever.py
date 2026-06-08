@@ -277,9 +277,9 @@ class RetrieverConfig:
     bm25_weight: float = 0.3
     bm25_top_k: int = 50  # How many BM25 results to fetch
 
-    # Cross-encoder reranking
+    # Cross-encoder reranking (default BAAI/bge-reranker-v2-m3; see VectorCypherConfig)
     enable_reranking: bool = False
-    reranking_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranking_model: str = "BAAI/bge-reranker-v2-m3"
     reranking_top_n: int = 50  # Candidates to feed to the cross-encoder
     reranking_blend_weight: float = 0.7  # Rerank vs original score blend
 

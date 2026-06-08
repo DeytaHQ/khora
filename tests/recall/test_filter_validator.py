@@ -287,6 +287,28 @@ def test_date_key_accepts_full_range_op_set() -> None:
     assert isinstance(model.occurred_at, DateOps)
 
 
+@pytest.mark.parametrize("op", ["$eq", "$ne"])
+def test_date_key_accepts_equality_ops(op: str) -> None:
+    # Date keys accept equality ($eq/$ne) — not just range. The DateOps arm
+    # has these fields, so a date key with $eq/$ne lands on DateOps (the operand
+    # is parsed + UTC-normalized like every other date operand).
+    model = RecallFilter.model_validate({"occurred_at": {op: "2026-04-05T00:00:00Z"}})
+    assert isinstance(model.occurred_at, DateOps)
+
+
+@pytest.mark.parametrize("op", ["$in", "$nin"])
+def test_date_key_accepts_set_ops(op: str) -> None:
+    # Date keys accept set membership ($in/$nin) over a list of date operands.
+    model = RecallFilter.model_validate({"occurred_at": {op: ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"]}})
+    assert isinstance(model.occurred_at, DateOps)
+
+
+def test_date_key_set_op_non_list_operand_raises() -> None:
+    # The DateOps set arm is typed list[datetime]; a scalar operand fails it.
+    with pytest.raises(RecallFilterValidationError):
+        RecallFilter.model_validate({"occurred_at": {"$in": "2026-01-01T00:00:00Z"}})
+
+
 def test_string_key_accepts_eq_ne_in_nin_exists() -> None:
     model = RecallFilter.model_validate({"source_type": {"$in": ["a", "b"], "$ne": "c", "$exists": True}})
     assert isinstance(model.source_type, StringOps)
@@ -528,6 +550,76 @@ def test_metadata_bare_list_is_opaque_exact_array() -> None:
 def test_metadata_unknown_operator_raises() -> None:
     with pytest.raises(RecallFilterValidationError):
         RecallFilter.model_validate({"metadata.x": {"$regex": "abc"}})
+
+
+# ---------------------------------------------------------------------------
+# Bare-metadata-blob grammar walk — each blob field is an independent
+# predicate (sibling-AND); literal-dotted and $-prefixed field NAMES inside a
+# blob are stored verbatim (not operators / not dot-paths). The folded
+# metadata.<path> form is covered above; these pin the bare-blob arm.
+# ---------------------------------------------------------------------------
+
+
+def test_bare_blob_each_field_is_independently_validated() -> None:
+    # Sibling-AND semantics: every field of a bare metadata blob is walked, so an
+    # invalid predicate on the SECOND field still raises (the walk does not stop
+    # at the first valid field). The error path names the offending blob field.
+    with pytest.raises(RecallFilterValidationError) as exc:
+        RecallFilter.model_validate({"metadata": {"good": {"$eq": 1}, "bad": {"$regex": "x"}}})
+    fe = exc.value.errors[0]
+    assert fe.code == "unknown_operator"
+    assert fe.path == "/metadata/bad/$regex"
+
+
+def test_bare_blob_operator_expr_field_validates() -> None:
+    # A bare-blob field whose value is a valid operator-expression validates and
+    # round-trips — the blob arm runs the same operator walk as the folded arm.
+    wire = {"metadata": {"score": {"$gte": 5}}}
+    model = RecallFilter.model_validate(wire)
+    assert model.metadata == {"score": {"$gte": 5}}
+    assert _roundtrip(wire) == wire
+
+
+def test_bare_blob_mixed_operator_and_field_raises() -> None:
+    # The operator-position-closure rule applies inside the bare blob too: a value
+    # object mixing $-ops with plain keys raises (path names the blob field).
+    with pytest.raises(RecallFilterValidationError) as exc:
+        RecallFilter.model_validate({"metadata": {"field": {"$gt": 1, "plain": 2}}})
+    fe = exc.value.errors[0]
+    assert fe.code == "mixed_operator_and_field"
+    assert fe.path == "/metadata/field"
+
+
+def test_bare_blob_nested_dict_field_is_whole_subdocument_equality() -> None:
+    # A nested-dict VALUE on a bare-blob field is whole-subdocument equality (an
+    # opaque literal object), round-tripping byte-stable.
+    wire = {"metadata": {"labels": {"team": "ingest", "tier": "gold"}}}
+    model = RecallFilter.model_validate(wire)
+    assert model.metadata == {"labels": {"team": "ingest", "tier": "gold"}}
+    assert _roundtrip(wire) == wire
+
+
+def test_bare_blob_literal_dotted_field_name_is_stored_verbatim() -> None:
+    # A dotted key INSIDE a bare metadata blob is a literal field name, NOT a
+    # dot-path: it is stored verbatim (the dot-path FOLD only fires on a flat
+    # top-level "metadata.<path>" key, not on keys nested inside the blob). It
+    # round-trips byte-stable and may carry an operator-expression value.
+    for wire in (
+        {"metadata": {"a.b": "x"}},
+        {"metadata": {"a.b.c": {"$gt": 1}}},
+    ):
+        assert _roundtrip(wire) == wire
+
+
+def test_bare_blob_dollar_prefixed_field_name_is_stored_verbatim() -> None:
+    # A $-prefixed key as a bare-blob FIELD NAME is stored verbatim (it is a field
+    # name, not an operator — operator position is the value object). The opaque
+    # scalar value round-trips, and a valid operator-expression value still walks.
+    for wire in (
+        {"metadata": {"$weird": "x"}},
+        {"metadata": {"$weird": {"$gt": 1}}},
+    ):
+        assert _roundtrip(wire) == wire
 
 
 # ---------------------------------------------------------------------------

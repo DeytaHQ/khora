@@ -360,9 +360,13 @@ class VectorCypherConfig:
     # entities span multiple sessions/channels.
     enable_session_aware_search: bool = True
 
-    # Cross-encoder reranking
+    # Cross-encoder reranking. Default is BAAI/bge-reranker-v2-m3 (568M,
+    # multilingual XLM-RoBERTa-large) - markedly stronger discrimination than the
+    # legacy ms-marco-MiniLM cross-encoders. It downloads ~2.3GB and is best on
+    # GPU; CPU-only deployments can set a lighter model (e.g.
+    # "cross-encoder/ms-marco-MiniLM-L-6-v2") via reranking_model.
     enable_reranking: bool = False
-    reranking_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    reranking_model: str = "BAAI/bge-reranker-v2-m3"
     reranking_top_n: int = 50  # How many candidates to feed to the cross-encoder
     reranking_blend_weight: float = 0.7  # Rerank vs original score blend (passed to reranker)
 
@@ -453,6 +457,20 @@ class VectorCypherEngine:
         """
         self._config = config
         self._vc_config = vectorcypher_config or VectorCypherConfig()
+
+        # Reconcile query-level reranker settings onto the VC config when the
+        # caller did not pass an explicit ``vectorcypher_config``. Historically
+        # ``KhoraConfig.query.reranking_model`` was silently ignored on the
+        # VectorCypher path (the engine only ever read VectorCypherConfig), so
+        # configuring the reranker the obvious way had no effect. An explicit
+        # ``vectorcypher_config`` still wins. See issue: reranker config foot-gun.
+        if vectorcypher_config is None:
+            query_cfg = getattr(config, "query", None)
+            if query_cfg is not None:
+                if getattr(query_cfg, "reranking_model", None):
+                    self._vc_config.reranking_model = query_cfg.reranking_model
+                if getattr(query_cfg, "llm_reranking_model", None):
+                    self._vc_config.llm_reranking_model = query_cfg.llm_reranking_model
 
         # Build storage config (shared helper handles SurrealDB, pool_pre_ping, etc.)
         self._storage_config = storage_config or build_storage_config(config)
