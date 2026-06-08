@@ -555,13 +555,22 @@ def _date_op_cases(key: str) -> list[ConformanceCase]:
     hit, miss, absent = (r.id for r in seed)
     bound = _DATE_BOUND
 
+    # ``created_at`` is stamped by the store on insert (the khora_chunks writer
+    # coalesces a missing created_at to ``now()``), so the "absent" record cannot
+    # be represented as NULL on the postgres leg — its ``now()`` value satisfies the
+    # lower-bound ops and breaks them. ``created_at`` is therefore validated on
+    # python (the oracle) + chronicle only, which keep an absent value NULL.
+    # ``occurred_at`` / ``source_timestamp`` are user-supplied and stay NULL when
+    # absent, so they keep postgres.
+    backends = _OP_BACKENDS - frozenset({"postgres"}) if key == "created_at" else _OP_BACKENDS
+
     def case(suffix: str, predicate: dict[str, Any], expected: frozenset[str], op_tag: str) -> ConformanceCase:
         return ConformanceCase(
             id=f"F-OP-{key}-{suffix}",
             filter={key: predicate},
             seed_records=seed,
             expected_ids=expected,
-            backends=_OP_BACKENDS,
+            backends=backends,
             exercises=("F-OP", key, op_tag),
         )
 
