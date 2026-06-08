@@ -53,24 +53,28 @@ for _noisy in ("httpx", "httpcore", "LiteLLM", "openai", "sqlalchemy.engine"):
 
 _DEFAULT_CONFIG = Path(__file__).parent.parent / "khora.embedded.yaml"
 _DOCS_DIR = Path(__file__).parent.parent / "data" / "mars_rovers"
-_VISION_MODEL = "gpt-4o"
-_ANSWER_MODEL = "gpt-4o"
+_VISION_MODEL = "gpt-5.5"
+_ANSWER_MODEL = "gpt-5.5"
 
 _ENTITY_TYPES = ["SPACECRAFT", "INSTRUMENT", "LOCATION", "MEASUREMENT", "MISSION"]
 _REL_TYPES = ["RELATES_TO", "PART_OF", "LOCATED_IN"]
 
 _VISION_SYSTEM = (
     "You are describing a figure — a map, chart, or labeled diagram — for a search index, in "
-    "enough detail that a reader could reconstruct it without seeing it. Cover three things:\n"
-    "1. CONTENT — transcribe every visible label, place name, axis title, legend entry, and number.\n"
+    "enough detail that a reader could reconstruct it without seeing it. Be exhaustive: a long, "
+    "complete description is the goal. Cover:\n"
+    "1. CONTENT — transcribe every visible label, place name, axis title, legend entry, and number. "
+    "Also describe physical features that are drawn but NOT labeled, and COUNT the repeated parts you "
+    "can see — for example, how many wheels, antennas, cameras, booms, or masts are visible.\n"
     "2. LAYOUT — say where each element sits and how elements relate in space. For a map, give "
     "positions with compass directions (north/south/east/west) and use the scale bar to estimate "
     "distances between places (for example, 'X is north of Y, roughly 2 km away'). For a diagram, "
-    "say what is mounted where and what is next to, above or below, or hidden behind what.\n"
+    "say what is mounted where and what is next to, above or below, in front of or behind, or hidden "
+    "behind what.\n"
     "3. STORY — if the figure shows a route or sequence such as a rover's traverse, narrate the "
-    "path in order from start to finish: the starting point, each stop in sequence, and the "
-    "overall direction of travel.\n"
-    "Completeness matters more than brevity; do not limit the length. No preamble."
+    "path in order from start to finish: the starting point, each stop in sequence, and the overall "
+    "direction of travel. If it shows an object, summarize what it is and what each major part does.\n"
+    "Do not limit the length — completeness is more important than brevity. No preamble."
 )
 
 _QUESTIONS = [
@@ -246,8 +250,9 @@ async def main() -> None:
         )
 
         # 4 — Retrieval-augmented QA: recall → grounded answer → cite external_ids.
+        #     limit=10 so cross-rover comparison questions surface chunks from both rovers.
         for question in _QUESTIONS:
-            recall = await kb.recall(question, namespace=ns_id, limit=6)
+            recall = await kb.recall(question, namespace=ns_id, limit=10)
             docs = {d.id: d for d in recall.documents}
             reply = await answer(question, recall, docs, client=client)
             sources: list[str] = []
