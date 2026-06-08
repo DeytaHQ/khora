@@ -40,7 +40,9 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from khora.db.session import run_migrations
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
@@ -84,7 +86,9 @@ def _make_config(url: str) -> Config:
 # A pre-migration ``khora_chunks`` table: the identity/temporal columns the
 # runtime always created, but WITHOUT the eight denormalized columns. Creating
 # this before upgrade lets migration 041 add ``source`` / ``external_id`` at the
-# narrow 255 width, which 042 then widens.
+# narrow 255 width, which 042 then widens. The ``content_tsv`` column + trigger
+# mirror the runtime so the full re-run of the chain (043/044 ``DISABLE TRIGGER
+# khora_chunks_content_tsv_update``) succeeds.
 _LEGACY_KHORA_CHUNKS_DDL = """
 CREATE TABLE khora_chunks (
     id UUID PRIMARY KEY,
@@ -93,8 +97,27 @@ CREATE TABLE khora_chunks (
     content TEXT NOT NULL,
     occurred_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ,
-    metadata JSONB DEFAULT '{}'::jsonb
+    metadata JSONB DEFAULT '{}'::jsonb,
+    content_tsv TSVECTOR
 )
+"""
+
+# The runtime's content_tsv trigger, byte-equivalent to
+# ``PgVectorTemporalStore.connect()``. Seeding it lets the full re-run of the
+# chain (043/044) DISABLE/ENABLE it without an UndefinedObjectError.
+_TSV_FUNCTION_DDL = """
+CREATE OR REPLACE FUNCTION khora_chunks_content_tsv_trigger() RETURNS trigger AS $$
+BEGIN
+    NEW.content_tsv := to_tsvector('english', NEW.content);
+    RETURN NEW;
+END
+$$ LANGUAGE plpgsql
+"""
+
+_TSV_TRIGGER_DDL = """
+CREATE TRIGGER khora_chunks_content_tsv_update
+BEFORE INSERT OR UPDATE ON khora_chunks
+FOR EACH ROW EXECUTE FUNCTION khora_chunks_content_tsv_trigger()
 """
 
 
@@ -105,6 +128,8 @@ async def _seed_legacy_table_at_baseline(url: str) -> None:
         async with engine.connect() as conn:
             await conn.execute(sa.text("DROP TABLE IF EXISTS khora_chunks CASCADE"))
             await conn.execute(sa.text(_LEGACY_KHORA_CHUNKS_DDL))
+            await conn.execute(sa.text(_TSV_FUNCTION_DDL))
+            await conn.execute(sa.text(_TSV_TRIGGER_DDL))
             await conn.execute(sa.text("UPDATE khora_alembic_version SET version_num = '040_chunks_last_accessed_at'"))
     finally:
         await engine.dispose()
@@ -128,46 +153,56 @@ async def _source_external_id_widths(url: str) -> dict[str, tuple[str, int | Non
         await engine.dispose()
 
 
+async def _reset_public_schema(eng: AsyncEngine) -> None:
+    """Wipe ``public`` and pre-create the wide khora_alembic_version table.
+
+    Mirrors ``test_migration_033_bitemporal.py``: alembic creates
+    ``khora_alembic_version`` with the default ``VARCHAR(32)`` but several
+    revision ids are wider. Pre-create the table with VARCHAR(64) so the chain
+    applies cleanly.
+    """
+    async with eng.begin() as conn:
+        r = await conn.execute(
+            sa.text("SELECT typname FROM pg_type WHERE typnamespace = 'public'::regnamespace AND typtype = 'e'")
+        )
+        for (typname,) in r.fetchall():
+            await conn.execute(sa.text(f"DROP TYPE IF EXISTS public.{typname} CASCADE"))
+        await conn.execute(sa.text("DROP SCHEMA public CASCADE"))
+        await conn.execute(sa.text("CREATE SCHEMA public"))
+        await conn.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await conn.execute(
+            sa.text(
+                "CREATE TABLE khora_alembic_version ("
+                "  version_num VARCHAR(64) NOT NULL,"
+                "  CONSTRAINT khora_alembic_version_pkc PRIMARY KEY (version_num)"
+                ")"
+            )
+        )
+
+
 @pytest.fixture
 def pg_url() -> Iterator[str]:
-    """Yield the base Postgres URL.
+    """Wipe ``public``, re-migrate to head, and yield the base Postgres URL.
 
-    Resets the Alembic head back to ``040`` and drops ``khora_chunks`` on setup
-    and teardown so the migration-test files can run in arbitrary order against
-    shared PostgreSQL without leaking state. The version-table walk-back is
-    guarded on table existence so the fixture is also safe on a never-migrated
-    DB (the version table is created by the first ``command.upgrade``).
+    The schema-wipe makes the tests safe to run against shared PostgreSQL (the
+    integration job migrates the service DB to head up front) without leaking
+    state. ``khora_chunks`` is runtime-managed (not Alembic), so after the
+    re-migrate it does not exist — each test seeds the legacy table itself.
     """
     if not _pg_reachable():
         pytest.skip("PostgreSQL not reachable (run `make dev` first)")
 
-    async def _reset() -> None:
-        admin = create_async_engine(DATABASE_URL, isolation_level="AUTOCOMMIT")
+    async def _setup() -> None:
+        eng = create_async_engine(DATABASE_URL)
         try:
-            async with admin.connect() as conn:
-                await conn.execute(sa.text("DROP TABLE IF EXISTS khora_chunks CASCADE"))
-                table_exists = await conn.execute(
-                    sa.text(
-                        "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-                        "WHERE table_name = 'khora_alembic_version')"
-                    )
-                )
-                if table_exists.scalar():
-                    await conn.execute(
-                        sa.text(
-                            "UPDATE khora_alembic_version SET version_num = "
-                            "'040_chunks_last_accessed_at' WHERE version_num != "
-                            "'040_chunks_last_accessed_at'"
-                        )
-                    )
+            await _reset_public_schema(eng)
         finally:
-            await admin.dispose()
+            await eng.dispose()
+        result = await run_migrations(DATABASE_URL)
+        assert result.success, f"migrations failed: {result.error}"
 
-    asyncio.run(_reset())
-    try:
-        yield DATABASE_URL
-    finally:
-        asyncio.run(_reset())
+    asyncio.run(_setup())
+    yield DATABASE_URL
 
 
 @pytest.fixture
@@ -180,11 +215,6 @@ def sqlite_url(tmp_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="migration test not yet CI-shared-DB-safe: collides with the integration job's "
-    "up-front `alembic upgrade head` on the shared service DB; tracked in #1020",
-    strict=False,
-)
 class TestMigration042OnPostgres:
     def test_upgrade_widens_source_and_external_id(self, pg_url: str) -> None:
         """Chain to head: ``source`` becomes TEXT, ``external_id`` becomes VARCHAR(512)."""

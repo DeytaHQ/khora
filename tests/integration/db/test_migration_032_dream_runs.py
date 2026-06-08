@@ -32,7 +32,7 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from khora.db.session import run_migrations
 
@@ -75,49 +75,56 @@ def _make_config(url: str) -> Config:
 
 
 # ---------------------------------------------------------------------------
-# Postgres fixture — schema-isolated per test so the four tests can run in
-# arbitrary order without leaking state. We point the async engine at a
-# unique schema, run the chain there, then drop it on teardown.
+# Postgres fixture — wipe ``public`` and re-migrate to head per test so the
+# tests run in arbitrary order against a shared PostgreSQL (the integration
+# job migrates the service DB to head up front) without leaking state.
 # ---------------------------------------------------------------------------
+
+
+async def _reset_public_schema(eng: AsyncEngine) -> None:
+    """Wipe ``public`` and pre-create the wide khora_alembic_version table.
+
+    Mirrors ``test_migration_033_bitemporal.py``: alembic creates
+    ``khora_alembic_version`` with the default ``VARCHAR(32)`` but several
+    revision ids are wider. Pre-create the table with VARCHAR(64) so the chain
+    applies cleanly.
+    """
+    async with eng.begin() as conn:
+        r = await conn.execute(
+            sa.text("SELECT typname FROM pg_type WHERE typnamespace = 'public'::regnamespace AND typtype = 'e'")
+        )
+        for (typname,) in r.fetchall():
+            await conn.execute(sa.text(f"DROP TYPE IF EXISTS public.{typname} CASCADE"))
+        await conn.execute(sa.text("DROP SCHEMA public CASCADE"))
+        await conn.execute(sa.text("CREATE SCHEMA public"))
+        await conn.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await conn.execute(
+            sa.text(
+                "CREATE TABLE khora_alembic_version ("
+                "  version_num VARCHAR(64) NOT NULL,"
+                "  CONSTRAINT khora_alembic_version_pkc PRIMARY KEY (version_num)"
+                ")"
+            )
+        )
 
 
 @pytest.fixture
 def pg_url() -> Iterator[str]:
-    """Yield the base Postgres URL; drop ``khora_dream_runs`` on teardown.
-
-    We don't isolate per-schema because asyncpg rejects URL-embedded
-    ``server_settings`` and threading per-test ``connect_args`` through the
-    Alembic command API is fragile. Integration tests run serially anyway
-    (per CLAUDE.md — `tests/integration/matrix/*` already DROP SCHEMA on
-    shared PostgreSQL).
-    """
+    """Wipe ``public``, re-migrate to head, and yield the base Postgres URL."""
     if not _pg_reachable():
         pytest.skip("PostgreSQL not reachable (run `make dev` first)")
 
-    async def _reset() -> None:
-        """Drop dream_runs table and reset alembic_version to 031 so tests
-        don't poison each other via leftover stamps."""
-        admin = create_async_engine(DATABASE_URL, isolation_level="AUTOCOMMIT")
+    async def _setup() -> None:
+        eng = create_async_engine(DATABASE_URL)
         try:
-            async with admin.connect() as conn:
-                await conn.execute(sa.text("DROP TABLE IF EXISTS khora_dream_runs CASCADE"))
-                # Reset alembic head to 031 so the next test's upgrade is a no-op
-                # (032 is the head once migration lands; we want a clean baseline).
-                await conn.execute(
-                    sa.text(
-                        "UPDATE khora_alembic_version SET version_num = "
-                        "'031_session_id_indexes' WHERE version_num != "
-                        "'031_session_id_indexes'"
-                    )
-                )
+            await _reset_public_schema(eng)
         finally:
-            await admin.dispose()
+            await eng.dispose()
+        result = await run_migrations(DATABASE_URL)
+        assert result.success, f"migrations failed: {result.error}"
 
-    asyncio.run(_reset())
-    try:
-        yield DATABASE_URL
-    finally:
-        asyncio.run(_reset())
+    asyncio.run(_setup())
+    yield DATABASE_URL
 
 
 @pytest.fixture
@@ -130,12 +137,6 @@ def sqlite_url(tmp_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="migration test not yet CI-shared-DB-safe: resets the alembic pointer without "
-    "dropping sibling tables, so it collides with the integration job's up-front "
-    "`alembic upgrade head` on the shared service DB; tracked in #1020",
-    strict=False,
-)
 class TestMigration032OnPostgres:
     def test_migration_032_creates_dream_runs_table(self, pg_url: str) -> None:
         """Upgrade head on fresh PG creates the table with all 16 columns + index."""

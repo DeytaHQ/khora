@@ -53,6 +53,7 @@ import asyncio
 import os
 import socket
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -61,7 +62,9 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
-from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+
+from khora.db.session import run_migrations
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
@@ -160,46 +163,57 @@ FOR EACH ROW EXECUTE FUNCTION khora_chunks_content_tsv_trigger()
 """
 
 
+async def _reset_public_schema(eng: AsyncEngine) -> None:
+    """Wipe ``public`` and pre-create the wide khora_alembic_version table.
+
+    Mirrors ``test_migration_033_bitemporal.py``: alembic creates
+    ``khora_alembic_version`` with the default ``VARCHAR(32)`` but several
+    revision ids are wider. Pre-create the table with VARCHAR(64) so the chain
+    applies cleanly.
+    """
+    async with eng.begin() as conn:
+        r = await conn.execute(
+            sa.text("SELECT typname FROM pg_type WHERE typnamespace = 'public'::regnamespace AND typtype = 'e'")
+        )
+        for (typname,) in r.fetchall():
+            await conn.execute(sa.text(f"DROP TYPE IF EXISTS public.{typname} CASCADE"))
+        await conn.execute(sa.text("DROP SCHEMA public CASCADE"))
+        await conn.execute(sa.text("CREATE SCHEMA public"))
+        await conn.execute(sa.text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await conn.execute(
+            sa.text(
+                "CREATE TABLE khora_alembic_version ("
+                "  version_num VARCHAR(64) NOT NULL,"
+                "  CONSTRAINT khora_alembic_version_pkc PRIMARY KEY (version_num)"
+                ")"
+            )
+        )
+
+
 @pytest.fixture
 def pg_url() -> Iterator[str]:
-    """Yield the base Postgres URL.
+    """Wipe ``public``, re-migrate to head, and yield the base Postgres URL.
 
-    Resets the Alembic head to 043 and drops ``khora_chunks`` (+ its trigger
-    function) on setup and teardown so the migration-test files can run in
-    arbitrary order against shared PostgreSQL without leaking state.
+    The schema-wipe makes the tests safe to run against shared PostgreSQL (the
+    integration job migrates the service DB to head up front) without leaking
+    state. ``khora_chunks`` is runtime-managed (not Alembic), so after the
+    re-migrate it does not exist — each test seeds the runtime-shaped table
+    (with its content_tsv trigger) itself.
     """
     if not _pg_reachable():
         pytest.skip("PostgreSQL not reachable (run `make dev` first)")
 
-    async def _reset() -> None:
-        admin = create_async_engine(DATABASE_URL, isolation_level="AUTOCOMMIT")
+    async def _setup() -> None:
+        eng = create_async_engine(DATABASE_URL)
         try:
-            async with admin.connect() as conn:
-                await conn.execute(sa.text("DROP TABLE IF EXISTS khora_chunks CASCADE"))
-                await conn.execute(sa.text("DROP FUNCTION IF EXISTS khora_chunks_content_tsv_trigger() CASCADE"))
-                # Walk the version table back to 043 so the next upgrade re-runs
-                # 044 from a known baseline. Guarded on table existence so the
-                # fixture is also safe against a never-migrated DB (the version
-                # table is created by the first ``command.upgrade``).
-                table_exists = await conn.execute(
-                    sa.text(
-                        "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
-                        "WHERE table_name = 'khora_alembic_version')"
-                    )
-                )
-                if table_exists.scalar():
-                    await conn.execute(
-                        sa.text("UPDATE khora_alembic_version SET version_num = :prev WHERE version_num != :prev"),
-                        {"prev": _PREV_REVISION},
-                    )
+            await _reset_public_schema(eng)
         finally:
-            await admin.dispose()
+            await eng.dispose()
+        result = await run_migrations(DATABASE_URL)
+        assert result.success, f"migrations failed: {result.error}"
 
-    asyncio.run(_reset())
-    try:
-        yield DATABASE_URL
-    finally:
-        asyncio.run(_reset())
+    asyncio.run(_setup())
+    yield DATABASE_URL
 
 
 @pytest.fixture
@@ -224,6 +238,15 @@ async def _seed_namespace(conn: AsyncConnection, ns_row_id) -> None:
     )
 
 
+def _coerce_source_timestamp(values: dict) -> dict:
+    """Return a copy of ``values`` with any ISO-string ``source_timestamp``
+    parsed into a ``datetime`` (asyncpg binds TIMESTAMPTZ from datetime, not str)."""
+    ts = values.get("source_timestamp")
+    if isinstance(ts, str):
+        return {**values, "source_timestamp": datetime.fromisoformat(ts)}
+    return values
+
+
 async def _seed_document(conn: AsyncConnection, doc_id, ns_row_id, values: dict) -> None:
     """Insert a ``documents`` row carrying the provenance the backfill copies."""
     await conn.execute(
@@ -236,7 +259,9 @@ async def _seed_document(conn: AsyncConnection, doc_id, ns_row_id, values: dict)
             " :source_url, :source_timestamp, :external_id, :content_type, "
             " :source, :title, NOW(), NOW())"
         ),
-        {"id": doc_id, "ns": ns_row_id, **values},
+        # asyncpg binds ``source_timestamp`` as a real TIMESTAMPTZ and rejects a
+        # str — parse any ISO string the caller passes into a datetime first.
+        {"id": doc_id, "ns": ns_row_id, **_coerce_source_timestamp(values)},
     )
 
 
@@ -291,11 +316,6 @@ _LONG_EXTERNAL_ID = "ext-" + ("y" * 400)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="migration test not yet CI-shared-DB-safe: collides with the integration job's "
-    "up-front `alembic upgrade head` on the shared service DB; tracked in #1020",
-    strict=False,
-)
 class TestMigration044OnPostgres:
     def test_backfill_happy_path(self, pg_url: str) -> None:
         """Each denormalized chunk col gets the parent document value verbatim,
@@ -486,15 +506,17 @@ class TestMigration044OnPostgres:
             engine = create_async_engine(pg_url)
             try:
                 async with engine.connect() as conn:
-                    return (
-                        await conn.execute(
-                            sa.text(
-                                "SELECT source_type, source_name, external_id, "
-                                "source, title FROM khora_chunks WHERE id = :id"
-                            ),
-                            {"id": chunk_id},
-                        )
-                    ).one()
+                    return tuple(
+                        (
+                            await conn.execute(
+                                sa.text(
+                                    "SELECT source_type, source_name, external_id, "
+                                    "source, title FROM khora_chunks WHERE id = :id"
+                                ),
+                                {"id": chunk_id},
+                            )
+                        ).one()
+                    )
             finally:
                 await engine.dispose()
 
@@ -651,7 +673,9 @@ class TestMigration044OnPostgres:
                     tgenabled = (
                         await conn.execute(
                             sa.text(
-                                "SELECT t.tgenabled FROM pg_trigger t "
+                                # Cast to text so the PG ``"char"`` ``tgenabled`` comes
+                                # back as a str (asyncpg returns the raw type as bytes).
+                                "SELECT t.tgenabled::text FROM pg_trigger t "
                                 "JOIN pg_class c ON c.oid = t.tgrelid "
                                 "WHERE c.relname = 'khora_chunks' "
                                 "AND t.tgname = :trigger"
