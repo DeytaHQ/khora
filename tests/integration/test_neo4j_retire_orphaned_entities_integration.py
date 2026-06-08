@@ -4,7 +4,7 @@ These tests exercise the full retire → snapshot → temporal-query path agains
 a running Neo4j instance, verifying that :EntityVersion nodes, [:SUPERSEDES]
 edges, and temporal property stamps work end-to-end through the driver.
 
-Gated by ``NEO4J_INTEGRATION_TEST=1`` (CI does not provision Neo4j).
+Gated by ``NEO4J_INTEGRATION_TEST=1`` (set by the CI integration job).
 
 How to run locally:
 

@@ -5,7 +5,7 @@ persisted under namespace A is not retrievable by a caller scoped to
 namespace B, even when that caller knows the entity ID. Same for
 relationships and episodes.
 
-Gated by ``NEO4J_INTEGRATION_TEST=1`` because CI does not provision Neo4j.
+Gated by ``NEO4J_INTEGRATION_TEST=1``; the CI integration job sets that flag.
 
 How to run locally::
 

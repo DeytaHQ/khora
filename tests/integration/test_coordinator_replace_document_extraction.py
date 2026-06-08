@@ -7,7 +7,7 @@ Exercises the full document-replacement lifecycle against a running Postgres
 - Graph-side failure → document lands in ``FAILED``; next successful replace
   heals it back to ``COMPLETED`` (self-heal)
 
-Gated by ``NEO4J_INTEGRATION_TEST=1`` because CI does not provision Neo4j.
+Gated by ``NEO4J_INTEGRATION_TEST=1``; the CI integration job sets that flag.
 
 How to run locally::
 

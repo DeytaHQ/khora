@@ -10,7 +10,7 @@ against a real Postgres + Neo4j stack and asserts:
    surviving doc) remain queryable; only the forgotten ``document_id`` is
    stripped from their ``source_document_ids`` array.
 
-Gated by ``NEO4J_INTEGRATION_TEST=1`` (CI does not provision Neo4j).
+Gated by ``NEO4J_INTEGRATION_TEST=1`` (set by the CI integration job).
 
 How to run locally::
 
