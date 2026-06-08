@@ -8,8 +8,9 @@ the whole postgres leg silently mis-maps survivors. These checks guard exactly
 that, with no database, so they run on every leg (including the no-Docker ones)
 and catch a regression even when Postgres is unavailable.
 
-Marked ``filter_conformance`` (NOT ``_pg_reachable``-gated, NOT ``integration``):
-the functions under test are pure file I/O over a ``tmp_path`` artifact.
+Marked ``integration`` + ``filter_conformance`` (NOT ``_pg_reachable``-gated): the
+functions under test are pure file I/O over a ``tmp_path`` artifact, so the test
+needs no live store and runs on every conformance leg.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import pytest
 
 from tests.integration.matrix import _conformance_pg
 
-pytestmark = [pytest.mark.filter_conformance]
+pytestmark = [pytest.mark.integration, pytest.mark.filter_conformance]
 
 
 @pytest.fixture
