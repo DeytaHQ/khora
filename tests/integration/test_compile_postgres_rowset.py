@@ -80,16 +80,19 @@ pytestmark = [
     pytest.mark.skipif(not _pg_reachable(), reason="PostgreSQL not reachable (run `make dev`)"),
 ]
 
-# These cases compile to a JSONB path operator (``#>``) whose path operand asyncpg
-# binds as ``character varying`` rather than ``text[]`` — Postgres then raises
-# "operator does not exist: jsonb #> character varying". This is a real Postgres
-# filter-compiler / asyncpg incompatibility (NOT a test bug), surfaced for the first
-# time now that this proof runs against real PG in CI. Quarantined until the compiler
-# emits a ``text[]`` path operand. Tracked in #1020.
-_xfail_jsonb_path_operator = pytest.mark.xfail(
-    reason="Postgres filter compiler emits `jsonb #> varchar`, which asyncpg rejects "
-    "(needs text[]); compiler/asyncpg bug surfaced by enabling this proof in CI; "
-    "tracked in #1020",
+# These cases assert array-aware ``@>`` containment: a scalar operand (``$eq`` /
+# ``$in`` / negated ``$ne``) should match BOTH a scalar field and an array field
+# that contains the value. On real Postgres the compiler's ``metadata @> '{k: v}'``
+# form does NOT match an array-valued field — the JSONB array-contains-primitive
+# exception does not apply at the nested-object key level, so a row whose ``tier``
+# is ``["gold", ...]`` is missed by ``tier == "gold"``. This is a SEPARATE compiler
+# defect from the ``#> varchar`` path-operand bug (the ``@>`` form never routes
+# through ``_jpath``); fixing it requires changing ``_md_containment`` to OR an
+# array-wrapped form, which also changes the unit-test SQL contract. Tracked in #1027.
+_xfail_array_containment = pytest.mark.xfail(
+    reason="compile_postgres `@>` containment does not match nested array membership on "
+    "real Postgres (scalar operand vs array-valued field); separate from the #> path "
+    "fix, requires a _md_containment change. Tracked in #1027",
     strict=False,
 )
 
@@ -236,7 +239,6 @@ async def _matching_labels(
 # ===========================================================================
 
 
-@_xfail_jsonb_path_operator
 async def test_numeric_gte_excludes_non_numbers_and_orders_numerically(seeded) -> None:
     # metadata.score >= 5 must include the numbers 10, 7, 5 — and EXCLUDE the
     # numeric-looking string "10" (it is text, not a number), the non-numeric
@@ -246,7 +248,6 @@ async def test_numeric_gte_excludes_non_numbers_and_orders_numerically(seeded) -
     assert labels == {"num10", "sysnull", "baddate"}
 
 
-@_xfail_jsonb_path_operator
 async def test_numeric_lt_orders_numerically_not_lexically(seeded) -> None:
     # metadata.score < 5 → only num2 (=2). If the compiler compared as TEXT,
     # "10" < "5" would be true and numstr would wrongly appear; the jsonb_typeof
@@ -255,7 +256,6 @@ async def test_numeric_lt_orders_numerically_not_lexically(seeded) -> None:
     assert labels == {"num2"}
 
 
-@_xfail_jsonb_path_operator
 async def test_numeric_range_band(seeded) -> None:
     # 3 <= score <= 9 → only the numbers 5 (sysnull) and 7 (baddate).
     labels = await _matching_labels(seeded, {"metadata.score": {"$gte": 3, "$lte": 9}})
@@ -267,7 +267,7 @@ async def test_numeric_range_band(seeded) -> None:
 # ===========================================================================
 
 
-@_xfail_jsonb_path_operator
+@_xfail_array_containment
 async def test_metadata_ne_includes_missing_key(seeded) -> None:
     # tier != "gold" compiles to NOT(metadata @> {"tier":"gold"}). Containment is
     # array-aware, so the array-tier row ("arr": ["gold","silver"]) DOES contain
@@ -315,7 +315,7 @@ async def test_not_eq_admits_null_row_like_ne(seeded) -> None:
 # ===========================================================================
 
 
-@_xfail_jsonb_path_operator
+@_xfail_array_containment
 async def test_metadata_in_matches_scalar_and_array_membership(seeded) -> None:
     # tier $in ["silver"] → every row whose tier is the scalar "silver" (num2,
     # baddate) AND the array-tier row (arr contains "silver"). Containment
@@ -324,7 +324,7 @@ async def test_metadata_in_matches_scalar_and_array_membership(seeded) -> None:
     assert labels == {"num2", "baddate", "arr"}
 
 
-@_xfail_jsonb_path_operator
+@_xfail_array_containment
 async def test_metadata_in_multiple_values(seeded) -> None:
     labels = await _matching_labels(seeded, {"metadata.tier": {"$in": ["silver", "bronze"]}})
     # silver: num2, baddate, arr (contains silver). bronze: numstr.
@@ -355,7 +355,6 @@ async def test_metadata_empty_nin_matches_everything(seeded) -> None:
 # ===========================================================================
 
 
-@_xfail_jsonb_path_operator
 async def test_metadata_date_range_excludes_malformed(seeded) -> None:
     # sent_at >= 2026-01-05 → num10 (2026-01-10). num2 (2026-01-02) is before.
     # baddate ("not-a-date") must be EXCLUDED — khora_try_timestamptz returns
@@ -365,7 +364,6 @@ async def test_metadata_date_range_excludes_malformed(seeded) -> None:
     assert labels == {"num10"}
 
 
-@_xfail_jsonb_path_operator
 async def test_metadata_date_eq_excludes_malformed(seeded) -> None:
     labels = await _matching_labels(seeded, {"metadata.sent_at": {"$date": "2026-01-02T00:00:00Z"}})
     assert labels == {"num2"}
@@ -401,7 +399,7 @@ async def test_metadata_exists_true_includes_null_valued_array_and_string(seeded
 # ===========================================================================
 
 
-@_xfail_jsonb_path_operator
+@_xfail_array_containment
 async def test_metadata_scalar_eq_matches_array_membership(seeded) -> None:
     # tier == "gold" via @> containment matches the scalar-gold rows AND the
     # array-tier row that contains "gold".

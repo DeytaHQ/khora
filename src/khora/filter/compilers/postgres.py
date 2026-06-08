@@ -44,7 +44,7 @@ from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy import ColumnElement
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 from khora.filter import (
     CompileContext,
@@ -428,14 +428,21 @@ class _Builder:
 
 
 def _jpath(segments: tuple[str, ...]) -> ColumnElement[Any]:
-    """Build the Postgres ``text[]`` path literal ``'{a,b}'`` for ``#>`` / ``#>>``.
+    """Build the Postgres ``text[]`` path operand for ``#>`` / ``#>>``.
 
-    Each segment is double-quoted (and its backslashes / quotes escaped) so a
-    segment containing ``,`` ``{`` ``}`` or whitespace survives the array-literal
-    parse.
+    The ``#>`` / ``#>>`` operators require a ``text[]`` right operand. Binding the
+    segments as a Python list typed ``ARRAY(Text())`` makes asyncpg transmit a
+    native ``text[]`` array over the protocol — no manual array-literal string,
+    so a segment containing ``,`` ``{`` ``}`` ``"`` ``\\`` or whitespace round-trips
+    verbatim (the protocol-level encoder handles framing, not us).
+
+    Prod impact of getting this wrong: only the ``#>`` / ``#>>`` path forms were
+    affected — nested ``metadata.a.b`` paths, nested-path ``$exists``, ``$date``
+    gates, exact-array ``$eq``, and nested range ops. The single-level ``@>``
+    containment and ``?`` key-presence forms never route through ``_jpath`` and
+    were unaffected.
     """
-    inner = ",".join('"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"' for s in segments)
-    return sa.literal("{" + inner + "}")
+    return sa.literal(list(segments), type_=ARRAY(sa.Text()))
 
 
 def _jsonb_literal(value: Any) -> ColumnElement[Any]:
