@@ -645,7 +645,7 @@ class TestEmptyBatchShortCircuits:
     @pytest.mark.asyncio
     async def test_remove_document_from_relationship_sources_batch_empty(self) -> None:
         b = _backend_with_session_mock(AsyncMock())
-        out = await b.remove_document_from_relationship_sources_batch([], uuid4())
+        out = await b.remove_document_from_relationship_sources_batch([], uuid4(), uuid4())
         assert out == 0
 
     @pytest.mark.asyncio

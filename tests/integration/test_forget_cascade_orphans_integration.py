@@ -43,7 +43,7 @@ from khora.extraction.extractors.base import (
 )
 from khora.khora import Khora
 
-EMBED_DIM = 4
+EMBED_DIM = 1536
 
 _EXTRACTION_REGISTRY: dict[str, ExtractionResult] = {}
 
@@ -98,10 +98,6 @@ async def _run_cypher(driver: Any, query: str, **params: Any) -> list[dict[str, 
     not os.environ.get("NEO4J_INTEGRATION_TEST"),
     reason="set NEO4J_INTEGRATION_TEST=1 to run against real backends (requires make dev)",
 )
-@pytest.mark.xfail(
-    reason="tracked in #1033: never-run-in-CI replace/forget lifecycle; first CI run hit fixture event-loop binding + downstream PG/graph failures. Quarantined pending triage against a live PG+Neo4j stack.",
-    strict=False,
-)
 class TestForgetCascadeOrphansIntegration:
     """End-to-end forget()-cascade behaviour against real Postgres + Neo4j."""
 
@@ -155,7 +151,12 @@ class TestForgetCascadeOrphansIntegration:
     def _graph_driver(self, kb: Khora) -> Any:
         graph = kb.storage.graph
         assert graph is not None, "graph backend must be configured"
-        driver = getattr(graph, "_driver", None)
+        # ``kb.storage.graph`` is a NamespaceRequiredProxy (IDOR hardening,
+        # PR #769) whose __getattr__ raises for any "_"-prefixed name, so
+        # unwrap to the real backend first; ``_backend`` is a real slot found
+        # by plain getattr before __getattr__ is consulted.
+        backend = getattr(graph, "_backend", graph)
+        driver = getattr(backend, "_driver", None)
         assert driver is not None, "Neo4j driver must be connected"
         return driver
 
@@ -174,6 +175,10 @@ class TestForgetCascadeOrphansIntegration:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason="tracked in #1039: pgvector entity upsert clobbers source_document_ids on conflict, so the forget cascade misclassifies the co-sourced survivor and never strips the forgotten doc id. Fix is a hot ingest-path change tracked separately from #1033.",
+        strict=False,
+    )
     async def test_forget_removes_orphan_entity_from_search_and_explore(self, kb: Khora, namespace_id: UUID) -> None:
         """Orphan entity disappears from entity_search and find_related_entities
         after forget().
@@ -221,7 +226,7 @@ class TestForgetCascadeOrphansIntegration:
         )
 
         # Sanity: pre-forget — all 3 entities surface via entity_search.
-        results = await kb.search_entities(namespace_id=namespace_id, query="anyone", limit=50)
+        results = await kb.search_entities(query="anyone", namespace=namespace_id, limit=50)
         names_before = {e.name for e in results}
         assert alice in names_before
         assert mallory in names_before, (
@@ -248,7 +253,7 @@ class TestForgetCascadeOrphansIntegration:
         # ----- Assertions: orphan entity gone, survivor remains -----
 
         # 1. mallory (single-source on doc_a) gone from entity_search.
-        results_after = await kb.search_entities(namespace_id=namespace_id, query="anyone", limit=50)
+        results_after = await kb.search_entities(query="anyone", namespace=namespace_id, limit=50)
         names_after = {e.name for e in results_after}
         assert mallory not in names_after, (
             f"orphan entity {mallory!r} still surfaced by entity_search after forget(doc_a). Got names: {names_after}"
@@ -309,7 +314,7 @@ class TestForgetCascadeOrphansIntegration:
         alice_id = UUID(alice_row_after[0]["id"])
         related = await kb.find_related_entities(
             entity_id=alice_id,
-            namespace_id=namespace_id,
+            namespace=namespace_id,
             max_depth=1,
             limit=20,
         )

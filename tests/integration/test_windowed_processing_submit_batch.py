@@ -233,10 +233,6 @@ class TestWindowedProcessingIntegration:
     # 9. Cross-window entity count not inflated
     # ------------------------------------------------------------------
 
-    @pytest.mark.xfail(
-        reason="tracked in #1033: cross-window entity count returned 0 (expected 2) on first CI run; quarantined pending triage.",
-        strict=False,
-    )
     async def test_cross_window_entity_count_not_inflated(self) -> None:
         """BatchResult.entities must not double-count shared entities across windows.
 
@@ -262,10 +258,16 @@ class TestWindowedProcessingIntegration:
             _plan_extraction(marker_unique, entities=[("UniqueEntity", "CONCEPT")])
             _plan_extraction(marker_alice, entities=[("Alice", "PERSON")])
 
+            # Each content must exceed the windowed-extraction min_extraction_tokens
+            # gate (50 words; engine.py skips docs whose chunks are all shorter).
+            # Pad with filler while keeping the marker substring so the extraction
+            # stub still matches. The marker still drives which entity is extracted;
+            # the padding only carries the chunk over the word-count gate.
+            _pad = " ".join(f"context detail line number {n} for this record" for n in range(12))
             docs = [
-                {"content": f"{marker_unique} only in doc 0", "external_id": f"cw-{ext}-0"},
-                {"content": f"{marker_alice} first time", "external_id": f"cw-{ext}-1"},
-                {"content": f"{marker_alice} second time", "external_id": f"cw-{ext}-2"},
+                {"content": f"{marker_unique} only in doc 0. {_pad}", "external_id": f"cw-{ext}-0"},
+                {"content": f"{marker_alice} first time. {_pad}", "external_id": f"cw-{ext}-1"},
+                {"content": f"{marker_alice} second time. {_pad}", "external_id": f"cw-{ext}-2"},
             ]
 
             result = await kb.remember_batch(

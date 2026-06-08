@@ -36,7 +36,7 @@ from khora.storage.backends.pgvector import PgVectorBackend
 from khora.storage.backends.postgresql import PostgreSQLBackend
 from khora.storage.coordinator import StorageCoordinator
 
-EMBED_DIM = 4
+EMBED_DIM = 1536
 
 
 @pytest.mark.integration
@@ -72,13 +72,15 @@ class TestGraphNamespaceIsolationIntegration:
     async def two_namespaces(self, coord: StorageCoordinator):
         ns_a = await coord.create_namespace(MemoryNamespace())
         ns_b = await coord.create_namespace(MemoryNamespace())
-        return ns_a.namespace_id, ns_b.namespace_id
+        # Coordinator primitives write the passed id verbatim into FK
+        # columns referencing memory_namespaces.id (the row PK), so resolve
+        # each stable namespace_id to its active version's row id first.
+        return (
+            await coord.resolve_namespace(ns_a.namespace_id),
+            await coord.resolve_namespace(ns_b.namespace_id),
+        )
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="tracked in #1033: PG namespace FK violation (namespace_id_fkey) on first CI run; quarantined pending triage against a live stack.",
-        strict=False,
-    )
     async def test_get_entity_isolated_across_namespaces(self, coord: StorageCoordinator, two_namespaces) -> None:
         """Entity created in ns A is invisible to ns B even with the ID."""
         ns_a, ns_b = two_namespaces
@@ -99,10 +101,6 @@ class TestGraphNamespaceIsolationIntegration:
         assert fetched_cross is None
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="tracked in #1033: PG namespace FK violation (namespace_id_fkey) on first CI run; quarantined pending triage against a live stack.",
-        strict=False,
-    )
     async def test_get_relationship_isolated_across_namespaces(self, coord: StorageCoordinator, two_namespaces) -> None:
         """Relationship created in ns A is invisible to ns B."""
         ns_a, ns_b = two_namespaces
