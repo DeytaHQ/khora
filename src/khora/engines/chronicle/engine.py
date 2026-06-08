@@ -1716,23 +1716,14 @@ class ChronicleEngine:
         # whole filter.
         filter_pushed_keys: frozenset[str] = frozenset()
         if filter_ast is not None:
-            from khora.filter import CompileContext
-            from khora.filter.compilers.chronicle import compile_chronicle
-            from khora.filter.compilers.python import compile_python
+            from khora.filter.execute import plan_chronicle_filter
 
-            compiled_bound = compile_chronicle(
-                filter_ast,
-                CompileContext(backend_target="chunks", on_unsupported="split"),
-            )
-            date_bound = compiled_bound.predicate
-            filter_pushed_keys = compiled_bound.consumed_keys
+            plan = plan_chronicle_filter(filter_ast)
+            date_bound = plan.date_bound
+            filter_pushed_keys = plan.pushed_keys
             created_after = _intersect_lower(created_after, date_bound.created_after)
             created_before = _intersect_upper(created_before, date_bound.created_before)
-
-            post_filter = compile_python(
-                filter_ast,
-                CompileContext(backend_target="chunks", on_unsupported="split"),
-            ).predicate
+            post_filter = plan.post_filter
 
         # ── Phase 1: Embed query + BM25 in parallel ───────────────────
         # BM25 needs only the query text (no embedding), so start it
