@@ -52,7 +52,7 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 - `storage/backends/surrealdb/` - Unified SurrealDB backend
 - `db/models.py` - SQLAlchemy ORM (UUID columns use `as_uuid=True`)
 - `_accel.py` - Rust/NumPy acceleration (MMR, cosine, pagerank, entity resolution, community detection, temporal)
-- `extraction/binary_readers.py` - PDF/xlsx/docx/parquet readers; stable public boundary.
+- `extraction/binary_readers.py` - xlsx/docx/parquet readers; stable public boundary (`.pdf` raises `NotImplementedError` — preprocess upstream or use khora-cli).
 - `pipelines/flows/ingest.py` - Document ingestion pipeline (3-phase: stage → enrich → expand)
 - `db/migrations/env.py` - Alembic with advisory locking
 - `config/schema.py` - `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
