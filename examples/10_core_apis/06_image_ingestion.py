@@ -1,4 +1,4 @@
-"""Workload 11 — Image ingestion: describe figures, remember them, recall across them.
+"""Core API — Image ingestion: describe figures, remember them, recall across them.
 
 Khora indexes **text**. To make an image searchable, describe it with a vision
 model and ``remember()`` the description — carrying the image's location in
@@ -11,8 +11,8 @@ descriptions and retrieve by similarity; no typed entity extraction needed
 
 Run it
 ======
-uv run python examples/30_workloads/11_image_ingestion.py
-python examples/30_workloads/11_image_ingestion.py
+uv run python examples/10_core_apis/06_image_ingestion.py
+python examples/10_core_apis/06_image_ingestion.py
 """
 
 from __future__ import annotations
