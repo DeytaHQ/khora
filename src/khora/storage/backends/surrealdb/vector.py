@@ -26,6 +26,7 @@ from khora.storage.backends.surrealdb._helpers import (
 from khora.telemetry import trace
 
 if TYPE_CHECKING:
+    from khora.filter.ast import FilterNode
     from khora.storage.backends.surrealdb.connection import SurrealDBConnection
 
 try:
@@ -340,11 +341,16 @@ class SurrealDBVectorAdapter:
         language: str = "english",
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Full-text (BM25) search on chunk content.
 
         Uses SurrealDB's ``@1@`` match operator and ``search::score(1)``
         for BM25 ranking.
+
+        ``filter_ast`` is accepted for protocol parity (the coordinator
+        forwards it uniformly); this backend does not compile the recall
+        filter, so it is ignored.
         """
         ns_rid = _rid("memory_namespace", namespace_id)
         where_clauses = [

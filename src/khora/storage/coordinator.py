@@ -36,6 +36,8 @@ from khora.storage.backends.base import PaginatedResult
 from khora.telemetry import get_collector, metric_counter, trace_span
 
 if TYPE_CHECKING:
+    from khora.filter.ast import FilterNode
+
     from .backends.base import (
         EventStoreProtocol,
         GraphBackendProtocol,
@@ -1042,8 +1044,17 @@ class StorageCoordinator:
         language: str = "english",
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
-        """Search chunks using PostgreSQL full-text search."""
+        """Search chunks using PostgreSQL full-text search.
+
+        ``filter_ast`` is the canonical recall-filter AST. It is forwarded to
+        the relational vector backend's ``search_fulltext`` — which queries the
+        legacy ``chunks`` table (no denormalized filter columns) and therefore
+        REFUSES to return rows under an active filter rather than risk
+        smuggling unfiltered chunks. The filtered BM25 path is the
+        ``khora_chunks`` temporal store (``TemporalVectorStore.search_fulltext``).
+        """
         if not self._vector:
             raise RuntimeError("Vector backend not configured")
         return await self._vector.search_fulltext(
@@ -1053,6 +1064,7 @@ class StorageCoordinator:
             language=language,
             created_after=created_after,
             created_before=created_before,
+            filter_ast=filter_ast,
         )
 
     async def count_chunks(self, namespace_id: UUID) -> int:

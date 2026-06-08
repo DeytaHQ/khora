@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     )
     from khora.core.models.document import DocumentSource
     from khora.core.models.recall import DocumentProjection
+    from khora.filter.ast import FilterNode
 
 
 @dataclass(frozen=True)
@@ -509,12 +510,19 @@ class VectorBackendProtocol(Protocol):
         *,
         limit: int = 10,
         language: str = "english",
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Search chunks using PostgreSQL full-text search.
 
         Uses ts_rank on the content_tsv generated column.
 
         Returns list of (chunk, rank_score) tuples.
+
+        ``filter_ast`` is the canonical recall-filter AST. The relational
+        ``chunks`` table lacks the denormalized filter columns, so backends
+        REFUSE under an active filter (return ``[]``) rather than smuggle
+        unfiltered rows; the filtered BM25 path is the ``khora_chunks``
+        temporal store.
         """
         ...
 

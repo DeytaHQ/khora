@@ -573,10 +573,14 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         limit: int = 10,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Public BM25 (SQLite FTS5) lookup over ``khora_chunks`` for the
         StorageCoordinator dispatch path. See :func:`temporal_chunk_to_chunk`
         for the ``TemporalChunk`` → ``Chunk`` adaptation.
+
+        ``filter_ast`` is accepted for protocol parity; this backend does not
+        compile the recall-filter AST yet, so it is ignored.
         """
         if not query_text or not query_text.strip():
             return []
