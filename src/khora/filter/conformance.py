@@ -419,17 +419,19 @@ async def seed_case(coord: StorageCoordinator, case: ConformanceCase) -> dict[st
     # the fixture helper lives under ``tests/`` (not importable in a bare install).
     from tests.integration._sqlite_lance_fixtures import EMBED_DIM, fake_embedding
 
-    # Deterministic, per-case namespace_id (xdist-safe). create_namespace honors a
-    # caller-supplied namespace_id (it passes the model straight to the relational
-    # backend). Seed every row under ns.namespace_id — the stable external id the
-    # recall read path scopes on.
+    # Deterministic, per-case namespace (xdist-safe): the stable namespace_id is
+    # derived from case.id, so the same case maps to the same namespace on every
+    # worker and distinct cases never collide. Child rows (documents/chunks) FK to
+    # ``memory_namespaces.id`` — the row-level id, NOT the stable namespace_id
+    # (MemoryNamespace: "use id for ... child-table FK lookups") — so seed every
+    # child under ``ns.id``, the persisted row id create_namespace returns.
     ns = await coord.create_namespace(
         MemoryNamespace(
             namespace_id=_case_namespace_id(case),
             metadata={"conformance_case": case.id},
         )
     )
-    namespace_id = ns.namespace_id
+    namespace_id = ns.id
 
     id_map: dict[str, UUID] = {}
     chunks: list[Chunk] = []
