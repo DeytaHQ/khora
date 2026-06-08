@@ -86,6 +86,10 @@ _QUESTIONS = [
     "What path did Curiosity traverse since landing?",
     "What is in front of each rover?",
     "How many wheels does Curiosity have?",
+    # Figure-only: these facts appear only in the described images, not in any prose
+    # doc — so correct answers prove the described images were used.
+    "On Curiosity's route map, how many geologic waypoints are marked?",
+    "On the Curiosity instrument diagram, which side of the rover is the DAN instrument on?",
 ]
 
 
