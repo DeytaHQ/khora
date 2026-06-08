@@ -29,6 +29,20 @@ explicit JSON null value. A ``{k: null}`` match resolves to ``(p = NULL OR p IS
 NONE)``; ``$exists: true`` is ``(p IS NOT NONE)`` and ``$exists: false`` is
 ``(p IS NONE)``.
 
+**Metadata equality / membership is array-aware.** A scalar ``$eq`` operand
+matches **both** a scalar field equal to it **and** an array field that contains
+it — ``(path = $b OR (type::is::array(path) AND path CONTAINS $b))`` — mirroring
+the Postgres ``@>`` two-arm form and the ``compile_python`` oracle's
+``_md_contains``. ``$in`` is contains-any (``path INSIDE $list OR
+(type::is::array(path) AND path CONTAINSANY $list)``); ``$ne`` / ``$nin`` are the
+negations (which therefore admit absent / wrong-type rows). The
+``type::is::array`` guard is load-bearing: SurrealQL ``CONTAINS`` / ``CONTAINSANY``
+do *substring* matching on a string left operand, so gating them to real arrays
+keeps element matching exact. A bare-list ``$eq`` (exact-array) and a sub-document
+dict ``$eq`` keep **exact** structural equality (``=``), not containment — this is
+the canonical ``tags: list[str]`` case, so array-awareness is the common path, not
+an edge case.
+
 **Range ops on metadata are type-gated.** A range op on a metadata path emits
 ``(type::is::<t>(path) AND path <op> $b)`` — the ``AND`` short-circuits so a
 wrong-typed / absent value never participates in the compare (``type::is::*``
@@ -304,9 +318,10 @@ class _Builder:
             if not operand:
                 return "false" if op == Op.IN else "true"
             values_bind = self._bind([_metadata_value(v) for v in operand])
-            if op == Op.IN:
-                return f"({node} INSIDE {values_bind})"
-            return f"!({node} INSIDE {values_bind})"
+            inner = self._md_contains_any(node, values_bind)
+            # $nin admits absent / wrong-type rows: the inner is total, so the
+            # negation is true for them (Rule 2 polarity).
+            return inner if op == Op.IN else f"!{inner}"
 
         if operand is None:
             # {k: null} → explicit json null OR absent path. $ne null → present
@@ -316,14 +331,50 @@ class _Builder:
             return f"({node} = NULL OR {node} IS NONE)"
 
         if op == Op.EQ:
-            return f"({node} = {self._bind(_metadata_value(operand))})"
+            return self._md_eq(node, operand)
         if op == Op.NE:
-            # ``!=`` already admits an absent / wrong-type path as true.
-            return f"({node} != {self._bind(_metadata_value(operand))})"
+            # Negate the (total) positive equality/containment form so an absent /
+            # wrong-type path is admitted (Rule 2) — same polarity as the oracle.
+            return f"!{self._md_eq(node, operand)}"
 
         # Range ops ($gt/$gte/$lt/$lte) — type-gated. The AND short-circuits so a
         # wrong-typed / absent value never reaches the compare.
         return self._md_range(node, op, operand)
+
+    def _md_eq(self, node: str, operand: Any) -> str:
+        """Positive metadata equality / containment for a non-null ``$eq`` operand.
+
+        Array-aware for a plain scalar (mirrors the oracle's ``_md_contains`` and
+        the Postgres ``@>`` two-arm form): a scalar operand matches **both** a
+        scalar field equal to it **and** an array field that contains it —
+        ``(node = $b OR (type::is::array(node) AND node CONTAINS $b))``. The
+        ``type::is::array`` guard is load-bearing: SurrealQL ``CONTAINS`` does
+        *substring* matching when its left operand is a string, so without the
+        guard a scalar field ``"xyz"`` would wrongly match operand ``"x"``;
+        gating to real arrays keeps element matching exact (verified on the
+        embedded engine). Both arms reuse a single bind.
+
+        A ``$date`` / ``datetime``, an exact-array ``tuple`` (bare-list ``$eq``),
+        and a sub-document ``dict`` keep **exact** equality — SurrealQL object /
+        array ``=`` is structural — matching the oracle's date-compare /
+        ``_exact_array_eq`` / ``_md_object_eq`` modes (NOT containment).
+        """
+        if isinstance(operand, (DateLiteral, datetime, tuple, dict)):
+            return f"({node} = {self._bind(_metadata_value(operand))})"
+        bind = self._bind(_metadata_value(operand))
+        return f"({node} = {bind} OR (type::is::array({node}) AND {node} CONTAINS {bind}))"
+
+    def _md_contains_any(self, node: str, values_bind: str) -> str:
+        """Array-aware contains-any for ``$in`` (mirrors ``any(_md_contains(node, v))``).
+
+        A scalar field that is a member of the operand list (``node INSIDE
+        $list`` — exact membership, since the right operand is a list) **or** an
+        array field sharing any element with it (``node CONTAINSANY $list``,
+        guarded to real arrays so a scalar string's substring ``CONTAINSANY``
+        never fires). Total against absent / wrong-type paths, so the ``$nin``
+        negation admits them.
+        """
+        return f"({node} INSIDE {values_bind} OR (type::is::array({node}) AND {node} CONTAINSANY {values_bind}))"
 
     def _md_range(self, node: str, op: Op, operand: Any) -> str:
         """A type-gated metadata range op: ``(type::is::<t>(node) AND node <op> $b)``.

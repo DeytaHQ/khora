@@ -11,8 +11,10 @@ lack of a test.
 
 These tests pin the *emitted SurrealQL* (the behavioral/semantic contract):
 
-* ``eq`` (scalar value form AND explicit ``{"eq": ...}`` form) → a plain
-  ``(metadata_.<path> = $bind)`` equality, NO type gate;
+* ``eq`` (scalar value form AND explicit ``{"eq": ...}`` form) → array-aware
+  containment ``(metadata_.<path> = $bind OR (type::is::array(...) AND ...
+  CONTAINS $bind))``, matching the recall-filter path so a scalar value also
+  matches an array field (the canonical ``tags: list[str]`` shape);
 * each range op (``gt`` / ``gte`` / ``lt`` / ``lte``) → a type-gated
   ``(type::is::<t>(metadata_.<path>) AND metadata_.<path> <op> $bind)`` so a
   numeric value orders numerically and a wrong-typed value is excluded;
@@ -76,24 +78,26 @@ def _norm(surql: str) -> str:
 # ===========================================================================
 
 
-def test_legacy_eq_scalar_form_is_plain_equality() -> None:
-    # A bare scalar value (no op dict) is the ``eq`` sugar: a plain ``=`` compare
-    # on the metadata path, the operand bound (never interpolated). NO type gate.
+def test_legacy_eq_scalar_form_is_array_aware() -> None:
+    # A bare scalar value (no op dict) is the ``eq`` sugar: array-aware containment
+    # on the metadata path (a scalar field equal to the value OR an array field
+    # containing it), matching the recall-filter path. The operand is bound once
+    # and reused across both arms, never interpolated.
     clauses, binds = _legacy_clauses({"tier": "gold"})
     assert len(clauses) == 1
     sql = _norm(clauses[0])
-    assert "(metadata_.tier = $" in sql
-    assert "type::is::" not in sql
+    assert "metadata_.tier = $" in sql
+    assert "type::is::array(metadata_.tier) and metadata_.tier contains $" in sql
     assert list(binds.values()) == ["gold"]
 
 
-def test_legacy_eq_dict_form_is_plain_equality() -> None:
+def test_legacy_eq_dict_form_is_array_aware() -> None:
     # The explicit ``{"eq": ...}`` dict form lowers identically to the scalar form.
     clauses, binds = _legacy_clauses({"tier": {"eq": "gold"}})
     assert len(clauses) == 1
     sql = _norm(clauses[0])
-    assert "(metadata_.tier = $" in sql
-    assert "type::is::" not in sql
+    assert "metadata_.tier = $" in sql
+    assert "type::is::array(metadata_.tier) and metadata_.tier contains $" in sql
     assert list(binds.values()) == ["gold"]
 
 

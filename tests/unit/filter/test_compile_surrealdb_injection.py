@@ -102,9 +102,10 @@ def test_legacy_additional_unsafe_key_raises_compile_error(store_module, additio
 def test_legacy_additional_eq_routes_through_guard(store_module) -> None:  # noqa: ANN001
     """A safe ``additional`` filter routes every op through the compiler.
 
-    ``eq`` keeps a plain ``metadata_.<path> = $b`` equality (no type-gate), a range
-    op gains a ``type::is::*`` gate, and a nested dotted key descends natively —
-    all with binds carried out-of-band (never the raw user value interpolated).
+    ``eq`` is array-aware containment (matching the recall-filter path: a scalar
+    field equal to the value OR an array field containing it), a range op gains a
+    ``type::is::*`` gate, and a nested dotted key descends natively — all with
+    binds carried out-of-band (never the raw user value interpolated).
     """
     from uuid import uuid4
 
@@ -121,9 +122,15 @@ def test_legacy_additional_eq_routes_through_guard(store_module) -> None:  # noq
     clauses, bindings = store_module.SurrealDBTemporalStore._build_filter_clauses(uuid4(), tf)
     joined = " ".join(clauses)
 
-    # Equality paths: plain ``= $bind`` (no type-gate), key descended natively.
-    assert "(metadata_.tier = $af_0_eq_0)" in joined
-    assert "(metadata_.flat = $af_3_eq_0)" in joined
+    # Equality paths: array-aware containment, key descended natively, value bound.
+    assert (
+        "(metadata_.tier = $af_0_eq_0 OR (type::is::array(metadata_.tier) AND metadata_.tier CONTAINS $af_0_eq_0))"
+        in joined
+    )
+    assert (
+        "(metadata_.flat = $af_3_eq_0 OR (type::is::array(metadata_.flat) AND metadata_.flat CONTAINS $af_3_eq_0))"
+        in joined
+    )
     # Range path: type-gated.
     assert "(type::is::number(metadata_.score) AND metadata_.score >= $af_1_gte_0)" in joined
     # Nested dotted key descends natively.

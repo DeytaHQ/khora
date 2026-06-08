@@ -361,7 +361,9 @@ def test_metadata_nested_path_descends_natively() -> None:
     compiled = compile_surrealdb(_ast({"metadata.a.b.c": "v"}), _CTX)
     sql = _norm(compiled.predicate)
     assert "metadata_.a.b.c" in sql
-    assert "(metadata_.a.b.c = $f_0)" in sql
+    # Scalar $eq is array-aware containment; the descent is intact in both arms,
+    # never collapsed/mangled into a single token.
+    assert "(metadata_.a.b.c = $f_0 or (type::is::array(metadata_.a.b.c) and metadata_.a.b.c contains $f_0))" in sql
     assert compiled.params == {"f_0": "v"}
     assert "metadata.a.b.c" in compiled.consumed_keys
 
@@ -380,9 +382,15 @@ def test_metadata_deep_path_not_mangled_into_single_token() -> None:
     assert "labels_region" not in sql
 
 
-def test_metadata_eq_single_segment_descends() -> None:
+def test_metadata_eq_single_segment_is_array_aware() -> None:
+    # Scalar $eq is array-aware containment (matches a scalar field equal to the
+    # operand OR an array field that contains it), mirroring the Postgres @>
+    # two-arm form and the compile_python oracle. The type::is::array guard keeps
+    # the CONTAINS arm from substring-matching a scalar string.
     compiled = compile_surrealdb(_ast({"metadata.tier": "gold"}), _CTX)
-    assert "(metadata_.tier = $f_0)" in _norm(compiled.predicate)
+    assert "(metadata_.tier = $f_0 or (type::is::array(metadata_.tier) and metadata_.tier contains $f_0))" in _norm(
+        compiled.predicate
+    )
     assert compiled.params == {"f_0": "gold"}
 
 
@@ -467,22 +475,38 @@ def test_metadata_direct_datetime_range_is_string_gated() -> None:
 # ===========================================================================
 
 
-def test_metadata_ne_is_bare_not_equals() -> None:
-    # Rule 2 (polarity): a metadata $ne is a plain ``!=`` — already true for an
-    # absent / wrong-type path, so absent rows are admitted without a null guard.
+def test_metadata_ne_is_negated_array_aware_containment() -> None:
+    # Rule 2 (polarity): a metadata $ne negates the array-aware containment form.
+    # The inner is total (false on absent / wrong-type), so the negation admits
+    # absent rows without a null guard.
     compiled = compile_surrealdb(_ast({"metadata.tier": {"$ne": "gold"}}), _CTX)
     sql = _norm(compiled.predicate)
-    assert "(metadata_.tier != $f_0)" in sql
+    assert "!(metadata_.tier = $f_0 or (type::is::array(metadata_.tier) and metadata_.tier contains $f_0))" in sql
     assert "is none" not in sql
     assert compiled.params == {"f_0": "gold"}
 
 
-def test_metadata_nin_is_negated_inside() -> None:
-    # Rule 2: metadata $nin is the negated INSIDE — absent paths are not INSIDE,
-    # so the negation is true (admits absent rows).
+def test_metadata_in_is_array_aware_contains_any() -> None:
+    # $in is array-aware contains-any: a scalar field that is a member of the
+    # operand list (``INSIDE``) OR an array field sharing any element with it
+    # (``CONTAINSANY``, guarded to real arrays). Mirrors the oracle's
+    # ``any(_md_contains(node, v))`` and the canonical ``tags: list[str]`` shape.
+    compiled = compile_surrealdb(_ast({"metadata.tier": {"$in": ["a", "b"]}}), _CTX)
+    sql = _norm(compiled.predicate)
+    assert (
+        "(metadata_.tier inside $f_0 or (type::is::array(metadata_.tier) and metadata_.tier containsany $f_0))" in sql
+    )
+    assert compiled.params == {"f_0": ["a", "b"]}
+
+
+def test_metadata_nin_is_negated_contains_any() -> None:
+    # Rule 2: metadata $nin negates the array-aware contains-any form — absent
+    # paths match neither arm, so the negation is true (admits absent rows).
     compiled = compile_surrealdb(_ast({"metadata.tier": {"$nin": ["a", "b"]}}), _CTX)
     sql = _norm(compiled.predicate)
-    assert "!(metadata_.tier inside $f_0)" in sql
+    assert (
+        "!(metadata_.tier inside $f_0 or (type::is::array(metadata_.tier) and metadata_.tier containsany $f_0))" in sql
+    )
     assert compiled.params == {"f_0": ["a", "b"]}
 
 
@@ -651,14 +675,19 @@ def test_field_mapping_remaps_metadata_root() -> None:
     # ``metadata_`` column — the same compiler serves the schema without any
     # per-engine branching.
     ctx = CompileContext(backend_target="temporal_chunk", field_mapping={"metadata": "metadata_"})
-    assert "(metadata_.tier = $f_0)" in _surql_norm(_ast({"metadata.tier": "gold"}), ctx)
+    assert (
+        "(metadata_.tier = $f_0 or (type::is::array(metadata_.tier) and metadata_.tier contains $f_0))"
+        in _surql_norm(_ast({"metadata.tier": "gold"}), ctx)
+    )
 
 
 def test_field_mapping_default_metadata_root_unremapped() -> None:
     # With no field_mapping the ``metadata`` root is the identity ``metadata`` — the
     # remap is a context choice, not hardcoded into the compiler.
     ctx = CompileContext(backend_target="temporal_chunk")
-    assert "(metadata.tier = $f_0)" in _surql_norm(_ast({"metadata.tier": "gold"}), ctx)
+    assert "(metadata.tier = $f_0 or (type::is::array(metadata.tier) and metadata.tier contains $f_0))" in _surql_norm(
+        _ast({"metadata.tier": "gold"}), ctx
+    )
 
 
 def test_field_mapping_remaps_system_key_name() -> None:

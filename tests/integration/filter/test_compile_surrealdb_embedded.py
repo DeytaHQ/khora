@@ -32,6 +32,7 @@ from khora.engines.skeleton.backends import TemporalFilter  # noqa: E402
 from khora.engines.skeleton.backends.surrealdb import SurrealDBTemporalStore  # noqa: E402
 from khora.filter import RecallFilter  # noqa: E402
 from khora.filter.ast import parse_to_ast  # noqa: E402
+from khora.filter.compilers.python import compile_python  # noqa: E402
 from khora.filter.compilers.surrealdb import compile_surrealdb  # noqa: E402
 from khora.filter.context import CompileContext  # noqa: E402
 from khora.storage.backends.surrealdb._helpers import _rid  # noqa: E402
@@ -225,3 +226,91 @@ async def test_legacy_additional_eq_matches_only_exact_value(conn: SurrealDBConn
     # and matches only the exact row — the wrong-typed "mismatch" row does not
     # coincidentally match a bound scalar.
     assert await _legacy_matching_content(conn, {"score": 10}) == ["ten"]
+
+
+# ===========================================================================
+# (6) Array-valued metadata fields + cross-backend parity with the oracle.
+# ===========================================================================
+#
+# The canonical connector metadata shape is ``tags: list[str]``, so a scalar
+# ``$eq`` / ``$in`` must match an ARRAY field that *contains* the value, not only
+# a scalar field equal to it (SurrealQL ``=`` / ``INSIDE`` are scalar). These
+# tests pin the array-aware row-sets AND assert they equal the ``compile_python``
+# oracle's row-set for the same corpus — the parity check that keeps the five
+# compilers from drifting (and that would have caught the scalar-only bug).
+
+# (content, metadata) corpus exercising scalar/array/missing/null/wrong-type plus
+# the substring traps (``CONTAINS`` does substring on a string operand, so a
+# scalar ``"xyz"`` and an array element ``"xyz"`` must NOT match operand ``"x"``).
+_TAGS_CORPUS: list[tuple[str, dict]] = [
+    ("scalar", {"tags": "x"}),
+    ("scalar_other", {"tags": "z"}),
+    ("scalar_super", {"tags": "xyz"}),  # substring trap
+    ("array", {"tags": ["x", "y"]}),
+    ("array_other", {"tags": ["z"]}),
+    ("array_super", {"tags": ["xyz"]}),  # element-substring trap
+    ("missing", {"foo": 1}),
+    ("null", {"tags": None}),
+    ("num", {"tags": 5}),
+]
+
+# The oracle reads ``record["metadata"]`` and resolves system keys by identity,
+# so it runs under a default context (no ``metadata`` → ``metadata_`` remap).
+_ORACLE_CTX = CompileContext(backend_target="temporal_chunk")
+
+
+@pytest.fixture
+async def tags_conn() -> AsyncIterator[SurrealDBConnection]:
+    """An embedded connection seeded with the array-valued ``tags`` corpus."""
+    connection = SurrealDBConnection(mode="memory")
+    await connection.connect()
+    try:
+        await connection.execute(_SCHEMA)
+        rows = [
+            {"id": _rid("temporal_chunk", uuid4()), "content": content, "metadata_": md} for content, md in _TAGS_CORPUS
+        ]
+        await connection.execute("INSERT INTO temporal_chunk $records", {"records": rows})
+        yield connection
+    finally:
+        await connection.disconnect()
+
+
+def _oracle_content(wire: dict) -> list[str]:
+    """Row-set the ``compile_python`` oracle accepts over ``_TAGS_CORPUS``."""
+    predicate = compile_python(parse_to_ast(RecallFilter.model_validate(wire)), _ORACLE_CTX).predicate
+    return sorted(content for content, md in _TAGS_CORPUS if predicate({"metadata": md}))
+
+
+async def test_scalar_eq_matches_scalar_and_array_fields(tags_conn: SurrealDBConnection) -> None:
+    # A scalar operand matches BOTH the scalar field equal to it AND the array
+    # field containing it — but NOT the substring traps (scalar "xyz" / element
+    # "xyz") which a naive string CONTAINS would wrongly include.
+    assert await _matching_content(tags_conn, {"metadata.tags": "x"}) == ["array", "scalar"]
+
+
+async def test_scalar_in_is_contains_any_over_scalar_and_array(tags_conn: SurrealDBConnection) -> None:
+    # $in is contains-any: scalar membership ("scalar"=x, "scalar_other"=z) plus
+    # array share-any (["x","y"], ["z"]). Substring traps stay excluded.
+    assert await _matching_content(tags_conn, {"metadata.tags": {"$in": ["x", "z"]}}) == sorted(
+        ["scalar", "scalar_other", "array", "array_other"]
+    )
+
+
+@pytest.mark.parametrize(
+    "wire",
+    [
+        {"metadata.tags": "x"},  # scalar $eq vs array field
+        {"metadata.tags": {"$in": ["x", "z"]}},  # contains-any
+        {"metadata.tags": {"$ne": "x"}},  # negated containment (admits absent/wrong-type)
+        {"metadata.tags": {"$nin": ["x", "z"]}},  # negated contains-any
+    ],
+)
+async def test_parity_with_python_oracle(tags_conn: SurrealDBConnection, wire: dict) -> None:
+    # The SurrealDB compiler must return the SAME rows as the compile_python
+    # oracle for the same corpus — the cross-backend parity guard. A divergence
+    # (e.g. scalar-only $eq missing array fields) fails here immediately. Scoped to
+    # the array-aware equality / membership ops: ``$exists`` is intentionally
+    # excluded because SurrealDB drops an explicit-null field inside a FLEXIBLE
+    # object on write (so present-null differs from the in-memory oracle) — a
+    # storage representation difference, not a compiler divergence.
+    assert await _matching_content(tags_conn, wire) == _oracle_content(wire)
