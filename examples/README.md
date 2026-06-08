@@ -129,6 +129,10 @@ Applications you'd actually ship. Each composes the core APIs around one shape.
   Bulk Slack-archive ingest — the cost-story demo (~10% extraction).
 - [`10_tool_router_learning.py`](30_workloads/10_tool_router_learning.py) — *chronicle* —
   Memory as a routing oracle: learn which tool resolves which request.
+- [`11_multimodal_document_qa.py`](30_workloads/11_multimodal_document_qa.py) — *vectorcypher* —
+  Multimodal document QA: parse a folder of NASA Mars-rover markdown (text +
+  `<img>` figures), vision-describe the figures, remember everything, then answer
+  cross-rover questions with retrieval-augmented generation (uses `OPENAI_API_KEY`).
 
 ## Operator helper
 
@@ -144,7 +148,7 @@ Each tutorial picks the engine that matches its scenario via
 
 | Engine | Strengths | Examples |
 |---|---|---|
-| **VectorCypher** (default) | Multi-hop graph traversal, entity reasoning, query-complexity routing, hybrid retrieval | `10_core_apis/{01-05}`, `20_integrations/03`, `30_workloads/{03,06,08}` |
+| **VectorCypher** (default) | Multi-hop graph traversal, entity reasoning, query-complexity routing, hybrid retrieval | `10_core_apis/{01-05}`, `20_integrations/03`, `30_workloads/{03,06,08,11}` |
 | **Chronicle** | Event streams, bi-temporal model, Ebbinghaus decay, abstention signals, time-bounded queries; no graph backend required | `00_quickstart/02`, `20_integrations/{01,02}`, `30_workloads/{01,02,04,05,07,10}` |
 | **Skeleton** | Cost-efficient hybrid search; ~10% LLM extraction; long-form / large corpora | `00_quickstart/{01,03,04}`, `10_core_apis/06`, `30_workloads/09` |
 
@@ -171,10 +175,10 @@ examples/
 │   ├── 01_langgraph.py
 │   ├── 02_openai_agents.py
 │   └── 03_crewai_multi_agent.py
-├── 30_workloads/                   # end-to-end scenarios (01–10)
+├── 30_workloads/                   # end-to-end scenarios (01–11)
 │   ├── 01_per_user_preferences.py
 │   ├── …
-│   └── 10_tool_router_learning.py
+│   └── 11_multimodal_document_qa.py
 │
 ├── khora.embedded.yaml             # configs — picks the backend
 ├── khora.standard.yaml
@@ -183,7 +187,8 @@ examples/
 │   ├── hr_policies.jsonl           #   used by 30_workloads/02
 │   ├── resumes.jsonl               #   used by 30_workloads/08
 │   ├── support_tickets.jsonl       #   used by 10_core_apis/01 + 30_workloads/03
-│   └── images/                     #   public-domain figures used by 10_core_apis/06 (see CREDITS.md)
+│   ├── images/                     #   public-domain figures used by 10_core_apis/06 (see CREDITS.md)
+│   └── mars_rovers/                #   NASA markdown corpus + figures used by 30_workloads/11
 │
 ├── config/                         # expertise + litellm sub-configs
 ├── _helpers/                       # shared khora fixtures + mock LLM
