@@ -125,7 +125,7 @@ Applications you'd actually ship. Each composes the core APIs around one shape.
   Bulk Slack-archive ingest — the cost-story demo (~10% extraction).
 - [`10_tool_router_learning.py`](30_workloads/10_tool_router_learning.py) — *chronicle* —
   Memory as a routing oracle: learn which tool resolves which request.
-- [`11_image_ingestion.py`](30_workloads/11_image_ingestion.py) — *vectorcypher* —
+- [`11_image_ingestion.py`](30_workloads/11_image_ingestion.py) — *skeleton* —
   Image ingestion: describe a set of figures with a vision model, remember the
   descriptions, then answer one question that spans several images (uses
   `OPENAI_API_KEY`).
@@ -144,9 +144,9 @@ Each tutorial picks the engine that matches its scenario via
 
 | Engine | Strengths | Examples |
 |---|---|---|
-| **VectorCypher** (default) | Multi-hop graph traversal, entity reasoning, query-complexity routing, hybrid retrieval | all of `10_core_apis/`, `20_integrations/03`, `30_workloads/{03,06,08,11}` |
+| **VectorCypher** (default) | Multi-hop graph traversal, entity reasoning, query-complexity routing, hybrid retrieval | all of `10_core_apis/`, `20_integrations/03`, `30_workloads/{03,06,08}` |
 | **Chronicle** | Event streams, bi-temporal model, Ebbinghaus decay, abstention signals, time-bounded queries; no graph backend required | `00_quickstart/02`, `20_integrations/{01,02}`, `30_workloads/{01,02,04,05,07,10}` |
-| **Skeleton** | Cost-efficient hybrid search; ~10% LLM extraction; long-form / large corpora | `00_quickstart/{01,03,04}`, `30_workloads/09` |
+| **Skeleton** | Cost-efficient hybrid search; ~10% LLM extraction; long-form / large corpora | `00_quickstart/{01,03,04}`, `30_workloads/{09,11}` |
 
 Every tutorial runs on both `sqlite_lance` (embedded, default) and
 `postgresql + neo4j` (standard).
