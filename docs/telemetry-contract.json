@@ -1046,6 +1046,18 @@
       "description": "Issue #904 (ADR-001). VectorCypher relationship-fetch silent fallback - incremented when the parallel rels_task raises and the retrieve path continues without relationships. The same event is also appended to RecallResult.engine_info['degradations']. Asymmetric prior art: _cypher_expand failure already sets engine_info['graph_fallback'] / 'graph_error'; this counter closes the rel-fetch gap. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.vectorcypher.chunk_mirror.degraded_total",
+      "type": "counter",
+      "stability": "public",
+      "unit": "1",
+      "owner": "vectorcypher",
+      "labels": [
+        {"name": "channel", "values": ["graph"], "_comment": "Which mirror channel degraded; graph = Neo4j Chunk-node mirror."},
+        {"name": "reason", "values": ["neo4j_write_failed"], "_comment": "Low-cardinality enum; extend when adding new chunk-mirror fallback paths."}
+      ],
+      "description": "ADR-001. VectorCypher Neo4j chunk-mirror silent fallback - incremented when the create-path Chunk-node write to Neo4j raises and ingest continues with chunks persisted only in pgvector. The same event is also appended to RememberResult.metadata['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
       "name": "khora.forget.cascade.degraded_total",
       "type": "counter",
       "stability": "public",

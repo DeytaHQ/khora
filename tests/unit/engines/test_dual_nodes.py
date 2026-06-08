@@ -58,6 +58,45 @@ def _make_neo4j_driver() -> tuple[MagicMock, AsyncMock]:
     return driver, session
 
 
+def _make_capturing_driver() -> tuple[MagicMock, AsyncMock, MagicMock]:
+    """Driver whose ``execute_write`` runs the write closure against a real mock tx.
+
+    The default ``_make_neo4j_driver`` mocks ``execute_write`` so the inner
+    ``_work(tx)`` closure never runs — that proves the method completes, but it
+    cannot observe what params reach ``tx.run``. The create paths bind the chunk
+    properties as Cypher params, so to assert on those we must actually invoke
+    the closure. Here ``execute_write`` calls ``await work_fn(tx)`` with a mock
+    ``tx`` whose ``run`` is an AsyncMock; the caller inspects ``tx.run.call_args``.
+
+    Returns:
+        Tuple of (driver, session, tx). ``tx.run`` is the AsyncMock to inspect.
+    """
+    driver, session = _make_neo4j_driver()
+    tx = MagicMock()
+    tx.run = AsyncMock()
+
+    async def _run_work(work_fn):
+        return await work_fn(tx)
+
+    session.execute_write = AsyncMock(side_effect=_run_work)
+    return driver, session, tx
+
+
+# The eight denormalized document-grained keys projected onto the Neo4j Chunk
+# node. ``source_timestamp`` is datetime-typed and serialized as an
+# ISO string at write time; the other seven are plain string properties.
+_DENORM_STRING_KEYS = (
+    "source_type",
+    "source_name",
+    "source_url",
+    "external_id",
+    "content_type",
+    "source",
+    "title",
+)
+_DENORM_KEYS = (*_DENORM_STRING_KEYS, "source_timestamp")
+
+
 class TestChunkNode:
     """Tests for ChunkNode dataclass."""
 
@@ -178,6 +217,27 @@ class TestDualNodeManagerEnsureIndexes:
         assert session.run.call_count >= 9  # At least 9 indexes defined
 
     @pytest.mark.asyncio
+    async def test_ensure_indexes_creates_denorm_filter_indexes(self) -> None:
+        """The 5 new denorm-key filter indexes are issued.
+
+        Recall pushdown filters land on these Chunk properties, so each needs a
+        backing index. We assert one ``CREATE INDEX ... ON (c.<key>)`` statement
+        per new key reached ``session.run`` (matched loosely on the property
+        reference so an index-name rename doesn't break the test).
+        """
+        driver, session = _make_neo4j_driver()
+        session.run = AsyncMock()
+
+        manager = DualNodeManager(driver)
+        await manager.ensure_indexes()
+
+        issued = " || ".join(call.args[0] for call in session.run.call_args_list)
+        # source/title/source_url are filterable but were intentionally NOT
+        # indexed in this change — assert exactly the 5 the spec lists.
+        for key in ("source_type", "source_name", "source_timestamp", "external_id", "content_type"):
+            assert f"FOR (c:Chunk) ON (c.{key})" in issued, f"ensure_indexes missing CREATE INDEX on c.{key}"
+
+    @pytest.mark.asyncio
     async def test_ensure_indexes_handles_errors(self) -> None:
         """Test that index creation errors are handled gracefully."""
         driver, session = _make_neo4j_driver()
@@ -267,6 +327,123 @@ class TestDualNodeManagerBatchOperations:
         """Test batch creation with empty list."""
         ids = await manager.create_chunk_nodes_batch([], uuid4())
         assert ids == []
+
+
+@pytest.mark.unit
+class TestDualNodeManagerDenormProjection:
+    """The 8 denormalized document keys reach Neo4j on both create paths.
+
+    A recall filter on ``source_type`` / ``title`` / ... pushes down to a Cypher
+    property compare on the Chunk node (see test_compile_cypher), so the create
+    paths MUST actually persist those properties — otherwise the pushed-down
+    predicate always matches NULL. These tests run the write closure against a
+    capturing tx and assert every denorm key is present in the bound params, with
+    ``source_timestamp`` serialized as an ``.isoformat()`` string (the datetime is
+    not bindable as-is and the Cypher compiler compares it lexicographically).
+    """
+
+    @staticmethod
+    def _chunk(**overrides):
+        from khora.engines.skeleton.backends import TemporalChunk
+
+        base = dict(
+            id=uuid4(),
+            namespace_id=uuid4(),
+            document_id=uuid4(),
+            content="body",
+            occurred_at=datetime.now(UTC),
+            source_type="document",
+            source_name="linear",
+            source_url="https://example.test/x",
+            source_timestamp=datetime(2026, 2, 3, 4, 5, 6, tzinfo=UTC),
+            external_id="ext-42",
+            content_type="text/markdown",
+            source="slack",
+            title="Quarterly plan",
+        )
+        base.update(overrides)
+        return TemporalChunk(**base)
+
+    @pytest.mark.asyncio
+    async def test_create_chunk_node_binds_all_denorm_keys(self) -> None:
+        """Single-create binds all 8 denorm keys; source_timestamp is isoformat."""
+        driver, _session, tx = _make_capturing_driver()
+        manager = DualNodeManager(driver)
+        ts = datetime(2026, 2, 3, 4, 5, 6, tzinfo=UTC)
+        chunk = self._chunk(source_timestamp=ts)
+
+        await manager.create_chunk_node(chunk)
+
+        tx.run.assert_awaited_once()
+        params = tx.run.await_args.kwargs
+        # All 8 denorm keys reached the param dict — none silently dropped.
+        for key in _DENORM_KEYS:
+            assert key in params, f"create_chunk_node dropped denorm key {key!r}"
+        assert params["source_type"] == "document"
+        assert params["source_name"] == "linear"
+        assert params["source_url"] == "https://example.test/x"
+        assert params["external_id"] == "ext-42"
+        assert params["content_type"] == "text/markdown"
+        assert params["source"] == "slack"
+        assert params["title"] == "Quarterly plan"
+        # The one datetime-typed key binds as its ISO string, NOT a datetime.
+        assert params["source_timestamp"] == ts.isoformat()
+        assert isinstance(params["source_timestamp"], str)
+        # Cypher CREATE references each denorm property by name.
+        cypher = tx.run.await_args.args[0]
+        for key in _DENORM_KEYS:
+            assert f"{key}:" in cypher
+
+    @pytest.mark.asyncio
+    async def test_create_chunk_node_none_source_timestamp_binds_none(self) -> None:
+        """A None source_timestamp binds None (not a crash on .isoformat())."""
+        driver, _session, tx = _make_capturing_driver()
+        manager = DualNodeManager(driver)
+
+        await manager.create_chunk_node(self._chunk(source_timestamp=None))
+
+        params = tx.run.await_args.kwargs
+        assert params["source_timestamp"] is None
+
+    @pytest.mark.asyncio
+    async def test_create_chunk_nodes_batch_binds_all_denorm_keys(self) -> None:
+        """Batch-create stamps all 8 denorm keys on each UNWIND row."""
+        driver, _session, tx = _make_capturing_driver()
+        manager = DualNodeManager(driver)
+        ts = datetime(2026, 2, 3, 4, 5, 6, tzinfo=UTC)
+        ns = uuid4()
+        chunks = [self._chunk(source_timestamp=ts, title=f"doc {i}", external_id=f"ext-{i}") for i in range(3)]
+
+        await manager.create_chunk_nodes_batch(chunks, ns)
+
+        tx.run.assert_awaited_once()
+        # Batch passes the row dicts as the ``chunks`` kwarg to UNWIND.
+        rows = tx.run.await_args.kwargs["chunks"]
+        assert len(rows) == 3
+        for i, row in enumerate(rows):
+            for key in _DENORM_KEYS:
+                assert key in row, f"batch row {i} dropped denorm key {key!r}"
+            assert row["source_timestamp"] == ts.isoformat()
+            assert isinstance(row["source_timestamp"], str)
+            assert row["title"] == f"doc {i}"
+            assert row["external_id"] == f"ext-{i}"
+            assert row["source_type"] == "document"
+            assert row["content_type"] == "text/markdown"
+        # The UNWIND CREATE references each denorm property.
+        cypher = tx.run.await_args.args[0]
+        for key in _DENORM_KEYS:
+            assert f"{key}:" in cypher
+
+    @pytest.mark.asyncio
+    async def test_create_chunk_nodes_batch_none_source_timestamp_binds_none(self) -> None:
+        """Batch path also tolerates a None source_timestamp (no .isoformat())."""
+        driver, _session, tx = _make_capturing_driver()
+        manager = DualNodeManager(driver)
+
+        await manager.create_chunk_nodes_batch([self._chunk(source_timestamp=None)], uuid4())
+
+        row = tx.run.await_args.kwargs["chunks"][0]
+        assert row["source_timestamp"] is None
 
 
 @pytest.mark.unit

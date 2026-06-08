@@ -87,6 +87,25 @@ _VC_ABSTENTION_COMBINED_SCORE_HISTOGRAM = metric_histogram(
     description="VectorCypher abstention combined-score (0.0=confident, 1.0=should-abstain).",
 )
 
+# Chunk graph-mirror degradation counter (ADR-001). The create path mirrors
+# pgvector-stored chunks into Neo4j Chunk nodes; a Neo4j write failure must not
+# abort the document ingest now that pgvector already holds the chunks. On
+# failure we record a Degradation, increment this counter, and continue - the
+# graph is left without the chunk mirror for this window. NO namespace_id label
+# - cardinality rule.
+_CHUNK_MIRROR_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.chunk_mirror.degraded_total",
+    unit="1",
+    description=(
+        "VectorCypher Neo4j chunk-mirror silent fallback. Incremented when the "
+        "create-path Chunk-node write to Neo4j raises and ingest continues with "
+        "chunks persisted only in pgvector. The same event is also appended to "
+        "RememberResult.metadata['degradations']. Labels: channel (graph), "
+        "reason (neo4j_write_failed). NO namespace_id label - cardinality rule. "
+        "See docs/architecture/failure-observability-contract.md."
+    ),
+)
+
 
 def _ensure_tags(value: Any) -> list[str]:
     """Coerce tags to a list — handles JSON strings from PostgreSQL metadata."""
@@ -1118,9 +1137,30 @@ class VectorCypherEngine:
                     for i, stored in enumerate(stored_chunks):
                         temporal_chunks[i].id = stored.id
 
-                    # Create Chunk nodes in Neo4j (skipped for SurrealDB — chunks in temporal store)
+                    # Create Chunk nodes in Neo4j (skipped for SurrealDB — chunks in temporal store).
+                    # The chunks are already durably stored in pgvector above, so a Neo4j
+                    # mirror failure must not abort ingest (ADR-001): record a Degradation,
+                    # increment the counter, and continue without the graph-side mirror.
                     if dual_nodes is not None:
-                        await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+                        try:
+                            await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+                        except Exception as exc:
+                            logger.warning(
+                                "Neo4j chunk-mirror write failed, continuing with chunks in pgvector only",
+                                exc_info=True,
+                            )
+                            _CHUNK_MIRROR_DEGRADED_COUNTER.add(
+                                1, attributes={"channel": "graph", "reason": "neo4j_write_failed"}
+                            )
+                            if out_diagnostics is not None:
+                                out_diagnostics.setdefault("degradations", []).append(
+                                    Degradation(
+                                        component="vectorcypher.chunk_mirror",
+                                        reason="neo4j_write_failed",
+                                        detail=str(exc)[:200] or None,
+                                        exception=type(exc).__name__,
+                                    )
+                                )
 
                     # Skeleton-based entity extraction (for core chunks only)
                     if self._config.pipeline.extract_entities:

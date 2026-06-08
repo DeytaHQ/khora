@@ -148,6 +148,12 @@ class DualNodeManager:
             "CREATE INDEX chunk_source_system IF NOT EXISTS FOR (c:Chunk) ON (c.source_system)",
             "CREATE INDEX chunk_author IF NOT EXISTS FOR (c:Chunk) ON (c.author)",
             "CREATE INDEX chunk_channel IF NOT EXISTS FOR (c:Chunk) ON (c.channel)",
+            # Denormalized document-grained filter indexes for recall pushdown
+            "CREATE INDEX chunk_source_type IF NOT EXISTS FOR (c:Chunk) ON (c.source_type)",
+            "CREATE INDEX chunk_source_name IF NOT EXISTS FOR (c:Chunk) ON (c.source_name)",
+            "CREATE INDEX chunk_source_timestamp IF NOT EXISTS FOR (c:Chunk) ON (c.source_timestamp)",
+            "CREATE INDEX chunk_external_id IF NOT EXISTS FOR (c:Chunk) ON (c.external_id)",
+            "CREATE INDEX chunk_content_type IF NOT EXISTS FOR (c:Chunk) ON (c.content_type)",
             # TimeNode indexes for time hierarchy traversal
             "CREATE INDEX timenode_id IF NOT EXISTS FOR (t:TimeNode) ON (t.id)",
             "CREATE INDEX timenode_namespace IF NOT EXISTS FOR (t:TimeNode) ON (t.namespace_id)",
@@ -184,7 +190,15 @@ class DualNodeManager:
             channel: $channel,
             confidence: $confidence,
             metadata: $metadata,
-            chunker_info: $chunker_info
+            chunker_info: $chunker_info,
+            source_type: $source_type,
+            source_name: $source_name,
+            source_url: $source_url,
+            source_timestamp: $source_timestamp,
+            external_id: $external_id,
+            content_type: $content_type,
+            source: $source,
+            title: $title
         })
         RETURN c.id AS id
         """
@@ -202,6 +216,14 @@ class DualNodeManager:
             confidence=chunk.confidence,
             metadata=serialize_dict(chunk.metadata or {}),
             chunker_info=json.dumps(chunk.chunker_info or {}),
+            source_type=chunk.source_type,
+            source_name=chunk.source_name,
+            source_url=chunk.source_url,
+            source_timestamp=chunk.source_timestamp.isoformat() if chunk.source_timestamp else None,
+            external_id=chunk.external_id,
+            content_type=chunk.content_type,
+            source=chunk.source,
+            title=chunk.title,
         )
 
         async with self._session() as session:
@@ -254,6 +276,14 @@ class DualNodeManager:
                     "confidence": chunk.confidence,
                     "metadata": serialize_dict(chunk.metadata or {}),
                     "chunker_info": json.dumps(chunk.chunker_info or {}),
+                    "source_type": chunk.source_type,
+                    "source_name": chunk.source_name,
+                    "source_url": chunk.source_url,
+                    "source_timestamp": chunk.source_timestamp.isoformat() if chunk.source_timestamp else None,
+                    "external_id": chunk.external_id,
+                    "content_type": chunk.content_type,
+                    "source": chunk.source,
+                    "title": chunk.title,
                 }
             )
 
@@ -271,7 +301,15 @@ class DualNodeManager:
             channel: chunk.channel,
             confidence: chunk.confidence,
             metadata: chunk.metadata,
-            chunker_info: chunk.chunker_info
+            chunker_info: chunk.chunker_info,
+            source_type: chunk.source_type,
+            source_name: chunk.source_name,
+            source_url: chunk.source_url,
+            source_timestamp: chunk.source_timestamp,
+            external_id: chunk.external_id,
+            content_type: chunk.content_type,
+            source: chunk.source,
+            title: chunk.title
         })
         """
 
