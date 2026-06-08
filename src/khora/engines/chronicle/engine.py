@@ -349,6 +349,104 @@ def _extract_temporal_bounds(temporal_filter: Any | None) -> tuple[datetime | No
     return _to_utc(start), _to_utc(end)
 
 
+def _intersect_lower(window: datetime | None, filter_bound: datetime | None) -> datetime | None:
+    """Intersect a lower bound with a filter's lower bound — narrow only.
+
+    Returns the LATER of the two (the tighter lower bound); ``None`` on either
+    side means unbounded below, so the other wins. The result is always >= the
+    incoming ``window`` lower bound — the filter can shrink the recency window
+    but never widen it. Both operands are coerced to tz-aware UTC so a zoneless
+    bound never raises against an aware one.
+    """
+    fb = _to_utc(filter_bound)
+    if fb is None:
+        return window
+    if window is None:
+        return fb
+    return max(window, fb)
+
+
+def _intersect_upper(window: datetime | None, filter_bound: datetime | None) -> datetime | None:
+    """Intersect an upper bound with a filter's upper bound — narrow only.
+
+    Returns the EARLIER of the two (the tighter upper bound); ``None`` on either
+    side means unbounded above, so the other wins. The result is always <= the
+    incoming ``window`` upper bound — narrow only, never widening.
+    """
+    fb = _to_utc(filter_bound)
+    if fb is None:
+        return window
+    if window is None:
+        return fb
+    return min(window, fb)
+
+
+# System keys the recall-filter post-filter reads off a chunk record. The eight
+# denormalized document keys live on the chunk's ``source_document`` projection
+# when present; ``DocumentSource`` only carries a subset (title / source /
+# source_type), so the rest resolve to absent on the legacy ``chunks`` path —
+# a documented limitation (positive predicates on them return empty there).
+_DOC_PROJECTION_KEYS: tuple[str, ...] = (
+    "source_type",
+    "source_name",
+    "source_url",
+    "external_id",
+    "content_type",
+    "source",
+    "title",
+)
+
+
+def _chunk_to_record(chunk: Chunk) -> dict[str, Any]:
+    """Map a :class:`Chunk` to the record dict the recall-filter post-filter reads.
+
+    The post-filter (``compile_python``) evaluates the full filter against this
+    record; ``compile_chronicle`` pushes the ``source_timestamp`` bound into the
+    recency window (its primary axis):
+
+    * ``occurred_at`` is the effective EVENT time ``COALESCE(occurred_at,
+      source_timestamp)`` — the chunk's real ``occurred_at`` column when carried
+      (sqlite_lance), recovered from ``source_timestamp`` when the literal field is
+      ``None`` (the legacy pgvector ``chunks`` DTO has no ``occurred_at`` column, so
+      the faithful event time there IS ``source_timestamp``). This recovery is why
+      an ``occurred_at`` filter does NOT false-empty on PG. Mirrors the engine's
+      ``RecallChunk.occurred_at`` surface derivation. ``occurred_at`` is enforced by
+      this post-filter, not pushed (it is the event-time axis, not the window axis).
+    * ``created_at`` and ``source_timestamp`` are the LITERAL column values (a
+      filter on those names is post-filtered against the real column).
+
+    The eight denormalized document keys are read off ``chunk.source_document``
+    when present (``DocumentSource`` carries only a subset; the rest stay absent,
+    so a positive predicate on them returns empty on the legacy path — documented
+    limitation, no faithful fallback exists). ``metadata`` is the chunk's own dict.
+    """
+    record: dict[str, Any] = {
+        # Effective event time = COALESCE(occurred_at, source_timestamp). occurred_at
+        # is conceptually PRESENT (it's the event time, == source_timestamp on the
+        # legacy path where the DTO leaves the literal field None); the adapter
+        # recovers it so an occurred_at filter does not false-empty. No created_at
+        # fallback — ingest time is not event time.
+        "occurred_at": chunk.occurred_at if chunk.occurred_at is not None else chunk.source_timestamp,
+        "created_at": chunk.created_at,
+        "source_timestamp": chunk.source_timestamp,
+        "metadata": chunk.metadata or {},
+    }
+    # Resolve each denorm doc key defensively: chunk attr → chunk.source_document
+    # attr → absent. The Chunk dataclass does not carry these today (they live on
+    # the source_document projection), but trying the chunk first is robust if a
+    # future DTO denormalizes them onto the chunk. A key found nowhere stays absent
+    # → compile_python's §4 missing-semantics → positive predicate empty
+    # (documented (v) limitation; no faithful fallback exists for these).
+    source_doc = chunk.source_document
+    for key in _DOC_PROJECTION_KEYS:
+        value = getattr(chunk, key, None)
+        if value is None and source_doc is not None:
+            value = getattr(source_doc, key, None)
+        if value is not None:
+            record[key] = value
+    return record
+
+
 def _temporal_proximity(
     referenced_date: datetime | None,
     start: datetime | None,
@@ -1484,8 +1582,12 @@ class ChronicleEngine:
             min_similarity: Minimum similarity threshold
             temporal_filter: Reserved for Phase 2 temporal filtering
             recency_bias: Override temporal decay weight (0.0-1.0)
-            filter_ast: Canonical recall-filter AST. Accepted for protocol
-                parity; Chronicle does not push filters down yet (ignored).
+            filter_ast: Canonical recall-filter AST. When supplied,
+                Chronicle pushes the conjunctive ``occurred_at`` / ``created_at``
+                date bounds into the recency window (narrow only) and post-filters
+                every retrieved chunk against the full filter — the eight
+                denormalized document keys and all metadata — before top-k. When
+                ``None``, the recency behavior is unchanged.
 
         Returns:
             RecallResult with fused and decay-scored chunks
@@ -1587,6 +1689,50 @@ class ChronicleEngine:
         # search_fulltext already pushdown COALESCE(source_timestamp,
         # created_at) when these are set; we just need to pass them in.
         created_after, created_before = _extract_temporal_bounds(temporal_filter)
+
+        # ── Deterministic recall filter ──────────────────────────────
+        # When a filter AST is supplied, compile it two ways:
+        #   1. compile_chronicle distills the conjunctive source_timestamp clauses
+        #      into a narrowing date-bound we intersect with the recency window
+        #      above (narrow only — max of lowers, min of uppers — never widening
+        #      it). Only source_timestamp pushes down: it is the window's own
+        #      primary axis COALESCE(source_timestamp, created_at), so the pushdown
+        #      is same-axis and superset-safe. occurred_at (the event-time axis)
+        #      and created_at (the window's fallback) are post-filter-only.
+        #   2. compile_python compiles the FULL AST to an in-memory predicate that
+        #      post-filters the retrieved chunk candidates (each mapped via
+        #      _chunk_to_record) — the safety net that enforces every predicate
+        #      (occurred_at as COALESCE(occurred_at, source_timestamp), created_at,
+        #      source_timestamp, the eight denormalized document keys, metadata)
+        #      against the field each record carries. Pushdown is only a
+        #      candidate-narrowing optimization on top.
+        # When filter_ast is None, both stay None and the recency behavior is
+        # unchanged.
+        post_filter: Callable[[Any], bool] | None = None
+        # Date keys the date-bound actually pushed into the recency window, for the
+        # honest engine_info["filter"] report below. Chronicle is partial-pushdown
+        # by design (only source_timestamp pushes down; the full filter is always
+        # enforced by the post-filter), so this is the source_timestamp subset, not the
+        # whole filter.
+        filter_pushed_keys: frozenset[str] = frozenset()
+        if filter_ast is not None:
+            from khora.filter import CompileContext
+            from khora.filter.compilers.chronicle import compile_chronicle
+            from khora.filter.compilers.python import compile_python
+
+            compiled_bound = compile_chronicle(
+                filter_ast,
+                CompileContext(backend_target="chunks", on_unsupported="split"),
+            )
+            date_bound = compiled_bound.predicate
+            filter_pushed_keys = compiled_bound.consumed_keys
+            created_after = _intersect_lower(created_after, date_bound.created_after)
+            created_before = _intersect_upper(created_before, date_bound.created_before)
+
+            post_filter = compile_python(
+                filter_ast,
+                CompileContext(backend_target="chunks", on_unsupported="split"),
+            ).predicate
 
         # ── Phase 1: Embed query + BM25 in parallel ───────────────────
         # BM25 needs only the query text (no embedding), so start it
@@ -1851,6 +1997,20 @@ class ChronicleEngine:
         )
         timings["cross_session_ms"] = (time.perf_counter() - start) * 1000
 
+        # ── Deterministic recall-filter post-filter ─────────────────────
+        # Applied ONCE here — AFTER cross-session expansion (which fetches
+        # entity-source chunks via get_chunks_batch that bypass the channel-level
+        # recency window) and BEFORE the final top-k trim — so the filter is the
+        # exact final narrowing force over EVERY candidate path. The date-bound
+        # was already pushed into the recency window for the channel reads above;
+        # this predicate covers the denormalized document keys + metadata
+        # Chronicle cannot push down, and re-checks the date bounds on
+        # window-bypassing expansion chunks.
+        if post_filter is not None:
+            start = time.perf_counter()
+            chunks_with_scores = [pair for pair in chunks_with_scores if post_filter(_chunk_to_record(pair[0]))]
+            timings["post_filter_ms"] = (time.perf_counter() - start) * 1000
+
         # Trim to requested limit
         chunks_with_scores = chunks_with_scores[:limit]
 
@@ -1993,6 +2153,19 @@ class ChronicleEngine:
                 "max_raw_vector_score": max_raw_cosine,
                 "abstention_signals": abstention_signals,
                 "timings": timings,
+                # Honest recall-filter pushdown report (mirrors the skeleton
+                # precedent #1022). Chronicle is partial-pushdown by design: only
+                # the source_timestamp date bound pushes into the recency window;
+                # the full filter (occurred_at / created_at / denorm doc keys /
+                # metadata) is always enforced by the in-memory post-filter. So we
+                # report both halves honestly rather than a single all-or-nothing
+                # flag. ``pushed_down`` is True only when a source_timestamp bound
+                # actually narrowed the window; ``post_filtered`` is True whenever a
+                # constraint-bearing filter was supplied (the post-filter ran).
+                "filter": {
+                    "pushed_down": bool(filter_pushed_keys),
+                    "post_filtered": filter_ast is not None and bool(filter_ast.children),
+                },
                 # ADR-001: callers can detect silent channel failures /
                 # fallbacks via this list. Empty when nothing degraded.
                 "degradations": degradations,
@@ -3153,3 +3326,15 @@ class ChronicleEngine:
             health["status"] = "degraded"
 
         return health
+
+
+# Register the deterministic recall-filter compiler for this engine/target at
+# import time (idempotent — same function object). The storage target is "chunks":
+# the filter attaches to the chunk read path, so "chunks" is the honest label.
+# Chronicle pushes down only the conjunctive source_timestamp date bound (the
+# recency window's primary stored axis); the engine post-filters the remainder via
+# compile_python. Mirrors the skeleton.pgvector registration site.
+from khora.filter import CompilerRegistry  # noqa: E402
+from khora.filter.compilers.chronicle import compile_chronicle  # noqa: E402
+
+CompilerRegistry.register("chronicle", "chunks", compile_chronicle)
