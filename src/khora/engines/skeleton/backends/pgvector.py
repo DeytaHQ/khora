@@ -457,12 +457,12 @@ class PgVectorTemporalStore(TemporalVectorStore):
             # compiler aliases nothing here (the store queries the base table),
             # so ``table_alias`` stays None.
             if filter_ast is not None:
-                from khora.filter import CompileContext
                 from khora.filter.compilers.postgres import compile_postgres
+                from khora.filter.execute import build_compile_context
 
                 compiled = compile_postgres(
                     filter_ast,
-                    CompileContext(backend_target="khora_chunks", on_unsupported="raise"),
+                    build_compile_context("khora_chunks", on_unsupported="raise"),
                 )
                 conditions.append(compiled.predicate)
 
