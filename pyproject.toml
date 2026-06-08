@@ -113,8 +113,8 @@ all-backends = [
 reranking = [
     "sentence-transformers>=5.4.1",
 ]
-# Binary file readers (PDF, Excel, Word text extraction) — used by khora-cli
-binary-readers = ["pymupdf>=1.27.2", "openpyxl>=3.1.0", "python-docx>=1.2.0"]
+# Binary file readers (Excel, Word text extraction) — used by khora-cli
+binary-readers = ["openpyxl>=3.1.0", "python-docx>=1.2.0"]
 # Parquet file support (used by khora-cli)
 parquet = ["pyarrow>=24.0.0"]
 # Accelerated CPU operations (numpy for cosine sim, rapidfuzz for string matching)
