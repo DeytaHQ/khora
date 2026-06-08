@@ -5,14 +5,15 @@ the Perseverance and Curiosity rovers) where figures are embedded as ``<img>``
 tags — maps, rover diagrams, traverse routes. khora indexes text, so the
 pipeline is:
 
-  1. **Parse** each ``.md`` — split into sections (text chunks) and pull out the
-     ``<img>`` tags (figures).
-  2. **Describe** every figure with a vision model, so the picture becomes
-     searchable text. The image's path rides in metadata.
-  3. **Remember** all of it — text + figure descriptions — into one namespace.
+  1. **Parse** each ``.md`` — split it into sections by heading (one chunk per
+     section) and pull out the ``<img>`` tags (figures).
+  2. **Describe** every figure with a vision model — the alt text steers it — so
+     the picture becomes searchable text. The image path rides in metadata.
+  3. **Remember** all of it with ``remember_batch``, giving every chunk a stable
+     ``external_id`` so recalled context can be cited.
   4. **Answer** questions with retrieval-augmented generation: ``recall()`` the
-     most relevant chunks, then have an LLM write a grounded answer *from that
-     context only*, and report which documents / figures it drew on.
+     most relevant chunks, have an LLM write a grounded answer *from that context
+     only*, and print the ``external_id`` of every source it drew on.
 
 Because the corpus spans two rovers, the questions are cross-document — "which
 has more cameras?", "are they in the same place?" — and some can only be
@@ -58,6 +59,14 @@ _ANSWER_MODEL = "gpt-4o"
 _ENTITY_TYPES = ["SPACECRAFT", "INSTRUMENT", "LOCATION", "MEASUREMENT", "MISSION"]
 _REL_TYPES = ["RELATES_TO", "PART_OF", "LOCATED_IN"]
 
+_VISION_SYSTEM = (
+    "You are describing a figure — a chart, map, or labeled diagram — for a search index. "
+    "Write a clear, thorough description of what the figure shows and its purpose. Transcribe "
+    "every visible label, place name, axis title, legend entry, and numeric value you can read, "
+    "and explain how the labeled parts relate to each other. Completeness matters more than "
+    "brevity, so do not limit the length. No preamble."
+)
+
 _QUESTIONS = [
     "Are Perseverance and Curiosity exploring the same place on Mars?",
     "Is Curiosity bigger than Perseverance?",
@@ -75,6 +84,10 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60] or "section"
+
+
 # ── Markdown parsing: sections → text chunks, <img> tags → figures ────────
 _IMG_RE = re.compile(r"<img\b[^>]*>")
 _SRC_RE = re.compile(r'src="([^"]+)"')
@@ -84,7 +97,8 @@ _ALT_RE = re.compile(r'alt="([^"]*)"')
 def parse_doc(path: Path) -> tuple[dict, list[tuple[str, str]], list[tuple[str, str]]]:
     """Return (meta, text_sections, figures) for one markdown doc.
 
-    text_sections: list of (heading, body). figures: list of (img_src, alt).
+    text_sections: list of (heading, body) — one per ``##`` section, plus the
+    intro under the ``#`` title. figures: list of (img_src, alt).
     """
     raw = path.read_text(encoding="utf-8")
 
@@ -118,21 +132,18 @@ def parse_doc(path: Path) -> tuple[dict, list[tuple[str, str]], list[tuple[str, 
 
 
 async def describe_image(path: Path, alt: str, *, client: AsyncOpenAI) -> str:
-    """Describe a figure with a vision model; the alt text steers the focus."""
+    """Describe a figure with a vision model. The doc's alt text is passed in so
+    the model knows what the figure is meant to convey before reading it."""
     mime = mimetypes.guess_type(str(path))[0] or "image/jpeg"
     data_url = f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode("ascii")
     resp = await client.chat.completions.create(
         model=_VISION_MODEL,
         messages=[
-            {
-                "role": "system",
-                "content": "Describe this figure for a search index in 2-4 factual sentences. "
-                "Name the labeled parts, places, or values you can read. No preamble.",
-            },
+            {"role": "system", "content": _VISION_SYSTEM},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"Context: {alt}"},
+                    {"type": "text", "text": f"Caption / alt text for this figure: {alt}\n\nDescribe the figure."},
                     {"type": "image_url", "image_url": {"url": data_url}},
                 ],
             },
@@ -146,10 +157,8 @@ async def answer(question: str, recall, docs: dict, *, client: AsyncOpenAI) -> s
     blocks = []
     for c in recall.chunks:
         doc = docs.get(c.document_id)
-        label = doc.title if doc else "?"
-        img = (doc.metadata.get("image_path") if doc else None) or ""
-        fig = f" (figure {Path(img).name})" if img else ""
-        blocks.append(f"[{label}{fig}]\n{c.content}")
+        cite = (doc.external_id if doc else None) or "?"
+        blocks.append(f"[{cite}]\n{c.content}")
     context = "\n\n".join(blocks)
     resp = await client.chat.completions.create(
         model=_ANSWER_MODEL,
@@ -175,74 +184,69 @@ async def main() -> None:
     config = KhoraConfig.from_yaml(args.config)
     client = AsyncOpenAI()  # reads OPENAI_API_KEY
 
-    # 1+2 — Parse every doc; describe its figures concurrently.
-    chunks: list[dict] = []
+    # 1 — Parse each doc into per-section text chunks; collect figures to describe.
+    batch: list[dict] = []
     figure_jobs: list[tuple[str, dict, Path, str]] = []
     for path in docs_paths:
         meta, sections, figures = parse_doc(path)
         stem = path.stem
         for heading, text in sections:
-            chunks.append(
+            batch.append(
                 {
                     "content": f"{meta['title']} — {heading}\n\n{text}",
                     "title": f"{meta['title']}: {heading}",
+                    "source": "mars_rovers",
+                    "external_id": f"{stem}#{_slug(heading)}",
                     "metadata": {"doc": stem, "source_url": meta.get("source", ""), "kind": "text"},
                 }
             )
         for src, alt in figures:
-            figure_jobs.append((stem, meta, (path.parent / src), alt))
+            figure_jobs.append((stem, meta, path.parent / src, alt))
+    print(f"parsed {len(docs_paths)} docs → {len(batch)} text chunks, {len(figure_jobs)} figures")
 
-    print(f"parsed {len(docs_paths)} docs → {len(chunks)} text chunks, {len(figure_jobs)} figures")
+    # 2 — Describe every figure with the vision model (alt text included).
     described = await asyncio.gather(
         *(describe_image(p, alt, client=client) for _stem, _meta, p, alt in figure_jobs)
     )
     for (stem, meta, p, alt), desc in zip(figure_jobs, described):
-        print(f"  described {p.name}: {desc[:70]}…")
-        chunks.append(
+        print(f"\n── figure: {p.name} ──\n{desc}")
+        batch.append(
             {
-                "content": f"{meta['title']} — figure: {desc}",
+                "content": f"{meta['title']} — figure ({p.name}): {desc}",
                 "title": f"{meta['title']}: figure",
-                "metadata": {
-                    "doc": stem,
-                    "source_url": meta.get("source", ""),
-                    "kind": "image",
-                    "image_path": str(p),
-                },
+                "source": "mars_rovers",
+                "external_id": f"{stem}#figure-{p.stem}",
+                "metadata": {"doc": stem, "source_url": meta.get("source", ""), "kind": "image", "image_path": str(p)},
             }
         )
 
     async with Khora(config, engine="vectorcypher", run_migrations=True) as kb:
         ns_id = (await kb.create_namespace()).namespace_id
 
-        # 3 — Remember every chunk (text + figure descriptions), capped concurrency.
-        sem = asyncio.Semaphore(5)
+        # 3 — Remember everything in one batch; each chunk keeps its external_id.
+        result = await kb.remember_batch(
+            batch,
+            namespace=ns_id,
+            max_concurrent=5,
+            entity_types=_ENTITY_TYPES,
+            relationship_types=_REL_TYPES,
+        )
+        print(
+            f"\nremembered {result.processed} chunks "
+            f"(chunks={result.chunks}, entities={result.entities})"
+        )
 
-        async def _remember(ch: dict) -> None:
-            async with sem:
-                await kb.remember(
-                    ch["content"],
-                    namespace=ns_id,
-                    title=ch["title"],
-                    source="mars_rovers",
-                    metadata=ch["metadata"],
-                    entity_types=_ENTITY_TYPES,
-                    relationship_types=_REL_TYPES,
-                )
-
-        await asyncio.gather(*(_remember(c) for c in chunks))
-        print(f"remembered {len(chunks)} chunks into the namespace")
-
-        # 4 — Retrieval-augmented QA: recall → grounded LLM answer → sources.
+        # 4 — Retrieval-augmented QA: recall → grounded answer → cite external_ids.
         for question in _QUESTIONS:
             recall = await kb.recall(question, namespace=ns_id, limit=6)
             docs = {d.id: d for d in recall.documents}
             reply = await answer(question, recall, docs, client=client)
-            sources = []
+            sources: list[str] = []
             for c in recall.chunks:
                 d = docs.get(c.document_id)
-                tag = d.metadata.get("doc") if d else None
-                if tag and tag not in sources:
-                    sources.append(tag)
+                eid = d.external_id if d else None
+                if eid and eid not in sources:
+                    sources.append(eid)
             print(f"\nQ: {question}\nA: {reply}\n   sources: {', '.join(sources)}")
 
 
