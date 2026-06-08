@@ -21,8 +21,10 @@ The contract these tests lock (§4):
      for metadata;
   3. a list operand against a scalar system column → constant ``false``;
   4. ``$exists`` / null use ``?`` / ``#>``-vs-``null``, not ``->>`` value extraction.
-* Array containment: scalar ``$eq`` on metadata → ``@>``; ``$in`` → OR of
-  containments / ``?|``; array operand ``$eq`` → exact ``#>`` = jsonb.
+* Array containment: scalar ``$eq`` on metadata → OR of the scalar-doc ``@>``
+  and the array-wrapped ``@>`` (so it matches both a scalar field and an
+  array-valued field containing the value); ``$in`` → OR of those containments;
+  array operand ``$eq`` → exact ``#>`` = jsonb.
 
 If the compiler module is not yet on the branch (implementation lands separately),
 the whole module skips cleanly so the suite stays green.
@@ -257,11 +259,17 @@ def test_system_null_operand_is_is_null() -> None:
 
 
 def test_metadata_eq_scalar_uses_containment() -> None:
-    # Array-containment rule: a scalar $eq on a metadata field is emitted as a
-    # JSONB containment (@>) so it matches both a scalar value AND membership in
-    # an array-valued field — never a brittle ->> text compare.
+    # Array-containment rule: a scalar $eq on a metadata field is emitted as the
+    # OR of two JSONB containments (@>) — the scalar-doc form AND an
+    # array-wrapped form — so it matches both a scalar value AND membership in an
+    # array-valued field (JSONB @> does not treat {"tier":"gold"} as contained by
+    # {"tier":["gold"]}, so the array-wrapped form is required). Never a brittle
+    # ->> text compare.
     sql = _sql_norm(_ast({"metadata.tier": "gold"}))
     assert "@>" in sql
+    # Both the scalar-doc and the array-wrapped containment docs are emitted.
+    assert '{"tier": "gold"}' in sql
+    assert '{"tier": ["gold"]}' in sql
 
 
 def test_metadata_nested_path_extraction() -> None:
@@ -288,10 +296,17 @@ def test_metadata_all_ranges_gate_on_typeof(wire_op: str) -> None:
 
 
 def test_metadata_in_is_or_of_containments_or_overlap() -> None:
-    # $in on a metadata field is membership across scalar and array fields:
-    # either an OR of @> containments or the ?| overlap operator.
+    # $in on a metadata field is membership across scalar and array fields: an OR
+    # of @> containments — each $in value contributing BOTH a scalar-doc and an
+    # array-wrapped containment so membership spans scalar- and array-valued
+    # fields.
     sql = _sql_norm(_ast({"metadata.tier": {"$in": ["gold", "silver"]}}))
-    assert "@>" in sql or "?|" in sql
+    assert "@>" in sql
+    # Each operand value emits its scalar-doc and array-wrapped containment.
+    assert '{"tier": "gold"}' in sql
+    assert '{"tier": ["gold"]}' in sql
+    assert '{"tier": "silver"}' in sql
+    assert '{"tier": ["silver"]}' in sql
 
 
 def test_metadata_empty_in_is_constant_false() -> None:
