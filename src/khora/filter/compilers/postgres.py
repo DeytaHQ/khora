@@ -39,6 +39,7 @@ for khora's own engines; not re-exported from :mod:`khora.__init__`.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -304,8 +305,9 @@ class _Builder:
         """Positive metadata equality — always a total boolean.
 
         A ``$date`` literal compares through the guarded timestamptz gate; a tuple
-        is an exact-array equality on the extracted node; any other scalar is
-        array-aware ``@>`` containment.
+        is an exact-array equality on the extracted node; a dict (sub-path
+        subdocument operand) is EXACT ``object_equal`` — ``#> = '{...}'::jsonb``,
+        NOT ``@>`` containment; any other scalar is array-aware ``@>`` containment.
         """
         if isinstance(operand, DateLiteral):
             return self._md_date_compare(segs, Op.EQ, operand)
@@ -314,6 +316,12 @@ class _Builder:
             # the path is absent, so coalesce the comparison to FALSE for totality.
             node = self._md_json(segs)
             return sa.func.coalesce(node == _jsonb_literal(list(operand)), sa.false())
+        if isinstance(operand, Mapping):
+            # Subdocument equality: EXACT object_equal, not containment. `_jsonb_literal`
+            # sorts keys, so the compare is key-order-insensitive (PG JSONB `=` is
+            # structural). `#>` is NULL on an absent path, so coalesce to FALSE.
+            node = self._md_json(segs)
+            return sa.func.coalesce(node == _jsonb_literal(dict(operand)), sa.false())
         return self._md_containment(segs, operand)
 
     def _md_range(self, segs: tuple[str, ...], op: Op, operand: Any) -> ColumnElement[bool]:

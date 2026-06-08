@@ -73,6 +73,7 @@ __all__ = [
     "PythonExecutor",
     "SeedRecord",
     "assert_case",
+    "f_objeq_cases",
     "f_op_cases",
     "oracle_survivors",
     "run_case_for_backend",
@@ -715,12 +716,42 @@ def f_sel_cases() -> list[ConformanceCase]:
 
 
 def f_objeq_cases() -> list[ConformanceCase]:
-    """F-OBJEQ: whole-subdocument / whole-blob object equality (exact ``=``).
+    """F-OBJEQ: metadata sub-path dict operand is EXACT ``object_equal`` (``=``).
 
-    Filled by the catalog ticket. A metadata sub-path dict operand is EXACT
-    equality, NOT ``@>`` containment.
+    A metadata sub-path dict operand is EXACT object equality, NOT ``@>``
+    containment: a stored object with EXTRA keys (the ``superset`` record) must NOT
+    survive. ``expected_ids`` is computed by construction from the four-record seed
+    (exact / superset / other / absent). The full metadata-grammar enumeration is
+    the catalog ticket's territory — this is the focused F-OBJEQ smoke set.
     """
-    return []
+    seed = (
+        SeedRecord(id="exact", metadata={"labels": {"team": "x"}}),
+        SeedRecord(id="superset", metadata={"labels": {"team": "x", "y": 2}}),
+        SeedRecord(id="other", metadata={"labels": {"team": "y"}}),
+        SeedRecord(id="absent"),
+    )
+    return [
+        ConformanceCase(
+            id="F-OBJEQ-metadata-labels-eq",
+            # Exact object_equal: only the record whose subdocument EQUALS the
+            # operand survives — the superset (extra key) must NOT match.
+            filter={"metadata.labels": {"team": "x"}},
+            seed_records=seed,
+            expected_ids=frozenset({"exact"}),
+            backends=_OP_BACKENDS,
+            exercises=("F-OBJEQ", "metadata.labels", "$eq", "dict"),
+        ),
+        ConformanceCase(
+            id="F-OBJEQ-metadata-labels-ne",
+            # $ne negates the total exact form: the complement (superset, other) plus
+            # the absent record survive (Rule 2 polarity — absent satisfies $ne).
+            filter={"metadata.labels": {"$ne": {"team": "x"}}},
+            seed_records=seed,
+            expected_ids=frozenset({"superset", "other", "absent"}),
+            backends=_OP_BACKENDS,
+            exercises=("F-OBJEQ", "metadata.labels", "$ne", "dict"),
+        ),
+    ]
 
 
 def f_dotkey_cases() -> list[ConformanceCase]:
