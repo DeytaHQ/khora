@@ -6,6 +6,8 @@
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
+> *"Khora is the receptacle, the space, the matrix in which all things come to be."* - Plato, *Timaeus*
+
 A Python library for creating knowledge repositories that ingest unstructured and structured multi-source data and expose a single query substrate, built for integrating into long-horizon AI agents.
 
 ## Quickstart
@@ -134,12 +136,6 @@ make lint        # ruff + ty typecheck
 ```
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
-
-## The name
-
-> *"Khora is the receptacle, the space, the matrix in which all things come to be."* - Plato, *Timaeus*
-
-Khora (χώρα) is Plato's term for the receptacle that holds and gives place to everything that comes into being - a fitting name for a substrate that takes in what an agent learns and makes it retrievable.
 
 ## License
 
