@@ -971,9 +971,30 @@ class TestRecallFilterKwarg:
 
         kb._engine.recall.assert_not_awaited()
 
+    @staticmethod
+    def _mock_result_with_engine_info(ns_id: object, engine_info: dict[str, object]) -> RecallResult:
+        """A ``_mock_result`` whose ``engine_info`` is pre-populated by the engine.
+
+        The facade reads the engine-reported ``engine_info["filter"]["pushed_down"]``
+        and surfaces it; this helper lets a facade test stage that engine report.
+        """
+        return RecallResult(
+            query="q",
+            namespace_id=ns_id,  # type: ignore[arg-type]
+            documents=[],
+            chunks=[],
+            entities=[],
+            relationships=[],
+            engine_info=engine_info,  # type: ignore[arg-type]
+        )
+
     @pytest.mark.asyncio
     async def test_engine_info_filter_present_with_filter(self) -> None:
-        """engine_info['filter'] is populated on the result when filter= is passed."""
+        """engine_info['filter'] is populated on the result when filter= is passed.
+
+        The default vectorcypher engine reports no pushdown, so the facade
+        surfaces ``pushed_down=False``.
+        """
         kb = _make_kb(connected=True)
         ns_id = uuid4()
         kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
@@ -985,6 +1006,96 @@ class TestRecallFilterKwarg:
         assert info["engine"] == "vectorcypher"
         assert info["pushed_down"] is False
         assert info["supported"] is False
+
+    @pytest.mark.asyncio
+    async def test_engine_info_surfaces_engine_reported_pushdown(self) -> None:
+        """The facade SURFACES an engine-reported pushdown.
+
+        When the engine already reports
+        ``engine_info["filter"]["pushed_down"] = True`` (the skeleton-pgvector
+        path reports this from its engine-level derivation), the facade must carry
+        that honest value through to the final result rather than hardcoding
+        ``False``.
+        """
+        kb = _make_kb(connected=True)
+        kb._engine_name = "skeleton"
+        ns_id = uuid4()
+        kb._engine.recall = AsyncMock(
+            return_value=self._mock_result_with_engine_info(
+                ns_id,
+                {"engine": "skeleton", "backend": "pgvector", "filter": {"pushed_down": True}},
+            )
+        )
+
+        result = await self._async_recall(kb, "q", namespace=ns_id, filter={"source_name": "linear"})
+
+        info = result.engine_info.get("filter")
+        assert info is not None
+        assert info["engine"] == "skeleton"
+        assert info["supported"] is True
+        assert info["pushed_down"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "engine_info",
+        [
+            # No "filter" key at all (e.g. an engine that never writes one).
+            {"engine": "skeleton", "backend": "lance"},
+            # A non-pgvector skeleton backend that accept-and-ignores the AST
+            # writes filter={"pushed_down": False} — the shape the live engine
+            # actually emits when the filter is not pushed into SQL.
+            {"engine": "skeleton", "backend": "lance", "filter": {"pushed_down": False}},
+        ],
+        ids=["filter-key-absent", "filter-pushed-down-false"],
+    )
+    async def test_engine_info_defaults_pushdown_false_when_engine_silent(self, engine_info: dict[str, object]) -> None:
+        """The facade reports ``pushed_down=False`` when the engine does not push down.
+
+        False case: a skeleton recall whose engine_info carries no
+        pushdown signal (a non-pgvector skeleton backend that accept-and-ignores
+        the filter, or any engine that omits the key) surfaces
+        ``pushed_down=False`` — the facade never claims a pushdown the engine did
+        not report.
+        """
+        kb = _make_kb(connected=True)
+        kb._engine_name = "skeleton"
+        ns_id = uuid4()
+        kb._engine.recall = AsyncMock(return_value=self._mock_result_with_engine_info(ns_id, engine_info))
+
+        result = await self._async_recall(kb, "q", namespace=ns_id, filter={"source_name": "linear"})
+
+        info = result.engine_info.get("filter")
+        assert info is not None
+        assert info["engine"] == "skeleton"
+        assert info["pushed_down"] is False
+
+    @pytest.mark.asyncio
+    async def test_bare_empty_filter_reaches_engine_as_non_none_ast(self) -> None:
+        """A bare ``filter={}`` reaches the engine as a non-None empty-AND AST.
+
+        Edge case: ``{}`` is NOT short-circuited to "no filter" at the
+        facade — it lowers to a match-everything ``FilterNode(op=AND, children=())``
+        which the facade still threads to the engine as a non-None ``filter_ast``.
+        The engine reports ``pushed_down=False`` for this empty AST because it
+        carries no constraints/leaves (nothing to push) — consistent with the
+        no-filter case. The plumbing fact pinned here is that ``{}`` is not
+        short-circuited to ``None``; the engine-level empty→False derivation is
+        exercised on the live pg path in
+        ``tests/recall/test_filter_skeleton_pgvector.py``.
+        """
+        from khora.filter import FilterNode
+        from khora.filter.ast import Op
+
+        kb = _make_kb(connected=True)
+        ns_id = uuid4()
+        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
+
+        await self._async_recall(kb, "q", namespace=ns_id, filter={})
+
+        filter_ast = kb._engine.recall.call_args.kwargs.get("filter_ast")
+        assert isinstance(filter_ast, FilterNode)
+        assert filter_ast.op == Op.AND
+        assert not filter_ast.children  # empty match-everything AND
 
     @pytest.mark.asyncio
     async def test_engine_info_filter_present_without_filter(self) -> None:
@@ -1015,7 +1126,12 @@ class TestRecallFilterKwarg:
 
     @pytest.mark.asyncio
     async def test_engine_info_filter_supported_for_skeleton(self) -> None:
-        """The skeleton engine is the planned pushdown target → supported=True (still not pushed down)."""
+        """The skeleton engine is the pushdown target → supported=True.
+
+        This mock engine reports no pushdown signal, so ``pushed_down`` defaults
+        to ``False`` (the live skeleton-pgvector pushdown is asserted True in
+        ``tests/recall/test_filter_skeleton_pgvector.py``).
+        """
         kb = _make_kb(connected=True)
         kb._engine_name = "skeleton"
         ns_id = uuid4()

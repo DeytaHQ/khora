@@ -642,6 +642,34 @@ class SkeletonConstructionEngine:
                 )
             )
 
+        engine_info: dict[str, Any] = {
+            "engine": "skeleton",
+            "backend": self._backend_type,
+            "hybrid_alpha": hybrid_alpha,
+            "temporal_filter": str(temporal_filter) if temporal_filter else None,
+        }
+        # Report honest filter pushdown. The pgvector compiler runs in
+        # on_unsupported="raise" mode, which is all-or-nothing: an unsupported
+        # leaf raises RecallFilterUnsupportedError before recall returns, so a
+        # recall that returns WITH a filter_ast on pgvector means every leaf was
+        # consumed (consumed_keys == all leaves) = fully pushed down. We derive
+        # the flag from that contract without recompiling. When split-mode
+        # (partial pushdown) lands, read CompiledFilter.consumed_keys and
+        # compare against the AST leaves instead.
+        #
+        # A constraint-free filter (the empty-AND root that ``filter={}`` /
+        # ``RecallFilter()`` normalizes to) carries zero leaves, so "all leaves
+        # consumed" is vacuous - nothing was pushed down. We report False for it,
+        # matching the no-filter case rather than claiming a pushdown that did
+        # not narrow anything. ``filter_ast.children`` is the "has constraints"
+        # check (the root is always an AND ``FilterNode``).
+        #
+        # The carrier is written on every recall (the no-filter case lands here
+        # too, with ``filter_ast is None`` -> False); only the boolean varies.
+        engine_info["filter"] = {
+            "pushed_down": filter_ast is not None and bool(filter_ast.children) and self._backend_type == "pgvector"
+        }
+
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
@@ -649,12 +677,7 @@ class SkeletonConstructionEngine:
             chunks=recall_chunks,
             entities=[],  # Skeleton engine focuses on chunks, not entities
             relationships=[],
-            engine_info={
-                "engine": "skeleton",
-                "backend": self._backend_type,
-                "hybrid_alpha": hybrid_alpha,
-                "temporal_filter": str(temporal_filter) if temporal_filter else None,
-            },
+            engine_info=engine_info,
         )
 
     def _build_temporal_filter_from_dict(self, filters: dict[str, Any]) -> TemporalFilter:
