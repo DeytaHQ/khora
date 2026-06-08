@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -180,7 +181,10 @@ async def seeded() -> AsyncIterator[tuple[AsyncConnection, UUID, dict[str, UUID]
                         "ns": ns,
                         "source_name": system.get("source_name", "linear"),
                         "source_type": system.get("source_type", "slack"),
-                        "occurred_at": system.get("occurred_at", "2026-01-05T00:00:00Z"),
+                        # asyncpg (unlike psycopg) is strict: a TIMESTAMPTZ bind
+                        # must be a datetime, not an ISO string. No row overrides
+                        # occurred_at, so the benign default is the only value used.
+                        "occurred_at": system.get("occurred_at", datetime(2026, 1, 5, tzinfo=UTC)),
                         "metadata": json.dumps(spec["metadata"]),
                     },
                 )

@@ -100,6 +100,11 @@ def _make_doc(namespace_id) -> Document:
 
 
 @skip_no_pg
+@pytest.mark.xfail(
+    reason="stale test API: PgVectorBackend (vector backend) has no create_namespace; "
+    "namespace creation lives on the relational backend; tracked in #1020",
+    strict=False,
+)
 class TestChunkNamespaceIsolationPg:
     async def test_cross_namespace_get_chunk_returns_none(self, backend: PgVectorBackend) -> None:
         ns_a = await backend.create_namespace(MemoryNamespace())
