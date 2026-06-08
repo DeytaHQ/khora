@@ -193,7 +193,7 @@ async def _strip_relationships(store: Any, ids: list[UUID], document_id: UUID, n
     if store is None:
         return
     if callable(getattr(store, "remove_document_from_relationship_sources_batch", None)):
-        await store.remove_document_from_relationship_sources_batch(ids, document_id)
+        await store.remove_document_from_relationship_sources_batch(ids, document_id, namespace_id)
     elif callable(getattr(store, "remove_document_from_relationship_sources", None)):
         await store.remove_document_from_relationship_sources(ids, document_id)
     elif callable(getattr(store, "strip_document_from_relationships", None)):

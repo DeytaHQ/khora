@@ -764,7 +764,7 @@ class StorageCoordinator:
                     )
                 if relationship_survivor_strip_ids:
                     await self._graph.remove_document_from_relationship_sources_batch(  # type: ignore[unresolved-attribute]
-                        relationship_survivor_strip_ids, old_document_id
+                        relationship_survivor_strip_ids, old_document_id, namespace_id
                     )
 
                 net_new_entities = [e for e in new_entities if (e.name, e.entity_type) not in entity_survivor_keys]

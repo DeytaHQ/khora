@@ -3596,11 +3596,13 @@ RETURN count(r) AS updated
         self,
         relationship_ids: list[UUID],
         document_id: UUID,
+        namespace_id: UUID,
     ) -> int:
         """Strip ``document_id`` from survivor relationships' source arrays.
 
         Sibling to :meth:`remove_document_from_entity_sources_batch` for
-        the edge side of the cascade.
+        the edge side of the cascade. The match is scoped to ``namespace_id``
+        so a strip never crosses the namespace boundary.
 
         Returns the number of relationships updated.
         """
@@ -3611,13 +3613,14 @@ RETURN count(r) AS updated
             result = await tx.run(
                 """
                 UNWIND $relationship_ids AS rid
-                MATCH ()-[r {id: rid}]-()
+                MATCH ()-[r {id: rid, namespace_id: $namespace_id}]-()
                 WITH DISTINCT r
                 SET r.source_document_ids =
                         [d IN coalesce(r.source_document_ids, []) WHERE d <> $doc_id]
                 RETURN count(r) AS updated
                 """,
                 relationship_ids=[str(rid) for rid in relationship_ids],
+                namespace_id=str(namespace_id),
                 doc_id=str(document_id),
             )
             record = await result.single()

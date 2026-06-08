@@ -1605,7 +1605,7 @@ class TestVectorCypherEngineForget:
             [survivor_rel_id], doc_id
         )
         connected_engine._storage.graph.remove_document_from_relationship_sources_batch.assert_awaited_once_with(
-            [survivor_rel_id], doc_id
+            [survivor_rel_id], doc_id, namespace_id
         )
         connected_engine._storage.graph.delete_relationships_batch.assert_not_called()
         connected_engine._storage.vector.delete_relationships_batch.assert_not_called()
