@@ -175,7 +175,7 @@ class CrossEncoderReranker(Reranker):
 
     def __init__(
         self,
-        model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        model_name: str = "BAAI/bge-reranker-v2-m3",
         device: str | None = None,
         batch_size: int = 32,
         include_date_prefix: bool = False,
@@ -517,7 +517,7 @@ def create_reranker(
         Reranker instance
     """
     if method == "cross_encoder":
-        model_name = model or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        model_name = model or "BAAI/bge-reranker-v2-m3"
         cache_key = f"cross_encoder:{model_name}:date_prefix={include_date_prefix}"
         if cache_key not in _reranker_cache:
             _reranker_cache[cache_key] = CrossEncoderReranker(
