@@ -491,3 +491,133 @@ async def test_skeleton_recall_handles_punctuated_query(kb: Khora, namespace_id:
     ):
         result = await _recall(kb, query, namespace=namespace_id, limit=3)
         assert isinstance(result.chunks, list), f"recall must not raise on {query!r}"
+
+
+# ---------------------------------------------------------------------------
+# Deterministic recall-filter — metadata pushdown + python-fallback parity.
+# ---------------------------------------------------------------------------
+#
+# These two cases drive the *public* ``Khora.recall(filter=...)`` end-to-end
+# through the skeleton engine into the sqlite_lance backend, where ``compile_lance``
+# pushes the metadata predicate into the SQLite WHERE (when JSON1 is available) and
+# a ``compile_python`` post-filter enforces the full AST. The seed corpus has one
+# in-scope tier and three out-of-scope rows, each violating the filter a DIFFERENT
+# way (wrong value / absent path / present-null), so a leak names how the predicate
+# failed to bite. All rows share embedding-vocabulary so the vector channel returns
+# the whole corpus and the filter is the only narrowing force.
+#
+# The first case exercises the pushdown path (JSON1 present); the second forces the
+# python-fallback by monkeypatching the backend's ``_has_json1`` capability flag to
+# False (the documented test seam — see SQLiteLanceTemporalStore.__init__) so every
+# metadata leaf defers to the compile_python post-filter. The load-bearing contract
+# the brief pins is that BOTH paths return the IDENTICAL in-scope chunk set.
+
+# metadata.tier == "gold" is the in-scope predicate. Each out-of-scope row violates
+# it a distinct way; every row shares "alpha gold" vocabulary so the vector channel
+# does not itself narrow.
+_FILTER_SEED: dict[str, dict[str, Any]] = {
+    "in_one": {"content": "alpha gold document one", "metadata": {"tier": "gold"}},
+    "in_two": {"content": "alpha gold document two", "metadata": {"tier": "gold"}},
+    # wrong value — tier present but != "gold".
+    "out_value": {"content": "alpha gold document silver tier", "metadata": {"tier": "silver"}},
+    # absent path — no "tier" key at all.
+    "out_absent": {"content": "alpha gold document no tier", "metadata": {"other": "x"}},
+    # present-null — tier explicitly null (distinct from absent; must not match $eq).
+    "out_null": {"content": "alpha gold document null tier", "metadata": {"tier": None}},
+}
+_FILTER_WIRE = {"metadata.tier": "gold"}
+
+
+async def _seed_filter_corpus(kb: Khora, namespace_id: UUID) -> dict[str, str]:
+    """Remember the filter corpus; return a ``label -> content`` map.
+
+    Content is distinct per row (skeleton dedupes by content checksum), so each
+    label round-trips to exactly one recallable chunk.
+    """
+    label_to_content: dict[str, str] = {}
+    for label, spec in _FILTER_SEED.items():
+        await _remember(
+            kb,
+            namespace_id=namespace_id,
+            content=spec["content"],
+            title=label,
+            metadata=spec["metadata"],
+        )
+        label_to_content[label] = spec["content"]
+    return label_to_content
+
+
+_IN_SCOPE_LABELS = ("in_one", "in_two")
+
+
+async def test_skeleton_recall_metadata_filter_pushdown(kb: Khora, namespace_id: UUID) -> None:
+    """``recall(filter={"metadata.tier": "gold"})`` narrows to exactly the gold rows.
+
+    Drives the metadata predicate through the JSON1 pushdown path. The three
+    out-of-scope rows (wrong value / absent path / present-null) must all be
+    excluded — proving the compiled SQLite WHERE + post-filter honor §4 exactly,
+    and that present-null does NOT match a positive ``$eq`` (the s4/s7 distinction
+    proven in the oracle, here end-to-end on a real store).
+    """
+    label_to_content = await _seed_filter_corpus(kb, namespace_id)
+
+    result = await kb.recall(
+        "alpha gold document",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+        filter=_FILTER_WIRE,
+    )
+
+    returned = {c.content for c in result.chunks}
+    in_scope = {label_to_content[label] for label in _IN_SCOPE_LABELS}
+    out_of_scope = {label_to_content[label] for label in _FILTER_SEED if label not in _IN_SCOPE_LABELS}
+
+    assert returned == in_scope, (
+        f"metadata filter must return exactly the in-scope chunks; "
+        f"leaked={returned & out_of_scope}, missing={in_scope - returned}"
+    )
+
+    # Control: with no filter the same recall reaches every seeded chunk, proving
+    # the narrowing is the FILTER's doing, not retrieval reachability.
+    unfiltered = await kb.recall("alpha gold document", namespace=namespace_id, limit=20, mode=SearchMode.VECTOR)
+    assert {c.content for c in unfiltered.chunks} == set(label_to_content.values())
+
+
+async def test_skeleton_recall_metadata_filter_python_fallback(
+    kb: Khora,
+    namespace_id: UUID,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forcing the python-fallback returns the IDENTICAL in-scope chunk set.
+
+    Monkeypatching the backend's ``_has_json1`` capability flag to ``False`` makes
+    ``compile_lance`` treat every metadata leaf as unsupported, so nothing about the
+    metadata predicate pushes into SQLite — the ``compile_python`` post-filter alone
+    enforces it against the decoded chunks. The contract: the fallback row-set is
+    IDENTICAL to the pushdown row-set (the two compilers agree on the §4 contract).
+    """
+    label_to_content = await _seed_filter_corpus(kb, namespace_id)
+    in_scope = {label_to_content[label] for label in _IN_SCOPE_LABELS}
+
+    # Force the fallback: disable JSON1 on the live temporal store. The flag is the
+    # documented test seam (SQLiteLanceTemporalStore.__init__); with it False the
+    # SchemaCapabilities the backend hands compile_lance carry sqlite_json1=False,
+    # so metadata leaves defer to the compile_python post-filter.
+    store = kb._get_engine()._get_temporal_store()  # type: ignore[attr-defined]
+    monkeypatch.setattr(store, "_has_json1", False)
+
+    result = await kb.recall(
+        "alpha gold document",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+        filter=_FILTER_WIRE,
+    )
+
+    returned = {c.content for c in result.chunks}
+    out_of_scope = {label_to_content[label] for label in _FILTER_SEED if label not in _IN_SCOPE_LABELS}
+    assert returned == in_scope, (
+        f"python-fallback must return the SAME in-scope set as pushdown; "
+        f"leaked={returned & out_of_scope}, missing={in_scope - returned}"
+    )
