@@ -11,8 +11,8 @@ descriptions and retrieve by similarity; no typed entity extraction needed
 
 Run it
 ======
-uv run python examples/10_core_apis/06_image_ingestion.py
-python examples/10_core_apis/06_image_ingestion.py
+uv run python examples/10_core_apis/07_image_ingestion.py
+python examples/10_core_apis/07_image_ingestion.py
 """
 
 from __future__ import annotations
