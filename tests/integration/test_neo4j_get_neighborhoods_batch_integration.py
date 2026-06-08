@@ -97,6 +97,7 @@ class TestNeo4jGetNeighborhoodsBatchIntegration:
 
             result = await backend.get_neighborhoods_batch(
                 [entity_a.id],
+                namespace_id=namespace_id,
                 depth=1,
                 limit_per_entity=50,
             )
@@ -212,6 +213,7 @@ class TestNeo4jGetNeighborhoodsBatchIntegration:
 
             result = await backend.get_neighborhoods_batch(
                 [entity_a.id],
+                namespace_id=namespace_id,
                 depth=2,
                 limit_per_entity=50,
             )
@@ -330,6 +332,7 @@ class TestNeo4jGetNeighborhoodsBatchIntegration:
 
             result = await backend.get_neighborhoods_batch(
                 [entity_1.id, entity_2.id],
+                namespace_id=namespace_id,
                 depth=1,
             )
 

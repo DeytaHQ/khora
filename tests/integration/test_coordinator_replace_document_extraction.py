@@ -189,7 +189,7 @@ class TestReplaceDocumentExtractionIntegration:
         assert bob_fetched.valid_until is not None  # retired
 
         # KNOWS edge was retired (valid_until stamped)
-        alice_edges = await coord.get_entity_relationships(alice.id)
+        alice_edges = await coord.get_entity_relationships(alice.id, namespace_id=namespace_id)
         knows = [r for r in alice_edges if r.relationship_type == "KNOWS"]
         assert len(knows) == 1
         assert knows[0].valid_until is not None
