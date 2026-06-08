@@ -2408,3 +2408,43 @@ class TestVectorCypherEngineApiTemporalFilter:
         assert signal is not None
         # Detector path produces "dictionary" / "semantic" / "none" — never "api".
         assert signal.source != "api"
+
+
+class TestRerankingConfigReconcile:
+    """``config.query.reranking_*`` must reach the VectorCypher engine (#1017, #1023)."""
+
+    @staticmethod
+    def _config():
+        from khora.config import KhoraConfig
+
+        return KhoraConfig(database_url="postgresql://u:p@localhost/db")
+
+    def test_query_reranking_family_reconciled_on_default_path(self) -> None:
+        cfg = self._config()
+        cfg.query.enable_reranking = True
+        cfg.query.reranking_model = "REPRO/model-from-query"
+        cfg.query.reranking_top_n = 33
+        eng = VectorCypherEngine(cfg)
+        assert eng._vc_config.enable_reranking is True
+        assert eng._vc_config.reranking_model == "REPRO/model-from-query"
+        assert eng._vc_config.reranking_top_n == 33
+
+    def test_explicit_vc_config_does_not_bypass_query_model(self) -> None:
+        # Enabling reranking via an explicit vc_config must not discard the
+        # query-level reranking_model (the #1023 second-order bug).
+        cfg = self._config()
+        cfg.query.reranking_model = "REPRO/model-from-query"
+        eng = VectorCypherEngine(cfg, vectorcypher_config=VectorCypherConfig(enable_reranking=True))
+        assert eng._vc_config.enable_reranking is True
+        assert eng._vc_config.reranking_model == "REPRO/model-from-query"
+
+    def test_explicit_field_wins_over_query(self) -> None:
+        cfg = self._config()
+        cfg.query.reranking_model = "REPRO/model-from-query"
+        eng = VectorCypherEngine(cfg, vectorcypher_config=VectorCypherConfig(reranking_model="EXPLICIT/win"))
+        assert eng._vc_config.reranking_model == "EXPLICIT/win"
+
+    def test_query_can_disable_reranking(self) -> None:
+        cfg = self._config()
+        cfg.query.enable_reranking = False
+        assert VectorCypherEngine(cfg)._vc_config.enable_reranking is False
