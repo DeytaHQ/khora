@@ -2127,16 +2127,20 @@ class Khora:
                 # per-chunk entity linkage, and emit a new RecallResult.
                 result = await self._upgrade_recall_documents(result, namespace_id)
 
-                # Record an honest filter-handling summary on every call. No
-                # engine pushes filters down in this revision, so ``pushed_down``
-                # is always False; ``supported`` is True only for the skeleton
-                # engine (the planned pushdown target). The engine name prefers
-                # whatever the engine already reported.
+                # Record an honest filter-handling summary on every call.
+                # ``pushed_down`` is engine-reported: the skeleton-pgvector path
+                # compiles ``filter_ast`` into SQL and stamps the result on
+                # ``engine_info["filter"]["pushed_down"]``; engines that do not
+                # push filters down leave it absent, so we default to False.
+                # ``supported`` is True only for the skeleton engine (the
+                # pushdown target). The engine name prefers whatever the engine
+                # already reported.
                 _engine_name = (result.engine_info or {}).get("engine", self._engine_name)
+                _pushed_down = (result.engine_info or {}).get("filter", {}).get("pushed_down", False)
                 _filter_info = {
                     "engine": _engine_name,
                     "supported": _engine_name == "skeleton",
-                    "pushed_down": False,
+                    "pushed_down": _pushed_down,
                 }
                 result = replace(result, engine_info={**(result.engine_info or {}), "filter": _filter_info})
 
