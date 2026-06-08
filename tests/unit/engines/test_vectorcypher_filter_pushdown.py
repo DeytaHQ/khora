@@ -53,6 +53,7 @@ from khora.engines.vectorcypher.retriever import (
 from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
 from khora.filter import CompileContext, FilterNode, RecallFilter, parse_to_ast
 from khora.filter.compilers.postgres import compile_postgres
+from khora.query.temporal_detection import TemporalCategory, TemporalSignal
 from khora.storage.backends.pgvector import PgVectorBackend
 
 pytestmark = pytest.mark.unit
@@ -527,3 +528,90 @@ class TestRelationalBackendRefusesFilter:
             "'recall_filter_unsupported_on_relational_chunks'; "
             f"records={[r.getMessage() for r in caplog.records]}"
         )
+
+
+def _change_recency_retriever(ns_id: UUID) -> VectorCypherRetriever:
+    """A MODERATE-path retriever wired so BOTH adaptive sub-searches CAN fire.
+
+    Builds on ``_make_retriever`` but enables the recency channel and stubs the
+    two adaptive sub-search entry points so we can assert whether they run:
+
+    * ``_decompose_change_query`` — the CHANGE-decomposition entry (gated on the
+      query-string-derived CHANGE signal + truthy ``version_history``).
+    * ``_recency_channel_chunks`` — the recency-channel entry (gated on the
+      query-string-derived ``is_temporal`` signal + a category ``default_window``).
+
+    ``temporal_recency_floor_enabled=False`` keeps ``synthesis_vetoed`` False so
+    the recency gate is reachable; ``_fetch_version_history`` returns a truthy
+    list so the CHANGE gate is reachable. With those satisfied, ``filter_ast`` is
+    the only remaining deciding condition on each gate.
+    """
+    retriever = _make_retriever(ns_id, complexity=QueryComplexity.MODERATE)
+    retriever._config = RetrieverConfig(
+        enable_bm25_channel=True,
+        enable_session_aware_search=False,
+        temporal_recency_channel_enabled=True,
+        temporal_recency_floor_enabled=False,
+    )
+    retriever._fetch_version_history = AsyncMock(return_value=[{"entity": "x"}])
+    retriever._decompose_change_query = MagicMock(return_value="current state of the config")
+    retriever._recency_channel_chunks = AsyncMock(return_value=[])
+    return retriever
+
+
+_CHANGE_SIGNAL = TemporalSignal(
+    is_temporal=True,
+    category=TemporalCategory.CHANGE,
+    confidence=0.9,
+    source="dictionary",
+)
+
+
+@_pushdown_gate
+class TestFilterGatesAdaptiveSubSearches:
+    """Adaptive sub-searches must NOT contaminate RRF under a ``filter_ast`` recall.
+
+    The CHANGE-decomposition and recency channels run ``temporal_filter=None``
+    sub-searches and merge their results into the vector pool that feeds RRF.
+    They are gated on the query-string-derived temporal signal, NOT on
+    ``temporal_filter`` — so a CHANGE/RECENCY-classified query combined with a
+    caller ``RecallFilter`` would otherwise smuggle filter-violating chunks into
+    the fused top-k (the deterministic pre-filter contract is violated). Until
+    ``filter_ast`` is threaded through those sub-searches (follow-up scope), they
+    must be skipped entirely when a filter is in flight.
+    """
+
+    async def test_change_and_recency_skipped_under_filter(self) -> None:
+        """With a filter present, neither adaptive sub-search runs (no merge)."""
+        ns_id = uuid4()
+        retriever = _change_recency_retriever(ns_id)
+
+        await retriever.retrieve(
+            "what changed in the config",
+            ns_id,
+            limit=10,
+            temporal_signal=_CHANGE_SIGNAL,
+            filter_ast=_build_filter_ast(),
+        )
+
+        retriever._decompose_change_query.assert_not_called()
+        retriever._recency_channel_chunks.assert_not_awaited()
+
+    async def test_change_and_recency_fire_without_filter(self) -> None:
+        """Control: with NO filter and the SAME CHANGE signal, both adaptive
+        sub-searches run — proving the ``filter_ast`` gate (not some unrelated
+        condition) is what suppresses them above. Without this control the
+        skip-assertion could pass vacuously."""
+        ns_id = uuid4()
+        retriever = _change_recency_retriever(ns_id)
+
+        await retriever.retrieve(
+            "what changed in the config",
+            ns_id,
+            limit=10,
+            temporal_signal=_CHANGE_SIGNAL,
+            filter_ast=None,
+        )
+
+        retriever._decompose_change_query.assert_called()
+        retriever._recency_channel_chunks.assert_awaited()

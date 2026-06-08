@@ -1454,7 +1454,20 @@ class VectorCypherRetriever:
         # to ensure both past and present evidence are retrieved. The original
         # query naturally retrieves past-state chunks ("used to", "previously"),
         # while the decomposed sub-query targets current-state chunks.
-        if temporal_signal and temporal_signal.category == TemporalCategory.CHANGE and version_history:
+        #
+        # Gated off when a caller filter_ast is in flight. The CHANGE signal is
+        # derived from the query string (not from temporal_filter), so this
+        # sub-search can fire under a filtered recall. It runs with
+        # temporal_filter=None and does not yet thread filter_ast (follow-up
+        # scope), so merging its results into the vector pool would smuggle
+        # filter-violating chunks into RRF and break the deterministic
+        # pre-filter contract. Skip it entirely until the filter is threaded.
+        if (
+            temporal_signal
+            and temporal_signal.category == TemporalCategory.CHANGE
+            and version_history
+            and filter_ast is None
+        ):
             current_state_query = self._decompose_change_query(query)
             if current_state_query and current_state_query != query:
                 with trace_span(
@@ -1470,10 +1483,8 @@ class VectorCypherRetriever:
                         query_text=current_state_query,
                         limit=limit,
                         min_similarity=min_similarity,
-                        # Carrying the caller filter across this CHANGE-
-                        # decomposition sub-search is deferred to follow-up
-                        # work; for now it is left unthreaded so this path
-                        # stays byte-identical to today.
+                        # Reached only when filter_ast is None (gated above), so
+                        # there is no caller filter to thread here.
                     )
                     # Merge sub-query results, deduplicating by chunk ID
                     existing_ids = {c[0] for c in vector_chunks}
@@ -1515,6 +1526,14 @@ class VectorCypherRetriever:
             and temporal_signal.is_temporal
             and _tp.default_window_days is not None
             and not synthesis_vetoed
+            # Gated off when a caller filter_ast is in flight. The recency
+            # channel is gated on the query-string-derived temporal signal, so
+            # it can fire under a filtered recall; it pulls chunks with
+            # temporal_filter=None and does not yet thread filter_ast (follow-up
+            # scope). Merging its results into the vector pool would smuggle
+            # filter-violating chunks into RRF and break the deterministic
+            # pre-filter contract. Skip it until the filter is threaded.
+            and filter_ast is None
         ):
             # Intentionally pass temporal_filter=None: the recency channel's
             # job is to surface today's chunks even when the cosine channel
