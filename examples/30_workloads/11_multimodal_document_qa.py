@@ -94,9 +94,7 @@ _QUESTIONS = [
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
     return parser.parse_args()
 
@@ -215,9 +213,7 @@ async def main() -> None:
     print(f"parsed {len(docs_paths)} docs → {len(batch)} text chunks, {len(figure_jobs)} figures")
 
     # 2 — Describe every figure with the vision model (alt text included).
-    described = await asyncio.gather(
-        *(describe_image(p, alt, client=client) for _stem, _meta, p, alt in figure_jobs)
-    )
+    described = await asyncio.gather(*(describe_image(p, alt, client=client) for _stem, _meta, p, alt in figure_jobs))
     for (stem, meta, p, alt), desc in zip(figure_jobs, described):
         print(f"\n── figure: {p.name} ──\n{desc}")
         batch.append(
@@ -241,10 +237,7 @@ async def main() -> None:
             entity_types=_ENTITY_TYPES,
             relationship_types=_REL_TYPES,
         )
-        print(
-            f"\nremembered {result.processed} chunks "
-            f"(chunks={result.chunks}, entities={result.entities})"
-        )
+        print(f"\nremembered {result.processed} chunks (chunks={result.chunks}, entities={result.entities})")
 
         # 4 — Retrieval-augmented QA: recall → grounded answer → cite external_ids.
         #     limit=10 so cross-rover comparison questions surface chunks from both rovers.
