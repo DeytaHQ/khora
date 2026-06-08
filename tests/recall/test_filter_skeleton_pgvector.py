@@ -1,5 +1,20 @@
 """Full-stack integration tests for the V1 recall-filter on Skeleton-pgvector.
 
+INTERIM TEST — SUPERSEDED BY PILLAR 1 (DYT-5025). This is an interim per-slice
+smoke test for the V1 Skeleton-pgvector filter path. Per ADR-092
+§🧪 Verification Strategy, this assertion *reduces to Pillar 1* (the
+filter-conformance corpus): its permanent home is the dedicated
+filter-conformance CI job (``tests/integration/matrix/``, marker
+``filter_conformance``, per-engine databases), tracked by DYT-5025 / P1, which
+is not built yet. That job is deliberately excluded from the main test job so
+the conformance cases never double-run. This file lives in ``tests/recall/`` and
+is collected by the main test job's unit step, where it SELF-SKIPS because that
+job provisions no Postgres — it gates locally via ``make dev`` only. That is
+acceptable for an interim smoke test; it is NOT the permanent CI gate. When
+DYT-5025 lands, MIGRATE/REMOVE this file so the assertion does not double-run
+against the Pillar-1 corpus. Do not entrench it (no Postgres service should be
+added to the main test job for this test).
+
 Where ``tests/integration/test_compile_postgres_rowset.py`` exercises the
 compiler against a hand-seeded temp table, this file drives the *public* API
 end-to-end: real ``Khora.remember()`` writes through the Skeleton engine into a
@@ -85,7 +100,17 @@ def _pg_reachable() -> bool:
 
 pytestmark = [
     pytest.mark.integration,
-    pytest.mark.skipif(not _pg_reachable(), reason="PostgreSQL not reachable (run `make dev`)"),
+    pytest.mark.skipif(
+        not _pg_reachable(),
+        # Not accidental missing coverage: this is an interim smoke test whose
+        # permanent CI coverage is Pillar 1's filter-conformance job (DYT-5025).
+        # It self-skips without local Postgres (run `make dev`).
+        reason=(
+            "interim smoke test; permanent CI coverage is Pillar 1's "
+            "filter-conformance job (DYT-5025). Self-skips without local "
+            "Postgres (run `make dev`)."
+        ),
+    ),
 ]
 
 
@@ -326,21 +351,27 @@ async def test_no_filter_returns_all_chunks(kb: Khora) -> None:
 
 
 async def test_engine_info_reports_skeleton_filter_row(kb: Khora) -> None:
-    """``engine_info['filter']`` reports the skeleton support row.
+    """``engine_info['filter']`` carries the skeleton support row, and the
+    filtered row-set is correct.
 
-    NOTE on ``pushed_down is False``: filtering is provably effective end-to-end
-    (test_filter_returns_exactly_in_scope_chunks above proves it), yet the
-    carrier flag still reports ``pushed_down=False``. That is the deliberate
-    as-built V1 placeholder — V1-j (#1012) intentionally did NOT update this
-    dict (khora.py:2136-2141). The engine_info support matrix is a V1
-    placeholder; honest per-engine pushdown reporting is a follow-up
-    (ADR-092 §6 / support-matrix). Do NOT flip the flag here — it is out of
-    scope and would break the unit contract at
-    tests/unit/test_khora.py::test_engine_info_filter_supported_for_skeleton.
+    What this pins is the *carrier contract*: ``engine_info['filter']`` is
+    present on a filtered recall and reports ``engine="skeleton"`` /
+    ``supported=True``, alongside a ``pushed_down`` flag. The assertion that
+    actually matters — that the filter narrows to exactly the in-scope rows — is
+    re-checked here too.
+
+    NOTE on ``pushed_down``: this test deliberately does NOT pin the flag's
+    value. Filtering is provably effective end-to-end
+    (test_filter_returns_exactly_in_scope_chunks proves it), but the as-built V1
+    carrier still reports ``pushed_down=False`` (khora.py:2136-2141); honest
+    per-engine pushdown reporting is a follow-up (DYT-5071 / V1-k, ADR-092 §6).
+    Asserting only that the key is present — not its value — means V1-k can flip
+    it to honest reporting without having to come back and edit this interim
+    test.
     """
     ns = await kb.create_namespace()
     namespace_id: UUID = ns.namespace_id
-    await _seed(kb, namespace_id)
+    chunk_ids = await _seed(kb, namespace_id)
 
     result = await kb.recall(
         "alpha bravo charlie",
@@ -350,10 +381,18 @@ async def test_engine_info_reports_skeleton_filter_row(kb: Khora) -> None:
         filter=_RECALL_FILTER,
     )
 
+    # Carrier present with the stable skeleton support row. ``pushed_down`` must
+    # be present (carrier shape) but its value is intentionally not pinned — see
+    # the note above (DYT-5071 / V1-k corrects it to honest reporting).
     info = (result.engine_info or {}).get("filter")
-    assert info == {"engine": "skeleton", "supported": True, "pushed_down": False}
-    # Pin the placeholder flag explicitly: filtering works (S1), reporting lags.
-    assert info["pushed_down"] is False
+    assert info is not None, "engine_info['filter'] carrier must be present on a filtered recall"
+    assert info["engine"] == "skeleton"
+    assert info["supported"] is True
+    assert "pushed_down" in info
+
+    # The assertion that actually matters: the filter narrows to exactly the
+    # in-scope rows (same contract as S1, re-pinned alongside the carrier).
+    assert {c.id for c in result.chunks} == _ids_for(chunk_ids, _IN_SCOPE)
 
 
 async def test_invalid_filter_raises_validation_error(kb: Khora) -> None:
