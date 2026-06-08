@@ -1419,7 +1419,7 @@ class QuerySettings(BaseSettings):
     enable_reranking: bool = Field(default=True, description="Enable result reranking")
     reranking_method: str = Field(default="cross_encoder", description="Reranking method: cross_encoder, llm")
     reranking_model: str | None = Field(
-        default="cross-encoder/ms-marco-MiniLM-L-12-v2",
+        default="BAAI/bge-reranker-v2-m3",
         description="Model for reranking (cross-encoder model or LLM)",
     )
     reranking_top_n: int = Field(default=50, ge=1, description="Number of candidates to rerank")
