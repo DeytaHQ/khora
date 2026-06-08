@@ -60,11 +60,17 @@ _ENTITY_TYPES = ["SPACECRAFT", "INSTRUMENT", "LOCATION", "MEASUREMENT", "MISSION
 _REL_TYPES = ["RELATES_TO", "PART_OF", "LOCATED_IN"]
 
 _VISION_SYSTEM = (
-    "You are describing a figure — a chart, map, or labeled diagram — for a search index. "
-    "Write a clear, thorough description of what the figure shows and its purpose. Transcribe "
-    "every visible label, place name, axis title, legend entry, and numeric value you can read, "
-    "and explain how the labeled parts relate to each other. Completeness matters more than "
-    "brevity, so do not limit the length. No preamble."
+    "You are describing a figure — a map, chart, or labeled diagram — for a search index, in "
+    "enough detail that a reader could reconstruct it without seeing it. Cover three things:\n"
+    "1. CONTENT — transcribe every visible label, place name, axis title, legend entry, and number.\n"
+    "2. LAYOUT — say where each element sits and how elements relate in space. For a map, give "
+    "positions with compass directions (north/south/east/west) and use the scale bar to estimate "
+    "distances between places (for example, 'X is north of Y, roughly 2 km away'). For a diagram, "
+    "say what is mounted where and what is next to, above or below, or hidden behind what.\n"
+    "3. STORY — if the figure shows a route or sequence such as a rover's traverse, narrate the "
+    "path in order from start to finish: the starting point, each stop in sequence, and the "
+    "overall direction of travel.\n"
+    "Completeness matters more than brevity; do not limit the length. No preamble."
 )
 
 _QUESTIONS = [
@@ -73,6 +79,9 @@ _QUESTIONS = [
     "Which rover has more cameras?",
     "Which instruments sit on Perseverance's robotic-arm turret?",
     "What has each rover discovered or demonstrated about Mars?",
+    "What path did Curiosity traverse since landing?",
+    "What is in front of each rover?",
+    "How many wheels does Curiosity have?",
 ]
 
 
