@@ -87,6 +87,68 @@ _VC_ABSTENTION_COMBINED_SCORE_HISTOGRAM = metric_histogram(
     description="VectorCypher abstention combined-score (0.0=confident, 1.0=should-abstain).",
 )
 
+# Chunk graph-mirror degradation counter (ADR-001). The create path mirrors
+# pgvector-stored chunks into Neo4j Chunk nodes; a Neo4j write failure must not
+# abort the document ingest now that pgvector already holds the chunks. On
+# failure we record a Degradation, increment this counter, and continue - the
+# graph is left without the chunk mirror for this window. NO namespace_id label
+# - cardinality rule.
+_CHUNK_MIRROR_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.chunk_mirror.degraded_total",
+    unit="1",
+    description=(
+        "VectorCypher Neo4j chunk-mirror silent fallback. Incremented when a "
+        "Chunk-node mirror write to Neo4j raises (create, replace, or batch "
+        "ingest path) and ingest continues with chunks persisted only in "
+        "pgvector. The same event is also appended to "
+        "RememberResult.metadata['degradations'] where a diagnostics sink "
+        "exists. Labels: channel (graph), reason (neo4j_write_failed). NO "
+        "namespace_id label - cardinality rule. "
+        "See docs/architecture/failure-observability-contract.md."
+    ),
+)
+
+
+async def _mirror_chunks_or_degrade(
+    dual_nodes: DualNodeManager | None,
+    chunks: list[TemporalChunk],
+    namespace_id: UUID,
+    out_diagnostics: dict[str, Any] | None = None,
+) -> None:
+    """Mirror chunks to Neo4j, degrading instead of raising on failure (ADR-001).
+
+    Every VectorCypher "pgvector first, then mirror to Neo4j" create path routes
+    its ``:Chunk`` write through this helper so the fallback behavior and the
+    observability signal are uniform across the create, replace, and batch
+    ingest paths. The chunks are already durable in pgvector by the time this
+    runs, so a Neo4j mirror failure must not abort ingest: it is logged at
+    WARNING, the ``khora.vectorcypher.chunk_mirror.degraded_total`` counter is
+    incremented with ``{channel, reason}`` (no ``namespace_id`` - cardinality
+    rule), and - when an ``out_diagnostics`` dict is supplied - a ``Degradation``
+    is appended to ``out_diagnostics['degradations']`` so it surfaces on
+    ``RememberResult.metadata``. No-ops when ``dual_nodes`` is ``None`` (e.g. the
+    SurrealDB unified backend keeps chunks in its temporal store).
+    """
+    if dual_nodes is None:
+        return
+    try:
+        await dual_nodes.create_chunk_nodes_batch(chunks, namespace_id)
+    except Exception as exc:
+        logger.warning(
+            "Neo4j chunk-mirror write failed, continuing with chunks in pgvector only",
+            exc_info=True,
+        )
+        _CHUNK_MIRROR_DEGRADED_COUNTER.add(1, attributes={"channel": "graph", "reason": "neo4j_write_failed"})
+        if out_diagnostics is not None:
+            out_diagnostics.setdefault("degradations", []).append(
+                Degradation(
+                    component="vectorcypher.chunk_mirror",
+                    reason="neo4j_write_failed",
+                    detail=str(exc)[:200] or None,
+                    exception=type(exc).__name__,
+                )
+            )
+
 
 def _ensure_tags(value: Any) -> list[str]:
     """Coerce tags to a list — handles JSON strings from PostgreSQL metadata."""
@@ -1118,9 +1180,11 @@ class VectorCypherEngine:
                     for i, stored in enumerate(stored_chunks):
                         temporal_chunks[i].id = stored.id
 
-                    # Create Chunk nodes in Neo4j (skipped for SurrealDB — chunks in temporal store)
-                    if dual_nodes is not None:
-                        await dual_nodes.create_chunk_nodes_batch(temporal_chunks, document.namespace_id)
+                    # Mirror the chunks to Neo4j (skipped for SurrealDB — chunks in temporal
+                    # store). The chunks are already durable in pgvector above, so a Neo4j
+                    # mirror failure degrades (counter + Degradation) rather than aborting
+                    # ingest (ADR-001).
+                    await _mirror_chunks_or_degrade(dual_nodes, temporal_chunks, document.namespace_id, out_diagnostics)
 
                     # Skeleton-based entity extraction (for core chunks only)
                     if self._config.pipeline.extract_entities:
@@ -1738,6 +1802,10 @@ class VectorCypherEngine:
                 )
             )
 
+        # A mirror-only Neo4j failure degrades rather than failing the document;
+        # collect any such Degradation here to surface on the result metadata.
+        replace_diagnostics: dict[str, Any] = {}
+
         try:
             # Wipe old VectorCypher-owned state.
             await temporal_store.delete_chunks_by_document(existing.id, namespace_id)
@@ -1753,8 +1821,11 @@ class VectorCypherEngine:
                 for tc, stored, chunk in zip(new_temporal_chunks, stored_temporal, new_chunks):
                     tc.id = stored.id
                     chunk.id = stored.id
-                if dual_nodes is not None:
-                    await dual_nodes.create_chunk_nodes_batch(new_temporal_chunks, namespace_id)
+                # Mirror the new chunks to Neo4j. A mirror-only failure degrades
+                # (counter + Degradation) instead of marking the document FAILED —
+                # pgvector already holds the chunks and the coordinator's #884 path
+                # below handles any remaining graph divergence.
+                await _mirror_chunks_or_degrade(dual_nodes, new_temporal_chunks, namespace_id, replace_diagnostics)
         except Exception as e:
             # Self-heal: mark FAILED and re-raise unwrapped so the next
             # successful replace against the same external_id heals the row.
@@ -1819,7 +1890,8 @@ class VectorCypherEngine:
                             "reason": "graph_mirror_failed_after_pg_commit",
                             "exception": graph_mirror_err.original_exception_type,
                             "issue": "884",
-                        }
+                        },
+                        *replace_diagnostics.get("degradations", []),
                     ],
                 },
             )
@@ -1913,13 +1985,17 @@ class VectorCypherEngine:
             if rel_reset_rows:
                 await reset_rel_source_chunk_ids(namespace_id, rel_reset_rows)
 
+        replace_metadata: dict[str, Any] = {"replaced": True, "old_document_id": str(existing.id)}
+        mirror_degradations = replace_diagnostics.get("degradations")
+        if mirror_degradations:
+            replace_metadata["degradations"] = list(mirror_degradations)
         return RememberResult(
             document_id=replace_result.document_id,
             namespace_id=namespace_id,
             chunks_created=replace_result.chunks_created,
             entities_extracted=replace_result.entities_created + replace_result.entities_updated,
             relationships_created=replace_result.relationships_created,
-            metadata={"replaced": True, "old_document_id": str(existing.id)},
+            metadata=replace_metadata,
         )
 
     def _validate_recall_results(
@@ -2814,9 +2890,10 @@ class VectorCypherEngine:
             for i, s in enumerate(stored):
                 all_temporal_chunks[i].id = s.id
 
-            # Batch create Neo4j chunk nodes (skipped for SurrealDB)
-            if dual_nodes is not None:
-                await dual_nodes.create_chunk_nodes_batch(all_temporal_chunks, namespace_id)
+            # Mirror the batch's chunks to Neo4j (skipped for SurrealDB). Chunks are
+            # already durable in pgvector, so a mirror failure degrades (counter +
+            # WARNING) rather than aborting the batch (ADR-001).
+            await _mirror_chunks_or_degrade(dual_nodes, all_temporal_chunks, namespace_id)
 
             _stage3_ms += (_time.perf_counter() - _t0) * 1000
 
