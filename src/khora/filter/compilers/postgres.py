@@ -362,16 +362,36 @@ class _Builder:
     def _md_containment(self, segs: tuple[str, ...], value: Any) -> ColumnElement[bool]:
         """Array-aware ``@>`` containment rooted at the metadata column.
 
-        For a single-segment path ``("tags",)`` this is ``metadata @> '{"tags":
-        v}'`` — which matches both a scalar field equal to ``v`` and an array
-        field containing ``v``. For a nested path the one-key doc is wrapped at
-        each segment (``{"a": {"tags": v}}``). ``@>`` returns a total boolean
-        (``FALSE`` on absent/mismatch, never ``NULL``), so it is negation-safe.
+        JSONB ``@>`` does NOT treat ``'{"tags": "x"}'`` as contained by
+        ``'{"tags": ["x"]}'`` — the array-contains-primitive exception applies
+        only when the operand itself is an array, not at a nested object key. So
+        a single ``metadata @> '{"tags": v}'`` misses an array-valued field. To
+        match BOTH a scalar field equal to ``v`` and an array field containing
+        ``v``, OR the scalar-doc form with an array-wrapped form whose leaf value
+        is a one-element list:
+
+            ``metadata @> '{"tags": v}'  OR  metadata @> '{"tags": [v]}'``
+
+        For a nested path the one-key doc is wrapped at each segment; the array
+        form wraps the LEAF value (``{"a": {"tags": v}}`` / ``{"a": {"tags":
+        [v]}}``). Each ``@>`` is a total boolean (``FALSE`` on absent/mismatch,
+        never ``NULL``), so the OR of two totals is total and negation-safe.
         """
-        doc: Any = _date_to_jsonable(value)
+        leaf = _date_to_jsonable(value)
+        scalar_doc: Any = leaf
+        array_doc: Any = [leaf]
         for seg in reversed(segs):
-            doc = {seg: doc}
-        return self._md.op("@>")(_jsonb_literal(doc))
+            scalar_doc = {seg: scalar_doc}
+            array_doc = {seg: array_doc}
+        # Both arms are `@>` probes, so a GIN index on `metadata` still serves
+        # this OR (the planner bitmap-ORs the two index scans) — do not collapse
+        # it into a non-`@>` form that loses the index. ``value is None`` only
+        # reaches here from `{k: {$in: [null, ...]}}` (a `{k: null}` $eq is routed
+        # to `_md_null` before this), where the array arm just adds `@> {k:[null]}`.
+        return sa.or_(
+            self._md.op("@>")(_jsonb_literal(scalar_doc)),
+            self._md.op("@>")(_jsonb_literal(array_doc)),
+        )
 
     def _md_exists(self, segs: tuple[str, ...]) -> ColumnElement[bool]:
         """Presence test for a metadata path — total boolean.
