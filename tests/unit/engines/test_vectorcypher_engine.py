@@ -1433,6 +1433,7 @@ class TestVectorCypherEngineForget:
         engine._storage.vector.remove_document_from_entity_sources = AsyncMock()
         engine._storage.vector.remove_document_from_relationship_sources = AsyncMock()
         engine._storage.graph = MagicMock()
+        engine._storage.graph.list_relationships = AsyncMock(return_value=[])
         engine._storage.graph.delete_entities_batch = AsyncMock()
         engine._storage.graph.delete_relationships_batch = AsyncMock()
         engine._storage.graph.remove_document_from_entity_sources_batch = AsyncMock()
