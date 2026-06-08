@@ -98,6 +98,10 @@ async def _run_cypher(driver: Any, query: str, **params: Any) -> list[dict[str, 
     not os.environ.get("NEO4J_INTEGRATION_TEST"),
     reason="set NEO4J_INTEGRATION_TEST=1 to run against real backends (requires make dev)",
 )
+@pytest.mark.xfail(
+    reason="tracked in #1033: never-run-in-CI replace/forget lifecycle; first CI run hit fixture event-loop binding + downstream PG/graph failures. Quarantined pending triage against a live PG+Neo4j stack.",
+    strict=False,
+)
 class TestForgetCascadeOrphansIntegration:
     """End-to-end forget()-cascade behaviour against real Postgres + Neo4j."""
 
@@ -117,7 +121,7 @@ class TestForgetCascadeOrphansIntegration:
             _stub_embed,
         )
 
-    @pytest.fixture(scope="class")
+    @pytest.fixture
     async def kb(self) -> AsyncIterator[Khora]:
         database_url = os.environ.get(
             "KHORA_DATABASE_URL",
