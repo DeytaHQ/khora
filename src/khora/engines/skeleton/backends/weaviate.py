@@ -33,6 +33,7 @@ is preserved for back-compat; it wraps the URL in a default
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -56,6 +57,13 @@ if TYPE_CHECKING:
 
 # Collection name for temporal chunks
 COLLECTION_NAME = "KhoraChunk"
+
+# Over-fetch multiplier applied when a ``filter_ast`` post-filter runs. Only the
+# two DATE properties (``occurred_at`` / ``created_at``) push down to Weaviate;
+# every other predicate is re-checked in Python against each candidate and may
+# drop rows. We fetch ``limit * _FILTER_OVERFETCH`` candidates so the trimmed
+# survivor set can still reach ``limit`` after the post-filter prunes.
+_FILTER_OVERFETCH = 4
 
 
 @dataclass(frozen=True)
@@ -399,13 +407,86 @@ class WeaviateTemporalStore(TemporalVectorStore):
         - alpha=0: Pure BM25 search
         - 0 < alpha < 1: Blend of both
 
-        ``filter_ast`` is accepted for protocol parity; this backend does not
-        compile the recall-filter AST yet, so it is ignored.
+        ``filter_ast`` is the deterministic recall-filter AST. When provided it is
+        handled in two halves:
+
+        1. **Push-down.** ``compile_weaviate`` lowers the pushable slice of the
+           AST to a native Weaviate :class:`~weaviate.classes.query.Filter` (only
+           the two DATE properties ``occurred_at`` / ``created_at`` are stored as
+           queryable Weaviate properties, so only date predicates push down). That
+           filter is AND-ed alongside the legacy ``temporal_filter`` result and
+           passed as ``filters=``; the two coexist during the ``TemporalFilter``
+           deprecation window.
+        2. **Post-filter.** ``compile_python`` compiles the *whole* AST to an
+           in-memory predicate that is re-applied to every returned chunk. Because
+           the post-filter prunes rows, the query over-fetches
+           ``limit * _FILTER_OVERFETCH`` candidates and the survivor set is trimmed
+           back to ``limit`` afterwards (ranking order preserved). Re-checking the
+           pushed-down date keys in Python is idempotent — this guarantees the
+           backend honors the filter and never raises.
+
+        Stale-collection-schema limitation: the eight document-grained system keys
+        (``source_type`` / ``source_name`` / ``source_url`` / ``source_timestamp``
+        / ``external_id`` / ``content_type`` / ``source`` / ``title``) are NOT
+        stored on the ``KhoraChunk`` collection, nor is the structured ``metadata``
+        blob (it is serialized to a single ``metadata_json`` string property). A
+        predicate on any of those post-filters against an absent field, so
+        ``compile_python``'s absent-key semantics apply (a positive op excludes the
+        chunk, a negation includes it). Pushing those down would need a separate
+        collection-projection change and is out of scope here.
+
+        Two edge cases worth knowing:
+
+        * **May return fewer than** ``limit``. A predicate Weaviate cannot
+          pre-narrow (any ``metadata`` path — metadata is not a queryable property)
+          is enforced only by the python post-filter, which prunes from the
+          ``limit * _FILTER_OVERFETCH`` candidate pool. A highly selective such
+          filter can leave fewer than ``limit`` survivors. This is superset-safe
+          (never a wrong row, only possibly fewer) and inherent to post-filtering;
+          a caller needing exactly ``limit`` under heavy metadata selectivity must
+          widen the candidate budget (raise ``limit`` upstream).
+        * **A positive predicate on an unstored key returns ZERO rows.** Because
+          the eight document-grained system keys above are absent on every stored
+          object, a positive predicate such as ``{"source_name": "foo"}``
+          post-filters to an empty result (absent == not-equal under §4); only the
+          negation form (``$ne`` / ``$nin``) admits those rows. Not a silent bug —
+          a direct consequence of the stale-collection-schema limitation.
         """
         from weaviate.classes.query import HybridFusion, MetadataQuery
 
         collection = await self._get_collection(namespace_id)
         weaviate_filter = self._build_weaviate_filter(temporal_filter) if temporal_filter else None
+
+        # Deterministic recall-filter AST: compile the pushable date slice to a
+        # native Weaviate filter and AND it into the legacy temporal filter; build
+        # an in-memory predicate over the whole AST for the post-filter pass.
+        post_filter: Callable[[Any], bool] | None = None
+        if filter_ast is not None:
+            from khora.filter import CompileContext
+            from khora.filter.compilers.python import compile_python
+            from khora.filter.compilers.weaviate import compile_weaviate
+
+            compiled = compile_weaviate(
+                filter_ast,
+                CompileContext(
+                    backend_target=COLLECTION_NAME,
+                    on_unsupported="split",
+                    field_mapping={"occurred_at": "occurred_at", "created_at": "created_at"},
+                ),
+            )
+            if compiled.predicate is not None:
+                weaviate_filter = (
+                    compiled.predicate if weaviate_filter is None else weaviate_filter & compiled.predicate
+                )
+
+            post_filter = compile_python(
+                filter_ast,
+                CompileContext(backend_target=COLLECTION_NAME, on_unsupported="split"),
+            ).predicate
+
+        # Over-fetch when a post-filter runs — it prunes rows, so we need a larger
+        # candidate pool to still satisfy ``limit`` after trimming.
+        fetch_limit = limit * _FILTER_OVERFETCH if post_filter is not None else limit
 
         if hybrid_alpha is not None and query_text:
             result = await collection.query.hybrid(
@@ -413,7 +494,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
                 vector=query_embedding,
                 alpha=hybrid_alpha,
                 filters=weaviate_filter,
-                limit=limit,
+                limit=fetch_limit,
                 return_metadata=MetadataQuery(score=True, distance=True),
                 include_vector=True,
                 fusion_type=HybridFusion.RELATIVE_SCORE,
@@ -422,7 +503,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
             result = await collection.query.near_vector(
                 near_vector=query_embedding,
                 filters=weaviate_filter,
-                limit=limit,
+                limit=fetch_limit,
                 return_metadata=MetadataQuery(distance=True),
                 include_vector=True,
             )
@@ -430,6 +511,9 @@ class WeaviateTemporalStore(TemporalVectorStore):
         search_results = []
         for obj in result.objects:
             chunk = self._object_to_chunk(obj, namespace_id)
+            # Post-filter the whole AST in Python (idempotent on pushed-down keys).
+            if post_filter is not None and not post_filter(chunk):
+                continue
             distance = obj.metadata.distance if obj.metadata else 0
             similarity = 1 - distance if distance else 0
             if similarity >= min_similarity:
@@ -441,6 +525,11 @@ class WeaviateTemporalStore(TemporalVectorStore):
                         combined_score=obj.metadata.score if obj.metadata else similarity,
                     )
                 )
+
+        # Trim survivors back to ``limit`` — over-fetch padded the candidate pool;
+        # ranking order is preserved (Weaviate returns best-scored first).
+        if post_filter is not None:
+            search_results = search_results[:limit]
 
         return search_results
 
@@ -638,3 +727,18 @@ def _chunk_to_properties(chunk: TemporalChunk) -> dict[str, Any]:
 
 
 __all__ = ["WeaviateBackendConfig", "WeaviateTemporalStore"]
+
+
+# Register the deterministic recall-filter push-down compiler for this
+# engine/target at import time (idempotent — same function object). ``weaviate.py``
+# is imported lazily by ``create_temporal_store("weaviate", ...)``, so registration
+# happens exactly when the Weaviate backend is first constructed — no eager cost,
+# and no registration when the backend is unused. Mirrors
+# ``pgvector.py``/``chronicle`` engine.py: the registry holds the backend's
+# push-down compiler keyed by its storage target (the collection name); the
+# ``compile_python`` post-filter is imported and applied directly in ``search()``,
+# never looked up via the registry (no engine registers a post-filter key).
+from khora.filter import CompilerRegistry  # noqa: E402
+from khora.filter.compilers.weaviate import compile_weaviate  # noqa: E402
+
+CompilerRegistry.register("skeleton.weaviate", COLLECTION_NAME, compile_weaviate)
