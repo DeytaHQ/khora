@@ -227,6 +227,70 @@ Coherence scoring complements, but does not replace, MMR diversity selection. MM
 
 > **Note:** Coherence scoring only applies to the VectorCypher retriever pipeline.
 
+### Reranking
+
+After RRF fusion, an optional neural reranker rescores the top candidates as query–document *pairs* (a cross-encoder, unlike the bi-encoder used for the initial embedding search). The reranker is cached across queries and runs in `asyncio.to_thread`, and it [skips small result sets](#reranking-skip-for-small-result-sets-p1) (<5 chunks).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `KHORA_QUERY_ENABLE_RERANKING` | `true` | Master on/off for the reranking stage. |
+| `KHORA_QUERY_RERANKING_METHOD` | `cross_encoder` | `cross_encoder` or `llm`. |
+| `KHORA_QUERY_RERANKING_MODEL` | `cross-encoder/ms-marco-MiniLM-L-12-v2` | Any sentence-transformers cross-encoder. |
+| `KHORA_QUERY_RERANKING_TOP_N` | `50` | Candidates fed to the reranker. |
+| `KHORA_QUERY_RERANKING_FINAL_K` | `10` | Results kept after reranking. |
+| `KHORA_QUERY_RERANKING_BLEND_WEIGHT` | `0.7` | Reranker-score weight when blending with the original fused score; remainder keeps the RRF score (`0.7` = 70 % reranker / 30 % original). |
+
+```bash
+KHORA_QUERY_RERANKING_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2   # faster swap
+KHORA_QUERY_RERANKING_BLEND_WEIGHT=0.7                            # default
+```
+
+**Choosing a model.** The `L-N` in the default model name is the number of transformer layers in the [MS MARCO MiniLM cross-encoder](https://www.sbert.net/docs/cross_encoder/pretrained_models.html) — more layers means more accurate but slower:
+
+| Model | Relative quality | Relative speed |
+|---|---|---|
+| `cross-encoder/ms-marco-MiniLM-L-6-v2` | ~equal to L-12 | ~2× faster |
+| `cross-encoder/ms-marco-MiniLM-L-12-v2` (default) | baseline | baseline |
+
+On the MS MARCO / TREC-DL benchmarks the L-6 and L-12 variants score within a hair of each other (NDCG@10 ≈ 74.3 for both) while L-6 is roughly twice as fast, so **L-6 is usually the better default** for latency-sensitive deployments. Because the reranker is cached by `(model, include_date_prefix)`, switching the model is a one-line config change with no code edit.
+
+**Use a stronger reranker for better relevance.** The default is the MS MARCO MiniLM cross-encoder, but in our testing a modern reranker like **[`BAAI/bge-reranker-v2-m3`](https://huggingface.co/BAAI/bge-reranker-v2-m3)** gives noticeably better results — it's multilingual, handles longer inputs, and ranks more robustly on paraphrased and domain-specific queries. Any model loadable by `CrossEncoder(model_name)` is valid (BGE, mxbai, etc.), so swapping it in is just a config change:
+
+```bash
+# Default is ms-marco; we got better results with bge.
+KHORA_QUERY_RERANKING_MODEL=BAAI/bge-reranker-v2-m3
+```
+
+```python
+from khora import Khora
+from khora.config import KhoraConfig
+
+config = KhoraConfig.from_yaml("khora.yaml")
+config.query.reranking_model = "BAAI/bge-reranker-v2-m3"
+kb = Khora(config)
+```
+
+```yaml
+# khora.yaml
+query:
+  reranking_model: BAAI/bge-reranker-v2-m3
+```
+
+The stronger model is larger and a bit slower per query than MiniLM — pair it with `KHORA_QUERY_RERANKING_TOP_N` if you need to bound the candidate count, and run it on GPU when available (the reranker auto-detects the device). BGE-reranker emits relevance logits rather than 0–1 scores; the default `RERANKING_BLEND_WEIGHT=0.7` works fine, but you can tune the blend if you want the reranker to dominate the final order.
+
+> **Tip:** Set `KHORA_QUERY_RERANKING_MODEL` explicitly rather than relying on the default. The high-level `QuerySettings` default is `L-12`, but some internal retriever defaults are `L-6`; pinning the env var removes the ambiguity about which model actually loads.
+
+**LLM listwise reranking (opt-in).** For temporal queries you can chain an LLM reranker *after* the cross-encoder stage. It only fires when the cross-encoder is *not* already confident — i.e. when the rank-1-vs-rank-2 score gap is below the confidence threshold — so most queries never pay the extra LLM call.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `KHORA_QUERY_ENABLE_LLM_RERANKING` | `false` | Opt-in; runs after the cross-encoder. |
+| `KHORA_QUERY_LLM_RERANKING_MODEL` | `gpt-4o-mini` | Model for the listwise pass. |
+| `KHORA_QUERY_LLM_RERANKING_TOP_N` | `10` | Top candidates sent to the LLM (3–30). |
+| `KHORA_QUERY_LLM_RERANKING_CONFIDENCE_THRESHOLD` | `0.1` | Trigger only when the cross-encoder rank-1/rank-2 gap is below this. |
+
+See also the opt-in [cross-encoder date-prefix experiment](#whats-next) below, which prepends `[YYYY-MM-DD]` to each candidate before scoring.
+
 ## What's Next
 
 These changes should eliminate the zero-result problem and significantly improve retrieval quality on descriptive/paraphrased queries. The benchmark should be re-run to validate the expected impact:

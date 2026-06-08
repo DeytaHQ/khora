@@ -258,6 +258,15 @@ Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retr
 | `KHORA_QUERY_ENABLE_HYDE_CYPHER` | `false` | **Opt-in.** Run LLM-picked parameterized Cypher templates as an extra retrieval channel for structured RECENCY queries. See [retrieval-tuning.md](query-engine/retrieval-tuning.md). |
 | `KHORA_QUERY_HYDE_CYPHER_LIMIT` | `20` | Max entities returned per HyDE-Cypher template execution. |
 | `KHORA_QUERY_ENABLE_RERANKING` | `true` | Cross-encoder reranking of top candidates. |
+| `KHORA_QUERY_RERANKING_METHOD` | `cross_encoder` | Reranker stage: `cross_encoder` or `llm`. |
+| `KHORA_QUERY_RERANKING_MODEL` | `cross-encoder/ms-marco-MiniLM-L-12-v2` | sentence-transformers cross-encoder model name. Any HuggingFace cross-encoder works. Default is ms-marco, but a stronger reranker such as `BAAI/bge-reranker-v2-m3` gives better relevance; `cross-encoder/ms-marco-MiniLM-L-6-v2` is ~2× faster at near-equal quality. See [retrieval-tuning.md](query-engine/retrieval-tuning.md#reranking). |
+| `KHORA_QUERY_RERANKING_TOP_N` | `50` | Candidates fed to the reranker (1+). |
+| `KHORA_QUERY_RERANKING_FINAL_K` | `10` | Results kept after reranking (1+). |
+| `KHORA_QUERY_RERANKING_BLEND_WEIGHT` | `0.7` | Weight on the reranker score when blending with the original fused score (`0.7` = 70 % reranker / 30 % original). |
+| `KHORA_QUERY_ENABLE_LLM_RERANKING` | `false` | **Opt-in.** LLM listwise reranking after the cross-encoder stage (temporal queries). |
+| `KHORA_QUERY_LLM_RERANKING_MODEL` | `gpt-4o-mini` | Model for LLM listwise reranking. |
+| `KHORA_QUERY_LLM_RERANKING_TOP_N` | `10` | Top candidates sent to the LLM reranker (3–30). |
+| `KHORA_QUERY_LLM_RERANKING_CONFIDENCE_THRESHOLD` | `0.1` | Only trigger LLM reranking when the cross-encoder's rank-1-vs-rank-2 score gap is below this. |
 | `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN` | `true` | Push relative-date filters into SQL WHERE clauses. |
 
 ## Tenancy
