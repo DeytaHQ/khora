@@ -86,7 +86,7 @@ The everyday calls, one concept at a time. Most run on VectorCypher (the default
   Inspect the graph khora builds at `remember` time.
 - [`05_find_related_entities.py`](10_core_apis/05_find_related_entities.py) —
   Explore the entity / relationship graph with `find_related_entities`.
-- [`06_expertise_config.py.py`](10_core_apis/06_expertise_config.py) — 
+- [`06_expertise_config.py`](10_core_apis/06_expertise_config.py) —
   Configure and use ontology as Khora ExpertiseConfig
 - [`07_image_ingestion.py`](10_core_apis/07_image_ingestion.py) — *skeleton* —
   Image ingestion: describe a set of figures with a vision model, remember the
