@@ -1611,6 +1611,37 @@ class TestVectorCypherEngineForget:
         connected_engine._storage.vector.delete_relationships_batch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_forget_cascade_classifies_relationships_from_graph_mirror(
+        self, connected_engine: VectorCypherEngine
+    ) -> None:
+        """On PG+graph stacks the vector relationships table is empty, so the
+        cascade falls back to the graph mirror to classify survivor
+        relationships; the forgotten doc id is still stripped on the mirror."""
+        doc_id = uuid4()
+        namespace_id = uuid4()
+        survivor_rel_id = uuid4()
+        other_doc = uuid4()
+
+        doc_mock = MagicMock()
+        doc_mock.namespace_id = namespace_id
+        connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
+        connected_engine._storage.delete_document = AsyncMock(return_value=True)
+        # Primary (pgvector) holds no relationships; the mirror (graph) does.
+        connected_engine._storage.vector.list_relationships = AsyncMock(return_value=[])
+        connected_engine._storage.graph.list_relationships = AsyncMock(
+            return_value=[_ent(survivor_rel_id, [doc_id, other_doc])]
+        )
+
+        await connected_engine.forget(doc_id, namespace_id)
+
+        # The survivor relationship is classified off the mirror and stripped
+        # there, scoped to the namespace.
+        connected_engine._storage.graph.remove_document_from_relationship_sources_batch.assert_awaited_once_with(
+            [survivor_rel_id], doc_id, namespace_id
+        )
+        connected_engine._storage.graph.delete_relationships_batch.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_forget_cascade_zero_extraction_skips_backend_calls(
         self, connected_engine: VectorCypherEngine
     ) -> None:
