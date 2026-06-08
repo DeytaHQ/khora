@@ -56,6 +56,7 @@ from khora.filter.conformance import (
 )
 from khora.storage.backends.postgresql import PostgreSQLBackend
 from khora.storage.coordinator import StorageCoordinator
+from tests.integration._sqlite_lance_fixtures import fake_embedding
 
 # Same default + normalization as the sibling skeleton/chronicle PG modules.
 DATABASE_URL = os.environ.get(
@@ -86,13 +87,18 @@ def _to_temporal_chunk(chunk: Chunk) -> TemporalChunk:
     and metadata — so copy those and let the skeleton-only columns default to
     ``None``. The pruned string-key F-OP cases are the only ones that would need
     the denormalized document columns, and they are not asserted on postgres.
+
+    The embedding is regenerated at ``EMBED_DIM`` (1536): ``seed_case`` builds it at
+    the sqlite_lance fixture's small dimension, but ``khora_chunks.embedding`` is a
+    fixed ``Vector(1536)`` column. The value is irrelevant to filter conformance
+    (the compiled predicate never touches the vector channel), only its dimension.
     """
     return TemporalChunk(
         id=chunk.id,
         namespace_id=chunk.namespace_id,
         document_id=chunk.document_id,
         content=chunk.content,
-        embedding=chunk.embedding,
+        embedding=fake_embedding(chunk.content, dim=EMBED_DIM),
         occurred_at=chunk.occurred_at,
         created_at=chunk.created_at,
         source_timestamp=chunk.source_timestamp,
