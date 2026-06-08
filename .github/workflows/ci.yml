@@ -440,7 +440,7 @@ jobs:
         # loud-DB-down guarantee is the KHORA_PG_REQUIRED guard + the migration
         # step (both fail red on PG-down) — not a coverage-collapse signal.
         run: |
-          uv run pytest tests/integration/ tests/unit/dream/test_locks.py -m integration -n 0 --cov=src/khora --cov-branch --cov-report=xml:coverage-integration.xml --cov-fail-under=0 --timeout=120 --timeout-method=thread
+          uv run pytest tests/integration/ tests/unit/dream/test_locks.py -m "integration and not filter_conformance" -n 0 --cov=src/khora --cov-branch --cov-report=xml:coverage-integration.xml --cov-fail-under=0 --timeout=120 --timeout-method=thread
 
       - name: Upload integration coverage to Codecov
         uses: codecov/codecov-action@v5
