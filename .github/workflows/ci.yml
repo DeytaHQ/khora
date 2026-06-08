@@ -265,8 +265,12 @@ jobs:
         run: uv run pytest tests/unit/test_migration_drift.py -v -o "addopts=" --no-cov
 
       - name: Run unit tests with coverage (parallel)
+        # tests/recall/ holds the recall-filter suite (validator, AST,
+        # compiler-dispatch, plus the skeleton-pgvector integration test which
+        # self-skips when Postgres is unreachable); collect it here so the
+        # filter tests gate in CI.
         run: |
-          uv run pytest tests/unit/ --cov=src/khora --cov-branch --cov-report=xml:coverage-unit.xml --cov-fail-under=0 -n auto --timeout=120 --timeout-method=thread
+          uv run pytest tests/unit/ tests/recall/ --cov=src/khora --cov-branch --cov-report=xml:coverage-unit.xml --cov-fail-under=0 -n auto --timeout=120 --timeout-method=thread
 
       - name: Upload unit coverage to Codecov
         uses: codecov/codecov-action@v5
