@@ -135,6 +135,12 @@ make lint        # ruff + ty typecheck
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
+## The name
+
+> *"Khora is the receptacle, the space, the matrix in which all things come to be."* - Plato, *Timaeus*
+
+Khora (χώρα) is Plato's term for the receptacle that holds and gives place to everything that comes into being - a fitting name for a substrate that takes in what an agent learns and makes it retrievable.
+
 ## License
 
 Copyright 2026 AllTheData Inc.
