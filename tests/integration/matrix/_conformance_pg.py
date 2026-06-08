@@ -44,6 +44,8 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.config import KhoraConfig
+from khora.core.models import Chunk
+from khora.engines.skeleton.backends import TemporalChunk
 from khora.engines.skeleton.backends.pgvector import (
     PgVectorTemporalStore,
     khora_chunks_table,
@@ -71,6 +73,45 @@ EMBED_DIM = 1536
 # Path of the JSON seed-map artifact the seed entrypoint writes and the test reads.
 # Shared via env so the workflow's seed step and pytest step agree on one file.
 SEED_MAP_PATH = os.environ.get("KHORA_CONFORMANCE_SEED_MAP", ".conformance_seed_map.json")
+
+
+def _to_temporal_chunk(chunk: Chunk) -> TemporalChunk:
+    """Adapt a core ``Chunk`` (what ``seed_case`` builds) to the ``TemporalChunk``
+    the skeleton ``khora_chunks`` store writes.
+
+    ``PgVectorTemporalStore.create_chunks_batch`` reads ``TemporalChunk``-only
+    columns (``source_system``/``author``/``channel``/the denormalized document
+    keys). ``seed_case`` sets only the fields both models share — ids, content,
+    embedding, the three ``_DATE_KEYS`` (occurred_at/created_at/source_timestamp),
+    and metadata — so copy those and let the skeleton-only columns default to
+    ``None``. The pruned string-key F-OP cases are the only ones that would need
+    the denormalized document columns, and they are not asserted on postgres.
+    """
+    return TemporalChunk(
+        id=chunk.id,
+        namespace_id=chunk.namespace_id,
+        document_id=chunk.document_id,
+        content=chunk.content,
+        embedding=chunk.embedding,
+        occurred_at=chunk.occurred_at,
+        created_at=chunk.created_at,
+        source_timestamp=chunk.source_timestamp,
+        metadata=dict(chunk.metadata or {}),
+        chunker_info=dict(chunk.chunker_info or {}),
+    )
+
+
+class _CoreChunkTemporalStore(PgVectorTemporalStore):
+    """``PgVectorTemporalStore`` that accepts ``seed_case``'s core ``Chunk`` objects.
+
+    The conformance seeder writes through the coordinator with core ``Chunk``
+    instances, but the skeleton store's batch insert reads ``TemporalChunk``-only
+    attributes. Convert at this boundary so the harness stays storage-agnostic and
+    the production store is untouched.
+    """
+
+    async def create_chunks_batch(self, chunks: list[Chunk]) -> list[TemporalChunk]:  # type: ignore[override]
+        return await super().create_chunks_batch([_to_temporal_chunk(c) for c in chunks])
 
 
 def postgres_conformance_cases() -> list[ConformanceCase]:
@@ -103,7 +144,7 @@ async def conformance_pg_coordinator() -> AsyncIterator[StorageCoordinator]:
 
     engine = create_async_engine(DATABASE_URL)
     relational = PostgreSQLBackend(DATABASE_URL, engine=engine)
-    vector = PgVectorTemporalStore(config, engine=engine)
+    vector = _CoreChunkTemporalStore(config, engine=engine)
     coord = StorageCoordinator(relational=relational, vector=vector)
     await coord.connect()
     try:
