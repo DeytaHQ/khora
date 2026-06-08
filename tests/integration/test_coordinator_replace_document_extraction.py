@@ -38,7 +38,7 @@ from khora.storage.backends.pgvector import PgVectorBackend
 from khora.storage.backends.postgresql import PostgreSQLBackend
 from khora.storage.coordinator import ReplaceResult, StorageCoordinator
 
-EMBED_DIM = 4
+EMBED_DIM = 1536
 
 
 def _chunks(namespace_id, document_id, count=2) -> list[Chunk]:
@@ -88,13 +88,15 @@ class TestReplaceDocumentExtractionIntegration:
     async def namespace_id(self, coord: StorageCoordinator):
         ns = MemoryNamespace()
         created = await coord.create_namespace(ns)
-        return created.namespace_id
+        # Coordinator primitives (create_document, upsert_entities_batch, ...)
+        # write the passed id verbatim into FK columns referencing
+        # memory_namespaces.id (the row PK), so resolve the stable
+        # namespace_id to the active version's row id first. Production
+        # Khora.remember() does this resolution before reaching the
+        # coordinator; these coordinator-level tests must do it explicitly.
+        return await coord.resolve_namespace(created.namespace_id)
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="tracked in #1033: PG namespace FK violation (namespace_id_fkey) on first CI run; quarantined pending triage against a live stack.",
-        strict=False,
-    )
     async def test_happy_path_mixed_retire_survive_net_new(self, coord: StorageCoordinator, namespace_id) -> None:
         """Full lifecycle: orphan retires, survivor remaps, net-new is created."""
         # Seed: old document with 2 chunks, a survivor entity (alice), an orphan entity (bob)
@@ -173,7 +175,7 @@ class TestReplaceDocumentExtractionIntegration:
         assert result.relationships_created == 0
 
         # Document is COMPLETED
-        persisted = await coord.get_document(new_doc.id)
+        persisted = await coord.get_document(new_doc.id, namespace_id=namespace_id)
         assert persisted is not None
         assert persisted.status == DocumentStatus.COMPLETED
 
@@ -181,12 +183,14 @@ class TestReplaceDocumentExtractionIntegration:
         chunks = await coord.get_chunks_by_document(new_doc.id, namespace_id=namespace_id)
         assert len(chunks) == 3
 
-        # Graph state: alice's source_document_ids has new_doc.id (swap happened),
-        # bob is retired (valid_until set), carol is net-new.
+        # Graph state: alice survives the replace, bob is retired (valid_until
+        # set), carol is net-new. This is an in-place replace
+        # (new_doc.id == old_doc.id), so the survivor remap leaves the shared
+        # doc id present rather than swapping one UUID for another; assert
+        # alice is still associated with the surviving doc id.
         alice_fetched = await coord.get_entity(alice.id, namespace_id=namespace_id)
         assert alice_fetched is not None
         assert new_doc.id in alice_fetched.source_document_ids
-        assert old_doc.id not in alice_fetched.source_document_ids
 
         bob_fetched = await coord.get_entity(bob.id, namespace_id=namespace_id)
         assert bob_fetched is not None
@@ -199,10 +203,6 @@ class TestReplaceDocumentExtractionIntegration:
         assert knows[0].valid_until is not None
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="tracked in #1033: PG namespace FK violation (namespace_id_fkey) on first CI run; quarantined pending triage against a live stack.",
-        strict=False,
-    )
     async def test_graph_failure_keeps_document_completed_then_next_replace_succeeds(
         self, coord: StorageCoordinator, namespace_id, monkeypatch
     ) -> None:
@@ -240,7 +240,12 @@ class TestReplaceDocumentExtractionIntegration:
         )
         await coord.upsert_entities_batch(namespace_id, [sole])
 
-        orig_retire = coord.graph.retire_orphaned_entities_batch  # type: ignore[union-attr]
+        # ``coord.graph`` is a NamespaceRequiredProxy (the coordinator wraps
+        # every public backend attr in __setattr__ regardless of how it was
+        # constructed); it has no __dict__ and rejects setattr, so patch the
+        # real backend behind it.
+        graph_backend = getattr(coord.graph, "_backend", coord.graph)
+        orig_retire = graph_backend.retire_orphaned_entities_batch  # type: ignore[union-attr]
         call_count = {"n": 0}
 
         async def flaky_retire(*args, **kwargs):
@@ -250,7 +255,7 @@ class TestReplaceDocumentExtractionIntegration:
             return await orig_retire(*args, **kwargs)
 
         monkeypatch.setattr(
-            coord.graph,  # type: ignore[arg-type]
+            graph_backend,
             "retire_orphaned_entities_batch",
             flaky_retire,
         )
@@ -276,7 +281,7 @@ class TestReplaceDocumentExtractionIntegration:
         assert isinstance(exc_info.value.__cause__, RuntimeError)
         assert "injected graph failure" in str(exc_info.value.__cause__)
 
-        after_graph_fail = await coord.get_document(new_doc.id)
+        after_graph_fail = await coord.get_document(new_doc.id, namespace_id=namespace_id)
         assert after_graph_fail is not None
         assert after_graph_fail.status == DocumentStatus.COMPLETED
         assert after_graph_fail.error_message is None
@@ -303,6 +308,6 @@ class TestReplaceDocumentExtractionIntegration:
         )
         assert result.document_id == new_doc2.id
 
-        healed = await coord.get_document(new_doc2.id)
+        healed = await coord.get_document(new_doc2.id, namespace_id=namespace_id)
         assert healed is not None
         assert healed.status == DocumentStatus.COMPLETED

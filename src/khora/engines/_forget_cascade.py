@@ -103,6 +103,17 @@ async def cascade_forget_extraction(
     entities = await primary.list_entities(namespace_id, limit=_SCAN_LIMIT)
     relationships = await primary.list_relationships(namespace_id, limit=_SCAN_LIMIT)
 
+    # Relationships are classified from whichever store actually holds them.
+    # On a PG+graph stack the vector ``relationships`` table is not written
+    # (relationships live in the graph backend), so the pgvector primary
+    # returns an empty list and every survivor relationship would silently
+    # keep the forgotten doc id. When the primary holds no relationships but
+    # the mirror (graph) can list them, classify off the mirror's rows so
+    # their ids match the graph nodes the strip/delete targets. Entities stay
+    # anchored on the primary unchanged.
+    if not relationships and mirror is not None and callable(getattr(mirror, "list_relationships", None)):
+        relationships = await mirror.list_relationships(namespace_id, limit=_SCAN_LIMIT)
+
     orphan_ent_ids = [e.id for e in entities if _is_orphan(e, document_id)]
     survive_ent_ids = [e.id for e in entities if _is_survivor(e, document_id)]
     orphan_rel_ids = [r.id for r in relationships if _is_orphan(r, document_id)]

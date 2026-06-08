@@ -53,10 +53,6 @@ class TestDualNodeManagerValidUntilFiltering:
     """End-to-end tests for valid_until filtering in get_entity_neighborhoods."""
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="tracked in #1033: prefer_current future valid_until filtering returned empty on first CI run; quarantined pending triage.",
-        strict=False,
-    )
     async def test_future_valid_until_surfaces_with_prefer_current_true(self) -> None:
         """Relationship with valid_until in future is included when prefer_current=True."""
         url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
