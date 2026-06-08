@@ -168,7 +168,7 @@ async def answer(question: str, recall, docs: dict, *, client: AsyncOpenAI) -> s
 
 async def main() -> None:
     args = _parse_args()
-    docs_paths = sorted(_DOCS_DIR.glob("*.md"))
+    docs_paths = sorted(p for p in _DOCS_DIR.glob("*.md") if p.name != "CREDITS.md")
     if not docs_paths:
         print(f"No markdown docs in {_DOCS_DIR}.")
         return
