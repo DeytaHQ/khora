@@ -14,6 +14,7 @@ from khora.engines.vectorcypher.engine import (
     ExtractionQualityMetrics,
     VectorCypherConfig,
     VectorCypherEngine,
+    _mirror_chunks_or_degrade,
 )
 from khora.khora import RecallResult
 
@@ -2544,3 +2545,58 @@ class TestRerankingConfigReconcile:
         cfg = self._config()
         cfg.query.enable_reranking = False
         assert VectorCypherEngine(cfg)._vc_config.enable_reranking is False
+
+
+@pytest.mark.unit
+class TestMirrorChunksOrDegrade:
+    """The shared chunk-mirror helper used by the create, replace, and batch
+    ingest paths — uniform degrade-and-continue behavior + observability."""
+
+    @pytest.mark.asyncio
+    async def test_none_dual_nodes_is_noop(self) -> None:
+        """No graph backend (e.g. SurrealDB) → no-op: no counter, no degradation."""
+        out: dict = {}
+        with patch("khora.engines.vectorcypher.engine._CHUNK_MIRROR_DEGRADED_COUNTER") as counter:
+            await _mirror_chunks_or_degrade(None, [MagicMock()], uuid4(), out)
+        counter.add.assert_not_called()
+        assert out == {}
+
+    @pytest.mark.asyncio
+    async def test_success_records_nothing(self) -> None:
+        """A successful mirror write leaves no counter increment / degradation."""
+        dual = MagicMock()
+        dual.create_chunk_nodes_batch = AsyncMock(return_value=[uuid4()])
+        out: dict = {}
+        with patch("khora.engines.vectorcypher.engine._CHUNK_MIRROR_DEGRADED_COUNTER") as counter:
+            await _mirror_chunks_or_degrade(dual, [MagicMock()], uuid4(), out)
+        dual.create_chunk_nodes_batch.assert_awaited_once()
+        counter.add.assert_not_called()
+        assert out == {}
+
+    @pytest.mark.asyncio
+    async def test_failure_degrades_and_counts_without_raising(self) -> None:
+        """A mirror failure increments the counter, records a Degradation, and does NOT raise."""
+        dual = MagicMock()
+        dual.create_chunk_nodes_batch = AsyncMock(side_effect=RuntimeError("neo4j down"))
+        out: dict = {}
+        with patch("khora.engines.vectorcypher.engine._CHUNK_MIRROR_DEGRADED_COUNTER") as counter:
+            # Must not raise.
+            await _mirror_chunks_or_degrade(dual, [MagicMock(), MagicMock()], uuid4(), out)
+        counter.add.assert_called_once_with(1, attributes={"channel": "graph", "reason": "neo4j_write_failed"})
+        degradations = out["degradations"]
+        assert len(degradations) == 1
+        entry = degradations[0]
+        assert entry["component"] == "vectorcypher.chunk_mirror"
+        assert entry["reason"] == "neo4j_write_failed"
+        assert entry["exception"] == "RuntimeError"
+        assert "neo4j down" in (entry.get("detail") or "")
+
+    @pytest.mark.asyncio
+    async def test_failure_without_diagnostics_sink_still_counts(self) -> None:
+        """When no out_diagnostics is supplied (batch path), the counter still fires."""
+        dual = MagicMock()
+        dual.create_chunk_nodes_batch = AsyncMock(side_effect=RuntimeError("boom"))
+        with patch("khora.engines.vectorcypher.engine._CHUNK_MIRROR_DEGRADED_COUNTER") as counter:
+            # No diagnostics dict, must not raise.
+            await _mirror_chunks_or_degrade(dual, [MagicMock()], uuid4(), None)
+        counter.add.assert_called_once_with(1, attributes={"channel": "graph", "reason": "neo4j_write_failed"})
