@@ -21,26 +21,28 @@ import pytest
 import khora.engines.chronicle.engine  # noqa: F401
 import khora.engines.skeleton.backends.pgvector  # noqa: F401
 import khora.engines.skeleton.backends.sqlite_lance  # noqa: F401
+import khora.engines.skeleton.backends.surrealdb  # noqa: F401
 import khora.engines.skeleton.backends.weaviate  # noqa: F401
 from khora.filter.registry import CompilerRegistry
 
 pytestmark = [pytest.mark.filter_conformance]
 
 
-# EXPECTED_KEYS is the single source of truth for which (engine_id, storage_target)
-# compilers the conformance job dispatches. Each is verified at its
-# ``CompilerRegistry.register(...)`` call-site in the engine/backend module imported
-# above. When a new compiler registers at import time (e.g. surrealdb / cypher land),
-# it MUST be added here — otherwise it registers silently while the conformance job
-# never exercises it (a silent coverage skew). This guard fails loudly
-# (``UnknownCompilerError``) only on a key that VANISHES or is renamed; a NEW unlisted
-# key is caught by this comment + review, so keep it current. Only these four
-# compilers register today — there is no surrealdb compiler and cypher.py is never
-# registered; their keys join EXPECTED_KEYS when they land.
+# Single source of truth for the registry keys the conformance corpus relies on.
+# Each is verified at its ``CompilerRegistry.register(...)`` call-site in the
+# engine/backend module imported above; KEEP THIS LIST IN LOCKSTEP WITH THOSE.
+# When a new compiler (e.g. cypher) lands and registers at import time, add its
+# ``(engine_id, storage_target)`` key here. Failure to update allows the compiler
+# to register silently while the conformance job silently excludes it — a dangerous
+# skew. This guard fails loudly (``UnknownCompilerError``) only on a key that
+# VANISHES or is renamed; a NEW unlisted key is caught by this comment + review.
+# Currently registered: chronicle, skeleton.pgvector, skeleton.sqlite_lance,
+# skeleton.surrealdb, skeleton.weaviate.
 EXPECTED_KEYS: tuple[tuple[str, str], ...] = (
     ("chronicle", "chunks"),
     ("skeleton.pgvector", "khora_chunks"),
     ("skeleton.sqlite_lance", "khora_chunks"),
+    ("skeleton.surrealdb", "temporal_chunk"),
     ("skeleton.weaviate", "KhoraChunk"),
 )
 
