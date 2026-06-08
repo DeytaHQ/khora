@@ -36,13 +36,6 @@ dict-like record and an attribute-style record (chunk/event dataclasses). Each
 semantic is asserted against both shapes via :func:`_both`. A key is ABSENT when
 neither attribute nor mapping access yields it; PRESENT-NULL when access yields
 Python ``None``. ``metadata`` is resolved the same way and defaults to ``{}``.
-
-INTERIM SKIP: ``compile_python`` lands with Backend's compiler slice. Until the
-module is importable, this whole module SELF-SKIPS (a clean collection-time skip,
-never an erroring import) so the suite stays green; it activates the instant the
-implementation lands. This mirrors the "implementation lands separately" idiom
-already used in the filter unit suite. It is NOT a permanent skip — once the
-compiler is on the branch the import succeeds and every test runs.
 """
 
 from __future__ import annotations
@@ -55,18 +48,11 @@ import pytest
 
 from khora.filter import RecallFilter
 from khora.filter.ast import FilterClause, FilterNode, parse_to_ast
+from khora.filter.compilers.python import compile_python
 from khora.filter.context import CompileContext
 from khora.filter.model import Op
 
 pytestmark = pytest.mark.unit
-
-# Interim self-skip until Backend's compile_python lands (see module docstring).
-# A failed import is a clean module skip here, not a LOUD error: this slice is
-# explicitly gated on a sibling task that is still in flight.
-compile_python = pytest.importorskip(
-    "khora.filter.compilers.python",
-    reason="compile_python not yet on the branch (Backend task in flight); test activates when it lands",
-).compile_python
 
 
 # ---------------------------------------------------------------------------

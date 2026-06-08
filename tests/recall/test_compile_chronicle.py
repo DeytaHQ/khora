@@ -32,9 +32,6 @@ shape:
   on a date key, are NOT a single contiguous window → left unconsumed.
 * The :class:`CompiledFilter` envelope: ``params`` empty, ``consumed_keys`` a
   frozenset, ``canonical_hash`` present.
-
-INTERIM SKIP: self-skips if the Chronicle compiler is not importable (it lands
-with Backend's compiler slice), so the suite stays green until then.
 """
 
 from __future__ import annotations
@@ -46,18 +43,11 @@ import pytest
 
 from khora.filter import RecallFilter
 from khora.filter.ast import FilterNode, parse_to_ast
+from khora.filter.compilers.chronicle import ChronicleDateBound, compile_chronicle
 from khora.filter.context import CompileContext
 from khora.filter.model import SYSTEM_KEYS
 
 pytestmark = pytest.mark.unit
-
-# Interim self-skip until Backend's Chronicle compiler lands (see module docstring).
-_chronicle_mod = pytest.importorskip(
-    "khora.filter.compilers.chronicle",
-    reason="Chronicle compiler not yet on the branch (Backend task in flight); test activates when it lands",
-)
-compile_chronicle = _chronicle_mod.compile_chronicle
-ChronicleDateBound = _chronicle_mod.ChronicleDateBound
 
 
 # ---------------------------------------------------------------------------

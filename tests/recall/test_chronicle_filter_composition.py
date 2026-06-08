@@ -21,9 +21,6 @@ directly (deterministic, no infra). The post-filter / telemetry assertions drive
 unit pattern from ``tests/unit/engines/test_chronicle_abstention_signals.py``):
 the semantic channel returns a known in-scope / out-of-scope chunk mix and the
 filter must narrow the result.
-
-INTERIM SKIP: self-skips if the filter compilers / engine wiring are not yet on
-the branch, so the suite stays green until Backend's slice lands.
 """
 
 from __future__ import annotations
@@ -35,26 +32,16 @@ from uuid import uuid4
 
 import pytest
 
+from khora.config import KhoraConfig
+from khora.config.schema import QuerySettings
+from khora.core.models import Chunk
+from khora.core.models.document import DocumentSource
+from khora.engines.chronicle import engine as chronicle_engine
+from khora.engines.chronicle.engine import ChronicleEngine
+from khora.filter import telemetry as filter_telemetry
+from khora.query import SearchMode
+
 pytestmark = pytest.mark.unit
-
-# Self-skip until the engine wiring + compilers are on the branch.
-pytest.importorskip(
-    "khora.filter.compilers.python",
-    reason="recall-filter compilers not yet on the branch (Backend task in flight)",
-)
-pytest.importorskip(
-    "khora.filter.compilers.chronicle",
-    reason="Chronicle compiler not yet on the branch (Backend task in flight)",
-)
-
-from khora.config import KhoraConfig  # noqa: E402
-from khora.config.schema import QuerySettings  # noqa: E402
-from khora.core.models import Chunk  # noqa: E402
-from khora.core.models.document import DocumentSource  # noqa: E402
-from khora.engines.chronicle import engine as chronicle_engine  # noqa: E402
-from khora.engines.chronicle.engine import ChronicleEngine  # noqa: E402
-from khora.filter import telemetry as filter_telemetry  # noqa: E402
-from khora.query import SearchMode  # noqa: E402
 
 # The narrow-only intersection helpers are required for part (c) assertion 1; if
 # they are renamed this import (and the tests) need a one-line update.
