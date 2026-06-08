@@ -25,6 +25,7 @@ Hybrid mode fuses ranks via RRF (same constants as the PG backend).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -160,6 +161,13 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         self._handle = handle
         self._connected = False
         self._chunks_vec: Any = None
+        # Whether the SQLite build has the JSON1 functions (json_extract /
+        # json_type / json_each). Probed once in connect(); gates metadata
+        # pushdown in compile_lance. Defaults False so a build without JSON1
+        # (or before connect()) routes every metadata predicate to the
+        # compile_python post-filter. Tests may monkeypatch this to False to
+        # exercise the fallback path.
+        self._has_json1 = False
         # LanceDB is a single-writer store — serialize add/delete on the
         # khora_chunks_vec table per-instance to mirror the main vector
         # adapter's policy.
@@ -182,6 +190,17 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         for stmt in _KHORA_CHUNKS_SCHEMA:
             await sqlite.execute(stmt)
         await sqlite.commit()
+
+        # Probe once for the JSON1 functions so compile_lance knows whether it
+        # can push metadata predicates down into the JSON-text ``metadata``
+        # column. A build without JSON1 raises on json_valid(); we degrade to
+        # the compile_python post-filter for all metadata leaves.
+        try:
+            cur = await sqlite.execute("SELECT json_valid('{}')")
+            row = await cur.fetchone()
+            self._has_json1 = bool(row and row[0] == 1)
+        except Exception:
+            self._has_json1 = False
 
         # Create the LanceDB vector table for khora_chunks. exist_ok keeps
         # this idempotent across processes/test runs.
@@ -371,8 +390,9 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
-        # ``filter_ast`` is accepted for protocol parity; this backend does not
-        # compile the recall-filter AST yet, so it is ignored.
+        # ``filter_ast`` is the deterministic recall-filter AST. compile_lance
+        # pushes what JSON1 supports into the SQLite WHERE; a compile_python
+        # post-filter then enforces the full AST (the exactness guarantee).
         with trace_span(
             "khora.temporal_store.search",
             namespace_id=str(namespace_id),
@@ -387,6 +407,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 temporal_filter=temporal_filter,
                 hybrid_alpha=hybrid_alpha,
                 query_text=query_text,
+                filter_ast=filter_ast,
             )
             _span.set_attribute("result_count", len(results))
             return results
@@ -401,7 +422,17 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         temporal_filter: TemporalFilter | None,
         hybrid_alpha: float | None,
         query_text: str | None,
+        filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
+        # Build the compile_python post-filter ONCE per recall (it is
+        # alias-independent — it runs on decoded TemporalChunks). compile_python
+        # fires the public ``khora.recall.filter.unindexed_metadata`` counter at
+        # build time, so building it per-pass would double-count it on a hybrid
+        # recall; one build per recall keeps that contract. The compile_lance
+        # pushdown is still compiled per-pass inside each pass (its column
+        # qualifier differs, and it fires zero unindexed_metadata).
+        post_filter = self._ast_post_filter(filter_ast)
+
         # Vector pass.  Fetch 2× when fusion is requested so RRF has a
         # broader rank corpus.
         vector_results = await self._vector_search(
@@ -410,6 +441,8 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
             temporal_filter,
             limit * 2 if hybrid_alpha is not None else limit,
             min_similarity,
+            filter_ast,
+            post_filter,
         )
 
         if hybrid_alpha is not None and query_text:
@@ -418,6 +451,8 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 query_text,
                 temporal_filter,
                 limit * 2,
+                filter_ast,
+                post_filter,
             )
             return self._rrf_fusion(vector_results, bm25_results, hybrid_alpha, limit)
 
@@ -433,6 +468,8 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 query_text,
                 temporal_filter,
                 needed + len(existing_ids),
+                filter_ast,
+                post_filter,
             )
             for bm25_result in bm25_results:
                 cid = str(bm25_result.chunk.id)
@@ -453,6 +490,8 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         temporal_filter: TemporalFilter | None,
         limit: int,
         min_similarity: float,
+        filter_ast: FilterNode | None = None,
+        post_filter: Callable[[TemporalChunk], bool] | None = None,
     ) -> list[TemporalSearchResult]:
         tbl = await self._vec_table()
         ns_text = uuid_to_text(namespace_id)
@@ -480,10 +519,23 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         if filter_sql:
             sql += f" AND {filter_sql}"
             params.extend(filter_params)
+        # Recall-filter AST pushdown. The base table is unaliased here, so the
+        # compiler qualifies system columns with backend_target (alias=None).
+        ast_sql, ast_params = self._build_ast_clause(filter_ast, alias=None)
+        if ast_sql:
+            sql += f" AND {ast_sql}"
+            params.extend(ast_params)
 
         cur = await self._sqlite.execute(sql, params)
         meta_rows = await cur.fetchall()
         by_id = {row["id"]: row for row in meta_rows}
+
+        # compile_python oracle: enforces the leaves compile_lance deferred,
+        # applied to the SAME decoded chunk that is returned. Built once per
+        # recall in _search_inner; default to a match-all if a direct caller
+        # (search_fulltext) didn't supply one.
+        if post_filter is None:
+            post_filter = self._ast_post_filter(filter_ast)
 
         out: list[TemporalSearchResult] = []
         for cid in ordered_ids:
@@ -499,6 +551,8 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
             if temporal_filter and temporal_filter.tags:
                 if not all(t in chunk.tags for t in temporal_filter.tags):
                     continue
+            if not post_filter(chunk):
+                continue
             out.append(
                 TemporalSearchResult(
                     chunk=chunk,
@@ -541,6 +595,8 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         query_text: str,
         temporal_filter: TemporalFilter | None,
         limit: int,
+        filter_ast: FilterNode | None = None,
+        post_filter: Callable[[TemporalChunk], bool] | None = None,
     ) -> list[TemporalSearchResult]:
         # FTS5 MATCH; SQLite's bm25() is lower-is-better — negate so the
         # semantics match the PG/SurrealDB siblings.
@@ -558,14 +614,29 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         if filter_sql:
             sql_parts.append(f"AND {filter_sql}")
             params.extend(filter_params)
-        # Over-fetch when tag filter is set so the post-decode pass still
-        # has enough rows.
-        fetch = limit * 4 if temporal_filter and temporal_filter.tags else limit
+        # Recall-filter AST pushdown. The base table is aliased ``c`` here, so
+        # the compiler qualifies system columns with that alias. Binds slot in
+        # before the trailing LIMIT bind (positional, emit order).
+        ast_sql, ast_params = self._build_ast_clause(filter_ast, alias="c")
+        if ast_sql:
+            sql_parts.append(f"AND {ast_sql}")
+            params.extend(ast_params)
+        # Over-fetch when a tag filter or AST post-filter is set so the
+        # post-decode pass still has enough rows.
+        narrowing = (temporal_filter and temporal_filter.tags) or (filter_ast is not None and filter_ast.children)
+        fetch = limit * 4 if narrowing else limit
         sql_parts.append("ORDER BY bm ASC LIMIT ?")
         params.append(fetch)
 
         cur = await self._sqlite.execute(" ".join(sql_parts), params)
         rows = await cur.fetchall()
+
+        # compile_python oracle: enforces the leaves compile_lance deferred,
+        # applied to the SAME decoded chunk that is returned. Built once per
+        # recall in _search_inner; default to a match-all if a direct caller
+        # (search_fulltext) didn't supply one.
+        if post_filter is None:
+            post_filter = self._ast_post_filter(filter_ast)
 
         out: list[TemporalSearchResult] = []
         for row in rows:
@@ -573,6 +644,8 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
             if temporal_filter and temporal_filter.tags:
                 if not all(t in chunk.tags for t in temporal_filter.tags):
                     continue
+            if not post_filter(chunk):
+                continue
             score = -float(row["bm"])
             out.append(
                 TemporalSearchResult(
@@ -665,6 +738,63 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
 
         return " AND ".join(clauses), params
 
+    def _build_ast_clause(
+        self,
+        filter_ast: FilterNode | None,
+        *,
+        alias: str | None,
+    ) -> tuple[str, list[Any]]:
+        """Compile the recall-filter AST to a SQLite WHERE fragment + binds.
+
+        ``compile_lance`` runs in ``split`` mode: it pushes the system-key and
+        (JSON1-permitting) metadata predicates it can express into SQLite and
+        leaves the rest to the :meth:`_ast_post_filter` callable — so this
+        fragment never wrongly excludes a row (superset-safe). ``alias`` matches
+        the table reference in the host query: ``None`` for the unaliased vector
+        post-fetch, ``"c"`` for the BM25 FTS-join. Returns ``("", [])`` when
+        there is nothing to push (no AST, or a bare match-everything filter).
+        """
+        if filter_ast is None or not filter_ast.children:
+            return "", []
+        from khora.filter import CompileContext, SchemaCapabilities
+        from khora.filter.compilers.lance import compile_lance
+
+        ctx = CompileContext(
+            backend_target="khora_chunks",
+            table_alias=alias,
+            on_unsupported="split",
+            schema_capabilities=SchemaCapabilities(sqlite_json1=self._has_json1),
+        )
+        compiled = compile_lance(filter_ast, ctx)
+        return compiled.predicate, list(compiled.params["args"])
+
+    @staticmethod
+    def _ast_post_filter(filter_ast: FilterNode | None) -> Callable[[TemporalChunk], bool]:
+        """Build the in-memory post-filter callable for the full AST.
+
+        ``compile_python`` is the oracle: it re-checks every leaf (system key
+        and metadata) against a decoded :class:`TemporalChunk`, enforcing the
+        leaves ``compile_lance`` deferred. The SAME decoded chunk that is
+        returned to the caller is passed here — never a re-read row — so the
+        oracle sees the row's true decoded values and the pushed SQL row-set is
+        a superset of the post-filtered set. Returns a match-all predicate when
+        there is no AST.
+
+        Built ONCE per recall in :meth:`_search_inner` and threaded into both
+        passes: ``compile_python`` fires the public
+        ``khora.recall.filter.unindexed_metadata`` counter at build time, so a
+        per-pass build would double-count it on a hybrid recall.
+        """
+        if filter_ast is None or not filter_ast.children:
+            return lambda _chunk: True
+        from khora.filter import CompileContext
+        from khora.filter.compilers.python import compile_python
+
+        return compile_python(
+            filter_ast,
+            CompileContext(backend_target="khora_chunks", on_unsupported="split"),
+        ).predicate
+
     # ------------------------------------------------------------------
     # Decode helpers
     # ------------------------------------------------------------------
@@ -728,3 +858,14 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
 
 
 __all__ = ["SQLiteLanceTemporalStore"]
+
+
+# Register the deterministic recall-filter compiler for this engine/target at
+# import time (idempotent — same function object). ``sqlite_lance.py`` is
+# imported lazily by ``create_temporal_store("sqlite_lance", ...)``, so
+# registration happens exactly when the embedded backend is first constructed —
+# no eager cost, and no registration when the backend is unused.
+from khora.filter import CompilerRegistry  # noqa: E402
+from khora.filter.compilers.lance import compile_lance  # noqa: E402
+
+CompilerRegistry.register("skeleton.sqlite_lance", "khora_chunks", compile_lance)

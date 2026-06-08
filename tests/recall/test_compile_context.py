@@ -143,6 +143,7 @@ def test_schema_capabilities_flag_defaults_are_false() -> None:
     assert caps.jsonb_path_query is False
     assert caps.full_text is False
     assert caps.native_map_metadata is False
+    assert caps.sqlite_json1 is False
 
 
 def test_schema_capabilities_defaults_instance_is_all_false() -> None:
@@ -152,7 +153,7 @@ def test_schema_capabilities_defaults_instance_is_all_false() -> None:
 
 def test_schema_capabilities_field_names() -> None:
     names = {f.name for f in dataclasses.fields(SchemaCapabilities)}
-    assert names == {"jsonb_path_query", "full_text", "native_map_metadata"}
+    assert names == {"jsonb_path_query", "full_text", "native_map_metadata", "sqlite_json1"}
 
 
 def test_schema_capabilities_is_frozen() -> None:
