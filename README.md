@@ -6,74 +6,16 @@
 [![Python 3.13+](https://img.shields.io/badge/python-3.13%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-> *"Khora is the receptacle, the space, the matrix in which all things come to be."* - Plato, *Timaeus*
+A Python library for creating knowledge repositories that ingest unstructured and structured multi-source data and expose a single query substrate, built for integrating into long-horizon AI agents.
 
-**Khora is a durable knowledge memory library for long-horizon AI agents, with pluggable retrieval engines and storage backends to fit different workloads.** It stores what your agent learns - documents, entities, relationships, events, facts - and retrieves it through hybrid search that combines vector similarity, graph traversal, keyword matching, and temporal context. A scheduled "dream phase" then reorganizes the store offline so quality doesn't decay as it grows.
+## Quickstart
 
-Khora is a **library, not an application**. You embed it in your agent's process; there is no server. Tooling lives in sibling packages (coming soon - CLI, API/MCP, ontology construction SDK).
-
-## Why khora?
-
-Long-horizon agents - copilots, customer-support bots, research assistants, anything that has to remember across sessions - hit four problems that pure vector search doesn't solve:
-
-1. **Ingest is more than chunking.** Useful memory needs entities, relationships, and temporal anchors extracted from the raw text. Khora runs a 3-phase ingest pipeline (stage → enrich → expand) with selective LLM extraction (default 70% of chunks, configurable) and cross-batch entity resolution.
-2. **Recall is more than cosine.** Real questions mix semantic similarity, multi-hop entity reasoning, freshness, and keyword precision. Khora's engines combine all four - vector + Cypher graph traversal + BM25 + RRF fusion + temporal-anchored reranking - and route per query.
-3. **Memory drifts.** Thresholds calibrated on day one stop working at week ten. Duplicates accumulate from independent ingest batches. Soft-deleted facts pile up. Khora's [dream phase](docs/dream-phase.md) audits the store, plans consolidation work (entity dedupe, centroid recompute, fact compaction, event clustering), and applies it under per-op transactions with snapshotted undo records.
-4. **Production needs observability.** Every recall emits OpenTelemetry spans and metrics through a stable, contract-tested surface; credential fields are `SecretStr`; free-text never leaks into span attributes. See [docs/observability.md](docs/observability.md).
-
-Khora's bet: instead of one opinionated memory model, ship **pluggable engines** for different access patterns, share the same storage substrate underneath them, and own the offline-maintenance gap that vector-store wrappers leave to operators.
-
-## Engines
-
-Khora ships **one production-ready engine** (VectorCypher) and two experimental ones (Chronicle, Skeleton). They share the storage substrate (PostgreSQL + pgvector, optionally Neo4j) and the ingest pipeline - pick by access pattern.
-
-### VectorCypher (default) - hybrid graph + vector recall
-
-The right choice for **knowledge-graph-shaped data**: documents that reference entities, entities that reference each other, queries that need multi-hop reasoning ("which engineers worked on projects that shipped with Acme?").
-
-- **Storage:** PostgreSQL + pgvector + Neo4j (or Memgraph / Neptune / AGE).
-- **Retrieval:** Vector similarity + Cypher graph traversal + BM25 keyword + RRF fusion + optional PPR (Personalized PageRank) + optional cross-encoder reranking.
-- **Extraction:** Selective per-chunk (KET-RAG style; default 70% of chunks get full LLM extraction, the rest get co-occurrence edges).
-- **Best for:** Multi-hop reasoning, entity-rich corpora, knowledge bases, "who knows whom"-style queries, anything where graph structure adds signal that flat embeddings miss.
-- **Status:** Production-ready on PostgreSQL + Neo4j. Experimental on embedded backends.
-
-### Chronicle (experimental) - temporal-first, no graph DB
-
-For **chat-shaped or event-stream data**: conversational memory, support tickets, meeting transcripts, anything where "when" is as important as "what". **Experimental** - not yet production-stamped on any stack; use it for evaluation and prototypes, and reach for VectorCypher in production.
-
-- **Storage:** PostgreSQL + pgvector. **No graph database required.**
-- **Retrieval:** 4-channel parallel - semantic vector + BM25 keyword + temporal + entity - fused with abstention signals that flag low-confidence answers before they reach your LLM.
-- **Extraction:** SVO events (subject-verb-object), entities, and facts via the same shared ingest pipeline.
-- **Time model:** Triple timestamps (`valid_from` / `valid_to` / `recorded_at`) + Ebbinghaus forgetting-curve decay applied to relevance scores.
-- **Best for:** Long conversations across sessions, recency-sensitive recall ("what did Alice say last week?"), benchmark-optimized retrieval (LongMemEval, LoCoMo, BEAM), deployments without a graph DB.
-- **Status:** Experimental on all stacks - not yet production-stamped.
-
-### Skeleton (experimental) - minimal-LLM ingestion
-
-Lazy-extraction engine that runs LLM-based entity extraction only on ~10% of chunks ("skeleton core" by PageRank) and expands on demand. **Experimental** - feature-complete enough for cost-sensitive prototypes and evaluation, but not production-stamped. New work should start with VectorCypher or Chronicle; revisit Skeleton if LLM cost dominates and your queries are mostly time-windowed hybrid search rather than multi-hop entity reasoning.
-
-| Engine | Multi-hop entity recall | Temporal recall | Graph DB needed | LLM cost (1k docs) | Status |
-|---|---|---|---|---|---|
-| **VectorCypher** | ✓ Native via Cypher | ✓ Temporal detection + reranking | ✓ Required | ~$0.10–0.20 | Production |
-| **Chronicle** | Limited (entity channel only) | ✓ Native bi-temporal + Ebbinghaus decay | - Not required | ~$0.15–0.30 | Experimental |
-| **Skeleton** | Limited (lazy expansion) | ✓ Bi-temporal | - Not required | ~$0.02–0.05 | Experimental |
-
-See [docs/engines/engine-comparison.md](docs/engines/engine-comparison.md) for the detailed comparison: full feature matrix, cost analysis per workload, hybrid-engine patterns, and migration recipes.
-
-## Install
+Two supported stacks. Pick by deployment shape - the public API is identical for both.
 
 ```bash
-pip install khora                 # core (PostgreSQL + pgvector)
-pip install khora[neo4j]          # + Neo4j for VectorCypher
-pip install khora[sqlite-lance]   # [experimental] embedded SQLite + LanceDB
-pip install khora[all-backends]   # everything: Neo4j, SQLite+LanceDB, Weaviate, AGE
+uv add khora              # Docker: PostgreSQL + pgvector + Neo4j
+uv add khora[embedded]    # Embedded: SQLite + LanceDB, no external services
 ```
-
-See [docs/configuration.md](docs/configuration.md) for the full extras list.
-
-## Production stack
-
-The recommended production stack is **PostgreSQL + pgvector + Neo4j** - runs the production VectorCypher engine (default), with the experimental Chronicle engine available on the same database. Set `KHORA_DATABASE_URL` and `KHORA_NEO4J_URL`, run `uv run alembic upgrade head`, then instantiate `Khora()` with no arguments:
 
 ```python
 import asyncio
@@ -81,7 +23,7 @@ from khora import Khora, context_text
 
 async def main() -> None:
     async with Khora() as kb:  # reads KHORA_DATABASE_URL / KHORA_NEO4J_URL
-        ns = await kb.create_namespace()  # keyword-only kwargs; no positional name
+        ns = await kb.create_namespace()
         await kb.remember(
             "Marie Curie won the Nobel Prize in Physics in 1903.",
             namespace=ns.namespace_id,
@@ -94,15 +36,39 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+For the Docker stack, set `KHORA_DATABASE_URL` and `KHORA_NEO4J_URL`, run `uv run alembic upgrade head`, then run the snippet above. For the embedded stack, set `KHORA_STORAGE_BACKEND=sqlite_lance` and the corresponding `db_path` - no external services required.
+
+See the [docs](https://docs.deyta.ai/khora) for the full extras list and env-var reference.
+
+## Why khora?
+
+Knowledge repositories for long-horizon agents - copilots, customer-support bots, research assistants - hit two problems that pure vector search doesn't solve:
+
+1. **Ingest is more than chunking.** A useful repository needs entities, relationships, and temporal anchors extracted from the raw text. Khora runs a 3-phase ingest pipeline (stage → enrich → expand) with selective LLM extraction (default 70% of chunks, configurable) and cross-batch entity resolution.
+2. **Retrieval is more than cosine.** Real queries mix semantic similarity, multi-hop entity reasoning, freshness, and keyword precision. Khora combines vector + Cypher graph traversal + BM25 + RRF fusion + temporal-anchored reranking, routed per query.
+
+## Storage stacks
+
+| Stack | Install | Use when |
+|---|---|---|
+| **PostgreSQL + pgvector + Neo4j** | `uv add khora` | Default. Docker-friendly, multi-tenant ready, scales horizontally. |
+| **SQLite + LanceDB** (experimental) | `uv add khora[embedded]` | Demos, evaluation, tests, single-user CLIs. Documented ceiling: ~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3. Known gaps: no point-in-time queries, partial atomicity in `coordinator.transaction()`, FTS on chunks only. |
+
+## Retrieval engines
+
+Khora's retrieval layer is pluggable. More than one engine can sit on the same storage substrate. The default is **VectorCypher**: it handles structured and unstructured data from multiple sources by combining a knowledge graph with a vector store, then dispatching each query to the best retrieval method via a query-aware router.
+
+The router selects between vector similarity, graph traversal, BM25 keyword, or a fused blend. RRF fusion, optional PPR (Personalized PageRank), and optional cross-encoder reranking shape the result set. Selective per-chunk LLM extraction (KET-RAG style) bounds ingest cost.
+
 ## Batch processing
 
 `submit_batch()` stages documents as PENDING and returns a `BatchHandle` immediately. A background processor picks them up and calls `on_result` per document as each completes.
 
-**The processor is opt-in.** Call `kb.start_pending_processor()` after `connect()` on services that write documents. Read-only services do not need it. The processor can be stopped with `await kb.stop_pending_processor()` and restarted at any time.
+The processor is opt-in - call `kb.start_pending_processor()` after `connect()` on services that write documents. Read-only services do not need it.
 
 ```python
 async with Khora() as kb:
-    kb.start_pending_processor()   # opt-in; write-path services only
+    kb.start_pending_processor()
     handle = await kb.submit_batch(
         [{"content": "doc 1"}, {"content": "doc 2"}],
         on_result=lambda completed, total, result: print(result),
@@ -113,139 +79,55 @@ async with Khora() as kb:
     await handle.wait()
 ```
 
-## Embedded option (experimental)
-
-Khora ships a zero-infrastructure embedded path - fine for demos, evaluation, tests, and small single-user CLIs; not yet stamped as a deployment story.
-
-- **SQLite + LanceDB** (`pip install khora[sqlite-lance]`, set `KHORA_STORAGE_BACKEND=sqlite_lance`) - covers VectorCypher, Skeleton, and Chronicle via dialect-aware Alembic migrations and LanceDB-backed vector search. Documented scale ceiling: **~1M chunks, ~100k entities, ~500k edges, traversal depth ≤3**. Known gaps: no point-in-time queries, partial atomicity in `coordinator.transaction()`, FTS on chunks only. See [configuration.md](docs/configuration.md#embedded-backends-experimental).
-
-> **Quickstart caveat.** A literal `Khora("memory://")` call passes `"memory://"` as the PostgreSQL URL, not as a backend selector - there is no `memory://` URL scheme parsed by khora itself today. To use the embedded path, set `KHORA_STORAGE_BACKEND=sqlite_lance` and the corresponding `db_path` / connection settings.
-
 ## Integrations
 
-Khora ships ready-made adapters for the major agentic frameworks. Each adapter is an opt-in optional extra - install only what you use, and the framework itself is imported lazily so importing `khora` never pulls in a framework you don't need.
+Opt-in adapters for the major agentic frameworks. Each adapter is in its own extra; the framework is imported lazily so `import khora` never pulls in a framework you don't use.
 
 | Framework | Install | Khora surface |
 |---|---|---|
-| [CrewAI](docs/integrations/crewai.md) | `pip install khora[crewai]` | `KhoraMemory` - drop-in storage backend for CrewAI's unified `Memory`. |
-| [LangGraph](docs/integrations/langgraph.md) | `pip install khora[langgraph]` | `KhoraStore` - `BaseStore` implementation for `StateGraph` semantic long-term memory. |
-| [Google ADK](docs/integrations/google_adk.md) | `pip install khora[google-adk]` | `KhoraMemoryService` - `BaseMemoryService` drop-in for ADK `Runner`. |
-| [OpenAI Agents SDK](docs/integrations/openai_agents.md) | `pip install khora[openai-agents]` | `KhoraSession` (`SessionABC`), `khora_recall_tool`, `KhoraMemoryHooks` - compose for session memory, recall-as-tool, and auto-persist. |
-| [LlamaIndex](docs/integrations/llamaindex.md) | `pip install khora[llamaindex]` | `KhoraRetriever` (async `BaseRetriever`), `KhoraMemoryBlock`, and the deprecated `KhoraChatStore`. |
+| [CrewAI](https://docs.deyta.ai/khora/integrations/crewai) | `uv add khora[crewai]` | `KhoraMemory` - drop-in storage backend for CrewAI's unified `Memory`. |
+| [LangGraph](https://docs.deyta.ai/khora/integrations/langgraph) | `uv add khora[langgraph]` | `KhoraStore` - `BaseStore` implementation for `StateGraph` semantic long-term memory. |
+| [Google ADK](https://docs.deyta.ai/khora/integrations/google_adk) | `uv add khora[google-adk]` | `KhoraMemoryService` - `BaseMemoryService` drop-in for ADK `Runner`. |
+| [OpenAI Agents SDK](https://docs.deyta.ai/khora/integrations/openai_agents) | `uv add khora[openai-agents]` | `KhoraSession`, `khora_recall_tool`, `KhoraMemoryHooks`. |
+| [LlamaIndex](https://docs.deyta.ai/khora/integrations/llamaindex) | `uv add khora[llamaindex]` | `KhoraRetriever`, `KhoraMemoryBlock`. |
 
-See [docs/integrations/](docs/integrations/index.md) for the full per-adapter docs and the "write your own" Protocol surface.
+See the [docs](https://docs.deyta.ai/khora) for per-adapter guides and the "write your own" Protocol surface.
 
 ## Examples
 
-A tiered gallery of runnable demos lives under `examples/`. Each demo is self-contained - the docstring explains the pedagogy, a `Run it` block shows the exact command. Start at the tier matching your intent:
+Runnable demos under `examples/`:
 
-- **`examples/00_quickstart/`** - minimal demos to verify your setup: remember + recall, grounded answers, forget, namespaces.
-- **`examples/10_core_apis/`** - what the public API does: batch ingest, recall filters, ontology config, entities + relationships, graph traversal.
-- **`examples/20_integrations/`** - adapters for LangGraph, OpenAI Agents SDK, CrewAI.
-- **`examples/30_workloads/`** - production-shaped use cases: per-user preferences with temporal decay, document Q&A with multi-signal abstention, support-ticket knowledge graphs, agent chat memory, dream-phase consolidation, namespace versioning, temporal range queries, resume search with cross-document entity resolution, bulk archive, tool-router learning.
+- **`00_quickstart/`** - remember + recall, grounded answers, forget, namespaces.
+- **`10_core_apis/`** - batch ingest, recall filters, ontology config, entities + relationships, graph traversal.
+- **`20_integrations/`** - LangGraph, OpenAI Agents SDK, CrewAI.
+- **`30_workloads/`** - per-user preferences with temporal decay, document Q&A with multi-signal abstention, support-ticket knowledge graphs, agent conversation history, namespace versioning, resume search with cross-document entity resolution.
 
-Run any demo from the repo root (e.g. `uv run python examples/30_workloads/01_per_user_preferences.py`). The embedded backend (`examples/khora.embedded.yaml`) needs no external services; pass `--config examples/khora.standard.yaml` to target PostgreSQL + Neo4j.
+Run any demo from the repo root, e.g. `uv run python examples/30_workloads/01_per_user_preferences.py`. The embedded backend (`examples/khora.embedded.yaml`) needs no external services; pass `--config examples/khora.standard.yaml` to target PostgreSQL + Neo4j.
 
-## Maintenance: dream phase
+## Rust acceleration (optional)
 
-Khora ships an **offline maintenance pass** ("dream phase") that audits an accumulated namespace and plans consolidation work - entity dedupe, fact compaction, event clustering.
+Khora ships an optional Rust extension (`khora-accel`) that speeds up MMR, cosine similarity, PageRank, entity resolution, community detection, and temporal operators. Pure-Python fallbacks ship in the base package; the Rust path is opt-in.
 
-```python
-from khora import Khora, KhoraConfig, DreamConfig
-
-kb = Khora(KhoraConfig(dream=DreamConfig(enabled=True)))
-
-# Dry-run - pure observation/planning, zero writes.
-result = await kb.dream(namespace_id, mode="dry-run")
-
-for op in result.ops:
-    print(op.op_type, op.decision, op.outputs)
+```bash
+uv add khora[rust]
 ```
 
-Operations span both engines and cover audits (Phase 1: read-only,
-report-only), planning (Phase 2: emit `DreamOp` per work item), and
-apply (mutating with snapshot-before-delete and per-op transactions).
-The current `OpKind` surface is enumerated in
-[docs/dream-phase.md](docs/dream-phase.md); examples include
-schema-drift / orphan-PageRank / `source_chunk_ids` audits on the
-vectorcypher side, abstention-threshold + tombstone audits on
-chronicle, and planners for cross-batch entity dedupe, centroid
-recompute, `source_chunk_ids` GC, fact compaction, event clustering,
-community summary, contradiction detection, and schema normalization.
-
-Default is `DreamConfig(enabled=False)` - the master switch is opt-in.
-**Both modes are live**: `mode="dry-run"` emits the plan only;
-`mode="apply"` runs the matching apply handler under a per-op
-transaction with the pre-state snapshotted into `undo.json` before
-each mutation. Five guardrails protect the apply path (7-day hard
-retention floor, `KHORA_DREAM_DISABLE_APPLY` kill-switch, `chunk_id`
-runtime assertion, snapshot-before-delete, advisory-lock-held-through-apply).
-
-See [docs/dream-phase.md](docs/dream-phase.md) for the full operator guide: research lineage, configuration surface, sink wiring, telemetry contract, storage substrate, and stability tags.
+Prebuilt wheels cover the common platforms (macOS arm64/x86_64, Linux x86_64/aarch64, Windows x86_64), so most users won't need a toolchain. Building from source requires **Rust 1.85+**.
 
 ## Observability
 
-khora emits OpenTelemetry spans and metrics through the OTel API.
-The export path is your choice: vanilla OTel SDK (`pip install
-khora[otel]`), [Logfire](https://logfire.pydantic.dev/)
-(`pip install khora[logfire]`), or nothing (zero-cost no-op). Khora
-never installs a `TracerProvider` at import time and never sets
-`service.name` - those belong to the host application.
+Khora emits OpenTelemetry spans and metrics through the OTel API. Export path is your choice: vanilla OTel SDK (`uv add khora[otel]`), [Logfire](https://logfire.pydantic.dev/) (`uv add khora[logfire]`), or nothing (zero-cost no-op). Credential fields on `KhoraConfig` are `pydantic.SecretStr`; free-text never leaks into span attributes.
 
-```bash
-pip install khora[otel]
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
-export OTEL_SERVICE_NAME="my-app"
-```
-
-```python
-from khora.telemetry import configure_telemetry
-configure_telemetry()      # honors OTEL_* env vars
-```
-
-See [docs/observability.md](docs/observability.md) for the full env-var
-contract, the precedence rules, vendor recipes (Honeycomb, Datadog,
-Tempo, etc.), sampling guidance, and the troubleshooting checklist.
-The complete telemetry surface lives in
-[`docs/telemetry-contract.json`](docs/telemetry-contract.json) with the
-drift gate enforced by `tests/unit/telemetry/test_contract.py`.
-
-Two separate observability channels live in `khora.telemetry`:
-
-- **Spans + metrics** via the OTel API (this section).
-- **Structured `LLMEvent` / `StorageEvent` / `PipelineEvent` rows** to
-  a dedicated PostgreSQL database when `KHORA_TELEMETRY_DATABASE_URL`
-  is set. Without it, a `NoOpCollector` is used (zero cost). Wired by
-  `init_telemetry()`, independent of `configure_telemetry()`.
-
-Credential fields on `KhoraConfig` (DSNs, passwords) are
-`pydantic.SecretStr` - `repr()` and config dumps render as
-`'**********'`. Callers that need the cleartext must call
-`.get_secret_value()` explicitly.
-
-**Async logging caveat.** Library consumers that import khora without
-configuring loguru sinks inherit the default sync stderr sink, which
-blocks the event loop on every log call inside `async def`. Either
-call `khora.logging_config.setup_logging()` (which configures sinks
-with `enqueue=True` and registers an `atexit` drain) or configure
-your own loguru sinks with `enqueue=True` explicitly.
+See the [docs](https://docs.deyta.ai/khora) for the env-var contract, vendor recipes, and the telemetry surface reference.
 
 ## Documentation
 
-Full documentation is hosted at **[docs.deyta.ai/khora](https://docs.deyta.ai/khora)**. In-repo entry points:
-
-- [API reference](docs/api-reference.md) - public `Khora` surface.
-- [Configuration](docs/configuration.md) - `KHORA_*` env vars and `KhoraConfig`.
-- [Observability](docs/observability.md) - OTel spans/metrics, `[otel]`/`[logfire]` paths, `configure_telemetry()`.
-- [Architecture](docs/architecture/overview.md) - how the pieces fit.
-- [Engines](docs/engines/engine-comparison.md) - VectorCypher, Skeleton, Chronicle.
-- [Migrations](docs/migrations.md) - Alembic workflow for library users.
-- [Downstream consumers](docs/consumers.md) - sibling packages and integration guide.
+Full documentation at **[docs.deyta.ai/khora](https://docs.deyta.ai/khora)** - API reference, configuration, architecture, migrations, integrations, and the downstream-consumer guide.
 
 ## Development
 
 ```bash
-make dev         # start PostgreSQL + Neo4j (Docker)
+make dev         # start PostgreSQL + Neo4j (Docker); alias: make db-up
 make test        # pytest with coverage
 make format      # ruff format + isort
 make lint        # ruff + ty typecheck
