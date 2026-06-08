@@ -7,7 +7,7 @@ source: https://science.nasa.gov/resource/diagram-of-curiosity-rover-instruments
 
 Curiosity carries ten science instruments distributed across its mast, arm, and body.
 
-<img src="images/curiosity-instruments.jpg" alt="Labeled diagram showing the locations of Curiosity's ten science instruments on the rover.">
+![Labeled diagram showing the locations of Curiosity's ten science instruments on the rover.](images/curiosity-instruments.jpg)
 
 *Figure: The locations of Curiosity's ten science instruments.*
 

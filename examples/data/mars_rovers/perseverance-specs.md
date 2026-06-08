@@ -11,7 +11,7 @@ Perseverance is about 3 meters long (10 feet, not counting the robotic arm), 2.7
 
 ## Cameras
 
-<img src="images/perseverance-cameras.jpg" alt="Labeled diagram of the Perseverance rover showing the locations of its many cameras across the mast, body, and robotic arm.">
+![Labeled diagram of the Perseverance rover showing the locations of its many cameras across the mast, body, and robotic arm.](images/perseverance-cameras.jpg)
 
 *Figure: The cameras of the Mars 2020 mission, labeled by location.*
 

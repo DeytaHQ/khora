@@ -7,7 +7,7 @@ source: https://science.nasa.gov/mission/msl-curiosity/location-map/
 
 Curiosity touched down at Bradbury Landing on the floor of Gale Crater in August 2012. After studying the plains — including the habitability discovery at Yellowknife Bay — it drove toward Mount Sharp, reaching the "Pahrump Hills" outcrop at the mountain's base.
 
-<img src="images/curiosity-traverse.jpg" alt="Map of the route driven by Curiosity from its 2012 landing site to the base of Mount Sharp.">
+![Map of the route driven by Curiosity from its 2012 landing site to the base of Mount Sharp.](images/curiosity-traverse.jpg)
 
 *Figure: Curiosity's route from landing to the base of Mount Sharp.*
 

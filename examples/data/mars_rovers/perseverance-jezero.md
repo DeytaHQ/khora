@@ -9,7 +9,7 @@ source: https://mars.nasa.gov/mars2020/mission/science/landing-site/
 
 Perseverance explores Jezero Crater, a roughly 45-kilometer-wide basin that billions of years ago held a lake fed by a river. The river built a fan-shaped delta whose clays and carbonates are good at preserving signs of ancient life, which makes the crater a prime astrobiology target.
 
-<img src="images/jezero-map.jpg" alt="Map of the regions in and around Jezero Crater on Mars, with the rover's landing area marked.">
+![Map of the regions in and around Jezero Crater on Mars, with the rover's landing area marked.](images/jezero-map.jpg)
 
 *Figure: Map of regions in and around Jezero Crater.*
 

@@ -1,12 +1,12 @@
 """Workload 11 — Multimodal document QA over a NASA Mars-rover corpus.
 
 A real-world shape: a folder of markdown documents (NASA public-domain text on
-the Perseverance and Curiosity rovers) where figures are embedded as ``<img>``
-tags — maps, rover diagrams, traverse routes. khora indexes text, so the
-pipeline is:
+the Perseverance and Curiosity rovers) where figures are embedded as Markdown
+images (``![alt](path)``) — maps, rover diagrams, traverse routes. khora indexes
+text, so the pipeline is:
 
   1. **Parse** each ``.md`` — split it into sections by heading (one chunk per
-     section) and pull out the ``<img>`` tags (figures).
+     section) and pull out the Markdown image embeds (figures).
   2. **Describe** every figure with a vision model — the alt text steers it — so
      the picture becomes searchable text. The image path rides in metadata.
   3. **Remember** all of it with ``remember_batch``, giving every chunk a stable
@@ -101,10 +101,8 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60] or "section"
 
 
-# ── Markdown parsing: sections → text chunks, <img> tags → figures ────────
-_IMG_RE = re.compile(r"<img\b[^>]*>")
-_SRC_RE = re.compile(r'src="([^"]+)"')
-_ALT_RE = re.compile(r'alt="([^"]*)"')
+# ── Markdown parsing: sections → text chunks, ![alt](src) images → figures ──
+_IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")  # markdown image: ![alt](src)
 
 
 def parse_doc(path: Path) -> tuple[dict, list[tuple[str, str]], list[tuple[str, str]]]:
@@ -122,14 +120,9 @@ def parse_doc(path: Path) -> tuple[dict, list[tuple[str, str]], list[tuple[str, 
             key, _, val = line.partition(":")
             meta[key.strip()] = val.strip().strip('"')
 
-    figures = [
-        (m1.group(1), (m2.group(1) if m2 else ""))
-        for tag in _IMG_RE.findall(raw)
-        if (m1 := _SRC_RE.search(tag))
-        for m2 in [_ALT_RE.search(tag)]
-    ]
+    figures = [(m.group(2), m.group(1)) for m in _IMG_RE.finditer(raw)]  # (src, alt)
 
-    # Strip img tags and figure-caption lines from the prose.
+    # Strip image embeds and figure-caption lines from the prose.
     body = _IMG_RE.sub("", raw)
     body = re.sub(r"^\*Figure:.*$", "", body, flags=re.M)
 

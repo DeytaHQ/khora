@@ -7,7 +7,7 @@ source: https://science.nasa.gov/mission/mars-2020-perseverance/location-map/
 
 From its landing site on the floor of Jezero Crater, Perseverance drove to the base of the ancient river delta, then climbed up and across the delta toward possible shoreline deposits. After exploring the delta it began climbing the crater rim, which rises about 610 meters (2,000 feet) above the floor, to reach the plains beyond.
 
-<img src="images/perseverance-traverse.jpg" alt="Map of the path driven by Perseverance across Jezero Crater toward the Bright Angel area.">
+![Map of the path driven by Perseverance across Jezero Crater toward the Bright Angel area.](images/perseverance-traverse.jpg)
 
 *Figure: Perseverance's path toward the "Bright Angel" area.*
 
