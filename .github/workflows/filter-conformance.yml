@@ -143,9 +143,11 @@ jobs:
         # The postgres leg also exports the live DSN + the loud-DB-down flag so
         # the suite aborts (rather than silently skipping) if Postgres is
         # unreachable, plus KHORA_CONFORMANCE_SEED_MAP so the read-only suite
-        # reads the seed step's id_map instead of re-seeding. Non-DB legs leave
-        # all three unset: python/chronicle self-seed in memory, and the
-        # remaining legs run the import-only registry/compile guard.
+        # reads the seed step's id_map. The map is postgres-exclusive by
+        # construction: only the postgres branch loads it, so the non-DB legs
+        # leave all three unset — python/chronicle run pure in-memory executors
+        # over each case's seed_records (no seeding, no map), and the remaining
+        # legs run the import-only registry/compile guard.
         env:
           KHORA_DATABASE_URL: ${{ matrix.postgres && 'postgresql://khora:khora@localhost:5434/khora' || '' }}
           # KHORA_PG_REQUIRED=1 makes tests/integration/conftest.py abort the
