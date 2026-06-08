@@ -50,6 +50,7 @@ pytest.importorskip(
 from khora.config import KhoraConfig  # noqa: E402
 from khora.config.schema import QuerySettings  # noqa: E402
 from khora.core.models import Chunk  # noqa: E402
+from khora.core.models.document import DocumentSource  # noqa: E402
 from khora.engines.chronicle import engine as chronicle_engine  # noqa: E402
 from khora.engines.chronicle.engine import ChronicleEngine  # noqa: E402
 from khora.filter import telemetry as filter_telemetry  # noqa: E402
@@ -497,3 +498,81 @@ async def test_no_filter_recall_does_not_fire_unindexed_metadata(
     await engine.recall("alpha", uuid4(), limit=10, mode=SearchMode.VECTOR)
 
     assert recording_counters["unindexed_metadata"].adds == []
+
+
+# ===========================================================================
+# Denorm doc-key carrier resolution (engine._chunk_to_record).
+# ===========================================================================
+#
+# The post-filter record resolves a system key off chunk.source_document
+# (DocumentSource carries ONLY id/title/source/source_type/created_at/
+# source_timestamp). So on the Chronicle path:
+#   * title / source / source_type RESOLVE from source_document when present.
+#   * source_name / source_url / external_id / content_type have NO carrier and
+#     are ALWAYS absent — a DOCUMENTED gap, not a bug. A positive predicate on a
+#     no-carrier key returns empty; a negative predicate ($ne) matches all.
+# We do NOT assert the no-carrier keys "return rows" (the lead's documented
+# limitation); we assert exactly the absent-key polarity.
+
+
+@pytest.mark.asyncio
+async def test_source_document_fallback_resolves_projected_keys() -> None:
+    # A chunk with source_document populated resolves source/source_type/title from
+    # it, so a filter on those keys narrows correctly.
+    sd = DocumentSource(id=uuid4(), title="Release notes", source="linear", source_type="issue")
+    match = _chunk("alpha match")
+    match.source_document = sd
+    other = _chunk("alpha other")
+    other.source_document = DocumentSource(id=uuid4(), title="x", source="slack", source_type="msg")
+    results = [(match, 0.9), (other, 0.8)]
+
+    engine = _engine_with_semantic(results)
+    result = await engine.recall(
+        "alpha",
+        uuid4(),
+        limit=10,
+        mode=SearchMode.VECTOR,
+        filter_ast=_filter_ast({"source": "linear"}),
+    )
+
+    assert {c.id for c in result.chunks} == {match.id}, "source must resolve off source_document for the post-filter"
+
+
+@pytest.mark.asyncio
+async def test_no_carrier_doc_key_positive_predicate_returns_empty() -> None:
+    # source_name has NO carrier (not on DocumentSource), so it is always absent on
+    # the Chronicle path → a positive $eq predicate returns empty. DOCUMENTED gap.
+    sd = DocumentSource(id=uuid4(), title="t", source="linear", source_type="issue")
+    chunk = _chunk("alpha")
+    chunk.source_document = sd
+    engine = _engine_with_semantic([(chunk, 0.9)])
+
+    result = await engine.recall(
+        "alpha",
+        uuid4(),
+        limit=10,
+        mode=SearchMode.VECTOR,
+        filter_ast=_filter_ast({"source_name": "linear"}),
+    )
+
+    assert result.chunks == [], "a positive predicate on a no-carrier key returns empty (documented gap)"
+
+
+@pytest.mark.asyncio
+async def test_no_carrier_doc_key_negative_predicate_matches_all() -> None:
+    # The $ne mirror: a no-carrier (always-absent) key satisfies $ne <value> for
+    # every row (Rule 2 polarity — absent is "not equal"), so the row survives.
+    sd = DocumentSource(id=uuid4(), title="t", source="linear", source_type="issue")
+    chunk = _chunk("alpha")
+    chunk.source_document = sd
+    engine = _engine_with_semantic([(chunk, 0.9)])
+
+    result = await engine.recall(
+        "alpha",
+        uuid4(),
+        limit=10,
+        mode=SearchMode.VECTOR,
+        filter_ast=_filter_ast({"source_name": {"$ne": "linear"}}),
+    )
+
+    assert {c.id for c in result.chunks} == {chunk.id}, "$ne on a no-carrier key matches all (absent is not-equal)"
