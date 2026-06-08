@@ -12,15 +12,19 @@ Connection parameters (env overrides, sensible ``make dev`` defaults)::
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from khora.core.models import Chunk, Document, MemoryNamespace
 from khora.core.models.document import DocumentStatus
 from khora.db.session import run_migrations
 from khora.storage.backends.pgvector import PgVectorBackend
+from khora.storage.backends.postgresql import PostgreSQLBackend
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
@@ -55,15 +59,70 @@ skip_no_pg = pytest.mark.skipif(
 )
 
 
+async def _reset_public_schema(eng: AsyncEngine) -> None:
+    """Wipe ``public`` and pre-create the wide khora_alembic_version table.
+
+    Mirrors ``test_migration_033_bitemporal.py``: alembic creates
+    ``khora_alembic_version`` with the default ``VARCHAR(32)`` but several
+    revision ids are wider. Pre-create the table with VARCHAR(64) so the chain
+    applies cleanly. Dropping the public-schema enum types first keeps a
+    half-present ``document_status`` enum from wedging the re-migrate.
+    """
+    async with eng.begin() as conn:
+        r = await conn.execute(
+            text("SELECT typname FROM pg_type WHERE typnamespace = 'public'::regnamespace AND typtype = 'e'")
+        )
+        for (typname,) in r.fetchall():
+            await conn.execute(text(f"DROP TYPE IF EXISTS public.{typname} CASCADE"))
+        await conn.execute(text("DROP SCHEMA public CASCADE"))
+        await conn.execute(text("CREATE SCHEMA public"))
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await conn.execute(
+            text(
+                "CREATE TABLE khora_alembic_version ("
+                "  version_num VARCHAR(64) NOT NULL,"
+                "  CONSTRAINT khora_alembic_version_pkc PRIMARY KEY (version_num)"
+                ")"
+            )
+        )
+
+
 @pytest.fixture(scope="module")
-async def _run_migrations_once():
+async def _run_migrations_once() -> AsyncIterator[None]:
+    """Wipe ``public`` and re-migrate to head before this module's tests.
+
+    A schema-wipe (not a bare ``run_migrations``) so the module never inherits
+    a downgraded / partially-dropped shared DB left by a preceding migration
+    test file's downgrade sub-tests (which would make ``run_migrations`` replay
+    forward from a broken middle).
+    """
+    eng = create_async_engine(DATABASE_URL)
+    try:
+        await _reset_public_schema(eng)
+    finally:
+        await eng.dispose()
     result = await run_migrations(DATABASE_URL)
     assert result.success, f"Migrations failed: {result.error}"
+    yield
 
 
 @pytest.fixture
 async def backend(_run_migrations_once):
     be = PgVectorBackend(DATABASE_URL)
+    await be.connect()
+    yield be
+    await be.disconnect()
+
+
+@pytest.fixture
+async def relational(_run_migrations_once):
+    """Relational backend for namespace + document creation.
+
+    ``create_namespace`` and ``create_document`` live on the relational
+    backend; the chunk getters under test stay on ``PgVectorBackend`` so the
+    namespace filter is exercised on the real vector-backend SQL.
+    """
+    be = PostgreSQLBackend(DATABASE_URL)
     await be.connect()
     yield be
     await be.disconnect()
@@ -100,18 +159,15 @@ def _make_doc(namespace_id) -> Document:
 
 
 @skip_no_pg
-@pytest.mark.xfail(
-    reason="stale test API: PgVectorBackend (vector backend) has no create_namespace; "
-    "namespace creation lives on the relational backend; tracked in #1020",
-    strict=False,
-)
 class TestChunkNamespaceIsolationPg:
-    async def test_cross_namespace_get_chunk_returns_none(self, backend: PgVectorBackend) -> None:
-        ns_a = await backend.create_namespace(MemoryNamespace())
-        ns_b = await backend.create_namespace(MemoryNamespace())
+    async def test_cross_namespace_get_chunk_returns_none(
+        self, backend: PgVectorBackend, relational: PostgreSQLBackend
+    ) -> None:
+        ns_a = await relational.create_namespace(MemoryNamespace())
+        ns_b = await relational.create_namespace(MemoryNamespace())
 
         doc = _make_doc(ns_a.id)
-        await backend.create_document(doc)
+        await relational.create_document(doc)
 
         chunk = _make_chunk(ns_a.id, doc.id)
         await backend.create_chunk(chunk)
@@ -121,14 +177,16 @@ class TestChunkNamespaceIsolationPg:
         # Cross-namespace lookup must return None.
         assert (await backend.get_chunk(chunk.id, namespace_id=ns_b.id)) is None
 
-    async def test_cross_namespace_get_chunks_batch_filters(self, backend: PgVectorBackend) -> None:
-        ns_a = await backend.create_namespace(MemoryNamespace())
-        ns_b = await backend.create_namespace(MemoryNamespace())
+    async def test_cross_namespace_get_chunks_batch_filters(
+        self, backend: PgVectorBackend, relational: PostgreSQLBackend
+    ) -> None:
+        ns_a = await relational.create_namespace(MemoryNamespace())
+        ns_b = await relational.create_namespace(MemoryNamespace())
 
         doc_a = _make_doc(ns_a.id)
         doc_b = _make_doc(ns_b.id)
-        await backend.create_document(doc_a)
-        await backend.create_document(doc_b)
+        await relational.create_document(doc_a)
+        await relational.create_document(doc_b)
 
         c_a = _make_chunk(ns_a.id, doc_a.id)
         c_b = _make_chunk(ns_b.id, doc_b.id)
@@ -137,12 +195,14 @@ class TestChunkNamespaceIsolationPg:
         result = await backend.get_chunks_batch([c_a.id, c_b.id], namespace_id=ns_a.id)
         assert set(result.keys()) == {c_a.id}
 
-    async def test_cross_namespace_get_chunks_by_document_returns_empty(self, backend: PgVectorBackend) -> None:
-        ns_a = await backend.create_namespace(MemoryNamespace())
-        ns_b = await backend.create_namespace(MemoryNamespace())
+    async def test_cross_namespace_get_chunks_by_document_returns_empty(
+        self, backend: PgVectorBackend, relational: PostgreSQLBackend
+    ) -> None:
+        ns_a = await relational.create_namespace(MemoryNamespace())
+        ns_b = await relational.create_namespace(MemoryNamespace())
 
         doc = _make_doc(ns_a.id)
-        await backend.create_document(doc)
+        await relational.create_document(doc)
         await backend.create_chunks_batch([_make_chunk(ns_a.id, doc.id) for _ in range(2)])
 
         # ns_B caller asks for doc — even guessing the doc id, namespace
@@ -152,11 +212,11 @@ class TestChunkNamespaceIsolationPg:
         same_ns = await backend.get_chunks_by_document(doc.id, namespace_id=ns_a.id)
         assert len(same_ns) == 2
 
-    async def test_chunker_info_roundtrip(self, backend: PgVectorBackend) -> None:
+    async def test_chunker_info_roundtrip(self, backend: PgVectorBackend, relational: PostgreSQLBackend) -> None:
         """chunker_info round-trips independently of metadata via pgvector."""
-        ns = await backend.create_namespace(MemoryNamespace())
+        ns = await relational.create_namespace(MemoryNamespace())
         doc = _make_doc(ns.id)
-        await backend.create_document(doc)
+        await relational.create_document(doc)
 
         chunk = _make_chunk(ns.id, doc.id)
         chunk.chunker_info = {"strategy": "fixed", "tokens": 256}
