@@ -637,7 +637,7 @@ uv run alembic upgrade head
 
 ## Recent Improvements
 
-**Cross-encoder reranking.** After the initial vector + Cypher retrieval, an optional cross-encoder model rescores the top candidates for precision. The model is cached across queries to avoid reload overhead, and inference runs in `asyncio.to_thread` to keep the event loop free. Enable/disable via `KHORA_QUERY_ENABLE_RERANKING`.
+**Cross-encoder reranking.** After the initial vector + Cypher retrieval, an optional cross-encoder model rescores the top candidates for precision. The model is cached across queries to avoid reload overhead, and inference runs in `asyncio.to_thread` to keep the event loop free. Reranking is **on by default** (model `BAAI/bge-reranker-v2-m3`, ~2.3 GB, GPU-preferred) and configured via `KHORA_QUERY_RERANKING_*` / `config.query.reranking_*`, or a `VectorCypherConfig` for per-engine overrides. Disable with `KHORA_QUERY_ENABLE_RERANKING=false`. See [retrieval tuning → Reranking](../query-engine/retrieval-tuning.md#reranking).
 
 **Independent BM25 channel.** VectorCypher now runs BM25 full-text search as a separate retrieval channel alongside vector and Cypher graph traversal. Results are fused via RRF, giving keyword-exact matches a dedicated signal path rather than relying solely on embedding similarity.
 

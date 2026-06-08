@@ -205,7 +205,7 @@ KHORA_QUERY_DIVERSITY_LAMBDA=0.5    # default
 
 ### Coherence Scoring
 
-The VectorCypher retriever applies a lightweight text coherence signal after RRF fusion to penalize word-shuffled confounders. This is particularly effective when LLM reranking is disabled (`KHORA_QUERY_ENABLE_LLM_RERANKING=false`), where confounders would otherwise rank alongside genuine results.
+The VectorCypher retriever applies a lightweight text coherence signal after RRF fusion to penalize word-shuffled confounders. This is particularly effective when LLM reranking is disabled (the default), where confounders would otherwise rank alongside genuine results.
 
 **How it works:** `bigram_coherence_score()` checks function-word transitions (articles → content words, prepositions → noun phrases). Genuine text has predictable bigram patterns; word-shuffled text does not. The score is blended into the RRF score via `apply_coherence_boost()`.
 
@@ -231,63 +231,66 @@ Coherence scoring complements, but does not replace, MMR diversity selection. MM
 
 After RRF fusion, an optional neural reranker rescores the top candidates as query–document *pairs* (a cross-encoder, unlike the bi-encoder used for the initial embedding search). The reranker is cached across queries and runs in `asyncio.to_thread`, and it [skips small result sets](#reranking-skip-for-small-result-sets-p1) (<5 chunks).
 
-| Variable | Default | Notes |
-|---|---|---|
-| `KHORA_QUERY_ENABLE_RERANKING` | `true` | Master on/off for the reranking stage. |
-| `KHORA_QUERY_RERANKING_METHOD` | `cross_encoder` | `cross_encoder` or `llm`. |
-| `KHORA_QUERY_RERANKING_MODEL` | `cross-encoder/ms-marco-MiniLM-L-12-v2` | Any sentence-transformers cross-encoder. |
-| `KHORA_QUERY_RERANKING_TOP_N` | `50` | Candidates fed to the reranker. |
-| `KHORA_QUERY_RERANKING_FINAL_K` | `10` | Results kept after reranking. |
-| `KHORA_QUERY_RERANKING_BLEND_WEIGHT` | `0.7` | Reranker-score weight when blending with the original fused score; remainder keeps the RRF score (`0.7` = 70 % reranker / 30 % original). |
+On the default **VectorCypher** engine, reranking is **on by default**: `query.enable_reranking` defaults to `True`, and the engine reconciles the `query.reranking_*` family — and the matching `KHORA_QUERY_RERANKING_*` env vars — onto its config. So the simplest way to configure it is through `KhoraConfig.query` / env vars:
 
 ```bash
-KHORA_QUERY_RERANKING_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2   # faster swap
-KHORA_QUERY_RERANKING_BLEND_WEIGHT=0.7                            # default
+KHORA_QUERY_ENABLE_RERANKING=true                      # default
+KHORA_QUERY_RERANKING_MODEL=BAAI/bge-reranker-v2-m3    # default
+KHORA_QUERY_RERANKING_TOP_N=50                         # default
+KHORA_QUERY_RERANKING_BLEND_WEIGHT=0.7                 # default
 ```
 
-**Choosing a model.** The `L-N` in the default model name is the number of transformer layers in the [MS MARCO MiniLM cross-encoder](https://www.sbert.net/docs/cross_encoder/pretrained_models.html) — more layers means more accurate but slower:
-
-| Model | Relative quality | Relative speed |
+| Env var (`KHORA_QUERY_…`) / `query.*` field | Default | Notes |
 |---|---|---|
-| `cross-encoder/ms-marco-MiniLM-L-6-v2` | ~equal to L-12 | ~2× faster |
-| `cross-encoder/ms-marco-MiniLM-L-12-v2` (default) | baseline | baseline |
+| `ENABLE_RERANKING` / `enable_reranking` | `true` | Master on/off. **On by default.** |
+| `RERANKING_MODEL` / `reranking_model` | `BAAI/bge-reranker-v2-m3` | Any model loadable by `CrossEncoder(name)`. |
+| `RERANKING_TOP_N` / `reranking_top_n` | `50` | Candidates fed to the reranker. |
+| `RERANKING_BLEND_WEIGHT` / `reranking_blend_weight` | `0.7` | Reranker-score weight when blending with the original fused score (`0.7` = 70 % reranker / 30 % original). |
 
-On the MS MARCO / TREC-DL benchmarks the L-6 and L-12 variants score within a hair of each other (NDCG@10 ≈ 74.3 for both) while L-6 is roughly twice as fast, so **L-6 is usually the better default** for latency-sensitive deployments. Because the reranker is cached by `(model, include_date_prefix)`, switching the model is a one-line config change with no code edit.
+> **Heads-up — reranking is on by default and loads a ~2.3 GB model.** With the defaults, the first `recall()` downloads and loads `BAAI/bge-reranker-v2-m3` (best on GPU). To disable it set `KHORA_QUERY_ENABLE_RERANKING=false` (or `query.enable_reranking=False`); to keep reranking but cut the footprint, pick a lighter `reranking_model` (see below).
 
-**Use a stronger reranker for better relevance.** The default is the MS MARCO MiniLM cross-encoder, but in our testing a modern reranker like **[`BAAI/bge-reranker-v2-m3`](https://huggingface.co/BAAI/bge-reranker-v2-m3)** gives noticeably better results — it's multilingual, handles longer inputs, and ranks more robustly on paraphrased and domain-specific queries. Any model loadable by `CrossEncoder(model_name)` is valid (BGE, mxbai, etc.), so swapping it in is just a config change:
+**The default reranker.** The default is **[`BAAI/bge-reranker-v2-m3`](https://huggingface.co/BAAI/bge-reranker-v2-m3)** — a 568M-parameter multilingual (XLM-RoBERTa-large) reranker chosen for its markedly stronger discrimination than the legacy MS MARCO MiniLM cross-encoders (on GraphRAG-Bench it lifted medium-difficulty accuracy from ~0.796 to ~0.82). The trade-off is weight: it downloads **~2.3 GB** and is best run on a **GPU** (the reranker auto-detects the device). It emits relevance logits rather than 0–1 scores; the default `reranking_blend_weight=0.7` handles that fine.
+
+**Choosing a lighter model (CPU-only / latency-sensitive).** On CPU-only deployments, or when the ~2.3 GB download and per-query cost of bge are too much, switch to a small MS MARCO MiniLM cross-encoder. The `L-N` suffix is the number of transformer layers ([sentence-transformers pretrained models](https://www.sbert.net/docs/cross_encoder/pretrained_models.html)) — more layers means more accurate but slower:
+
+| Model | Notes |
+|---|---|
+| `BAAI/bge-reranker-v2-m3` (default) | Strongest relevance; ~2.3 GB; GPU recommended. |
+| `cross-encoder/ms-marco-MiniLM-L-12-v2` | Lightweight; ~74.3 NDCG@10 on TREC-DL. |
+| `cross-encoder/ms-marco-MiniLM-L-6-v2` | Lightest; near-identical quality to L-12, ~2× faster. Best CPU default. |
+
+Because the reranker is cached by `(model, include_date_prefix)`, switching the model is a one-line config change:
 
 ```bash
-# Default is ms-marco; we got better results with bge.
-KHORA_QUERY_RERANKING_MODEL=BAAI/bge-reranker-v2-m3
+KHORA_QUERY_RERANKING_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2   # lighter, CPU-friendly
 ```
+
+**Per-engine overrides with `VectorCypherConfig`.** For finer control you can pass a `VectorCypherConfig` via `engine_kwargs`. Any field you set there explicitly wins over `query.*`, which in turn wins over the `VectorCypherConfig` defaults:
 
 ```python
 from khora import Khora
-from khora.config import KhoraConfig
+from khora.engines.vectorcypher import VectorCypherConfig
 
-config = KhoraConfig.from_yaml("khora.yaml")
-config.query.reranking_model = "BAAI/bge-reranker-v2-m3"
-kb = Khora(config)
+kb = Khora(
+    config,
+    engine="vectorcypher",
+    engine_kwargs={"vectorcypher_config": VectorCypherConfig(reranking_top_n=100)},
+)
 ```
 
-```yaml
-# khora.yaml
-query:
-  reranking_model: BAAI/bge-reranker-v2-m3
-```
+> **Precedence:** explicit `vectorcypher_config` field > `query.*` / `KHORA_QUERY_RERANKING_*` > `VectorCypherConfig` default. One edge case: a `vectorcypher_config` field set *to its own dataclass default* can't be distinguished from "unset", so `query.*` wins for that field — configure those via `query.*` instead.
 
-The stronger model is larger and a bit slower per query than MiniLM — pair it with `KHORA_QUERY_RERANKING_TOP_N` if you need to bound the candidate count, and run it on GPU when available (the reranker auto-detects the device). BGE-reranker emits relevance logits rather than 0–1 scores; the default `RERANKING_BLEND_WEIGHT=0.7` works fine, but you can tune the blend if you want the reranker to dominate the final order.
+**LLM listwise reranking (opt-in).** For temporal queries you can chain an LLM reranker *after* the cross-encoder stage. It only fires when the cross-encoder is *not* already confident — i.e. when the rank-1-vs-rank-2 score gap is below the confidence threshold — so most queries never pay the extra LLM call:
 
-> **Tip:** Set `KHORA_QUERY_RERANKING_MODEL` explicitly rather than relying on the default. The high-level `QuerySettings` default is `L-12`, but some internal retriever defaults are `L-6`; pinning the env var removes the ambiguity about which model actually loads.
-
-**LLM listwise reranking (opt-in).** For temporal queries you can chain an LLM reranker *after* the cross-encoder stage. It only fires when the cross-encoder is *not* already confident — i.e. when the rank-1-vs-rank-2 score gap is below the confidence threshold — so most queries never pay the extra LLM call.
-
-| Variable | Default | Notes |
+| Env var (`KHORA_QUERY_…`) / `query.*` field | Default | Notes |
 |---|---|---|
-| `KHORA_QUERY_ENABLE_LLM_RERANKING` | `false` | Opt-in; runs after the cross-encoder. |
-| `KHORA_QUERY_LLM_RERANKING_MODEL` | `gpt-4o-mini` | Model for the listwise pass. |
-| `KHORA_QUERY_LLM_RERANKING_TOP_N` | `10` | Top candidates sent to the LLM (3–30). |
-| `KHORA_QUERY_LLM_RERANKING_CONFIDENCE_THRESHOLD` | `0.1` | Trigger only when the cross-encoder rank-1/rank-2 gap is below this. |
+| `ENABLE_LLM_RERANKING` / `enable_llm_reranking` | `false` | Opt-in; runs after the cross-encoder, temporal queries only. |
+| `LLM_RERANKING_MODEL` / `llm_reranking_model` | `gpt-4o-mini` | Model for the listwise pass. |
+| `LLM_RERANKING_TOP_N` / `llm_reranking_top_n` | `10` | Top candidates sent to the LLM. |
+| `LLM_RERANKING_CONFIDENCE_THRESHOLD` / `llm_reranking_confidence_threshold` | `0.1` | Trigger only when the cross-encoder rank-1/rank-2 gap is below this. |
+| `llm_reranking_mode` (`VectorCypherConfig` only) | `"auto"` | `"auto"` gates the LLM step on version metadata; `"always"` forces it on every temporal query. |
+
+> **Note:** `KHORA_QUERY_RERANKING_METHOD` and `KHORA_QUERY_RERANKING_FINAL_K` exist on `QuerySettings` but have no `VectorCypherConfig` equivalent, so they are **not** applied on the VectorCypher (`recall()`) path — they affect the separate `HybridQueryEngine` only.
 
 See also the opt-in [cross-encoder date-prefix experiment](#whats-next) below, which prepends `[YYYY-MM-DD]` to each candidate before scoring.
 

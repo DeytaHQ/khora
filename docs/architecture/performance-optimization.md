@@ -404,7 +404,7 @@ config = RetrieverConfig(
 )
 ```
 
-`bigram_coherence_score()` checks function-word transitions (articles → content words, prepositions → noun phrases). The score is blended into the RRF score via `apply_coherence_boost()`. This adds negligible latency (pure Python string analysis, no LLM calls) while improving confounder rejection when LLM reranking is disabled (`KHORA_QUERY_ENABLE_LLM_RERANKING=false`).
+`bigram_coherence_score()` checks function-word transitions (articles → content words, prepositions → noun phrases). The score is blended into the RRF score via `apply_coherence_boost()`. This adds negligible latency (pure Python string analysis, no LLM calls) while improving confounder rejection when LLM reranking is disabled (the default).
 
 ## Phase 9: Neo4j Write Contention Elimination
 

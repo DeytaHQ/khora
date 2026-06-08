@@ -183,7 +183,7 @@ result: RecallResult = await kb.recall(
 
 - `mode` - one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, or `ALL`.
 - `start_time` / `end_time` - explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required. Honored on all three engines (chronicle, vectorcypher, skeleton).
-- To skip LLM-side work (reranking, HyDE expansion), set the config flags `enable_llm_reranking=False` and `enable_hyde="never"` on `KhoraConfig.query` (env: `KHORA_QUERY_ENABLE_LLM_RERANKING`, `KHORA_QUERY_ENABLE_HYDE`).
+- To skip LLM-side work: LLM listwise reranking is off by default (enable via `query.enable_llm_reranking=True` / `KHORA_QUERY_ENABLE_LLM_RERANKING`), and set `enable_hyde="never"` on `KhoraConfig.query` (env: `KHORA_QUERY_ENABLE_HYDE`) to disable HyDE expansion. Note the cross-encoder reranker is on by default and runs locally (not an LLM call); disable it with `KHORA_QUERY_ENABLE_RERANKING=false`.
 
 ### `context_text`
 
