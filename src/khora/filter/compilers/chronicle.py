@@ -217,10 +217,13 @@ def _consumable_date_clause(
 ) -> tuple[str, Op, datetime] | None:
     """Return ``(key, op, datetime)`` if ``node`` is a pushdownable date clause, else ``None``.
 
-    A pushdownable clause is a leaf on ``occurred_at`` / ``created_at`` with a
-    range op (``$gt``/``$gte``/``$lt``/``$lte``) or ``$eq`` and a datetime /
-    :class:`DateLiteral` operand. ``$ne`` / ``$in`` / ``$nin`` / ``{k: null}`` and
-    any logical sub-node return ``None`` (not a single contiguous window).
+    A pushdownable clause is a leaf on ``source_timestamp`` (the window's primary axis,
+    ``COALESCE(source_timestamp, created_at)``) with a range op (``$gt``/``$gte``/
+    ``$lt``/``$lte``) or ``$eq`` and a datetime / :class:`DateLiteral` operand.
+    ``occurred_at`` (event-time axis) and ``created_at`` (window's fallback, not
+    primary axis) are cross-dimensional and post-filtered instead. ``$ne`` / ``$in``
+    / ``$nin`` / ``{k: null}`` on any date key, and any logical sub-node, return
+    ``None`` (not a single contiguous window).
     """
     if not isinstance(node, FilterClause):
         return None
