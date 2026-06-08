@@ -16,6 +16,7 @@ from khora.filter.compilers.chronicle import ChronicleDateBound, compile_chronic
 from khora.filter.compilers.lance import compile_lance
 from khora.filter.compilers.postgres import compile_postgres
 from khora.filter.compilers.python import compile_python
+from khora.filter.compilers.weaviate import compile_weaviate
 
 __all__ = [
     "ChronicleDateBound",
@@ -23,4 +24,5 @@ __all__ = [
     "compile_lance",
     "compile_postgres",
     "compile_python",
+    "compile_weaviate",
 ]
