@@ -16,7 +16,7 @@ Choose VectorCypher instead when:
 
 - Building long-term knowledge bases with rich entity relationships
 - Graph traversal and entity exploration are primary use cases
-- Upfront extraction cost is acceptable for better retrieval quality (use `engine_kwargs={"skeleton_core_ratio": 1.0}` for full 100% extraction)
+- Upfront extraction cost is acceptable for better retrieval quality (use `engine_kwargs={"vectorcypher_config": VectorCypherConfig(skeleton_core_ratio=1.0)}` for full 100% extraction)
 
 ## Architecture Overview
 
@@ -183,12 +183,15 @@ Implements TG-RAG-inspired hierarchical time navigation:
 KET-RAG-inspired PageRank-based core chunk selection:
 
 ```python
-# Add chunks (fast, no LLM)
-for chunk in chunks:
-    indexer.add_chunk(chunk.id, chunk.content)
+# core_ratio is a constructor parameter (default 0.1 = top 10% as "core")
+indexer = SkeletonIndexer(core_ratio=0.1)
 
-# Build skeleton - identifies top 10% as "core"
-core_chunk_ids = indexer.build_skeleton(core_ratio=0.1)
+# Add chunks (fast, no LLM) - add_chunk takes a chunk object
+for chunk in chunks:
+    indexer.add_chunk(chunk)
+
+# Build skeleton - identifies core chunks, returns their IDs
+core_chunk_ids = indexer.build_skeleton()
 
 # Only core chunks get LLM extraction
 for chunk_id in core_chunk_ids:

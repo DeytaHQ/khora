@@ -162,7 +162,7 @@ handle: BatchHandle = await kb.submit_batch(
 
 Deferred sibling of `remember_batch()`: persists every document as `PENDING` and returns a `BatchHandle` immediately; the pending processor picks each document up and fires `on_result` as it completes. Accepts the same provenance kwargs and per-doc dict shape as `remember_batch()` - per-doc dict values override the top-level kwargs. See [`BatchHandle`](#batchhandle) below for the wait/identity surface.
 
-> **The pending processor is opt-in and must be running.** `submit_batch()` raises if `kb.start_pending_processor()` has not been called first (after `connect()`). The check is enforced after the documents are staged as `PENDING`, so a failure leaves rows in the queue. Call `start_pending_processor()` on every write-path service.
+> **The pending processor is opt-in.** `submit_batch()` raises if `kb.start_pending_processor()` has not been called first (after `connect()`), so call it on each write-path service. The check runs after the documents are staged as `PENDING`, so a failure leaves rows in the queue.
 
 `max_concurrent` caps concurrency for this batch's documents specifically; the global processor pool size still applies as a ceiling. The pool is sized via `KhoraConfig.pipelines.pending_processor_max_concurrent` (env: `KHORA_PIPELINES_PENDING_PROCESSOR_MAX_CONCURRENT`); effective per-batch concurrency is `min(pool_size, max_concurrent)`. Two batches submitted concurrently are rate-limited independently - their `max_concurrent` values do not stack.
 
@@ -178,11 +178,12 @@ result: RecallResult = await kb.recall(
     min_similarity: float = 0.0,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
+    filter: RecallFilter | dict[str, Any] | None = None,
 )
 ```
 
 - `mode` - one of `SearchMode.VECTOR`, `GRAPH`, `HYBRID`, or `ALL`.
-- `start_time` / `end_time` - explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required. Honored on all three engines (chronicle, vectorcypher, skeleton).
+- `start_time` / `end_time` - **Deprecated.** Explicit temporal filter; bypasses NLP temporal detection. Both-naive or both-aware datetimes are required. Honored on all three engines (chronicle, vectorcypher, skeleton). Prefer the `filter` form: `filter={"occurred_at": {"$gte": ..., "$lt": ...}}`. Cannot be combined with `filter=`.
 - To skip LLM-side work (reranking, HyDE expansion), set the config flags `enable_llm_reranking=False` and `enable_hyde="never"` on `KhoraConfig.query` (env: `KHORA_QUERY_ENABLE_LLM_RERANKING`, `KHORA_QUERY_ENABLE_HYDE`).
 
 ### `context_text`
@@ -298,7 +299,7 @@ Returned by `kb.submit_batch(...)` (the async-staging path that returns immediat
 
 | Field / method | Type | Description |
 |---|---|---|
-| `id` | `UUID` | Batch identifier (also surfaced in per-document `DocumentResult`). |
+| `batch_id` | `UUID` | Batch identifier (also surfaced in per-document `DocumentResult`). |
 | `total` | `int` | Number of documents staged. |
 | `await handle.wait()` | `coroutine` | Resolves when the worker has called `on_result` for every document. |
 

@@ -27,13 +27,13 @@ Every query is classified into one of seven categories, each driving different r
 
 | Category | Description | Example Query | Recency Weight | Temporal Sort | Notes |
 |-----------|-------------|---------------|----------------|---------------|-------|
-| `NONE` | No temporal signal | "Explain how X works" | 0.2 | No | Default behavior |
+| `NONE` | No temporal signal | "Explain how X works" | 0.0 | No | Default behavior |
 | `EXPLICIT` | Parseable dates | "Before April 2024" | 0.3 | No | Generates a `TemporalFilter` for date-range pushdown |
 | `STATE_QUERY` | Current state | "What does Alice currently do?" | 0.5 | Yes (DESC) | High recency, favors newest facts |
-| `ORDINAL` | Ordering / sequence | "Which event happened first?" | 0.1 | Yes (DESC) | Low recency, preserves chronological order |
+| `ORDINAL` | Ordering / sequence | "Which event happened first?" | 0.3 | Yes (DESC) | Moderate recency, preserves chronological order |
 | `AGGREGATE` | Totals / counts | "How many jobs in total?" | 0.0 | No | No recency - needs broad recall |
-| `RECENCY` | Latest results | "Most recent update" | 0.5 | Yes (DESC) | Short decay window (7 days) |
-| `CHANGE` | Temporal evolution | "Did they switch jobs?" | 0.3 | Yes (DESC) | Moderate recency for tracking changes |
+| `RECENCY` | Latest results | "Most recent update" | 0.5 | Yes (DESC) | Sharp 3-day decay, 30-day window |
+| `CHANGE` | Temporal evolution | "Did they switch jobs?" | 0.4 | Yes (DESC) | Moderate recency for tracking changes |
 
 ### Detection Cascade
 
@@ -60,7 +60,8 @@ The full query understanding pipeline can extract temporal references via LLM. T
 The detector returns a `TemporalSignal` dataclass:
 
 ```python
-from khora.engines.vectorcypher.temporal_detection import TemporalSignal
+from khora.query.temporal_detection import TemporalSignal
+# (also re-exported from the shim khora.engines.vectorcypher.temporal_detection)
 
 @dataclass(frozen=True)
 class TemporalSignal:
@@ -116,13 +117,13 @@ Each temporal category maps to specific retrieval parameters:
 
 | Category | Recency Weight | Decay Override | Effect |
 |-----------|---------------|----------------|--------|
-| `NONE` | 0.2 | - | Subtle recency preference |
+| `NONE` | 0.0 | - | No recency - pure relevance |
 | `EXPLICIT` | 0.3 | - | Moderate, combined with date-range filter |
 | `STATE_QUERY` | 0.5 | - | Strong recency, most recent fact wins |
-| `ORDINAL` | 0.1 | - | Weak recency, preserves chronological order |
+| `ORDINAL` | 0.3 | - | Moderate recency, preserves chronological order |
 | `AGGREGATE` | 0.0 | - | No recency at all - pure relevance |
-| `RECENCY` | 0.5 | 7 days | Strong recency, sharp 7-day decay |
-| `CHANGE` | 0.3 | - | Moderate recency for evolution tracking |
+| `RECENCY` | 0.5 | 3 days | Strong recency, sharp 3-day decay (30-day window) |
+| `CHANGE` | 0.4 | 14 days | Moderate recency for evolution tracking (60-day window) |
 
 ### Temporal-anchored HyDE
 
@@ -186,20 +187,20 @@ from khora.query.temporal import TemporalFilter, TemporalOperator
 # BETWEEN: start <= timestamp <= end
 filter = TemporalFilter(
     operator=TemporalOperator.BETWEEN,
-    start=datetime(2024, 1, 1),
-    end=datetime(2024, 3, 31)
+    start_time=datetime(2024, 1, 1),
+    end_time=datetime(2024, 3, 31)
 )
 
 # AFTER: timestamp > start
 filter = TemporalFilter(
     operator=TemporalOperator.AFTER,
-    start=datetime(2024, 1, 1)
+    start_time=datetime(2024, 1, 1)
 )
 
 # BEFORE: timestamp < end
 filter = TemporalFilter(
     operator=TemporalOperator.BEFORE,
-    end=datetime(2024, 6, 1)
+    end_time=datetime(2024, 6, 1)
 )
 ```
 
@@ -212,8 +213,8 @@ Entities can have validity periods - "Alice was CEO from 2020–2023". Two speci
 # (entity.valid_from <= start AND entity.valid_until >= end)
 filter = TemporalFilter(
     operator=TemporalOperator.DURING,
-    start=datetime(2022, 1, 1),
-    end=datetime(2022, 12, 31)
+    start_time=datetime(2022, 1, 1),
+    end_time=datetime(2022, 12, 31)
 )
 # "Who was CEO for all of 2022?"
 
@@ -221,8 +222,8 @@ filter = TemporalFilter(
 # (entity.valid_from <= end AND entity.valid_until >= start)
 filter = TemporalFilter(
     operator=TemporalOperator.OVERLAPS,
-    start=datetime(2022, 1, 1),
-    end=datetime(2022, 12, 31)
+    start_time=datetime(2022, 1, 1),
+    end_time=datetime(2022, 12, 31)
 )
 # "Who was CEO at any point during 2022?"
 ```
@@ -233,13 +234,13 @@ When the dictionary detector classifies a query as `EXPLICIT`, it also attempts 
 
 ```python
 # Query: "What happened before April 2024?"
-# → EXPLICIT category, TemporalFilter(occurred_before=2024-04-01)
+# → EXPLICIT category, TemporalFilter(end_time=2024-04-01)
 
 # Query: "Updates since January 2024"
-# → EXPLICIT category, TemporalFilter(occurred_after=2024-01-01)
+# → EXPLICIT category, TemporalFilter(start_time=2024-01-01)
 
 # Query: "Events around March 15, 2024"
-# → EXPLICIT category, TemporalFilter(occurred_after=2024-02-13, occurred_before=2024-04-14)
+# → EXPLICIT category, TemporalFilter(start_time=2024-02-13, end_time=2024-04-14)
 ```
 
 Supported date formats include `YYYY-MM-DD`, `YYYY/MM/DD`, `Month DD, YYYY`, and `DD Month YYYY`.

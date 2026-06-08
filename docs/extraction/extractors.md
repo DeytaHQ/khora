@@ -21,8 +21,8 @@ from khora.extraction.extractors import LLMEntityExtractor
 
 extractor = LLMEntityExtractor(
     model="gpt-4o-mini",      # LLM model
-    temperature=0.3,           # Low for consistent extraction
-    max_tokens=4000,           # Output token limit
+    temperature=0.0,           # Deterministic extraction (default)
+    max_tokens=16384,          # Output token limit (default)
     timeout=60,                # Request timeout (seconds)
     max_retries=3,             # Retry count
     max_concurrent=10,         # Parallel extractions
@@ -36,7 +36,7 @@ from khora.config import LiteLLMConfig
 
 config = LiteLLMConfig(
     model="gpt-4o-mini",
-    max_tokens=4000,
+    max_tokens=16384,
     timeout=60,
     max_retries=3,
     max_concurrent_llm_calls=10,
@@ -328,7 +328,7 @@ This means extraction time scales with the single slowest batch, not the sum of 
 
 ### Two-Pass Relationship Extraction
 
-The extractor automatically runs a second-pass relationship extraction when `num_relationships < num_entities - 1`, using `RELATIONSHIP_EXTRACTION_PROMPT`. This targets sparse graphs where entities were extracted but relationships between them were missed. The second pass is automatic and not configurable - it triggers whenever the entity-to-relationship ratio suggests missing connections.
+The extractor automatically runs a second-pass relationship extraction when `num_entities >= 2 and num_relationships < num_entities - 1`, using `RELATIONSHIP_EXTRACTION_PROMPT` (it never fires for documents with 0 or 1 entity). This targets sparse graphs where entities were extracted but relationships between them were missed. The second pass is automatic and not configurable - it triggers whenever the entity-to-relationship ratio suggests missing connections.
 
 ## JSON Parsing
 
@@ -347,22 +347,22 @@ def _parse_response(self, content: str) -> ExtractionResult:
 
 ## Error Handling
 
-Extraction uses retry with exponential backoff:
+Extraction uses retry with exponential backoff, driven by `tenacity`'s `AsyncRetrying`. Retries stop after `max_retries` attempts or 180 seconds total (`stop_after_attempt(self._max_retries) | stop_after_delay(180)`), with `wait_exponential` backoff between attempts:
 
 ```python
-for attempt in range(self._max_retries):
-    try:
+from tenacity import AsyncRetrying, stop_after_attempt, stop_after_delay, wait_exponential
+
+async for attempt in AsyncRetrying(
+    stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
+    wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
+):
+    with attempt:
         response = await litellm.acompletion(
             model=self._model,
             messages=messages,
             response_format={"type": "json_object"},
         )
-        return self._parse_response(response.choices[0].message.content)
-    except Exception as e:
-        if attempt < self._max_retries - 1:
-            await asyncio.sleep(2 ** attempt)
-        else:
-            return ExtractionResult(metadata={"error": str(e)})
+        result = self._parse_response(response.choices[0].message.content)
 ```
 
 ## API Usage

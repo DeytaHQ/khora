@@ -107,16 +107,19 @@ edges = await storage.get_valid_at(
 
 ### Exclusive Relationships
 
-Some relationships are mutually exclusive-a person can only have one at a time:
+Some relationships are mutually exclusive - a person can only have one at a time. The set is a local variable (`exclusive_types`) inside `_handle_conflicts`, not a module-level constant:
 
 ```python
-EXCLUSIVE_RELATIONSHIP_TYPES = {
-    "WORKS_FOR",      # Can only work for one company
-    "REPORTS_TO",     # Can only report to one manager
-    "MANAGES",        # Usually manages one team
-    "MARRIED_TO",     # Monogamous relationship
-    "CEO_OF",         # One CEO per company
-    "LIVES_IN",       # One primary residence
+# Local to TemporalEdgeStorage._handle_conflicts
+exclusive_types = {
+    "WORKS_FOR",
+    "REPORTS_TO",
+    "MANAGES",
+    "MARRIED_TO",
+    "CEO_OF",
+    "PRESIDENT_OF",
+    "LOCATED_AT",
+    "HEADQUARTERED_IN",
 }
 ```
 
@@ -127,17 +130,27 @@ When a new exclusive relationship is created, conflicting older edges are automa
 ```python
 # January 2024: Alice works for Acme
 edge1 = await storage.create_edge(
-    alice_id, acme_id, "WORKS_FOR",
-    namespace_id=ns_id,
-    occurred_at=datetime(2024, 1, 15),
+    TemporalEdge(
+        id=uuid4(),
+        namespace_id=ns_id,
+        source_entity_id=alice_id,
+        target_entity_id=acme_id,
+        relationship_type="WORKS_FOR",
+        occurred_at=datetime(2024, 1, 15),
+    ),
 )
 # edge1.is_valid = True
 
 # March 2024: Alice now works for Beta Corp
 edge2 = await storage.create_edge(
-    alice_id, beta_id, "WORKS_FOR",
-    namespace_id=ns_id,
-    occurred_at=datetime(2024, 3, 1),
+    TemporalEdge(
+        id=uuid4(),
+        namespace_id=ns_id,
+        source_entity_id=alice_id,
+        target_entity_id=beta_id,
+        relationship_type="WORKS_FOR",
+        occurred_at=datetime(2024, 3, 1),
+    ),
 )
 # edge2.is_valid = True
 # edge1.is_valid = False (automatically invalidated)
@@ -148,40 +161,37 @@ edge2 = await storage.create_edge(
 ### Conflict Detection Algorithm
 
 ```python
-async def _check_and_resolve_conflicts(
-    self,
-    source_entity_id: UUID,
-    relationship_type: str,
-    new_edge_id: UUID,
-    occurred_at: datetime,
-) -> list[UUID]:
-    """Check for conflicting edges and invalidate them."""
-    if relationship_type not in EXCLUSIVE_RELATIONSHIP_TYPES:
-        return []
-
-    # Find existing valid edges of same type from same source
-    existing = await self.get_edges_by_entity(
-        source_entity_id,
-        relationship_type=relationship_type,
-        direction="outgoing",
-        valid_only=True,
+async def _handle_conflicts(self, new_edge: TemporalEdge) -> None:
+    """Check for and handle conflicting edges."""
+    # Find existing valid edges of the same type between the same pair
+    existing = await self.get_edges_by_entity_pair(
+        new_edge.source_entity_id,
+        new_edge.target_entity_id,
+        new_edge.namespace_id,
+        relationship_type=new_edge.relationship_type,
+        include_invalid=False,
     )
 
-    invalidated = []
-    for edge in existing:
-        if edge.id == new_edge_id:
-            continue
+    exclusive_types = {
+        "WORKS_FOR",
+        "REPORTS_TO",
+        "MANAGES",
+        "MARRIED_TO",
+        "CEO_OF",
+        "PRESIDENT_OF",
+        "LOCATED_AT",
+        "HEADQUARTERED_IN",
+    }
 
-        # Newer edge supersedes older edge
-        if edge.occurred_at < occurred_at:
-            await self.invalidate_edge(
-                edge.id,
-                invalidated_by=new_edge_id,
-                reason=f"Superseded by newer {relationship_type} relationship",
-            )
-            invalidated.append(edge.id)
-
-    return invalidated
+    if new_edge.relationship_type.upper() in exclusive_types:
+        for old_edge in existing:
+            # If new edge is more recent, invalidate the old one
+            if new_edge.occurred_at > old_edge.occurred_at:
+                await self.invalidate_edge(
+                    old_edge.id,
+                    invalidated_by=new_edge.id,
+                    reason=f"Superseded by newer {new_edge.relationship_type} edge",
+                )
 ```
 
 ## Hierarchical Time Graph
@@ -228,9 +238,14 @@ When storing an edge with a timestamp, the time hierarchy is automatically creat
 ```python
 # Store edge that occurred on 2024-01-15
 await storage.create_edge(
-    source_id, target_id, "MENTIONS",
-    namespace_id=ns_id,
-    occurred_at=datetime(2024, 1, 15),
+    TemporalEdge(
+        id=uuid4(),
+        namespace_id=ns_id,
+        source_entity_id=source_id,
+        target_entity_id=target_id,
+        relationship_type="MENTIONS",
+        occurred_at=datetime(2024, 1, 15),
+    ),
 )
 
 # Automatically creates (if not existing):
@@ -427,18 +442,7 @@ for edge in sorted(all_edges, key=lambda e: e.occurred_at):
 
 ### As-Of Queries
 
-```python
-# What did the system know on a specific date?
-# (Uses ingested_at, not occurred_at)
-
-edges = await storage.get_edges_by_entity(
-    alice_id,
-    namespace_id=ns_id,
-    ingested_before=datetime(2024, 1, 1),
-)
-# Returns only edges ingested before Jan 1, 2024
-# Even if they describe events after that date
-```
+The `ingested_at` column stores transaction time, but `get_edges_by_entity` does not expose an `ingested_before` filter - it only filters on `occurred_at` (via `time_start` / `time_end`). An "as-of" query over transaction time would need a new query method or a direct `TemporalEdgeModel` select on `ingested_at`.
 
 ## Related Documentation
 

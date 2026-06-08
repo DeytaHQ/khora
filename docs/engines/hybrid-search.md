@@ -438,8 +438,8 @@ async with Khora(db_url, engine="skeleton") as kb:
 ```bash
 KHORA_QUERY_VECTOR_WEIGHT=0.7
 KHORA_QUERY_KEYWORD_WEIGHT=0.3
-KHORA_QUERY_MIN_CHUNK_SIMILARITY=0.0
-KHORA_QUERY_MIN_ENTITY_SIMILARITY=0.0
+KHORA_QUERY_MIN_CHUNK_SIMILARITY=0.05
+KHORA_QUERY_MIN_ENTITY_SIMILARITY=0.05
 ```
 
 `hybrid_alpha` is a per-call argument to `kb.recall(...)` only - there

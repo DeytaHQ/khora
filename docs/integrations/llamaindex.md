@@ -135,7 +135,7 @@ nodes = asyncio.run(retriever.aretrieve("query"))
 ```
 
 We deliberately do not ship a `nest_asyncio` workaround - that's a
-hidden reentrancy bomb under any real agent loop.
+hidden reentrancy hazard under any real agent loop.
 
 ## `KhoraMemoryBlock`
 
