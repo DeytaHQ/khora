@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+import sqlalchemy as sa
 from loguru import logger
 from sqlalchemy import delete, func, literal_column, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -42,6 +43,43 @@ except ImportError:
 
 
 _DEADLOCK_MAX_RETRIES = 3
+
+# Cap on retained source-id provenance per entity. Mirrors Neo4j's
+# ``entity_source_document_ids_max`` default (see neo4j.py); the two backends
+# must agree so forget()'s survivor-strip behaves identically across a
+# PG+Neo4j stack.
+_SOURCE_IDS_CAP = 100
+
+
+def _accumulate_source_ids_sql(column: str) -> sa.TextClause:
+    """Build the ON CONFLICT set-expression that accumulates source ids.
+
+    Mirrors Neo4j's ``ON MATCH SET e.source_*_ids = (existing + incoming)[-N..]``
+    semantics (neo4j.py:1714-1715) but adds a dedup pass so re-extracting the
+    same document many times does NOT evict prior *distinct* provenance ids.
+
+    The existing row is referenced by the table name ``entities``; the proposed
+    row by ``excluded``. The two arrays are concatenated (existing first, so
+    incoming ids carry the higher ordinals), grouped by element to dedup while
+    keeping each id's most-recent position, capped to the
+    ``_SOURCE_IDS_CAP`` most-recent DISTINCT ids, and re-aggregated newest-last
+    so the tail holds the freshest provenance (matching Neo4j's tail-cap order).
+
+    ``column`` is ``"source_document_ids"`` or ``"source_chunk_ids"``. The cap is
+    an int constant inlined into the SQL (no bind param — a bind param could
+    collide with the executemany VALUES binding); ``column`` is never
+    caller-supplied so there is no injection surface.
+    """
+    # `column` is one of two hard-coded literals and the cap is an int constant,
+    # so no user input reaches this SQL (bind params are deliberately avoided so
+    # they can't collide with the executemany VALUES binding) — hence noqa: S608.
+    return sa.text(
+        f"(SELECT COALESCE(array_agg(elem ORDER BY last_ord), ARRAY[]::uuid[]) "  # noqa: S608
+        f"FROM (SELECT elem, MAX(ord) AS last_ord "
+        f"FROM unnest(COALESCE(entities.{column}, ARRAY[]::uuid[]) || excluded.{column}) "
+        f"WITH ORDINALITY AS u(elem, ord) "
+        f"GROUP BY elem ORDER BY MAX(ord) DESC LIMIT {_SOURCE_IDS_CAP}) d)"
+    )
 
 
 def _namespace_lock_keys(namespace_id: UUID) -> tuple[int, int]:
@@ -902,8 +940,8 @@ class PgVectorBackend(AsyncSessionMixin):
                 set_={
                     "description": stmt.excluded.description,
                     "attributes": stmt.excluded.attributes,
-                    "source_document_ids": stmt.excluded.source_document_ids,
-                    "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                    "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
+                    "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
                     "mention_count": stmt.excluded.mention_count,
                     "embedding": stmt.excluded.embedding,
                     "embedding_model": stmt.excluded.embedding_model,
@@ -1099,8 +1137,8 @@ class PgVectorBackend(AsyncSessionMixin):
                         set_={
                             "description": stmt.excluded.description,
                             "attributes": stmt.excluded.attributes,
-                            "source_document_ids": stmt.excluded.source_document_ids,
-                            "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                            "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
+                            "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
                             "mention_count": stmt.excluded.mention_count,
                             "embedding": stmt.excluded.embedding,
                             "embedding_model": stmt.excluded.embedding_model,
