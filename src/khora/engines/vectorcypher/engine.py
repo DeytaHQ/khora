@@ -458,19 +458,43 @@ class VectorCypherEngine:
         self._config = config
         self._vc_config = vectorcypher_config or VectorCypherConfig()
 
-        # Reconcile query-level reranker settings onto the VC config when the
-        # caller did not pass an explicit ``vectorcypher_config``. Historically
-        # ``KhoraConfig.query.reranking_model`` was silently ignored on the
-        # VectorCypher path (the engine only ever read VectorCypherConfig), so
-        # configuring the reranker the obvious way had no effect. An explicit
-        # ``vectorcypher_config`` still wins. See issue: reranker config foot-gun.
-        if vectorcypher_config is None:
-            query_cfg = getattr(config, "query", None)
-            if query_cfg is not None:
-                if getattr(query_cfg, "reranking_model", None):
-                    self._vc_config.reranking_model = query_cfg.reranking_model
-                if getattr(query_cfg, "llm_reranking_model", None):
-                    self._vc_config.llm_reranking_model = query_cfg.llm_reranking_model
+        # Reconcile the reranking config family from ``KhoraConfig.query`` onto
+        # the VC config, so ``query.*`` / ``KHORA_QUERY_RERANKING_*`` env vars
+        # take effect on the default ``recall()`` path. The VectorCypher engine
+        # only ever reads ``VectorCypherConfig``, so without this the entire
+        # ``query.reranking_*`` family (including ``enable_reranking``) is a
+        # silent no-op - and the bge reranker default never loads (issues #1017,
+        # #1023).
+        #
+        # Precedence: a value explicitly set on a passed ``vectorcypher_config``
+        # wins; otherwise the ``query.*`` value applies; otherwise the
+        # ``VectorCypherConfig`` default. "Explicitly set" is detected by
+        # comparing the field to its dataclass default, so passing a
+        # ``vectorcypher_config`` to (e.g.) enable reranking no longer discards
+        # the rest of ``query.*`` (the #1017 reconcile was previously skipped
+        # entirely whenever a ``vectorcypher_config`` was supplied). The one
+        # ambiguity this can't resolve is a field explicitly set to its default
+        # value; use ``query.*`` for that field instead.
+        query_cfg = getattr(config, "query", None)
+        if query_cfg is not None:
+            _vc_defaults = VectorCypherConfig()
+            for _field in (
+                "enable_reranking",
+                "reranking_model",
+                "reranking_top_n",
+                "reranking_blend_weight",
+                "enable_llm_reranking",
+                "llm_reranking_model",
+                "llm_reranking_top_n",
+                "llm_reranking_confidence_threshold",
+            ):
+                _query_val = getattr(query_cfg, _field, None)
+                if _query_val is None:
+                    continue
+                # Only fill in fields the caller left at the VectorCypherConfig
+                # default (i.e. did not explicitly override).
+                if getattr(self._vc_config, _field) == getattr(_vc_defaults, _field):
+                    setattr(self._vc_config, _field, _query_val)
 
         # Build storage config (shared helper handles SurrealDB, pool_pre_ping, etc.)
         self._storage_config = storage_config or build_storage_config(config)

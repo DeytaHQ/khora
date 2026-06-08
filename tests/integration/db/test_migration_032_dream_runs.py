@@ -130,6 +130,12 @@ def sqlite_url(tmp_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.xfail(
+    reason="migration test not yet CI-shared-DB-safe: resets the alembic pointer without "
+    "dropping sibling tables, so it collides with the integration job's up-front "
+    "`alembic upgrade head` on the shared service DB; tracked in #1020",
+    strict=False,
+)
 class TestMigration032OnPostgres:
     def test_migration_032_creates_dream_runs_table(self, pg_url: str) -> None:
         """Upgrade head on fresh PG creates the table with all 16 columns + index."""

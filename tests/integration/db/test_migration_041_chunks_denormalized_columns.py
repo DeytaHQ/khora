@@ -160,6 +160,11 @@ def sqlite_url(tmp_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.xfail(
+    reason="migration test not yet CI-shared-DB-safe: collides with the integration job's "
+    "up-front `alembic upgrade head` on the shared service DB; tracked in #1020",
+    strict=False,
+)
 class TestMigration041OnPostgres:
     def test_adds_eight_columns_to_existing_table(self, pg_url: str) -> None:
         """Existing ``khora_chunks`` (missing the columns) gains all eight."""

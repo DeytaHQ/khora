@@ -232,9 +232,15 @@ jobs:
         run: uv run python tools/check_optional_imports.py
 
   # ============================================================================
-  # Test — pytest with coverage (parallel with lint and security)
+  # Test (unit) — pytest unit + recall suites with coverage, no services.
   # ============================================================================
-  test:
+  # Hermetic: no database side-car. The recall-filter Postgres smoke test in
+  # tests/recall/ self-skips when Postgres is unreachable, so it is collected
+  # here without provisioning a server. This job also owns the per-path
+  # coverage floor check: all floor paths (sqlite_lance/*, chronicle/engine.py,
+  # _fts5.py, _accel.py) are exercised by the unit + embedded suites, not by
+  # the Postgres integration tests, so the floors must be measured here.
+  test-unit:
     needs: install
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -272,6 +278,12 @@ jobs:
         run: |
           uv run pytest tests/unit/ tests/recall/ --cov=src/khora --cov-branch --cov-report=xml:coverage-unit.xml --cov-fail-under=0 -n auto --timeout=120 --timeout-method=thread
 
+      - name: Generate JSON coverage for floor check
+        run: uv run coverage json -o coverage.json
+
+      - name: Check per-path coverage floors
+        run: uv run python scripts/check_coverage_floors.py
+
       - name: Upload unit coverage to Codecov
         uses: codecov/codecov-action@v5
         if: always()
@@ -282,22 +294,113 @@ jobs:
           name: khora-coverage-unit
           fail_ci_if_error: false
 
-      - name: Run integration tests with coverage (parallel)
-        # ``-n auto`` parallelises across CPU cores via pytest-xdist.
-        # Most integration tests use per-test ``tmp_path`` + mocked LLMs
-        # and have no shared state. Real-Postgres / real-Neo4j tests
-        # are gated behind their own env vars (``NEO4J_INTEGRATION_TEST``,
-        # etc.) and are skipped in this job. Coverage append works under
-        # xdist via ``coverage.context = ...`` already set in pyproject.
-        # Expected wall-time cut: ~50% (was ~160s serial).
+  # ============================================================================
+  # Test (integration) — pytest integration suite against a real Postgres.
+  # ============================================================================
+  # Postgres is a GitHub-Actions services side-car (pgvector image, since the
+  # schema has Vector(1536) columns and tests CREATE EXTENSION vector). Host
+  # port 5434 mirrors compose.yaml so the default DSN works and a developer
+  # reproduces CI 1:1 with `make dev`. Three stacked tripwires keep a DB-down
+  # run from passing by skipping the Postgres-gated tests: the services
+  # health-check (gates step start), an explicit readiness step (mirrors the
+  # weaviate job), and KHORA_PG_REQUIRED=1 (makes the conftest guard abort
+  # loudly if Postgres is somehow unreachable).
+  # The `alembic upgrade head` step brings the shared DB to head before the
+  # suite runs (it also doubles as a `CREATE EXTENSION vector` smoke that fails
+  # loudly on a wrong image), guaranteeing base tables for assume-exists tests.
+  # Tests run serially (`-n 0`) because several issue `DROP SCHEMA public
+  # CASCADE` against the one shared database.
+  test-integration:
+    needs: install
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Job-level env so every step (migrations, pytest, the conftest guard)
+    # inherits the same Postgres DSN and the loud-DB-down flag.
+    env:
+      KHORA_DATABASE_URL: postgresql://khora:khora@localhost:5434/khora
+      KHORA_PG_REQUIRED: "1"
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: khora
+          POSTGRES_PASSWORD: khora
+          POSTGRES_DB: khora
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U khora -d khora"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Restore venv cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
+
+      - name: Wait for Postgres readiness
+        # Mirrors the weaviate-integration job's readiness loop for repo-style
+        # consistency. The services health-check already gates step start; this
+        # gives a clear, early failure message if Postgres is somehow not up.
         run: |
-          uv run pytest tests/integration/ --cov=src/khora --cov-branch --cov-append --cov-report=term-missing --cov-report=xml:coverage-integration.xml --cov-fail-under=77 -m integration -n auto --timeout=120 --timeout-method=thread
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5434 -U khora >/dev/null 2>&1; then
+              echo "postgres ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres did not become ready within 60s"
+          exit 1
 
-      - name: Generate JSON coverage for floor check
-        run: uv run coverage json -o coverage.json
+      - name: Apply database migrations
+        # env.py normalizes the plain DSN to asyncpg internally and takes the
+        # advisory lock, so a single upgrade-head here brings the shared DB to
+        # head before the suite runs. Also a CREATE EXTENSION vector smoke —
+        # fails loudly if the image lacks pgvector.
+        run: uv run alembic upgrade head
 
-      - name: Check per-path coverage floors
-        run: uv run python scripts/check_coverage_floors.py
+      - name: Run integration tests with coverage
+        # KHORA_PG_REQUIRED=1 (job env) flips the per-module skipif into a hard
+        # session abort (tests/integration/conftest.py) — a DB-down run cannot
+        # pass by silently skipping the Postgres-gated tests.
+        #
+        # tests/unit/dream/test_locks.py holds @pytest.mark.integration
+        # advisory-lock tests that need real Postgres; they live under
+        # tests/unit/ so the unit job's no-services run self-skips them. Collect
+        # the file here (still under -m integration) so they gate against the
+        # real side-car; its pure-unit lock-id tests stay in the unit job.
+        #
+        # ``-n 0`` (SERIAL): several PG tests issue ``DROP SCHEMA public
+        # CASCADE`` against the single shared database, so running them in
+        # parallel under xdist would corrupt each other's schema.
+        #
+        # ``--cov-fail-under=0`` is deliberate, not a placeholder: the
+        # integration suite alone is structurally low-coverage (most src is
+        # unit-covered), so an integration-only floor would gate almost nothing.
+        # The 77 aggregate stays in Codecov's combined project status, and the
+        # loud-DB-down guarantee is the KHORA_PG_REQUIRED guard + the migration
+        # step (both fail red on PG-down) — not a coverage-collapse signal.
+        run: |
+          uv run pytest tests/integration/ tests/unit/dream/test_locks.py -m integration -n 0 --cov=src/khora --cov-branch --cov-report=xml:coverage-integration.xml --cov-fail-under=0 --timeout=120 --timeout-method=thread
 
       - name: Upload integration coverage to Codecov
         uses: codecov/codecov-action@v5

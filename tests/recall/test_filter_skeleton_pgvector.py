@@ -353,22 +353,17 @@ async def test_no_filter_returns_all_chunks(kb: Khora) -> None:
 
 
 async def test_engine_info_reports_skeleton_filter_row(kb: Khora) -> None:
-    """``engine_info['filter']`` carries the skeleton support row, and the
-    filtered row-set is correct.
+    """``engine_info['filter']`` carries the skeleton support row with HONEST
+    ``pushed_down=True``, and the filtered row-set is correct.
 
-    What this pins is the *carrier contract*: ``engine_info['filter']`` is
-    present on a filtered recall and reports ``engine="skeleton"`` /
-    ``supported=True``, alongside a ``pushed_down`` flag. The assertion that
+    What this pins is the *carrier contract* with honest pushdown reporting:
+    ``engine_info['filter']`` is present on a filtered recall and
+    reports ``engine="skeleton"`` / ``supported=True`` / ``pushed_down=True``.
+    The skeleton-pgvector backend compiles the whole filter to a SQL WHERE
+    predicate, so the pushdown is genuine — the facade surfaces the
+    engine-reported flag rather than hardcoding ``False``. The assertion that
     actually matters — that the filter narrows to exactly the in-scope rows — is
     re-checked here too.
-
-    NOTE on ``pushed_down``: this test deliberately does NOT pin the flag's
-    value. Filtering is provably effective end-to-end
-    (test_filter_returns_exactly_in_scope_chunks proves it), but the as-built
-    carrier still reports ``pushed_down=False`` (khora.py:2136-2141); honest
-    per-engine pushdown reporting is a follow-up. Asserting only that the key is
-    present — not its value — means that follow-up can flip it to honest
-    reporting without having to come back and edit this interim test.
     """
     ns = await kb.create_namespace()
     namespace_id: UUID = ns.namespace_id
@@ -382,18 +377,75 @@ async def test_engine_info_reports_skeleton_filter_row(kb: Khora) -> None:
         filter=_RECALL_FILTER,
     )
 
-    # Carrier present with the stable skeleton support row. ``pushed_down`` must
-    # be present (carrier shape) but its value is intentionally not pinned — see
-    # the note above (a follow-up corrects it to honest reporting).
+    # Carrier present with the stable skeleton support row. The full filter is
+    # compiled to a khora_chunks WHERE predicate, so ``pushed_down`` is honestly
+    # True for the skeleton-pgvector path.
     info = (result.engine_info or {}).get("filter")
     assert info is not None, "engine_info['filter'] carrier must be present on a filtered recall"
     assert info["engine"] == "skeleton"
     assert info["supported"] is True
-    assert "pushed_down" in info
+    assert info["pushed_down"] is True
 
     # The assertion that actually matters: the filter narrows to exactly the
     # in-scope rows (same contract as S1, re-pinned alongside the carrier).
     assert {c.id for c in result.chunks} == _ids_for(chunk_ids, _IN_SCOPE)
+
+
+async def test_engine_info_no_filter_reports_pushed_down_false(kb: Khora) -> None:
+    """A no-filter recall reports ``pushed_down=False`` on the live lake.
+
+    Pushdown is reported honestly per call. With no ``filter=`` there
+    is nothing to push down, so the carrier — still present on every recall —
+    reports ``pushed_down=False`` even on the skeleton-pgvector path that DOES
+    push filters down when one is supplied.
+    """
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+    await _seed(kb, namespace_id)
+
+    result = await kb.recall(
+        "alpha bravo charlie",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+    )
+
+    info = (result.engine_info or {}).get("filter")
+    assert info is not None, "engine_info['filter'] carrier must be present even with no filter"
+    assert info["engine"] == "skeleton"
+    assert info["pushed_down"] is False
+
+
+async def test_engine_info_bare_filter_reports_pushed_down_false(kb: Khora) -> None:
+    """A bare ``filter={}`` reports ``pushed_down=False`` on the live lake.
+
+    Edge case: ``{}`` is a non-None match-everything AST (so it reaches
+    the engine), but it carries zero predicates and narrows nothing. The live
+    skeleton-pgvector derivation requires the filter to actually have
+    constraints (``bool(filter_ast.children)``), so a constraint-free filter
+    honestly reports ``pushed_down=False`` — no pushdown bit, nothing to claim.
+    The unfiltered row-set is returned (same as the control), confirming the
+    bare filter does not narrow.
+    """
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+    chunk_ids = await _seed(kb, namespace_id)
+
+    result = await kb.recall(
+        "alpha bravo charlie",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+        filter={},
+    )
+
+    info = (result.engine_info or {}).get("filter")
+    assert info is not None, "engine_info['filter'] carrier must be present on a bare-filter recall"
+    assert info["engine"] == "skeleton"
+    assert info["pushed_down"] is False, "a constraint-free filter narrows nothing → not pushed down"
+
+    # The bare filter matches everything, so the full corpus comes back.
+    assert {c.id for c in result.chunks} == set(chunk_ids.values())
 
 
 async def test_invalid_filter_raises_validation_error(kb: Khora) -> None:

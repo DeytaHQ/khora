@@ -291,6 +291,11 @@ _LONG_EXTERNAL_ID = "ext-" + ("y" * 400)
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.xfail(
+    reason="migration test not yet CI-shared-DB-safe: collides with the integration job's "
+    "up-front `alembic upgrade head` on the shared service DB; tracked in #1020",
+    strict=False,
+)
 class TestMigration044OnPostgres:
     def test_backfill_happy_path(self, pg_url: str) -> None:
         """Each denormalized chunk col gets the parent document value verbatim,
