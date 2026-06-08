@@ -4,7 +4,32 @@ All notable changes to Khora are documented here.
 
 Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were internal (no git tags).
 
-## [0.18.5] - denormalized chunk columns and the RecallFilter foundation
+## [0.19.0] - recall filtering, BGE default reranker, PyMuPDF removal
+
+Minor release. The `RecallFilter` foundation from 0.18.5 is now wired end-to-end: `recall(filter=...)` accepts a structured filter that compiles to native pushdown on each backend (pgvector, Neo4j Cypher, Chronicle), with a Python post-filter fallback and honest pushdown reporting. The default cross-encoder reranker changes to `BAAI/bge-reranker-v2-m3`. PyMuPDF is removed from the `binary-readers` extra (breaking for bundled PDF text extraction).
+
+### Breaking changes
+
+- **PyMuPDF removed; bundled PDF text extraction dropped** (#1030): the `binary-readers` extra now installs only `openpyxl` + `python-docx` (xlsx/docx). `extract_if_needed()` keeps its public signature, but the `.pdf` branch now raises `NotImplementedError` pointing callers to preprocess PDFs upstream. Non-PDF extraction (xlsx, docx, parquet) is unchanged. PDF parsing may be reintroduced later via a different library.
+- **Default reranker is now `BAAI/bge-reranker-v2-m3`** (#1021): replaces the previous default cross-encoder. `recall()` reranking honors `query.reranking_model`, and the full reranking config family is reconciled from `query.*` (#1023, #1025). Override `KHORA_QUERY_RERANKING_MODEL` to pin the old model.
+
+### Added
+
+- **`recall(filter=...)` structured recall filtering** with per-backend pushdown:
+  - Internal filter AST + compiler-dispatch infrastructure (#1007).
+  - `filter=` kwarg on `recall()` carrying a canonical filter AST through the engines (#1009).
+  - Backend compilers: Postgres/pgvector (#1008, JSONB path operand bound as `text[]` #1026), Neo4j Cypher with system-key pushdown (#1015), Chronicle with date-bound pushdown + Python post-filter (#1029).
+  - `filter_ast` threaded from the Skeleton engine to the backend `search()` (#1012).
+  - Recall-filter telemetry counters + canonical-hash span attribute (#1011), and honest filter-pushdown status surfaced in `RecallResult.engine_info` (#1022).
+- **Examples**: image ingestion (`10_core_apis/06`) and multimodal document QA (`30_workloads/11`) (#1014).
+
+### Changed
+
+- Denormalized document keys are now projected onto Neo4j chunk nodes (#1024), so document-grained recall filters push down on the graph backend.
+
+### Fixed
+
+- Postgres recall-filter compiler binds JSONB path operands as `text[]` so path filters match correctly (#1026).
 
 Patch release. Lays the schema, model, and ingest groundwork for selective recall filtering: `khora_chunks` rows now carry the parent document's eight provenance fields (`source_type`, `source_name`, `source_url`, `source_timestamp`, `external_id`, `content_type`, `source`, `title`) plus the document's free-form metadata, so a filter can be evaluated on the chunk row without a document join. Adds the typed `RecallFilter` model and its validator as public API. The query-side application of `RecallFilter` to `recall()` is not wired in this release - this ships the carrier columns, indexes, backfill, and the filter document it will consume.
 
