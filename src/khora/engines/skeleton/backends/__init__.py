@@ -202,11 +202,17 @@ class TemporalVectorStore(Protocol):
         limit: int = 10,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Full-text search over the temporal store's chunk table.
 
         Returns ``[]`` by default; backends with a populated fulltext
         column override this.
+
+        ``filter_ast`` is the canonical recall-filter AST. The pgvector
+        backend compiles it to the SAME ``khora_chunks`` WHERE predicate the
+        vector path uses; the other backends accept it for protocol parity
+        and ignore it (no compilation yet).
         """
         return []
 

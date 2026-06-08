@@ -573,6 +573,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         limit: int = 10,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Public BM25 / ts_rank lookup over ``khora_chunks`` for the
         StorageCoordinator dispatch path.
@@ -582,6 +583,12 @@ class PgVectorTemporalStore(TemporalVectorStore):
         ``TemporalChunk`` is adapted via :func:`temporal_chunk_to_chunk`
         so the retriever sees a uniform ``Chunk`` shape regardless of
         whether the data came from ``chunks`` or ``khora_chunks``.
+
+        ``filter_ast`` is the deterministic recall-filter AST. When provided
+        it is compiled to a single-table ``khora_chunks`` WHERE predicate and
+        AND-ed into the conditions — the SAME compile context the vector path
+        uses (``_search_inner``), so the BM25 channel honors the identical
+        filter and cannot return filter-violating chunks.
         """
         if not query_text or not query_text.strip():
             return []
@@ -598,6 +605,18 @@ class PgVectorTemporalStore(TemporalVectorStore):
             conditions.append(
                 func.coalesce(khora_chunks_table.c.occurred_at, khora_chunks_table.c.created_at) <= created_before
             )
+        # Deterministic recall-filter AST: compile to a single khora_chunks
+        # WHERE predicate and AND it into the conditions, using the SAME
+        # context as the vector path (`_search_inner`).
+        if filter_ast is not None:
+            from khora.filter import CompileContext
+            from khora.filter.compilers.postgres import compile_postgres
+
+            compiled = compile_postgres(
+                filter_ast,
+                CompileContext(backend_target="khora_chunks", on_unsupported="raise"),
+            )
+            conditions.append(compiled.predicate)
         async with self._get_session() as session:
             results = await self._bm25_search(session, query_text, conditions, limit)
         return [(temporal_chunk_to_chunk(r.chunk), float(r.bm25_score or 0.0)) for r in results]

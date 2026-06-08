@@ -65,6 +65,7 @@ if TYPE_CHECKING:
 
     from khora.engines.skeleton.backends import TemporalFilter, TemporalVectorStore
     from khora.extraction.embedders import EmbedderProtocol  # type: ignore[unresolved-import]
+    from khora.filter import FilterNode
     from khora.query.reranking import CrossEncoderReranker, LLMReranker
     from khora.storage import StorageCoordinator
 
@@ -551,6 +552,7 @@ class VectorCypherRetriever:
         limit: int | None = None,
         min_similarity: float = 0.0,
         mode: SearchMode = SearchMode.HYBRID,
+        filter_ast: FilterNode | None = None,
     ) -> VectorCypherResult:
         """Retrieve relevant chunks using VectorCypher hybrid approach.
 
@@ -571,6 +573,13 @@ class VectorCypherRetriever:
                 skips vector + graph (BM25 only). The engine is responsible
                 for validating this against ``supported_modes`` before
                 calling retrieve.
+            filter_ast: Canonical recall-filter AST. When set, it is pushed
+                down into the vector channel (``_vector_search_chunks`` ->
+                ``TemporalVectorStore.search``) and the independent BM25
+                channel (``_bm25_search_chunks`` -> ``search_fulltext``),
+                where the pgvector backend compiles it to the SAME
+                ``khora_chunks`` WHERE predicate. ``None`` leaves every path
+                byte-identical to the no-filter behaviour.
 
         Returns:
             VectorCypherResult with chunks, entities, and metadata
@@ -736,6 +745,7 @@ class VectorCypherRetriever:
                     graph_depth=graph_depth,
                     limit=limit,
                     routing=routing,
+                    filter_ast=filter_ast,
                 )
             elif force_simple or (not force_graph and routing.complexity == QueryComplexity.SIMPLE):
                 # Simple path: direct chunk retrieval. Also the destination
@@ -754,6 +764,7 @@ class VectorCypherRetriever:
                     temporal_signal=temporal_signal,
                     min_similarity=min_similarity,
                     mode=mode,
+                    filter_ast=filter_ast,
                 )
             else:
                 # Complex/moderate path: VectorCypher with parallel execution.
@@ -773,6 +784,7 @@ class VectorCypherRetriever:
                         temporal_signal=temporal_signal,
                         min_similarity=min_similarity,
                         mode=mode,
+                        filter_ast=filter_ast,
                     )
                 except _NEO4J_TRANSIENT_ERRORS as e:
                     logger.warning(f"Graph search failed, falling back to vector-only: {e}")
@@ -835,6 +847,8 @@ class VectorCypherRetriever:
         graph_depth: int | None,
         limit: int,
         routing: RoutingDecision,
+        *,
+        filter_ast: FilterNode | None = None,
     ) -> VectorCypherResult:
         """Phase C fast path (#569): typed-entity recency in one Cypher query.
 
@@ -877,6 +891,7 @@ class VectorCypherRetriever:
                 graph_depth=graph_depth,
                 limit=limit,
                 routing=routing,
+                filter_ast=filter_ast,
             )
 
         # No graph layer → fall back.
@@ -889,6 +904,7 @@ class VectorCypherRetriever:
                 graph_depth=graph_depth,
                 limit=limit,
                 routing=routing,
+                filter_ast=filter_ast,
             )
             fallback.metadata["typed_entity_fast_path_fallback"] = True
             fallback.metadata["typed_entity_type"] = entity_type
@@ -937,6 +953,7 @@ class VectorCypherRetriever:
                     graph_depth=graph_depth,
                     limit=limit,
                     routing=routing,
+                    filter_ast=filter_ast,
                 )
                 fallback.metadata["typed_entity_fast_path_fallback"] = True
                 fallback.metadata["typed_entity_type"] = entity_type
@@ -952,6 +969,7 @@ class VectorCypherRetriever:
                     graph_depth=graph_depth,
                     limit=limit,
                     routing=routing,
+                    filter_ast=filter_ast,
                 )
                 fallback.metadata["typed_entity_fast_path_fallback"] = True
                 fallback.metadata["typed_entity_type"] = entity_type
@@ -1020,6 +1038,7 @@ class VectorCypherRetriever:
         temporal_signal: TemporalSignal | None = None,
         min_similarity: float = 0.0,
         mode: SearchMode = SearchMode.HYBRID,
+        filter_ast: FilterNode | None = None,
     ) -> VectorCypherResult:
         """Internal VectorCypher retrieval with graph traversal.
 
@@ -1069,6 +1088,7 @@ class VectorCypherRetriever:
                     limit=limit,
                     hybrid_alpha_override=effective_hybrid_alpha,
                     min_similarity=min_similarity,
+                    filter_ast=filter_ast,
                 )
             )
 
@@ -1080,6 +1100,7 @@ class VectorCypherRetriever:
                     query=query,
                     namespace_id=namespace_id,
                     limit=self._config.bm25_top_k,
+                    filter_ast=filter_ast,
                 )
             )
 
@@ -1119,6 +1140,7 @@ class VectorCypherRetriever:
                 temporal_signal=temporal_signal,
                 min_similarity=min_similarity,
                 mode=mode,
+                filter_ast=filter_ast,
             )
 
         # Step 3b: Session-aware parallel retrieval
@@ -1186,6 +1208,11 @@ class VectorCypherRetriever:
                     else:
                         session_tf = _TF(channel=ch)
 
+                    # Session fan-out is PRIMARY retrieval (per-session
+                    # partitioning of the same query — it replaces the cancelled
+                    # global vector task), so it carries the caller filter.
+                    # filter_ast composes orthogonally with the per-session
+                    # TemporalFilter (both AND in the same conditions list).
                     session_tasks.append(
                         asyncio.create_task(
                             self._vector_search_chunks(
@@ -1196,6 +1223,7 @@ class VectorCypherRetriever:
                                 limit=per_session_limit,
                                 hybrid_alpha_override=effective_hybrid_alpha,
                                 min_similarity=min_similarity,
+                                filter_ast=filter_ast,
                             )
                         )
                     )
@@ -1213,6 +1241,7 @@ class VectorCypherRetriever:
                             limit=fallback_limit,
                             hybrid_alpha_override=effective_hybrid_alpha,
                             min_similarity=min_similarity,
+                            filter_ast=filter_ast,
                         )
                     )
                 )
@@ -1407,6 +1436,9 @@ class VectorCypherRetriever:
                 limit=limit,
                 hybrid_alpha_override=effective_hybrid_alpha,
                 min_similarity=min_similarity,
+                # Carrying the caller filter across this restrictive-fallback
+                # sub-search is deferred to follow-up work; for now it is left
+                # unthreaded so this path stays byte-identical to today.
             )
 
         # Await BM25 results (also launched in parallel at the beginning)
@@ -1438,6 +1470,10 @@ class VectorCypherRetriever:
                         query_text=current_state_query,
                         limit=limit,
                         min_similarity=min_similarity,
+                        # Carrying the caller filter across this CHANGE-
+                        # decomposition sub-search is deferred to follow-up
+                        # work; for now it is left unthreaded so this path
+                        # stays byte-identical to today.
                     )
                     # Merge sub-query results, deduplicating by chunk ID
                     existing_ids = {c[0] for c in vector_chunks}
@@ -2221,6 +2257,7 @@ class VectorCypherRetriever:
         temporal_signal: TemporalSignal | None = None,
         min_similarity: float = 0.0,
         mode: SearchMode = SearchMode.HYBRID,
+        filter_ast: FilterNode | None = None,
     ) -> VectorCypherResult:
         """Simple retrieval path - vector search only.
 
@@ -2264,6 +2301,7 @@ class VectorCypherRetriever:
                         query=query,
                         namespace_id=namespace_id,
                         limit=self._config.bm25_top_k if mode != SearchMode.KEYWORD else max(limit, 50),
+                        filter_ast=filter_ast,
                     )
                 )
 
@@ -2278,6 +2316,7 @@ class VectorCypherRetriever:
                     temporal_filter=temporal_filter,
                     hybrid_alpha=effective_alpha,
                     query_text=query,
+                    filter_ast=filter_ast,
                 )
 
             chunk_results: list[tuple[Chunk, float]] = []
@@ -2970,6 +3009,7 @@ class VectorCypherRetriever:
         *,
         hybrid_alpha_override: float | None = None,
         min_similarity: float = 0.0,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Direct vector search on chunks via pgvector.
 
@@ -2984,6 +3024,9 @@ class VectorCypherRetriever:
                                    channel is active to avoid double-counting.
             min_similarity: Per-call cosine-similarity floor applied at the
                 storage layer. Forwarded to ``TemporalVectorStore.search``.
+            filter_ast: Canonical recall-filter AST. Forwarded to
+                ``TemporalVectorStore.search``, where the pgvector backend
+                compiles it to a ``khora_chunks`` WHERE predicate.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -2998,6 +3041,7 @@ class VectorCypherRetriever:
                 temporal_filter=temporal_filter,
                 hybrid_alpha=effective_alpha,
                 query_text=query_text,
+                filter_ast=filter_ast,
             )
 
             span.set_attribute("chunk_count", len(results))
@@ -3129,6 +3173,8 @@ class VectorCypherRetriever:
         query: str,
         namespace_id: UUID,
         limit: int,
+        *,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Full-text BM25 search on chunks.
 
@@ -3143,6 +3189,16 @@ class VectorCypherRetriever:
             query: Original query text
             namespace_id: Namespace to search
             limit: Maximum results
+            filter_ast: Canonical recall-filter AST. When set, the search is
+                pushed down through the temporal store's ``search_fulltext``
+                (which compiles it to the SAME ``khora_chunks`` WHERE the
+                vector channel uses). The coordinator ``chunks``-table
+                fallback is then NOT used: that legacy table cannot honor a
+                ``khora_chunks``-compiled predicate, so falling back would
+                smuggle filter-violating chunks into RRF. When the temporal
+                path is unavailable/empty under a filter, BM25 returns ``[]``
+                rather than unfiltered rows. ``None`` keeps the
+                temporal-first-then-coordinator behaviour byte-identical.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -3157,7 +3213,7 @@ class VectorCypherRetriever:
                 source = "coordinator"
                 temporal_fulltext = getattr(self._vector_store, "search_fulltext", None)
                 if callable(temporal_fulltext):
-                    raw = await temporal_fulltext(namespace_id, query, limit=limit)
+                    raw = await temporal_fulltext(namespace_id, query, limit=limit, filter_ast=filter_ast)
                     # Real backends return ``list[tuple[Chunk, float]]``; the
                     # ``isinstance`` check rejects the bare-AsyncMock case
                     # (and any other non-list return) so we fall through to
@@ -3166,7 +3222,12 @@ class VectorCypherRetriever:
                     if isinstance(raw, list) and raw:
                         results = raw
                         source = "temporal_store"
-                if not results and self._storage is not None:
+                # Coordinator fallback reads the legacy ``chunks`` table, whose
+                # schema cannot carry the ``khora_chunks``-compiled predicate.
+                # Only take it when NO deterministic filter is set — otherwise
+                # it would smuggle filter-violating chunks into RRF (the
+                # filtered path forbids a PG post-filter backstop).
+                if not results and filter_ast is None and self._storage is not None:
                     coord_results = await self._storage.search_fulltext_chunks(
                         namespace_id,
                         query,

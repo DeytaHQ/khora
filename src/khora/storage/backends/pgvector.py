@@ -16,6 +16,7 @@ from sqlalchemy import delete, func, literal_column, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
+from khora.core.diagnostics import Degradation
 from khora.core.models import Chunk
 from khora.db.models import (
     Base,
@@ -30,7 +31,7 @@ from khora.storage.backends.mixins import AsyncSessionMixin
 from khora.telemetry import trace
 
 if TYPE_CHECKING:
-    pass
+    from khora.filter.ast import FilterNode
 
 try:
     import numpy as np
@@ -760,12 +761,42 @@ class PgVectorBackend(AsyncSessionMixin):
         language: str = "english",
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Search chunks using PostgreSQL full-text search with ts_rank.
 
         Uses the content_tsv generated column and GIN index for efficient
         full-text matching.
+
+        ``filter_ast`` REFUSAL (ADR-001): this backend reads the relational
+        ``chunks`` table, which lacks the denormalized filter columns the
+        recall-filter compiler targets (``khora_chunks``). It therefore CANNOT
+        honor a recall filter here. When ``filter_ast`` is present we return
+        ``[]`` and log a WARNING rather than attempt to compile the
+        ``khora_chunks`` predicate (would SQL-error) or return unfiltered rows
+        (would smuggle filter-violating chunks into RRF — forbidden, no PG
+        post-filter backstop). The filtered BM25 path is the ``khora_chunks``
+        temporal store's ``search_fulltext``; callers route the filtered query
+        there (the VectorCypher retriever skips this fallback under a filter).
         """
+        if filter_ast is not None:
+            # Deliberate refusal, not a caught exception: WARNING + Degradation
+            # (ADR-001), no result carrier on this bare-list method so the log
+            # is the surfaced signal. No new metric (telemetry-contract churn).
+            degradation = Degradation(
+                component="pgvector.search_fulltext",
+                reason="recall_filter_unsupported_on_relational_chunks",
+                detail=(
+                    "filter_ast present but relational chunks table lacks denormalized "
+                    "filter columns; use khora_chunks temporal store"
+                ),
+                exception=None,
+            )
+            logger.warning(
+                "Relational chunks BM25 search refused under an active recall filter: {}",
+                degradation,
+            )
+            return []
         async with self._get_session() as session:
             # OR the query terms instead of plainto_tsquery's implicit AND: a
             # full-sentence question rarely has every content word in one chunk,

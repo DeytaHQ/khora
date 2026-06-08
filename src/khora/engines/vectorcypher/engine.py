@@ -2087,8 +2087,9 @@ class VectorCypherEngine:
             temporal_filter: Temporal constraints
             graph_depth: Override graph traversal depth
             hybrid_alpha: Blend factor (0=graph, 1=vector)
-            filter_ast: Canonical recall-filter AST. Accepted for protocol
-                parity; VectorCypher does not push filters down yet (ignored).
+            filter_ast: Canonical recall-filter AST. Compiled to a
+                ``khora_chunks`` WHERE predicate and pushed down into both the
+                vector channel and the independent BM25 channel.
 
         Returns:
             RecallResult with chunks, entities, and context
@@ -2167,6 +2168,7 @@ class VectorCypherEngine:
                 limit=limit,
                 min_similarity=min_similarity,
                 mode=mode,
+                filter_ast=filter_ast,
             )
         finally:
             retriever._config.hybrid_alpha = original_alpha
