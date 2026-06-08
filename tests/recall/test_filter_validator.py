@@ -289,7 +289,7 @@ def test_date_key_accepts_full_range_op_set() -> None:
 
 @pytest.mark.parametrize("op", ["$eq", "$ne"])
 def test_date_key_accepts_equality_ops(op: str) -> None:
-    # §2: date keys accept equality ($eq/$ne) — not just range. The DateOps arm
+    # Date keys accept equality ($eq/$ne) — not just range. The DateOps arm
     # has these fields, so a date key with $eq/$ne lands on DateOps (the operand
     # is parsed + UTC-normalized like every other date operand).
     model = RecallFilter.model_validate({"occurred_at": {op: "2026-04-05T00:00:00Z"}})
@@ -298,7 +298,7 @@ def test_date_key_accepts_equality_ops(op: str) -> None:
 
 @pytest.mark.parametrize("op", ["$in", "$nin"])
 def test_date_key_accepts_set_ops(op: str) -> None:
-    # §2: date keys accept set membership ($in/$nin) over a list of date operands.
+    # Date keys accept set membership ($in/$nin) over a list of date operands.
     model = RecallFilter.model_validate({"occurred_at": {op: ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"]}})
     assert isinstance(model.occurred_at, DateOps)
 
@@ -553,7 +553,7 @@ def test_metadata_unknown_operator_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bare-metadata-blob grammar walk (§3) — each blob field is an independent
+# Bare-metadata-blob grammar walk — each blob field is an independent
 # predicate (sibling-AND); literal-dotted and $-prefixed field NAMES inside a
 # blob are stored verbatim (not operators / not dot-paths). The folded
 # metadata.<path> form is covered above; these pin the bare-blob arm.

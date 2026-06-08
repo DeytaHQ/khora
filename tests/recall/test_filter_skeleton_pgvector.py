@@ -1,29 +1,30 @@
-"""Full-stack integration tests for the V1 recall-filter on Skeleton-pgvector.
+"""Full-stack integration tests for the recall-filter on Skeleton-pgvector.
 
-INTERIM TEST — SUPERSEDED BY PILLAR 1 (DYT-5025). This is an interim per-slice
-smoke test for the V1 Skeleton-pgvector filter path. Per ADR-092
-§🧪 Verification Strategy, this assertion *reduces to Pillar 1* (the
-filter-conformance corpus): its permanent home is the dedicated
-filter-conformance CI job (``tests/integration/matrix/``, marker
-``filter_conformance``, per-engine databases), tracked by DYT-5025 / P1, which
-is not built yet. That job is deliberately excluded from the main test job so
-the conformance cases never double-run. This file lives in ``tests/recall/`` and
-is collected by the main test job's unit step, where it SELF-SKIPS because that
-job provisions no Postgres — it gates locally via ``make dev`` only. That is
-acceptable for an interim smoke test; it is NOT the permanent CI gate. When
-DYT-5025 lands, MIGRATE/REMOVE this file so the assertion does not double-run
-against the Pillar-1 corpus. Do not entrench it (no Postgres service should be
-added to the main test job for this test).
+INTERIM TEST — SUPERSEDED BY THE FILTER-CONFORMANCE SUITE. This is an interim
+smoke test for the Skeleton-pgvector filter path. Per the project's
+filter-verification strategy, this assertion reduces to the dedicated
+filter-conformance corpus: its permanent home is a separate filter-conformance
+CI job (``tests/integration/matrix/``, its own conformance marker, per-engine
+databases) that is not built yet. That job is deliberately excluded from the
+main test job so the conformance cases never double-run. This file lives in
+``tests/recall/`` and is collected by the main test job's unit step, where it
+SELF-SKIPS because that job provisions no Postgres — it gates locally via
+``make dev`` only. That is acceptable for an interim smoke test; it is NOT the
+permanent CI gate. When the filter-conformance suite lands, MIGRATE/REMOVE this
+file so the assertion does not double-run against the conformance corpus. Do not
+entrench it (no Postgres service should be added to the main test job for this
+test).
 
 Where ``tests/integration/test_compile_postgres_rowset.py`` exercises the
 compiler against a hand-seeded temp table, this file drives the *public* API
 end-to-end: real ``Khora.remember()`` writes through the Skeleton engine into a
 real ``khora_chunks`` table, and ``Khora.recall(filter=...)`` must narrow the
-result to exactly the in-scope rows. V1-j (PR #1012) wired ``filter_ast`` from
-the facade through the skeleton engine into the pgvector store's WHERE predicate,
-so row filtering is now effective end-to-end — these tests pin that contract.
+result to exactly the in-scope rows. The engine→backend wiring threads
+``filter_ast`` from the facade through the skeleton engine into the pgvector
+store's WHERE predicate, so row filtering is effective end-to-end — these tests
+pin that contract.
 
-Three scenarios (DYT-5040 V1-T):
+Three scenarios:
 
 * S1 — row-set: 5 in-scope + 5 out-of-scope chunks, each out-of-scope row
   violating EXACTLY ONE of the three predicates (wrong ``source_name``;
@@ -103,12 +104,12 @@ pytestmark = [
     pytest.mark.skipif(
         not _pg_reachable(),
         # Not accidental missing coverage: this is an interim smoke test whose
-        # permanent CI coverage is Pillar 1's filter-conformance job (DYT-5025).
+        # permanent CI coverage is the dedicated filter-conformance job.
         # It self-skips without local Postgres (run `make dev`).
         reason=(
-            "interim smoke test; permanent CI coverage is Pillar 1's "
-            "filter-conformance job (DYT-5025). Self-skips without local "
-            "Postgres (run `make dev`)."
+            "interim smoke test; permanent CI coverage is the dedicated "
+            "filter-conformance job. Self-skips without local Postgres "
+            "(run `make dev`)."
         ),
     ),
 ]
@@ -290,10 +291,11 @@ async def test_filter_returns_exactly_in_scope_chunks(kb: Khora) -> None:
     """``recall(filter=...)`` narrows the live result to exactly the 5 in-scope
     chunks — no out-of-scope leak.
 
-    This is the end-to-end proof that V1-j (#1012) actually filters rows: the
-    facade builds the AST, the skeleton engine threads it to the pgvector store,
-    and the compiler emits a ``khora_chunks`` WHERE predicate. Every out-of-scope
-    row violates exactly one predicate, so a leak would name the broken one.
+    This is the end-to-end proof that the engine→backend wiring actually filters
+    rows: the facade builds the AST, the skeleton engine threads it to the
+    pgvector store, and the compiler emits a ``khora_chunks`` WHERE predicate.
+    Every out-of-scope row violates exactly one predicate, so a leak would name
+    the broken one.
     """
     ns = await kb.create_namespace()
     namespace_id: UUID = ns.namespace_id
@@ -362,12 +364,11 @@ async def test_engine_info_reports_skeleton_filter_row(kb: Khora) -> None:
 
     NOTE on ``pushed_down``: this test deliberately does NOT pin the flag's
     value. Filtering is provably effective end-to-end
-    (test_filter_returns_exactly_in_scope_chunks proves it), but the as-built V1
+    (test_filter_returns_exactly_in_scope_chunks proves it), but the as-built
     carrier still reports ``pushed_down=False`` (khora.py:2136-2141); honest
-    per-engine pushdown reporting is a follow-up (DYT-5071 / V1-k, ADR-092 §6).
-    Asserting only that the key is present — not its value — means V1-k can flip
-    it to honest reporting without having to come back and edit this interim
-    test.
+    per-engine pushdown reporting is a follow-up. Asserting only that the key is
+    present — not its value — means that follow-up can flip it to honest
+    reporting without having to come back and edit this interim test.
     """
     ns = await kb.create_namespace()
     namespace_id: UUID = ns.namespace_id
@@ -383,7 +384,7 @@ async def test_engine_info_reports_skeleton_filter_row(kb: Khora) -> None:
 
     # Carrier present with the stable skeleton support row. ``pushed_down`` must
     # be present (carrier shape) but its value is intentionally not pinned — see
-    # the note above (DYT-5071 / V1-k corrects it to honest reporting).
+    # the note above (a follow-up corrects it to honest reporting).
     info = (result.engine_info or {}).get("filter")
     assert info is not None, "engine_info['filter'] carrier must be present on a filtered recall"
     assert info["engine"] == "skeleton"
