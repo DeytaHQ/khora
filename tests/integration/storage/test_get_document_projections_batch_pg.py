@@ -29,7 +29,7 @@ from khora.storage.backends.postgresql import PostgreSQLBackend
 
 DATABASE_URL = os.environ.get(
     "KHORA_DATABASE_URL",
-    "postgresql+asyncpg://khora:khora@localhost:5432/khora",
+    "postgresql+asyncpg://khora:khora@localhost:5434/khora",
 )
 
 if DATABASE_URL.startswith("postgresql://"):
@@ -47,7 +47,7 @@ def _pg_reachable() -> bool:
 
     parsed = urlparse(DATABASE_URL.replace("+asyncpg", ""))
     host = parsed.hostname or "localhost"
-    port = parsed.port or 5432
+    port = parsed.port or 5434
     try:
         with socket.create_connection((host, port), timeout=2):
             return True
