@@ -19,14 +19,15 @@ in any public ``__all__`` and not re-exported from :mod:`khora.__init__`.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from khora.filter.ast import FilterNode
+from khora.filter.ast import FilterClause, FilterNode
 from khora.filter.compilers.chronicle import ChronicleDateBound, compile_chronicle
 from khora.filter.compilers.python import compile_python
 from khora.filter.context import CompileContext, SchemaCapabilities
+from khora.filter.model import Op
 
 
 def build_compile_context(
@@ -109,3 +110,86 @@ def run_chronicle_filter(
     """
     post_filter = plan_chronicle_filter(filter_ast).post_filter
     return [record for record in records if post_filter(record)]
+
+
+# --------------------------------------------------------------------------- #
+# AST leaf inspection — one walk, several thin detectors.
+#
+# An engine composing a caller filter across adaptive sub-searches needs a few
+# cheap structural questions answered about the AST: which keys it constrains,
+# whether any leaf falls outside a backend's pushdown set, whether it touches a
+# date key, and whether it pins a metadata channel at the top level. All four
+# are thin consumers of :func:`iter_leaf_clauses` — the single canonical leaf
+# walk — so the traversal logic lives in exactly one place.
+# --------------------------------------------------------------------------- #
+
+
+def iter_leaf_clauses(node: FilterNode | FilterClause) -> Iterator[FilterClause]:
+    """Yield every :class:`FilterClause` leaf in an AST subtree.
+
+    The one canonical walk: ``AND`` / ``OR`` / ``NOT`` recurse through
+    ``FilterNode.children``; a :class:`FilterClause` is a leaf. The detectors
+    below are thin consumers of this generator so the traversal is defined once.
+    """
+    if isinstance(node, FilterClause):
+        yield node
+        return
+    for child in node.children:
+        yield from iter_leaf_clauses(child)
+
+
+def filter_leaf_keys(node: FilterNode | FilterClause) -> frozenset[str]:
+    """Return the set of dotted keys every leaf in the AST constrains.
+
+    ``".".join(clause.path)`` for each leaf — identical to how the compilers
+    build :attr:`CompiledFilter.consumed_keys` (their ``_path_str`` joins the
+    same segment tuple), so this set can be differenced against ``consumed_keys``
+    to find residual (un-pushed) leaves.
+    """
+    return frozenset(".".join(clause.path) for clause in iter_leaf_clauses(node))
+
+
+def has_residual_metadata(node: FilterNode | FilterClause, consumed_keys: frozenset[str]) -> bool:
+    """Return whether any AST leaf was not pushed down (needs a post-filter).
+
+    ``True`` when at least one leaf key is absent from ``consumed_keys`` — i.e.
+    the backend compiler (run in ``"split"`` mode) could not express it, so the
+    engine must apply an in-memory post-filter and may want to over-fetch first.
+    """
+    return bool(filter_leaf_keys(node) - consumed_keys)
+
+
+def filter_constrains_date_key(node: FilterNode | FilterClause) -> bool:
+    """Return whether any leaf constrains a date system key.
+
+    Keys on the leaf *path*, not its operator, so it covers every form an
+    ``occurred_at`` / ``created_at`` predicate can take — a bare ``$eq``, a range
+    (``$gte`` / ``$lte``), ``$in``, or ``$exists`` — each of which lowers to a
+    single-segment :class:`FilterClause` on that path.
+    """
+    return any(clause.path in (("occurred_at",), ("created_at",)) for clause in iter_leaf_clauses(node))
+
+
+def caller_channel_constraint(node: FilterNode) -> frozenset[str] | None:
+    """Return the channels a top-level ``metadata.channel`` predicate pins, or ``None``.
+
+    Inspects ONLY the root ``AND``'s direct children. A ``metadata.channel``
+    constraint buried inside an ``$or`` / ``$not`` is not a hard conjunctive
+    constraint, so it yields ``None`` (never over-restrict). For a direct child
+    that is a ``metadata.channel`` leaf: ``$eq`` of a string contributes that
+    value; ``$in`` contributes its string members. Any other shape (or no such
+    leaf) yields ``None``. Conservative on purpose — equality / membership only.
+    """
+    if node.op != Op.AND:
+        return None
+    channels: set[str] = set()
+    for child in node.children:
+        if not isinstance(child, FilterClause) or child.path != ("metadata", "channel"):
+            continue
+        if child.op == Op.EQ and isinstance(child.operand, str):
+            channels.add(child.operand)
+        elif child.op == Op.IN:
+            channels.update(item for item in child.operand if isinstance(item, str))
+        else:
+            return None
+    return frozenset(channels) if channels else None

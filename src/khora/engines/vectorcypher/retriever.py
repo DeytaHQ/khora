@@ -118,6 +118,22 @@ _REL_FETCH_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# Graph-channel-empty-under-filter counter (ADR-001). Incremented when the
+# in-memory metadata post-filter empties the graph chunk channel while the
+# SQL-pushed vector/BM25 channels returned filtered rows — i.e. the graph side
+# under-recalled relative to the completeness backstop. The same event is also
+# appended to RecallResult.engine_info['degradations']. NO namespace_id label -
+# cardinality rule.
+_GRAPH_CHANNEL_EMPTY_COUNTER = metric_counter(
+    "khora.vectorcypher.graph_channel.empty_total",
+    unit="1",
+    description=(
+        "VectorCypher graph chunk channel emptied by the in-memory metadata "
+        "post-filter while the vector/BM25 channels returned filtered rows. "
+        "Labels: reason (empty_under_filter). NO namespace_id label - cardinality rule."
+    ),
+)
+
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
     """Normalize the value of ``chunker_info`` returned by a record dict.
@@ -336,6 +352,11 @@ class RetrieverConfig:
     max_chunks: int = 50
     max_entities: int = 30
     max_relationships: int = 90  # ~3x max_entities
+
+    # Over-fetch multiplier for the graph chunk channel when a residual metadata
+    # predicate must be applied as an in-memory post-filter (metadata is not
+    # pushable to Cypher). Capped at min(limit*multiplier, 200).
+    metadata_overfetch_multiplier: int = 3
 
 
 def _extract_occurred_at(item: Any) -> str | None:
@@ -1065,6 +1086,33 @@ class VectorCypherRetriever:
         # failures without changing signatures.
         degradations: list[Degradation] = []
 
+        # When the caller filter has a leaf the Cypher chunk channel cannot push
+        # down (any metadata predicate — metadata is a serialized JSON property
+        # on the Chunk node, not pushable to Cypher), the graph channel applies
+        # an in-memory post-filter after the fetch. Over-fetch the graph channel
+        # so the post-filter still has enough candidates to fuse. The probe runs
+        # the Cypher compiler in split mode (never raises) and compares its
+        # consumed keys to every leaf key; system-key-only and no-filter recalls
+        # leave the fetch limit unchanged (those push down exactly).
+        graph_overfetch = False
+        if filter_ast is not None:
+            from khora.filter.compilers.cypher import compile_cypher
+            from khora.filter.execute import build_compile_context, has_residual_metadata
+
+            graph_overfetch = has_residual_metadata(
+                filter_ast,
+                compile_cypher(
+                    filter_ast,
+                    build_compile_context("Chunk", table_alias="c", on_unsupported="split"),
+                ).consumed_keys,
+            )
+        # Graph + PPR fetch budget: widen to make room for the post-filter when a
+        # residual metadata predicate is present, capped to keep the over-fetch
+        # bounded; otherwise the historical ``limit * 2`` fetch is preserved.
+        graph_fetch_limit = (
+            min(limit * self._config.metadata_overfetch_multiplier, 200) if graph_overfetch else limit * 2
+        )
+
         # #833 channel-skip: GRAPH mode drops vector + BM25 chunk channels
         # (entry entities still come from the entity-level vector index,
         # since the cypher expansion needs seeds).
@@ -1171,7 +1219,26 @@ class VectorCypherRetriever:
                     logger.warning(f"Session discovery failed, using global search: {e}")
                     entity_channels = []
 
-            if len(entity_channels) >= 2:
+            # Best-effort efficiency guard: when the caller pins a
+            # ``metadata.channel`` at the top level of its filter, fan out only
+            # over the discovered sessions that intersect it. NOTE: the
+            # discovered ``channel`` (a Chunk-node column) and the caller's
+            # ``metadata.channel`` (a JSONB blob key) are distinct fields — this
+            # intersect is purely an efficiency narrowing. Correctness never
+            # depends on it: filter_ast is AND-composed into every per-session
+            # search, so even when the two fields differ the result row-set is
+            # still correct (possibly empty). A disjoint or empty intersect
+            # skips the fan-out and keeps the global vector task (which already
+            # carries filter_ast).
+            from khora.filter.execute import caller_channel_constraint
+
+            caller_channels = caller_channel_constraint(filter_ast) if filter_ast is not None else None
+            if caller_channels is not None:
+                fanout_channels = [ch for ch in entity_channels if ch in caller_channels]
+            else:
+                fanout_channels = entity_channels
+
+            if len(fanout_channels) >= 2:
                 # Cancel the original global vector search
                 if vector_chunks_task is not None:
                     vector_chunks_task.cancel()
@@ -1182,15 +1249,15 @@ class VectorCypherRetriever:
 
                 # Fan out per-session vector searches + one unscoped fallback
                 session_aware_activated = True
-                per_session_limit = max(3, limit // len(entity_channels))
+                per_session_limit = max(3, limit // len(fanout_channels))
                 logger.info(
-                    f"Session-aware search: {len(entity_channels)} sessions, {per_session_limit} chunks/session"
+                    f"Session-aware search: {len(fanout_channels)} sessions, {per_session_limit} chunks/session"
                 )
 
                 from khora.engines.skeleton.backends import TemporalFilter as _TF
 
                 session_tasks: list[asyncio.Task[list[tuple[UUID, float, Chunk]]]] = []
-                for ch in entity_channels:
+                for ch in fanout_channels:
                     # Build a per-session temporal filter, preserving any existing
                     # time-range constraints from the original filter.
                     if temporal_filter is not None:
@@ -1253,7 +1320,7 @@ class VectorCypherRetriever:
                 merged: dict[UUID, tuple[UUID, float, Chunk]] = {}
                 for i, result in enumerate(all_session_results):
                     if isinstance(result, Exception):
-                        ch_label = entity_channels[i] if i < len(entity_channels) else "fallback"
+                        ch_label = fanout_channels[i] if i < len(fanout_channels) else "fallback"
                         logger.warning(f"Session search failed for channel={ch_label}: {result}")
                         continue
                     for chunk_id, score, chunk in result:
@@ -1265,7 +1332,7 @@ class VectorCypherRetriever:
                 _session_aware_chunks = list(merged.values())
                 logger.info(
                     f"Session-aware search merged {len(merged)} unique chunks "
-                    f"from {len(entity_channels)} sessions + fallback"
+                    f"from {len(fanout_channels)} sessions + fallback"
                 )
 
         # Compute adaptive depth based on entry entity count
@@ -1380,7 +1447,7 @@ class VectorCypherRetriever:
                 tol=self._config.ppr_tol,
                 top_entities=self._config.ppr_top_entities,
                 chunk_similarity=chunk_similarity,
-                limit=limit * 2,
+                limit=graph_fetch_limit,
             )
             graph_chunks = ppr_chunks
             ppr_path_used = bool(ppr_chunks)
@@ -1394,9 +1461,10 @@ class VectorCypherRetriever:
                 entity_ids=all_entity_ids,
                 namespace_id=namespace_id,
                 temporal_filter=temporal_filter,
-                limit=limit * 2,  # Fetch more for fusion
+                limit=graph_fetch_limit,  # Fetch more for fusion (widened on residual metadata)
                 temporal_sort=_tp.temporal_sort,
                 prefer_current=_tp.prefer_current,
+                filter_ast=filter_ast,
             )
 
         # Step 6: Wait for parallel vector chunk search to complete
@@ -1426,6 +1494,12 @@ class VectorCypherRetriever:
             and temporal_filter
             and len(vector_chunks) < limit // 2
             and not is_explicit_with_date
+            # Skip under ANY caller filter: the re-run intentionally drops the
+            # caller filter (it re-searches with temporal_filter=None and does
+            # not thread filter_ast), so re-running it would smuggle
+            # filter-violating chunks into RRF. Under a caller filter, sparse
+            # vector results are the correct (deterministic) signal.
+            and filter_ast is None
         ):
             logger.debug(f"Temporal filter too restrictive ({len(vector_chunks)} results), falling back to unfiltered")
             vector_chunks = await self._vector_search_chunks(
@@ -1436,9 +1510,9 @@ class VectorCypherRetriever:
                 limit=limit,
                 hybrid_alpha_override=effective_hybrid_alpha,
                 min_similarity=min_similarity,
-                # Carrying the caller filter across this restrictive-fallback
-                # sub-search is deferred to follow-up work; for now it is left
-                # unthreaded so this path stays byte-identical to today.
+                # Reached only when filter_ast is None (gated above); the re-run
+                # drops the temporal filter, so there is no caller filter to
+                # thread here.
             )
 
         # Await BM25 results (also launched in parallel at the beginning)
@@ -1455,19 +1529,12 @@ class VectorCypherRetriever:
         # query naturally retrieves past-state chunks ("used to", "previously"),
         # while the decomposed sub-query targets current-state chunks.
         #
-        # Gated off when a caller filter_ast is in flight. The CHANGE signal is
-        # derived from the query string (not from temporal_filter), so this
-        # sub-search can fire under a filtered recall. It runs with
-        # temporal_filter=None and does not yet thread filter_ast (follow-up
-        # scope), so merging its results into the vector pool would smuggle
-        # filter-violating chunks into RRF and break the deterministic
-        # pre-filter contract. Skip it entirely until the filter is threaded.
-        if (
-            temporal_signal
-            and temporal_signal.category == TemporalCategory.CHANGE
-            and version_history
-            and filter_ast is None
-        ):
+        # The CHANGE signal is derived from the query string (not from
+        # temporal_filter), so this sub-search can fire under a filtered recall.
+        # It runs with temporal_filter=None (current-state intent) but carries
+        # the caller filter_ast, which _vector_search_chunks pushes down, so its
+        # merged results are filter-correct.
+        if temporal_signal and temporal_signal.category == TemporalCategory.CHANGE and version_history:
             current_state_query = self._decompose_change_query(query)
             if current_state_query and current_state_query != query:
                 with trace_span(
@@ -1483,8 +1550,7 @@ class VectorCypherRetriever:
                         query_text=current_state_query,
                         limit=limit,
                         min_similarity=min_similarity,
-                        # Reached only when filter_ast is None (gated above), so
-                        # there is no caller filter to thread here.
+                        filter_ast=filter_ast,
                     )
                     # Merge sub-query results, deduplicating by chunk ID
                     existing_ids = {c[0] for c in vector_chunks}
@@ -1526,14 +1592,6 @@ class VectorCypherRetriever:
             and temporal_signal.is_temporal
             and _tp.default_window_days is not None
             and not synthesis_vetoed
-            # Gated off when a caller filter_ast is in flight. The recency
-            # channel is gated on the query-string-derived temporal signal, so
-            # it can fire under a filtered recall; it pulls chunks with
-            # temporal_filter=None and does not yet thread filter_ast (follow-up
-            # scope). Merging its results into the vector pool would smuggle
-            # filter-violating chunks into RRF and break the deterministic
-            # pre-filter contract. Skip it until the filter is threaded.
-            and filter_ast is None
         ):
             # Intentionally pass temporal_filter=None: the recency channel's
             # job is to surface today's chunks even when the cosine channel
@@ -1541,10 +1599,19 @@ class VectorCypherRetriever:
             # (temporal_query_relevance_floor) is the safeguard against
             # irrelevant-but-fresh chunks muscling in (Devil's-Advocate
             # follow-up: decouple channel filter from synthesized floor).
+            #
+            # The recency channel reads the relational chunks table, which
+            # cannot push down a khora_chunks-compiled predicate, so the caller
+            # filter is enforced as an in-memory post-filter inside
+            # _recency_channel_chunks. Quality trade-off (accepted): under a
+            # restrictive caller filter the recency channel post-filters in
+            # memory and may return fewer rows, slightly under-recalling the
+            # "current state" intent on a tightly date-filtered namespace.
             recent_chunks = await self._recency_channel_chunks(
                 query_embedding=query_embedding,
                 namespace_id=namespace_id,
                 temporal_filter=None,
+                filter_ast=filter_ast,
             )
             if recent_chunks:
                 existing_ids = {c[0] for c in vector_chunks}
@@ -1572,6 +1639,37 @@ class VectorCypherRetriever:
                 if expanded:
                     graph_chunks = graph_chunks + expanded
                     logger.debug(f"Lazy expansion added {len(expanded)} chunks to graph results")
+
+        # Step 6c: Full-AST in-memory post-filter on the graph chunk channel.
+        # The vector + BM25 channels enforce the caller filter via the pgvector
+        # pushdown; the graph (and PPR) channel reads chunks from Neo4j, where
+        # only the system-key slice pushed down (metadata is a serialized JSON
+        # property, not Cypher-expressible). Re-check the WHOLE AST here so a
+        # metadata leaf — including one inside an ``$or`` whose Cypher side
+        # collapsed to a non-constraining ``true`` — is enforced before fusion.
+        # No-filter recalls leave ``graph_chunks`` untouched.
+        if filter_ast is not None and graph_chunks:
+            from khora.filter.compilers.python import compile_python
+            from khora.filter.execute import build_compile_context
+
+            graph_post_filter = compile_python(
+                filter_ast, build_compile_context("Chunk", on_unsupported="split")
+            ).predicate
+            graph_chunks_before = len(graph_chunks)
+            graph_chunks = [(cid, s, ch) for (cid, s, ch) in graph_chunks if graph_post_filter(ch)]
+            # ADR-001: when the post-filter empties the graph channel but the
+            # SQL-pushed vector/BM25 channels returned filtered rows, the graph
+            # side under-recalled relative to the completeness backstop. Record
+            # one degradation so callers can see the channel was dropped.
+            if not graph_chunks and graph_chunks_before and (vector_chunks or bm25_chunks):
+                degradations.append(
+                    Degradation(
+                        component="vectorcypher.graph_channel",
+                        reason="empty_under_filter",
+                        detail=f"{graph_chunks_before} graph chunks dropped by metadata post-filter",
+                    )
+                )
+                _GRAPH_CHANNEL_EMPTY_COUNTER.add(1, attributes={"reason": "empty_under_filter"})
 
         # Step 7: RRF fusion with score normalization and dynamic weights
         fused_results = self._fuse_results(
@@ -2922,6 +3020,7 @@ class VectorCypherRetriever:
         *,
         temporal_sort: bool = False,
         prefer_current: bool = False,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Fetch chunks connected to entities via MENTIONED_IN.
 
@@ -2932,6 +3031,9 @@ class VectorCypherRetriever:
             limit: Maximum chunks to return
             temporal_sort: If True, sort by occurred_at DESC (for temporal queries)
             prefer_current: When True, filter out expired entities
+            filter_ast: Canonical recall-filter AST. The system-key slice is
+                pushed down into the Cypher chunk query; metadata leaves are
+                left for the engine's in-memory post-filter.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -2949,6 +3051,7 @@ class VectorCypherRetriever:
                     temporal_sort=temporal_sort,
                     prefer_current=prefer_current,
                     limit=limit,
+                    filter_ast=filter_ast,
                 )
             elif self._storage:
                 # SurrealDB fallback: get chunks via entity source_chunk_ids
@@ -3092,6 +3195,7 @@ class VectorCypherRetriever:
         query_embedding: list[float],
         namespace_id: UUID,
         temporal_filter: TemporalFilter | None,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Issue #567 A3 — pure-recency candidate pool.
 
@@ -3101,6 +3205,12 @@ class VectorCypherRetriever:
         similarity against ``query_embedding`` and drops anything below
         ``temporal_query_relevance_floor``. Pool augmentation only — the
         caller merges results into the existing vector pool.
+
+        ``filter_ast``: the caller recall-filter AST. This channel reads the
+        relational chunks table, which cannot push down a khora_chunks-compiled
+        predicate, so the filter is enforced as a full-AST in-memory post-filter
+        — no filter-violating chunk reaches RRF. (Trade-off: under a restrictive
+        caller filter this may return fewer rows; see the call site.)
 
         Returns ``list[tuple[chunk_id, score, Chunk]]`` matching the
         shape of ``_vector_search_chunks`` so RRF can fuse it directly.
@@ -3182,6 +3292,19 @@ class VectorCypherRetriever:
                         ),
                     )
                 )
+
+            # Enforce the caller filter in memory: the recency channel reads the
+            # relational chunks table and cannot push a khora_chunks-compiled
+            # predicate to SQL, so drop any chunk that fails the full AST. This
+            # keeps filter-violating recent chunks out of RRF.
+            if filter_ast is not None:
+                from khora.filter.compilers.python import compile_python
+                from khora.filter.execute import build_compile_context
+
+                recency_post_filter = compile_python(
+                    filter_ast, build_compile_context("Chunk", on_unsupported="split")
+                ).predicate
+                filtered = [(cid, s, ch) for (cid, s, ch) in filtered if recency_post_filter(ch)]
 
             span.set_attribute("raw_count", len(recent_tuples))
             span.set_attribute("filtered_count", len(filtered))

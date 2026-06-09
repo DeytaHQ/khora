@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from neo4j import AsyncDriver, AsyncSession
 
     from khora.engines.skeleton.backends import TemporalChunk, TemporalFilter
+    from khora.filter import FilterNode
     from khora.storage.backends.neo4j import Neo4jBackend
 
 
@@ -473,6 +474,7 @@ class DualNodeManager:
         temporal_sort: bool = False,
         prefer_current: bool = False,
         limit: int = 50,
+        filter_ast: FilterNode | None = None,
     ) -> list[dict[str, Any]]:
         """Get chunks connected to the given entities via MENTIONED_IN.
 
@@ -484,6 +486,12 @@ class DualNodeManager:
                 has not passed (for temporal queries). Entities without
                 valid_until are kept (NULL = still valid).
             limit: Maximum chunks to return
+            filter_ast: Canonical recall-filter AST. The system-key slice
+                (the projected document/date keys on the Chunk node) is
+                pushed down here as an extra ``WHERE`` predicate; any metadata
+                leaf is not expressible in Cypher and is left to the engine's
+                in-memory post-filter. A predicate this backend cannot honor at
+                all raises :class:`RecallFilterUnsupportedError`.
 
         Returns:
             List of chunk dicts with entity connection info.
@@ -523,6 +531,29 @@ class DualNodeManager:
         # comparison yields NULL and would drop every current entity.
         if prefer_current:
             temporal_conditions.append("(e.valid_until IS NULL OR datetime(e.valid_until) > datetime())")
+
+        # Push the caller filter's system-key slice down to Cypher. The MATCH
+        # below binds the chunk as ``c`` (the compiler's default node variable),
+        # so the compiled predicate references ``c.<key>`` directly. Metadata
+        # leaves are not Cypher-expressible and are dropped here (the engine
+        # post-filters them); a predicate the backend cannot honor at all raises
+        # ``RecallFilterUnsupportedError`` from this call — deliberately OUTSIDE
+        # the ClientError/timeout handler below so a capability gap surfaces to
+        # the caller rather than being masked as a transient Neo4j failure.
+        if filter_ast is not None:
+            from khora.filter.compilers.cypher import compile_cypher
+            from khora.filter.execute import build_compile_context
+
+            compiled = compile_cypher(
+                filter_ast,
+                build_compile_context("Chunk", table_alias="c", on_unsupported="split"),
+            )
+            # Only splice when at least one leaf actually pushed down. A
+            # metadata-only filter consumes nothing here (every leaf collapses to
+            # a non-constraining ``true``); leave it entirely to the post-filter.
+            if compiled.consumed_keys:
+                temporal_conditions.append(compiled.predicate)
+                params.update(compiled.params)
 
         where_clause = ""
         if temporal_conditions:
