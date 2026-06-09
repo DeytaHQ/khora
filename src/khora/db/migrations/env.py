@@ -108,12 +108,12 @@ def _acquire_advisory_lock(
     min_delay: float = 0.05,
     max_delay: float = 2.0,
 ) -> None:
-    """Block until pg_advisory_xact_lock is acquired, with timeout.
+    """Block until pg_advisory_lock is acquired, with timeout.
 
     Uses full jitter exponential backoff to decorrelate concurrent callers
     (algorithm: ``wait_random_exponential`` from tenacity / AWS Architecture Blog).
 
-    Transaction-scoped lock auto-releases on commit/rollback.
+    Session-scoped lock — released explicitly in do_run_migrations' finally block.
     """
     if timeout <= 0:
         raise ValueError("timeout must be positive")
@@ -123,7 +123,7 @@ def _acquire_advisory_lock(
     attempt = 0
     while True:
         acquired = connection.execute(
-            text("SELECT pg_try_advisory_xact_lock(:lock_id)"),
+            text("SELECT pg_try_advisory_lock(:lock_id)"),
             {"lock_id": LOCK_ID},
         ).scalar()
         if acquired:
@@ -143,6 +143,14 @@ def _acquire_advisory_lock(
         attempt += 1
 
 
+def _release_advisory_lock(connection: Connection) -> None:
+    """Release the session-scoped migration advisory lock. Best-effort."""
+    try:
+        connection.execute(text("SELECT pg_advisory_unlock(:lock_id)"), {"lock_id": LOCK_ID})
+    except Exception:
+        logger.warning("Failed to release migration advisory lock — it will clear on connection close.")
+
+
 def do_run_migrations(connection: Connection) -> None:
     """Run migrations with advisory lock (Postgres only)."""
     dialect_name = connection.dialect.name
@@ -155,75 +163,86 @@ def do_run_migrations(connection: Connection) -> None:
         version_table=VERSION_TABLE,
         # SQLite requires batch mode for ALTER operations that involve FKs/constraints
         render_as_batch=is_sqlite,
+        # Commit each migration's DDL and version stamp atomically so a mid-chain
+        # failure never leaves the recorded revision ahead of the applied schema.
+        transaction_per_migration=True,
     )
 
-    with context.begin_transaction():
-        if is_postgres:
-            _acquire_advisory_lock(connection)
+    # Session-scoped advisory lock acquired BEFORE alembic's transaction
+    # demarcation: with transaction_per_migration each migration commits its own
+    # transaction, which would release a transaction-scoped lock after the first
+    # step. A session-scoped lock is held for the whole run regardless and is
+    # released deterministically in the finally below (same NullPool connection).
+    if is_postgres:
+        _acquire_advisory_lock(connection)
+    try:
+        with context.begin_transaction():
+            # Ahead-detection: skip if DB is at a revision this version doesn't know.
+            # Use information_schema.tables (SQL-standard, respects search_path) to check
+            # existence before querying the version table. Querying a missing table inside
+            # an explicit transaction puts PostgreSQL into ABORTED state, preventing
+            # context.run_migrations() from running (InFailedSQLTransactionError).
+            if is_sqlite:
+                table_exists = connection.execute(
+                    text("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=:table)"),
+                    {"table": VERSION_TABLE},
+                ).scalar()
+            else:
+                table_exists = connection.execute(
+                    text("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = :table)"),
+                    {"table": VERSION_TABLE},
+                ).scalar()
 
-        # Ahead-detection: skip if DB is at a revision this version doesn't know.
-        # Use information_schema.tables (SQL-standard, respects search_path) to check
-        # existence before querying the version table. Querying a missing table inside
-        # an explicit transaction puts PostgreSQL into ABORTED state, preventing
-        # context.run_migrations() from running (InFailedSQLTransactionError).
-        if is_sqlite:
-            table_exists = connection.execute(
-                text("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=:table)"),
-                {"table": VERSION_TABLE},
-            ).scalar()
-        else:
-            table_exists = connection.execute(
-                text("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = :table)"),
-                {"table": VERSION_TABLE},
-            ).scalar()
-
-        # Pre-migration widen: existing PostgreSQL deployments may have version_num
-        # at the Alembic default VARCHAR(32). Khora revision IDs (e.g.
-        # "022_promote_external_id_index_unique") exceed 32 chars, so the next
-        # migration step would fail when Alembic writes the new revision. Widen
-        # in-place before running migrations. Idempotent: skipped if already wide.
-        if is_postgres and table_exists:
-            current_width = connection.execute(
-                text(
-                    "SELECT character_maximum_length FROM information_schema.columns "
-                    "WHERE table_name = :table AND column_name = 'version_num'"
-                ),
-                {"table": VERSION_TABLE},
-            ).scalar()
-            if current_width is not None and current_width < VERSION_NUM_LENGTH:
-                connection.execute(
+            # Pre-migration widen: existing PostgreSQL deployments may have version_num
+            # at the Alembic default VARCHAR(32). Khora revision IDs (e.g.
+            # "022_promote_external_id_index_unique") exceed 32 chars, so the next
+            # migration step would fail when Alembic writes the new revision. Widen
+            # in-place before running migrations. Idempotent: skipped if already wide.
+            if is_postgres and table_exists:
+                current_width = connection.execute(
                     text(
-                        f"ALTER TABLE {VERSION_TABLE} "  # noqa: S608
-                        f"ALTER COLUMN version_num TYPE VARCHAR({VERSION_NUM_LENGTH})"
+                        "SELECT character_maximum_length FROM information_schema.columns "
+                        "WHERE table_name = :table AND column_name = 'version_num'"
+                    ),
+                    {"table": VERSION_TABLE},
+                ).scalar()
+                if current_width is not None and current_width < VERSION_NUM_LENGTH:
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE {VERSION_TABLE} "  # noqa: S608
+                            f"ALTER COLUMN version_num TYPE VARCHAR({VERSION_NUM_LENGTH})"
+                        )
                     )
-                )
 
-        current_rev = None
-        if table_exists:
-            try:
-                result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))  # noqa: S608
-                row = result.fetchone()
-                current_rev = row[0] if row else None
-            except Exception:
-                # Version SELECT failed after table was confirmed present (e.g. permission
-                # denied, transient error). Treat as no current revision so migrations
-                # can still proceed.
-                logger.warning(
-                    "Could not read current revision from %s — proceeding without ahead-detection.",
-                    VERSION_TABLE,
-                )
+            current_rev = None
+            if table_exists:
+                try:
+                    result = connection.execute(text(f"SELECT version_num FROM {VERSION_TABLE} LIMIT 1"))  # noqa: S608
+                    row = result.fetchone()
+                    current_rev = row[0] if row else None
+                except Exception:
+                    # Version SELECT failed after table was confirmed present (e.g. permission
+                    # denied, transient error). Treat as no current revision so migrations
+                    # can still proceed.
+                    logger.warning(
+                        "Could not read current revision from %s — proceeding without ahead-detection.",
+                        VERSION_TABLE,
+                    )
 
-        if current_rev is not None:
-            known_revisions = {r.revision for r in ScriptDirectory.from_config(config).walk_revisions()}
-            if current_rev not in known_revisions:
-                logger.warning(
-                    "Database at revision %s which is not recognized by this Khora version "
-                    "— skipping migrations (database is ahead).",
-                    current_rev,
-                )
-                raise _DatabaseAheadError(current_rev)
+            if current_rev is not None:
+                known_revisions = {r.revision for r in ScriptDirectory.from_config(config).walk_revisions()}
+                if current_rev not in known_revisions:
+                    logger.warning(
+                        "Database at revision %s which is not recognized by this Khora version "
+                        "— skipping migrations (database is ahead).",
+                        current_rev,
+                    )
+                    raise _DatabaseAheadError(current_rev)
 
-        context.run_migrations()
+            context.run_migrations()
+    finally:
+        if is_postgres:
+            _release_advisory_lock(connection)
 
 
 def run_migrations_offline() -> None:
@@ -260,11 +279,19 @@ async def run_async_migrations() -> None:
             if connection.dialect.name == "sqlite":
                 await connection.execute(text("PRAGMA foreign_keys = ON"))
             await connection.run_sync(do_run_migrations)
-            # Explicitly commit — Alembic's "non-transactional DDL" path on SQLite
-            # doesn't issue COMMIT, and SQLAlchemy's async connection does not
-            # auto-commit on close. Without this, all DDL is lost. Safe on Postgres:
-            # the surrounding context.begin_transaction() already commits, and this
-            # is a no-op after commit.
+            # Explicitly commit any transaction still open on the connection.
+            # Still required after the transaction_per_migration flip:
+            #   - SQLite's non-transactional-DDL path does not issue its own COMMIT.
+            #   - On Postgres the outer context.begin_transaction() is now a
+            #     nullcontext (it no longer commits), and each migration commits its
+            #     own DDL + version stamp inside its per-migration transaction. This
+            #     trailing commit flushes only the residual work SQLAlchemy autobegan
+            #     outside those per-migration transactions — the ahead-detection /
+            #     pre-widen reads and the advisory unlock — which is otherwise left
+            #     pending in the no-migration-step edge case (e.g. an up-to-date DB).
+            # SQLAlchemy's async connection does not auto-commit on close, so without
+            # this that residual transaction would roll back. Harmless when nothing
+            # is pending.
             await connection.commit()
 
         await connectable.dispose()
