@@ -1107,8 +1107,10 @@ class VectorCypherRetriever:
                 ).consumed_keys,
             )
         # Graph + PPR fetch budget: widen to make room for the post-filter when a
-        # residual metadata predicate is present, capped to keep the over-fetch
-        # bounded; otherwise the historical ``limit * 2`` fetch is preserved.
+        # residual metadata predicate is present; otherwise the historical
+        # ``limit * 2`` fetch is preserved. The absolute ``200`` ceiling caps the
+        # extra graph work so a large multiplier paired with a large limit cannot
+        # blow up the Neo4j fetch (the multiplier is bounded ge=2 le=10).
         graph_fetch_limit = (
             min(limit * self._config.metadata_overfetch_multiplier, 200) if graph_overfetch else limit * 2
         )
@@ -1662,6 +1664,10 @@ class VectorCypherRetriever:
             # side under-recalled relative to the completeness backstop. Record
             # one degradation so callers can see the channel was dropped.
             if not graph_chunks and graph_chunks_before and (vector_chunks or bm25_chunks):
+                logger.warning(
+                    f"Graph chunk channel emptied by metadata post-filter "
+                    f"({graph_chunks_before} dropped); vector/BM25 channels returned rows"
+                )
                 degradations.append(
                     Degradation(
                         component="vectorcypher.graph_channel",
