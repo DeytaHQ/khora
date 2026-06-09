@@ -44,11 +44,13 @@ except ImportError:
 
 _DEADLOCK_MAX_RETRIES = 3
 
-# Cap on retained source-id provenance per entity. Mirrors Neo4j's
-# ``entity_source_document_ids_max`` default (see neo4j.py); the two backends
-# must agree so forget()'s survivor-strip behaves identically across a
-# PG+Neo4j stack.
-_SOURCE_IDS_CAP = 100
+# Caps on retained source-id provenance per entity, per column. Mirror Neo4j's
+# defaults (see neo4j.py): documents capped at 100
+# (``entity_source_document_ids_max``) and chunks capped at 250
+# (``entity_source_chunk_ids_max``). The two backends must agree per column so
+# forget()'s survivor-strip behaves identically across a PG+Neo4j stack.
+_SOURCE_DOCUMENT_IDS_CAP = 100  # mirrors Neo4j entity_source_document_ids_max
+_SOURCE_CHUNK_IDS_CAP = 250  # mirrors Neo4j entity_source_chunk_ids_max
 
 
 def _accumulate_source_ids_sql(column: str) -> sa.TextClause:
@@ -61,15 +63,30 @@ def _accumulate_source_ids_sql(column: str) -> sa.TextClause:
     The existing row is referenced by the table name ``entities``; the proposed
     row by ``excluded``. The two arrays are concatenated (existing first, so
     incoming ids carry the higher ordinals), grouped by element to dedup while
-    keeping each id's most-recent position, capped to the
-    ``_SOURCE_IDS_CAP`` most-recent DISTINCT ids, and re-aggregated newest-last
-    so the tail holds the freshest provenance (matching Neo4j's tail-cap order).
+    keeping each id's most-recent position, capped to the column's most-recent
+    DISTINCT ids, and re-aggregated newest-last so the tail holds the freshest
+    provenance (matching Neo4j's tail-cap order). The cap is per column:
+    ``source_document_ids`` keeps ``_SOURCE_DOCUMENT_IDS_CAP`` (100, mirroring
+    Neo4j ``entity_source_document_ids_max``) and ``source_chunk_ids`` keeps
+    ``_SOURCE_CHUNK_IDS_CAP`` (250, mirroring Neo4j
+    ``entity_source_chunk_ids_max``).
+
+    Note the dedup asymmetry: Neo4j does NOT dedup — it concatenates and
+    tail-slices, so it can hold duplicate ids — whereas pgvector dedups here.
+    forget() is resilient to the difference because ``_is_orphan`` /
+    ``_is_survivor`` (engines/_forget_cascade.py) only check membership + length,
+    not exact content.
 
     ``column`` is ``"source_document_ids"`` or ``"source_chunk_ids"``. The cap is
     an int constant inlined into the SQL (no bind param — a bind param could
     collide with the executemany VALUES binding); ``column`` is never
     caller-supplied so there is no injection surface.
     """
+    _caps = {
+        "source_document_ids": _SOURCE_DOCUMENT_IDS_CAP,
+        "source_chunk_ids": _SOURCE_CHUNK_IDS_CAP,
+    }
+    cap = _caps[column]
     # `column` is one of two hard-coded literals and the cap is an int constant,
     # so no user input reaches this SQL (bind params are deliberately avoided so
     # they can't collide with the executemany VALUES binding) — hence noqa: S608.
@@ -78,7 +95,7 @@ def _accumulate_source_ids_sql(column: str) -> sa.TextClause:
         f"FROM (SELECT elem, MAX(ord) AS last_ord "
         f"FROM unnest(COALESCE(entities.{column}, ARRAY[]::uuid[]) || excluded.{column}) "
         f"WITH ORDINALITY AS u(elem, ord) "
-        f"GROUP BY elem ORDER BY MAX(ord) DESC LIMIT {_SOURCE_IDS_CAP}) d)"
+        f"GROUP BY elem ORDER BY MAX(ord) DESC LIMIT {cap}) d)"
     )
 
 

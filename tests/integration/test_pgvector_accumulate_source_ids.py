@@ -10,10 +10,11 @@ the pgvector half of a PG+Neo4j dual-write disagreed with the Neo4j half
 (which uses ``ON MATCH SET e.source_*_ids = (existing + incoming)[-N..]``).
 
 Fix: ``_accumulate_source_ids_sql`` unions existing+incoming uuid[] arrays,
-dedups, and keeps the ``_SOURCE_IDS_CAP`` (=100) most-recent DISTINCT ids
-newest-last. The dedup is what guards the core regression here:
-re-extracting the SAME document many times must NOT evict a prior *distinct*
-provenance id by burning through the cap.
+dedups, and keeps each column's most-recent DISTINCT ids newest-last
+(``_SOURCE_DOCUMENT_IDS_CAP`` =100 for documents, ``_SOURCE_CHUNK_IDS_CAP``
+=250 for chunks, mirroring Neo4j). The dedup is what guards the core
+regression here: re-extracting the SAME document many times must NOT evict a
+prior *distinct* provenance id by burning through the cap.
 
 Gated by ``KHORA_DATABASE_URL`` (defaults to the ``make dev`` Postgres on
 port 5432). The test needs real Postgres — the accumulation is implemented
@@ -32,7 +33,7 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.core.models import Entity
-from khora.storage.backends.pgvector import _SOURCE_IDS_CAP, PgVectorBackend
+from khora.storage.backends.pgvector import _SOURCE_CHUNK_IDS_CAP, PgVectorBackend
 
 # Match the schema's pgvector column dimension (Vector(1536)).
 EMBED_DIM = 1536
@@ -159,6 +160,9 @@ async def test_batch_upsert_accumulates_and_dedups_source_ids(backend: PgVectorB
     persisted = await _read_back(backend, namespace_id, name)
     assert set(persisted.source_document_ids) == {doc_a, doc_b}
     assert set(persisted.source_chunk_ids) == {chunk_a, chunk_b}
+    # Newest-at-tail: doc_b was upserted after doc_a, so it must land at the
+    # tail — this locks the tail-cap contract (the cap evicts from the head).
+    assert persisted.source_document_ids[-1] == doc_b
 
     # Re-upsert an already-recorded id — must not create a duplicate.
     await backend.upsert_entities_batch(
@@ -177,38 +181,44 @@ async def test_batch_upsert_accumulates_and_dedups_source_ids(backend: PgVectorB
 async def test_batch_reextracting_same_doc_does_not_evict_prior_distinct_id(
     backend: PgVectorBackend, namespace_id: UUID
 ) -> None:
-    """Core regression: re-extracting the SAME document many more times than
-    the retention cap must NOT push a prior *distinct* provenance id out.
+    """Core regression: re-extracting the SAME document/chunk many more times
+    than the retention cap must NOT push a prior *distinct* provenance id out.
 
     Without the dedup pass, a flood of identical incoming ids would burn
-    through ``_SOURCE_IDS_CAP`` slots and evict ``first_doc`` from the tail.
-    The dedup collapses the repeats to a single retained id, so ``first_doc``
-    survives.
+    through the column's cap slots and evict ``first_doc`` / ``first_chunk``
+    from the tail. The dedup collapses the repeats to a single retained id, so
+    the prior distinct ids survive. Both columns share ``_accumulate_source_ids_sql``,
+    so the chunk column is asserted the same way.
     """
     name = f"acc-evict-{uuid4()}"
     first_doc = uuid4()
     spammy_doc = uuid4()
+    first_chunk = uuid4()
+    spammy_chunk = uuid4()
 
-    # Record a distinct prior id once.
+    # Record distinct prior ids once.
     await backend.upsert_entities_batch(
         namespace_id,
-        [_entity(namespace_id, name, source_document_ids=[first_doc])],
+        [_entity(namespace_id, name, source_document_ids=[first_doc], source_chunk_ids=[first_chunk])],
     )
 
-    # Re-extract the same (spammy) doc far more times than the cap. Separate
-    # upsert calls — a single batch cannot carry the same identity twice
-    # (ON CONFLICT cannot affect a row a second time), and repeated calls are
-    # the real re-ingest shape anyway.
-    for _ in range(_SOURCE_IDS_CAP + 20):
+    # Re-extract the same (spammy) doc/chunk far more times than either cap.
+    # Separate upsert calls — a single batch cannot carry the same identity
+    # twice (ON CONFLICT cannot affect a row a second time), and repeated calls
+    # are the real re-ingest shape anyway.
+    for _ in range(_SOURCE_CHUNK_IDS_CAP + 20):
         await backend.upsert_entities_batch(
             namespace_id,
-            [_entity(namespace_id, name, source_document_ids=[spammy_doc])],
+            [_entity(namespace_id, name, source_document_ids=[spammy_doc], source_chunk_ids=[spammy_chunk])],
         )
 
     persisted = await _read_back(backend, namespace_id, name)
-    assert first_doc in persisted.source_document_ids, "prior distinct id was evicted by repeats"
+    assert first_doc in persisted.source_document_ids, "prior distinct doc id was evicted by repeats"
     assert set(persisted.source_document_ids) == {first_doc, spammy_doc}
-    assert len(persisted.source_document_ids) == 2, "repeats must dedup to a single retained id"
+    assert len(persisted.source_document_ids) == 2, "doc repeats must dedup to a single retained id"
+    assert first_chunk in persisted.source_chunk_ids, "prior distinct chunk id was evicted by repeats"
+    assert set(persisted.source_chunk_ids) == {first_chunk, spammy_chunk}
+    assert len(persisted.source_chunk_ids) == 2, "chunk repeats must dedup to a single retained id"
 
 
 # =========================================================================
