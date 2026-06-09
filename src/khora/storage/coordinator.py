@@ -1398,6 +1398,17 @@ class StorageCoordinator:
                 batch_size=batch_size,
                 bulk_mode=bulk_mode,
             )
+            # Split embedded backends (e.g. sqlite_lance): the vector adapter
+            # owns only entity *vectors* and has no upsert_entities_batch, so
+            # the graph-only branch above persisted entity rows but dropped
+            # their embeddings. Write the embeddings through
+            # update_entity_embeddings_batch so the entity vector store is
+            # populated; otherwise search_similar_entities returns nothing and
+            # the VectorCypher GRAPH recall channel silently degrades to
+            # vector-only (#1057). The graph upsert just wrote these entity rows
+            # to the relational store, so the vector adapter can resolve their
+            # namespaces by id.
+            await self._persist_entity_embeddings_after_graph_upsert(results, namespace_id)
         elif has_vector:
             results = await self._vector.upsert_entities_batch(namespace_id, entities, batch_size=batch_size)  # type: ignore[unresolved-attribute]
 
@@ -1410,6 +1421,32 @@ class StorageCoordinator:
         logger.debug(f"upsert_entities_batch: returning {len(results)} results for {len(entities)} input entities")
 
         return results
+
+    async def _persist_entity_embeddings_after_graph_upsert(
+        self,
+        results: list[tuple[Entity, bool]],
+        namespace_id: UUID,
+    ) -> None:
+        """Write through entity embeddings on graph-only/split backends (#1057).
+
+        When ``upsert_entities_batch`` took the graph-only branch (the vector
+        adapter has no ``upsert_entities_batch``), entities that arrived with an
+        embedding had it dropped. If the vector adapter can store entity vectors
+        via ``update_entity_embeddings_batch``, persist them here so entity
+        similarity search works. No-op when the vector adapter can't store entity
+        vectors or no entity carries an embedding. Idempotent: the batch update
+        uses upsert (delete + add) semantics.
+        """
+        vector = self._vector
+        if vector is None or not hasattr(vector, "update_entity_embeddings_batch"):
+            return
+        updates = [
+            (entity.id, entity.embedding, entity.embedding_model or "")
+            for entity, _ in results
+            if entity.embedding is not None
+        ]
+        if updates:
+            await vector.update_entity_embeddings_batch(updates, namespace_id=namespace_id)
 
     @_record_storage_op("create_relationships_batch", "graph")
     async def create_relationships_batch(

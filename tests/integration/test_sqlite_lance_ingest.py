@@ -369,6 +369,41 @@ class TestSQLiteLanceIngest:
         finally:
             await coord.disconnect()
 
+    async def test_entity_embeddings_persist_for_similarity_search(self, tmp_path: Path) -> None:
+        """Regression for #1057: upsert_entities_batch must persist entity
+        embeddings on sqlite_lance.
+
+        The lance vector adapter has no ``upsert_entities_batch``, so the
+        coordinator took the graph-only branch and dropped the embeddings the
+        entities carried. The entity vector store stayed empty,
+        ``search_similar_entities`` returned nothing, and the VectorCypher
+        GRAPH recall channel silently degraded to vector-only.
+        """
+        coord = await build_sqlite_lance_coordinator(tmp_path)
+        try:
+            ns = await coord.create_namespace(MemoryNamespace())
+            doc = _make_document(ns.id, idx=0, topic="ada")
+            await coord.create_document(doc)
+
+            emb = fake_embedding("Ada Lovelace")
+            ada = Entity(
+                namespace_id=ns.id,
+                name="Ada Lovelace",
+                entity_type="PERSON",
+                embedding=emb,
+                embedding_model="fake",
+                source_document_ids=[doc.id],
+            )
+            results = await coord.upsert_entities_batch(ns.id, [ada])
+            stored_id = results[0][0].id
+
+            # Before #1057 this returned [] - the entity vector was never written.
+            hits = await coord.search_similar_entities(ns.id, emb, limit=5)
+            assert hits, "entity embedding not persisted: search_similar_entities returned nothing (#1057)"
+            assert any(eid == stored_id for eid, _score in hits)
+        finally:
+            await coord.disconnect()
+
     async def test_chunk_insert_with_unknown_document_id_fails(self, tmp_path: Path) -> None:
         """FKs must be enforced: a chunk pointing at a non-existent document
         cannot be inserted.  After the drift fix, UUIDs on both
