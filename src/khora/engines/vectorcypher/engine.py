@@ -745,6 +745,10 @@ class VectorCypherEngine:
             recency_weight=self._vc_config.temporal_recency_weight,
             recency_decay_days=self._vc_config.temporal_recency_decay_days,
             recency_decay_type=self._vc_config.recency_decay_type,
+            # Post-fusion coherence re-rank weight; KHORA_QUERY_COHERENCE_WEIGHT=0
+            # disables it (#1056). Previously hardcoded to the RetrieverConfig
+            # default and unreachable from public config.
+            coherence_weight=self._config.query.coherence_weight,
             min_entity_similarity=self._vc_config.retriever_min_entity_similarity,
             hybrid_alpha=self._vc_config.fusion_hybrid_alpha,
             lazy_entity_expansion=self._vc_config.lazy_entity_expansion,

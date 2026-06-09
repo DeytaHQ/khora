@@ -1289,6 +1289,14 @@ class QuerySettings(BaseSettings):
     graph_weight: float = Field(default=0.3, ge=0.0, le=1.0, description="Weight for graph search in fusion")
     keyword_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="Weight for keyword search in fusion")
 
+    # Coherence re-rank: a small post-fusion nudge that demotes word-shuffled /
+    # disfluent confounders. Applied to [0,1]-normalized fused scores so it acts
+    # as a true ~w nudge (#1056). Set to 0.0 to disable
+    # (``KHORA_QUERY_COHERENCE_WEIGHT=0``).
+    coherence_weight: float = Field(
+        default=0.1, ge=0.0, le=1.0, description="Weight of the bigram-coherence re-rank after fusion (0.0 disables)"
+    )
+
     # Temporal settings.
     # `recency_weight` and `recency_decay_days` were tightened
     # from (0.2, 30) to (0.35, 7) after BEAM 100K showed the four weakest

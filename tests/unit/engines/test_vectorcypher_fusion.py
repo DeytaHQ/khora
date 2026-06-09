@@ -496,3 +496,36 @@ class TestApplyCoherenceBoost:
         boosted = apply_coherence_boost(results, coherence_weight=0.2)
         # coherence=1.0 for empty content (< 6 words): (1-0.2)*0.9 + 0.2*1.0 = 0.92
         assert abs(boosted[0].rrf_score - 0.92) < 1e-10
+
+    def test_coherence_does_not_override_relevance_at_rrf_scale_1056(self) -> None:
+        """Regression for #1056: at raw weighted-RRF scale, a default
+        coherence_weight=0.1 must NOT demote the relevance winner.
+
+        The retriever applies coherence to raw RRF scores (~0.02 at top, k=60).
+        Blending those against coherence in [0, 1] lets the nominal-10% term
+        dominate, demoting a more-relevant-but-less-fluent chunk below a filler.
+        The fix normalizes fused scores to [0, 1] BEFORE the coherence blend
+        (the order the retriever now uses). This test pins both halves: the raw
+        order is corrupted, the normalized order is not.
+        """
+        winner_id, filler_id = uuid4(), uuid4()
+        # Less-fluent but clearly more relevant (rank-1 in both channels).
+        winner_text = "revenue in of the company and the and the field team"  # coherence 0.6
+        # Fully "coherent" filler that loses on relevance.
+        filler_text = "The report discusses the impact of the new policy on trade"  # coherence 1.0
+
+        def _fused() -> list[FusedResult]:
+            return [
+                FusedResult(item_id=winner_id, item=SimpleNamespace(content=winner_text), rrf_score=0.02639),
+                FusedResult(item_id=filler_id, item=SimpleNamespace(content=filler_text), rrf_score=0.00909),
+            ]
+
+        # Buggy order (coherence on RAW rrf scores): the winner is demoted.
+        raw = apply_coherence_boost(_fused(), coherence_weight=0.1)
+        raw.sort(key=lambda r: r.rrf_score, reverse=True)
+        assert raw[0].item_id == filler_id, "expected the raw-scale bug to demote the winner"
+
+        # Fixed order (normalize to [0,1] BEFORE the blend): winner stays on top.
+        fixed = apply_coherence_boost(normalize_scores(_fused()), coherence_weight=0.1)
+        fixed.sort(key=lambda r: r.rrf_score, reverse=True)
+        assert fixed[0].item_id == winner_id, "normalize-before-blend must keep the relevance winner on top"
