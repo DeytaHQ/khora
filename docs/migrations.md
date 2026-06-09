@@ -13,7 +13,7 @@ async with Khora(run_migrations=True) as kb:
     ...
 ```
 
-Khora takes a PostgreSQL advisory lock (ID `6001515088189075507`, 60 s timeout), runs any pending migrations, and releases the lock. Safe under concurrent startup - only one process runs the migrations at a time, the others wait and then no-op.
+Khora takes a session-scoped PostgreSQL advisory lock (`pg_advisory_lock`, ID `6001515088189075507`, 60 s timeout) before the migration transaction, runs any pending migrations, and releases the lock explicitly in a `finally` block. The lock is session-scoped (rather than transaction-scoped) because each migration commits its own transaction, which would otherwise release the lock mid-chain. Safe under concurrent startup - only one process runs the migrations at a time, the others wait and then no-op.
 
 ### 2. Run them out-of-band
 

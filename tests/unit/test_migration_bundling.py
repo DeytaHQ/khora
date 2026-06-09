@@ -897,13 +897,14 @@ class TestDoRunMigrationsAheadDetection:
     def _setup_conn(self, version_num: str | None, *, table_exists: bool = True) -> MagicMock:
         """Create a mock connection that returns the given version for the advisory
         lock query, information_schema existence check, version-num width check,
-        and (optionally) the version table query.
+        the version table query (optional), and the advisory unlock.
 
         Execute call order after the fix:
-          1. pg_try_advisory_xact_lock         → scalar() True
+          1. pg_try_advisory_lock              → scalar() True
           2. information_schema.tables check   → scalar() table_exists
           3. information_schema.columns width  → scalar() 64 (only when table_exists)
           4. SELECT version_num                → fetchone() row/None (only when table_exists)
+          N. pg_advisory_unlock                → in the finally block (always runs)
         """
         conn = MagicMock()
         # do_run_migrations branches on dialect.name — simulate Postgres.
@@ -914,6 +915,10 @@ class TestDoRunMigrationsAheadDetection:
 
         pg_catalog_result = MagicMock()
         pg_catalog_result.scalar.return_value = table_exists
+
+        # The session-scoped lock is released in do_run_migrations' finally block,
+        # so a pg_advisory_unlock execute always fires last on every path.
+        unlock_result = MagicMock()
 
         if table_exists:
             # Width check returns 64 — already wide enough, no ALTER issued.
@@ -926,9 +931,9 @@ class TestDoRunMigrationsAheadDetection:
                 version_result.fetchone.return_value = (version_num,)
             else:
                 version_result.fetchone.return_value = None
-            conn.execute.side_effect = [lock_result, pg_catalog_result, width_result, version_result]
+            conn.execute.side_effect = [lock_result, pg_catalog_result, width_result, version_result, unlock_result]
         else:
-            conn.execute.side_effect = [lock_result, pg_catalog_result]
+            conn.execute.side_effect = [lock_result, pg_catalog_result, unlock_result]
 
         return conn
 
@@ -967,6 +972,31 @@ class TestDoRunMigrationsAheadDetection:
         env.context.run_migrations.assert_called_once()
 
     @pytest.mark.unit
+    def test_configures_transaction_per_migration(self):
+        """do_run_migrations configures Alembic with transaction_per_migration=True.
+
+        Each migration's DDL and its version-table stamp must commit atomically so a
+        mid-chain failure never leaves the recorded revision ahead of the applied
+        schema. The unit suite can't exercise the real per-migration commit boundary
+        (context is fully mocked here), so this kwarg assertion guards the core fix
+        against accidental revert; the integration replay test is the real PG gate.
+        """
+        env = _load_env_functions()
+        conn = self._setup_conn("known_rev")
+
+        mock_rev = MagicMock()
+        mock_rev.revision = "known_rev"
+        mock_script_dir = MagicMock()
+        mock_script_dir.walk_revisions.return_value = [mock_rev]
+
+        with patch.object(env.ScriptDirectory, "from_config", return_value=mock_script_dir):
+            env.do_run_migrations(conn)
+
+        env.context.configure.assert_called_once()
+        call_kwargs = env.context.configure.call_args[1]
+        assert call_kwargs["transaction_per_migration"] is True
+
+    @pytest.mark.unit
     def test_proceeds_when_no_current_revision(self):
         """Runs migrations normally when version table exists but is empty (no rows)."""
         env = _load_env_functions()
@@ -990,12 +1020,17 @@ class TestDoRunMigrationsAheadDetection:
 
         env.do_run_migrations(conn)
 
-        # Exactly 2 execute calls: advisory lock + information_schema check — no version query
-        assert conn.execute.call_count == 2
+        # Exactly 3 execute calls: advisory lock + information_schema check + unlock —
+        # no version query (the version table is absent)
+        assert conn.execute.call_count == 3
+        # The first call is the session-scoped advisory-lock acquire.
+        assert "pg_try_advisory_lock" in str(conn.execute.call_args_list[0].args[0])
         # Verify the second call is the information_schema existence check by inspecting its
         # bound parameters — more reliable than parsing the SQL text() object string
         second_call_params = conn.execute.call_args_list[1][0][1]
         assert second_call_params == {"table": env.VERSION_TABLE}
+        # The final call is the finally-block advisory unlock — covers the new release path.
+        assert "pg_advisory_unlock" in str(conn.execute.call_args_list[-1].args[0])
         env.context.run_migrations.assert_called_once()
 
     @pytest.mark.unit
@@ -1020,8 +1055,15 @@ class TestDoRunMigrationsAheadDetection:
         width_result = MagicMock()
         width_result.scalar.return_value = 64
 
-        # Fourth execute (version SELECT) raises an error
-        conn.execute.side_effect = [lock_result, existence_result, width_result, Exception("permission denied")]
+        # Fourth execute (version SELECT) raises an error; fifth is the finally unlock.
+        unlock_result = MagicMock()
+        conn.execute.side_effect = [
+            lock_result,
+            existence_result,
+            width_result,
+            Exception("permission denied"),
+            unlock_result,
+        ]
 
         env.do_run_migrations(conn)
 
@@ -1081,12 +1123,15 @@ class TestDoRunMigrationsAheadDetection:
         version_result = MagicMock()
         version_result.fetchone.return_value = ("known_rev",)
 
+        unlock_result = MagicMock()  # finally-block pg_advisory_unlock
+
         conn.execute.side_effect = [
             lock_result,
             existence_result,
             width_result,
             alter_result,
             version_result,
+            unlock_result,
         ]
 
         mock_rev = MagicMock()
@@ -1118,8 +1163,12 @@ class TestDoRunMigrationsAheadDetection:
         with patch.object(env.ScriptDirectory, "from_config", return_value=mock_script_dir):
             env.do_run_migrations(conn)
 
-        # Only 4 executes: lock, exists, width-check, version SELECT — no ALTER.
-        assert conn.execute.call_count == 4
+        # Only 5 executes: lock, exists, width-check, version SELECT, unlock — no ALTER.
+        assert conn.execute.call_count == 5
+        # The final call is the finally-block advisory unlock — covers the new release path.
+        assert "pg_advisory_unlock" in str(conn.execute.call_args_list[-1].args[0])
+        # And no ALTER TABLE was issued anywhere (column already wide enough).
+        assert not any("ALTER TABLE" in str(c.args[0]) for c in conn.execute.call_args_list)
 
 
 # ---------------------------------------------------------------------------

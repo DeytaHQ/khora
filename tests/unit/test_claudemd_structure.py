@@ -94,8 +94,8 @@ class TestContentPreservation:
     def test_expertiseconfig_contract(self, claude_md_content: str) -> None:
         assert "ExpertiseConfig contract" in claude_md_content
 
-    def test_pg_advisory_xact_lock(self, claude_md_content: str) -> None:
-        assert "pg_advisory_xact_lock" in claude_md_content
+    def test_pg_advisory_lock(self, claude_md_content: str) -> None:
+        assert "pg_advisory_lock" in claude_md_content
 
     def test_database_ahead_error(self, claude_md_content: str) -> None:
         assert "_DatabaseAheadError" in claude_md_content
