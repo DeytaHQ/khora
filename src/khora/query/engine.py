@@ -16,12 +16,12 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass, field
-from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from loguru import logger
 
+from khora.search_mode import SearchMode
 from khora.telemetry import trace, trace_span
 
 from .fusion import reciprocal_rank_fusion
@@ -45,16 +45,6 @@ if TYPE_CHECKING:
     from khora.core.models import Chunk, Entity
     from khora.extraction.embedders import Embedder
     from khora.storage import StorageCoordinator
-
-
-class SearchMode(Enum):
-    """Search mode for the query engine."""
-
-    VECTOR = auto()  # Vector similarity only
-    GRAPH = auto()  # Graph traversal only
-    HYBRID = auto()  # Combine vector and graph
-    ALL = auto()  # Vector, graph, and keyword
-    KEYWORD = auto()  # BM25 / keyword-only (used by Skeleton)
 
 
 @dataclass

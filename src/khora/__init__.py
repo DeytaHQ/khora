@@ -75,7 +75,7 @@ from .khora import (
     RememberResult,
     Stats,
 )
-from .query import SearchMode
+from .search_mode import SearchMode
 
 __version__ = __import__("importlib").metadata.version("khora")
 
