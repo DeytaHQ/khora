@@ -1054,7 +1054,7 @@
       "labels": [
         {"name": "reason", "values": ["empty_under_filter"], "_comment": "Low-cardinality enum; extend when adding new graph-channel-empty paths."}
       ],
-      "description": "ADR-001. VectorCypher graph chunk channel emptied by the in-memory metadata post-filter while the SQL-pushed vector/BM25 channels returned filtered rows - i.e. the graph side under-recalled relative to the completeness backstop (metadata is not pushable to Cypher, so a metadata predicate is enforced in memory after the graph fetch). The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+      "description": "VectorCypher graph chunk channel emptied by the in-memory metadata post-filter while the SQL-pushed vector/BM25 channels returned filtered rows - i.e. the graph side under-recalled relative to the completeness backstop (metadata is not pushable to Cypher, so a metadata predicate is enforced in memory after the graph fetch). The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
       "name": "khora.vectorcypher.chunk_mirror.degraded_total",

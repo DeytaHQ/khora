@@ -118,7 +118,7 @@ _REL_FETCH_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
-# Graph-channel-empty-under-filter counter (ADR-001). Incremented when the
+# Graph-channel-empty-under-filter counter. Incremented when the
 # in-memory metadata post-filter empties the graph chunk channel while the
 # SQL-pushed vector/BM25 channels returned filtered rows — i.e. the graph side
 # under-recalled relative to the completeness backstop. The same event is also
@@ -1659,10 +1659,10 @@ class VectorCypherRetriever:
             ).predicate
             graph_chunks_before = len(graph_chunks)
             graph_chunks = [(cid, s, ch) for (cid, s, ch) in graph_chunks if graph_post_filter(ch)]
-            # ADR-001: when the post-filter empties the graph channel but the
-            # SQL-pushed vector/BM25 channels returned filtered rows, the graph
-            # side under-recalled relative to the completeness backstop. Record
-            # one degradation so callers can see the channel was dropped.
+            # When the post-filter empties the graph channel but the SQL-pushed
+            # vector/BM25 channels returned filtered rows, the graph side
+            # under-recalled relative to the completeness backstop. Record one
+            # degradation so callers can see the channel was dropped.
             if not graph_chunks and graph_chunks_before and (vector_chunks or bm25_chunks):
                 logger.warning(
                     f"Graph chunk channel emptied by metadata post-filter "
