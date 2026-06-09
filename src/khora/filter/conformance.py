@@ -1742,27 +1742,27 @@ def f_objeq_cases() -> list[ConformanceCase]:
             frozenset({"oe-exact", "oe-exact-dup", "oe-two-key", "oe-two-key-rev", "oe-superset"}),
             ("F-OBJEQ", "metadata.labels.team", "path"),
         ),
-        ConformanceCase(
-            id="F-OBJEQ-metadata-labels-in",
-            # A dict $in element is EXACT object_equal per element, NOT @>
-            # containment: only the record whose subdocument EQUALS the operand
-            # survives — the superset (extra key) must NOT match.
-            filter={"metadata.labels": {"$in": [{"team": "x"}]}},
-            seed_records=seed,
-            expected_ids=frozenset({"exact"}),
-            backends=_OP_BACKENDS,
-            exercises=("F-OBJEQ", "metadata.labels", "$in", "dict"),
+        # A dict $in element is per-element EXACT object_equal, NOT @> containment:
+        # only labels that EQUAL an operand element survive — the superset (extra
+        # key) must NOT match (mirrors the sub-path $eq dict branch).
+        _case(
+            "F-OBJEQ-in",
+            {"metadata.labels": {"$in": [{"team": "ingest"}]}},
+            seed,
+            frozenset({"oe-exact", "oe-exact-dup"}),
+            ("F-OBJEQ", "metadata.labels", "$in", "dict"),
         ),
-        ConformanceCase(
-            id="F-OBJEQ-metadata-labels-nin",
-            # $nin negates the per-element exact form: the complement (superset,
-            # other) plus the absent record survive (Rule 2 polarity — absent
-            # satisfies $nin).
-            filter={"metadata.labels": {"$nin": [{"team": "x"}]}},
-            seed_records=seed,
-            expected_ids=frozenset({"superset", "other", "absent"}),
-            backends=_OP_BACKENDS,
-            exercises=("F-OBJEQ", "metadata.labels", "$nin", "dict"),
+        # $nin negates the per-element exact form: the complement (superset, other,
+        # two-key, nested) plus the absent record survive (Rule 2 polarity — absent
+        # satisfies $nin).
+        _case(
+            "F-OBJEQ-nin",
+            {"metadata.labels": {"$nin": [{"team": "ingest"}]}},
+            seed,
+            frozenset(
+                {"oe-two-key", "oe-two-key-rev", "oe-nested", "oe-nested-rev", "oe-superset", "oe-other", "oe-absent"}
+            ),
+            ("F-OBJEQ", "metadata.labels", "$nin", "dict"),
         ),
     ]
 
