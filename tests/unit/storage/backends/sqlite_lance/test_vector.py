@@ -253,6 +253,37 @@ class TestChunkCRUD:
         assert fetched.chunker_info == {"strategy": "fixed", "tokens": 256}
         assert fetched.metadata == {"doc_key": "doc_val"}
 
+    async def test_occurred_at_roundtrip(self, adapter: SQLiteLanceVectorAdapter):
+        """occurred_at persists and reads back, distinct from created_at/source_timestamp."""
+        ns, doc = uuid4(), uuid4()
+        occurred = datetime(2023, 7, 4, 12, 30, tzinfo=UTC)
+        c = _make_chunk(
+            ns,
+            doc,
+            embedding=_unit(8, 0),
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            source_timestamp=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        c.occurred_at = occurred
+        await adapter.create_chunk(c)
+
+        fetched = await adapter.get_chunk(c.id, namespace_id=ns)
+        assert fetched is not None
+        assert fetched.occurred_at == occurred
+        # Distinct from the other two timestamps.
+        assert fetched.created_at != occurred
+        assert fetched.source_timestamp != occurred
+
+    async def test_occurred_at_defaults_none(self, adapter: SQLiteLanceVectorAdapter):
+        """A chunk without occurred_at reads back NULL."""
+        ns, doc = uuid4(), uuid4()
+        c = _make_chunk(ns, doc, embedding=_unit(8, 0))
+        await adapter.create_chunk(c)
+
+        fetched = await adapter.get_chunk(c.id, namespace_id=ns)
+        assert fetched is not None
+        assert fetched.occurred_at is None
+
     async def test_delete_chunks_by_document_with_session_skips_commit(self, adapter: SQLiteLanceVectorAdapter):
         """When a session is provided the caller owns commits.
 

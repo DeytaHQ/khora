@@ -11,8 +11,11 @@ break:
   evaluated against a genuinely round-tripped blob, not a hand-built dict.
 * **Date columns** — ``source_timestamp`` pushes down to the real recency window
   (``COALESCE(source_timestamp, created_at)``) at the SQL layer, and ``occurred_at`` is
-  enforced by the post-filter against the chunk read back from storage (the
-  ``COALESCE(occurred_at, source_timestamp)`` recovery against real columns).
+  enforced by the post-filter against the chunk read back from storage. The embedded
+  sqlite_lance write path now persists a distinct ``occurred_at`` column (migration
+  ``046``), so a chunk's effective event time ``COALESCE(occurred_at, source_timestamp)``
+  honors an in-range ``occurred_at`` even when ``source_timestamp`` is out of range, and
+  falls back to ``source_timestamp`` when ``occurred_at`` is unset.
 
 Seeding goes through the coordinator's own write API (``create_chunks_batch``) with
 deterministic fake embeddings, exactly like the sibling sqlite_lance ingest suite, so
@@ -197,19 +200,21 @@ async def test_source_timestamp_pushdown_narrows_against_real_window(tmp_path: P
 @pytest.mark.asyncio
 async def test_occurred_at_coalesce_recovery_against_real_columns(tmp_path: Path) -> None:
     # occurred_at is post-filtered against the chunk read back from storage, using
-    # the effective event time COALESCE(occurred_at, source_timestamp). The key
-    # guard is that an occurred_at filter does NOT false-empty when occurred_at is
-    # absent on the stored row — it recovers via source_timestamp.
+    # the effective event time COALESCE(occurred_at, source_timestamp). The embedded
+    # sqlite_lance write path now persists a distinct occurred_at column (migration
+    # 046 → create_chunks_batch / _row_to_chunk in sqlite_lance/vector.py), so this
+    # asserts two halves of the contract against what the store actually round-trips:
     #
-    # Real-storage truth this surfaces (which a mocked candidate list hides): the
-    # embedded sqlite_lance chunk write path persists source_timestamp but NOT a
-    # distinct occurred_at column (it is read back as NULL — see
-    # sqlite_lance/vector.py create_chunks_batch). So on this backend the effective
-    # event time collapses to source_timestamp, and a chunk seeded with an
-    # occurred_at value but an out-of-range source_timestamp is still dropped. That
-    # write-path gap is independent of this filter and tracked separately; here we
-    # assert the filter's observable contract against what the store actually
-    # round-trips.
+    #   1. HONORED: a chunk whose occurred_at is in range but whose source_timestamp
+    #      is out of range still SURVIVES — the effective event time resolves to the
+    #      in-range occurred_at, NOT the out-of-range source_timestamp. This is the
+    #      regression guard for the persist-occurred_at fix: if the write path dropped
+    #      occurred_at (read back as NULL), COALESCE would collapse to the out-of-range
+    #      source_timestamp and this chunk would be (wrongly) filtered out.
+    #   2. FALLBACK: a chunk with NO occurred_at but an in-range source_timestamp still
+    #      SURVIVES — COALESCE recovers via source_timestamp (no false-empty).
+    #
+    # A chunk with neither anchor in range is dropped (negative case).
     coord = await build_sqlite_lance_coordinator(tmp_path)
     try:
         ns = await coord.create_namespace(MemoryNamespace())
@@ -217,24 +222,72 @@ async def test_occurred_at_coalesce_recovery_against_real_columns(tmp_path: Path
             coord,
             ns.id,
             [
-                # source_timestamp in range → effective event time in range → survives
-                # (the recovery path; proves NO false-empty when occurred_at is unset).
+                # occurred_at in range, source_timestamp out of range → effective event
+                # time honors the persisted occurred_at → survives. Drops to a false
+                # negative if occurred_at is not round-tripped (the regression guard).
+                {"content": "occurred honored", "occurred_at": _IN_RANGE, "source_timestamp": _OUT_OF_RANGE},
+                # no occurred_at, source_timestamp in range → COALESCE recovers via
+                # source_timestamp → survives (proves NO false-empty when occurred_at
+                # is unset).
                 {"content": "fallback recover", "source_timestamp": _IN_RANGE},
-                # occurred_at seeded in range but NOT persisted by the embedded write
-                # path; source_timestamp out of range → effective event time out of
-                # range → dropped.
-                {"content": "occurred not persisted", "occurred_at": _IN_RANGE, "source_timestamp": _OUT_OF_RANGE},
-                # no in-range anchor at all → dropped.
+                # neither anchor in range → dropped.
                 {"content": "no anchor in range", "source_timestamp": _OUT_OF_RANGE},
             ],
         )
-        recovered_id = chunks[0].id
+        honored_id = chunks[0].id
+        fallback_id = chunks[1].id
 
         returned = await _recall_ids(_engine_over(coord), ns.id, {"occurred_at": {"$gte": _FILTER_LB}})
-        assert returned == {recovered_id}, (
-            "occurred_at filter must recover event time from source_timestamp "
-            "(no false-empty) and drop rows whose effective event time is out of range"
+        assert returned == {honored_id, fallback_id}, (
+            "occurred_at filter must (1) honor a persisted in-range occurred_at even when "
+            "source_timestamp is out of range, and (2) recover event time from "
+            "source_timestamp when occurred_at is unset (no false-empty); rows whose "
+            "effective event time is out of range are dropped"
         )
+        # Explicit regression guard: the honored chunk would be dropped if the write
+        # path failed to round-trip occurred_at (effective time would fall back to its
+        # out-of-range source_timestamp). Assert it survives on its own merits.
+        assert honored_id in returned, (
+            "chunk with in-range occurred_at + out-of-range source_timestamp must survive "
+            "— a regression in occurred_at persistence would drop it"
+        )
+    finally:
+        await coord.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_occurred_at_round_trips_through_real_store(tmp_path: Path) -> None:
+    # Direct write→read round-trip of the distinct occurred_at column through the real
+    # coordinator/vector adapter (no filter, no engine). A chunk seeded with an
+    # occurred_at that differs from both created_at and source_timestamp must read back
+    # with that exact occurred_at — proving migration 046 + create_chunks_batch /
+    # _row_to_chunk persist and restore the column, not silently coalesce it away.
+    coord = await build_sqlite_lance_coordinator(tmp_path)
+    try:
+        ns = await coord.create_namespace(MemoryNamespace())
+        chunks = await _seed(
+            coord,
+            ns.id,
+            [
+                {
+                    "content": "distinct occurred_at",
+                    "occurred_at": _IN_RANGE,
+                    "source_timestamp": _OUT_OF_RANGE,
+                },
+            ],
+        )
+        written = chunks[0]
+        assert written.occurred_at == _IN_RANGE  # sanity: seeded as expected
+
+        read_back = await coord.get_chunk(written.id, namespace_id=ns.id)
+        assert read_back is not None
+        assert read_back.occurred_at == _IN_RANGE, (
+            "occurred_at must round-trip through the real store unchanged "
+            f"(wrote {written.occurred_at!r}, read back {read_back.occurred_at!r})"
+        )
+        # source_timestamp stays distinct — occurred_at is not derived from it.
+        assert read_back.source_timestamp == _OUT_OF_RANGE
+        assert read_back.occurred_at != read_back.source_timestamp
     finally:
         await coord.disconnect()
 

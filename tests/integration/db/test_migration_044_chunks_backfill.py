@@ -93,7 +93,7 @@ pytestmark = pytest.mark.integration
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "src" / "khora" / "db" / "migrations"
 
 _PREV_REVISION = "043_khora_chunks_metadata_backfill"
-_HEAD_REVISION = "045_khora_try_timestamptz"
+_HEAD_REVISION = "046_chunks_occurred_at"
 
 _TSV_TRIGGER = "khora_chunks_content_tsv_update"
 
@@ -302,6 +302,11 @@ async def _step_version_back(conn: AsyncConnection) -> None:
         sa.text("UPDATE khora_alembic_version SET version_num = :prev"),
         {"prev": _PREV_REVISION},
     )
+    # The step-back above is metadata-only, so chunks.occurred_at (added by
+    # migration 046 during the first upgrade-to-head) survives. Drop it so the
+    # replayed ``upgrade head`` re-applies 046 cleanly — mirrors the
+    # drop+recreate of khora_chunks the seed helpers perform.
+    await conn.execute(sa.text("ALTER TABLE chunks DROP COLUMN IF EXISTS occurred_at"))
 
 
 # A >255-char source and external_id: each fits in full now that the columns

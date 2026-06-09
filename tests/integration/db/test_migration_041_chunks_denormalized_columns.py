@@ -210,6 +210,11 @@ class TestMigration041OnPostgres:
                     await conn.execute(
                         sa.text("UPDATE khora_alembic_version SET version_num = '040_chunks_last_accessed_at'")
                     )
+                    # The step-back above is metadata-only, so chunks.occurred_at
+                    # (added by migration 046 during the first upgrade-to-head)
+                    # survives. Drop it so the replayed ``upgrade head`` re-applies
+                    # 046 cleanly — mirrors the drop+recreate of khora_chunks above.
+                    await conn.execute(sa.text("ALTER TABLE chunks DROP COLUMN IF EXISTS occurred_at"))
             finally:
                 await engine.dispose()
 
@@ -272,6 +277,11 @@ class TestMigration041OnPostgres:
                     await conn.execute(
                         sa.text("UPDATE khora_alembic_version SET version_num = '040_chunks_last_accessed_at'")
                     )
+                    # The step-back above is metadata-only, so chunks.occurred_at
+                    # (added by migration 046 during the first upgrade-to-head)
+                    # survives. Drop it so the replayed ``upgrade head`` re-applies
+                    # 046 cleanly — mirrors the drop+recreate of khora_chunks above.
+                    await conn.execute(sa.text("ALTER TABLE chunks DROP COLUMN IF EXISTS occurred_at"))
             finally:
                 await engine.dispose()
 
@@ -312,7 +322,7 @@ class TestMigration041OnPostgres:
                 async with engine.connect() as conn:
                     # Chain reached head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "045_khora_try_timestamptz"
+                    assert result.scalar() == "046_chunks_occurred_at"
 
                     # The migration did not create the table.
                     result = await conn.execute(
@@ -343,7 +353,7 @@ class TestMigration041OnSqlite:
             try:
                 async with engine.connect() as conn:
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
-                    assert result.scalar() == "045_khora_try_timestamptz"
+                    assert result.scalar() == "046_chunks_occurred_at"
             finally:
                 await engine.dispose()
 

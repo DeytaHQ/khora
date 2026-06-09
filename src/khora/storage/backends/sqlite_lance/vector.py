@@ -193,6 +193,7 @@ class SQLiteLanceVectorAdapter:
                     c.embedding_model,
                     _dt_to_str(c.created_at) or now,
                     _dt_to_str(c.source_timestamp),
+                    _dt_to_str(c.occurred_at),
                     _dt_to_str(c.last_accessed_at),
                     uuid_to_text(c.session_id) if c.session_id is not None else None,
                 )
@@ -220,8 +221,8 @@ class SQLiteLanceVectorAdapter:
             "INSERT INTO chunks "
             "(id, namespace_id, document_id, content, chunk_index, start_char, "
             "end_char, token_count, metadata, chunker_info, embedding_model, "
-            "created_at, source_timestamp, last_accessed_at, session_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, source_timestamp, occurred_at, last_accessed_at, session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             sqlite_rows,
         )
         await self._sqlite.commit()
@@ -947,6 +948,7 @@ class SQLiteLanceVectorAdapter:
             embedding_model=row["embedding_model"] or "",
             created_at=_parse_dt(row["created_at"]) or datetime.now(UTC),
             source_timestamp=_parse_dt(row["source_timestamp"]),
+            occurred_at=_parse_dt(_row_get("occurred_at")),
             last_accessed_at=_parse_dt(_row_get("last_accessed_at")),
             session_id=(UUID(row["session_id"]) if row["session_id"] else None),
         )
