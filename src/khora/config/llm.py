@@ -6,6 +6,7 @@ with fallbacks and routing.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Annotated, Any
@@ -331,6 +332,40 @@ def get_shared_session() -> Any:
     return _shared_aiohttp_session
 
 
+# Wall-clock headroom added on top of the configured per-request timeout before
+# the asyncio deadline fires — gives litellm's own timeout a chance to act first.
+_LLM_DEADLINE_GRACE_S = 30.0
+
+# Default deadline for litellm calls that carry no configured timeout of their
+# own (e.g. chat responses, chronicle event/fact extraction).
+DEFAULT_LLM_TIMEOUT_S = 60.0
+
+
+def llm_call_timeout(timeout: float | int | None, *, attempts: int = 1) -> float | None:
+    """Wall-clock deadline (seconds) for a litellm call, for ``asyncio.wait_for``.
+
+    litellm's default aiohttp transport (used for every async call unless
+    ``disable_aiohttp_transport`` is set) builds the per-request aiohttp
+    ``ClientTimeout`` with only ``sock_read``/``sock_connect`` and no ``total``,
+    so a connection that completes the TLS handshake then never sends a byte is
+    never cancelled and the ``await`` hangs indefinitely. Wrapping the call in
+    ``asyncio.wait_for(coro, llm_call_timeout(...))`` gives the event loop a
+    deadline it always honours; where the call site has a surrounding retry, a
+    cancelled attempt reconnects on the next one.
+
+    ``attempts`` covers calls that retry *internally* (litellm/router
+    ``num_retries``): the deadline then spans the whole retry budget so it does
+    not pre-empt a legitimate retry. Sites with no internal retries use the
+    default ``attempts=1``.
+
+    Returns ``timeout * attempts`` plus a small grace margin, or ``None`` (no
+    enforced deadline) when no positive timeout is configured.
+    """
+    if timeout is None or timeout <= 0:
+        return None
+    return float(timeout) * max(1, attempts) + _LLM_DEADLINE_GRACE_S
+
+
 async def close_shared_session() -> None:
     """Close the shared aiohttp session. Call on engine/app shutdown."""
     global _shared_aiohttp_session, _connector_settings
@@ -462,13 +497,14 @@ async def acompletion(
     router = _get_router(config)
 
     _t0 = _time.perf_counter()
+    _deadline = llm_call_timeout(config.timeout, attempts=config.max_retries + 1)
     if router is not None:
         # The Router manages its own retries via router_settings; don't double
         # up litellm's per-call num_retries on top of the router's.
         call_kwargs.pop("num_retries", None)
-        response = await router.acompletion(**call_kwargs)
+        response = await asyncio.wait_for(router.acompletion(**call_kwargs), _deadline)
     else:
-        response = await litellm.acompletion(**call_kwargs)
+        response = await asyncio.wait_for(litellm.acompletion(**call_kwargs), _deadline)
     _latency = (_time.perf_counter() - _t0) * 1000
 
     # Record telemetry

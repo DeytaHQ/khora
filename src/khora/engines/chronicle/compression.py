@@ -23,6 +23,7 @@ from uuid import UUID, uuid4
 import litellm
 from loguru import logger
 
+from khora.config.llm import DEFAULT_LLM_TIMEOUT_S, llm_call_timeout
 from khora.core.diagnostics import ErrorRecord
 from khora.engines.chronicle.events import (
     _EXTRACTION_FAILED_COUNTER as _CHRONICLE_EXTRACTION_FAILED_COUNTER,
@@ -244,14 +245,17 @@ class FactExtractor:
 
         _t0 = _time.perf_counter()
         try:
-            response = await litellm.acompletion(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _FACT_EXTRACTION_SYSTEM},
-                    {"role": "user", "content": text[:4000]},
-                ],
-                temperature=0.0,
-                max_tokens=1500,
+            response = await asyncio.wait_for(
+                litellm.acompletion(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": _FACT_EXTRACTION_SYSTEM},
+                        {"role": "user", "content": text[:4000]},
+                    ],
+                    temperature=0.0,
+                    max_tokens=1500,
+                ),
+                llm_call_timeout(DEFAULT_LLM_TIMEOUT_S),
             )
             content = response.choices[0].message.content or "[]"
             raw_facts = _parse_json_array(content)
@@ -431,14 +435,17 @@ class MemoryCompressor:
 
         _t0 = _time.perf_counter()
         try:
-            response = await litellm.acompletion(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _CONTRADICTION_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.0,
-                max_tokens=200,
+            response = await asyncio.wait_for(
+                litellm.acompletion(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": _CONTRADICTION_SYSTEM},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.0,
+                    max_tokens=200,
+                ),
+                llm_call_timeout(DEFAULT_LLM_TIMEOUT_S),
             )
             content = response.choices[0].message.content or "{}"
             result = _parse_json_object(content)

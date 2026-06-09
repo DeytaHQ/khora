@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
 
-from khora.config.llm import get_shared_session
+from khora.config.llm import get_shared_session, llm_call_timeout
 from khora.exceptions import EmbeddingError
 from khora.telemetry import trace_span
 
@@ -415,12 +415,15 @@ class LiteLLMEmbedder(Embedder):
 
                     _t0 = _time.perf_counter()
                     set_connector_attributes(req_span, get_shared_session())
-                    response = await litellm.aembedding(
-                        model=self._model,
-                        input=sanitized,
-                        timeout=self._timeout,
-                        dimensions=self._dimension,
-                        shared_session=get_shared_session(),
+                    response = await asyncio.wait_for(
+                        litellm.aembedding(
+                            model=self._model,
+                            input=sanitized,
+                            timeout=self._timeout,
+                            dimensions=self._dimension,
+                            shared_session=get_shared_session(),
+                        ),
+                        llm_call_timeout(self._timeout),
                     )
                     set_rate_limit_attributes(req_span, response)
                     _latency = (_time.perf_counter() - _t0) * 1000
