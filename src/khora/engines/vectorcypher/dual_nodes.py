@@ -536,13 +536,9 @@ class DualNodeManager:
         # below binds the chunk as ``c`` (the compiler's default node variable),
         # so the compiled predicate references ``c.<key>`` directly. ``"split"``
         # mode means a leaf this backend cannot express (any metadata predicate)
-        # is NOT raised here — it is omitted from ``consumed_keys`` and left to
-        # the engine's full-AST in-memory post-filter, which enforces every leaf.
-        # So in normal operation this call does not raise. It is still placed
-        # OUTSIDE the ClientError/timeout handler below so that if the compiler
-        # ever does raise ``RecallFilterUnsupportedError`` (an internal failure
-        # on a genuinely non-splittable predicate) it surfaces to the caller
-        # rather than being masked as a transient Neo4j failure.
+        # is omitted from ``consumed_keys`` and left to the engine's full-AST
+        # in-memory post-filter, which enforces every leaf — so this call does
+        # not raise.
         if filter_ast is not None:
             from khora.filter.compilers.cypher import compile_cypher
             from khora.filter.execute import build_compile_context
