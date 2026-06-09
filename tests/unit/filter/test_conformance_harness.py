@@ -30,7 +30,7 @@ import pytest
 from sqlalchemy.sql.elements import ColumnElement
 
 from khora.filter import RecallFilterUnsupportedError
-from khora.filter.ast import FilterNode
+from khora.filter.ast import FilterNode, parse_to_ast
 from khora.filter.conformance import (
     ChronicleExecutor,
     ConformanceCase,
@@ -477,3 +477,62 @@ def test_f_exists_covers_eight_shapes_in_two_modes() -> None:
     # dropped shape is caught loudly (the per-shape test above guards each mode).
     shapes = [c for c in f_exists_cases()]
     assert len(shapes) == 8, f"expected 8 F-EXISTS shapes (8 × 2 modes = 16), got {len(shapes)}"
+
+
+# --------------------------------------------------------------------------- #
+# System-key $exists is a CONSTANT on EVERY string-emitting backend (cross-
+# backend determinism — the always-present axiom).
+# --------------------------------------------------------------------------- #
+#
+# The oracle treats a system key as always-present, so $exists:true is a constant
+# TRUE (all rows) and $exists:false a constant FALSE (no rows). postgres / lance
+# already emit a constant; cypher and surrealdb were FIXED to do the same (they
+# previously emitted a `IS NOT NULL` / `IS NOT NONE` presence test that diverged on
+# an unset system column). Pin the constant on every string-emitting compiler so a
+# regression to a presence test on ANY backend fails loudly. (postgres emits a
+# SQLAlchemy ``true()``/``false()`` object and weaviate defers $exists to the
+# post-filter — both are checked in their own compiler suites; here we pin the
+# three string-emitting compilers where the regression risk lives.)
+
+
+@pytest.mark.parametrize(
+    ("label", "compiler", "ctx", "true_token", "false_token"),
+    [
+        (
+            "surrealdb",
+            "compile_surrealdb",
+            {"backend_target": "temporal_chunk", "field_mapping": {"metadata": "metadata_"}},
+            "true",
+            "false",
+        ),
+        ("cypher", "compile_cypher", {"backend_target": "Chunk", "table_alias": "c"}, "true", "false"),
+        # SQLite has no boolean literal — the constant is the integer 1 / 0.
+        ("sqlite_lance", "compile_lance", {"backend_target": "khora_chunks"}, "1", "0"),
+    ],
+)
+def test_system_exists_is_constant_not_presence_test(
+    label: str, compiler: str, ctx: dict[str, Any], true_token: str, false_token: str
+) -> None:
+    import importlib
+
+    from khora.filter import RecallFilter
+    from khora.filter.context import CompileContext
+
+    module_name = "lance" if label == "sqlite_lance" else label
+    compile_fn = getattr(importlib.import_module(f"khora.filter.compilers.{module_name}"), compiler)
+
+    def _norm(pred: object) -> str:
+        return str(pred).lower()
+
+    def _ast(wire: dict[str, Any]):  # noqa: ANN202 - local AST builder via the real validator
+        return parse_to_ast(RecallFilter.model_validate(wire))
+
+    true_pred = _norm(compile_fn(_ast({"source_name": {"$exists": True}}), CompileContext(**ctx)).predicate)
+    false_pred = _norm(compile_fn(_ast({"source_name": {"$exists": False}}), CompileContext(**ctx)).predicate)
+
+    # $exists:true is a constant TRUE; $exists:false a constant FALSE — NOT a
+    # presence test on the column. A regression to ``IS NOT NULL`` / ``IS NOT NONE``
+    # (or its negation) on any of these backends would diverge from the oracle and
+    # is caught here.
+    assert true_token in true_pred and "is not null" not in true_pred and "is not none" not in true_pred, true_pred
+    assert false_token in false_pred and "is null" not in false_pred and "is none" not in false_pred, false_pred
