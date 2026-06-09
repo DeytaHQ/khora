@@ -170,9 +170,15 @@ async def _assert_entry_entities_present(retriever, query: str, namespace_id: UU
     If entity vector search returns 0, the recall short-circuits and the graph
     spies pass VACUOUSLY. Asserting > 0 here (with the floor lowered) closes that
     hole before any channel assertion.
+
+    ``recall()`` resolves the public namespace_id to the active row-level id
+    before searching entity vectors (entities are keyed by the row id), so we
+    resolve here too — passing the public id straight to
+    ``_vector_search_entities`` matches nothing and fails this gate spuriously.
     """
+    resolved = await retriever._storage.resolve_namespace(namespace_id)
     embedding = await retriever._embedder.embed(query)
-    entry = await retriever._vector_search_entities(embedding, namespace_id, limit=10)
+    entry = await retriever._vector_search_entities(embedding, resolved, limit=10)
     assert entry, (
         "entry_entities == 0 on the live stack even with min_entity_similarity=0.0 — "
         "the seed did not surface; graph spies would pass vacuously. Escalate (seed problem)."
@@ -386,11 +392,11 @@ async def test_change_decomposition_threads_filter(
     await _assert_entry_entities_present(retriever, "Acme Corp", namespace_id)
 
     # Sanity: the SUPERSEDES seed must produce version history, else the CHANGE
-    # decomposition never fires and the >= 2 assertion is vacuous.
-    entry = await retriever._vector_search_entities(
-        await retriever._embedder.embed("Acme Corp"), namespace_id, limit=10
-    )
-    version_history = await retriever._fetch_version_history([e[0] for e in entry], namespace_id)
+    # decomposition never fires and the >= 2 assertion is vacuous. Resolve the
+    # public namespace_id to the row id (entities/version history are keyed by it).
+    resolved = await retriever._storage.resolve_namespace(namespace_id)
+    entry = await retriever._vector_search_entities(await retriever._embedder.embed("Acme Corp"), resolved, limit=10)
+    version_history = await retriever._fetch_version_history([e[0] for e in entry], resolved)
     assert version_history, "SUPERSEDES seed produced no version history — CHANGE decomp would not fire"
 
     captures = spy_on(monkeypatch, retriever, "_vector_search_chunks")
