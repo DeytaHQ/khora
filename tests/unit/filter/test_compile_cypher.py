@@ -283,23 +283,28 @@ def test_system_empty_nin_is_constant_true() -> None:
 
 
 # ===========================================================================
-# Rule 4 — $exists / null resolve to IS [NOT] NULL.
+# Rule 4 — $exists on a system key is a CONSTANT (the always-present axiom); a
+# null operand resolves to IS [NOT] NULL.
 # ===========================================================================
 
 
-def test_system_exists_true_is_is_not_null() -> None:
-    # A chunk node has no stored null — an absent property IS null — so $exists is a
-    # presence test (IS NOT NULL), and it binds nothing.
+def test_system_exists_true_is_constant_true() -> None:
+    # A system key is treated as ALWAYS PRESENT (the oracle's axiom), so $exists:true
+    # is a CONSTANT ``true`` — NOT a presence test (``IS NOT NULL``), which would
+    # exclude rows where an unwritten denormalized doc key is genuinely null. Matches
+    # compile_python / compile_postgres / compile_lance. Binds nothing.
     compiled = compile_cypher(_ast({"source_name": {"$exists": True}}), _CTX)
-    assert "c.source_name is not null" in _norm(compiled.predicate)
+    sql = _norm(compiled.predicate)
+    assert "true" in sql
+    assert "is not null" not in sql and "is null" not in sql
     assert compiled.params == {}
 
 
-def test_system_exists_false_is_is_null() -> None:
+def test_system_exists_false_is_constant_false() -> None:
     compiled = compile_cypher(_ast({"source_name": {"$exists": False}}), _CTX)
     sql = _norm(compiled.predicate)
-    assert "c.source_name is null" in sql
-    assert "is not null" not in sql
+    assert "false" in sql
+    assert "is null" not in sql
     assert compiled.params == {}
 
 

@@ -146,10 +146,12 @@ def test_system_ne_is_bare_not_equals() -> None:
 def test_system_gt_is_property_compare() -> None:
     # A system DATE key takes a plain ISO-8601 string operand (DateOps parses it to
     # a datetime); the operand binds as a real datetime (the SDK encodes it as a
-    # SurrealQL datetime — the system-column divergence from the metadata path).
+    # SurrealQL datetime — the system-column divergence from the metadata path). The
+    # range op is guarded with ``IS NOT NONE`` so an absent date row never matches
+    # (SurrealQL's NONE-comparison is asymmetric — see the range-operator test).
     compiled = compile_surrealdb(_ast({"created_at": {"$gt": "2026-01-01T00:00:00Z"}}), _CTX)
     sql = _norm(compiled.predicate)
-    assert "(created_at > $f_0)" in sql
+    assert "(created_at is not none and created_at > $f_0)" in sql
     assert isinstance(compiled.params["f_0"], datetime)
 
 
@@ -163,10 +165,14 @@ def test_system_gt_is_property_compare() -> None:
     ],
 )
 def test_system_date_range_operators(wire_op: str, surql_op: str) -> None:
-    # System datetime columns are typed, so their range ops are UNGATED (no
-    # ``type::is::*`` prefix — the gate is metadata-only).
+    # System datetime columns are typed, so their range ops carry no ``type::is::*``
+    # prefix (the type-gate is metadata-only). They ARE guarded with ``IS NOT NONE``
+    # though: SurrealQL's NONE-comparison is asymmetric (``NONE < x`` is TRUE, ``NONE
+    # > x`` is FALSE), so without the guard a lower-bound op would wrongly include an
+    # absent date row. The guard makes every range op exclude an absent value,
+    # matching the oracle (a missing field never satisfies a range compare).
     sql = _surql_norm(_ast({"occurred_at": {wire_op: "2026-03-04T05:06:07Z"}}))
-    assert f"(occurred_at {surql_op} $f_0)" in sql
+    assert f"(occurred_at is not none and occurred_at {surql_op} $f_0)" in sql
     assert "type::is::" not in sql
 
 
@@ -282,23 +288,28 @@ def test_system_in_is_membership_not_exact_array() -> None:
 
 
 # ===========================================================================
-# Rule 4 — $exists / null resolve to IS [NOT] NONE / (= NULL OR IS NONE).
+# Rule 4 — $exists on a system key is a CONSTANT (the always-present axiom); a
+# null operand resolves to (= NULL OR IS NONE).
 # ===========================================================================
 
 
-def test_system_exists_true_is_is_not_none() -> None:
-    # An unwritten column reads NONE, so $exists is a presence test (IS NOT NONE),
-    # binding nothing.
+def test_system_exists_true_is_constant_true() -> None:
+    # A system key is treated as ALWAYS PRESENT (the oracle's axiom), so $exists:true
+    # is a CONSTANT ``true`` — NOT a presence test (``IS NOT NONE``), which would
+    # exclude rows where an unwritten denormalized doc key reads NONE. Matches
+    # compile_python / compile_postgres / compile_lance. Binds nothing.
     compiled = compile_surrealdb(_ast({"source_name": {"$exists": True}}), _CTX)
-    assert "(source_name is not none)" in _norm(compiled.predicate)
+    sql = _norm(compiled.predicate)
+    assert "true" in sql
+    assert "is not none" not in sql and "is none" not in sql
     assert compiled.params == {}
 
 
-def test_system_exists_false_is_is_none() -> None:
+def test_system_exists_false_is_constant_false() -> None:
     compiled = compile_surrealdb(_ast({"source_name": {"$exists": False}}), _CTX)
     sql = _norm(compiled.predicate)
-    assert "(source_name is none)" in sql
-    assert "is not none" not in sql
+    assert "false" in sql
+    assert "is none" not in sql
     assert compiled.params == {}
 
 
@@ -344,7 +355,7 @@ def test_direct_datetime_clause_binds_real_datetime() -> None:
     clause = FilterClause(path=("occurred_at",), op=Op.GTE, operand=datetime(2026, 1, 1, tzinfo=UTC))
     node = FilterNode(op=Op.AND, children=(clause,))
     compiled = compile_surrealdb(node, _CTX)
-    assert "(occurred_at >= $f_0)" in _norm(compiled.predicate)
+    assert "(occurred_at is not none and occurred_at >= $f_0)" in _norm(compiled.predicate)
     assert compiled.params["f_0"] == datetime(2026, 1, 1, tzinfo=UTC)
 
 

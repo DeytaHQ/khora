@@ -10,14 +10,16 @@ Which backend this leg runs is selected by ``KHORA_CONFORMANCE_BACKEND`` (defaul
 ``python``), so the CI matrix runs one leg per backend with the same test module:
 
 * ``python`` / ``chronicle`` — in-memory executors, NO database. Every case runs.
-* ``postgres`` — gated behind ``_pg_reachable``; compiles the real Postgres
-  ``WHERE`` and runs it against a live ``khora_chunks`` store. The store is seeded
-  ONCE, out-of-band, by ``_conformance_seed`` (the workflow's one-time step);
-  this module is strictly READ-ONLY, so every xdist worker only reads (no write
+* ``postgres`` / ``surrealdb`` — TOTAL-exact live legs: the compiled ``WHERE`` alone
+  decides the row-set, asserted directly against the oracle.
+* ``cypher`` / ``weaviate`` / ``sqlite_lance`` — SPLIT live legs: the compiled
+  server-side prefilter over-returns, so the executor runs the production read path
+  (prefilter then ``compile_python`` post-filter) and asserts THAT against the oracle.
+  All five DB legs are gated behind their store's reachability and read a store
+  seeded ONCE out-of-band (the seed step), so every xdist worker only reads (no write
   contention under ``-n auto``).
-* anything else (surreal / weaviate / cypher / sqlite_lance — NOT in the harness
-  ``BACKENDS``) collects ZERO conformance cases; only the registry guard runs on
-  that leg. A module-level skip states the reason rather than erroring.
+* a backend outside the harness ``BACKENDS`` collects ZERO conformance cases; only
+  the registry guard runs on that leg. A module-level skip states the reason.
 
 The corpus is excluded from the main test/integration jobs via the
 ``filter_conformance`` marker (see ``pyproject.toml`` addopts); it runs only in
@@ -39,7 +41,20 @@ from khora.filter.conformance import (
     PostgresExecutor,
     PythonExecutor,
     assert_case,
+    f_array_cases,
+    f_coerce_cases,
+    f_dates_cases,
+    f_dotkey_cases,
+    f_exists_cases,
+    f_impossible_cases,
+    f_logic_cases,
+    f_nullval_cases,
+    f_objeq_cases,
     f_op_cases,
+    f_polarity_cases,
+    f_sel_cases,
+    f_sugar_cases,
+    f_unsup_cases,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.filter_conformance]
@@ -54,20 +69,46 @@ SELECTED_BACKEND = os.environ.get("KHORA_CONFORMANCE_BACKEND", "python")
 # --------------------------------------------------------------------------- #
 
 
-def _all_cases() -> list[ConformanceCase]:
-    """The corpus families this live-store matrix executes against real backends.
+# The 14 family generators that make up the conformance corpus — the same set
+# the fast unit catalog (``tests/unit/filter/test_conformance_catalog.py``) drives.
+# Each family declares per-case ``backends``; ``_cases_for`` filters to the selected
+# backend, so a family that excludes a backend (with a documented capability reason)
+# simply contributes no cases on that leg — never a silent skip.
+_FAMILY_GENERATORS = (
+    f_op_cases,
+    f_coerce_cases,
+    f_polarity_cases,
+    f_array_cases,
+    f_exists_cases,
+    f_logic_cases,
+    f_sugar_cases,
+    f_dates_cases,
+    f_nullval_cases,
+    f_objeq_cases,
+    f_dotkey_cases,
+    f_sel_cases,
+    f_unsup_cases,
+    f_impossible_cases,
+)
 
-    Only ``f_op_cases`` runs here today. The other catalog families are authored
-    and validated against the in-memory python oracle + Chronicle in the fast unit
-    suite (``tests/unit/filter/test_conformance_catalog.py``), but are deliberately
-    NOT wired into this live-store leg yet: the metadata-shaped families exercise
-    ``compile_postgres`` paths with known open divergences (sub-path object-equality,
-    array-valued containment, nested ``jsonb`` path typing) tracked separately, so
-    running them against live Postgres would fail on those compiler bugs rather than
-    on the corpus. They join this matrix once those divergences are resolved and the
-    per-backend executors land in ``src/khora/filter/conformance.py``.
+
+def _all_cases() -> list[ConformanceCase]:
+    """Every corpus case across all 14 families, executed against real backends.
+
+    The full corpus now runs here (not only ``f_op_cases``): the per-backend
+    executors landed in ``src/khora/filter/conformance.py`` and the open
+    ``compile_postgres`` divergences (array-of-dicts object-equality, etc.) are
+    resolved, so every family is wired into this live-store leg. Each case's
+    ``backends`` set decides which legs it runs on — a total backend (postgres /
+    surrealdb) asserts the compiled WHERE alone equals the oracle, a split backend
+    (cypher / weaviate / sqlite_lance) runs the production prefilter + post-filter
+    path. A family that prunes a backend does so only with a documented capability
+    reason (e.g. the string document keys are not seeded onto the live chunk row).
     """
-    return list(f_op_cases())
+    cases: list[ConformanceCase] = []
+    for generator in _FAMILY_GENERATORS:
+        cases.extend(generator())
+    return cases
 
 
 def _cases_for(backend: str) -> list[ConformanceCase]:
@@ -164,6 +205,54 @@ def _postgres_executor_for(case: ConformanceCase) -> PostgresExecutor:
 
 
 # --------------------------------------------------------------------------- #
+# surrealdb / cypher / weaviate / sqlite_lance legs: per-backend runner module.
+# --------------------------------------------------------------------------- #
+#
+# Each of these four backends has a sibling ``_conformance_<backend>`` helper module
+# (owned by the runner ticket) that hides the embedded-vs-docker seeding difference
+# behind ONE factory. The locked seam (agreed with the runner ticket + team-lead)
+# is exactly two callables per module:
+#
+# * ``reachable() -> bool`` — is the live store up (embedded → always True;
+#   docker neo4j/weaviate → probe the service). The local-dev skip gate.
+# * ``executor_for(case) -> BackendExecutor`` — a ready executor for the case:
+#   embedded legs seed the case in-process then return the executor; docker legs
+#   read the seed-map and close their runner over the case's id_map (like PG). The
+#   module imports the executor CLASS this file also imports (``SurrealExecutor`` /
+#   ``CypherExecutor`` / ``WeaviateExecutor`` / ``LanceExecutor``) and injects its
+#   own ``LiveRunner`` — so the REAL per-backend compiler still runs in-harness
+#   (the executor owns the compile), and the module only executes.
+#
+# Importing those modules is LAZY (inside the dispatch) so the python / chronicle /
+# postgres legs never import the surreal / neo4j / weaviate / lance SDKs.
+
+# backend name -> runner-module import path.
+_LIVE_BACKENDS: dict[str, str] = {
+    "surrealdb": "tests.integration.matrix._conformance_surreal",
+    "cypher": "tests.integration.matrix._conformance_neo4j",
+    "weaviate": "tests.integration.matrix._conformance_weaviate",
+    "sqlite_lance": "tests.integration.matrix._conformance_lance",
+}
+
+
+def _live_module(backend: str):  # noqa: ANN202 - the runner module
+    """Lazily import ``backend``'s ``_conformance_<backend>`` runner module."""
+    import importlib
+
+    return importlib.import_module(_LIVE_BACKENDS[backend])
+
+
+# Gate each live leg on its store being reachable (local-dev convenience; CI's
+# parent conftest still aborts RED when the store is required but down). The
+# postgres gate above stays as-is; this guards the four new legs symmetrically.
+if SELECTED_BACKEND in _LIVE_BACKENDS and not _live_module(SELECTED_BACKEND).reachable():
+    pytest.skip(
+        f"{SELECTED_BACKEND} store not reachable (start the conformance stack first)",
+        allow_module_level=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # The parametrized assertion.
 # --------------------------------------------------------------------------- #
 
@@ -177,5 +266,9 @@ def test_conformance_case(case: ConformanceCase) -> None:
         assert_case(case, "chronicle", ChronicleExecutor())
     elif SELECTED_BACKEND == "postgres":
         assert_case(case, "postgres", _postgres_executor_for(case))
+    elif SELECTED_BACKEND in _LIVE_BACKENDS:
+        # The runner module's factory returns a ready executor for this case
+        # (embedded: seed-in-process; docker: read the seed-map + close the runner).
+        assert_case(case, SELECTED_BACKEND, _live_module(SELECTED_BACKEND).executor_for(case))
     else:  # pragma: no cover - module-level skip already guards this
         pytest.fail(f"unexpected conformance backend {SELECTED_BACKEND!r}")

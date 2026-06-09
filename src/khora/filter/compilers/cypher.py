@@ -21,9 +21,11 @@ the four emission rules:
    against a scalar node property is compiled as a normal ``=`` against a list
    bind — a scalar property never equals a list, so Cypher yields ``false``; no
    special-cased constant is emitted. ``$in`` / ``$nin`` are normal membership.
-4. **Presence/null.** ``$exists`` resolves to ``var.key IS NOT NULL`` /
-   ``var.key IS NULL`` and a ``{k: null}`` match resolves to ``var.key IS NULL``
-   (Neo4j has no stored-null property — an absent property *is* null).
+4. **Presence/null.** ``$exists`` on a system key is a CONSTANT (``true`` /
+   ``false``) — a system key is treated as always-present (the oracle's axiom), so a
+   presence test would diverge whenever the property is genuinely unset on the node.
+   A ``{k: null}`` match resolves to ``var.key IS NULL`` (Neo4j has no stored-null
+   property — an absent property *is* null).
 
 **Totality (the rule that makes negation uniform).** ``NOT`` is compiled as
 ``(NOT (<child>))``; Cypher ``NOT null`` is ``null`` (drops the row), which would
@@ -196,9 +198,15 @@ class _Builder:
         operand = clause.operand
 
         if op == Op.EXISTS:
-            # A chunk node has no stored null — an absent property IS null. So
-            # $exists is presence: IS NOT NULL (true) / IS NULL (false).
-            return f"({prop} IS NOT NULL)" if operand else f"({prop} IS NULL)"
+            # A system key is treated as ALWAYS PRESENT (the oracle's axiom: an
+            # absent system value resolves to None, which still counts as
+            # present-with-null for $exists). So $exists on a system key is a
+            # CONSTANT — true / false — matching compile_python / compile_postgres /
+            # compile_lance, NOT a presence test (``IS NOT NULL``). A presence test
+            # would diverge whenever the property is genuinely unset on the node
+            # (e.g. an unwritten denormalized doc key), which the oracle keeps under
+            # $exists:true. The chunk row itself always exists.
+            return "true" if operand else "false"
 
         if op in (Op.IN, Op.NIN):
             if not operand:

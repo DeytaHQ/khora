@@ -40,8 +40,9 @@ suite; **not** re-exported from :mod:`khora.__init__` or :mod:`khora.filter`.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+import re
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from uuid import UUID, uuid5
@@ -50,28 +51,40 @@ import pytest
 
 from khora.core.models import Chunk, Document, MemoryNamespace
 from khora.filter import (
+    CompiledFilter,
     RecallFilter,
     RecallFilterUnsupportedError,
+    SchemaCapabilities,
 )
-from khora.filter.ast import FilterNode, parse_to_ast
+from khora.filter.ast import DateLiteral, FilterNode, parse_to_ast
+from khora.filter.compilers.cypher import compile_cypher
+from khora.filter.compilers.lance import compile_lance
 from khora.filter.compilers.postgres import compile_postgres
 from khora.filter.compilers.python import compile_python
+from khora.filter.compilers.surrealdb import compile_surrealdb
+from khora.filter.compilers.weaviate import compile_weaviate
 
 # Cross-file import boundary: conformance.py depends on execute.py (the production
 # compile/execute seam); execute.py imports NOTHING back (one-way). ``build_compile_context``
 # is the one production CompileContext builder; ``run_chronicle_filter`` is the
 # Chronicle date-bound-pushdown + full-AST post-filter applied to in-memory records.
-from khora.filter.execute import build_compile_context, run_chronicle_filter
+from khora.filter.execute import build_compile_context, iter_leaf_clauses, run_chronicle_filter
+from khora.filter.model import Op
 from khora.storage.coordinator import StorageCoordinator
 
 __all__ = [
     "BackendExecutor",
     "ChronicleExecutor",
     "ConformanceCase",
+    "CypherExecutor",
+    "LanceExecutor",
+    "LiveRunner",
     "PostgresExecutor",
     "PostgresRunner",
     "PythonExecutor",
     "SeedRecord",
+    "SurrealExecutor",
+    "WeaviateExecutor",
     "assert_case",
     "f_array_cases",
     "f_coerce_cases",
@@ -92,8 +105,26 @@ __all__ = [
     "seed_case",
 ]
 
-# The three backend names a case may target / a runner may dispatch on.
-BACKENDS: frozenset[str] = frozenset({"python", "postgres", "chronicle"})
+# The backend names a case may target / a runner may dispatch on. ``python`` is
+# the oracle; ``chronicle`` is the date-bound-pushdown + full-AST post-filter seam;
+# ``postgres`` and ``surrealdb`` are TOTAL-exact (the compiled WHERE alone decides
+# the row-set); ``cypher`` / ``weaviate`` / ``sqlite_lance`` are split + post-filter
+# (the compiled prefilter over-returns, the ``compile_python`` post-filter narrows
+# to the oracle). The conformance framework treats all six DB backends as
+# oracle-comparable; the per-family ``backends`` set prunes only with a documented
+# capability reason (never a silent skip).
+BACKENDS: frozenset[str] = frozenset(
+    {"python", "postgres", "chronicle", "surrealdb", "cypher", "weaviate", "sqlite_lance"}
+)
+
+# The total-exact backends: the compiled WHERE alone equals the oracle (run with
+# ``on_unsupported="raise"`` — every leaf must push down or surface a gap).
+_TOTAL_BACKENDS: frozenset[str] = frozenset({"postgres", "surrealdb"})
+# The split + post-filter backends: the compiled prefilter over-returns (or
+# under-pushes), so the executor MUST run the production read path — compiled
+# server-side prefilter, then ``compile_python`` post-filter — to land on the
+# oracle row-set. NEVER assert WHERE-alone == oracle for these.
+_SPLIT_BACKENDS: frozenset[str] = frozenset({"cypher", "weaviate", "sqlite_lance"})
 
 # The eight denormalized document system keys carried on the seed Document, in
 # the order ``parse_to_ast`` lowers them (the three date keys live on the chunk).
@@ -267,6 +298,17 @@ class ChronicleExecutor:
     so the executor needs no live store; ``run_chronicle_filter`` returns the
     surviving record mappings (the same dict objects, in order), which this maps
     back to their ``seed_id`` by object identity.
+
+    **Chronicle is an EXECUTION-SEAM check, not independent backend coverage.**
+    This executor genuinely exercises the production Chronicle seam — the real
+    ``source_timestamp`` date-bound pushdown composed with the post-filter — so it
+    proves that composition is faithful. But the post-filter half IS
+    :func:`compile_python` (the oracle itself), so the survivor set is
+    oracle-equivalent *by construction*: it cannot disagree with the python oracle
+    the way an independent backend compiler (postgres / surrealdb / cypher /
+    weaviate / sqlite_lance) can. Read a green chronicle leg as "the pushdown +
+    post-filter composition is wired correctly", NOT as a second, independent
+    oracle. The independent backend evidence comes from the five DB executors.
     """
 
     def survivors(
@@ -327,6 +369,190 @@ class PostgresExecutor:
         ctx = build_compile_context("khora_chunks", on_unsupported="raise")
         compiled = compile_postgres(filter_ast, ctx)
         return self._runner(compiled.predicate, compiled.params, records)
+
+
+# --------------------------------------------------------------------------- #
+# Live-store executors (surrealdb / cypher / weaviate / sqlite_lance).
+# --------------------------------------------------------------------------- #
+#
+# Each of these four executors compiles a case through its REAL backend compiler
+# in-harness (with the production-faithful CompileContext that the corresponding
+# skeleton backend uses on the live recall path) and hands the compiled artifact
+# to an injected :class:`LiveRunner` that executes it against a seeded live store.
+# The split executors ALSO build the ``compile_python`` post-filter (the same
+# safety net the production engine applies after a server-side prefilter) and pass
+# it through, because their compilers over-return / under-push and the WHERE alone
+# does NOT equal the oracle — only ``server prefilter ∘ post-filter`` does. The
+# surrealdb executor is TOTAL (``on_unsupported="raise"``), so the compiled WHERE
+# alone decides the row-set; it still passes a post-filter so every runner shares
+# one :class:`LiveRunner` signature (the surrealdb runner may ignore it).
+
+
+class LiveRunner(Protocol):
+    """Run a compiled live-store predicate (+ a post-filter) -> surviving ids.
+
+    ``@internal``. The injected seam the four live-store executors below call after
+    they have compiled the AST with the REAL per-backend compiler. Wiring this to a
+    seeded store (seed → emit the server-side prefilter → read candidate rows →
+    apply ``post_filter`` → map back to ``seed_id``) is the CI ticket's concern; the
+    harness defines only the contract.
+
+    * ``compiled`` — the :class:`CompiledFilter` the executor produced with the real
+      compiler (its ``predicate`` is the server-side prefilter — a SurrealQL /
+      Cypher / SQLite string, or a weaviate ``Filter`` object — and ``params`` its
+      binds; ``consumed_keys`` says which leaves pushed down).
+    * ``filter_ast`` — the canonical AST (available for a runner that wants to
+      inspect leaves; most runners read ``compiled`` alone).
+    * ``post_filter`` — the ``compile_python`` predicate over the FULL AST. For the
+      split backends (cypher / weaviate / sqlite_lance) the runner MUST apply it to
+      the candidate rows it reads, because the prefilter only over-returns. For the
+      total backend (surrealdb) it is oracle-equivalent to apply or skip.
+    * ``records`` — the ``(seed_id, mapping)`` list under test (same contract as
+      :class:`PostgresRunner`).
+    """
+
+    def __call__(
+        self,
+        compiled: CompiledFilter[Any],
+        filter_ast: FilterNode,
+        post_filter: Callable[[Mapping[str, Any]], bool],
+        records: Sequence[tuple[str, Mapping[str, Any]]],
+    ) -> frozenset[str]: ...
+
+
+class SurrealExecutor:
+    """Compile with the real :func:`compile_surrealdb`; run via an injected runner.
+
+    ``@internal``. SurrealDB is TOTAL-exact: SurrealQL's NONE-boolean algebra makes
+    every leaf a total boolean, so the compiled ``WHERE`` alone equals the oracle
+    row-set. The compiler is driven with ``on_unsupported="raise"`` (a clause it
+    cannot express surfaces as :class:`RecallFilterUnsupportedError`, matched against
+    ``expect_unsupported``), against the production context the skeleton SurrealDB
+    backend uses (``temporal_chunk`` target, ``metadata`` → ``metadata_`` mapping).
+    A ``compile_python`` post-filter is still built and passed through so every live
+    runner shares one :class:`LiveRunner` signature; the surrealdb runner may ignore
+    it (the total ``WHERE`` is the source of truth).
+    """
+
+    def __init__(self, runner: LiveRunner) -> None:
+        self._runner = runner
+
+    def survivors(
+        self,
+        filter_ast: FilterNode,
+        records: Sequence[tuple[str, Mapping[str, Any]]],
+    ) -> frozenset[str]:
+        ctx = build_compile_context(
+            "temporal_chunk",
+            field_mapping={"metadata": "metadata_"},
+            on_unsupported="raise",
+        )
+        compiled = compile_surrealdb(filter_ast, ctx)
+        post_filter = _python_post_filter(filter_ast, "temporal_chunk")
+        return self._runner(compiled, filter_ast, post_filter, records)
+
+
+class CypherExecutor:
+    """Compile with the real :func:`compile_cypher`; run via an injected runner.
+
+    ``@internal``. Cypher is NOT total-exact: a metadata predicate is never pushed
+    down (Neo4j stores ``metadata`` as a serialized JSON string), so the compiled
+    ``WHERE`` over-returns on any metadata leaf. The executor therefore runs the
+    production read path — server-side prefilter (compiled with
+    ``on_unsupported="split"``, the mode vectorcypher drives) then the
+    ``compile_python`` post-filter — to land on the oracle row-set. The context
+    mirrors vectorcypher's live recall path (``Chunk`` node, alias ``c``).
+    """
+
+    def __init__(self, runner: LiveRunner) -> None:
+        self._runner = runner
+
+    def survivors(
+        self,
+        filter_ast: FilterNode,
+        records: Sequence[tuple[str, Mapping[str, Any]]],
+    ) -> frozenset[str]:
+        ctx = build_compile_context("Chunk", table_alias="c", on_unsupported="split")
+        compiled = compile_cypher(filter_ast, ctx)
+        post_filter = _python_post_filter(filter_ast, "Chunk")
+        return self._runner(compiled, filter_ast, post_filter, records)
+
+
+class WeaviateExecutor:
+    """Compile with the real :func:`compile_weaviate`; run via an injected runner.
+
+    ``@internal``. Weaviate is a superset-safe partial pushdown (NOT total-exact):
+    negations / ``$exists`` / null / metadata / undeclared keys are deliberately
+    left unpushed (a server-side negation would false-exclude null/absent rows), so
+    the compiled ``Filter`` only over-returns. The executor runs the production read
+    path — the over-returning ``Filter`` prefilter (``on_unsupported="split"``) then
+    the ``compile_python`` post-filter. The context mirrors the skeleton weaviate
+    backend's live path (``KhoraChunk`` collection, the two date keys declared
+    pushable via ``field_mapping``). ``compiled.predicate`` may be ``None`` (nothing
+    pushable) — the runner treats that as "no server-side filter, post-filter all".
+    """
+
+    def __init__(self, runner: LiveRunner) -> None:
+        self._runner = runner
+
+    def survivors(
+        self,
+        filter_ast: FilterNode,
+        records: Sequence[tuple[str, Mapping[str, Any]]],
+    ) -> frozenset[str]:
+        ctx = build_compile_context(
+            "KhoraChunk",
+            field_mapping={"occurred_at": "occurred_at", "created_at": "created_at"},
+            on_unsupported="split",
+        )
+        compiled = compile_weaviate(filter_ast, ctx)
+        post_filter = _python_post_filter(filter_ast, "KhoraChunk")
+        return self._runner(compiled, filter_ast, post_filter, records)
+
+
+class LanceExecutor:
+    """Compile with the real :func:`compile_lance`; run via an injected runner.
+
+    ``@internal``. sqlite_lance is NOT total-exact: with JSON1 it pushes most
+    metadata leaves, but defers the bare-blob ``$eq``, ``object_equal`` dict
+    operands, ``$date`` compares, and dict ``$in`` / ``$nin`` elements to the
+    ``compile_python`` post-filter (and an ``$or`` / ``$not`` over any of those is
+    deferred wholesale). The executor runs the production read path — the SQLite
+    prefilter (``on_unsupported="split"``, JSON1 advertised) then the post-filter.
+    The context mirrors the skeleton sqlite_lance backend's live path
+    (``khora_chunks`` target, JSON1 capability on); ``table_alias`` is left unset
+    here (the vector post-fetch path is unaliased, so a bare ``khora_chunks.col``
+    qualifier is the production-faithful form).
+    """
+
+    def __init__(self, runner: LiveRunner) -> None:
+        self._runner = runner
+
+    def survivors(
+        self,
+        filter_ast: FilterNode,
+        records: Sequence[tuple[str, Mapping[str, Any]]],
+    ) -> frozenset[str]:
+        ctx = build_compile_context(
+            "khora_chunks",
+            on_unsupported="split",
+            schema_capabilities=SchemaCapabilities(sqlite_json1=True),
+        )
+        compiled = compile_lance(filter_ast, ctx)
+        post_filter = _python_post_filter(filter_ast, "khora_chunks")
+        return self._runner(compiled, filter_ast, post_filter, records)
+
+
+def _python_post_filter(filter_ast: FilterNode, target: str) -> Callable[[Mapping[str, Any]], bool]:
+    """Build the ``compile_python`` post-filter for a split-mode read path.
+
+    ``@internal``. The same full-AST in-memory safety net the production engines
+    apply after a server-side prefilter — compiled with ``on_unsupported="split"``
+    so it never raises (it must express the whole AST in memory, which the python
+    oracle always can). Shared by the four live-store executors so the post-filter
+    is constructed one way.
+    """
+    return compile_python(filter_ast, build_compile_context(target, on_unsupported="split")).predicate
 
 
 # --------------------------------------------------------------------------- #
@@ -505,22 +731,179 @@ _DATE_MID = datetime(2026, 3, 15, tzinfo=UTC)
 _DATE_MISS = datetime(2020, 1, 1, tzinfo=UTC)
 _DATE_BOUND = "2026-01-01T00:00:00Z"
 
-# All three backends are oracle-comparable for the F-OP family on the embedded
-# date/metadata surface; the catalog/CI tickets prune per-backend as needed (the
-# eight denorm document keys are not carried on the legacy chronicle DTO, so a
-# positive predicate on them is chronicle-empty — flagged via ``backends`` there).
-_OP_BACKENDS: frozenset[str] = frozenset({"python", "postgres", "chronicle"})
+# The in-memory backends that read the record mapping directly: the python oracle
+# and the chronicle plan/run seam. Every case targets at least these two.
+_INMEM_BACKENDS: frozenset[str] = frozenset({"python", "chronicle"})
 
-# String-key F-OP cases run on python + chronicle only — NOT postgres. The postgres
-# leg targets ``khora_chunks`` (the denormalized single-table target), but
-# ``seed_case`` denormalizes only ``_DATE_KEYS`` onto the seeded Chunk — the core
-# Chunk model carries none of the seven string document keys (only the skeleton DTO
-# does), so a positive string predicate is postgres-empty until the seeder
-# denormalizes the doc-keys onto the chunk row (a follow-up harness concern).
-# Pruning postgres here keeps ``ConformanceCase.backends`` an honest single source of
-# truth; the date-key F-OP cases keep postgres. python (the oracle) + chronicle still
-# validate every string case.
-_STRING_OP_BACKENDS: frozenset[str] = _OP_BACKENDS - frozenset({"postgres"})
+# The live DB backends that carry the chunk ``metadata`` blob and the user-supplied
+# date columns (``occurred_at`` / ``source_timestamp``) — postgres + surrealdb
+# (total-exact: the compiled WHERE alone decides) and cypher + weaviate + sqlite_lance
+# (split + ``compile_python`` post-filter). A metadata / occurred_at / source_timestamp
+# predicate is oracle-comparable on ALL of them (the post-filter is the safety net for
+# the split backends, so none is silently skipped).
+_LIVE_BACKENDS: frozenset[str] = _TOTAL_BACKENDS | _SPLIT_BACKENDS
+
+# Every backend a metadata-only / occurred_at / source_timestamp case can run on.
+_OP_BACKENDS: frozenset[str] = _INMEM_BACKENDS | _LIVE_BACKENDS
+
+# String-key cases run on python + chronicle only — NOT any live DB backend. Every
+# live store seeds the chunk row through ``seed_case``, which writes only the three
+# ``_DATE_KEYS`` + ``metadata`` onto the core ``Chunk`` (the seven string document
+# keys — ``source_name`` / ``source_url`` / ``external_id`` / ``content_type`` /
+# ``source`` / ``source_type`` / ``title`` — are NOT carried on the core Chunk model,
+# only on the skeleton DTOs, and the live runners copy only dates+metadata, mirroring
+# ``_conformance_pg._to_temporal_chunk``). So a positive string predicate is empty on
+# every live store and a negative one would diverge — they are pruned to python +
+# chronicle (a documented capability/seed reason, NOT a silent skip). The in-memory
+# oracle + chronicle still validate every string case.
+_STRING_OP_BACKENDS: frozenset[str] = _INMEM_BACKENDS
+
+# ``created_at`` is stamped by every live store on insert (the writer coalesces a
+# missing ``created_at`` to ``now()``), so an "absent" row cannot stay NULL on a live
+# leg — its ``now()`` value satisfies a lower-bound op and breaks the by-construction
+# ``expected_ids``. A ``created_at`` predicate is therefore validated on the in-memory
+# backends only (they keep an absent value NULL); ``occurred_at`` / ``source_timestamp``
+# are user-supplied and stay NULL when absent, so they keep the live backends.
+_CREATED_AT_BACKENDS: frozenset[str] = _INMEM_BACKENDS
+
+# Mirrors ``compile_surrealdb._SAFE_SEGMENT_RE`` (kept in sync intentionally): a
+# metadata path segment surrealdb can safely interpolate. A segment that fails this
+# (e.g. a ``$``-prefixed key) makes the surrealdb compiler raise ``CompileError``, so
+# the case is pruned from the surrealdb leg only — every other backend binds the path.
+_SURREAL_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _surreal_excluded(filter_: dict[str, Any] | RecallFilter, seed: tuple[SeedRecord, ...]) -> bool:
+    """Whether a case must be pruned from the **surrealdb** leg (documented Rule 2).
+
+    ``@internal``. surrealdb is total-exact (the compiled WHERE alone decides), so a
+    case it cannot faithfully represent has no post-filter safety net and must be
+    scoped off the surreal leg with a documented capability reason. Three genuine
+    embedded-SurrealDB representation quirks (NOT fixable in the compiled WHERE):
+
+    * **Unsafe metadata segment** — a ``$``-prefixed (or otherwise non-identifier)
+      metadata path segment: ``compile_surrealdb`` interpolates each segment and
+      raises ``CompileError`` on an unsafe one (its injection guard). The other
+      backends bind the path, so this drops surrealdb only.
+    * **Metadata ``$date`` / datetime operand** — a metadata datetime round-trips
+      through the FLEXIBLE object column as a string, and the operand binds as
+      ``.isoformat()`` (``+00:00``) while the stored string may use a different ISO
+      offset form (``Z``), so the lexicographic compare misses. The form mismatch is
+      inherent to string-stored metadata datetimes, not something the WHERE can fix.
+    * **Present-JSON-null metadata value that the filter distinguishes from absent**
+      — SurrealDB drops an explicit ``null`` field inside a FLEXIBLE object on write,
+      so a stored ``{k: null}`` becomes indistinguishable from an absent ``k``. A
+      case only diverges when its result actually *depends* on that distinction, so
+      we prune precisely: compute the oracle survivors with the present-null seed
+      value treated as present vs. coerced to absent, and prune surreal only if the
+      two differ (e.g. ``$exists`` and the present-null isolation cases diverge; a
+      ``$ne`` that keeps both present-null and absent does not).
+
+    Detection is empirical for the null-drop bucket (re-runs the oracle on a
+    null-coerced seed) so it neither over- nor under-prunes.
+    """
+    ast = _resolve_ast(filter_)
+    leaves = list(iter_leaf_clauses(ast))
+    # Unsafe metadata segment (injection guard).
+    if any(
+        leaf.path and leaf.path[0] == "metadata" and any(not _SURREAL_SAFE_SEGMENT_RE.match(s) for s in leaf.path[1:])
+        for leaf in leaves
+    ):
+        return True
+    # Metadata $date / datetime operand (string-stored datetime, ISO-form mismatch).
+    for leaf in leaves:
+        if not (leaf.path and leaf.path[0] == "metadata"):
+            continue
+        operand = leaf.operand
+        if isinstance(operand, (DateLiteral, datetime)):
+            return True
+        if isinstance(operand, (list, tuple)) and any(isinstance(x, (DateLiteral, datetime)) for x in operand):
+            return True
+    # Present-JSON-null metadata value the filter distinguishes from absent.
+    return _surreal_null_drop_diverges(ast, seed)
+
+
+def _surreal_null_drop_diverges(ast: FilterNode, seed: tuple[SeedRecord, ...]) -> bool:
+    """Whether coercing every present-JSON-null metadata value to absent flips a result.
+
+    Mirrors SurrealDB's FLEXIBLE null-drop on write (a stored ``{k: null}`` becomes
+    absent). Runs the python oracle over the seed as authored vs. over a copy whose
+    explicit-``None`` metadata values are removed (coerced to absent); a difference
+    means surrealdb's null-drop would diverge, so the case is pruned from surreal.
+    """
+    ctx = build_compile_context("chunks", on_unsupported="raise")
+    predicate = compile_python(ast, ctx).predicate
+    as_authored = frozenset(rec.id for rec in seed if predicate(_record_mapping(rec)))
+    as_null_dropped = frozenset(
+        rec.id for rec in seed if predicate(_record_mapping(_with_metadata(rec, _drop_json_nulls(rec.metadata or {}))))
+    )
+    return as_authored != as_null_dropped
+
+
+def _drop_json_nulls(value: Any) -> Any:
+    """Recursively drop dict entries whose value is ``None`` (the FLEXIBLE null-drop)."""
+    if isinstance(value, dict):
+        return {k: _drop_json_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_json_nulls(v) for v in value]
+    return value
+
+
+def _with_metadata(rec: SeedRecord, metadata: dict[str, Any]) -> SeedRecord:
+    """A copy of ``rec`` with ``metadata`` replaced (for the null-drop probe)."""
+    return replace(rec, metadata=metadata)
+
+
+def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[SeedRecord, ...]) -> frozenset[str]:
+    """Compute the backend set a case can run on, from the leaves its filter touches.
+
+    ``@internal``. Lowers the filter through the real ``parse_to_ast`` and walks its
+    leaf clauses (:func:`~khora.filter.execute.iter_leaf_clauses`) to apply the
+    divergence framework's documented capability prunes:
+
+    * a leaf that READS one of the seven STRING document keys' value (any op except
+      ``$exists``) → :data:`_STRING_OP_BACKENDS` (python + chronicle): those keys
+      are not seeded onto the live chunk row, so a value-reading predicate is empty
+      / divergent on every live store;
+    * a ``$exists`` on a string document key is **NOT** a prune: ``$exists`` on a
+      system key is a CONSTANT (the column is always present in the row), so it is
+      value-independent and oracle-comparable on every backend — this is what lets
+      the F-EXISTS system-key shapes execute in both the pushed-down and
+      post-filtered modes;
+    * otherwise a leaf reading ``created_at`` → drop only ``created_at``'s live legs
+      (the store stamps ``now()``), keeping the rest;
+    * a surreal-only quirk (unsafe segment / metadata ``$date`` / present-null the
+      filter distinguishes) → drop **surrealdb** only (:func:`_surreal_excluded`);
+      every other backend keeps the case;
+    * a metadata-only / ``occurred_at`` / ``source_timestamp`` case → all backends.
+
+    The prune is the most restrictive constraint any leaf imposes. A case that
+    value-reads BOTH a string key and metadata is python + chronicle (the string key
+    is the binding constraint). This is the single source of truth for ``backends``
+    across the hand-authored families, so widening / pruning is computed, never
+    hand-kept.
+    """
+    string_keys = set(_DOC_STRING_KEYS)
+    reads_string_value = False
+    reads_created_at = False
+    for clause in iter_leaf_clauses(_resolve_ast(filter_)):
+        root = clause.path[0] if clause.path else ""
+        if root in string_keys and clause.op is not Op.EXISTS:
+            # A value-reading predicate on an unseeded string column — in-memory only.
+            reads_string_value = True
+        elif root == "created_at":
+            # The store stamps created_at on insert — its live legs diverge.
+            reads_created_at = True
+    if reads_string_value:
+        return _STRING_OP_BACKENDS
+    if reads_created_at:
+        return _CREATED_AT_BACKENDS
+    if _surreal_excluded(filter_, seed):
+        # Drop surrealdb only; every other backend handles the case (postgres /
+        # sqlite_lance bind the path + post-filter, cypher / weaviate defer metadata).
+        return _OP_BACKENDS - frozenset({"surrealdb"})
+    return _OP_BACKENDS
+
 
 # The one non-null string system key — its column defaults to ``"library"`` at the
 # SQL layer, so a ``-5`` row with the key unset would be ``"library"`` on the SQL
@@ -595,14 +978,15 @@ def _date_op_cases(key: str) -> list[ConformanceCase]:
     bound = _DATE_BOUND
     hit_iso = _DATE_HIT.isoformat().replace("+00:00", "Z")
 
-    # ``created_at`` is stamped by the store on insert (the khora_chunks writer
-    # coalesces a missing created_at to ``now()``), so the "absent" ``-5`` record
-    # cannot be represented as NULL on the postgres leg — its ``now()`` value
-    # satisfies the lower-bound ops and breaks them. ``created_at`` is therefore
-    # validated on python (the oracle) + chronicle only, which keep an absent value
-    # NULL. ``occurred_at`` / ``source_timestamp`` are user-supplied and stay NULL
-    # when absent, so they keep postgres.
-    backends = _OP_BACKENDS - frozenset({"postgres"}) if key == "created_at" else _OP_BACKENDS
+    # ``created_at`` is stamped by every live store on insert (the writer coalesces
+    # a missing created_at to ``now()``), so the "absent" ``-5`` record cannot be
+    # represented as NULL on any live leg — its ``now()`` value satisfies the
+    # lower-bound ops and breaks them. ``created_at`` is therefore validated on the
+    # in-memory backends only (they keep an absent value NULL). ``occurred_at`` /
+    # ``source_timestamp`` are user-supplied and stay NULL when absent, so they keep
+    # the live backends (total-exact postgres / surrealdb + split cypher / weaviate /
+    # sqlite_lance).
+    backends = _CREATED_AT_BACKENDS if key == "created_at" else _OP_BACKENDS
 
     def case(suffix: str, predicate: dict[str, Any], expected: frozenset[str], op_tag: str) -> ConformanceCase:
         return ConformanceCase(
@@ -693,12 +1077,13 @@ def _metadata_op_case() -> ConformanceCase:
         SeedRecord(id="meta-silver", metadata={"tier": "silver"}),
         SeedRecord(id="meta-absent"),
     )
+    filter_ = {"metadata.tier": "gold"}
     return ConformanceCase(
         id="F-OP-metadata-tier-eq",
-        filter={"metadata.tier": "gold"},
+        filter=filter_,
         seed_records=seed,
         expected_ids=frozenset({"meta-gold"}),
-        backends=_OP_BACKENDS,
+        backends=_backends_for_filter(filter_, seed),
         exercises=("F-OP", "metadata.tier", "$eq"),
     )
 
@@ -753,17 +1138,23 @@ def _case(
     expected: frozenset[str],
     exercises: tuple[str, ...],
 ) -> ConformanceCase:
-    """Build a ConformanceCase scoped to the three in-memory backends.
+    """Build a ConformanceCase whose ``backends`` is computed from its filter.
 
     A thin constructor so the family generators read as a flat table of
-    ``id · filter · expected_ids · exercises`` rows.
+    ``id · filter · expected_ids · exercises`` rows. The backend set is derived
+    via :func:`_backends_for_filter` — a metadata-only / ``occurred_at`` /
+    ``source_timestamp`` case widens to all backends (the in-memory oracle +
+    chronicle, the total-exact postgres + surrealdb, and the split cypher +
+    weaviate + sqlite_lance whose post-filter lands on the oracle); a case touching
+    a string document key or ``created_at`` is pruned with the documented
+    capability/seed reason. No family is silently skipped.
     """
     return ConformanceCase(
         id=cid,
         filter=filter_,
         seed_records=seed,
         expected_ids=expected,
-        backends=_OP_BACKENDS,
+        backends=_backends_for_filter(filter_, seed),
         exercises=exercises,
     )
 
@@ -1675,6 +2066,19 @@ def f_objeq_cases() -> list[ConformanceCase]:
         SeedRecord(id="lit-num", metadata={"x": 7}),  # numeric 7 (would match a real range)
         SeedRecord(id="lit-or", metadata={"y": {"$or": [1, 2]}}),  # literal {$or:[1,2]}
     )
+    # Array-of-dicts seed (its own seed so it does NOT perturb the scalar-object
+    # cases above). ``labels`` is variously an ARRAY of dict elements, a scalar
+    # object, an array with a superset element, an other-only array, or absent. A
+    # dict ``$in`` element is per-element array-aware EXACT object_equal (the oracle
+    # matches an array ELEMENT exactly equal to the dict, OR the scalar node exactly
+    # equal to it) — NOT ``@>`` containment, so a superset element does NOT match.
+    arr = (
+        SeedRecord(id="oe-arr-exact", metadata={"labels": [{"team": "ingest"}, {"team": "ops"}]}),
+        SeedRecord(id="oe-arr-superset", metadata={"labels": [{"team": "ingest", "extra": 1}]}),
+        SeedRecord(id="oe-arr-scalar", metadata={"labels": {"team": "ingest"}}),
+        SeedRecord(id="oe-arr-other", metadata={"labels": [{"team": "ops"}]}),
+        SeedRecord(id="oe-arr-absent"),
+    )
     return [
         # exact subdoc: extra-key / scalar / absent excluded.
         _case(
@@ -1763,6 +2167,37 @@ def f_objeq_cases() -> list[ConformanceCase]:
                 {"oe-two-key", "oe-two-key-rev", "oe-nested", "oe-nested-rev", "oe-superset", "oe-other", "oe-absent"}
             ),
             ("F-OBJEQ", "metadata.labels", "$nin", "dict"),
+        ),
+        # ARRAY-of-dicts $in: a dict element matches an ARRAY field that holds it
+        # exactly (oe-arr-exact) AND a scalar field equal to it (oe-arr-scalar), but
+        # NOT a superset element (oe-arr-superset). This is the array-aware
+        # exact-per-element form (postgres jsonb_array_elements OR scalar-exact;
+        # surrealdb INSIDE/CONTAINSANY; the split backends defer to the post-filter).
+        # The contrast $eq below proves the array does NOT match the bare dict.
+        _case(
+            "F-OBJEQ-in-array-of-dicts",
+            {"metadata.labels": {"$in": [{"team": "ingest"}]}},
+            arr,
+            frozenset({"oe-arr-exact", "oe-arr-scalar"}),
+            ("F-OBJEQ", "metadata.labels", "$in", "array-of-dicts"),
+        ),
+        # $eq of the bare dict is whole-node exact (NOT array-aware): only the scalar
+        # object matches; the array (even the one holding the exact element) does NOT.
+        _case(
+            "F-OBJEQ-eq-array-is-not-element",
+            {"metadata.labels": {"team": "ingest"}},
+            arr,
+            frozenset({"oe-arr-scalar"}),
+            ("F-OBJEQ", "metadata.labels", "$eq", "array-of-dicts"),
+        ),
+        # $nin of the dict negates the array-aware per-element form: the superset,
+        # the other-only array, and the absent row survive (Rule 2 polarity).
+        _case(
+            "F-OBJEQ-nin-array-of-dicts",
+            {"metadata.labels": {"$nin": [{"team": "ingest"}]}},
+            arr,
+            frozenset({"oe-arr-superset", "oe-arr-other", "oe-arr-absent"}),
+            ("F-OBJEQ", "metadata.labels", "$nin", "array-of-dicts"),
         ),
     ]
 

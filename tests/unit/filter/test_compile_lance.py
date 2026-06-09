@@ -442,9 +442,12 @@ def test_metadata_splits_to_nonconstraining_one_when_json1_unavailable() -> None
 # ===========================================================================
 #
 # Bare-blob $eq (SQLite json() is key-order-sensitive, the oracle is not),
-# object_equal dict operand (same), and a $date metadata compare (ISO parse-or-
-# exclude SQLite cannot replicate to match the oracle). In raise mode they raise;
-# in split mode they emit "1" and stay out of consumed_keys.
+# object_equal dict operand (same), a $date metadata compare (ISO parse-or-
+# exclude SQLite cannot replicate to match the oracle), and a $in / $nin carrying
+# an element json_each containment cannot match — a dict (object_equal-per-element,
+# bound as a JSON-text scalar) or a None (a JSON-null member, which the type gate
+# excludes). In raise mode they raise; in split mode they emit "1" and stay out of
+# consumed_keys (the compile_python post-filter re-checks them).
 
 
 @pytest.mark.parametrize(
@@ -453,6 +456,11 @@ def test_metadata_splits_to_nonconstraining_one_when_json1_unavailable() -> None
         {"metadata": {"a": 1}},  # bare-blob $eq
         {"metadata.labels": {"team": "x"}},  # object_equal dict operand
         {"metadata.due": {"$date": "2026-01-01T00:00:00Z"}},  # $date metadata compare
+        {"metadata.labels": {"$in": [{"team": "x"}]}},  # dict $in element (object_equal)
+        {"metadata.labels": {"$nin": [{"team": "x"}]}},  # dict $nin element (object_equal)
+        {"metadata.labels": {"$in": [{"team": "x"}, "scalar"]}},  # mixed dict+scalar $in
+        {"metadata.x": {"$in": [None, "v"]}},  # None $in element (JSON-null member)
+        {"metadata.x": {"$nin": [None]}},  # None $nin element (JSON-null member)
     ],
 )
 def test_metadata_sql_unsupported_cases_raise_in_raise_mode(wire: dict) -> None:
@@ -466,6 +474,11 @@ def test_metadata_sql_unsupported_cases_raise_in_raise_mode(wire: dict) -> None:
         {"metadata": {"a": 1}},
         {"metadata.labels": {"team": "x"}},
         {"metadata.due": {"$date": "2026-01-01T00:00:00Z"}},
+        {"metadata.labels": {"$in": [{"team": "x"}]}},
+        {"metadata.labels": {"$nin": [{"team": "x"}]}},
+        {"metadata.labels": {"$in": [{"team": "x"}, "scalar"]}},
+        {"metadata.x": {"$in": [None, "v"]}},
+        {"metadata.x": {"$nin": [None]}},
     ],
 )
 def test_metadata_sql_unsupported_cases_split_to_nonconstraining_one(wire: dict) -> None:

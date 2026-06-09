@@ -52,7 +52,20 @@ from khora.engines.skeleton.backends.pgvector import (
 )
 from khora.filter.conformance import (
     ConformanceCase,
+    f_array_cases,
+    f_coerce_cases,
+    f_dates_cases,
+    f_dotkey_cases,
+    f_exists_cases,
+    f_impossible_cases,
+    f_logic_cases,
+    f_nullval_cases,
+    f_objeq_cases,
     f_op_cases,
+    f_polarity_cases,
+    f_sel_cases,
+    f_sugar_cases,
+    f_unsup_cases,
 )
 from khora.storage.backends.postgresql import PostgreSQLBackend
 from khora.storage.coordinator import StorageCoordinator
@@ -85,8 +98,10 @@ def _to_temporal_chunk(chunk: Chunk) -> TemporalChunk:
     keys). ``seed_case`` sets only the fields both models share — ids, content,
     embedding, the three ``_DATE_KEYS`` (occurred_at/created_at/source_timestamp),
     and metadata — so copy those and let the skeleton-only columns default to
-    ``None``. The pruned string-key F-OP cases are the only ones that would need
-    the denormalized document columns, and they are not asserted on postgres.
+    ``None``. Cases that value-read a string document key (across every family) are
+    pruned from the postgres ``backends`` for exactly this reason — those columns are
+    not seeded here — so postgres only ever asserts metadata / occurred_at /
+    source_timestamp cases, which this adapter carries faithfully.
 
     The embedding is regenerated at ``EMBED_DIM`` (1536): ``seed_case`` builds it at
     the sqlite_lance fixture's small dimension, but ``khora_chunks.embedding`` is a
@@ -120,15 +135,39 @@ class _CoreChunkTemporalStore(PgVectorTemporalStore):
         return await super().create_chunks_batch([_to_temporal_chunk(c) for c in chunks])
 
 
+# The 14 family generators — the full conformance corpus. The seed entrypoint and
+# the test module both pull from this through ``postgres_conformance_cases`` so they
+# never drift on what the postgres leg seeds vs asserts.
+_FAMILY_GENERATORS = (
+    f_op_cases,
+    f_coerce_cases,
+    f_polarity_cases,
+    f_array_cases,
+    f_exists_cases,
+    f_logic_cases,
+    f_sugar_cases,
+    f_dates_cases,
+    f_nullval_cases,
+    f_objeq_cases,
+    f_dotkey_cases,
+    f_sel_cases,
+    f_unsup_cases,
+    f_impossible_cases,
+)
+
+
 def postgres_conformance_cases() -> list[ConformanceCase]:
     """Every corpus case whose ``backends`` includes ``postgres``.
 
-    The single source of truth for *what the postgres leg seeds and asserts* —
-    the seed entrypoint and the test module both call this so they never drift.
-    Pulls from every non-empty case family (today only ``f_op_cases``; the catalog
-    families return ``[]`` until filled).
+    The single source of truth for *what the postgres leg seeds and asserts* — the
+    seed entrypoint and the test module both call this so they never drift. Pulls
+    from all 14 families and keeps the postgres-targeting subset (a family prunes
+    postgres only with a documented capability reason — e.g. the string document
+    keys and ``created_at`` are not seeded onto the live chunk row).
     """
-    cases: list[ConformanceCase] = list(f_op_cases())
+    cases: list[ConformanceCase] = []
+    for generator in _FAMILY_GENERATORS:
+        cases.extend(generator())
     return [c for c in cases if "postgres" in c.backends]
 
 
