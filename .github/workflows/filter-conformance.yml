@@ -189,18 +189,23 @@ jobs:
 
       - name: Wait for Neo4j readiness
         if: matrix.neo4j
-        # Mirrors the test-integration readiness loop: neo4j images take 20-40s to
-        # boot, so poll the bolt port (7687) for a clear, early failure message.
-        # A bash /dev/tcp probe so no extra client (cypher-shell) is needed.
+        # The Bolt TCP port (7687) opens BEFORE Neo4j can complete a Bolt handshake or
+        # serve a query, so a bare /dev/tcp port probe races the seed step (it connects
+        # while the server is still starting and fails with "incomplete handshake
+        # response"). Poll with cypher-shell (bundled in the image) running a real Bolt
+        # query — the only signal that guarantees the seed step can connect. neo4j
+        # images take 20-40s to boot and Bolt readiness can lag the open port further.
         run: |
-          for i in $(seq 1 30); do
-            if (echo > /dev/tcp/localhost/7687) >/dev/null 2>&1; then
-              echo "neo4j bolt ready"
+          for i in $(seq 1 40); do
+            if docker exec khora-conformance-neo4j \
+                cypher-shell -u neo4j -p password "RETURN 1;" >/dev/null 2>&1; then
+              echo "neo4j ready (bolt query answered)"
               exit 0
             fi
-            sleep 2
+            sleep 3
           done
-          echo "neo4j did not become ready within 60s"
+          echo "neo4j did not become ready within 120s"
+          docker logs khora-conformance-neo4j 2>&1 | tail -50 || true
           exit 1
 
       - name: Seed Neo4j conformance corpus
