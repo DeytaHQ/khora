@@ -388,6 +388,7 @@ class PgVectorBackend(AsyncSessionMixin):
             created_at=chunk.created_at,
             source_timestamp=getattr(chunk, "source_timestamp", None),
             last_accessed_at=getattr(chunk, "last_accessed_at", None),
+            occurred_at=getattr(chunk, "occurred_at", None),
             session_id=getattr(chunk, "session_id", None),
         )
         session.add(model)
@@ -428,6 +429,7 @@ class PgVectorBackend(AsyncSessionMixin):
                 created_at=chunk.created_at,
                 source_timestamp=getattr(chunk, "source_timestamp", None),
                 last_accessed_at=getattr(chunk, "last_accessed_at", None),
+                occurred_at=getattr(chunk, "occurred_at", None),
                 session_id=getattr(chunk, "session_id", None),
             )
             for chunk in chunks
@@ -795,6 +797,7 @@ class PgVectorBackend(AsyncSessionMixin):
             created_at=model.created_at,
             source_timestamp=getattr(model, "source_timestamp", None),
             last_accessed_at=getattr(model, "last_accessed_at", None),
+            occurred_at=getattr(model, "occurred_at", None),
             session_id=getattr(model, "session_id", None),
         )
 
