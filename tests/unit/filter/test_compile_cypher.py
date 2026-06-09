@@ -472,6 +472,123 @@ def test_unsupported_clause_splits_to_nonconstraining_true() -> None:
 
 
 # ===========================================================================
+# All-or-nothing OR / NOT deferral (split mode) — the false-exclude guard.
+# ===========================================================================
+#
+# Cypher pushes ONLY system keys; a metadata leaf is unpushable and emits the
+# non-constraining "true" under split. That placeholder is superset-safe in
+# positive position (A AND true ≡ A), but NOT (A OR true) ≡ NOT true ≡ false would
+# FALSE-EXCLUDE every row — and the compile_python post-filter only narrows, so it
+# could not recover the wrongly-dropped rows. So when ANY descendant leaf of an
+# $or / $not is an unpushable metadata leaf, the WHOLE node defers to "true"
+# (consuming nothing). An $and stays independent: the metadata child becomes
+# "true" and the pushable system-key sibling still narrows. Mirrors the same guard
+# in compile_lance. These four shapes are exactly the cypher conformance leg's
+# divergences ($not over a metadata range / $exists).
+
+_CTX_SPLIT = CompileContext(backend_target="Chunk", on_unsupported="split")
+
+
+def test_not_over_metadata_exists_defers_to_nonconstraining_true() -> None:
+    # {metadata.k: {$not: {$exists: true}}} — the F-LOGIC-not-exists divergence.
+    # The metadata $exists leaf is unpushable; compiling the NOT naively would emit
+    # (NOT (true)) ≡ false and exclude every row. The all-or-nothing guard defers
+    # the whole NOT to the non-constraining "true" and consumes nothing — the
+    # post-filter then applies the real $not($exists).
+    compiled = compile_cypher(_ast({"metadata.k": {"$not": {"$exists": True}}}), _CTX_SPLIT)
+    sql = _norm(compiled.predicate)
+    assert "true" in sql
+    assert "not (" not in sql and "false" not in sql
+    assert "metadata.k" not in compiled.consumed_keys
+
+
+@pytest.mark.parametrize("wire_op", ["$lt", "$gt"])
+def test_not_range_over_metadata_defers_to_nonconstraining_true(wire_op: str) -> None:
+    # {metadata.num: {$not: {$lt|$gt: N}}} — the F-POLARITY-num-not-lt/gt
+    # divergences. A $not-range over an unpushable metadata leaf must defer the
+    # whole NOT to "true" (not constrain via (NOT (...)) / false) and consume
+    # nothing, so the prefilter stays a superset.
+    compiled = compile_cypher(_ast({"metadata.num": {"$not": {wire_op: 5}}}), _CTX_SPLIT)
+    sql = _norm(compiled.predicate)
+    assert "true" in sql
+    assert "not (" not in sql and "false" not in sql
+    assert "metadata.num" not in compiled.consumed_keys
+    assert compiled.params == {}
+
+
+def test_or_with_unpushable_metadata_disjunct_defers_whole_node() -> None:
+    # $or mixing a pushable system key with an unpushable metadata leaf: the whole
+    # OR defers to "true" and consumes nothing (all-or-nothing). Pushing only
+    # source_name would make the OR match-all here while a wrapping NOT would
+    # false-exclude — the trap the guard closes.
+    compiled = compile_cypher(
+        _ast({"$or": [{"source_name": "linear"}, {"metadata.tier": "gold"}]}),
+        _CTX_SPLIT,
+    )
+    assert compiled.predicate == "true"
+    assert compiled.consumed_keys == frozenset()
+
+
+def test_and_pushes_system_key_defers_metadata_clause() -> None:
+    # $and distribution stays intact: the pushable source_name narrows; the
+    # unpushable metadata leaf becomes "true" and is left to the post-filter.
+    # consumed_keys carries only the pushed system key.
+    compiled = compile_cypher(
+        _ast({"source_name": "linear", "metadata.tier": "gold"}),
+        _CTX_SPLIT,
+    )
+    sql = _norm(compiled.predicate)
+    assert "coalesce(c.source_name = $f_0, false)" in sql
+    assert " and true" in sql  # the deferred metadata leaf
+    assert compiled.consumed_keys == frozenset({"source_name"})
+
+
+def test_and_with_deferred_or_child_still_pushes_system_sibling() -> None:
+    # AND distribution holds even when an AND child is itself a deferred OR: the
+    # OR-over-(system + metadata) defers to "true", and the sibling system key still
+    # narrows. Only the sibling lands in consumed_keys.
+    compiled = compile_cypher(
+        _ast(
+            {
+                "source_type": "slack",
+                "$or": [{"source_name": "linear"}, {"metadata.tier": "gold"}],
+            }
+        ),
+        _CTX_SPLIT,
+    )
+    sql = _norm(compiled.predicate)
+    assert "coalesce(c.source_type = $f_0, false)" in sql
+    assert " and true" in sql  # the deferred OR
+    assert compiled.consumed_keys == frozenset({"source_type"})
+
+
+def test_nested_not_not_over_metadata_defers_whole_node() -> None:
+    # NOT(NOT(metadata-leaf)) — a nested negation whose innermost leaf is unpushable
+    # metadata. The all-or-nothing guard fires at the outer NOT (the whole subtree
+    # is non-consumable), deferring to "true" and consuming nothing — no (NOT (NOT
+    # (...))) constraint reaches the prefilter.
+    inner = FilterClause(path=("metadata", "k"), op=Op.EQ, operand="v")
+    node = FilterNode(
+        op=Op.NOT,
+        children=(FilterNode(op=Op.NOT, children=(inner,)),),
+    )
+    compiled = compile_cypher(node, _CTX_SPLIT)
+    assert compiled.predicate == "true"
+    assert compiled.consumed_keys == frozenset()
+
+
+def test_not_over_system_key_still_pushes_in_split_mode() -> None:
+    # A $not over a fully-consumable system-key leaf is unaffected by the guard: it
+    # still compiles to the constraining (NOT (...)) with a total child and consumes
+    # the key. Only unpushable subtrees defer.
+    compiled = compile_cypher(_ast({"$not": {"source_name": "linear"}}), _CTX_SPLIT)
+    sql = _norm(compiled.predicate)
+    assert sql.startswith("(not (")
+    assert "coalesce(c.source_name = $f_0, false)" in sql
+    assert "source_name" in compiled.consumed_keys
+
+
+# ===========================================================================
 # CompiledFilter envelope — consumed_keys / canonical_hash / params.
 # ===========================================================================
 
