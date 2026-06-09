@@ -19,6 +19,7 @@ Both raise ``RecallFilterValidationError`` carrying a populated
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -1022,3 +1023,138 @@ def test_reasonable_nesting_within_limit_passes() -> None:
     for _ in range(8):
         deep = {"$and": [deep]}
     RecallFilter.model_validate(deep)
+
+
+# ===========================================================================
+# F-VALIDATE conformance gap-fill (val-14..27)
+#
+# The conformance corpus enumerates 30 validation cases (val-1..30). The bulk
+# are already pinned above: unknown top-level keys (val-1..5), op-outside-subset
+# (val-6), $exists on a date key (val-7/8), non-list $in/$nin (val-9/10),
+# non-bool $exists (val-11), mixed/nested-$-in-equality (val-12/13), $comment
+# (val-21), logical operand not a list (val-24), and empty $and/$or/$nor
+# (val-28/29/30). This block fills the remaining val gaps and pins the three
+# documented NOT-raised acceptance guards — each cross-checked against the live
+# validator, not derived from the corpus prose.
+# ===========================================================================
+
+
+# --- val-14..19 — out-of-scope operators raise (closed operator whitelist) ---
+#
+# The metadata operator whitelist is closed: any $-key that is not one of the
+# supported comparison / set / presence operators is a grammar violation. A
+# bare-value-position out-of-scope op raises `unknown_operator` (these probe the
+# PREDICATE position, where the $-key is an operator — not an opaque operand).
+@pytest.mark.parametrize(
+    "op",
+    ["$regex", "$elemMatch", "$size", "$all", "$type", "$mod", "$expr", "$where"],
+)
+def test_out_of_scope_operator_on_metadata_raises(op: str) -> None:
+    with pytest.raises(RecallFilterValidationError) as exc:
+        RecallFilter.model_validate({"metadata.x": {op: 1}})
+    assert any(fe.code == "unknown_operator" for fe in exc.value.errors)
+
+
+# --- typed-key operand type-gate raises (the F-IMPOSSIBLE cases that fail at
+#     VALIDATION, not at compile) ---
+#
+# A handful of corpus F-IMPOSSIBLE shapes never reach a compiler: the typed
+# system-key arm rejects a wrong-typed operand at model_validate time. These are
+# distinct from the bare-list `$eq` SUGAR ({"source_type": ["a","b"]}), which is
+# accepted as exact-array equality — the difference is the EXPLICIT operator form
+# (and the date/numeric type) that lands a list / number on a `str` / `datetime`
+# field.
+
+
+def test_explicit_eq_list_on_string_key_raises() -> None:
+    # {"source_name": {"$eq": [...]}}: StringOps.$eq is typed `str`, so an explicit
+    # list operand raises (vs the bare-list sugar form, which is exact-array $eq).
+    with pytest.raises(RecallFilterValidationError):
+        RecallFilter.model_validate({"source_name": {"$eq": ["linear", "slack"]}})
+
+
+def test_bare_list_on_date_key_raises() -> None:
+    # {"occurred_at": [...]}: a bare list on a DATE key has no exact-array meaning —
+    # DateOps / the datetime arm want a datetime, so a list of strings raises.
+    with pytest.raises(RecallFilterValidationError):
+        RecallFilter.model_validate({"occurred_at": ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"]})
+
+
+def test_in_numeric_elements_on_string_key_raises() -> None:
+    # {"external_id": {"$in": [1, 2]}}: StringOps.$in is typed `list[str]`, so
+    # numeric elements raise — a cross-type set membership is a grammar error, not a
+    # silently-coerced compare.
+    with pytest.raises(RecallFilterValidationError):
+        RecallFilter.model_validate({"external_id": {"$in": [1, 2]}})
+
+
+# --- val-20 — a $-op inside an $in operand list is an OPAQUE literal (ACCEPTED) ---
+#
+# The corpus lists val-20 ("regex-in-$in") under raising cases, but the live
+# validator treats every $in operand element as an opaque exact-array literal:
+# {"$in": [{"$regex": "a"}]} matches the LITERAL object {"$regex": "a"}, it is
+# never re-parsed as an operator (parity with the operand-opacity contract pinned
+# by test_operand_opacity_in_list_of_objects). So this is an ACCEPTANCE guard, not
+# a raise. The genuine raise for a stray operator is the bare-value form (val-14..19
+# above), where the $-key sits in PREDICATE position.
+def test_dollar_op_inside_in_operand_is_opaque_literal_not_raised() -> None:
+    # An operator-looking object as an $in element is data, not a grammar error.
+    model = RecallFilter.model_validate({"metadata.x": {"$in": [{"$regex": "a"}, {"$where": "x"}]}})
+    assert isinstance(model, RecallFilter)
+
+
+# --- val-22 — {$gte: null} on a date key is an UNSET range field (ACCEPTED) ---
+#
+# The corpus lists val-22 as a raise, but `null` on a DateOps range field is the
+# field's unset sentinel (DateOps.gte is `datetime | None`), so the validator
+# accepts it and the operand simply carries no lower bound. This is an acceptance
+# guard documenting that a null operand on a typed date op is unset, not a type
+# error. (A malformed non-null date operand still raises — see the $date tests.)
+def test_gte_null_on_date_key_is_unset_bound_not_raised() -> None:
+    model = RecallFilter.model_validate({"occurred_at": {"$gte": None}})
+    assert isinstance(model.occurred_at, DateOps)
+    assert model.occurred_at.gte is None
+
+
+# --- val-23 — field-form $not of a bare scalar raises (pinned above) ---
+#
+# val-23 (`{field: {"$not": <scalar>}}` raises) is already covered by
+# test_not_field_form_bare_scalar_raises; not duplicated here.
+
+
+# --- val-25/26/27 — documented NOT-raised acceptance guards ---
+#
+# These pin the validator against OVER-eager rejection: each is a deliberately
+# accepted edge the grammar permits. A future tightening that started raising on
+# any of them would break the documented contract — so these assert ACCEPTANCE.
+
+
+def test_val25_dotted_literal_key_in_blob_is_accepted_verbatim() -> None:
+    # val-25: a dotted key INSIDE a bare metadata blob is a literal field name (not
+    # a dot-path to fold). The validator stores it verbatim and round-trips it —
+    # it must NOT be rejected as an unknown/malformed key.
+    wire = {"metadata": {"a.b": "x"}}
+    model = RecallFilter.model_validate(wire)
+    assert model.metadata == {"a.b": "x"}
+    assert model.model_dump(by_alias=True, exclude_none=True) == wire
+
+
+def test_val26_dollar_literal_key_in_blob_is_accepted_verbatim() -> None:
+    # val-26: a $-prefixed key as a bare-blob FIELD NAME (value position is the
+    # operator slot, not the key) is a literal field name, stored verbatim. The
+    # validator must NOT mistake it for a stray operator and raise.
+    wire = {"metadata": {"$weird": "x"}}
+    model = RecallFilter.model_validate(wire)
+    assert model.metadata == {"$weird": "x"}
+    assert model.model_dump(by_alias=True, exclude_none=True) == wire
+
+
+def test_val27_duplicate_top_level_key_last_wins_is_accepted() -> None:
+    # val-27: a wire document with a duplicate key (JSON permits it) resolves
+    # last-wins BEFORE the validator sees it (json.loads keeps the final value),
+    # so the validator receives a well-formed single-key mapping and accepts it.
+    # The guard is that this round-trips to the last value, never raises.
+    wire = json.loads('{"source_type": "a", "source_type": "b"}')
+    assert wire == {"source_type": "b"}
+    model = RecallFilter.model_validate(wire)
+    assert model.source_type == "b"
