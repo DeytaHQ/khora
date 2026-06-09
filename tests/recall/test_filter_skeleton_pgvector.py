@@ -257,6 +257,10 @@ async def _seed(kb: Khora, namespace_id: UUID) -> dict[str, UUID]:
         )
         doc_to_label[result.document_id] = label
 
+    # khora_chunks stores the row-level namespace id (not the stable public id).
+    # Resolve before the direct SQL query.
+    resolved_ns = await kb.storage.resolve_namespace(namespace_id)
+
     # Resolve each document's single chunk id from the live khora_chunks table.
     engine = create_async_engine(_database_url())
     try:
@@ -264,7 +268,7 @@ async def _seed(kb: Khora, namespace_id: UUID) -> dict[str, UUID]:
             rows = (
                 await conn.execute(
                     sa.text("SELECT id, document_id FROM khora_chunks WHERE namespace_id = :ns"),
-                    {"ns": namespace_id},
+                    {"ns": resolved_ns},
                 )
             ).fetchall()
     finally:

@@ -277,8 +277,8 @@ async def _ingest_one(kb: Khora, namespace_id: UUID, seq: int) -> None:
         namespace=namespace_id,
         title=f"soak-{seq}",
         metadata={"seq": seq},
-        entity_types=["PERSON", "CONCEPT"],
-        relationship_types=["RELATES_TO"],
+        entity_types=[],
+        relationship_types=[],
     )
 
 
