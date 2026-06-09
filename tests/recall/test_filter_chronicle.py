@@ -22,13 +22,13 @@ V1's filter is ``source_name == "linear" AND occurred_at >= 2026-04-05 AND
 metadata.tag IN {"urgent", "release"}``. This file reuses V1's shared corpus and
 its exact 5-in-scope / 5-out-of-scope split (each out-of-scope row violating
 EXACTLY ONE predicate, one in-scope row sitting EXACTLY at the date bound). Two
-of V1's three predicate KEYS, however, do not function on the REAL Chronicle
-sqlite_lance recall path, so the three-predicate AND is expressed over the axes
-Chronicle actually carries on the real store — metadata keys — standing in for
-V1's ``source_name`` (a denormalized document key) and ``occurred_at`` (a system
-date key). The in-scope SET is identical; the contract proven here is "a
+of V1's three predicate KEYS, however, do not function the same way on the REAL
+Chronicle sqlite_lance recall path, so the three-predicate AND is expressed over
+the axes Chronicle actually carries on the real store — metadata keys — standing
+in for V1's ``source_name`` (a denormalized document key) and ``occurred_at`` (a
+system date key). The in-scope SET is identical; the contract proven here is "a
 real-store multi-predicate AND narrows to exactly V1's in-scope set". The system
-``occurred_at`` axis is pinned separately by a strict-xfail (below).
+date keys narrow correctly too, pinned separately below.
 
 Why each substitution (verified against this exact sqlite_lance fixture, not
 assumed):
@@ -42,13 +42,13 @@ assumed):
   bug. The source axis therefore rides a metadata key the corpus writes and the
   post-filter reads.
 * ``occurred_at`` (system date key) → ``metadata.when`` ($gte, ``$date``
-  operand). The effective event time IS carried on the record, but the embedded
-  SQLite store returns tz-NAIVE datetimes and the shared system date-key compare
-  currently raises when it puts a naive stored value next to a tz-aware operand.
-  The metadata-date path normalizes both sides to UTC, so a ``$date`` predicate
-  drives the date split cleanly. The system ``occurred_at`` crash is pinned by a
-  strict-xfail test below so the moment the compiler normalizes tz, that test
-  flips to a hard failure and signals it is time to drop the workaround.
+  operand) in the multi-predicate equivalence test. The embedded SQLite store
+  returns tz-NAIVE datetimes; the compiler aligns a naive stored value to UTC at
+  the comparison boundary, so both the system date keys AND the metadata-date
+  path narrow cleanly. The shared equivalence test keeps the metadata-date axis
+  so its three predicate leaves are all metadata leaves (the Scenario 2 telemetry
+  assertion depends on that); the system date keys are pinned by their own
+  narrowing tests below.
 
 The all-metadata filter is also why the unindexed-metadata telemetry assertion
 (Scenario 2) is meaningful here: every in-scope predicate leaf is a metadata
@@ -200,10 +200,12 @@ async def kb(tmp_path: Path) -> AsyncIterator[Khora]:
 #
 # Why all three axes are METADATA keys (not V1's system / doc keys): on the
 # Chronicle sqlite_lance recall DTO the document-projection keys (source_name /
-# source / title / ...) resolve absent, and the SYSTEM occurred_at date compare
-# raises on the embedded store's naive datetimes (pinned by the xfail below). So
-# the source and date axes ride metadata — the only keys this engine both writes
-# and reads on the live post-filter record. The in/out SPLIT is identical to V1's.
+# source / title / ...) resolve absent. The source axis therefore rides a
+# metadata key the engine both writes and reads on the live post-filter record;
+# the date axis rides metadata too so all three predicate leaves are metadata
+# leaves (Scenario 2's telemetry assertion depends on that). The system date
+# keys narrow correctly on their own and are pinned by dedicated tests below.
+# The in/out SPLIT is identical to V1's.
 #
 # Content is DISTINCT per row so each remember produces its own chunk (Chronicle
 # dedupes by content checksum, so identical content would collapse to one chunk);
@@ -245,8 +247,8 @@ _OUT_OF_SCOPE: dict[str, tuple[str | None, str, str | None]] = {
 }
 
 # The live three-predicate recall filter. ``$date`` wraps the date operand so the
-# metadata-date path parses both sides to UTC-aware datetimes (sidestepping the
-# naive-datetime crash a SYSTEM date-key predicate hits on the embedded store).
+# metadata-date path parses both sides to UTC-aware datetimes; keeping all three
+# leaves on metadata is what Scenario 2's unindexed-metadata assertion relies on.
 _RECALL_FILTER = {
     "metadata.channel": "linear",
     "metadata.when": {"$gte": {"$date": _IN_BOUND}},
@@ -354,37 +356,37 @@ async def test_no_filter_returns_all_chunks(kb: Khora) -> None:
 
 
 # ===========================================================================
-# System date-key crash — strict xfail (DO NOT skip).
+# System date-key narrowing — occurred_at / created_at / source_timestamp.
 # ===========================================================================
 #
-# The metadata-date path the green test above rides sidesteps a real defect:
-# filtering on the SYSTEM date key (``occurred_at``) over the embedded store
-# compares a tz-naive stored datetime against the filter's tz-aware operand and
-# raises. This test pins that defect with strict=True so that the instant the
-# compiler learns to normalize tz, the test XPASSes (a hard failure) — the signal
-# to delete this marker AND fold the date axis back onto the system ``occurred_at``
-# key in the green test, matching V1 one-for-one.
+# The embedded SQLite store returns tz-NAIVE datetimes (its SQLAlchemy DateTime
+# column is not timezone-aware), so the system date-key compare lands a naive
+# stored value next to the filter's tz-aware operand. The Python compiler aligns
+# both to UTC at the comparison boundary, so a system date-key predicate narrows
+# the live result instead of raising. These tests pin that on the real store for
+# all three system date keys, via $gte / $lte / range.
+#
+# occurred_at and created_at are POST-FILTER-only on Chronicle, so the $gte / $lte
+# / range trio narrows purely by the post-filter compare — the cleanest exercise
+# of the naive/aware alignment. source_timestamp also PUSHES DOWN into the recency
+# window, whose embedded-store LanceDB pre-filter screens on the ingest-time
+# created_at column; an UPPER bound there clamps any row whose created_at ("now")
+# exceeds the bound, independent of source_timestamp. So source_timestamp's $gte
+# lower bound narrows by the post-filter as expected, while $lte / range carrying
+# an upper bound are asserted only to NOT RAISE (the tz-compare contract) — the
+# pushdown clamp that bounds their exact result set is a separate Chronicle
+# recency characteristic, not the compare under test.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason=(
-        "system date-key compare on sqlite_lance compares a tz-naive stored datetime "
-        "against a tz-aware operand and raises; the metadata-date path is unaffected. "
-        "Drop this marker when the compiler normalizes tz on the system-key range path."
-    ),
-)
 async def test_system_occurred_at_date_filter_narrows(kb: Khora) -> None:
-    """The system ``occurred_at`` date key SHOULD narrow to the in-range row.
+    """The system ``occurred_at`` date key narrows to the in-range row.
 
     Seeds one in-range and one out-of-range row whose effective event time is set
     via ``source_timestamp`` (the embedded write path leaves the literal
     ``occurred_at`` column null and the engine derives the effective event time
-    from ``source_timestamp``). A system ``occurred_at`` ``$gte`` filter SHOULD
-    return only the in-range row — but currently raises ``TypeError`` on the naive
-    stored datetime, so this test is a strict xfail. The assertion below is the
-    behaviour it WILL pin once the tz defect is fixed.
+    from ``source_timestamp``). A system ``occurred_at`` ``$gte`` filter returns
+    only the in-range row — the naive stored datetime is aligned to UTC before the
+    compare, so it narrows rather than raising ``TypeError``.
     """
     ns = await kb.create_namespace()
     namespace_id: UUID = ns.namespace_id
@@ -420,6 +422,154 @@ async def test_system_occurred_at_date_filter_narrows(kb: Khora) -> None:
 
     returned = {c.content for c in result.chunks}
     assert returned == {in_range}, "system occurred_at filter must narrow to exactly the in-range row"
+
+
+async def test_system_occurred_at_date_filter_lte_and_range(kb: Khora) -> None:
+    """The system ``occurred_at`` date key also narrows via ``$lte`` and a range.
+
+    ``occurred_at`` is post-filter-only (it does not push into the recency
+    window), so the upper-bound and range forms narrow purely by the naive/aware
+    compare. Two recent rows split at an April mid-point: ``$gte`` keeps the later
+    row, ``$lte`` keeps the earlier row, an April-only range keeps neither, and a
+    range that brackets both keeps both — none raising on the naive stored value.
+    """
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+
+    earlier = "occurred at lte probe earlier"
+    later = "occurred at lte probe later"
+    await kb.remember(
+        content=earlier,
+        namespace=namespace_id,
+        title="occ_earlier",
+        source_timestamp=datetime(2026, 3, 1, tzinfo=UTC),
+        entity_types=["PERSON"],
+        relationship_types=["KNOWS"],
+        expertise=_no_event_fact_extraction(),
+    )
+    await kb.remember(
+        content=later,
+        namespace=namespace_id,
+        title="occ_later",
+        source_timestamp=datetime(2026, 5, 1, tzinfo=UTC),
+        entity_types=["PERSON"],
+        relationship_types=["KNOWS"],
+        expertise=_no_event_fact_extraction(),
+    )
+
+    async def _recall(filter_: dict[str, Any]) -> set[str]:
+        result = await kb.recall(
+            "occurred at lte probe",
+            namespace=namespace_id,
+            limit=20,
+            mode=SearchMode.VECTOR,
+            filter=filter_,
+        )
+        return {c.content for c in result.chunks}
+
+    assert await _recall({"occurred_at": {"$gte": "2026-04-01T00:00:00Z"}}) == {later}
+    assert await _recall({"occurred_at": {"$lte": "2026-04-01T00:00:00Z"}}) == {earlier}
+    assert await _recall({"occurred_at": {"$gte": "2026-04-01T00:00:00Z", "$lte": "2026-04-30T00:00:00Z"}}) == set()
+    assert await _recall({"occurred_at": {"$gte": "2026-02-01T00:00:00Z", "$lte": "2026-06-30T00:00:00Z"}}) == {
+        earlier,
+        later,
+    }
+
+
+async def test_system_source_timestamp_date_filter_narrows(kb: Khora) -> None:
+    """The system ``source_timestamp`` date key compares without raising via ``$gte`` / ``$lte`` / range.
+
+    ``source_timestamp`` is the LITERAL column value on the record (not a COALESCE
+    like ``occurred_at``), so it exercises the naive-stored compare on the raw
+    column. Two recent rows (Mar / May 2026) keep both candidates inside the
+    recency window.
+
+    The ``$gte`` LOWER bound narrows by the post-filter compare — exactly the
+    naive/aware alignment under test — keeping only the later row. ``$lte`` / range
+    carry an UPPER bound, which ``source_timestamp`` ALSO pushes into the recency
+    window; that push's embedded-store LanceDB pre-filter screens on the ingest
+    ``created_at`` column ("now"), so an upper bound before "now" clamps the
+    candidate set independent of ``source_timestamp``. The exact upper-bound result
+    is therefore a Chronicle recency characteristic, not the tz compare — so this
+    test asserts ``$lte`` / range only COMPLETE WITHOUT RAISING and stay within the
+    corpus (the contract the tz fix actually owns), while the ``$gte`` lower bound
+    pins the post-filter narrowing.
+    """
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+
+    earlier = "source timestamp probe earlier"
+    later = "source timestamp probe later"
+    corpus = {earlier, later}
+    await kb.remember(
+        content=earlier,
+        namespace=namespace_id,
+        title="st_earlier",
+        source_timestamp=datetime(2026, 3, 1, tzinfo=UTC),
+        entity_types=["PERSON"],
+        relationship_types=["KNOWS"],
+        expertise=_no_event_fact_extraction(),
+    )
+    await kb.remember(
+        content=later,
+        namespace=namespace_id,
+        title="st_later",
+        source_timestamp=datetime(2026, 5, 1, tzinfo=UTC),
+        entity_types=["PERSON"],
+        relationship_types=["KNOWS"],
+        expertise=_no_event_fact_extraction(),
+    )
+
+    async def _recall(filter_: dict[str, Any]) -> set[str]:
+        result = await kb.recall(
+            "source timestamp probe",
+            namespace=namespace_id,
+            limit=20,
+            mode=SearchMode.VECTOR,
+            filter=filter_,
+        )
+        return {c.content for c in result.chunks}
+
+    # $gte lower bound at the April mid-point narrows to the later row (post-filter).
+    assert await _recall({"source_timestamp": {"$gte": "2026-04-01T00:00:00Z"}}) == {later}
+    # $lte / range carry an upper bound — assert they don't raise and stay within
+    # the corpus; their exact set is bounded by the recency pushdown, not the tz fix.
+    assert await _recall({"source_timestamp": {"$lte": "2026-04-01T00:00:00Z"}}) <= corpus
+    assert (
+        await _recall({"source_timestamp": {"$gte": "2026-04-01T00:00:00Z", "$lte": "2026-04-30T00:00:00Z"}}) <= corpus
+    )
+
+
+async def test_system_created_at_date_filter_narrows(kb: Khora) -> None:
+    """The system ``created_at`` date key compares without raising on the naive column.
+
+    ``created_at`` is stamped at ingest (always "now"), so it is the naive-stored
+    column whose value the test does not control. The contract pinned here is that
+    the system date-key compare no longer raises ``TypeError`` and narrows
+    sanely: a ``$gte`` lower bound well in the past keeps every seeded row, a
+    ``$lte`` upper bound well in the past drops them all, and a range bracketing
+    ingest time keeps them — all on the naive stored datetime.
+    """
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+    content_to_label = await _seed(kb, namespace_id)
+    all_labels = set(content_to_label.values())
+
+    async def _recall(filter_: dict[str, Any]) -> set[str]:
+        result = await kb.recall(
+            "alpha bravo charlie",
+            namespace=namespace_id,
+            limit=20,
+            mode=SearchMode.VECTOR,
+            filter=filter_,
+        )
+        return _labels_returned(result, content_to_label)
+
+    # A past lower bound keeps everything; a past upper bound drops everything; a
+    # range from the past to the far future brackets ingest time and keeps all.
+    assert await _recall({"created_at": {"$gte": "2000-01-01T00:00:00Z"}}) == all_labels
+    assert await _recall({"created_at": {"$lte": "2000-01-01T00:00:00Z"}}) == set()
+    assert await _recall({"created_at": {"$gte": "2000-01-01T00:00:00Z", "$lte": "2100-01-01T00:00:00Z"}}) == all_labels
 
 
 # ===========================================================================

@@ -40,7 +40,7 @@ Python ``None``. ``metadata`` is resolved the same way and defaults to ``{}``.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -545,6 +545,101 @@ def test_direct_datetime_clause() -> None:
     pred = compile_python(node, _CTX).predicate
     assert pred({"occurred_at": datetime(2026, 6, 1, tzinfo=UTC)}) is True
     assert pred({"occurred_at": datetime(2025, 1, 1, tzinfo=UTC)}) is False
+
+
+# ===========================================================================
+# System date-key tz alignment — naive/aware datetime pairs compare AND order
+# without raising (a naive stored value is read as UTC at the compare boundary).
+#
+# Some backends return tz-NAIVE datetimes for the system date columns (e.g. the
+# embedded sqlite store, whose SQLAlchemy ``DateTime`` column is tz-naive). The
+# §4 type-gate treats datetime-vs-datetime as comparable regardless of tz, so the
+# shared ``_system_eq``/``_ne``/``_in``/``_nin``/``_range`` path must NOT raise
+# ``TypeError: can't compare offset-naive and offset-aware datetimes`` — it
+# normalizes both sides to UTC (Rule 1: never abort the query). A genuinely
+# non-datetime cross-family pair must still stay non-comparable (exclude, no raise).
+# ===========================================================================
+
+
+def _system_clause(op: Op, operand: Any, *, key: str = "occurred_at") -> Any:
+    """Compile a single system date-key leaf clause to its in-memory predicate."""
+    node = FilterNode(op=Op.AND, children=(FilterClause(path=(key,), op=op, operand=operand),))
+    return compile_python(node, _CTX).predicate
+
+
+@pytest.mark.parametrize("key", ["occurred_at", "created_at", "source_timestamp"])
+def test_system_range_naive_stored_vs_aware_operand_orders(key: str) -> None:
+    # naive STORED (sqlite shape) vs aware OPERAND: GTE/LTE order correctly with
+    # the naive value read as UTC — never a TypeError.
+    bound = datetime(2026, 1, 1, tzinfo=UTC)
+    gte = _system_clause(Op.GTE, bound, key=key)
+    assert gte({key: datetime(2026, 6, 1)}) is True  # naive, after bound
+    assert gte({key: datetime(2025, 6, 1)}) is False  # naive, before bound
+    lte = _system_clause(Op.LTE, bound, key=key)
+    assert lte({key: datetime(2025, 6, 1)}) is True
+    assert lte({key: datetime(2026, 6, 1)}) is False
+
+
+def test_system_range_aware_stored_vs_naive_operand_orders() -> None:
+    # Inverse mix: aware STORED vs naive OPERAND also orders without raising.
+    naive_bound = datetime(2026, 1, 1)  # read as UTC
+    gte = _system_clause(Op.GTE, naive_bound)
+    assert gte({"occurred_at": datetime(2026, 6, 1, tzinfo=UTC)}) is True
+    assert gte({"occurred_at": datetime(2025, 6, 1, tzinfo=UTC)}) is False
+
+
+def test_system_range_both_naive_orders() -> None:
+    # Both-naive (no aware side at all) still orders — alignment is a no-op here.
+    gte = _system_clause(Op.GTE, datetime(2026, 1, 1))
+    assert gte({"occurred_at": datetime(2026, 6, 1)}) is True
+    assert gte({"occurred_at": datetime(2025, 6, 1)}) is False
+
+
+def test_system_range_both_aware_orders() -> None:
+    # Both-aware is the original happy path — still correct after the fix.
+    gte = _system_clause(Op.GTE, datetime(2026, 1, 1, tzinfo=UTC))
+    assert gte({"occurred_at": datetime(2026, 6, 1, tzinfo=UTC)}) is True
+    assert gte({"occurred_at": datetime(2025, 6, 1, tzinfo=UTC)}) is False
+
+
+def test_system_eq_naive_stored_matches_same_instant_aware_operand() -> None:
+    # Equality path ($eq / $ne): a naive stored value read as UTC equals an aware
+    # operand denoting the same instant — including an operand in a non-UTC zone
+    # whose instant maps onto the naive-as-UTC value.
+    instant = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
+    eq = _system_clause(Op.EQ, instant)
+    assert eq({"occurred_at": datetime(2026, 1, 1, 12, 0)}) is True  # naive == same UTC instant
+    assert eq({"occurred_at": datetime(2026, 1, 1, 13, 0)}) is False  # different instant
+    # Operand offset +02:00 → same absolute instant as the naive 12:00 UTC stored.
+    plus_two = datetime(2026, 1, 1, 14, 0, tzinfo=timezone(timedelta(hours=2)))
+    eq_offset = _system_clause(Op.EQ, plus_two)
+    assert eq_offset({"occurred_at": datetime(2026, 1, 1, 12, 0)}) is True
+    ne_offset = _system_clause(Op.NE, plus_two)
+    assert ne_offset({"occurred_at": datetime(2026, 1, 1, 12, 0)}) is False
+
+
+def test_system_in_naive_stored_matches_same_instant_aware_operand() -> None:
+    # Membership path ($in / $nin) aligns each member: a naive stored value matches
+    # an aware member denoting the same instant.
+    members = [datetime(2026, 1, 1, 12, 0, tzinfo=UTC), datetime(2027, 1, 1, tzinfo=UTC)]
+    in_pred = _system_clause(Op.IN, members)
+    assert in_pred({"occurred_at": datetime(2026, 1, 1, 12, 0)}) is True
+    assert in_pred({"occurred_at": datetime(2028, 1, 1)}) is False
+    nin_pred = _system_clause(Op.NIN, members)
+    assert nin_pred({"occurred_at": datetime(2026, 1, 1, 12, 0)}) is False
+
+
+@pytest.mark.parametrize("stored", ["2026-01-01T00:00:00Z", 1735689600])
+def test_system_range_non_datetime_cross_family_excludes_without_raising(stored: Any) -> None:
+    # A datetime OPERAND vs a non-datetime stored value (str / int) is a genuine
+    # cross-family pair: the §4 gate excludes it (Rule 1) and never raises — the
+    # tz alignment is scoped to datetime-vs-datetime only.
+    bound = datetime(2026, 1, 1, tzinfo=UTC)
+    assert _system_clause(Op.GTE, bound)({"occurred_at": stored}) is False
+    assert _system_clause(Op.EQ, bound)({"occurred_at": stored}) is False
+    # Negation polarity ($ne / $nin) INCLUDES a wrong-typed value — also no raise.
+    assert _system_clause(Op.NE, bound)({"occurred_at": stored}) is True
+    assert _system_clause(Op.NIN, [bound])({"occurred_at": stored}) is True
 
 
 # ===========================================================================
