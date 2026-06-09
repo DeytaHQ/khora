@@ -577,6 +577,15 @@ def canonical_hash(node: FilterNode | FilterClause) -> str:
       sibling predicates does not change the hash (``{a AND b}`` == ``{b AND a}``).
     * **Order is preserved** for a ``$not`` operand, for ``$in``/``$nin`` lists,
       and for ``$eq`` exact-array operands — those are order-significant.
+    * **An ordered-array operand (a tuple: ``$eq`` exact-array, ``$in``/``$nin``)
+      hashes distinctly from a containment-list operand (an explicit ``$eq`` list).**
+      The two are disambiguated by a **structural** ``operand_kind`` field on the
+      clause record — a sibling of ``operand``, not part of the operand value — so
+      an exact-array ``$eq`` and a containment ``$eq`` on the same path do **not**
+      share a hash. The sibling placement makes it **forge-proof**: a user-supplied
+      operand value (which is opaque JSON) cannot mint the distinguishing field
+      because the value is confined under the ``operand`` key. See
+      :func:`_canonicalize` and :func:`_canonicalize_operand`.
     * **Dict operands** (whole-subdocument / whole-blob equality) have their keys
       sorted so semantically equal objects hash equally.
     * Two ASTs that differ only in **semantics** (different op, path, or operand)
@@ -598,12 +607,26 @@ def canonical_hash(node: FilterNode | FilterClause) -> str:
 
 
 def _canonicalize(node: FilterNode | FilterClause) -> Any:
-    """Build the stable, JSON-serializable representation of an AST subtree."""
+    """Build the stable, JSON-serializable representation of an AST subtree.
+
+    A leaf clause records an ``operand_kind`` field **alongside** ``operand`` to
+    disambiguate the two array-shaped operands (an order-significant ``tuple`` —
+    an ``$eq`` exact-array or an ``$in``/``$nin`` list — versus an explicit-``$eq``
+    containment ``list``) that otherwise canonicalize to the same JSON array. This
+    sibling field is **structural**, not part of the operand value: it lives on the
+    clause record, so it is **forge-proof**. A user ``$eq`` operand is arbitrary
+    opaque JSON (a list, a dict, nested), but it is canonicalized under the
+    ``operand`` key only — it can never reach into the clause record to mint its own
+    ``operand_kind`` sibling. (Contrast an in-operand sentinel such as a magic dict
+    key, which a user dict value ``{"<sentinel>": ...}`` could forge.) See
+    :func:`_operand_kind`.
+    """
     if isinstance(node, FilterClause):
         return {
             "k": "clause",
             "path": list(node.path),
             "op": node.op.value,
+            "operand_kind": _operand_kind(node.operand),
             "operand": _canonicalize_operand(node.operand),
         }
     # FilterNode (logical).
@@ -617,11 +640,45 @@ def _canonicalize(node: FilterNode | FilterClause) -> Any:
     return {"k": "node", "op": node.op.value, "children": children}
 
 
+def _operand_kind(operand: Any) -> str:
+    """Return the structural container kind of a leaf operand.
+
+    This is the **forge-proof** discriminator between the two array-shaped operands
+    that would otherwise canonicalize to the same JSON array:
+
+    * ``"tuple"`` — an order-significant array: a ``$eq`` *exact-array* operand (a
+      bare list desugars to this) or an ``$in``/``$nin`` membership list.
+    * ``"list"`` — an explicit-``$eq`` array-containment operand (``{"$eq": [...]}``
+      lowers to a ``list`` via :func:`_lower_scalar_operand`).
+    * ``"scalar"`` — anything else (scalars, dicts, datetimes, ``$date`` literals,
+      ``None``); these never collide with an array, so they share one neutral kind.
+
+    The discriminator is emitted by :func:`_canonicalize` as a clause-record sibling
+    of ``operand`` — *not* inside the operand value — so a user-supplied operand
+    (arbitrary opaque JSON) can never forge it. Only the tuple-vs-list split is
+    load-bearing; ``$in``/``$nin`` tuples are already distinguished from a ``$eq``
+    tuple by the clause-level ``op`` field, so reusing ``"tuple"`` across them is safe.
+    """
+    if isinstance(operand, tuple):
+        return "tuple"
+    if isinstance(operand, list):
+        return "list"
+    return "scalar"
+
+
 def _canonicalize_operand(operand: Any) -> Any:
     """Canonicalize a leaf operand into JSON-serializable form.
 
-    Tuples (``$in``/``$nin`` lists, ``$eq`` exact-arrays) keep their order. Dict
-    operands (subdocument / blob equality) sort their keys recursively so
+    Array-shaped operands (an order-significant ``tuple`` — ``$eq`` exact-array or
+    ``$in``/``$nin`` — and an explicit-``$eq`` containment ``list``) are emitted as
+    plain JSON arrays with element order preserved. They are **not** disambiguated
+    here: the tuple-vs-list distinction is carried by the structural ``operand_kind``
+    sibling on the clause record (see :func:`_canonicalize` / :func:`_operand_kind`),
+    which is forge-proof because it lives outside the operand value. Keeping this
+    function's array encoding plain means a user ``$eq`` value cannot reproduce a
+    distinguishing in-operand sentinel.
+
+    Dict operands (subdocument / blob equality) sort their keys recursively so
     key-order is not significant. :class:`DateLiteral` and :class:`~datetime.datetime`
     are tagged + ISO-encoded so they never collide with a plain string.
     """
@@ -629,10 +686,10 @@ def _canonicalize_operand(operand: Any) -> Any:
         return {"$date": operand.value.isoformat()}
     if isinstance(operand, datetime):
         return {"$dt": operand.isoformat()}
-    if isinstance(operand, tuple):
-        # Order-significant — preserve it.
-        return [_canonicalize_operand(item) for item in operand]
-    if isinstance(operand, list):
+    if isinstance(operand, (tuple, list)):
+        # Order-significant array (tuple) or containment list — both plain JSON
+        # arrays, order preserved. The tuple-vs-list distinction is carried by the
+        # structural ``operand_kind`` sibling on the clause record, not here.
         return [_canonicalize_operand(item) for item in operand]
     if isinstance(operand, dict):
         # Order-insensitive object equality — sort keys recursively.
