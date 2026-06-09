@@ -39,7 +39,7 @@ WHERE namespace_id = '...'
 ORDER BY similarity DESC;
 ```
 
-You can't accidentally see another namespace's data.
+Namespace filtering happens in the database, so a query only ever returns rows from its own namespace.
 
 ## Protocol-level isolation contract
 
@@ -261,7 +261,7 @@ await kb.storage.set_sync_checkpoint(
 
 ## Cross-Namespace Queries
 
-Need to search multiple namespaces? (Note: this bypasses isolation - make sure you have permission)
+Need to search multiple namespaces? This pattern deliberately crosses the isolation boundary, so confirm the caller is authorized for each namespace first.
 
 ```python
 all_results = []

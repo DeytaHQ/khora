@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Khora is a **Khora** - a system that remembers everything you tell it and helps you find what you need later. Unlike a simple database or search engine, Khora understands your content at multiple levels: the literal words, the concepts and meanings, and the relationships between things.
+Khora is our open source python library for creating knowledge repositories that ingest unstructured and structured multi-source data and expose a single query substrate, built for integrating into long-horizon AI agents.
 
 ## The Big Picture
 
@@ -311,5 +311,5 @@ Every read / exists / mutation method on a storage backend takes `*, namespace_i
 ## What's Next?
 
 - **[Storage Backends](storage-backends.md)** - How PostgreSQL, pgvector, and Neo4j work together
-- **[Multi-Tenancy](multi-tenancy.md)** - Organizations, workspaces, and namespaces in detail
+- **[Multi-Tenancy](multi-tenancy.md)** - Namespaces and isolation modes in detail
 - **[Event Sourcing](event-sourcing.md)** - The immutable event log and what you can do with it

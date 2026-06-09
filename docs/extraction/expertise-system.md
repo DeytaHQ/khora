@@ -425,7 +425,7 @@ skill = ExtractionSkill.research_papers()
 # Types: PERSON, ORGANIZATION, CONCEPT, TECHNOLOGY, EVENT
 
 # Slack messages
-skill = ExtractionSkill.slack()
+skill = load_expertise("builtin:slack")
 # Types: PERSON, CHANNEL, TEAM, TOPIC, PROJECT, DECISION
 # Extracts DM recipients, conversation threads, and team dynamics
 ```

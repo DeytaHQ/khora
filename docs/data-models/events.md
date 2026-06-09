@@ -109,7 +109,7 @@ class EventType(str, Enum):
 event shapes for the four most-frequent resource types. Each takes
 `(namespace_id, <resource>_id, data, **kwargs)`; the `**kwargs`
 forward to the dataclass constructor (`actor_id`, `actor_type`,
-`correlation_id`, `causation_id`, …).
+`correlation_id`, …).
 
 ```python
 # Document created

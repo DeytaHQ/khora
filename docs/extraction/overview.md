@@ -1,6 +1,6 @@
 # Extraction Pipeline Overview
 
-When you store content in Khora, it doesn't just sit there as text. The extraction pipeline transforms your raw content into structured, searchable knowledge. This is where the magic happens.
+When you store content in Khora, it doesn't just sit there as text. The extraction pipeline transforms your raw content into structured, searchable knowledge. This is where raw content becomes structured knowledge.
 
 ## What the Pipeline Does
 
@@ -227,8 +227,9 @@ RememberResult(
 )
 ```
 
-(Semantic expansion is currently controlled globally via
-`KhoraConfig.extraction.enable_semantic_expansion`, not per-call.)
+(Semantic expansion is gated by `ExpansionConfig.inference_mode` (set on
+the `ExpertiseConfig`) together with the `enable_expansion` flag on the
+ingest flow, not by a single global config field.)
 
 Behind the scenes:
 1. **Staging**: Checksum computed, no duplicate found, document created
@@ -267,8 +268,8 @@ await kb.remember(
 ```
 
 `chunk_size`, `embedding_model`, and `extraction_model` aren't per-call
-kwargs. Set them via `KhoraConfig.chunker.chunk_size`,
-`KhoraConfig.embedding.model`, and `KhoraConfig.llm.model` (or the
+kwargs. Set them via `KhoraConfig.pipelines.chunk_size`,
+`KhoraConfig.llm.embedding_model`, and `KhoraConfig.llm.model` (or the
 matching `KHORA_*` env vars) at construction time.
 
 ### Batch Processing

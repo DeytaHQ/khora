@@ -22,7 +22,7 @@ Choose Skeleton Construction instead when:
 - **No Neo4j available**: VectorCypher requires Neo4j
 - **Simple infrastructure preferred**: Skeleton works with PostgreSQL only
 
-For comprehensive extraction over 100% of chunks, pass `engine_kwargs={"skeleton_core_ratio": 1.0}` - VectorCypher's KET-RAG selectivity defaults to the top 70% of chunks but accepts a 1.0 override that extracts from every chunk.
+For comprehensive extraction over 100% of chunks, pass `engine_kwargs={"vectorcypher_config": VectorCypherConfig(skeleton_core_ratio=1.0)}` - VectorCypher's KET-RAG selectivity defaults to the top 70% of chunks but accepts a 1.0 override that extracts from every chunk.
 
 ## Architecture Overview
 
@@ -183,7 +183,7 @@ class RetrieverConfig:
     # Search thresholds
     min_entity_similarity: float = 0.3
     hybrid_alpha: float = 0.7
-    coherence_weight: float = 0.0  # Weight for cross-chunk coherence scoring
+    coherence_weight: float = 0.1  # Weight for cross-chunk coherence scoring
 
     # Entity expansion
     lazy_entity_expansion: bool = False  # Defer entity expansion until needed
@@ -198,7 +198,7 @@ class RetrieverConfig:
 1. **Route Query**: Classify as SIMPLE, MODERATE, or COMPLEX
 2. **Detect Temporal Signal**: Classify query into a temporal category (see [Temporal Detection](#temporal-detection))
 3. **Embed Query**: Generate query embedding via LiteLLM
-4. **Vector Search**: Find entry entities via pgvector similarity (with `hnsw.ef_search = 200`)
+4. **Vector Search**: Find entry entities via pgvector similarity (with `hnsw.ef_search = 100`)
 5. **Cypher Expand**: Traverse graph to find related entities (if complex)
 6. **Fetch Chunks**: Get chunks via `MENTIONED_IN` relationships, with optional temporal sort
 7. **RRF Fusion**: Combine vector and graph results
@@ -380,19 +380,19 @@ The detector classifies the query, and the resulting `TemporalSignal.category` m
 
 | Category | `recency_weight` | `temporal_sort` | `decay_days_override` | Example Query |
 |----------|------------------|-----------------|-----------------------|---------------|
-| `NONE` | 0.2 | No | - | "What is the capital of France?" |
+| `NONE` | 0.0 | No | - | "What is the capital of France?" |
 | `EXPLICIT` | 0.3 | No | - | "What happened before April 2024?" |
 | `STATE_QUERY` | 0.5 | Yes | - | "What instrument is she currently playing?" |
-| `ORDINAL` | 0.1 | Yes | - | "Which event happened first?" |
+| `ORDINAL` | 0.3 | Yes | - | "Which event happened first?" |
 | `AGGREGATE` | 0.0 | No | - | "How many projects in total?" |
-| `RECENCY` | 0.5 | Yes | 7 | "What's the most recent update?" |
-| `CHANGE` | 0.3 | Yes | - | "Does she still work at Google?" |
+| `RECENCY` | 0.5 | Yes | 3 | "What's the most recent update?" |
+| `CHANGE` | 0.4 | Yes | 14 | "Does she still work at Google?" |
 
 ### Effect on the Retrieval Pipeline
 
 - **`recency_weight`** - Passed to `apply_recency_boost()` after RRF fusion. Higher values amplify the temporal signal; `0.0` (AGGREGATE) disables recency entirely.
 - **`temporal_sort`** - When `True`, `DualNodeManager.get_chunks_by_entities()` uses `ORDER BY c.occurred_at DESC, total_mentions DESC` in its Cypher query, surfacing the most recent chunks first.
-- **`decay_days_override`** - Overrides the default `recency_decay_days` (30) for categories like RECENCY where a tighter window (7 days) is more appropriate.
+- **`decay_days_override`** - Overrides the default `recency_decay_days` (30) for categories like RECENCY where a tighter window (3 days) is more appropriate.
 
 ### Simple Path Recency
 

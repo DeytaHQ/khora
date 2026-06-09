@@ -95,7 +95,7 @@ Chunk(
     content="...portion of text...",
     embedding=[0.021, -0.156, ...],  # 1536 floats
     embedding_model="text-embedding-3-small",
-    index=2,                    # Third chunk in document
+    chunk_index=2,              # Third chunk in document
     start_char=1024,            # Character offset
     end_char=1536,
     token_count=512,
@@ -105,7 +105,7 @@ Chunk(
 
 **Key fields:**
 - `embedding` - Vector representation for similarity search
-- `index` - Position in parent document (for context)
+- `chunk_index` - Position in parent document (for context)
 - `start_char`, `end_char` - Character offsets (for highlighting)
 - `token_count` - Useful for understanding chunk sizes
 

@@ -75,6 +75,8 @@ Backend availability is logged at import time via the `_HAS_RUST`,
 
 ## Module Reference (13 Modules, 40+ Exported Functions)
 
+> `blocking.rs` is also part of the crate: it exports `block_and_score_pairs` (candidate blocking + pair scoring for entity resolution) and has its own Criterion bench (`benches/block_and_score_pairs.rs`). It is not documented in detail below.
+
 ### `cosine.rs` - Vector Similarity (5 functions)
 
 Provides single-pair, batch (1-to-N), all-pairs cosine similarity,
@@ -249,13 +251,13 @@ RRF scoring, score normalisation, and fusion diagnostics for result fusion.
 | `weighted_rrf_normalized` | Normalized weighted RRF | Normalizes vector and graph scores to [0, 1] via min-max before computing RRF. Prevents the source with larger absolute scores from dominating. |
 | `weighted_rrf_normalized_with_provenance` | RRF with source tracking | Returns fused results along with provenance information (which source contributed each result). |
 | `weighted_rrf_normalized_with_diagnostics` | RRF with fusion diagnostics | Returns fused results along with diagnostic information including per-source score distributions, overlap statistics, and fusion quality metrics. |
-| `batch_score_stats` | `(scores: Vec<f64>) -> (f64, f64, f64, f64)` | Compute min, max, mean, and standard deviation for a batch of scores. |
+| `batch_score_stats` | `(scores: Vec<f64>) -> (f64, f64, f64, f64, f64)` | Compute `(mean, std_dev, min, max, median)` for a batch of scores. |
 | `score_entropy` | `(scores: Vec<f64>) -> f64` | Compute Shannon entropy of a score distribution. Used for fusion quality assessment. |
 
 **Rust techniques:**
 - **hashbrown::HashMap** - Fast hash accumulation of scores across ranked lists.
 - **OrderedFloat** - `ordered_float::OrderedFloat` wraps `f64` for total ordering, enabling safe `sort_by` without `unwrap_or` on `partial_cmp`.
-- **No GIL release** - These are fast enough that GIL overhead would dominate; runs with GIL held.
+- **Partial GIL release** - The five heavier functions (`weighted_rrf_normalized`, `weighted_rrf_normalized_with_provenance`, `weighted_rrf_normalized_with_diagnostics`, `batch_score_stats`, `score_entropy`) release the GIL via `py.detach()`. The three lightweight ones (`reciprocal_rank_fusion`, `weighted_rrf`, `normalize_scores`) run with the GIL held - they are fast enough that detach overhead would dominate.
 
 **Python consumers:**
 - `khora._accel.reciprocal_rank_fusion` - low-level string-ID RRF (the higher-level `khora.engines.vectorcypher.fusion` wraps this with `FusedResult` metadata tracking)
@@ -391,9 +393,9 @@ Must be called before any parallel work is spawned. Rayon only allows one global
 
 ### Requirements
 
-- **Rust** >= 1.75 (edition 2021)
+- **Rust** >= 1.85 (edition 2024)
 - **maturin** - PyO3 build tool
-- **Python** >= 3.10 with NumPy
+- **Python** >= 3.13 with NumPy
 
 ### Build from Source
 
@@ -427,6 +429,8 @@ pip install khora-accel
 ## Performance Characteristics
 
 ### Speedup Ranges by Category
+
+> The figures below are illustrative estimates, not all benchmark-backed. Only cosine similarity has a functional Criterion bench today; the bm25 and pagerank benches are placeholders (see Benchmark Infrastructure).
 
 | Category | Operations | Estimated Speedup | Key Technique |
 |----------|-----------|-------------------|---------------|

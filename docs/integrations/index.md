@@ -4,7 +4,7 @@ khora ships first-party adapters for the major agentic-framework
 ecosystems. Each adapter lives in its own optional extra so importing
 `khora` never drags in a framework you don't use, and the adapter
 module itself imports the framework lazily - the top-level package
-load is free even with all five extras installed. Every adapter
+load is free even with every adapter extra installed. Every adapter
 satisfies one of two runtime-checkable Protocols in
 `khora.integrations.protocol` (`MemoryAdapter` or `RetrieverAdapter`)
 and registers via the `khora.integrations` entry-point group so
@@ -21,7 +21,7 @@ downstream tooling can discover what is installed.
 | [LlamaIndex](llamaindex.md) | `pip install khora[llamaindex]` | `KhoraRetriever` (async `BaseRetriever`), `KhoraMemoryBlock`, and the deprecated `KhoraChatStore`. |
 | [Hermes](hermes.md) | `pip install hermes-agent` (see note) | `KhoraMemoryProvider` - `MemoryProvider` plugin for the Hermes agent loop. |
 
-All five adapters share the same khora primitives - `Khora.remember`,
+All six adapters share the same khora primitives - `Khora.remember`,
 `Khora.recall`, `Khora.forget`, and `Khora.submit_batch` - so a single
 khora instance can back several frameworks at once. Each adapter
 documents its namespace-resolution rule (typically a UUID5 derived
@@ -90,6 +90,6 @@ framework adapter:
   from inside a running event loop, surfacing the deadlock surface
   loudly rather than hanging.
 
-See any of the five shipped adapters for a working template - they
+See any of the six shipped adapters for a working template - they
 range from ~150 LOC (CrewAI) to ~600 LOC (OpenAI Agents) and exercise
 every part of the foundation.

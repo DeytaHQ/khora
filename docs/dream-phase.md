@@ -4,8 +4,8 @@
 
 The naming follows the complementary learning systems framework from neuroscience: ingestion is the fast, episodic path (`Khora.remember`), dream phase is the slow, reorganizing path. Same store, different access regime, different objective function. See [Research & Prior Art](#research--prior-art) for the lineage.
 
-> **Status - read this once before scheduling anything in prod.**
-> Ten ops are live: five Phase-1 audits (read-only, no side effects) and five Phase-2 planners (planning + apply). Apply mode mutates the relational store through bi-temporal soft-delete and one hard-delete path (`fact_compaction` on already-tombstoned rows past retention); the graph-store mirror for the four vectorcypher mutation ops is deferred to a future release. Five guardrails protect the apply path: hard 7-day retention floor, `KHORA_DREAM_DISABLE_APPLY` env-var kill-switch, advisory-lock-held-through-apply, `chunk_id` runtime assertion, snapshot-before-mutate undo records. Default config is `enabled=False`; nothing happens until you opt in.
+> **Status - read this before scheduling dream-apply in production.**
+> Fourteen ops are live: five Phase-1 audits (read-only, no side effects) and nine planner / mutation ops (planning + apply), including the four Phase-5 ops (community summary, contradiction detect, prune edges, normalize schema). Apply mode mutates the relational store through bi-temporal soft-delete and one hard-delete path (`fact_compaction` on already-tombstoned rows past retention); the graph-store mirror for the five vectorcypher mutation ops is deferred to a future release. Five guardrails protect the apply path: hard 7-day retention floor, `KHORA_DREAM_DISABLE_APPLY` env-var kill-switch, advisory-lock-held-through-apply, `chunk_id` runtime assertion, snapshot-before-mutate undo records. Default config is `enabled=False`; nothing happens until you opt in.
 
 ## When to use it
 
@@ -94,7 +94,6 @@ Never normalizes type names. `ExpertiseConfig` is declarative user intent; rewri
 Builds the entity-relationship graph for the namespace, down-weights `ASSOCIATED_WITH` co-occurrence edges to `0.2` (so they don't dominate), runs the `_accel.pagerank` Rust kernel, then flags entities matching all of:
 - PR score in the bottom `orphan_pr_percentile_threshold` percentile (default 5)
 - `mention_count ≤ 1`
-- No recent recall hits
 
 Output is a list of `{entity_id, name, type, pr_score, mention_count}` with `archive_candidate=true`. The op never archives.
 
@@ -232,8 +231,23 @@ Functional equivalents live at `khora.dream.api.{dream, dream_status, dream_hist
 | `centroid_min_intra_cluster_cosine` | `0.88` | Multimodal-cluster floor |
 | `dedupe_entities_default_threshold` | `0.90` | Fallback cosine merge threshold |
 | `dedupe_entities_per_type_thresholds` | `{}` | Per-`entity_type` overrides (e.g. `{"PERSON": 0.95}`) |
+| `dedupe_verifier_band_low` / `_band_high` | `0.78` / `0.95` | Borderline-merge band; pairs in `[low, high)` route through the two-LLM judge |
+| `dedupe_verifier_model` / `dedupe_auditor_model` | `"gpt-4o-mini"` / `"claude-haiku-4.5"` | Verifier (first judge) and auditor (second judge, distinct family) model ids; both must agree on `merge` |
+| `dedupe_verifier_timeout_seconds` | `10` | Per-judge LLM timeout; timeout / transport error degrades the verdict to `defer` |
+| `dedupe_verifier_min_confidence` | `0.6` | Confidence floor each judge must report when voting `merge`; below-floor degrades to `defer` |
 | `event_clustering_cosine_threshold` | `0.95` | Chronicle event near-dup threshold |
 | `event_clustering_window_days` | `7` | Sliding `referenced_date` window half-width |
+| `prune_edges_enabled` | `False` | Master switch for the vectorcypher edge-pruning op |
+| `prune_edges_target_predicates` | `["ASSOCIATED_WITH"]` | Whitelist of `relationship_type` values eligible for pruning |
+| `prune_edges_confidence_threshold` | `0.4` | Edges below this confidence satisfy the first prune conjunct |
+| `contradiction_detect_enabled` | `False` | Master switch for the contradiction-detection op (report only) |
+| `contradiction_detect_similarity_threshold` | `0.5` | Textual-similarity threshold below which same-`(source, target, type)` pairs are flagged |
+| `community_summary_enabled` | `False` | Master toggle for the community-summary op (first LLM-using dream op) |
+| `community_summary_min_size` | `5` | Minimum community size to emit a summary op for |
+| `community_summary_model` | `"gpt-4o-mini"` | LLM model used by the community-summary apply handler |
+| `community_summary_max_members_per_prompt` | `20` | Per-community cap on member ids carried into the LLM prompt |
+| `normalize_schema_enabled` | `False` | Master toggle for the schema-drift normalization op |
+| `normalize_schema_mapping` | `{}` | Operator-supplied `old_type -> new_type` rename mapping; empty = op refuses to run |
 
 ### Op kinds
 
@@ -251,6 +265,9 @@ Functional equivalents live at `khora.dream.api.{dream, dream_status, dream_hist
 | `VECTORCYPHER_SOURCE_CHUNK_IDS_GC` | `vectorcypher_source_chunk_ids_gc` | 2 (planner) | `apply_vectorcypher_source_chunk_ids_gc` - array filter. Dialect-aware. Idempotent. |
 | `CHRONICLE_FACT_COMPACTION` | `chronicle_fact_compaction` | 2 (planner) | `apply_chronicle_fact_compaction` - **only hard-delete op**. Snapshots full rows into undo.json before DELETE. 7-day retention floor. |
 | `CHRONICLE_EVENT_CLUSTERING` | `chronicle_event_clustering` | 2 (planner) | `apply_chronicle_event_clustering` - bi-temporal soft-merge via `merged_into_event_id` (migration 034). |
+| `VECTORCYPHER_PRUNE_EDGES` | `vectorcypher_prune_edges` | 5.2 (planner + apply) | `apply_vectorcypher_prune_edges` - stamps `valid_to = NOW()` on low-confidence / orphaned edges (bi-temporal soft-delete). Postgres-only. Idempotent. Gated by `prune_edges_enabled`. |
+| `VECTORCYPHER_CONTRADICTION_DETECT` | `vectorcypher_contradiction_detect` | 5.3 (planner + apply) | `apply_vectorcypher_contradiction_detect` - **report only**; never touches `relationships`. Inserts findings into `dream_conflicts` (`ON CONFLICT DO NOTHING`). Gated by `contradiction_detect_enabled`. |
+| `VECTORCYPHER_COMMUNITY_SUMMARY` | `vectorcypher_community_summary` | 5.1 (planner + apply) | `apply_vectorcypher_community_summary` - **first LLM-using op**; one `acompletion` call per community, writes grounded summary to `khora_dream_communities`. Postgres-only. Gated by `community_summary_enabled`. |
 | `VECTORCYPHER_NORMALIZE_SCHEMA` | `vectorcypher_normalize_schema` | 5.4 (planner + apply) | `apply_vectorcypher_normalize_schema` - operator-supplied `old_type -> new_type` mapping; rewrites `entity_type` / `relationship_type` and emits one `ENTITY_UPDATED` / `RELATIONSHIP_UPDATED` event per row. Refuses to run on empty mapping. **Consumer-contract impact:** type names are part of the public stability contract - see [consumers.md](consumers.md). |
 
 #### Postgres-only apply ops
@@ -451,7 +468,7 @@ Dream phase does not solve memory drift. It provides the substrate to detect dri
 - Decide *when* to run. That's operator policy - cron / Temporal / k8s CronJob.
 - Validate that a planned op makes business sense. The planner uses heuristics (cosine, Levenshtein, age thresholds); operators are expected to dry-run several times and review the file-sink reports before flipping to apply.
 - Reverse an applied op automatically. Undo records are persisted to `undo.json` (schema `dream-undo/1`) but there is no `kb.undo(run_id)` API. Restoring from the snapshot is a hand-rolled operation; an automated undo player is planned.
-- Replace good ingest-time decisions. If dedupe finds 10,000 candidate merges in a fresh namespace, the bug is upstream - in the extraction pipeline, the embedding model choice, or the per-type thresholds - not in dream phase.
+- Replace good ingest-time decisions. If dedupe finds 10,000 candidate merges in a fresh namespace, that usually points to an upstream issue - in the extraction pipeline, the embedding model choice, or the per-type thresholds - rather than to dream phase.
 
 ## Stability
 
@@ -471,10 +488,9 @@ Dream phase does not solve memory drift. It provides the substrate to detect dri
 
 Tracked under the umbrella [#649](https://github.com/DeytaHQ/khora/issues/649).
 
-- **Phase 5 - advanced operations** (#670, #671, #672, #673). Community detection + LLM-generated summaries (GraphRAG-style; the first dream-phase ops to actually call an LLM, gated by the existing `llm_max_tokens_per_run` budget), edge pruning by weight × recency, contradiction detection across `memory_facts`, schema-drift normalization with an operator-supplied mapping.
 - **`apply_vectorcypher_centroid_recompute` on SQLite-LanceDB.** The handler is Postgres-only because the embedded vector backend's `update_entity_embedding` commits out-of-band, violating the caller-owned-transaction contract. The SQLite path needs a session-aware vector-backend write API first.
 - **`apply_vectorcypher_dedupe_entities` Neo4j re-target.** The Postgres `relationships` rewrite ships today. The Neo4j edge re-target + archived-node path needs a different transactional shape (no shared session with PG) and is deferred.
 - **Auto-chaining of dedupe → centroid_recompute.** Today `centroid_recompute` in the default plan dispatch receives `merge_clusters=[]` and emits no DreamOps. Real centroid plans require direct invocation with clusters from a prior dedupe run, or manual operator stitching via `resume_from`.
 - **Planner `mode="apply"` cleanup.** Two of the Phase 2 planners (`plan_vectorcypher_dedupe_entities`, `plan_vectorcypher_source_chunk_ids_gc`, `plan_vectorcypher_centroid_recompute`) still accept a `mode="apply"` kwarg that raises `NotImplementedError`. The orchestrator never sets this kwarg - the dedicated `apply_<op>` functions are the real apply entry point. The raise path is dead code reachable only from direct callers; removing the kwarg is a follow-up cleanup.
 
-Phase 4 has shipped. The kill-criterion telemetry remains `khora.dream.runs_total` - it now distinguishes `mode="dry-run"` vs `mode="apply"` via the `outcome` label and informs whether to invest in Phase 5.
+Phases 4 and 5 have shipped. The four Phase-5 advanced ops (#670, #671, #672, #673) - community detection + LLM-generated summaries (GraphRAG-style; the first dream-phase ops to actually call an LLM, gated by the existing `llm_max_tokens_per_run` budget), edge pruning by weight × recency, contradiction detection across live relationships, and schema-drift normalization with an operator-supplied mapping - are registered with plan + apply handlers and gated behind `community_summary_enabled` / `prune_edges_enabled` / `contradiction_detect_enabled` / `normalize_schema_enabled` (all default off). The kill-criterion telemetry remains `khora.dream.runs_total` - it distinguishes `mode="dry-run"` vs `mode="apply"` via the `outcome` label.

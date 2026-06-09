@@ -39,7 +39,7 @@ results = await kb.recall(
 )
 ```
 
-**The magic**: Vector search understands that "dog" and "puppy" are related, that "king" minus "man" plus "woman" roughly equals "queen", and that a question about "revenue" might be answered by content about "sales figures".
+**Why it works**: Vector search understands that "dog" and "puppy" are related, that "king" minus "man" plus "woman" roughly equals "queen", and that a question about "revenue" might be answered by content about "sales figures".
 
 ## Graph Search
 
@@ -68,7 +68,7 @@ results = await kb.recall(
 # globally via KhoraConfig.query at construction time.
 ```
 
-**The magic**: If Alice works at Acme and Bob also works at Acme, graph search can infer they're colleagues - even if no document explicitly says so.
+**Why it works**: If Alice works at Acme and Bob also works at Acme, graph search can infer they're colleagues - even if no document explicitly says so.
 
 **Note**: Graph search now also uses entity embeddings. When your query mentions concepts rather than exact names, pgvector finds entities with similar descriptions, then Neo4j explores their relationships.
 
@@ -97,7 +97,7 @@ results = await kb.recall(
 )
 ```
 
-**The magic**: Sometimes you don't want "conceptually similar" - you want exactly what you typed. Keyword search delivers precision.
+**Why it works**: Sometimes you don't want "conceptually similar" - you want exactly what you typed. Keyword search delivers precision.
 
 ## Hybrid Search (Default)
 
@@ -125,7 +125,7 @@ results = await kb.recall(
 )
 ```
 
-**The magic**: A document ranked #5 in vector and #3 in graph will beat one ranked #1 in vector alone. Consensus across methods signals relevance. Keyword search catches exact terms that vector search might miss.
+**Why it works**: A document ranked #5 in vector and #3 in graph will beat one ranked #1 in vector alone. Consensus across methods signals relevance. Keyword search catches exact terms that vector search might miss.
 
 Default weights:
 - Vector: 50% (semantic similarity usually matters most)
@@ -162,7 +162,7 @@ print(f"Vector: {by_method.get('vector', {}).get('count', 0)} chunks")
 print(f"Graph: {by_method.get('graph', {}).get('count', 0)} chunks")
 ```
 
-**The magic**: Some queries benefit from semantic understanding, others from relationships, others from exact terms. ALL mode lets each method contribute what it's good at.
+**Why it works**: Some queries benefit from semantic understanding, others from relationships, others from exact terms. ALL mode lets each method contribute what it's good at.
 
 Default weights:
 - Vector: 50%

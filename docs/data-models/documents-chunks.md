@@ -311,7 +311,7 @@ CREATE TABLE chunks (
     namespace_id UUID NOT NULL,
     content TEXT,
     embedding vector(1536),
-    index INTEGER,
+    chunk_index INTEGER,
     start_char INTEGER,
     end_char INTEGER,
     token_count INTEGER,

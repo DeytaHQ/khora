@@ -1,6 +1,6 @@
 # Storage Backends
 
-Khora doesn't use one database - it uses three, each chosen for what it does best. This might seem like overkill, but each backend excels at queries the others struggle with.
+Khora doesn't use one database - it uses three, each chosen for what it does best. Each backend is chosen because it performs queries the others cannot do or handle less well.
 
 ## The Three Musketeers
 
@@ -112,8 +112,8 @@ CREATE TABLE chunks (
     namespace_id UUID NOT NULL,
     document_id UUID NOT NULL,
     content TEXT,
-    embedding vector(1536),  -- The magic: 1536 floats (or halfvec for float16)
-    index INTEGER,           -- Position in document
+    embedding vector(1536),  -- 1536 floats (or halfvec for float16)
+    chunk_index INTEGER,     -- Position in document
     token_count INTEGER,
     created_at TIMESTAMPTZ
 );
@@ -124,7 +124,9 @@ USING hnsw (embedding vector_cosine_ops)
 WITH (ef_construction = 128);
 ```
 
-> **Note:** The HNSW index replaced the earlier IVFFlat index. HNSW provides better recall and doesn't require retraining when data grows. The `ef_construction=128` parameter (up from the default 64) improves index quality at build time. Query-time recall can be tuned separately with `SET hnsw.ef_search = N` (default 200 at query time).
+> **Note:** `ix_khora_chunks_embedding_hnsw` is the HNSW index on the vectorcypher runtime table `khora_chunks`. The ORM/Alembic `chunks` table has its own HNSW index named `ix_chunks_embedding_hnsw`. The `chunks` label in the CREATE statement above is the runtime-table shape.
+
+> **Note:** The HNSW index replaced the earlier IVFFlat index. HNSW provides better recall and doesn't require retraining when data grows. The `ef_construction=128` parameter (up from the default 64) improves index quality at build time. Query-time recall can be tuned separately with `SET hnsw.ef_search = N` (config default 100 at query time).
 >
 > **halfvec support:** pgvector's `halfvec` type stores embeddings as float16 instead of float32, halving storage and memory usage with minimal quality loss. Khora supports halfvec via the `embedding_type` storage configuration.
 
@@ -587,7 +589,7 @@ SurrealDB is an alternative that serves as **all three backends** - relational, 
 | Role | SurrealDB Implementation |
 |------|-------------------------|
 | **Relational** | Document/namespace storage with SurrealQL queries |
-| **Vector** | Native vector similarity search with HNSW indexes |
+| **Vector** | Vector similarity search; the embedded path uses brute-force cosine (KNN `<|K|>` is unreliable in embedded mode), HNSW on the remote path |
 | **Graph** | Native graph traversal via SurrealQL graph queries |
 | **Event Store** | Append-only event log with SurrealQL |
 

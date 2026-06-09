@@ -1,6 +1,6 @@
 # Chunkers
 
-Chunking is deceptively important. Split your documents wrong, and your retrieval suffers - fragments lose context, or bloated chunks dilute relevance. Split them right, and each chunk becomes a self-contained piece of knowledge.
+Chunking is deceptively important. If documents are split poorly, retrieval suffers - fragments lose context, or bloated chunks dilute relevance. Split them right, and each chunk becomes a self-contained piece of knowledge.
 
 ## Why Chunking Matters
 
@@ -12,7 +12,7 @@ Embedding models have token limits (typically 512-8192). More importantly, retri
 
 Too small:
 ```
-"Einstein developed"      <- Useless fragment
+"Einstein developed"      <- Too small to be useful
 ```
 
 Too large:
@@ -366,7 +366,7 @@ All chunkers automatically filter out empty or near-empty chunks before returnin
 # In Chunker base class (extraction/chunkers/base.py)
 MIN_CHUNK_CHARS = 10
 
-def filter_empty_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
+def filter_empty_chunks(self, chunks: list[ChunkResult]) -> list[ChunkResult]:
     """Remove chunks with fewer than MIN_CHUNK_CHARS characters."""
     return [c for c in chunks if len(c.content.strip()) >= MIN_CHUNK_CHARS]
 ```

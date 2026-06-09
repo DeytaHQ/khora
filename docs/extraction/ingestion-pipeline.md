@@ -68,7 +68,7 @@ This catches duplicates even if the filename or metadata changed. Same content =
 
 When did this content actually originate - not when it was ingested, but when it was created at the source? That instant becomes each chunk's `occurred_at` and drives temporal queries ("what was discussed last week?" should find content from last week, not content ingested last week about events from six months ago).
 
-**Recommended: pass it explicitly.** The connector knows its source's semantics, so resolve the one meaningful instant and hand it to `remember(..., source_timestamp=...)` (also accepted by `remember_batch` / `submit_batch`). An explicit value takes precedence over the metadata fallback below. ISO-8601 strings (trailing `Z`, explicit offset, or date-only `YYYY-MM-DD`) are coerced via `coerce_source_timestamp` (re-exported from `khora.pipelines`), so connectors don't need to parse upstream:
+**Recommended: pass it explicitly.** The connector knows its source's semantics, so resolve the one meaningful instant and hand it to `remember(..., source_timestamp=...)` (also accepted by `remember_batch` / `submit_batch`). An explicit value takes precedence over the metadata fallback below. ISO-8601 strings (trailing `Z`, explicit offset, or date-only `YYYY-MM-DD`) are coerced via `coerce_source_timestamp` (from `khora.pipelines.connector_metadata`), so connectors don't need to parse upstream:
 
 ```python
 await kb.remember(content, namespace=ns_id, source_timestamp="2026-05-13T14:00:00Z", ...)
@@ -164,8 +164,8 @@ Embedding is batched internally - instead of 100 API calls for 100 chunks, we ma
 entities, relationships = await extract_entities(
     chunks,
     model="gpt-4o-mini",
-    skill="general_entities",  # or domain-specific
-    max_concurrent=20          # parallel LLM calls
+    skill_name="general_entities",  # or domain-specific
+    max_concurrent=20               # parallel LLM calls
 )
 ```
 

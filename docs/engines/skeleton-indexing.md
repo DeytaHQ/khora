@@ -180,16 +180,17 @@ def _select_core_chunks(self, core_ratio: float = 0.1):
 ### During Ingestion
 
 ```python
-from khora.engines.khora.skeleton import SkeletonIndexer
+from khora.engines.skeleton.skeleton import SkeletonIndexer
 
-indexer = SkeletonIndexer()
+# core_ratio is a constructor parameter (default 0.1)
+indexer = SkeletonIndexer(core_ratio=0.1)
 
-# Add all chunks (fast, no LLM)
+# Add all chunks (fast, no LLM) - add_chunk takes a chunk object
 for chunk in chunks:
-    indexer.add_chunk(chunk.id, chunk.content)
+    indexer.add_chunk(chunk)
 
 # Build skeleton - identifies core chunks
-core_chunk_ids = indexer.build_skeleton(core_ratio=0.1)
+core_chunk_ids = indexer.build_skeleton()
 
 # Only extract entities from core chunks
 for chunk_id in core_chunk_ids:
@@ -397,10 +398,10 @@ batch_size = 1000
 for i in range(0, len(chunks), batch_size):
     batch = chunks[i:i + batch_size]
     for chunk in batch:
-        indexer.add_chunk(chunk.id, chunk.content)
+        indexer.add_chunk(chunk)
 
 # Build skeleton after all chunks added
-core_ids = indexer.build_skeleton(core_ratio=0.1)
+core_ids = indexer.build_skeleton()
 ```
 
 ### Persistence

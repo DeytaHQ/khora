@@ -214,7 +214,7 @@ await save_to_analytics(trace_dict)
 - Simple factual lookups ("what's Alice's email?")
 - Specific entity queries ("show me the Q4 report")
 - Time-sensitive real-time queries
-- When you're counting API costs
+- When you want to minimize API costs
 
 ## How Follow-Ups Are Generated
 
