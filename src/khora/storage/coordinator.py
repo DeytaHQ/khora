@@ -36,6 +36,8 @@ from khora.storage.backends.base import PaginatedResult
 from khora.telemetry import get_collector, metric_counter, trace_span
 
 if TYPE_CHECKING:
+    from khora.filter.ast import FilterNode
+
     from .backends.base import (
         EventStoreProtocol,
         GraphBackendProtocol,
@@ -620,6 +622,12 @@ class StorageCoordinator:
             entity_retirement_rows: list[dict[str, str]] = []
             entity_survivor_keys: set[tuple[str, str]] = set()
             entity_survivor_remap_rows: list[dict[str, str]] = []
+            # Co-sourced entities that the NEW extraction no longer mentions:
+            # another document still sources them (source_document_count > 1),
+            # so they must survive — but the replaced document's id must be
+            # stripped from their source_document_ids. Without this they keep a
+            # dangling reference to a document that no longer extracts them.
+            entity_survivor_strip_ids: list[UUID] = []
             for rec in old_entity_records:
                 # Belt-and-suspenders: skip cross-namespace leaks even though
                 # the prefetch Cypher is already namespace-scoped.
@@ -646,6 +654,10 @@ class StorageCoordinator:
                             "retired_at": retired_at_iso,
                         }
                     )
+                else:
+                    # Co-sourced (count > 1) and dropped from the new
+                    # extraction: keep the node, strip the old document id.
+                    entity_survivor_strip_ids.append(UUID(rec["id"]))
 
             # For relationships, identity is (src_entity, tgt_entity,
             # sanitized_type).  Both sides of the comparison are now
@@ -653,6 +665,10 @@ class StorageCoordinator:
             # correctly as survivors instead of leaking into net-new + retire.
             relationship_retirement_rows: list[dict[str, Any]] = []
             relationship_survivor_remap_rows: list[dict[str, str]] = []
+            # Mirror of entity_survivor_strip_ids for the edge side: co-sourced
+            # relationships dropped from the new extraction survive but must
+            # lose the replaced document id from their source arrays.
+            relationship_survivor_strip_ids: list[UUID] = []
             for rec in old_relationship_records:
                 rel_id = rec["id"]
                 rel_key = (
@@ -676,6 +692,10 @@ class StorageCoordinator:
                             "retired_at": retired_at,
                         }
                     )
+                else:
+                    # Co-sourced (count > 1) and dropped from the new
+                    # extraction: keep the edge, strip the old document id.
+                    relationship_survivor_strip_ids.append(UUID(rel_id))
 
             # 2. Postgres transaction: atomic chunk hard-replace.
             #    Embedding (OpenAI roundtrip) happened before this block - the
@@ -733,6 +753,20 @@ class StorageCoordinator:
                         entity_survivors=entity_survivor_remap_rows,
                         relationship_survivors=relationship_survivor_remap_rows,
                         namespace_id=namespace_id,
+                    )
+
+                # Strip the replaced document id from co-sourced survivors the
+                # new extraction no longer mentions (entities/relationships with
+                # source_document_count > 1). Unlike remap (swap old->new), these
+                # keys are absent from the new extraction, so there is no new
+                # doc id to swap in — the old id is simply removed.
+                if entity_survivor_strip_ids:
+                    await self._graph.remove_document_from_entity_sources_batch(  # type: ignore[unresolved-attribute]
+                        entity_survivor_strip_ids, old_document_id, namespace_id
+                    )
+                if relationship_survivor_strip_ids:
+                    await self._graph.remove_document_from_relationship_sources_batch(  # type: ignore[unresolved-attribute]
+                        relationship_survivor_strip_ids, old_document_id, namespace_id
                     )
 
                 net_new_entities = [e for e in new_entities if (e.name, e.entity_type) not in entity_survivor_keys]
@@ -1010,8 +1044,17 @@ class StorageCoordinator:
         language: str = "english",
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
-        """Search chunks using PostgreSQL full-text search."""
+        """Search chunks using PostgreSQL full-text search.
+
+        ``filter_ast`` is the canonical recall-filter AST. It is forwarded to
+        the relational vector backend's ``search_fulltext`` — which queries the
+        legacy ``chunks`` table (no denormalized filter columns) and therefore
+        REFUSES to return rows under an active filter rather than risk
+        smuggling unfiltered chunks. The filtered BM25 path is the
+        ``khora_chunks`` temporal store (``TemporalVectorStore.search_fulltext``).
+        """
         if not self._vector:
             raise RuntimeError("Vector backend not configured")
         return await self._vector.search_fulltext(
@@ -1021,6 +1064,7 @@ class StorageCoordinator:
             language=language,
             created_after=created_after,
             created_before=created_before,
+            filter_ast=filter_ast,
         )
 
     async def count_chunks(self, namespace_id: UUID) -> int:

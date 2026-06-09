@@ -193,6 +193,31 @@ class TestRememberResultExtractionMetadata:
         assert metadata["extraction_errors"] == 1
         assert metadata["degradations"] == degradations
 
+    def test_chunk_mirror_degradation_surfaces_without_extraction_errors(self) -> None:
+        """A chunk-mirror degradation alone (errors=0) still reaches metadata.
+
+        The Neo4j chunk-mirror failure appends a Degradation to
+        ``out_diagnostics['degradations']`` but is NOT an extraction error, so
+        ``extraction_errors`` stays 0. This guards that ``degradations`` surfaces
+        on ``RememberResult.metadata`` on its own — the existing failure test
+        always pairs degradations with a non-zero error count, which would mask a
+        regression that only emits ``degradations`` when ``extraction_errors``.
+        """
+        from khora.engines.vectorcypher.engine import _build_remember_metadata
+
+        degradations = [
+            {
+                "component": "vectorcypher.chunk_mirror",
+                "reason": "neo4j_write_failed",
+                "detail": "neo4j connection reset",
+                "exception": "RuntimeError",
+            }
+        ]
+        metadata = _build_remember_metadata({"extraction_errors": 0, "degradations": degradations})
+        assert metadata["degradations"] == degradations
+        # No extraction error occurred, so that key is absent (not 0).
+        assert "extraction_errors" not in metadata
+
     def test_none_or_empty_input_returns_empty(self) -> None:
         """Pre-fix callers that don't allocate a dict still get an empty payload."""
         from khora.engines.vectorcypher.engine import _build_remember_metadata

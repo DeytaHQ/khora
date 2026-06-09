@@ -52,7 +52,7 @@ Docker Compose is always available. Always run `make test` before opening a PR. 
 - `storage/backends/surrealdb/` - Unified SurrealDB backend
 - `db/models.py` - SQLAlchemy ORM (UUID columns use `as_uuid=True`)
 - `_accel.py` - Rust/NumPy acceleration (MMR, cosine, pagerank, entity resolution, community detection, temporal)
-- `extraction/binary_readers.py` - PDF/xlsx/docx/parquet readers; stable public boundary.
+- `extraction/binary_readers.py` - xlsx/docx/parquet readers; stable public boundary (`.pdf` raises `NotImplementedError` — preprocess upstream or use khora-cli).
 - `pipelines/flows/ingest.py` - Document ingestion pipeline (3-phase: stage → enrich → expand)
 - `db/migrations/env.py` - Alembic with advisory locking
 - `config/schema.py` - `KhoraConfig` Pydantic settings (storage, LLM, pipeline, query, tenancy)
@@ -163,7 +163,7 @@ These principles are working if: fewer unnecessary changes in diffs, fewer rewri
 ### Migrations & Schema
 - **Never use `create_tables()`** - deprecated, bypasses Alembic. Use `run_migrations()` or `Khora(run_migrations=True)`. Create new migrations with `uv run alembic revision --autogenerate -m "desc"`
 - **Version table:** `khora_alembic_version` (not `alembic_version`) - avoids conflicts with downstream apps
-- **Advisory lock:** `run_migrations()` uses `pg_advisory_xact_lock` (ID `6001515088189075507`), 60s timeout
+- **Advisory lock:** `run_migrations()` uses a session-scoped `pg_advisory_lock` (ID `6001515088189075507`), 60s timeout. Acquired before the migration transaction and released explicitly in a `finally` block. Session-scoped (not the transaction-scoped `pg_advisory_xact_lock`) because migrations run with `transaction_per_migration=True` — each migration commits its own transaction, which would release a transaction-scoped lock mid-chain
 - **Migrations bundled** in `src/khora/db/migrations/`, not `alembic/`. Root `alembic.ini` is dev-only
 - **Skip-ahead:** When multiple services share a DB with different Khora versions, `run_migrations()` detects if the DB revision is unknown (ahead) and skips gracefully - returns `MigrationResult(success=True, skipped=True)`. Signaled via `_DatabaseAheadError` from `env.py` to `session.py`
 - **Fresh-DB behavior:** On a PostgreSQL database with no `khora_alembic_version` table yet, `run_migrations()` / `Khora(run_migrations=True)` correctly creates all tables from scratch. Prior to v0.6.6, querying the missing version table inside an explicit transaction caused `InFailedSQLTransactionError`. The fix uses `information_schema.tables` to check table existence before querying it - never issuing a statement that could abort the transaction.

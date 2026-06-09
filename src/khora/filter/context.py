@@ -71,6 +71,10 @@ class SchemaCapabilities:
     * ``native_map_metadata`` — backend stores metadata as a real nested map/object
       (SurrealDB) rather than a serialized JSON string (Neo4j), so a metadata
       predicate can push down instead of falling to a post-filter.
+    * ``sqlite_json1`` — SQLite backend has the JSON1 functions (``json_extract`` /
+      ``json_type`` / ``json_each``) available, so a metadata predicate can push
+      down into the ``khora_chunks.metadata`` JSON-TEXT column; ``False`` makes the
+      SQLite compiler treat every metadata leaf as unsupported (post-filtered).
 
     ``DEFAULTS`` is the conservative all-``False`` instance — a backend with no
     declared capabilities. Engines pass a richer instance for backends that have
@@ -81,6 +85,7 @@ class SchemaCapabilities:
     jsonb_path_query: bool = False
     full_text: bool = False
     native_map_metadata: bool = False
+    sqlite_json1: bool = False
 
     # Populated after the class is defined (cannot reference the class in its own
     # body). ClassVar is excluded from ``__slots__``.
@@ -112,7 +117,11 @@ class CompileContext:
     * ``field_mapping`` — optional system-key → backend column/property name map.
       Lets one compiler serve a different schema (e.g. the legacy
       ``chunks``/``documents`` tables) without per-engine branching. ``None`` =
-      identity mapping (system key name == column name).
+      identity mapping (system key name == column name). A compiler MAY also treat
+      the KEY SET as the backend's declared+pushable property whitelist — a key
+      absent from ``field_mapping`` is then "undeclared" and not pushed down (as
+      :func:`~khora.filter.compilers.weaviate.compile_weaviate` does, leaving
+      undeclared keys to the post-filter).
     * ``schema_capabilities`` — what the backend can do natively
       (:class:`SchemaCapabilities`).
     * ``on_unsupported`` — ``"raise"`` stops on the first node the backend cannot

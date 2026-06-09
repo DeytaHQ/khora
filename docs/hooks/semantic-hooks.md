@@ -104,7 +104,7 @@ SemanticFilter(
 
 ### Level 2: LLM evaluation
 
-> **Default OFF.** Level 2 is gated by `KHORA_HOOKS_LLM_EVALUATION_ENABLED=true`. **It costs real money** - every filter with `examples` evaluated against every passing event makes a nano-LLM call (rate-limited and budgeted; see [Cost Controls](#cost-controls)). Audit your filter set and confirm the per-hour budget before flipping it on in production.
+> **Default OFF.** Level 2 is gated by `KHORA_HOOKS_LLM_EVALUATION_ENABLED=true`. **This incurs real LLM cost** - every filter with `examples` evaluated against every passing event makes a nano-LLM call (rate-limited and budgeted; see [Cost Controls](#cost-controls)). Audit your filter set and confirm the per-hour budget before flipping it on in production.
 
 Level 2 **only fires when the filter supplies `examples`** - without them the LLM has no calibration and produces noise, so the dispatcher silently skips Level 2 (Level 1 result is final). To enable the LLM tier on a filter:
 

@@ -113,8 +113,8 @@ all-backends = [
 reranking = [
     "sentence-transformers>=5.4.1",
 ]
-# Binary file readers (PDF, Excel, Word text extraction) — used by khora-cli
-binary-readers = ["pymupdf>=1.27.2", "openpyxl>=3.1.0", "python-docx>=1.2.0"]
+# Binary file readers (Excel, Word text extraction) — used by khora-cli
+binary-readers = ["openpyxl>=3.1.0", "python-docx>=1.2.0"]
 # Parquet file support (used by khora-cli)
 parquet = ["pyarrow>=24.0.0"]
 # Accelerated CPU operations (numpy for cosine sim, rapidfuzz for string matching)
@@ -144,7 +144,7 @@ nlp = ["spacy>=3.8.0"]
 # LOCKSTEP: this pin must match rust/khora-accel/Cargo.toml's version exactly.
 # Bump both in the same PR. See CLAUDE.md → Version Bumps.
 rust = [
-    "khora-accel==0.18.5",
+    "khora-accel==0.19.0",
 ]
 # SurrealDB unified backend (graph + vector + relational in one DB)
 surrealdb = ["surrealdb>=2.0.0,<3.0"]
@@ -245,7 +245,7 @@ addopts = [
     # Ladders 65 → 70 → 72 → 77 → 80 → 85 per #695.
     "--cov-fail-under=77",
     "-m",
-    "not slow",
+    "not slow and not filter_conformance",
 ]
 markers = [
     "unit: Unit tests",
@@ -255,6 +255,7 @@ markers = [
     "soak: Long-running soak/burn-in tests (skipped by default; run with -m soak --no-cov)",
     "embedded: Tests that exercise the SQLite+LanceDB embedded stack (no Docker required)",
     "security: Structural/regression tests for the security surface (IGR-225 IDOR gate, etc.)",
+    "filter_conformance: Recall-filter conformance corpus (own CI job; excluded from the main test job)",
 ]
 asyncio_mode = "auto"
 

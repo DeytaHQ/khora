@@ -3,8 +3,8 @@
 Mirrors the gating of the other real-Neo4j integration modules in this
 repo (``test_neo4j_get_entity_relationships_integration.py``): marked
 ``@pytest.mark.integration`` and skipped unless ``NEO4J_INTEGRATION_TEST=1``,
-because Khora's CI does not provision a Neo4j instance. Local developers
-running ``make dev`` can exercise these.
+because real-Neo4j tests are gated on that flag. The CI integration job
+provisions Neo4j and sets the flag; locally, run ``make dev`` first.
 
 How to run locally:
 

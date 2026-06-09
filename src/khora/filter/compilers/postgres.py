@@ -39,12 +39,13 @@ for khora's own engines; not re-exported from :mod:`khora.__init__`.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy import ColumnElement
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 from khora.filter import (
     CompileContext,
@@ -278,7 +279,7 @@ class _Builder:
                 # (so $in would wrongly match all), and sa.not_() of that empty
                 # chain is invalid SQL (so $nin would error at execute time).
                 return sa.false() if op == Op.IN else sa.true()
-            chain = sa.or_(*(self._md_containment(segs, v) for v in operand))
+            chain = sa.or_(*(self._md_in_element(segs, v) for v in operand))
             return chain if op == Op.IN else sa.not_(chain)
 
         if op == Op.EQ:
@@ -304,8 +305,9 @@ class _Builder:
         """Positive metadata equality — always a total boolean.
 
         A ``$date`` literal compares through the guarded timestamptz gate; a tuple
-        is an exact-array equality on the extracted node; any other scalar is
-        array-aware ``@>`` containment.
+        is an exact-array equality on the extracted node; a dict (sub-path
+        subdocument operand) is EXACT ``object_equal`` — ``#> = '{...}'::jsonb``,
+        NOT ``@>`` containment; any other scalar is array-aware ``@>`` containment.
         """
         if isinstance(operand, DateLiteral):
             return self._md_date_compare(segs, Op.EQ, operand)
@@ -314,7 +316,28 @@ class _Builder:
             # the path is absent, so coalesce the comparison to FALSE for totality.
             node = self._md_json(segs)
             return sa.func.coalesce(node == _jsonb_literal(list(operand)), sa.false())
+        if isinstance(operand, Mapping):
+            # Subdocument equality: EXACT object_equal, not containment. `_jsonb_literal`
+            # sorts keys, so the compare is key-order-insensitive (PG JSONB `=` is
+            # structural). `#>` is NULL on an absent path, so coalesce to FALSE.
+            node = self._md_json(segs)
+            return sa.func.coalesce(node == _jsonb_literal(dict(operand)), sa.false())
         return self._md_containment(segs, operand)
+
+    def _md_in_element(self, segs: tuple[str, ...], value: Any) -> ColumnElement[bool]:
+        """One ``$in`` / ``$nin`` operand element — total boolean.
+
+        A dict element is EXACT ``object_equal`` (``#> = '{...}'::jsonb``, NOT
+        ``@>`` containment) — mirroring the dict branch of :meth:`_md_eq`, so a
+        stored superset object does not satisfy membership. Any other element
+        (scalar / array / null) routes through array-aware ``@>`` containment.
+        Both forms are total booleans, so the OR chain (and its ``$nin``
+        negation) stays negation-safe.
+        """
+        if isinstance(value, Mapping):
+            node = self._md_json(segs)
+            return sa.func.coalesce(node == _jsonb_literal(dict(value)), sa.false())
+        return self._md_containment(segs, value)
 
     def _md_range(self, segs: tuple[str, ...], op: Op, operand: Any) -> ColumnElement[bool]:
         """A metadata range op — jsonb_typeof-gated cast, coalesced to total."""
@@ -362,16 +385,36 @@ class _Builder:
     def _md_containment(self, segs: tuple[str, ...], value: Any) -> ColumnElement[bool]:
         """Array-aware ``@>`` containment rooted at the metadata column.
 
-        For a single-segment path ``("tags",)`` this is ``metadata @> '{"tags":
-        v}'`` — which matches both a scalar field equal to ``v`` and an array
-        field containing ``v``. For a nested path the one-key doc is wrapped at
-        each segment (``{"a": {"tags": v}}``). ``@>`` returns a total boolean
-        (``FALSE`` on absent/mismatch, never ``NULL``), so it is negation-safe.
+        JSONB ``@>`` does NOT treat ``'{"tags": "x"}'`` as contained by
+        ``'{"tags": ["x"]}'`` — the array-contains-primitive exception applies
+        only when the operand itself is an array, not at a nested object key. So
+        a single ``metadata @> '{"tags": v}'`` misses an array-valued field. To
+        match BOTH a scalar field equal to ``v`` and an array field containing
+        ``v``, OR the scalar-doc form with an array-wrapped form whose leaf value
+        is a one-element list:
+
+            ``metadata @> '{"tags": v}'  OR  metadata @> '{"tags": [v]}'``
+
+        For a nested path the one-key doc is wrapped at each segment; the array
+        form wraps the LEAF value (``{"a": {"tags": v}}`` / ``{"a": {"tags":
+        [v]}}``). Each ``@>`` is a total boolean (``FALSE`` on absent/mismatch,
+        never ``NULL``), so the OR of two totals is total and negation-safe.
         """
-        doc: Any = _date_to_jsonable(value)
+        leaf = _date_to_jsonable(value)
+        scalar_doc: Any = leaf
+        array_doc: Any = [leaf]
         for seg in reversed(segs):
-            doc = {seg: doc}
-        return self._md.op("@>")(_jsonb_literal(doc))
+            scalar_doc = {seg: scalar_doc}
+            array_doc = {seg: array_doc}
+        # Both arms are `@>` probes, so a GIN index on `metadata` still serves
+        # this OR (the planner bitmap-ORs the two index scans) — do not collapse
+        # it into a non-`@>` form that loses the index. ``value is None`` only
+        # reaches here from `{k: {$in: [null, ...]}}` (a `{k: null}` $eq is routed
+        # to `_md_null` before this), where the array arm just adds `@> {k:[null]}`.
+        return sa.or_(
+            self._md.op("@>")(_jsonb_literal(scalar_doc)),
+            self._md.op("@>")(_jsonb_literal(array_doc)),
+        )
 
     def _md_exists(self, segs: tuple[str, ...]) -> ColumnElement[bool]:
         """Presence test for a metadata path — total boolean.
@@ -428,14 +471,21 @@ class _Builder:
 
 
 def _jpath(segments: tuple[str, ...]) -> ColumnElement[Any]:
-    """Build the Postgres ``text[]`` path literal ``'{a,b}'`` for ``#>`` / ``#>>``.
+    """Build the Postgres ``text[]`` path operand for ``#>`` / ``#>>``.
 
-    Each segment is double-quoted (and its backslashes / quotes escaped) so a
-    segment containing ``,`` ``{`` ``}`` or whitespace survives the array-literal
-    parse.
+    The ``#>`` / ``#>>`` operators require a ``text[]`` right operand. Binding the
+    segments as a Python list typed ``ARRAY(Text())`` makes asyncpg transmit a
+    native ``text[]`` array over the protocol — no manual array-literal string,
+    so a segment containing ``,`` ``{`` ``}`` ``"`` ``\\`` or whitespace round-trips
+    verbatim (the protocol-level encoder handles framing, not us).
+
+    Prod impact of getting this wrong: only the ``#>`` / ``#>>`` path forms were
+    affected — nested ``metadata.a.b`` paths, nested-path ``$exists``, ``$date``
+    gates, exact-array ``$eq``, and nested range ops. The single-level ``@>``
+    containment and ``?`` key-presence forms never route through ``_jpath`` and
+    were unaffected.
     """
-    inner = ",".join('"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"' for s in segments)
-    return sa.literal("{" + inner + "}")
+    return sa.literal(list(segments), type_=ARRAY(sa.Text()))
 
 
 def _jsonb_literal(value: Any) -> ColumnElement[Any]:

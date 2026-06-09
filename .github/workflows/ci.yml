@@ -315,10 +315,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     # Job-level env so every step (migrations, pytest, the conftest guard)
-    # inherits the same Postgres DSN and the loud-DB-down flag.
+    # inherits the same Postgres DSN and the loud-DB-down flag. The Neo4j
+    # vars match the contract the integration tests read (KHORA_NEO4J_URL /
+    # _USERNAME / _PASSWORD, defaults bolt://localhost:7687, neo4j, password)
+    # and NEO4J_INTEGRATION_TEST=1 flips the per-module skipif so the Neo4j
+    # graph-backend tests actually run against the side-car.
     env:
       KHORA_DATABASE_URL: postgresql://khora:khora@localhost:5434/khora
       KHORA_PG_REQUIRED: "1"
+      KHORA_NEO4J_URL: bolt://localhost:7687
+      KHORA_NEO4J_USERNAME: neo4j
+      KHORA_NEO4J_PASSWORD: password
+      NEO4J_INTEGRATION_TEST: "1"
     services:
       postgres:
         image: pgvector/pgvector:pg17
@@ -333,6 +341,21 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      neo4j:
+        image: neo4j:2025.12.1
+        env:
+          NEO4J_AUTH: neo4j/password
+        ports:
+          - 7687:7687
+        # wget the HTTP endpoint on 7474 — mirrors the compose.yaml
+        # healthcheck for this image. neo4j images take ~20-40s to start,
+        # so a generous retry budget keeps the gate from going green early.
+        options: >-
+          --health-cmd "wget -q --spider http://localhost:7474 || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -371,6 +394,23 @@ jobs:
           echo "postgres did not become ready within 60s"
           exit 1
 
+      - name: Wait for Neo4j readiness
+        # Mirrors the Postgres/Weaviate readiness loops. The services
+        # health-check already gates step start, but neo4j images take
+        # 20-40s to boot, so poll the bolt port (7687) here for a clear,
+        # early failure message if the side-car is somehow not up. Uses a
+        # bash /dev/tcp probe so no extra client (cypher-shell) is needed.
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/localhost/7687) >/dev/null 2>&1; then
+              echo "neo4j bolt ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "neo4j did not become ready within 60s"
+          exit 1
+
       - name: Apply database migrations
         # env.py normalizes the plain DSN to asyncpg internally and takes the
         # advisory lock, so a single upgrade-head here brings the shared DB to
@@ -400,7 +440,7 @@ jobs:
         # loud-DB-down guarantee is the KHORA_PG_REQUIRED guard + the migration
         # step (both fail red on PG-down) — not a coverage-collapse signal.
         run: |
-          uv run pytest tests/integration/ tests/unit/dream/test_locks.py -m integration -n 0 --cov=src/khora --cov-branch --cov-report=xml:coverage-integration.xml --cov-fail-under=0 --timeout=120 --timeout-method=thread
+          uv run pytest tests/integration/ tests/unit/dream/test_locks.py -m "integration and not filter_conformance" -n 0 --cov=src/khora --cov-branch --cov-report=xml:coverage-integration.xml --cov-fail-under=0 --timeout=120 --timeout-method=thread
 
       - name: Upload integration coverage to Codecov
         uses: codecov/codecov-action@v5

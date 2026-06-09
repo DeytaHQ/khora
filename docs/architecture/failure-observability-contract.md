@@ -112,7 +112,7 @@ engine plugin's `dream_capabilities`. Each entry is shaped
 threads it through `_temporal_channel` and `_temporal_channel_chunks_fallback`,
 and attaches the populated list to `RecallResult.engine_info["degradations"]`.
 
-Six call sites record entries:
+Eight call sites record entries:
 
 | Site                                      | `component`                     | `reason`                       |
 | ----------------------------------------- | ------------------------------- | ------------------------------ |

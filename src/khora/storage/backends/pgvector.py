@@ -11,11 +11,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+import sqlalchemy as sa
 from loguru import logger
 from sqlalchemy import delete, func, literal_column, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
+from khora.core.diagnostics import Degradation
 from khora.core.models import Chunk
 from khora.db.models import (
     Base,
@@ -30,7 +32,7 @@ from khora.storage.backends.mixins import AsyncSessionMixin
 from khora.telemetry import trace
 
 if TYPE_CHECKING:
-    pass
+    from khora.filter.ast import FilterNode
 
 try:
     import numpy as np
@@ -41,6 +43,60 @@ except ImportError:
 
 
 _DEADLOCK_MAX_RETRIES = 3
+
+# Caps on retained source-id provenance per entity, per column. Mirror Neo4j's
+# defaults (see neo4j.py): documents capped at 100
+# (``entity_source_document_ids_max``) and chunks capped at 250
+# (``entity_source_chunk_ids_max``). The two backends must agree per column so
+# forget()'s survivor-strip behaves identically across a PG+Neo4j stack.
+_SOURCE_DOCUMENT_IDS_CAP = 100  # mirrors Neo4j entity_source_document_ids_max
+_SOURCE_CHUNK_IDS_CAP = 250  # mirrors Neo4j entity_source_chunk_ids_max
+
+
+def _accumulate_source_ids_sql(column: str) -> sa.TextClause:
+    """Build the ON CONFLICT set-expression that accumulates source ids.
+
+    Mirrors Neo4j's ``ON MATCH SET e.source_*_ids = (existing + incoming)[-N..]``
+    semantics (neo4j.py:1714-1715) but adds a dedup pass so re-extracting the
+    same document many times does NOT evict prior *distinct* provenance ids.
+
+    The existing row is referenced by the table name ``entities``; the proposed
+    row by ``excluded``. The two arrays are concatenated (existing first, so
+    incoming ids carry the higher ordinals), grouped by element to dedup while
+    keeping each id's most-recent position, capped to the column's most-recent
+    DISTINCT ids, and re-aggregated newest-last so the tail holds the freshest
+    provenance (matching Neo4j's tail-cap order). The cap is per column:
+    ``source_document_ids`` keeps ``_SOURCE_DOCUMENT_IDS_CAP`` (100, mirroring
+    Neo4j ``entity_source_document_ids_max``) and ``source_chunk_ids`` keeps
+    ``_SOURCE_CHUNK_IDS_CAP`` (250, mirroring Neo4j
+    ``entity_source_chunk_ids_max``).
+
+    Note the dedup asymmetry: Neo4j does NOT dedup — it concatenates and
+    tail-slices, so it can hold duplicate ids — whereas pgvector dedups here.
+    forget() is resilient to the difference because ``_is_orphan`` /
+    ``_is_survivor`` (engines/_forget_cascade.py) only check membership + length,
+    not exact content.
+
+    ``column`` is ``"source_document_ids"`` or ``"source_chunk_ids"``. The cap is
+    an int constant inlined into the SQL (no bind param — a bind param could
+    collide with the executemany VALUES binding); ``column`` is never
+    caller-supplied so there is no injection surface.
+    """
+    _caps = {
+        "source_document_ids": _SOURCE_DOCUMENT_IDS_CAP,
+        "source_chunk_ids": _SOURCE_CHUNK_IDS_CAP,
+    }
+    cap = _caps[column]
+    # `column` is one of two hard-coded literals and the cap is an int constant,
+    # so no user input reaches this SQL (bind params are deliberately avoided so
+    # they can't collide with the executemany VALUES binding) — hence noqa: S608.
+    return sa.text(
+        f"(SELECT COALESCE(array_agg(elem ORDER BY last_ord), ARRAY[]::uuid[]) "  # noqa: S608
+        f"FROM (SELECT elem, MAX(ord) AS last_ord "
+        f"FROM unnest(COALESCE(entities.{column}, ARRAY[]::uuid[]) || excluded.{column}) "
+        f"WITH ORDINALITY AS u(elem, ord) "
+        f"GROUP BY elem ORDER BY MAX(ord) DESC LIMIT {cap}) d)"
+    )
 
 
 def _namespace_lock_keys(namespace_id: UUID) -> tuple[int, int]:
@@ -760,12 +816,42 @@ class PgVectorBackend(AsyncSessionMixin):
         language: str = "english",
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Search chunks using PostgreSQL full-text search with ts_rank.
 
         Uses the content_tsv generated column and GIN index for efficient
         full-text matching.
+
+        ``filter_ast`` REFUSAL (ADR-001): this backend reads the relational
+        ``chunks`` table, which lacks the denormalized filter columns the
+        recall-filter compiler targets (``khora_chunks``). It therefore CANNOT
+        honor a recall filter here. When ``filter_ast`` is present we return
+        ``[]`` and log a WARNING rather than attempt to compile the
+        ``khora_chunks`` predicate (would SQL-error) or return unfiltered rows
+        (would smuggle filter-violating chunks into RRF — forbidden, no PG
+        post-filter backstop). The filtered BM25 path is the ``khora_chunks``
+        temporal store's ``search_fulltext``; callers route the filtered query
+        there (the VectorCypher retriever skips this fallback under a filter).
         """
+        if filter_ast is not None:
+            # Deliberate refusal, not a caught exception: WARNING + Degradation
+            # (ADR-001), no result carrier on this bare-list method so the log
+            # is the surfaced signal. No new metric (telemetry-contract churn).
+            degradation = Degradation(
+                component="pgvector.search_fulltext",
+                reason="recall_filter_unsupported_on_relational_chunks",
+                detail=(
+                    "filter_ast present but relational chunks table lacks denormalized "
+                    "filter columns; use khora_chunks temporal store"
+                ),
+                exception=None,
+            )
+            logger.warning(
+                "Relational chunks BM25 search refused under an active recall filter: {}",
+                degradation,
+            )
+            return []
         async with self._get_session() as session:
             # OR the query terms instead of plainto_tsquery's implicit AND: a
             # full-sentence question rarely has every content word in one chunk,
@@ -871,8 +957,8 @@ class PgVectorBackend(AsyncSessionMixin):
                 set_={
                     "description": stmt.excluded.description,
                     "attributes": stmt.excluded.attributes,
-                    "source_document_ids": stmt.excluded.source_document_ids,
-                    "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                    "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
+                    "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
                     "mention_count": stmt.excluded.mention_count,
                     "embedding": stmt.excluded.embedding,
                     "embedding_model": stmt.excluded.embedding_model,
@@ -1068,8 +1154,8 @@ class PgVectorBackend(AsyncSessionMixin):
                         set_={
                             "description": stmt.excluded.description,
                             "attributes": stmt.excluded.attributes,
-                            "source_document_ids": stmt.excluded.source_document_ids,
-                            "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                            "source_document_ids": _accumulate_source_ids_sql("source_document_ids"),
+                            "source_chunk_ids": _accumulate_source_ids_sql("source_chunk_ids"),
                             "mention_count": stmt.excluded.mention_count,
                             "embedding": stmt.excluded.embedding,
                             "embedding_model": stmt.excluded.embedding_model,

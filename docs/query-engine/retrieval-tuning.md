@@ -4,7 +4,7 @@ This document explains changes made to Khora's retrieval pipeline in response to
 
 ## Background: What the Benchmarks Showed
 
-We ran the `retrieval_basic` benchmark (120 documents, 55 queries across 3 difficulty levels) against four systems. Khora had a serious problem: **25.5% of queries returned zero results**. Not low-quality results - literally nothing.
+We ran the `retrieval_basic` benchmark (120 documents, 55 queries across 3 difficulty levels) against four systems. The benchmark surfaced a clear issue: **25.5% of queries returned zero results**. Not low-quality results - literally nothing.
 
 The strangest finding was that Khora performed *worst on the easiest queries*. Simple factual lookups like "wrought-iron tower built for the 1889 World's Fair in Paris" (expecting the Eiffel Tower document) returned nothing, while complex multi-concept queries like "quantum mechanical effects near black hole event horizons" returned perfect results.
 
@@ -111,9 +111,9 @@ File changed: `query/engine.py`
 
 ### Entity Linking Thresholds (P2)
 
-The fuzzy matching threshold dropped from 0.8 to 0.6, and the embedding similarity threshold from 0.7 to 0.4.
+The fuzzy matching threshold dropped from 0.8 to 0.5, and the embedding similarity threshold from 0.7 to 0.4.
 
-The previous 0.8 fuzzy threshold required near-exact string matches (e.g., "Einstein" would match "Einstien" but not "Albert Einstein"). At 0.6, more reasonable variations get through to the linking step, where further disambiguation happens.
+The previous 0.8 fuzzy threshold required near-exact string matches (e.g., "Einstein" would match "Einstien" but not "Albert Einstein"). At 0.5, more reasonable variations get through to the linking step, where further disambiguation happens.
 
 The 0.7 embedding threshold for entity linking was stricter than the chunk similarity threshold, which made no sense - if you're willing to consider a chunk at 0.3 similarity, you should be willing to consider an entity match at 0.4.
 
@@ -164,7 +164,7 @@ Environment variables:
 ```bash
 KHORA_QUERY_MIN_CHUNK_SIMILARITY=0.05     # default
 KHORA_QUERY_MIN_ENTITY_SIMILARITY=0.05    # default
-KHORA_QUERY_ENTITY_LINKING_FUZZY_THRESHOLD=0.6
+KHORA_QUERY_ENTITY_LINKING_FUZZY_THRESHOLD=0.5    # default
 KHORA_QUERY_ENTITY_LINKING_EMBEDDING_THRESHOLD=0.4
 ```
 

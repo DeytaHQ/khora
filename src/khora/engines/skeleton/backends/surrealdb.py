@@ -22,11 +22,11 @@ from khora.engines.skeleton.backends import (
     TemporalVectorStore,
     temporal_chunk_to_chunk,
 )
+from khora.filter.model import Op
 from khora.storage.backends.surrealdb._helpers import (
     _parse_dt,
     _parse_uuid,
     _rid,
-    _sanitize_field_name,
 )
 from khora.storage.backends.surrealdb.connection import SurrealDBConnection
 from khora.telemetry import trace, trace_span
@@ -95,6 +95,22 @@ _TEMPORAL_CHUNK_SEARCH_INDEXES = """
 DEFINE INDEX IF NOT EXISTS idx_tc_embedding ON temporal_chunk FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32 EFC 128 M 24;
 DEFINE INDEX IF NOT EXISTS idx_tc_content_ft ON temporal_chunk FIELDS content SEARCH ANALYZER khora_fulltext BM25;
 """
+
+# Legacy ``TemporalFilter.additional`` range-op names → the canonical filter Op,
+# so the deterministic-filter compiler can build a type-gated metadata compare.
+_LEGACY_RANGE_OPS: dict[str, Op] = {
+    "gt": Op.GT,
+    "gte": Op.GTE,
+    "lt": Op.LT,
+    "lte": Op.LTE,
+}
+
+# Every legacy ``additional`` op routed through the deterministic-filter compiler.
+# ``eq`` is included so the bare-equality path is validated through the same
+# injection guard as the range ops — its $eq metadata emission is a plain
+# ``(metadata_.<path> = $b)`` (no type-gate), preserving the equality semantics
+# callers depend on while no longer interpolating an unvalidated user key.
+_LEGACY_OPS: dict[str, Op] = {"eq": Op.EQ, **_LEGACY_RANGE_OPS}
 
 
 class SurrealDBTemporalStore(TemporalVectorStore):
@@ -320,8 +336,9 @@ class SurrealDBTemporalStore(TemporalVectorStore):
     ) -> list[TemporalSearchResult]:
         """Search temporal chunks with optional hybrid (vector + BM25) ranking.
 
-        ``filter_ast`` is accepted for protocol parity; this backend does not
-        compile the recall-filter AST yet, so it is ignored.
+        ``filter_ast`` is the deterministic recall-filter AST. When provided it
+        is compiled to a SurrealQL ``WHERE`` predicate and AND-ed alongside the
+        legacy ``temporal_filter`` clauses.
         """
         with trace_span(
             "khora.temporal_store.search",
@@ -337,6 +354,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
                 temporal_filter=temporal_filter,
                 hybrid_alpha=hybrid_alpha,
                 query_text=query_text,
+                filter_ast=filter_ast,
             )
             _span.set_attribute("result_count", len(results))
             return results
@@ -351,9 +369,32 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         temporal_filter: TemporalFilter | None = None,
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
         # Build shared WHERE clauses from temporal_filter
         filter_clauses, filter_bindings = self._build_filter_clauses(namespace_id, temporal_filter)
+
+        # Deterministic recall-filter AST: compile to a SurrealQL predicate and
+        # AND it into the shared clauses. ``field_mapping`` maps the ``metadata``
+        # root to the physical ``metadata_`` column so a metadata path descends
+        # natively; system keys map identity (the table stores them as bare
+        # columns). The compiler runs in on_unsupported="raise" mode — the
+        # skeleton engine has no post-filter path, so partial pushdown ("split")
+        # is never consumed here.
+        if filter_ast is not None:
+            from khora.filter import CompileContext
+            from khora.filter.compilers.surrealdb import compile_surrealdb
+
+            compiled = compile_surrealdb(
+                filter_ast,
+                CompileContext(
+                    backend_target="temporal_chunk",
+                    field_mapping={"metadata": "metadata_"},
+                    on_unsupported="raise",
+                ),
+            )
+            filter_clauses.append(compiled.predicate)
+            filter_bindings.update(compiled.params)
 
         # Determine search strategy
         pure_bm25 = hybrid_alpha is not None and hybrid_alpha == 0.0
@@ -454,12 +495,16 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         limit: int = 10,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Public BM25 lookup over the SurrealDB temporal-chunk table.
 
         See :func:`temporal_chunk_to_chunk` for the ``TemporalChunk`` →
         ``Chunk`` adaptation. Falls back to ``[]`` on backends without
         a BM25 index configured (``optimize_storage()`` not yet run).
+
+        ``filter_ast`` is accepted for protocol parity; this backend does not
+        compile the recall-filter AST yet, so it is ignored.
         """
         if not query_text or not query_text.strip():
             return []
@@ -709,31 +754,72 @@ class SurrealDBTemporalStore(TemporalVectorStore):
             clauses.append("tags CONTAINSALL $filter_tags")
             bindings["filter_tags"] = f.tags
 
-        # Additional structured filters
+        # Additional structured filters. EVERY user key is routed through the
+        # deterministic-filter SurrealDB compiler so its injection guard validates
+        # each path segment (``TemporalFilter.additional`` keys are NOT
+        # char-restricted upstream — interpolating one verbatim is an injection
+        # surface). Range comparisons additionally get a ``type::is::*`` gate
+        # (numeric ordering, not lexicographic; wrong-typed values gated out);
+        # ``eq`` emits a plain ``(metadata_.<path> = $b)``, preserving the
+        # equality semantics callers depend on. This replaces the old
+        # ``_sanitize_field_name`` string mangling.
         for i, (key, value) in enumerate(f.additional.items()):
-            safe_key = _sanitize_field_name(key)
             if isinstance(value, dict):
                 for op, val in value.items():
-                    param = f"af_{i}_{op}"
-                    if op == "eq":
-                        clauses.append(f"metadata_.{safe_key} = ${param}")
-                    elif op == "gte":
-                        clauses.append(f"metadata_.{safe_key} >= ${param}")
-                    elif op == "lte":
-                        clauses.append(f"metadata_.{safe_key} <= ${param}")
-                    elif op == "gt":
-                        clauses.append(f"metadata_.{safe_key} > ${param}")
-                    elif op == "lt":
-                        clauses.append(f"metadata_.{safe_key} < ${param}")
-                    else:
+                    if op not in _LEGACY_OPS:
                         continue
-                    bindings[param] = val
+                    predicate, binds = SurrealDBTemporalStore._legacy_metadata_predicate(key, op, val, f"af_{i}_{op}")
+                    clauses.append(predicate)
+                    bindings.update(binds)
             else:
-                param = f"af_{i}"
-                clauses.append(f"metadata_.{safe_key} = ${param}")
-                bindings[param] = value
+                predicate, binds = SurrealDBTemporalStore._legacy_metadata_predicate(key, "eq", value, f"af_{i}_eq")
+                clauses.append(predicate)
+                bindings.update(binds)
 
         return clauses, bindings
 
+    @staticmethod
+    def _legacy_metadata_predicate(key: str, op: str, val: Any, param_namespace: str) -> tuple[str, dict[str, Any]]:
+        """Compile a legacy ``additional`` metadata predicate via the recall-filter compiler.
+
+        Reuses the deterministic-filter SurrealDB compiler so the (possibly
+        dotted) ``key`` is validated through the compiler's injection guard before
+        any interpolation — an unsafe segment raises
+        :class:`~khora.filter.context.CompileError`. ``op`` is one of
+        ``eq``/``gt``/``gte``/``lt``/``lte`` (an :data:`_LEGACY_OPS` key); a range
+        op also emits a ``type::is::*`` gate so a numeric value orders numerically
+        and a wrong-typed value is excluded, while ``eq`` emits a plain
+        ``(metadata_.<path> = $b)`` equality. ``key`` is split on ``.`` into a
+        nested path. Returns the SurrealQL fragment + its binds, named under
+        ``param_namespace`` so concurrent legacy keys never collide.
+        """
+        from khora.filter.ast import FilterClause
+        from khora.filter.compilers.surrealdb import _Builder
+        from khora.filter.context import CompileContext
+
+        builder = _Builder(
+            ctx=CompileContext(
+                backend_target="temporal_chunk",
+                param_namespace=param_namespace,
+                field_mapping={"metadata": "metadata_"},
+            ),
+            consumed=set(),
+        )
+        clause = FilterClause(path=("metadata", *key.split(".")), op=_LEGACY_OPS[op], operand=val)
+        predicate = builder.compile_clause(clause)
+        return predicate, builder.params
+
 
 __all__ = ["SurrealDBTemporalStore"]
+
+
+# Register the deterministic recall-filter compiler for this engine/target at
+# import time (idempotent — same function object). ``surrealdb.py`` is imported
+# lazily by ``create_temporal_store("surrealdb", ...)``, so registration happens
+# exactly when the SurrealDB backend is first constructed — no eager cost, and no
+# registration when the backend is unused. Mirrors ``pgvector.py``'s
+# ``skeleton.pgvector`` registration.
+from khora.filter import CompilerRegistry  # noqa: E402
+from khora.filter.compilers.surrealdb import compile_surrealdb  # noqa: E402
+
+CompilerRegistry.register("skeleton.surrealdb", "temporal_chunk", compile_surrealdb)

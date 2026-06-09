@@ -194,7 +194,9 @@ TemporalFilter.after("2023-06-01")
 Recency bias can also be applied - recent content scores higher.
 Recency weighting is configured globally via `QueryConfig.apply_recency_bias`
 and `QueryConfig.recency_weight`; the legacy `recency_bias=` knob isn't
-exposed on the current public surface.
+exposed on the current public surface. Recency bias is **off by default**
+(`apply_recency_bias=False`); when enabled, the defaults are
+`recency_weight=0.35` and `recency_decay_days=7.0`.
 
 ## Step 5b: MMR Diversity Selection (Optional)
 
@@ -230,9 +232,10 @@ QueryResult(
         entities_linked=["Albert Einstein"],
         relationships_traversed=[("Einstein", "AUTHORED", "Relativity Paper")]
     ),
-    search_contributions=SearchContributions(vector=4, graph=3, keyword=1)
 )
 ```
+
+Per-method search contributions (vector / graph / keyword counts, latencies, score ranges) are not a hand-constructed field - they surface on `engine_info["search_methods"]["by_method"]` (see below).
 
 > **Two retrieval surfaces, two result shapes.** Khora exposes two independent retrieval paths and they intentionally use different result types:
 >

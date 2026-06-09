@@ -14,6 +14,7 @@ from khora.engines.vectorcypher.engine import (
     ExtractionQualityMetrics,
     VectorCypherConfig,
     VectorCypherEngine,
+    _mirror_chunks_or_degrade,
 )
 from khora.khora import RecallResult
 
@@ -1432,6 +1433,7 @@ class TestVectorCypherEngineForget:
         engine._storage.vector.remove_document_from_entity_sources = AsyncMock()
         engine._storage.vector.remove_document_from_relationship_sources = AsyncMock()
         engine._storage.graph = MagicMock()
+        engine._storage.graph.list_relationships = AsyncMock(return_value=[])
         engine._storage.graph.delete_entities_batch = AsyncMock()
         engine._storage.graph.delete_relationships_batch = AsyncMock()
         engine._storage.graph.remove_document_from_entity_sources_batch = AsyncMock()
@@ -1603,10 +1605,41 @@ class TestVectorCypherEngineForget:
             [survivor_rel_id], doc_id
         )
         connected_engine._storage.graph.remove_document_from_relationship_sources_batch.assert_awaited_once_with(
-            [survivor_rel_id], doc_id
+            [survivor_rel_id], doc_id, namespace_id
         )
         connected_engine._storage.graph.delete_relationships_batch.assert_not_called()
         connected_engine._storage.vector.delete_relationships_batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_forget_cascade_classifies_relationships_from_graph_mirror(
+        self, connected_engine: VectorCypherEngine
+    ) -> None:
+        """On PG+graph stacks the vector relationships table is empty, so the
+        cascade falls back to the graph mirror to classify survivor
+        relationships; the forgotten doc id is still stripped on the mirror."""
+        doc_id = uuid4()
+        namespace_id = uuid4()
+        survivor_rel_id = uuid4()
+        other_doc = uuid4()
+
+        doc_mock = MagicMock()
+        doc_mock.namespace_id = namespace_id
+        connected_engine._storage.get_document = AsyncMock(return_value=doc_mock)
+        connected_engine._storage.delete_document = AsyncMock(return_value=True)
+        # Primary (pgvector) holds no relationships; the mirror (graph) does.
+        connected_engine._storage.vector.list_relationships = AsyncMock(return_value=[])
+        connected_engine._storage.graph.list_relationships = AsyncMock(
+            return_value=[_ent(survivor_rel_id, [doc_id, other_doc])]
+        )
+
+        await connected_engine.forget(doc_id, namespace_id)
+
+        # The survivor relationship is classified off the mirror and stripped
+        # there, scoped to the namespace.
+        connected_engine._storage.graph.remove_document_from_relationship_sources_batch.assert_awaited_once_with(
+            [survivor_rel_id], doc_id, namespace_id
+        )
+        connected_engine._storage.graph.delete_relationships_batch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_forget_cascade_zero_extraction_skips_backend_calls(
@@ -2301,6 +2334,102 @@ class TestProcessDocumentWindowing:
         persisted_doc = engine._storage.update_document.await_args.args[0]
         assert persisted_doc.relationship_count == rels
 
+    @pytest.mark.asyncio
+    async def test_neo4j_chunk_mirror_failure_does_not_abort_ingest(self, engine: VectorCypherEngine) -> None:
+        """A Neo4j chunk-mirror write failure degrades, it does not propagate (ADR-001).
+
+        Chunks are already durably stored in pgvector before the Neo4j mirror, so
+        a graph-side write failure must NOT abort the document ingest. The create
+        path catches the exception, records a ``vectorcypher.chunk_mirror``
+        Degradation in ``out_diagnostics['degradations']``, and the document still
+        completes with its full chunk count.
+        """
+        engine._vc_config = VectorCypherConfig(max_chunks_in_flight=None)
+
+        raw_chunks = [self._make_raw_chunk(f"chunk {i}") for i in range(3)]
+        doc = MagicMock()
+        doc.id = uuid4()
+        doc.namespace_id = uuid4()
+        doc.content = "test content"
+        doc.metadata = {}
+
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = raw_chunks
+        engine._embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536] * len(texts))
+        engine._temporal_store.create_chunks_batch = AsyncMock(
+            side_effect=lambda chunks: [MagicMock(id=uuid4()) for _ in chunks]
+        )
+        # The graph mirror raises — the failure mode under test.
+        engine._dual_nodes.create_chunk_nodes_batch = AsyncMock(side_effect=RuntimeError("neo4j connection reset"))
+
+        out_diagnostics: dict[str, object] = {}
+        with (
+            patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker),
+            patch("khora.engines.vectorcypher.engine._CHUNK_MIRROR_DEGRADED_COUNTER") as mock_counter,
+        ):
+            total_chunks, _, _ = await engine._process_document(
+                doc,
+                skill_name="default",
+                occurred_at=datetime.now(UTC),
+                entity_types=[],
+                relationship_types=[],
+                out_diagnostics=out_diagnostics,
+            )
+
+        # The mirror was attempted and failed, but ingest still completed with the
+        # full chunk count from pgvector — the exception did NOT propagate.
+        engine._dual_nodes.create_chunk_nodes_batch.assert_awaited_once()
+        assert total_chunks == 3
+        engine._storage.update_document.assert_awaited()
+
+        # The degradation is recorded for downstream observability (ADR-001).
+        degradations = out_diagnostics.get("degradations", [])
+        chunk_mirror = [d for d in degradations if d.get("component") == "vectorcypher.chunk_mirror"]
+        assert len(chunk_mirror) == 1, f"expected one chunk_mirror degradation, got {degradations}"
+        entry = chunk_mirror[0]
+        assert entry["reason"] == "neo4j_write_failed"
+        assert entry["exception"] == "RuntimeError"
+        assert "neo4j connection reset" in (entry.get("detail") or "")
+
+        # The degraded_total counter is incremented with the bounded labels —
+        # this is part of the observable telemetry contract for the failure.
+        mock_counter.add.assert_called_once_with(1, attributes={"channel": "graph", "reason": "neo4j_write_failed"})
+
+    @pytest.mark.asyncio
+    async def test_neo4j_chunk_mirror_success_records_no_degradation(self, engine: VectorCypherEngine) -> None:
+        """Happy path: a successful mirror leaves no chunk_mirror degradation."""
+        engine._vc_config = VectorCypherConfig(max_chunks_in_flight=None)
+
+        raw_chunks = [self._make_raw_chunk("chunk 0")]
+        doc = MagicMock()
+        doc.id = uuid4()
+        doc.namespace_id = uuid4()
+        doc.content = "test content"
+        doc.metadata = {}
+
+        mock_chunker = MagicMock()
+        mock_chunker.chunk.return_value = raw_chunks
+        engine._embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.1] * 1536] * len(texts))
+        engine._temporal_store.create_chunks_batch = AsyncMock(
+            side_effect=lambda chunks: [MagicMock(id=uuid4()) for _ in chunks]
+        )
+        engine._dual_nodes.create_chunk_nodes_batch = AsyncMock(return_value=[uuid4()])
+
+        out_diagnostics: dict[str, object] = {}
+        with patch("khora.extraction.chunkers.create_chunker", return_value=mock_chunker):
+            total_chunks, _, _ = await engine._process_document(
+                doc,
+                skill_name="default",
+                occurred_at=datetime.now(UTC),
+                entity_types=[],
+                relationship_types=[],
+                out_diagnostics=out_diagnostics,
+            )
+
+        assert total_chunks == 1
+        degradations = out_diagnostics.get("degradations", [])
+        assert not [d for d in degradations if d.get("component") == "vectorcypher.chunk_mirror"]
+
 
 @pytest.mark.unit
 class TestVectorCypherEngineApiTemporalFilter:
@@ -2448,3 +2577,58 @@ class TestRerankingConfigReconcile:
         cfg = self._config()
         cfg.query.enable_reranking = False
         assert VectorCypherEngine(cfg)._vc_config.enable_reranking is False
+
+
+@pytest.mark.unit
+class TestMirrorChunksOrDegrade:
+    """The shared chunk-mirror helper used by the create, replace, and batch
+    ingest paths — uniform degrade-and-continue behavior + observability."""
+
+    @pytest.mark.asyncio
+    async def test_none_dual_nodes_is_noop(self) -> None:
+        """No graph backend (e.g. SurrealDB) → no-op: no counter, no degradation."""
+        out: dict = {}
+        with patch("khora.engines.vectorcypher.engine._CHUNK_MIRROR_DEGRADED_COUNTER") as counter:
+            await _mirror_chunks_or_degrade(None, [MagicMock()], uuid4(), out)
+        counter.add.assert_not_called()
+        assert out == {}
+
+    @pytest.mark.asyncio
+    async def test_success_records_nothing(self) -> None:
+        """A successful mirror write leaves no counter increment / degradation."""
+        dual = MagicMock()
+        dual.create_chunk_nodes_batch = AsyncMock(return_value=[uuid4()])
+        out: dict = {}
+        with patch("khora.engines.vectorcypher.engine._CHUNK_MIRROR_DEGRADED_COUNTER") as counter:
+            await _mirror_chunks_or_degrade(dual, [MagicMock()], uuid4(), out)
+        dual.create_chunk_nodes_batch.assert_awaited_once()
+        counter.add.assert_not_called()
+        assert out == {}
+
+    @pytest.mark.asyncio
+    async def test_failure_degrades_and_counts_without_raising(self) -> None:
+        """A mirror failure increments the counter, records a Degradation, and does NOT raise."""
+        dual = MagicMock()
+        dual.create_chunk_nodes_batch = AsyncMock(side_effect=RuntimeError("neo4j down"))
+        out: dict = {}
+        with patch("khora.engines.vectorcypher.engine._CHUNK_MIRROR_DEGRADED_COUNTER") as counter:
+            # Must not raise.
+            await _mirror_chunks_or_degrade(dual, [MagicMock(), MagicMock()], uuid4(), out)
+        counter.add.assert_called_once_with(1, attributes={"channel": "graph", "reason": "neo4j_write_failed"})
+        degradations = out["degradations"]
+        assert len(degradations) == 1
+        entry = degradations[0]
+        assert entry["component"] == "vectorcypher.chunk_mirror"
+        assert entry["reason"] == "neo4j_write_failed"
+        assert entry["exception"] == "RuntimeError"
+        assert "neo4j down" in (entry.get("detail") or "")
+
+    @pytest.mark.asyncio
+    async def test_failure_without_diagnostics_sink_still_counts(self) -> None:
+        """When no out_diagnostics is supplied (batch path), the counter still fires."""
+        dual = MagicMock()
+        dual.create_chunk_nodes_batch = AsyncMock(side_effect=RuntimeError("boom"))
+        with patch("khora.engines.vectorcypher.engine._CHUNK_MIRROR_DEGRADED_COUNTER") as counter:
+            # No diagnostics dict, must not raise.
+            await _mirror_chunks_or_degrade(dual, [MagicMock()], uuid4(), None)
+        counter.add.assert_called_once_with(1, attributes={"channel": "graph", "reason": "neo4j_write_failed"})

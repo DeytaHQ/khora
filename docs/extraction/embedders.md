@@ -1,6 +1,6 @@
 # Embedders
 
-Embeddings are the magic that makes semantic search work. An embedder converts text into vectors - lists of numbers that capture meaning. Similar concepts get similar vectors, enabling "find things like this" queries even when the exact words differ.
+Embeddings are what make semantic search work. An embedder converts text into vectors - lists of numbers that capture meaning. Similar concepts get similar vectors, enabling "find things like this" queries even when the exact words differ.
 
 ## What Embeddings Do
 
@@ -216,15 +216,15 @@ The embedder automatically truncates texts that exceed the model's token limit b
 ```python
 # Handled automatically - no configuration needed
 embedding = await embedder.embed(very_long_text)
-# Text is truncated at sentence boundaries if too long
+# Text is truncated to the token limit if too long
 ```
 
 **How it works:**
-1. Estimates token count using `tiktoken` (when available) or a character-based heuristic
-2. If the text exceeds the model's limit (e.g., 8191 tokens for `text-embedding-3-small`), truncates at the nearest sentence boundary
-3. Falls back to word boundary truncation if no sentence break is found
+1. Encodes the text with `tiktoken` (when available) using the `cl100k_base` encoding
+2. If the token count exceeds the model's limit (e.g., 8191 tokens for `text-embedding-3-small`), keeps the first `max_tokens` tokens and decodes them back to text (a plain token slice - no sentence or word boundary detection)
+3. If `tiktoken` is unavailable, falls back to a conservative character slice (~3.5 chars/token)
 
-This eliminates API errors from oversized inputs and ensures truncation preserves semantic coherence by breaking at natural language boundaries.
+This eliminates API errors from oversized inputs.
 
 ## Pre-Normalized Embeddings
 

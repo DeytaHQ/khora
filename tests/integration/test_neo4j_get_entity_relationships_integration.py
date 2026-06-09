@@ -108,6 +108,7 @@ class TestNeo4jGetEntityRelationshipsIntegration:
 
             got = await backend.get_entity_relationships(
                 entity_a.id,
+                namespace_id=namespace_id,
                 direction="outgoing",
             )
 

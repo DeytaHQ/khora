@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from loguru import logger
@@ -25,6 +25,9 @@ from khora.core.models.recall import DocumentProjection
 from khora.core.models.tenancy import TenancyMode
 from khora.storage.backends._fts5 import escape_fts5_query
 from khora.storage.backends.base import PaginatedResult
+
+if TYPE_CHECKING:
+    from khora.filter.ast import FilterNode
 
 # ---------------------------------------------------------------------------
 # Schema DDL
@@ -1202,8 +1205,14 @@ class SQLiteVectorBackend:
         *,
         limit: int = 10,
         language: str = "english",
+        filter_ast: FilterNode | None = None,
     ) -> list[tuple[Chunk, float]]:
-        """Full-text search via FTS5."""
+        """Full-text search via FTS5.
+
+        ``filter_ast`` is accepted for protocol parity (the coordinator
+        forwards it uniformly); this backend does not compile the recall
+        filter, so it is ignored.
+        """
         match_expr = escape_fts5_query(query_text)
         if not match_expr:
             return []

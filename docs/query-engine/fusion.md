@@ -58,7 +58,7 @@ Total RRF score: 0.00820
 
 Document D scores higher (0.01596 vs 0.00820) because it appears in multiple sources, even though E ranked #1 in vector search.
 
-This is exactly what we want: **documents found by multiple methods get boosted**.
+This is the behavior we're after: **documents found by multiple methods get boosted**.
 
 ## The K Parameter
 

@@ -79,7 +79,7 @@ provider = KhoraMemoryProvider(kb=kb)
 ```
 
 `kb` is REQUIRED. The factory does not silently call `Khora.shared()`
-- adapter lifecycle is the caller's problem. The example plugin is
+- adapter lifecycle is the caller's responsibility. The example plugin is
 the only place `Khora.shared()` is wired in.
 
 ## Namespace mapping

@@ -19,6 +19,7 @@ from pydantic import SecretStr
 
 from khora.engines.skeleton.backends import TemporalChunk
 from khora.engines.skeleton.backends.weaviate import (
+    _FILTER_OVERFETCH,
     COLLECTION_NAME,
     WeaviateBackendConfig,
     WeaviateTemporalStore,
@@ -27,6 +28,8 @@ from khora.engines.skeleton.backends.weaviate import (
     _extract_vector,
     _parse_host_port,
 )
+from khora.filter import RecallFilter
+from khora.filter.ast import parse_to_ast
 
 # ---------------------------------------------------------------------------
 # WeaviateBackendConfig validation
@@ -470,3 +473,274 @@ class TestCRUD:
         ok = await store.delete_chunk(uuid4(), uuid4())
         assert ok is True
         tenant_scoped.data.delete_by_id.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# search() filter_ast wiring (push-down + post-filter)
+# ---------------------------------------------------------------------------
+
+
+class _FakeProperty:
+    """Records the property + op a ``Filter.by_property(p).<op>(v)`` call builds.
+
+    The compiler only needs each chained builder to return *some* object the
+    wiring can hand to the query; the test inspects the recorded structure to
+    confirm a push-down filter was assembled (rather than asserting against the
+    real ``weaviate-client`` ``_Filters`` internals, which are not installed in
+    the unit-test venv).
+    """
+
+    def __init__(self, prop: str) -> None:
+        self.prop = prop
+
+    def _leaf(self, op: str, value: Any) -> _FakeFilter:
+        return _FakeFilter(kind="leaf", prop=self.prop, op=op, value=value)
+
+    def equal(self, value: Any) -> _FakeFilter:
+        return self._leaf("equal", value)
+
+    def greater_than(self, value: Any) -> _FakeFilter:
+        return self._leaf("greater_than", value)
+
+    def greater_or_equal(self, value: Any) -> _FakeFilter:
+        return self._leaf("greater_or_equal", value)
+
+    def less_than(self, value: Any) -> _FakeFilter:
+        return self._leaf("less_than", value)
+
+    def less_or_equal(self, value: Any) -> _FakeFilter:
+        return self._leaf("less_or_equal", value)
+
+    def is_none(self, value: bool) -> _FakeFilter:
+        return self._leaf("is_none", value)
+
+
+class _FakeFilter:
+    """A minimal stand-in for weaviate v4 ``Filter`` / ``_Filters``.
+
+    Supports the builder surface ``compile_weaviate`` uses
+    (``by_property`` / ``all_of`` / ``any_of``) and the ``&`` operator the
+    backend wiring uses to AND the pushed-down filter into the legacy temporal
+    filter.
+    """
+
+    def __init__(
+        self,
+        *,
+        kind: str,
+        prop: str | None = None,
+        op: str | None = None,
+        value: Any = None,
+        children: list[_FakeFilter] | None = None,
+    ) -> None:
+        self.kind = kind
+        self.prop = prop
+        self.op = op
+        self.value = value
+        self.children = children or []
+
+    @staticmethod
+    def by_property(prop: str) -> _FakeProperty:
+        return _FakeProperty(prop)
+
+    @staticmethod
+    def all_of(filters: list[_FakeFilter]) -> _FakeFilter:
+        return _FakeFilter(kind="all_of", children=list(filters))
+
+    @staticmethod
+    def any_of(filters: list[_FakeFilter]) -> _FakeFilter:
+        return _FakeFilter(kind="any_of", children=list(filters))
+
+    def __and__(self, other: _FakeFilter) -> _FakeFilter:
+        return _FakeFilter(kind="all_of", children=[self, other])
+
+    def props_touched(self) -> set[str]:
+        """The set of property names anywhere in the (possibly nested) filter."""
+        if self.kind == "leaf":
+            return {self.prop} if self.prop else set()
+        out: set[str] = set()
+        for child in self.children:
+            out |= child.props_touched()
+        return out
+
+
+def _install_query_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inject ``weaviate.classes.query`` with the fake ``Filter`` + query enums.
+
+    ``compile_weaviate`` lazily imports ``Filter`` from this submodule, and
+    ``search`` imports ``HybridFusion`` / ``MetadataQuery`` from it. The base
+    fake-weaviate installer leaves ``query`` empty, so this layers the symbols on.
+    """
+    import sys
+
+    query_mod = sys.modules["weaviate.classes.query"]
+    query_mod.Filter = _FakeFilter  # type: ignore[attr-defined]
+    query_mod.HybridFusion = SimpleNamespace(RELATIVE_SCORE="relative_score")  # type: ignore[attr-defined]
+    query_mod.MetadataQuery = lambda **kw: SimpleNamespace(**kw)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "weaviate.classes.query", query_mod)
+
+
+def _fake_object(*, occurred_at: datetime, distance: float = 0.1, metadata: dict[str, Any] | None = None) -> Any:
+    """Build a fake Weaviate result object shaped for ``_object_to_chunk``.
+
+    ``metadata`` is serialized into the ``metadata_json`` string property the way
+    real chunks store it, so ``_object_to_chunk`` parses it back onto the chunk's
+    ``metadata`` dict for the python post-filter to read.
+    """
+    import json
+
+    return SimpleNamespace(
+        uuid=str(uuid4()),
+        properties={
+            "content": "hello",
+            "document_id": str(uuid4()),
+            "occurred_at": occurred_at,
+            "created_at": occurred_at,
+            "source_system": "slack",
+            "metadata_json": json.dumps(metadata or {}),
+        },
+        vector=None,
+        metadata=SimpleNamespace(distance=distance, score=1.0 - distance),
+    )
+
+
+async def _store_with_query(
+    monkeypatch: pytest.MonkeyPatch, objects: list[Any]
+) -> tuple[WeaviateTemporalStore, MagicMock]:
+    """A connected store whose tenant-scoped ``query.near_vector`` returns ``objects``."""
+    _weaviate, client = _install_fake_weaviate(monkeypatch)
+    _install_query_filter(monkeypatch)
+
+    collection = MagicMock(name="CollectionAsync")
+    collection.tenants.create = AsyncMock()
+    tenant_scoped = MagicMock(name="TenantScopedCollection")
+    tenant_scoped.query.near_vector = AsyncMock(return_value=SimpleNamespace(objects=objects))
+    tenant_scoped.query.hybrid = AsyncMock(return_value=SimpleNamespace(objects=objects))
+    collection.with_tenant = MagicMock(return_value=tenant_scoped)
+    client.collections.get = MagicMock(return_value=collection)
+
+    store = _build_store("http://localhost:8090")
+    await store.connect()
+    return store, tenant_scoped
+
+
+@pytest.mark.unit
+class TestSearchFilterAstWiring:
+    @pytest.mark.asyncio
+    async def test_no_filter_ast_does_not_overfetch_or_post_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Baseline: without filter_ast the query keeps the caller's limit and
+        # passes no AST-derived filter (None when there is no temporal filter).
+        objs = [_fake_object(occurred_at=datetime(2026, 6, i + 1, tzinfo=UTC)) for i in range(3)]
+        store, tenant_scoped = await _store_with_query(monkeypatch, objs)
+
+        results = await store.search(uuid4(), [0.1] * 1536, limit=5)
+
+        tenant_scoped.query.near_vector.assert_awaited_once()
+        kwargs = tenant_scoped.query.near_vector.call_args.kwargs
+        assert kwargs["limit"] == 5  # no over-fetch
+        assert kwargs["filters"] is None
+        assert len(results) == 3
+
+    @pytest.mark.asyncio
+    async def test_filter_ast_pushes_date_filter_and_overfetches(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A date predicate on a declared property (occurred_at) must push down to
+        # Weaviate (a non-None filter touching occurred_at) and the query must
+        # over-fetch because a post-filter runs.
+        objs = [_fake_object(occurred_at=datetime(2026, 6, i + 1, tzinfo=UTC)) for i in range(3)]
+        store, tenant_scoped = await _store_with_query(monkeypatch, objs)
+
+        ast = parse_to_ast(RecallFilter.model_validate({"occurred_at": {"$gt": "2026-01-01T00:00:00Z"}}))
+        await store.search(uuid4(), [0.1] * 1536, limit=10, filter_ast=ast)
+
+        kwargs = tenant_scoped.query.near_vector.call_args.kwargs
+        assert kwargs["limit"] == 10 * _FILTER_OVERFETCH
+        pushed = kwargs["filters"]
+        assert pushed is not None
+        assert isinstance(pushed, _FakeFilter)
+        assert "occurred_at" in pushed.props_touched()
+
+    @pytest.mark.asyncio
+    async def test_post_filter_drops_non_matching_rows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The post-filter re-checks the whole AST in Python: candidates whose
+        # occurred_at falls on/before the cutoff are dropped even though the mock
+        # query returned them (the push-down is a superset prefilter).
+        cutoff = datetime(2026, 6, 1, tzinfo=UTC)
+        passing = [_fake_object(occurred_at=datetime(2026, 6, 5, tzinfo=UTC)) for _ in range(2)]
+        failing = [_fake_object(occurred_at=datetime(2026, 5, 1, tzinfo=UTC)) for _ in range(3)]
+        store, _tenant = await _store_with_query(monkeypatch, passing + failing)
+
+        ast = parse_to_ast(RecallFilter.model_validate({"occurred_at": {"$gt": cutoff.isoformat()}}))
+        results = await store.search(uuid4(), [0.1] * 1536, limit=10, filter_ast=ast)
+
+        assert len(results) == 2  # the 3 failing rows are post-filtered out
+        for r in results:
+            assert r.chunk.occurred_at is not None
+            assert r.chunk.occurred_at > cutoff
+
+    @pytest.mark.asyncio
+    async def test_post_filter_trims_survivors_to_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Over-fetch returns more survivors than ``limit``; the result is trimmed
+        # back to ``limit`` while preserving the order the query returned them
+        # (Weaviate ranks best-first, so trimming keeps the top-``limit`` slice).
+        objs = [_fake_object(occurred_at=datetime(2026, 6, 10, tzinfo=UTC), distance=0.05) for _ in range(8)]
+        returned_ids = [obj.uuid for obj in objs]
+        store, _tenant = await _store_with_query(monkeypatch, objs)
+
+        ast = parse_to_ast(RecallFilter.model_validate({"occurred_at": {"$gt": "2026-01-01T00:00:00Z"}}))
+        results = await store.search(uuid4(), [0.1] * 1536, limit=3, filter_ast=ast)
+
+        assert len(results) == 3  # trimmed from 8 survivors
+        # Order preserved: the trimmed slice is the first 3 the query returned.
+        assert [str(r.chunk.id) for r in results] == returned_ids[:3]
+
+    @pytest.mark.asyncio
+    async def test_undeclared_system_key_post_filters_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A predicate on a document-grained key that is NOT a declared Weaviate
+        # property (source_name) pushes NOTHING down (filters stays None), but the
+        # post-filter still applies it — and since that property is absent on the
+        # stored object, compile_python's positive-op semantics exclude every row.
+        objs = [_fake_object(occurred_at=datetime(2026, 6, i + 1, tzinfo=UTC)) for i in range(3)]
+        store, tenant_scoped = await _store_with_query(monkeypatch, objs)
+
+        ast = parse_to_ast(RecallFilter.model_validate({"source_name": "linear"}))
+        results = await store.search(uuid4(), [0.1] * 1536, limit=10, filter_ast=ast)
+
+        # Undeclared key → nothing pushed down (no temporal filter either).
+        assert tenant_scoped.query.near_vector.call_args.kwargs["filters"] is None
+        # source_name is absent on the chunk → positive $eq excludes all rows.
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_selective_metadata_filter_may_return_fewer_than_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A metadata predicate cannot push down (metadata is not a queryable
+        # Weaviate property), so the python post-filter enforces it over the
+        # over-fetched candidate pool. When the filter is highly selective the
+        # result can be FEWER than ``limit`` — superset-safe (only matching rows,
+        # never a wrong one), and the surviving subset keeps the returned order.
+        #
+        # Shape: limit=3 over-fetches 3 * _FILTER_OVERFETCH = 12 candidates; a
+        # selective {"metadata.tag": {"$in": ["rare"]}} matches only 2 of them.
+        matching = [
+            _fake_object(occurred_at=datetime(2026, 6, i + 1, tzinfo=UTC), distance=0.01 * i, metadata={"tag": "rare"})
+            for i in range(2)
+        ]
+        non_matching = [
+            _fake_object(occurred_at=datetime(2026, 6, 10 + i, tzinfo=UTC), distance=0.5, metadata={"tag": "common"})
+            for i in range(10)
+        ]
+        # Interleave so the survivors are not just a contiguous prefix.
+        objs = [non_matching[0], matching[0], *non_matching[1:5], matching[1], *non_matching[5:]]
+        assert len(objs) == 12  # the full over-fetched pool for limit=3
+        match_ids = [matching[0].uuid, matching[1].uuid]
+        store, tenant_scoped = await _store_with_query(monkeypatch, objs)
+
+        ast = parse_to_ast(RecallFilter.model_validate({"metadata.tag": {"$in": ["rare"]}}))
+        results = await store.search(uuid4(), [0.1] * 1536, limit=3, filter_ast=ast)
+
+        # Over-fetched the 12-candidate pool; metadata path is undeclared → nothing
+        # pushed server-side.
+        assert tenant_scoped.query.near_vector.call_args.kwargs["limit"] == 3 * _FILTER_OVERFETCH
+        assert tenant_scoped.query.near_vector.call_args.kwargs["filters"] is None
+        # Exactly the 2 matching rows survive (< limit=3), in returned order.
+        assert [str(r.chunk.id) for r in results] == match_ids
+        assert all(r.chunk.metadata.get("tag") == "rare" for r in results)

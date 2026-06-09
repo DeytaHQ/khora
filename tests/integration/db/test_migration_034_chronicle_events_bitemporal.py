@@ -209,11 +209,6 @@ async def test_migration_034_creates_live_partial_index(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="not yet CI-shared-DB-safe: fails against the integration job's shared, "
-    "up-front-migrated service DB; tracked in #1020",
-    strict=False,
-)
 async def test_migration_034_self_fk_set_null_on_delete(
     pg_engine: AsyncEngine,
 ) -> None:
@@ -237,8 +232,8 @@ async def test_migration_034_self_fk_set_null_on_delete(
         await conn.execute(
             text(
                 "INSERT INTO documents "
-                "(id, namespace_id, source, status, chunk_count, document_metadata, created_at, updated_at) "
-                "VALUES (:id, :ns, 'test', 'ready', 1, '{}'::jsonb, NOW(), NOW())"
+                "(id, namespace_id, content, source, status, chunk_count, metadata, created_at, updated_at) "
+                "VALUES (:id, :ns, 'doc body', 'test', 'completed', 1, '{}'::jsonb, NOW(), NOW())"
             ),
             {"id": uuid4(), "ns": ns_id},
         )
@@ -247,8 +242,8 @@ async def test_migration_034_self_fk_set_null_on_delete(
         await conn.execute(
             text(
                 "INSERT INTO chunks "
-                "(id, namespace_id, document_id, chunk_index, content, content_hash, created_at) "
-                "SELECT :cid, :ns, id, 0, 'x', 'h', NOW() FROM documents LIMIT 1"
+                "(id, namespace_id, document_id, chunk_index, content, created_at) "
+                "SELECT :cid, :ns, id, 0, 'x', NOW() FROM documents LIMIT 1"
             ),
             {"cid": chunk_id, "ns": ns_id},
         )

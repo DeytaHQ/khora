@@ -3443,16 +3443,22 @@ RETURN count(r) AS updated
             async def _remap_entities(tx: AsyncManagedTransaction) -> None:
                 # Single-branch, tolerant form:
                 #   filtered = array with every occurrence of old_doc_id removed
-                #   append new_doc_id only if not already present
+                #   append new_doc_id only when old_doc_id was actually present
+                #   AND new_doc_id is not already present
                 # Idempotent on retry AND tolerant of pre-existing duplicates
                 # (e.g. ``[old, old, new]`` from a partially-written prior run
                 # collapses cleanly to ``[new]`` instead of ``[new, new]``).
+                # When old_doc_id is absent the remap is a no-op: appending
+                # new_doc_id then would grow an array that never referenced the
+                # remapped document.
                 query = """
                 UNWIND $survivors AS s
                 MATCH (e:Entity {id: s.entity_id, namespace_id: $namespace_id})
-                WITH e, s, [x IN coalesce(e.source_document_ids, []) WHERE x <> s.old_doc_id] AS filtered
+                WITH e, s, coalesce(e.source_document_ids, []) AS original
+                WITH e, s, original, [x IN original WHERE x <> s.old_doc_id] AS filtered
                 SET e.source_document_ids = filtered +
-                    CASE WHEN s.new_doc_id IN filtered THEN [] ELSE [s.new_doc_id] END
+                    CASE WHEN s.old_doc_id IN original AND NOT s.new_doc_id IN filtered
+                        THEN [s.new_doc_id] ELSE [] END
                 """
                 await tx.run(query, survivors=entity_survivors, namespace_id=ns_str)
 
@@ -3471,9 +3477,11 @@ RETURN count(r) AS updated
                 UNWIND $survivors AS s
                 MATCH ()-[rel {id: s.relationship_id, namespace_id: $namespace_id}]-()
                 WITH DISTINCT rel, s
-                WITH rel, s, [x IN coalesce(rel.source_document_ids, []) WHERE x <> s.old_doc_id] AS filtered
+                WITH rel, s, coalesce(rel.source_document_ids, []) AS original
+                WITH rel, s, original, [x IN original WHERE x <> s.old_doc_id] AS filtered
                 SET rel.source_document_ids = filtered +
-                    CASE WHEN s.new_doc_id IN filtered THEN [] ELSE [s.new_doc_id] END
+                    CASE WHEN s.old_doc_id IN original AND NOT s.new_doc_id IN filtered
+                        THEN [s.new_doc_id] ELSE [] END
                 """
                 await tx.run(query, survivors=relationship_survivors, namespace_id=ns_str)
 
@@ -3588,11 +3596,13 @@ RETURN count(r) AS updated
         self,
         relationship_ids: list[UUID],
         document_id: UUID,
+        namespace_id: UUID,
     ) -> int:
         """Strip ``document_id`` from survivor relationships' source arrays.
 
         Sibling to :meth:`remove_document_from_entity_sources_batch` for
-        the edge side of the cascade.
+        the edge side of the cascade. The match is scoped to ``namespace_id``
+        so a strip never crosses the namespace boundary.
 
         Returns the number of relationships updated.
         """
@@ -3603,13 +3613,14 @@ RETURN count(r) AS updated
             result = await tx.run(
                 """
                 UNWIND $relationship_ids AS rid
-                MATCH ()-[r {id: rid}]-()
+                MATCH ()-[r {id: rid, namespace_id: $namespace_id}]-()
                 WITH DISTINCT r
                 SET r.source_document_ids =
                         [d IN coalesce(r.source_document_ids, []) WHERE d <> $doc_id]
                 RETURN count(r) AS updated
                 """,
                 relationship_ids=[str(rid) for rid in relationship_ids],
+                namespace_id=str(namespace_id),
                 doc_id=str(document_id),
             )
             record = await result.single()

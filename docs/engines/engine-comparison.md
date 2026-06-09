@@ -26,7 +26,7 @@ The embedded path (SQLite + LanceDB) has a documented scale ceiling: **~1M chunk
 | **Entity Extraction** | Selective (70% default, configurable 0.0–1.0) | Lazy (on-demand) | Full extraction |
 | **Core Data Model** | Dual nodes (Entity + Chunk) | Chunks with temporal metadata | SVO events + facts |
 | **Time Model** | Bi-temporal + temporal detection (7 categories) | Bi-temporal (`occurred_at` + `ingested_at`) | Triple timestamps + Ebbinghaus decay |
-| **LLM Cost** | Medium (~700 calls/1000 docs) at default; ~1000 at `skeleton_core_ratio=1.0` | Lower (~100 calls/1000 docs) | Medium (~700 calls/1000 docs) |
+| **LLM Cost** | Medium (~700 calls/1000 docs) at default; ~1000 at `skeleton_core_ratio=1.0` | Lower (~100 calls/1000 docs) | Higher (~1000 calls/1000 docs, full extraction) |
 | **Graph Backend** | Required (Neo4j/Neptune/AGE) | Not required | Not required |
 | **Search Modes** | Vector + Cypher + BM25 + RRF | Vector + BM25 Hybrid | 4-channel: Semantic + BM25 + Temporal + Entity |
 | **Point-in-time queries** | Production-only (PG+Neo4j); not supported on the embedded `sqlite_lance` backend | n/a | n/a |
@@ -54,8 +54,10 @@ async with Khora(db_url, engine="vectorcypher") as kb:
     print(f"Extracted {result.entities_extracted} entities")
 
 # For 100% extraction (legacy GraphRAG behavior):
+from khora.engines.vectorcypher import VectorCypherConfig
+
 async with Khora(db_url, engine="vectorcypher",
-                 engine_kwargs={"skeleton_core_ratio": 1.0}) as kb:
+                 engine_kwargs={"vectorcypher_config": VectorCypherConfig(skeleton_core_ratio=1.0)}) as kb:
     ns = await kb.create_namespace()
     result = await kb.remember(
         content,

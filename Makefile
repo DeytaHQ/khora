@@ -7,7 +7,7 @@
 #   make dev               # Start development environment
 #   make test              # Run tests with coverage
 
-.PHONY: help dev dev-down test test-unit test-embedded test-integration test-soak lint format typecheck prek clean \
+.PHONY: help dev dev-down db-up db-down test test-unit test-embedded test-integration test-soak lint format typecheck prek clean \
         rust-build rust-dev rust-test rust-bench rust-clean \
         docker-run docker-down docker-clean
 
@@ -35,8 +35,8 @@ help:
 	@echo "Development:"
 	@echo "  make install          Sync venv with all extras (crewai combo by default)"
 	@echo "  make install-adk      Sync venv with the google-adk extras combo"
-	@echo "  make dev              Start databases (postgres + neo4j)"
-	@echo "  make dev-down         Stop databases"
+	@echo "  make dev              Start databases (postgres + neo4j) [alias: db-up]"
+	@echo "  make dev-down         Stop databases [alias: db-down]"
 	@echo "  make test             Run tests with coverage (unit parallel + integration serial)"
 	@echo "  make test-unit        Run unit tests in parallel (-n auto)"
 	@echo "  make test-embedded    Run SQLite+LanceDB embedded-stack tests (no Docker)"
@@ -99,6 +99,10 @@ dev:
 # Stop local development databases
 dev-down:
 	docker compose down
+
+# Aliases for dev / dev-down
+db-up: dev
+db-down: dev-down
 
 # Run unit tests in parallel (xdist) with coverage; integration tests stay serial
 # because tests/integration/matrix/* fixtures DROP SCHEMA on shared PostgreSQL.

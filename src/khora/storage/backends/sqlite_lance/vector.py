@@ -41,6 +41,8 @@ from ._helpers import from_json_text, to_json_text, uuid_to_text
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from khora.filter.ast import FilterNode
+
     from .connection import EmbeddedStorageHandle
 
 
@@ -523,6 +525,7 @@ class SQLiteLanceVectorAdapter:
         language: str = "english",  # noqa: ARG002 — accepted for protocol parity
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        filter_ast: FilterNode | None = None,  # noqa: ARG002 — accepted for protocol parity
     ) -> list[tuple[Chunk, float]]:
         """FTS5 BM25 ranking.
 

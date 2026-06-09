@@ -148,6 +148,12 @@ class DualNodeManager:
             "CREATE INDEX chunk_source_system IF NOT EXISTS FOR (c:Chunk) ON (c.source_system)",
             "CREATE INDEX chunk_author IF NOT EXISTS FOR (c:Chunk) ON (c.author)",
             "CREATE INDEX chunk_channel IF NOT EXISTS FOR (c:Chunk) ON (c.channel)",
+            # Denormalized document-grained filter indexes for recall pushdown
+            "CREATE INDEX chunk_source_type IF NOT EXISTS FOR (c:Chunk) ON (c.source_type)",
+            "CREATE INDEX chunk_source_name IF NOT EXISTS FOR (c:Chunk) ON (c.source_name)",
+            "CREATE INDEX chunk_source_timestamp IF NOT EXISTS FOR (c:Chunk) ON (c.source_timestamp)",
+            "CREATE INDEX chunk_external_id IF NOT EXISTS FOR (c:Chunk) ON (c.external_id)",
+            "CREATE INDEX chunk_content_type IF NOT EXISTS FOR (c:Chunk) ON (c.content_type)",
             # TimeNode indexes for time hierarchy traversal
             "CREATE INDEX timenode_id IF NOT EXISTS FOR (t:TimeNode) ON (t.id)",
             "CREATE INDEX timenode_namespace IF NOT EXISTS FOR (t:TimeNode) ON (t.namespace_id)",
@@ -184,7 +190,15 @@ class DualNodeManager:
             channel: $channel,
             confidence: $confidence,
             metadata: $metadata,
-            chunker_info: $chunker_info
+            chunker_info: $chunker_info,
+            source_type: $source_type,
+            source_name: $source_name,
+            source_url: $source_url,
+            source_timestamp: $source_timestamp,
+            external_id: $external_id,
+            content_type: $content_type,
+            source: $source,
+            title: $title
         })
         RETURN c.id AS id
         """
@@ -202,6 +216,14 @@ class DualNodeManager:
             confidence=chunk.confidence,
             metadata=serialize_dict(chunk.metadata or {}),
             chunker_info=json.dumps(chunk.chunker_info or {}),
+            source_type=chunk.source_type,
+            source_name=chunk.source_name,
+            source_url=chunk.source_url,
+            source_timestamp=chunk.source_timestamp.isoformat() if chunk.source_timestamp else None,
+            external_id=chunk.external_id,
+            content_type=chunk.content_type,
+            source=chunk.source,
+            title=chunk.title,
         )
 
         async with self._session() as session:
@@ -254,6 +276,14 @@ class DualNodeManager:
                     "confidence": chunk.confidence,
                     "metadata": serialize_dict(chunk.metadata or {}),
                     "chunker_info": json.dumps(chunk.chunker_info or {}),
+                    "source_type": chunk.source_type,
+                    "source_name": chunk.source_name,
+                    "source_url": chunk.source_url,
+                    "source_timestamp": chunk.source_timestamp.isoformat() if chunk.source_timestamp else None,
+                    "external_id": chunk.external_id,
+                    "content_type": chunk.content_type,
+                    "source": chunk.source,
+                    "title": chunk.title,
                 }
             )
 
@@ -271,7 +301,15 @@ class DualNodeManager:
             channel: chunk.channel,
             confidence: chunk.confidence,
             metadata: chunk.metadata,
-            chunker_info: chunk.chunker_info
+            chunker_info: chunk.chunker_info,
+            source_type: chunk.source_type,
+            source_name: chunk.source_name,
+            source_url: chunk.source_url,
+            source_timestamp: chunk.source_timestamp,
+            external_id: chunk.external_id,
+            content_type: chunk.content_type,
+            source: chunk.source,
+            title: chunk.title
         })
         """
 
@@ -479,9 +517,12 @@ class DualNodeManager:
                 temporal_conditions.append("c.channel = $channel")
                 params["channel"] = temporal_filter.channel
 
-        # For temporal queries, prefer entities whose validity hasn't expired
+        # For temporal queries, prefer entities whose validity hasn't expired.
+        # valid_until is stored as an ISO string, so coerce with datetime()
+        # before comparing against the ZONED DATETIME — a bare string > datetime
+        # comparison yields NULL and would drop every current entity.
         if prefer_current:
-            temporal_conditions.append("(e.valid_until IS NULL OR e.valid_until > datetime())")
+            temporal_conditions.append("(e.valid_until IS NULL OR datetime(e.valid_until) > datetime())")
 
         where_clause = ""
         if temporal_conditions:
@@ -596,13 +637,20 @@ class DualNodeManager:
         # validity has expired. NULL valid_until is kept (no known end = still valid).
         # Hoist datetime() into a WITH clause so it is evaluated once per row,
         # not once per relationship in the all() predicate.
+        #
+        # valid_until is persisted as an ISO STRING (``.isoformat()`` at the
+        # neo4j backend boundary), so coerce it with Cypher datetime() before
+        # comparing against the ZONED DATETIME ``_now``. A bare ``string > datetime``
+        # comparison yields NULL, which would silently drop every future-dated
+        # edge from the neighborhood.
         temporal_preamble = ""
         temporal_clause = ""
         if prefer_current:
             temporal_preamble = "WITH e, datetime() AS _now"
             temporal_clause = (
-                "AND (related.valid_until IS NULL OR related.valid_until > _now)"
-                "\n          AND all(r IN relationships(path) WHERE r.valid_until IS NULL OR r.valid_until > _now)"
+                "AND (related.valid_until IS NULL OR datetime(related.valid_until) > _now)"
+                "\n          AND all(r IN relationships(path) "
+                "WHERE r.valid_until IS NULL OR datetime(r.valid_until) > _now)"
             )
 
         # OPTIMIZATION: Single query fetches all neighborhoods in batch

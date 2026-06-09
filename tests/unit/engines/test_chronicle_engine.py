@@ -64,6 +64,7 @@ class TestChronicleEngineForget:
         engine._storage.vector.remove_document_from_relationship_sources = AsyncMock()
         # Graph backend exposes the Neo4j-style batch helpers (mirror).
         engine._storage.graph = MagicMock()
+        engine._storage.graph.list_relationships = AsyncMock(return_value=[])
         engine._storage.graph.delete_entities_batch = AsyncMock()
         engine._storage.graph.delete_relationships_batch = AsyncMock()
         engine._storage.graph.remove_document_from_entity_sources_batch = AsyncMock()
@@ -168,7 +169,7 @@ class TestChronicleEngineForget:
             [survivor_rel_id], doc_id
         )
         connected_engine._storage.graph.remove_document_from_relationship_sources_batch.assert_awaited_once_with(
-            [survivor_rel_id], doc_id
+            [survivor_rel_id], doc_id, namespace_id
         )
         connected_engine._storage.vector.delete_relationships_batch.assert_not_called()
 

@@ -5,7 +5,7 @@ persisted under namespace A is not retrievable by a caller scoped to
 namespace B, even when that caller knows the entity ID. Same for
 relationships and episodes.
 
-Gated by ``NEO4J_INTEGRATION_TEST=1`` because CI does not provision Neo4j.
+Gated by ``NEO4J_INTEGRATION_TEST=1``; the CI integration job sets that flag.
 
 How to run locally::
 
@@ -36,7 +36,7 @@ from khora.storage.backends.pgvector import PgVectorBackend
 from khora.storage.backends.postgresql import PostgreSQLBackend
 from khora.storage.coordinator import StorageCoordinator
 
-EMBED_DIM = 4
+EMBED_DIM = 1536
 
 
 @pytest.mark.integration
@@ -72,7 +72,13 @@ class TestGraphNamespaceIsolationIntegration:
     async def two_namespaces(self, coord: StorageCoordinator):
         ns_a = await coord.create_namespace(MemoryNamespace())
         ns_b = await coord.create_namespace(MemoryNamespace())
-        return ns_a.namespace_id, ns_b.namespace_id
+        # Coordinator primitives write the passed id verbatim into FK
+        # columns referencing memory_namespaces.id (the row PK), so resolve
+        # each stable namespace_id to its active version's row id first.
+        return (
+            await coord.resolve_namespace(ns_a.namespace_id),
+            await coord.resolve_namespace(ns_b.namespace_id),
+        )
 
     @pytest.mark.asyncio
     async def test_get_entity_isolated_across_namespaces(self, coord: StorageCoordinator, two_namespaces) -> None:

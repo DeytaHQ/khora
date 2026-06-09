@@ -45,8 +45,9 @@ Connection parameters (env overrides, sensible ``make dev`` defaults)::
     KHORA_NEO4J_PASSWORD     (default: password)
     KHORA_DATABASE_URL       (default: postgresql+asyncpg://khora:khora@localhost:5432/khora)
 
-Embedding dimension is pinned to 4 (matching the sibling test) via an
-``embed_batch`` monkeypatch. All entity extraction is driven by a
+Embedding dimension is pinned to 1536 (matching the sibling test and the
+``chunks.embedding`` / ``entities.embedding`` ``vector(1536)`` columns) via
+an ``embed_batch`` monkeypatch. All entity extraction is driven by a
 registry-based stub that matches markers in the document content.
 """
 
@@ -70,7 +71,7 @@ from khora.extraction.extractors.base import (
 )
 from khora.khora import Khora, RememberResult
 
-EMBED_DIM = 4
+EMBED_DIM = 1536
 
 # Module-scoped extraction registry. ``plan_extraction`` stages the
 # ExtractionResult returned for any text containing ``marker``; the
@@ -254,7 +255,7 @@ class TestReplaceViaRememberIntegration:
             _stub_embed_batch,
         )
 
-    @pytest.fixture(scope="class")
+    @pytest.fixture
     async def kb(self) -> AsyncIterator[Khora]:
         database_url = os.environ.get(
             "KHORA_DATABASE_URL",
@@ -298,7 +299,12 @@ class TestReplaceViaRememberIntegration:
     def _graph_driver(self, kb: Khora) -> Any:
         graph = kb.storage.graph
         assert graph is not None, "graph backend must be configured"
-        driver = getattr(graph, "_driver", None)
+        # ``kb.storage.graph`` is a NamespaceRequiredProxy (IDOR hardening,
+        # PR #769) whose __getattr__ raises for any "_"-prefixed name, so
+        # unwrap to the real backend first; ``_backend`` is a real slot found
+        # by plain getattr before __getattr__ is consulted.
+        backend = getattr(graph, "_backend", graph)
+        driver = getattr(backend, "_driver", None)
         assert driver is not None, "Neo4j driver must be connected"
         return driver
 
@@ -359,7 +365,7 @@ class TestReplaceViaRememberIntegration:
         # Same document id reused across replacements.
         assert v1.document_id == v2.document_id
 
-        doc = await kb.get_document(v2.document_id)
+        doc = await kb.get_document(v2.document_id, namespace=namespace_id)
         assert doc is not None
         assert doc.status == DocumentStatus.COMPLETED
         assert doc.external_id == ext
@@ -424,27 +430,31 @@ class TestReplaceViaRememberIntegration:
         dave = f"dave-{uuid4().hex[:6]}"
         eve = f"eve-{uuid4().hex[:6]}"
 
+        # Markers must be pairwise non-substring: the extraction stub matches
+        # the FIRST registered marker found in the text, so the doc-A v2 marker
+        # below must not contain the doc-A v1 marker (else v2 re-extracts dave
+        # and the replace never drops him). Use disjoint tokens.
         plan_extraction(
-            "cs-doc-a",
+            "csdocaOrig",
             entities=[(dave, "PERSON")],
             relationships=[],
         )
         result_a = await self._remember(
             kb,
             namespace_id=namespace_id,
-            content=f"cs-doc-a mentions {dave}.",
+            content=f"csdocaOrig mentions {dave}.",
             external_id=ext_a,
         )
 
         plan_extraction(
-            "cs-doc-b",
+            "csdocb",
             entities=[(dave, "PERSON")],
             relationships=[],
         )
         result_b = await self._remember(
             kb,
             namespace_id=namespace_id,
-            content=f"cs-doc-b also mentions {dave}.",
+            content=f"csdocb also mentions {dave}.",
             external_id=ext_b,
         )
         # Confirm co-sourcing before replacing.
@@ -453,16 +463,18 @@ class TestReplaceViaRememberIntegration:
         assert str(result_a.document_id) in dave_pre["sdids"]
         assert str(result_b.document_id) in dave_pre["sdids"]
 
-        # Replace doc A with extraction that drops Dave entirely.
+        # Replace doc A with extraction that drops Dave entirely. The v2 marker
+        # "csdocaRevision" is not a superset of the v1 marker "csdocaOrig", so
+        # the stub matches v2 → extracts eve (not dave).
         plan_extraction(
-            "cs-doc-a-v2",
+            "csdocaRevision",
             entities=[(eve, "PERSON")],
             relationships=[],
         )
         await self._remember(
             kb,
             namespace_id=namespace_id,
-            content=f"cs-doc-a-v2 no longer mentions the original person; {eve} stepped in.",
+            content=f"csdocaRevision no longer mentions the original person; {eve} stepped in.",
             external_id=ext_a,
         )
 
@@ -572,7 +584,9 @@ class TestReplaceViaRememberIntegration:
         # aborted replace (PG rollback is the invariant).
         chunks_before = await kb.storage.get_chunks_by_document(v1.document_id, namespace_id=namespace_id)
 
-        vector_backend = kb.storage.vector
+        # ``kb.storage.vector`` is a NamespaceRequiredProxy (no __dict__,
+        # rejects setattr); patch the real backend behind it.
+        vector_backend = getattr(kb.storage.vector, "_backend", kb.storage.vector)
         assert vector_backend is not None
         call_count = {"n": 0}
 
@@ -614,7 +628,7 @@ class TestReplaceViaRememberIntegration:
         # rolled-back transaction also reverts the in-tx status stamp, so
         # the row keeps its prior (v1) COMPLETED status.  The exception
         # still propagates to the caller.
-        post_rollback = await kb.get_document(v1.document_id)
+        post_rollback = await kb.get_document(v1.document_id, namespace=namespace_id)
         assert post_rollback is not None
         assert post_rollback.status != DocumentStatus.FAILED
 
@@ -657,7 +671,9 @@ class TestReplaceViaRememberIntegration:
             external_id=ext,
         )
 
-        graph = kb.storage.graph
+        # ``kb.storage.graph`` is a NamespaceRequiredProxy (no __dict__,
+        # rejects setattr); patch the real backend behind it.
+        graph = getattr(kb.storage.graph, "_backend", kb.storage.graph)
         assert graph is not None
         orig_retire = graph.retire_orphaned_entities_batch  # type: ignore[unresolved-attribute]
         call_count = {"n": 0}
@@ -670,23 +686,29 @@ class TestReplaceViaRememberIntegration:
 
         monkeypatch.setattr(graph, "retire_orphaned_entities_batch", flaky_retire)
 
-        # v2 retirement fails mid-way → document lands in FAILED.
+        # v2 retirement fails mid-graph. Per #884, _remember_via_replace catches
+        # GraphMirrorFailedAfterPGCommitError (the PG tx already committed) and
+        # returns a degraded RememberResult instead of re-raising; the
+        # divergence is surfaced via metadata["degradations"] (ADR-001).
         plan_extraction(
             "heal-v2",
             entities=[],  # orphans doomed
             relationships=[],
         )
-        with pytest.raises(RuntimeError, match="injected graph failure"):
-            await self._remember(
-                kb,
-                namespace_id=namespace_id,
-                content="heal-v2 no entities at all.",
-                external_id=ext,
-            )
+        degraded = await self._remember(
+            kb,
+            namespace_id=namespace_id,
+            content="heal-v2 no entities at all.",
+            external_id=ext,
+        )
+        degradations = degraded.metadata.get("degradations", [])
+        assert any(d.get("issue") == "884" for d in degradations), (
+            f"expected a #884 graph-mirror degradation in result metadata; got {degradations!r}"
+        )
 
         # #887: PG tx committed (chunks + status stamp persisted), so the
         # document stays COMPLETED even though the graph-side retire raised.
-        post_graph_fail = await kb.get_document(v1.document_id)
+        post_graph_fail = await kb.get_document(v1.document_id, namespace=namespace_id)
         assert post_graph_fail is not None
         assert post_graph_fail.status == DocumentStatus.COMPLETED
         assert post_graph_fail.error_message is None
@@ -705,7 +727,7 @@ class TestReplaceViaRememberIntegration:
             external_id=ext,
         )
 
-        healed = await kb.get_document(v1.document_id)
+        healed = await kb.get_document(v1.document_id, namespace=namespace_id)
         assert healed is not None
         assert healed.status == DocumentStatus.COMPLETED
         assert healed.error_message is None

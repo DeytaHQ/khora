@@ -124,6 +124,56 @@ def test_system_eq_on_string_key_with_ops_form() -> None:
     assert compiled.params == {"f_0": "slack"}
 
 
+# ===========================================================================
+# Pushdown guard — all 8 denormalized document keys lower to Cypher.
+# ===========================================================================
+#
+# The eight document-grained keys are projected onto the recall Chunk
+# node so a recall filter on any of them is pushed down to Cypher (not left to a
+# post-filter). SYSTEM_KEYS already contains all ten filterable keys, and the
+# compiler handles them generically via the system-key path — so this guard pins
+# the *contract* (each denorm key pushes down to a `c.<key>` property predicate
+# AND lands in consumed_keys), independent of which individual keys other tests
+# happen to exercise. It catches a regression that drops one of the eight from
+# SYSTEM_KEYS (it would then fall through to `_unsupported` and stop pushing
+# down) and locks the source_timestamp datetime → .isoformat() string binding.
+_DENORM_STRING_KEYS = (
+    "source_type",
+    "source_name",
+    "source_url",
+    "external_id",
+    "content_type",
+    "source",
+    "title",
+)
+
+
+@pytest.mark.parametrize("key", _DENORM_STRING_KEYS)
+def test_denorm_string_key_pushes_down(key: str) -> None:
+    # Each of the seven string-valued denorm keys compiles to a coalesced `=`
+    # property compare on the chunk node, binds the operand, and is reported in
+    # consumed_keys (engine applies no post-filter for a pushed-down key).
+    compiled = compile_cypher(_ast({key: "v"}), _CTX)
+    sql = _norm(compiled.predicate)
+    assert f"coalesce(c.{key} = $f_0, false)" in sql
+    assert compiled.params == {"f_0": "v"}
+    assert key in compiled.consumed_keys
+    # A denorm key is a typed node property, never a serialized-metadata lookup.
+    assert "metadata" not in sql
+
+
+def test_denorm_source_timestamp_pushes_down_as_iso_string() -> None:
+    # source_timestamp is the one datetime-typed denorm key. It pushes down like
+    # the string keys but binds its operand as the UTC-normalized .isoformat()
+    # string (lexicographic compare), matching how dual_nodes serializes it at
+    # write time. Completes the 8-key set with the string-key guard above.
+    compiled = compile_cypher(_ast({"source_timestamp": "2026-02-03T00:00:00Z"}), _CTX)
+    sql = _norm(compiled.predicate)
+    assert "coalesce(c.source_timestamp = $f_0, false)" in sql
+    assert compiled.params["f_0"].startswith("2026-02-03")
+    assert "source_timestamp" in compiled.consumed_keys
+
+
 def test_system_gt_is_property_compare() -> None:
     # A system DATE key takes a plain ISO-8601 string operand (DateOps parses it to
     # a datetime); the operand binds as its .isoformat() string.
