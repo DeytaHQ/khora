@@ -773,6 +773,28 @@ def f_objeq_cases() -> list[ConformanceCase]:
             backends=_OP_BACKENDS,
             exercises=("F-OBJEQ", "metadata.labels", "$ne", "dict"),
         ),
+        ConformanceCase(
+            id="F-OBJEQ-metadata-labels-in",
+            # A dict $in element is EXACT object_equal per element, NOT @>
+            # containment: only the record whose subdocument EQUALS the operand
+            # survives — the superset (extra key) must NOT match.
+            filter={"metadata.labels": {"$in": [{"team": "x"}]}},
+            seed_records=seed,
+            expected_ids=frozenset({"exact"}),
+            backends=_OP_BACKENDS,
+            exercises=("F-OBJEQ", "metadata.labels", "$in", "dict"),
+        ),
+        ConformanceCase(
+            id="F-OBJEQ-metadata-labels-nin",
+            # $nin negates the per-element exact form: the complement (superset,
+            # other) plus the absent record survive (Rule 2 polarity — absent
+            # satisfies $nin).
+            filter={"metadata.labels": {"$nin": [{"team": "x"}]}},
+            seed_records=seed,
+            expected_ids=frozenset({"superset", "other", "absent"}),
+            backends=_OP_BACKENDS,
+            exercises=("F-OBJEQ", "metadata.labels", "$nin", "dict"),
+        ),
     ]
 
 
