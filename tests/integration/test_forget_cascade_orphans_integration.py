@@ -175,10 +175,6 @@ class TestForgetCascadeOrphansIntegration:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="tracked in #1039: pgvector entity upsert clobbers source_document_ids on conflict, so the forget cascade misclassifies the co-sourced survivor and never strips the forgotten doc id. Fix is a hot ingest-path change tracked separately from #1033.",
-        strict=False,
-    )
     async def test_forget_removes_orphan_entity_from_search_and_explore(self, kb: Khora, namespace_id: UUID) -> None:
         """Orphan entity disappears from entity_search and find_related_entities
         after forget().
