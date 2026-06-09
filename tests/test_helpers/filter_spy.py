@@ -239,21 +239,26 @@ def plan_extraction(
     )
 
 
-def stub_llm(monkeypatch: Any) -> None:
+def stub_llm(monkeypatch: Any, dim: int = EMBED_DIM) -> None:
     """Patch the embedder + entity extractor to the deterministic registry.
 
     No ``OPENAI_API_KEY`` / network needed. Call once per test module (e.g. via
     an autouse fixture). Resets the extraction registry so stale markers from a
     prior module never leak. Embedding and extraction are patched at the class
     method level so every engine code path picks them up.
+
+    ``dim`` sizes the deterministic vectors. The embedded LanceDB suites use the
+    default (small) ``EMBED_DIM``; the live-DB suites pass ``dim=1536`` because
+    the Postgres pgvector column is fixed at 1536 (see ``KhoraConfig`` validation:
+    "Postgres backend currently supports only embedding_dimension=1536").
     """
     _EXTRACTION_REGISTRY.clear()
 
     async def _embed_batch(self: Any, texts: list[str]) -> list[list[float]]:
-        return [fake_embedding(t) for t in texts]
+        return [fake_embedding(t, dim) for t in texts]
 
     async def _embed(self: Any, text: str) -> list[float]:
-        return fake_embedding(text)
+        return fake_embedding(text, dim)
 
     async def _extract_multi(self: Any, texts: list[str], **_kwargs: Any) -> list[ExtractionResult]:
         out: list[ExtractionResult] = []

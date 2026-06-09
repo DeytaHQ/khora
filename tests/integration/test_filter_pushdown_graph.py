@@ -69,7 +69,6 @@ from khora import Khora
 from khora.config import KhoraConfig
 from khora.query import SearchMode
 from tests.test_helpers.filter_spy import (
-    EMBED_DIM,
     assert_filter_threaded,
     plan_extraction,
     seed_corpus,
@@ -78,6 +77,11 @@ from tests.test_helpers.filter_spy import (
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.filter_enforcement]
+
+# The Postgres pgvector column is fixed at 1536 (KhoraConfig rejects any other
+# dimension on the PG backend), so the live-DB suite sizes its deterministic
+# vectors at 1536 rather than the small embedded ``EMBED_DIM``.
+_PG_EMBED_DIM = 1536
 
 
 # --------------------------------------------------------------------------- #
@@ -111,7 +115,8 @@ _SKIP = pytest.mark.skipif(
 async def kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
     # Deterministic extractor + embedder so the same content seeds the same
     # entities + vectors as the embedded suite (shared via filter_spy.stub_llm).
-    stub_llm(monkeypatch)
+    # Sized at 1536 because the Postgres pgvector column requires it.
+    stub_llm(monkeypatch, dim=_PG_EMBED_DIM)
 
     database_url = os.environ.get(
         "KHORA_DATABASE_URL",
@@ -121,8 +126,8 @@ async def kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
     config = KhoraConfig(database_url=database_url, neo4j_url=neo4j_url)
     config.storage.neo4j_user = os.environ.get("KHORA_NEO4J_USERNAME", "neo4j")
     config.storage.neo4j_password = os.environ.get("KHORA_NEO4J_PASSWORD", "password")
-    config.llm.embedding_dimension = EMBED_DIM
-    config.storage.embedding_dimension = EMBED_DIM
+    config.llm.embedding_dimension = _PG_EMBED_DIM
+    config.storage.embedding_dimension = _PG_EMBED_DIM
     config.pipeline.extract_entities = True
     config.pipeline.selective_extraction = False
 
