@@ -56,7 +56,7 @@ khora's own engines; not re-exported from :mod:`khora.__init__`.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from khora.filter import (
@@ -437,6 +437,14 @@ def _comparable(stored: Any, operand: Any) -> bool:
     strings with strings, datetimes with datetimes. Any cross-family pair is
     NOT comparable — the positive op excludes it (Rule 1: never abort, exclude
     instead of raising a ``TypeError`` on ``str < int``).
+
+    Two datetimes are comparable regardless of tz-awareness: a naive stored
+    value (some backends — e.g. the embedded sqlite store, whose SQLAlchemy
+    ``DateTime`` column is tz-naive — return naive datetimes) is normalized to
+    UTC at the comparison boundary by :func:`_align_dt`, so the pair both
+    compares and orders without a ``TypeError``. The gate stays a same-family
+    test; the tz alignment is applied to the *values* before ``==`` / ``<`` /
+    membership, never here.
     """
     if _is_number(operand):
         return _is_number(stored)
@@ -451,6 +459,27 @@ def _comparable(stored: Any, operand: Any) -> bool:
     return type(stored) is type(operand)
 
 
+def _to_utc(value: datetime) -> datetime:
+    """Normalize a datetime to UTC-aware — naive is read as UTC (mirrors :func:`_try_parse_utc`)."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _align_dt(stored: Any, value: Any) -> tuple[Any, Any]:
+    """Align a comparable datetime pair to UTC-aware so ``==`` / ``<`` never raise.
+
+    Only rewrites when BOTH operands are datetimes (the sole family where a
+    naive/aware mix raises ``TypeError`` on compare). A naive operand on either
+    side — stored (e.g. the embedded sqlite store) or the filter value — is read
+    as UTC, mirroring :func:`_try_parse_utc` / :func:`_md_date_compare`. Any
+    other pair (already-handled by :func:`_comparable`) passes through unchanged.
+    """
+    if isinstance(stored, datetime) and isinstance(value, datetime):
+        return _to_utc(stored), _to_utc(value)
+    return stored, value
+
+
 # ----- system-key value comparisons (None / wrong-type aware) -------------- #
 
 
@@ -460,6 +489,7 @@ def _system_eq(stored: Any, value: Any) -> bool:
         return False
     if not _comparable(stored, value):
         return False
+    stored, value = _align_dt(stored, value)
     return stored == value
 
 
@@ -469,6 +499,7 @@ def _system_ne(stored: Any, value: Any) -> bool:
         return True
     if not _comparable(stored, value):
         return True
+    stored, value = _align_dt(stored, value)
     return stored != value
 
 
@@ -476,14 +507,20 @@ def _system_in(stored: Any, values: list[Any]) -> bool:
     """System ``$in``: present, comparable to, and equal to some member."""
     if stored is None:
         return False
-    return any(_comparable(stored, v) and stored == v for v in values)
+    return any(_comparable(stored, v) and _eq_aligned(stored, v) for v in values)
 
 
 def _system_nin(stored: Any, values: list[Any]) -> bool:
     """System ``$nin``: include None / wrong-type; exclude only an in-set match."""
     if stored is None:
         return True
-    return not any(_comparable(stored, v) and stored == v for v in values)
+    return not any(_comparable(stored, v) and _eq_aligned(stored, v) for v in values)
+
+
+def _eq_aligned(stored: Any, value: Any) -> bool:
+    """``stored == value`` with a naive/aware datetime pair aligned to UTC first."""
+    stored, value = _align_dt(stored, value)
+    return stored == value
 
 
 def _system_range(stored: Any, value: Any, range_fn: Callable[[Any, Any], bool]) -> bool:
@@ -492,6 +529,7 @@ def _system_range(stored: Any, value: Any, range_fn: Callable[[Any, Any], bool])
         return False
     if not _comparable(stored, value):
         return False
+    stored, value = _align_dt(stored, value)
     return range_fn(stored, value)
 
 
