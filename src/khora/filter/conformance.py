@@ -746,25 +746,32 @@ _LIVE_BACKENDS: frozenset[str] = _TOTAL_BACKENDS | _SPLIT_BACKENDS
 # Every backend a metadata-only / occurred_at / source_timestamp case can run on.
 _OP_BACKENDS: frozenset[str] = _INMEM_BACKENDS | _LIVE_BACKENDS
 
-# String-key cases run on python + chronicle only — NOT any live DB backend. Every
-# live store seeds the chunk row through ``seed_case``, which writes only the three
-# ``_DATE_KEYS`` + ``metadata`` onto the core ``Chunk`` (the seven string document
-# keys — ``source_name`` / ``source_url`` / ``external_id`` / ``content_type`` /
-# ``source`` / ``source_type`` / ``title`` — are NOT carried on the core Chunk model,
-# only on the skeleton DTOs, and the live runners copy only dates+metadata, mirroring
-# ``_conformance_pg._to_temporal_chunk``). So a positive string predicate is empty on
-# every live store and a negative one would diverge — they are pruned to python +
-# chronicle (a documented capability/seed reason, NOT a silent skip). The in-memory
-# oracle + chronicle still validate every string case.
-_STRING_OP_BACKENDS: frozenset[str] = _INMEM_BACKENDS
+# The live backends that do NOT carry the seven string document keys
+# (``source_name`` / ``source_url`` / ``external_id`` / ``content_type`` /
+# ``source`` / ``source_type`` / ``title``) on the queryable row, so a predicate that
+# READS a string-key value is empty / divergent there and is pruned: postgres + lance
+# seed through the core ``Chunk`` (the string keys live on the Document, not the
+# core chunk, so they land NULL), and the weaviate ``KhoraChunk`` collection schema
+# has no string-key columns at all. The surrealdb and cypher runners seed the seven
+# string keys verbatim onto the queryable row, so they KEEP string-key value cases.
+_NO_STRING_KEY_BACKENDS: frozenset[str] = frozenset({"postgres", "sqlite_lance", "weaviate"})
 
-# ``created_at`` is stamped by every live store on insert (the writer coalesces a
-# missing ``created_at`` to ``now()``), so an "absent" row cannot stay NULL on a live
-# leg — its ``now()`` value satisfies a lower-bound op and breaks the by-construction
-# ``expected_ids``. A ``created_at`` predicate is therefore validated on the in-memory
-# backends only (they keep an absent value NULL); ``occurred_at`` / ``source_timestamp``
-# are user-supplied and stay NULL when absent, so they keep the live backends.
-_CREATED_AT_BACKENDS: frozenset[str] = _INMEM_BACKENDS
+# The live backends that STAMP ``created_at`` to ``now()`` on insert when absent
+# (postgres + lance via the skeleton temporal store; weaviate via the same store
+# path), so an "absent" row cannot stay NULL there — its ``now()`` value satisfies a
+# lower-bound op and breaks the by-construction ``expected_ids``. A ``created_at``
+# predicate is pruned from these. The surrealdb (explicit ``option<datetime>`` insert,
+# no default) and cypher (omitted property when absent) runners keep an absent
+# ``created_at`` NULL, so they KEEP ``created_at`` cases. ``occurred_at`` /
+# ``source_timestamp`` are user-supplied and stay NULL everywhere — never pruned.
+_CREATED_AT_STAMP_BACKENDS: frozenset[str] = frozenset({"postgres", "sqlite_lance", "weaviate"})
+
+# The live backends whose runner seeds through ``seed_case`` — i.e. it writes one
+# ``Document`` per record into the relational ``documents`` table (which enforces
+# UNIQUE ``(namespace_id, external_id)``). A case whose seed has a duplicate non-NULL
+# ``external_id`` cannot be written here. The surrealdb / cypher runners seed rows
+# directly (no ``documents`` table), so they are unaffected.
+_SEED_CASE_BACKENDS: frozenset[str] = frozenset({"postgres", "sqlite_lance", "weaviate"})
 
 # Mirrors ``compile_surrealdb._SAFE_SEGMENT_RE`` (kept in sync intentionally): a
 # metadata path segment surrealdb can safely interpolate. A segment that fails this
@@ -858,62 +865,77 @@ def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[See
     """Compute the backend set a case can run on, from the leaves its filter touches.
 
     ``@internal``. Lowers the filter through the real ``parse_to_ast`` and walks its
-    leaf clauses (:func:`~khora.filter.execute.iter_leaf_clauses`) to apply the
-    divergence framework's documented capability prunes:
+    leaf clauses (:func:`~khora.filter.execute.iter_leaf_clauses`), starting from all
+    backends and SUBTRACTING per-backend exclusions (each a documented capability /
+    seed reason — never a silent skip):
 
     * a leaf that READS one of the seven STRING document keys' value (any op except
-      ``$exists``) → :data:`_STRING_OP_BACKENDS` (python + chronicle): those keys
-      are not seeded onto the live chunk row, so a value-reading predicate is empty
-      / divergent on every live store;
+      ``$exists``) → drop :data:`_NO_STRING_KEY_BACKENDS` (postgres / sqlite_lance /
+      weaviate, whose seed does not carry the string keys). surrealdb + cypher KEEP
+      it (their runners seed the string keys verbatim); python + chronicle always do;
     * a ``$exists`` on a string document key is **NOT** a prune: ``$exists`` on a
-      system key is a CONSTANT (the column is always present in the row), so it is
-      value-independent and oracle-comparable on every backend — this is what lets
-      the F-EXISTS system-key shapes execute in both the pushed-down and
-      post-filtered modes;
-    * otherwise a leaf reading ``created_at`` → drop only ``created_at``'s live legs
-      (the store stamps ``now()``), keeping the rest;
+      system key is a CONSTANT (the always-present axiom), value-independent and
+      oracle-comparable on every backend — this is what lets the F-EXISTS system-key
+      shapes execute in both the pushed-down and post-filtered modes;
+    * a leaf reading ``created_at`` → drop :data:`_CREATED_AT_STAMP_BACKENDS`
+      (postgres / sqlite_lance / weaviate stamp ``now()`` on insert). surrealdb +
+      cypher KEEP it (they leave an absent ``created_at`` NULL); ``occurred_at`` /
+      ``source_timestamp`` are never pruned;
     * a surreal-only quirk (unsafe segment / metadata ``$date`` / present-null the
       filter distinguishes) → drop **surrealdb** only (:func:`_surreal_excluded`);
-      every other backend keeps the case;
     * a metadata-only / ``occurred_at`` / ``source_timestamp`` case → all backends.
 
-    The prune is the most restrictive constraint any leaf imposes. A case that
-    value-reads BOTH a string key and metadata is python + chronicle (the string key
-    is the binding constraint). This is the single source of truth for ``backends``
-    across the hand-authored families, so widening / pruning is computed, never
-    hand-kept.
+    Exclusions are unioned (the most restrictive set any leaf imposes wins), then
+    subtracted from :data:`_OP_BACKENDS`. This is the single source of truth for
+    ``backends`` across the hand-authored families, so widening / pruning is computed,
+    never hand-kept.
     """
     string_keys = set(_DOC_STRING_KEYS)
-    reads_string_value = False
-    reads_created_at = False
+    excluded: set[str] = set()
     for clause in iter_leaf_clauses(_resolve_ast(filter_)):
         root = clause.path[0] if clause.path else ""
         if root in string_keys and clause.op is not Op.EXISTS:
-            # A value-reading predicate on an unseeded string column — in-memory only.
-            reads_string_value = True
+            # A value-reading predicate on a string column the seed may not carry.
+            excluded |= _NO_STRING_KEY_BACKENDS
         elif root == "created_at":
-            # The store stamps created_at on insert — its live legs diverge.
-            reads_created_at = True
-    if reads_string_value:
-        return _STRING_OP_BACKENDS
-    if reads_created_at:
-        return _CREATED_AT_BACKENDS
+            # A store that stamps created_at on insert can't keep the absent row NULL.
+            excluded |= _CREATED_AT_STAMP_BACKENDS
+    if _seed_has_duplicate_external_id(seed):
+        # The ``documents`` table has a UNIQUE ``(namespace_id, external_id)``
+        # constraint, so a seed with two records sharing an ``external_id`` cannot be
+        # written through the ``seed_case`` Document path (postgres / sqlite_lance /
+        # weaviate). surrealdb / cypher seed onto the chunk row directly (no documents
+        # UNIQUE), so they are unaffected — drop only the Document-path backends.
+        excluded |= _SEED_CASE_BACKENDS
     if _surreal_excluded(filter_, seed):
-        # Drop surrealdb only; every other backend handles the case (postgres /
-        # sqlite_lance bind the path + post-filter, cypher / weaviate defer metadata).
-        return _OP_BACKENDS - frozenset({"surrealdb"})
-    return _OP_BACKENDS
+        # A surreal-only representation quirk (no post-filter safety net on the total
+        # surreal leg) — drop surrealdb; every other backend keeps the case.
+        excluded.add("surrealdb")
+    return _OP_BACKENDS - excluded
 
 
-# The one non-null string system key — its column defaults to ``"library"`` at the
-# SQL layer, so a ``-5`` row with the key unset would be ``"library"`` on the SQL
-# backends but ``None`` in the in-memory oracle. To keep ``expected_ids`` backend-
-# consistent that key is seeded with five populated rows (no NULL row); every other
-# string key is nullable (unset ⇒ NULL on the SQL backends, ``None`` in the oracle —
-# consistent), so it carries the ``-5`` NULL row that F1 (Mongo-faithful negation)
-# keeps under ``$ne``/``$nin``. (String-key cases run on python + chronicle today —
-# see ``_STRING_OP_BACKENDS`` — but the seed stays SQL-consistent for when the
-# seeder denormalizes the doc-keys onto the chunk row and they gain a SQL leg.)
+def _seed_has_duplicate_external_id(seed: tuple[SeedRecord, ...]) -> bool:
+    """Whether the seed has two records sharing a non-NULL ``external_id``.
+
+    ``documents`` enforces UNIQUE ``(namespace_id, external_id)`` and ``seed_case``
+    writes one Document per record under one namespace, so a duplicate non-NULL
+    ``external_id`` violates the constraint on the Document-path backends (the
+    ``external_id`` F-OP seed's ``$eq``-tied pair is the case in point).
+    """
+    seen = [rec.external_id for rec in seed if rec.external_id is not None]
+    return len(seen) != len(set(seen))
+
+
+# The one non-null string system key — its column defaults to ``"library"`` on the
+# postgres ``khora_chunks`` schema, so a ``-5`` row with the key unset would be
+# ``"library"`` on that backend but ``None`` in the in-memory oracle. To keep
+# ``expected_ids`` backend-consistent that key is seeded with five populated rows (no
+# NULL row); every other string key is nullable (unset ⇒ NULL on the stores that
+# carry it, ``None`` in the oracle — consistent), so it carries the ``-5`` NULL row
+# that F1 (Mongo-faithful negation) keeps under ``$ne``/``$nin``. String-key VALUE
+# cases run on the backends whose runner seeds the string keys (surrealdb + cypher,
+# plus python + chronicle) and are pruned from the rest (postgres / sqlite_lance /
+# weaviate); the per-case set is computed by :func:`_backends_for_filter`.
 _NON_NULL_STRING_KEY = "source_type"
 
 
@@ -978,23 +1000,22 @@ def _date_op_cases(key: str) -> list[ConformanceCase]:
     bound = _DATE_BOUND
     hit_iso = _DATE_HIT.isoformat().replace("+00:00", "Z")
 
-    # ``created_at`` is stamped by every live store on insert (the writer coalesces
-    # a missing created_at to ``now()``), so the "absent" ``-5`` record cannot be
-    # represented as NULL on any live leg — its ``now()`` value satisfies the
-    # lower-bound ops and breaks them. ``created_at`` is therefore validated on the
-    # in-memory backends only (they keep an absent value NULL). ``occurred_at`` /
-    # ``source_timestamp`` are user-supplied and stay NULL when absent, so they keep
-    # the live backends (total-exact postgres / surrealdb + split cypher / weaviate /
-    # sqlite_lance).
-    backends = _CREATED_AT_BACKENDS if key == "created_at" else _OP_BACKENDS
-
+    # ``backends`` is computed per-case from the filter + seed
+    # (:func:`_backends_for_filter`): a ``created_at`` predicate drops the live legs
+    # that stamp ``now()`` on insert (postgres / sqlite_lance / weaviate) while
+    # keeping surrealdb / cypher (which leave an absent ``created_at`` NULL);
+    # ``occurred_at`` / ``source_timestamp`` are user-supplied and stay on every
+    # backend. The surrealdb NONE<date asymmetry on lower-bound ops is handled in
+    # ``compile_surrealdb`` (a guarded ``IS NOT NONE``), so surreal keeps the
+    # ``$lt`` / ``$lte`` date cases.
     def case(suffix: str, predicate: dict[str, Any], expected: frozenset[str], op_tag: str) -> ConformanceCase:
+        filter_ = {key: predicate}
         return ConformanceCase(
             id=f"F-OP-{key}-{suffix}",
-            filter={key: predicate},
+            filter=filter_,
             seed_records=seed,
             expected_ids=expected,
-            backends=backends,
+            backends=_backends_for_filter(filter_, seed),
             exercises=("F-OP", key, op_tag),
         )
 
@@ -1033,20 +1054,24 @@ def _string_op_cases(key: str) -> list[ConformanceCase]:
     nullable = key != _NON_NULL_STRING_KEY
     seed = _string_field_seed(key, nullable=nullable)
     r1, r2, r3, r4, r5 = (r.id for r in seed)
+
     # The ``-5`` row is kept by every negation here regardless of nullability: for a
     # nullable key it is the NULL row F1 includes; for the non-null key it is
     # ``"kafka"``, which is unequal to every negation operand below ("direct" /
     # "connection"). The two reasons converge on the same survivor set, so the
-    # expected_ids stay consistent across the python oracle and chronicle (the two
-    # backends these string cases run on — see ``_STRING_OP_BACKENDS``).
-
+    # expected_ids stay consistent across every backend that carries the string key.
+    # ``backends`` is computed per-case (:func:`_backends_for_filter`): a value-reading
+    # string predicate drops the live legs that do not seed the string keys
+    # (postgres / sqlite_lance / weaviate) and keeps surrealdb + cypher (which do) plus
+    # python + chronicle; an ``$exists`` (a constant on a system key) stays on all.
     def case(suffix: str, predicate: Any, expected: frozenset[str], op_tag: str) -> ConformanceCase:
+        filter_ = {key: predicate}
         return ConformanceCase(
             id=f"F-OP-{key}-{suffix}",
-            filter={key: predicate},
+            filter=filter_,
             seed_records=seed,
             expected_ids=expected,
-            backends=_STRING_OP_BACKENDS,
+            backends=_backends_for_filter(filter_, seed),
             exercises=("F-OP", key, op_tag),
         )
 
@@ -1101,8 +1126,10 @@ def f_op_cases() -> list[ConformanceCase]:
     scalar. Each key is seeded with five records; the nullable keys carry a NULL
     ``-5`` row that F1 (Mongo-faithful negation) keeps under ``$ne`` / ``$nin``,
     while the one non-null key (``source_type``) is seeded fully populated so its
-    ``expected_ids`` stay consistent across the in-memory oracle and chronicle (the
-    string-key cases run on python + chronicle only — see ``_STRING_OP_BACKENDS``).
+    ``expected_ids`` stay consistent across every backend that carries the key. A
+    string-key VALUE case runs on the backends whose runner seeds the string keys
+    (surrealdb + cypher, plus python + chronicle); a string-key ``$exists`` (a
+    constant on a system key) runs on all (see :func:`_backends_for_filter`).
     Every case tags the system key it exercises in ``exercises`` so the coverage
     meta-test can assert the union covers :data:`SYSTEM_KEYS`. ``expected_ids`` is
     computed by construction from each case's known seed (the runner confirms,
