@@ -279,7 +279,7 @@ class _Builder:
                 # (so $in would wrongly match all), and sa.not_() of that empty
                 # chain is invalid SQL (so $nin would error at execute time).
                 return sa.false() if op == Op.IN else sa.true()
-            chain = sa.or_(*(self._md_containment(segs, v) for v in operand))
+            chain = sa.or_(*(self._md_in_element(segs, v) for v in operand))
             return chain if op == Op.IN else sa.not_(chain)
 
         if op == Op.EQ:
@@ -323,6 +323,21 @@ class _Builder:
             node = self._md_json(segs)
             return sa.func.coalesce(node == _jsonb_literal(dict(operand)), sa.false())
         return self._md_containment(segs, operand)
+
+    def _md_in_element(self, segs: tuple[str, ...], value: Any) -> ColumnElement[bool]:
+        """One ``$in`` / ``$nin`` operand element — total boolean.
+
+        A dict element is EXACT ``object_equal`` (``#> = '{...}'::jsonb``, NOT
+        ``@>`` containment) — mirroring the dict branch of :meth:`_md_eq`, so a
+        stored superset object does not satisfy membership. Any other element
+        (scalar / array / null) routes through array-aware ``@>`` containment.
+        Both forms are total booleans, so the OR chain (and its ``$nin``
+        negation) stays negation-safe.
+        """
+        if isinstance(value, Mapping):
+            node = self._md_json(segs)
+            return sa.func.coalesce(node == _jsonb_literal(dict(value)), sa.false())
+        return self._md_containment(segs, value)
 
     def _md_range(self, segs: tuple[str, ...], op: Op, operand: Any) -> ColumnElement[bool]:
         """A metadata range op — jsonb_typeof-gated cast, coalesced to total."""

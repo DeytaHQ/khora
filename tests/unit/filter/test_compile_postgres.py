@@ -368,6 +368,94 @@ def test_metadata_nested_dict_operand_eq_is_exact_object_match() -> None:
 
 
 # ===========================================================================
+# $in / $nin with a DICT element — exact object_equal per element, not @>.
+#
+# A dict element of a metadata $in is a whole-subdocument exact match (mirroring
+# the dict branch of $eq), NOT @> containment — so a stored superset object does
+# NOT satisfy membership. Scalar / array elements are unchanged (array-aware @>
+# containment); only the dict element switched. $nin negates the per-element OR
+# chain, so superset / absent rows are INCLUDED.
+# ===========================================================================
+
+
+def test_metadata_in_dict_element_is_exact_object_match_not_containment() -> None:
+    # A single dict element of $in compiles to the exact #> = <jsonb object> form
+    # (the same object_equal shape $eq emits for a dict operand) — NEVER @>
+    # containment, so a stored object with extra keys does not match.
+    sql = _sql_norm(_ast({"metadata.labels": {"$in": [{"team": "x"}]}}))
+    assert "#>" in sql
+    # Exact equality against a jsonb object literal — not array-aware @>.
+    assert "@>" not in sql
+    assert "labels" in sql
+    assert '{"team": "x"}' in sql
+
+
+def test_metadata_in_nested_path_dict_element_is_exact_object_match() -> None:
+    # Same exact-object match through a nested metadata path: the dict element
+    # addresses the subdocument via #> and compares it exactly, not via @>.
+    sql = _sql_norm(_ast({"metadata.outer.inner": {"$in": [{"team": "x"}]}}))
+    assert "#>" in sql
+    assert "outer" in sql and "inner" in sql
+    assert "@>" not in sql
+    assert '{"team": "x"}' in sql
+
+
+def test_metadata_nin_dict_element_negates_exact_object_match() -> None:
+    # $nin with a dict element is the per-element exact-equality chain wrapped in
+    # NOT. The positive form is total (coalesced to FALSE on absent/wrong-type), so
+    # NOT flips superset / absent rows to TRUE — they are INCLUDED by $nin
+    # (Rule 2 polarity: a superset is "not equal" to the operand, an absent key
+    # satisfies $nin).
+    sql = _sql_norm(_ast({"metadata.labels": {"$nin": [{"team": "x"}]}}))
+    assert sql.startswith("not ")
+    assert "#>" in sql
+    assert "@>" not in sql
+    # The total guard (coalesce → false) under the NOT is what admits the absent
+    # row — assert it is present, not merely the negation token.
+    assert "coalesce(" in sql
+    assert '{"team": "x"}' in sql
+
+
+def test_metadata_in_mixed_dict_and_scalar_elements() -> None:
+    # A mixed $in list [{dict}, scalar] emits ONE OR chain combining the dict
+    # element's exact object match with the scalar element's array-aware
+    # containment. Both forms coexist: the dict arm is #> = <jsonb> (no @>), the
+    # scalar arm is the OR of the scalar-doc and array-wrapped @> containments.
+    sql = _sql_norm(_ast({"metadata.labels": {"$in": [{"team": "x"}, "scalar"]}}))
+    assert " or " in sql
+    # Dict element → exact object match.
+    assert "#>" in sql
+    assert '{"team": "x"}' in sql
+    # Scalar element → array-aware @> containment (both scalar-doc and array-doc).
+    assert "@>" in sql
+    assert '{"labels": "scalar"}' in sql
+    assert '{"labels": ["scalar"]}' in sql
+
+
+def test_metadata_in_scalar_elements_still_use_containment() -> None:
+    # Regression: a scalar-only $in is unchanged by the dict-element fix — every
+    # element still compiles to array-aware @> containment (scalar-doc OR
+    # array-wrapped), with NO #> exact-equality leaking in.
+    sql = _sql_norm(_ast({"metadata.tier": {"$in": ["gold", "silver"]}}))
+    assert "@>" in sql
+    assert "#>" not in sql
+    assert '{"tier": "gold"}' in sql
+    assert '{"tier": ["gold"]}' in sql
+    assert '{"tier": "silver"}' in sql
+    assert '{"tier": ["silver"]}' in sql
+
+
+def test_metadata_in_array_element_still_uses_containment() -> None:
+    # Regression: an array (list) element of $in is NOT a dict, so it stays on the
+    # array-aware @> containment path — only dict elements switched to exact
+    # equality. A list operand element lowers through the same containment doc as
+    # a scalar (its leaf value is the list).
+    sql = _sql_norm(_ast({"metadata.tags": {"$in": [["x", "y"]]}}))
+    assert "@>" in sql
+    assert "#>" not in sql
+
+
+# ===========================================================================
 # Rule 4 — $exists / null on metadata use key-presence, not value extraction.
 # ===========================================================================
 
