@@ -313,9 +313,9 @@ async def test_graph_overfetch_post_filter_threads_filter(
 @_SKIP
 @pytest.mark.asyncio
 async def test_session_fanout_threads_filter(kb: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch) -> None:
-    """When entry entities span >= 2 sessions, every per-session search threads the filter.
+    """When entry entities span >= 2 channels, every per-channel search threads the filter.
 
-    Vacuity N is DYNAMIC: one ``_vector_search_chunks`` per fanned-out session +
+    Vacuity N is DYNAMIC: one ``_vector_search_chunks`` per fanned-out channel +
     one unscoped fallback. We assert ``>= 2`` (fan-out requires >= 2 channels)
     and that every capture matches — not a hardcoded exact count.
     """
@@ -323,19 +323,20 @@ async def test_session_fanout_threads_filter(kb: Khora, namespace_id: UUID, monk
         "Ada Lovelace",
         entities=[("Ada Lovelace", "PERSON")],
     )
-    # Two docs in TWO DISTINCT sessions naming the same entity, so the entry
-    # entity spans >= 2 sessions and the fan-out activates. seed_corpus does not
-    # thread session_id, so seed directly with remember(session_id=...) (#620).
-    from uuid import uuid4
-
-    for content in ("Ada Lovelace published her notes.", "Ada Lovelace presented again later."):
-        await kb.remember(
-            content=content,
-            namespace=namespace_id,
-            entity_types=["PERSON"],
-            relationship_types=[],
-            session_id=uuid4(),
-        )
+    # Two docs in TWO DISTINCT channels naming the same entity, so the entry
+    # entity is MENTIONED_IN chunks spanning >= 2 distinct ``c.channel`` values
+    # and the session-aware fan-out activates. ``get_entity_channels`` reads the
+    # Chunk ``channel`` column, which is derived from document ``metadata["channel"]``
+    # (engine.py: ``doc_metadata.get("channel")``) — NOT session_id — so the
+    # discriminator to seed is the channel, set via per-doc metadata.
+    await seed_corpus(
+        lambda **kw: kb.remember(entity_types=["PERSON"], relationship_types=[], **kw),
+        namespace_id,
+        [
+            {"content": "Ada Lovelace published her notes.", "metadata": {"channel": "chan-a"}},
+            {"content": "Ada Lovelace presented again later.", "metadata": {"channel": "chan-b"}},
+        ],
+    )
 
     retriever = _retriever(kb)
     await _assert_entry_entities_present(retriever, "Ada Lovelace", namespace_id)
