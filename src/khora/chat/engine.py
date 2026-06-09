@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import litellm
 from loguru import logger
+
+from khora.config.llm import DEFAULT_LLM_TIMEOUT_S, llm_call_timeout
 
 from .history import HistoryManager
 from .prompt import PromptGenerator
@@ -171,11 +174,14 @@ class ChatEngine:
         import time as _time
 
         _t0 = _time.perf_counter()
-        response = await litellm.acompletion(
-            model=self.llm_model,
-            messages=messages,
-            max_tokens=self.persona.chat.response.max_tokens,
-            temperature=self.persona.chat.response.temperature,
+        response = await asyncio.wait_for(
+            litellm.acompletion(
+                model=self.llm_model,
+                messages=messages,
+                max_tokens=self.persona.chat.response.max_tokens,
+                temperature=self.persona.chat.response.temperature,
+            ),
+            llm_call_timeout(DEFAULT_LLM_TIMEOUT_S),
         )
         _latency = (_time.perf_counter() - _t0) * 1000
 

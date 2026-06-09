@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
+
+from khora.config.llm import DEFAULT_LLM_TIMEOUT_S, llm_call_timeout
 
 if TYPE_CHECKING:
     pass
@@ -150,10 +153,13 @@ class HistoryManager:
         # Generate summary
         summary_prompt = self._build_compression_prompt(to_compress, history.compressed_summary)
 
-        response = await litellm.acompletion(
-            model=self.compression_model,
-            messages=[{"role": "user", "content": summary_prompt}],
-            max_tokens=500,
+        response = await asyncio.wait_for(
+            litellm.acompletion(
+                model=self.compression_model,
+                messages=[{"role": "user", "content": summary_prompt}],
+                max_tokens=500,
+            ),
+            llm_call_timeout(DEFAULT_LLM_TIMEOUT_S),
         )
 
         new_summary = response.choices[0].message.content

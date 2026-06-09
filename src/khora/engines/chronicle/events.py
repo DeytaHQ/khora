@@ -19,6 +19,7 @@ from uuid import UUID, uuid4
 import litellm
 from loguru import logger
 
+from khora.config.llm import DEFAULT_LLM_TIMEOUT_S, llm_call_timeout
 from khora.core.diagnostics import ErrorRecord
 from khora.telemetry.metrics import metric_counter
 
@@ -188,14 +189,17 @@ class EventExtractor:
 
         _t0 = _time.perf_counter()
         try:
-            response = await litellm.acompletion(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _EVENT_SYSTEM},
-                    {"role": "user", "content": text[:4000]},  # Cap input
-                ],
-                temperature=0.0,
-                max_tokens=1000,
+            response = await asyncio.wait_for(
+                litellm.acompletion(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": _EVENT_SYSTEM},
+                        {"role": "user", "content": text[:4000]},  # Cap input
+                    ],
+                    temperature=0.0,
+                    max_tokens=1000,
+                ),
+                llm_call_timeout(DEFAULT_LLM_TIMEOUT_S),
             )
             content = response.choices[0].message.content or "[]"
             raw_events = self._parse_events(content)
