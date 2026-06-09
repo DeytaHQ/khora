@@ -157,6 +157,18 @@ class CompilerRegistry:
         return compiler
 
     @classmethod
+    def registered_keys(cls) -> frozenset[tuple[str, str]]:
+        """Snapshot of every registered ``(engine_id, storage_target)`` key.
+
+        ``@internal``. A thread-safe read of the full key set, used by the
+        conformance drift guard to assert the registry holds *exactly* the
+        compilers the corpus expects — so a new, unlisted registration fails
+        loudly instead of being silently excluded from the conformance matrix.
+        """
+        with cls._lock:
+            return frozenset(cls._registry)
+
+    @classmethod
     def _clear(cls) -> None:
         """Drop every registration. Test-only escape hatch (not public API)."""
         with cls._lock:
