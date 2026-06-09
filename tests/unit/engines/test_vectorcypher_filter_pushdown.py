@@ -1005,6 +1005,29 @@ class TestGraphChannelFullAstPostFilter:
         graph_empty = [d for d in degradations if d.get("reason") == "empty_under_filter"]
         assert not graph_empty, f"degradation wrongly fired while a graph chunk survived: {degradations}"
 
+    async def test_graph_channel_empty_increments_filter_counter(self, monkeypatch) -> None:
+        """Emptying the graph channel under a filter fires the declared filter counter.
+
+        The service-level ``khora.recall.filter.graph_channel_empty`` counter
+        (owner: filter) must actually increment — not the prior engine-private
+        duplicate. Spy on the ``record_graph_channel_empty`` helper the retriever
+        calls.
+        """
+        import khora.engines.vectorcypher.retriever as rmod
+
+        calls: list[int] = []
+        monkeypatch.setattr(rmod, "record_graph_channel_empty", lambda: calls.append(1))
+
+        ns_id = uuid4()
+        retriever = _make_retriever(ns_id, complexity=QueryComplexity.MODERATE)
+        violators = [_graph_chunk(ns_id, tag="noise")]
+        retriever._fetch_chunks_from_entities = AsyncMock(return_value=[(c.id, 0.9, c) for c in violators])
+
+        ast = parse_to_ast(RecallFilter.model_validate({"metadata.tag": {"$in": ["urgent"]}}))
+        await retriever.retrieve("alpha bravo charlie", ns_id, limit=10, filter_ast=ast)
+
+        assert calls, "record_graph_channel_empty not invoked when the graph channel emptied under a filter"
+
 
 # --------------------------------------------------------------------------- #
 # Partial failure: an unsupported-filter compile error surfaces to the caller

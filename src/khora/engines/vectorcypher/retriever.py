@@ -38,6 +38,7 @@ except ImportError:
 
 from khora.core.diagnostics import Degradation
 from khora.core.models import Chunk, Entity, Relationship
+from khora.filter.telemetry import record_graph_channel_empty
 from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
 from khora.telemetry.metrics import metric_counter
@@ -115,22 +116,6 @@ _REL_FETCH_DEGRADED_COUNTER = metric_counter(
         "path continues without relationships. The same event is also "
         "appended to RecallResult.engine_info['degradations']. Labels: "
         "reason (fetch_failed). NO namespace_id label - cardinality rule."
-    ),
-)
-
-# Graph-channel-empty-under-filter counter. Incremented when the
-# in-memory metadata post-filter empties the graph chunk channel while the
-# SQL-pushed vector/BM25 channels returned filtered rows — i.e. the graph side
-# under-recalled relative to the completeness backstop. The same event is also
-# appended to RecallResult.engine_info['degradations']. NO namespace_id label -
-# cardinality rule.
-_GRAPH_CHANNEL_EMPTY_COUNTER = metric_counter(
-    "khora.vectorcypher.graph_channel.empty_total",
-    unit="1",
-    description=(
-        "VectorCypher graph chunk channel emptied by the in-memory metadata "
-        "post-filter while the vector/BM25 channels returned filtered rows. "
-        "Labels: reason (empty_under_filter). NO namespace_id label - cardinality rule."
     ),
 )
 
@@ -1659,23 +1644,26 @@ class VectorCypherRetriever:
             ).predicate
             graph_chunks_before = len(graph_chunks)
             graph_chunks = [(cid, s, ch) for (cid, s, ch) in graph_chunks if graph_post_filter(ch)]
-            # When the post-filter empties the graph channel but the SQL-pushed
-            # vector/BM25 channels returned filtered rows, the graph side
-            # under-recalled relative to the completeness backstop. Record one
-            # degradation so callers can see the channel was dropped.
-            if not graph_chunks and graph_chunks_before and (vector_chunks or bm25_chunks):
-                logger.warning(
-                    f"Graph chunk channel emptied by metadata post-filter "
-                    f"({graph_chunks_before} dropped); vector/BM25 channels returned rows"
-                )
-                degradations.append(
-                    Degradation(
-                        component="vectorcypher.graph_channel",
-                        reason="empty_under_filter",
-                        detail=f"{graph_chunks_before} graph chunks dropped by metadata post-filter",
+            if not graph_chunks:
+                # The caller filter narrowed the graph channel to empty (it held
+                # candidates before the post-filter). Emit the service-level
+                # filter counter for every such recall.
+                record_graph_channel_empty()
+                # When the SQL-pushed vector/BM25 channels still returned filtered
+                # rows, the graph side under-recalled relative to the completeness
+                # backstop: record one degradation so callers see the dropped channel.
+                if vector_chunks or bm25_chunks:
+                    logger.warning(
+                        f"Graph chunk channel emptied by metadata post-filter "
+                        f"({graph_chunks_before} dropped); vector/BM25 channels returned rows"
                     )
-                )
-                _GRAPH_CHANNEL_EMPTY_COUNTER.add(1, attributes={"reason": "empty_under_filter"})
+                    degradations.append(
+                        Degradation(
+                            component="vectorcypher.graph_channel",
+                            reason="empty_under_filter",
+                            detail=f"{graph_chunks_before} graph chunks dropped by metadata post-filter",
+                        )
+                    )
 
         # Step 7: RRF fusion with score normalization and dynamic weights
         fused_results = self._fuse_results(

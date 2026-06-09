@@ -125,11 +125,12 @@ def test_has_residual_metadata_false_for_system_only() -> None:
         {"occurred_at": "2026-04-05"},
         {"created_at": {"$gte": "2026-04-05"}},
         {"occurred_at": {"$in": ["2026-04-05", "2026-04-06"]}},
+        {"occurred_at": {"$gte": "2026-04-05"}, "source_name": "linear"},
     ],
-    ids=["gte", "lte", "eq", "created_at", "in"],
+    ids=["gte", "lte", "eq", "created_at", "in", "conjunctive_with_other_key"],
 )
 def test_filter_constrains_date_key_true(doc: dict) -> None:
-    """Any operator on occurred_at / created_at is detected."""
+    """Any operator on a top-level conjunctive occurred_at / created_at is detected."""
     assert filter_constrains_date_key(_ast(doc)) is True
 
 
@@ -139,11 +140,13 @@ def test_filter_constrains_date_key_true(doc: dict) -> None:
         {"metadata.channel": "alpha"},
         {"source_name": "linear"},
         {"source_timestamp": "2026-04-05"},
+        {"$or": [{"occurred_at": {"$gte": "2026-04-05"}}, {"source_name": "linear"}]},
+        {"$not": {"occurred_at": {"$gte": "2026-04-05"}}},
     ],
-    ids=["metadata_only", "system_string_key", "source_timestamp_excluded"],
+    ids=["metadata_only", "system_string_key", "source_timestamp_excluded", "date_under_or", "date_under_not"],
 )
 def test_filter_constrains_date_key_false(doc: dict) -> None:
-    """Non-date keys (including source_timestamp, which is excluded) are not flagged."""
+    """Non-date keys and dates buried under $or/$not (not hard conjunctive) are not flagged."""
     assert filter_constrains_date_key(_ast(doc)) is False
 
 

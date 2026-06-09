@@ -118,9 +118,12 @@ def run_chronicle_filter(
 # An engine composing a caller filter across adaptive sub-searches needs a few
 # cheap structural questions answered about the AST: which keys it constrains,
 # whether any leaf falls outside a backend's pushdown set, whether it touches a
-# date key, and whether it pins a metadata channel at the top level. All four
-# are thin consumers of :func:`iter_leaf_clauses` — the single canonical leaf
-# walk — so the traversal logic lives in exactly one place.
+# date key, and whether it pins a metadata channel at the top level. The
+# key-set detectors (which-keys, residual-pushdown) are thin consumers of
+# :func:`iter_leaf_clauses` — the single canonical leaf walk. The date-key and
+# channel detectors instead inspect ONLY the root ``AND``'s direct children,
+# because a predicate buried under ``$or`` / ``$not`` is not a hard conjunctive
+# constraint and must not drive ranking-mode decisions.
 # --------------------------------------------------------------------------- #
 
 
@@ -159,15 +162,24 @@ def has_residual_metadata(node: FilterNode | FilterClause, consumed_keys: frozen
     return bool(filter_leaf_keys(node) - consumed_keys)
 
 
-def filter_constrains_date_key(node: FilterNode | FilterClause) -> bool:
-    """Return whether any leaf constrains a date system key.
+def filter_constrains_date_key(node: FilterNode) -> bool:
+    """Return whether a top-level conjunctive leaf constrains a date system key.
 
-    Keys on the leaf *path*, not its operator, so it covers every form an
-    ``occurred_at`` / ``created_at`` predicate can take — a bare ``$eq``, a range
-    (``$gte`` / ``$lte``), ``$in``, or ``$exists`` — each of which lowers to a
-    single-segment :class:`FilterClause` on that path.
+    Inspects ONLY the root ``AND``'s direct children — mirroring
+    :func:`caller_channel_constraint`. A date predicate buried inside an
+    ``$or`` / ``$not`` is not a hard conjunctive constraint, so it does not flag
+    (it is still enforced on every channel via the threaded filter; this gate
+    only governs EXPLICIT recency synthesis). Keys on the leaf *path*, not its
+    operator, so it covers every form an ``occurred_at`` / ``created_at``
+    predicate can take — a bare ``$eq``, a range (``$gte`` / ``$lte``), ``$in``,
+    or ``$exists``. A bare single predicate parses to ``AND`` with one child, so
+    the common ``{"occurred_at": {"$gte": ...}}`` case still flags.
     """
-    return any(clause.path in (("occurred_at",), ("created_at",)) for clause in iter_leaf_clauses(node))
+    if node.op != Op.AND:
+        return False
+    return any(
+        isinstance(child, FilterClause) and child.path in (("occurred_at",), ("created_at",)) for child in node.children
+    )
 
 
 def caller_channel_constraint(node: FilterNode) -> frozenset[str] | None:

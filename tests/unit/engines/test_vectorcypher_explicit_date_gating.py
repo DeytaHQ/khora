@@ -179,3 +179,36 @@ class TestNonDateFilterDoesNotForceExplicit:
 
         signal = _forwarded_signal(engine)
         assert signal.source != "api"
+
+
+class TestUnderFilledCounter:
+    """A filtered recall returning fewer than the requested limit emits the counter."""
+
+    async def test_under_filled_fires_when_filtered_recall_below_limit(self, monkeypatch: Any) -> None:
+        """The mock retriever returns zero chunks; a filtered recall under k records it.
+
+        Wires the declared ``khora.recall.filter.under_filled`` counter. The
+        engine imports the helper locally inside ``recall``, so patching the
+        source module attribute is picked up at call time.
+        """
+        import khora.filter.telemetry as tel
+
+        calls: list[int] = []
+        monkeypatch.setattr(tel, "record_under_filled", lambda: calls.append(1))
+
+        engine = _connected_engine()  # retriever.retrieve returns 0 chunks
+        await engine.recall("any query", uuid4(), limit=10, filter_ast=_ast({"metadata.channel": "alpha"}))
+
+        assert calls, "under_filled not recorded for a filtered recall that returned fewer than the limit"
+
+    async def test_under_filled_not_fired_without_filter(self, monkeypatch: Any) -> None:
+        """Control: an unfiltered recall never emits the filter under-filled counter."""
+        import khora.filter.telemetry as tel
+
+        calls: list[int] = []
+        monkeypatch.setattr(tel, "record_under_filled", lambda: calls.append(1))
+
+        engine = _connected_engine()
+        await engine.recall("any query", uuid4(), limit=10, filter_ast=None)
+
+        assert not calls, "under_filled fired for an unfiltered recall"

@@ -2187,6 +2187,13 @@ class VectorCypherEngine:
         finally:
             retriever._config.hybrid_alpha = original_alpha
 
+        # When a caller filter narrowed the candidate set below the requested k,
+        # emit the service-level under-filled counter (owner: filter) once.
+        if filter_ast is not None and len(result.chunks) < limit:
+            from khora.filter.telemetry import record_under_filled
+
+            record_under_filled()
+
         # Validate and filter retrieval results
         validated_chunks = self._validate_recall_results(result.chunks, query)
 

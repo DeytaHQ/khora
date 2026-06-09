@@ -84,3 +84,21 @@ def record_unindexed_metadata(*, op: str) -> None:
     Never pass ``namespace_id`` or a metadata key-path (both unbounded).
     """
     _get_unindexed_metadata_counter().add(1, attributes={"op": op})
+
+
+def record_under_filled() -> None:
+    """Record one filtered recall that returned fewer results than the requested limit.
+
+    Fired once per recall (no attributes) when a caller filter narrowed the
+    candidate set below the requested ``k``. Never pass ``namespace_id``.
+    """
+    _get_under_filled_counter().add(1)
+
+
+def record_graph_channel_empty() -> None:
+    """Record one filtered recall whose graph channel was narrowed to empty.
+
+    Fired once per recall (no attributes) when a caller filter eliminated every
+    graph-channel candidate. Never pass ``namespace_id``.
+    """
+    _get_graph_channel_empty_counter().add(1)
