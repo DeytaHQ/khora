@@ -420,17 +420,19 @@ async def seed_case(coord: StorageCoordinator, case: ConformanceCase) -> dict[st
     # the fixture helper lives under ``tests/`` (not importable in a bare install).
     from tests.integration._sqlite_lance_fixtures import EMBED_DIM, fake_embedding
 
-    # Deterministic, per-case namespace_id (xdist-safe). create_namespace honors a
-    # caller-supplied namespace_id (it passes the model straight to the relational
-    # backend). Seed every row under ns.namespace_id — the stable external id the
-    # recall read path scopes on.
+    # Deterministic, per-case namespace (xdist-safe): the stable namespace_id is
+    # derived from case.id, so the same case maps to the same namespace on every
+    # worker and distinct cases never collide. Child rows (documents/chunks) FK to
+    # ``memory_namespaces.id`` — the row-level id, NOT the stable namespace_id
+    # (MemoryNamespace: "use id for ... child-table FK lookups") — so seed every
+    # child under ``ns.id``, the persisted row id create_namespace returns.
     ns = await coord.create_namespace(
         MemoryNamespace(
             namespace_id=_case_namespace_id(case),
             metadata={"conformance_case": case.id},
         )
     )
-    namespace_id = ns.namespace_id
+    namespace_id = ns.id
 
     id_map: dict[str, UUID] = {}
     chunks: list[Chunk] = []
@@ -499,6 +501,17 @@ _STR_OTHER = "other-value"
 # positive predicate on them is chronicle-empty — flagged via ``backends`` there).
 _OP_BACKENDS: frozenset[str] = frozenset({"python", "postgres", "chronicle"})
 
+# String-key F-OP cases run on python + chronicle only — NOT postgres. The
+# postgres leg targets ``khora_chunks`` (the denormalized single-table target),
+# but ``seed_case`` denormalizes only ``_DATE_KEYS`` onto the seeded Chunk — the
+# core Chunk model carries none of the seven string document keys (only the
+# skeleton DTO does), so a positive string predicate is postgres-empty until the
+# seeder denormalizes the doc-keys onto the chunk row (a follow-up harness
+# concern). Pruning postgres here keeps ``ConformanceCase.backends`` an honest
+# single source of truth; the date-key F-OP cases keep postgres. python (the
+# oracle) + chronicle still validate every string case.
+_STRING_OP_BACKENDS: frozenset[str] = _OP_BACKENDS - frozenset({"postgres"})
+
 
 def _date_field_seed(key: str) -> tuple[SeedRecord, SeedRecord, SeedRecord]:
     """Three records for a date-key F-OP case: in-range, out-of-range, absent.
@@ -543,13 +556,22 @@ def _date_op_cases(key: str) -> list[ConformanceCase]:
     hit, miss, absent = (r.id for r in seed)
     bound = _DATE_BOUND
 
+    # ``created_at`` is stamped by the store on insert (the khora_chunks writer
+    # coalesces a missing created_at to ``now()``), so the "absent" record cannot
+    # be represented as NULL on the postgres leg — its ``now()`` value satisfies the
+    # lower-bound ops and breaks them. ``created_at`` is therefore validated on
+    # python (the oracle) + chronicle only, which keep an absent value NULL.
+    # ``occurred_at`` / ``source_timestamp`` are user-supplied and stay NULL when
+    # absent, so they keep postgres.
+    backends = _OP_BACKENDS - frozenset({"postgres"}) if key == "created_at" else _OP_BACKENDS
+
     def case(suffix: str, predicate: dict[str, Any], expected: frozenset[str], op_tag: str) -> ConformanceCase:
         return ConformanceCase(
             id=f"F-OP-{key}-{suffix}",
             filter={key: predicate},
             seed_records=seed,
             expected_ids=expected,
-            backends=_OP_BACKENDS,
+            backends=backends,
             exercises=("F-OP", key, op_tag),
         )
 
@@ -583,7 +605,7 @@ def _string_op_cases(key: str) -> list[ConformanceCase]:
             filter={key: predicate},
             seed_records=seed,
             expected_ids=expected,
-            backends=_OP_BACKENDS,
+            backends=_STRING_OP_BACKENDS,
             exercises=("F-OP", key, op_tag),
         )
 

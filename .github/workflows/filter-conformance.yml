@@ -1,0 +1,166 @@
+name: Filter Conformance
+
+# ---------------------------------------------------------------------------
+# Recall-filter conformance matrix. One leg per engine; each leg provisions
+# ONLY the database it needs (see the "Start Postgres" step below) so a leg
+# that needs no live store never waits on an idle container.
+#
+# This file is intentionally separate from ci.yml: GitHub schedules a separate
+# workflow file as its own check, so this matrix runs concurrently with the
+# main `test` job and gates the PR on its own.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# UV_NO_SYNC mirrors ci.yml: each leg installs the crewai extras combo once
+# (NEVER `--all-extras` — crewai and google-adk pin conflicting
+# opentelemetry-api ranges), then `uv run` must not re-resolve the venv.
+env:
+  UV_NO_SYNC: "1"
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # `include` so each leg carries its own provisioning metadata:
+        #   postgres: leg needs a live Postgres container + one-time seed.
+        # Legs without that flag run the import-only registry/compile guard,
+        # which needs no live database.
+        include:
+          # In-memory oracle — no service, no seed.
+          - backend: python
+          # Live Postgres executor — the only leg that provisions a DB.
+          - backend: postgres
+            postgres: true
+          # Chronicle date-bound pushdown + in-memory post-filter — no DB.
+          - backend: chronicle
+          # The four legs below currently run the registry/compile guard
+          # (resolve the compiler from the registry + compile the AST, no live
+          # execution). They grow into live conformance execution once their
+          # harness executor lands in src/khora/filter/conformance.py.
+          - backend: sqlite_lance
+          - backend: cypher
+          - backend: surrealdb
+          - backend: weaviate
+    env:
+      KHORA_CONFORMANCE_BACKEND: ${{ matrix.backend }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        # crewai combo — matches ci.yml's `install` job (NEVER `--all-extras`:
+        # crewai/google-adk conflict on opentelemetry-api).
+        run: uv sync --all-extras --no-extra google-adk
+
+      # -- Per-leg Postgres -------------------------------------------------- #
+      # A job-level `services:` block would start the container on EVERY matrix
+      # leg, leaving idle DBs on the in-memory legs and violating "each leg
+      # provisions only its own DB". `docker run` inside an `if:`-guarded step
+      # starts Postgres ONLY on the leg that sets `matrix.postgres`. Image,
+      # creds, host port (5434) and the readiness loop mirror ci.yml's
+      # `test-integration` job so a developer reproduces CI 1:1 with `make dev`.
+      - name: Start Postgres
+        if: matrix.postgres
+        run: |
+          docker run -d --name khora-conformance-pg \
+            -e POSTGRES_USER=khora \
+            -e POSTGRES_PASSWORD=khora \
+            -e POSTGRES_DB=khora \
+            -p 5434:5432 \
+            --health-cmd "pg_isready -U khora -d khora" \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 10 \
+            pgvector/pgvector:pg17
+
+      - name: Wait for Postgres readiness
+        if: matrix.postgres
+        # Mirrors the test-integration readiness loop: a clear, early failure
+        # message if the container is somehow not up.
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5434 -U khora >/dev/null 2>&1; then
+              echo "postgres ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres did not become ready within 60s"
+          exit 1
+
+      - name: Apply database migrations
+        if: matrix.postgres
+        # env.py normalizes the plain DSN to asyncpg and takes the advisory
+        # lock; a single upgrade-head brings the DB to head before the seed.
+        # Also a CREATE EXTENSION vector smoke that fails loudly on a wrong image.
+        env:
+          KHORA_DATABASE_URL: postgresql://khora:khora@localhost:5434/khora
+        run: uv run alembic upgrade head
+
+      - name: Seed conformance corpus
+        if: matrix.postgres
+        # One-time seed of the conformance store, run ONCE before pytest. It also
+        # writes the per-case id_map (the seeder assigns random chunk UUIDs each
+        # run) as a JSON artifact at KHORA_CONFORMANCE_SEED_MAP. The read-only
+        # pytest step below reads that same file instead of re-seeding, so each
+        # case is seeded exactly once (read-only cases). Both steps point at the
+        # same workspace-relative path — same job, same runner, so the file
+        # persists between steps without an artifact upload.
+        env:
+          KHORA_DATABASE_URL: postgresql://khora:khora@localhost:5434/khora
+          KHORA_CONFORMANCE_SEED_MAP: ${{ github.workspace }}/.conformance_seed_map.json
+        run: uv run python -m tests.integration.matrix._conformance_seed
+
+      # -- Conformance suite ------------------------------------------------- #
+      - name: Run filter conformance
+        # The postgres leg also exports the live DSN + the loud-DB-down flag so
+        # the suite aborts (rather than silently skipping) if Postgres is
+        # unreachable, plus KHORA_CONFORMANCE_SEED_MAP so the read-only suite
+        # reads the seed step's id_map. The map is postgres-exclusive by
+        # construction: only the postgres branch loads it, so the non-DB legs
+        # leave all three unset — python/chronicle run pure in-memory executors
+        # over each case's seed_records (no seeding, no map), and the remaining
+        # legs run the import-only registry/compile guard.
+        env:
+          KHORA_DATABASE_URL: ${{ matrix.postgres && 'postgresql://khora:khora@localhost:5434/khora' || '' }}
+          # KHORA_PG_REQUIRED=1 makes tests/integration/conftest.py abort the
+          # session red if Postgres is unreachable — prevents a silent skip of
+          # the postgres conformance cases. Do not drop it from this leg.
+          KHORA_PG_REQUIRED: ${{ matrix.postgres && '1' || '' }}
+          KHORA_CONFORMANCE_SEED_MAP: ${{ matrix.postgres && format('{0}/.conformance_seed_map.json', github.workspace) || '' }}
+        run: |
+          uv run pytest \
+            tests/integration/matrix/test_filter_conformance.py \
+            tests/integration/matrix/test_compiler_registry_keys.py \
+            -m "filter_conformance" -n auto --no-cov -v
+
+      - name: Stop Postgres
+        if: ${{ always() && matrix.postgres }}
+        run: docker rm -f khora-conformance-pg || true
