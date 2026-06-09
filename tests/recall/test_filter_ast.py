@@ -190,8 +190,8 @@ def test_explicit_eq_list_operand_stays_a_plain_list_not_a_tuple() -> None:
     # An EXPLICIT {"$eq": [list]} is array-CONTAINMENT, not the bare-list exact-array
     # sugar. It lowers to a plain ``list`` operand (carried verbatim by
     # ``_lower_scalar_operand``) — distinct from the bare-list form, which lowers to
-    # a ``tuple``. This container-type split is what ``canonical_hash`` tags
-    # differently (``[...]`` vs ``{"$arr": [...]}``).
+    # a ``tuple``. This container-type split is what ``canonical_hash`` records
+    # differently via the structural ``operand_kind`` field on the clause record.
     (clause,) = _clauses(_ast({"metadata.tags": {"$eq": ["a", "b"]}}))
     assert clause.path == ("metadata", "tags")
     assert clause.op == Op.EQ
