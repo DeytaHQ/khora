@@ -42,7 +42,6 @@ Example usage:
         result = await kb.recall("Who did Alice meet?", namespace=ns.namespace_id)
 """
 
-from . import integrations
 from .config import KhoraConfig
 from .core.models.document import DocumentSource
 from .core.models.event import EventType
@@ -127,3 +126,16 @@ __all__ = [
     "Op",
     "SYSTEM_KEYS",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name == "integrations":
+        import importlib
+        mod = importlib.import_module(".integrations", package=__name__)
+        globals()["integrations"] = mod
+        return mod
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return __all__ + ["integrations"]

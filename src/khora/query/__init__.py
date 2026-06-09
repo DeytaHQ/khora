@@ -73,7 +73,7 @@ def __getattr__(name: str) -> object:
 
 
 def __dir__() -> list[str]:
-    return __all__ + list(_LAZY)
+    return __all__  # __all__ already includes all lazy names
 
 
 __all__ = [
