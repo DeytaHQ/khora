@@ -381,11 +381,13 @@ def _intersect_upper(window: datetime | None, filter_bound: datetime | None) -> 
     return min(window, fb)
 
 
-# System keys the recall-filter post-filter reads off a chunk record. The eight
-# denormalized document keys live on the chunk's ``source_document`` projection
-# when present; ``DocumentSource`` only carries a subset (title / source /
-# source_type), so the rest resolve to absent on the legacy ``chunks`` path —
-# a documented limitation (positive predicates on them return empty there).
+# System keys the recall-filter post-filter reads off a chunk record. All seven
+# denormalized document keys live on the per-document ``DocumentProjection`` the
+# recall path hydrates for filtered queries (``get_document_projections_batch``);
+# ``DocumentSource`` carries only a subset (title / source / source_type), kept as
+# a tertiary fallback so the projection-less paths don't regress. When a doc-key
+# filter is present these resolve via the projection; on the short-circuited path
+# (no doc-key leaf) the projection isn't fetched and the keys stay absent.
 _DOC_PROJECTION_KEYS: tuple[str, ...] = (
     "source_type",
     "source_name",
@@ -397,7 +399,7 @@ _DOC_PROJECTION_KEYS: tuple[str, ...] = (
 )
 
 
-def _chunk_to_record(chunk: Chunk) -> dict[str, Any]:
+def _chunk_to_record(chunk: Chunk, doc: DocumentProjection | None = None) -> dict[str, Any]:
     """Map a :class:`Chunk` to the record dict the recall-filter post-filter reads.
 
     The post-filter (``compile_python``) evaluates the full filter against this
@@ -415,10 +417,12 @@ def _chunk_to_record(chunk: Chunk) -> dict[str, Any]:
     * ``created_at`` and ``source_timestamp`` are the LITERAL column values (a
       filter on those names is post-filtered against the real column).
 
-    The eight denormalized document keys are read off ``chunk.source_document``
-    when present (``DocumentSource`` carries only a subset; the rest stay absent,
-    so a positive predicate on them returns empty on the legacy path — documented
-    limitation, no faithful fallback exists). ``metadata`` is the chunk's own dict.
+    The seven denormalized document keys resolve from ``doc`` (the per-document
+    :class:`DocumentProjection` the recall path hydrates when a doc-key filter is
+    present), falling back to ``chunk.source_document`` (a subset). When ``doc`` is
+    ``None`` — the short-circuited path (no doc-key leaf) or a degraded hydration —
+    a key found nowhere stays absent, so a positive predicate on it returns empty.
+    ``metadata`` is the chunk's own dict.
     """
     record: dict[str, Any] = {
         # Effective event time = COALESCE(occurred_at, source_timestamp). occurred_at
@@ -431,15 +435,18 @@ def _chunk_to_record(chunk: Chunk) -> dict[str, Any]:
         "source_timestamp": chunk.source_timestamp,
         "metadata": chunk.metadata or {},
     }
-    # Resolve each denorm doc key defensively: chunk attr → chunk.source_document
-    # attr → absent. The Chunk dataclass does not carry these today (they live on
-    # the source_document projection), but trying the chunk first is robust if a
-    # future DTO denormalizes them onto the chunk. A key found nowhere stays absent
-    # → compile_python's §4 missing-semantics → positive predicate empty
-    # (documented (v) limitation; no faithful fallback exists for these).
+    # Resolve each denorm doc key: chunk attr → hydrated projection (``doc``) →
+    # chunk.source_document → absent. The Chunk dataclass does not carry these
+    # today (they live on the document), but trying the chunk first is robust if a
+    # future DTO denormalizes them onto the chunk. ``doc`` carries all seven keys;
+    # source_document is the tertiary fallback for projection-less paths. A key
+    # found nowhere stays absent → compile_python's §4 missing-semantics →
+    # positive predicate empty.
     source_doc = chunk.source_document
     for key in _DOC_PROJECTION_KEYS:
         value = getattr(chunk, key, None)
+        if value is None and doc is not None:
+            value = getattr(doc, key, None)
         if value is None and source_doc is not None:
             value = getattr(source_doc, key, None)
         if value is not None:
@@ -1997,9 +2004,46 @@ class ChronicleEngine:
         # this predicate covers the denormalized document keys + metadata
         # Chronicle cannot push down, and re-checks the date bounds on
         # window-bypassing expansion chunks.
+        #
+        # Doc-key hydration: when the filter constrains one of the seven
+        # denormalized document keys (and only then), batch-fetch the per-document
+        # DocumentProjection so the post-filter resolves those keys instead of
+        # treating them as absent. The common case (no filter, recency-only,
+        # occurred_at, or metadata-only filter) short-circuits and pays ZERO extra
+        # query. One fetch per recall, not N+1.
         if post_filter is not None:
+            from khora.filter.execute import filter_leaf_keys
+
+            projections: dict[UUID, DocumentProjection] = {}
+            needs_doc_keys = filter_ast is not None and bool(filter_leaf_keys(filter_ast) & set(_DOC_PROJECTION_KEYS))
+            if needs_doc_keys and chunks_with_scores:
+                doc_ids = list({chunk.document_id for chunk, _ in chunks_with_scores})
+                try:
+                    projections = await storage.get_document_projections_batch(doc_ids, namespace_id=namespace_id)
+                except Exception as exc:
+                    # ADR-001: hydration is best-effort. On failure the post-filter
+                    # still runs with doc keys absent for every chunk (positive
+                    # doc-key predicates return empty) — recall never crashes.
+                    logger.warning(
+                        "Chronicle doc-key hydration failed; doc-key predicates will treat keys as absent: {}",
+                        exc,
+                        exc_info=True,
+                    )
+                    _record_channel_degradation(
+                        degradations,
+                        component="chronicle.doc_hydration",
+                        reason="projection_fetch_failed",
+                        detail=str(exc),
+                        exc=exc,
+                    )
+                    projections = {}
+
             start = time.perf_counter()
-            chunks_with_scores = [pair for pair in chunks_with_scores if post_filter(_chunk_to_record(pair[0]))]
+            chunks_with_scores = [
+                pair
+                for pair in chunks_with_scores
+                if post_filter(_chunk_to_record(pair[0], projections.get(pair[0].document_id)))
+            ]
             timings["post_filter_ms"] = (time.perf_counter() - start) * 1000
 
         # Trim to requested limit
