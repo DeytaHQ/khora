@@ -1640,6 +1640,14 @@ class QuerySettings(BaseSettings):
     chronicle_overfetch_multiplier: int = Field(
         default=4, ge=2, le=10, description="Over-fetch multiplier for Chronicle retrieval channels"
     )
+    metadata_overfetch_multiplier: int = Field(
+        default=3,
+        ge=2,
+        le=10,
+        description="Over-fetch multiplier for the VectorCypher graph chunk channel when a "
+        "residual metadata predicate must be applied as a Python post-filter (metadata is not "
+        "pushable to Cypher). Capped at min(limit*multiplier, 200).",
+    )
     chronicle_rrf_semantic_weight: float = Field(
         default=1.0, ge=0.0, le=2.0, description="RRF weight for semantic channel in Chronicle fusion"
     )

@@ -259,6 +259,7 @@ Prefix: `KHORA_QUERY_`. See [query-engine/retrieval-tuning.md](query-engine/retr
 | `KHORA_QUERY_HYDE_CYPHER_LIMIT` | `20` | Max entities returned per HyDE-Cypher template execution. |
 | `KHORA_QUERY_ENABLE_RERANKING` | `true` | Cross-encoder reranking of top candidates. |
 | `KHORA_QUERY_TEMPORAL_SQL_PUSHDOWN` | `true` | Push relative-date filters into SQL WHERE clauses. |
+| `KHORA_QUERY_METADATA_OVERFETCH_MULTIPLIER` | `3` | Over-fetch multiplier (2–10) for the VectorCypher graph chunk channel when a caller filter has a metadata predicate that can't push down to Cypher and must be post-filtered in memory. The graph fetch widens to `min(limit * multiplier, 200)` so fusion still has candidates after filtering; no effect for no-filter or system-key-only filters. |
 
 ## Tenancy
 

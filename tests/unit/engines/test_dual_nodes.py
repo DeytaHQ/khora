@@ -1150,3 +1150,75 @@ class TestDualNodeManagerGetEntityChannels:
         )
 
         assert channels == ["only-session"]
+
+
+class _EmptyAsyncResult:
+    """An async-iterable Neo4j result that yields no records."""
+
+    def __aiter__(self) -> _EmptyAsyncResult:
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+def _make_read_capturing_driver() -> tuple[MagicMock, AsyncMock, MagicMock]:
+    """Driver whose ``execute_read`` runs the read closure against a real mock tx.
+
+    ``get_chunks_by_entities`` reads via ``session.execute_read(_work)`` where
+    ``_work(tx)`` calls ``tx.run(query, **params)``. To observe the query and
+    bound params we must actually invoke the closure: ``execute_read`` here calls
+    ``await work_fn(tx)`` with a mock ``tx`` whose ``run`` returns an empty
+    async result. The caller inspects ``tx.run.await_args``.
+    """
+    driver, session = _make_neo4j_driver()
+    tx = MagicMock()
+    tx.run = AsyncMock(return_value=_EmptyAsyncResult())
+
+    async def _run_work(work_fn):
+        return await work_fn(tx)
+
+    session.execute_read = AsyncMock(side_effect=_run_work)
+    return driver, session, tx
+
+
+class TestGetChunksByEntitiesFilterPushdown:
+    """The caller filter's system-key slice is pushed into the graph Cypher query."""
+
+    @pytest.mark.asyncio
+    async def test_system_key_filter_pushed_as_bound_param(self) -> None:
+        """A system-key predicate is spliced into the WHERE with its value bound.
+
+        The compiled predicate references ``c.<key>`` and the value travels as a
+        Cypher ``$param`` (no string interpolation) — the injection-safe path.
+        """
+        from khora.filter import RecallFilter, parse_to_ast
+
+        driver, _session, tx = _make_read_capturing_driver()
+        manager = DualNodeManager(driver)
+        ast = parse_to_ast(RecallFilter.model_validate({"source_name": "linear"}))
+
+        await manager.get_chunks_by_entities([uuid4()], uuid4(), filter_ast=ast, limit=5)
+
+        tx.run.assert_awaited_once()
+        query = tx.run.await_args.args[0]
+        params = tx.run.await_args.kwargs
+        assert "source_name" in query, "system-key predicate was not pushed into the Cypher WHERE"
+        assert any(v == "linear" for v in params.values()), "filter value was not passed as a bound parameter"
+
+    @pytest.mark.asyncio
+    async def test_metadata_only_filter_not_spliced(self) -> None:
+        """A metadata-only filter consumes nothing on the Cypher side (deferred to post-filter)."""
+        from khora.filter import RecallFilter, parse_to_ast
+
+        driver, _session, tx = _make_read_capturing_driver()
+        manager = DualNodeManager(driver)
+        ast = parse_to_ast(RecallFilter.model_validate({"metadata.tag": "urgent"}))
+
+        await manager.get_chunks_by_entities([uuid4()], uuid4(), filter_ast=ast, limit=5)
+
+        tx.run.assert_awaited_once()
+        params = tx.run.await_args.kwargs
+        assert not any(v == "urgent" for v in params.values()), (
+            "metadata leaf was wrongly pushed to Cypher instead of deferred to the in-memory post-filter"
+        )

@@ -780,6 +780,7 @@ class VectorCypherEngine:
             ppr_max_iter=self._config.query.ppr_max_iter,
             ppr_tol=self._config.query.ppr_tol,
             ppr_top_entities=self._config.query.ppr_top_entities,
+            metadata_overfetch_multiplier=self._config.query.metadata_overfetch_multiplier,
         )
         self._retriever = VectorCypherRetriever(
             vector_store=self._temporal_store,
@@ -2105,7 +2106,20 @@ class VectorCypherEngine:
         # Always run temporal detection (dictionary-based, <10μs, deterministic);
         # temporal category detection is critical for recency weighting and sort order.
         temporal_signal: TemporalSignal | None = None
-        if temporal_filter is not None:
+        # A caller filter that constrains a date system key (occurred_at /
+        # created_at) is an explicit temporal intent, just like an
+        # API-supplied temporal_filter — gate the EXPLICIT synthesis on either
+        # source. A non-date caller filter (e.g. pure metadata.channel) must NOT
+        # trigger EXPLICIT: it runs the normal detector and rides alongside as
+        # filter_ast. When only filter_ast carries the date, the synthesized
+        # signal's temporal_filter stays None (the date predicate is applied via
+        # filter_ast on the channels; the version-filter block no-ops on None).
+        from khora.filter.execute import filter_constrains_date_key
+
+        explicit_from_date = temporal_filter is not None or (
+            filter_ast is not None and filter_constrains_date_key(filter_ast)
+        )
+        if explicit_from_date:
             # API-asserted bounds: synthesize an EXPLICIT signal so downstream
             # behavior (skip-fallback in retriever, version filter, recency
             # weighting) treats the caller-supplied predicate as a high-confidence
@@ -2172,6 +2186,13 @@ class VectorCypherEngine:
             )
         finally:
             retriever._config.hybrid_alpha = original_alpha
+
+        # When a caller filter narrowed the candidate set below the requested k,
+        # emit the service-level under-filled counter (owner: filter) once.
+        if filter_ast is not None and len(result.chunks) < limit:
+            from khora.filter.telemetry import record_under_filled
+
+            record_under_filled()
 
         # Validate and filter retrieval results
         validated_chunks = self._validate_recall_results(result.chunks, query)
