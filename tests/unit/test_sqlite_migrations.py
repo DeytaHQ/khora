@@ -82,7 +82,7 @@ class TestSqliteMigrations:
                     # Version table must point at head.
                     result = await conn.execute(sa.text("SELECT version_num FROM khora_alembic_version"))
                     version = result.scalar()
-                    assert version == "045_khora_try_timestamptz"
+                    assert version == "046_chunks_occurred_at"
             finally:
                 await engine.dispose()
 
@@ -118,6 +118,8 @@ class TestSqliteMigrations:
                     result = await conn.execute(sa.text("PRAGMA table_info(chunks)"))
                     chunk_cols = {r[1] for r in result}
                     assert "embedding" not in chunk_cols
+                    # occurred_at (046) is added on both dialects.
+                    assert "occurred_at" in chunk_cols
                     result = await conn.execute(sa.text("PRAGMA table_info(entities)"))
                     entity_cols = {r[1] for r in result}
                     assert "embedding" not in entity_cols

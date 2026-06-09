@@ -253,6 +253,8 @@ class ChunkModel(Base):
     # decay path treats ``max(source_timestamp, last_accessed_at)`` as the
     # effective event time so frequently-recalled chunks stay fresh.
     last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Real-world event time the chunk's content refers to, distinct from created_at.
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Session attribution for agentic-framework adapters (#620).
     # Inherited from the parent document at chunking time.
