@@ -33,7 +33,4 @@ def test_searchmode_resolves_from_engine() -> None:
 
 
 def test_searchmode_identity_preserved_across_reexports() -> None:
-    _run(
-        "import khora; from khora.query import SearchMode; "
-        "assert khora.SearchMode is SearchMode"
-    )
+    _run("import khora; from khora.query import SearchMode; assert khora.SearchMode is SearchMode")

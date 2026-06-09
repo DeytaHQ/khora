@@ -131,6 +131,7 @@ __all__ = [
 def __getattr__(name: str) -> object:
     if name == "integrations":
         import importlib
+
         mod = importlib.import_module(".integrations", package=__name__)
         globals()["integrations"] = mod
         return mod
