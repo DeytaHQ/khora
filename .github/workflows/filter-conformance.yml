@@ -32,31 +32,50 @@ env:
 
 jobs:
   conformance:
+    # Per-leg check name: the three legs that actually execute and assert row-sets
+    # (the in-memory python oracle, live Postgres, and Chronicle) report as
+    # `conformance (<backend>)`; the four legs that today run ONLY the import/compile
+    # guard report as `compile-guard (<backend>)`. This keeps a green check from
+    # advertising backend conformance it did not run — a guard leg flips back to
+    # `conformance` only once it seeds a store and asserts row-set equality vs the
+    # python oracle.
+    name: ${{ matrix.kind }} (${{ matrix.backend }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        # `include` so each leg carries its own provisioning metadata:
+        # `include` so each leg carries its own provisioning + naming metadata:
+        #   kind:     `conformance` (executes + asserts row-sets) vs `compile-guard`
+        #             (import-only registry/compile check, no live execution yet).
         #   postgres: leg needs a live Postgres container + one-time seed.
-        # Legs without that flag run the import-only registry/compile guard,
+        # Legs without the postgres flag run the import-only registry/compile guard,
         # which needs no live database.
         include:
           # In-memory oracle — no service, no seed.
           - backend: python
+            kind: conformance
           # Live Postgres executor — the only leg that provisions a DB.
           - backend: postgres
             postgres: true
+            kind: conformance
           # Chronicle date-bound pushdown + in-memory post-filter — no DB.
           - backend: chronicle
+            kind: conformance
           # The four legs below currently run the registry/compile guard
           # (resolve the compiler from the registry + compile the AST, no live
-          # execution). They grow into live conformance execution once their
-          # harness executor lands in src/khora/filter/conformance.py.
+          # execution) — hence `kind: compile-guard`, so their green check does not
+          # claim executed backend conformance. They grow into live conformance
+          # execution (and flip to `kind: conformance`) once their harness executor
+          # lands in src/khora/filter/conformance.py.
           - backend: sqlite_lance
+            kind: compile-guard
           - backend: cypher
+            kind: compile-guard
           - backend: surrealdb
+            kind: compile-guard
           - backend: weaviate
+            kind: compile-guard
     env:
       KHORA_CONFORMANCE_BACKEND: ${{ matrix.backend }}
     steps:

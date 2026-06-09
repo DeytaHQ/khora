@@ -55,11 +55,17 @@ SELECTED_BACKEND = os.environ.get("KHORA_CONFORMANCE_BACKEND", "python")
 
 
 def _all_cases() -> list[ConformanceCase]:
-    """Every case from every non-empty corpus family.
+    """The corpus families this live-store matrix executes against real backends.
 
-    Today only ``f_op_cases`` is populated; the catalog families return ``[]``
-    until filled, and iterating them here means new families join the matrix
-    with no change to this module.
+    Only ``f_op_cases`` runs here today. The other catalog families are authored
+    and validated against the in-memory python oracle + Chronicle in the fast unit
+    suite (``tests/unit/filter/test_conformance_catalog.py``), but are deliberately
+    NOT wired into this live-store leg yet: the metadata-shaped families exercise
+    ``compile_postgres`` paths with known open divergences (sub-path object-equality,
+    array-valued containment, nested ``jsonb`` path typing) tracked separately, so
+    running them against live Postgres would fail on those compiler bugs rather than
+    on the corpus. They join this matrix once those divergences are resolved and the
+    per-backend executors land in ``src/khora/filter/conformance.py``.
     """
     return list(f_op_cases())
 
