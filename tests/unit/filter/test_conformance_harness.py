@@ -38,6 +38,7 @@ from khora.filter.conformance import (
     PythonExecutor,
     SeedRecord,
     assert_case,
+    f_objeq_cases,
     f_op_cases,
     oracle_survivors,
     run_case_for_backend,
@@ -237,8 +238,26 @@ def test_f_op_chronicle_agrees_with_python_oracle() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# PostgresExecutor invokes the REAL compile_postgres.
+# F-OBJEQ: a metadata sub-path dict operand is EXACT object_equal, NOT @>.
 # --------------------------------------------------------------------------- #
+#
+# These ACTUALLY RUN the f_objeq_cases() corpus through the Python oracle (the
+# reference compile_postgres is checked against). The superset record (extra key)
+# must NOT survive the $eq — that is the bug the postgres _md_eq fix closes; the
+# matching postgres-side SQL shape (exact `#> = sorted-jsonb`, no `@>`) is asserted
+# in test_compile_postgres.py, and the same case runs end-to-end against the live
+# PostgresExecutor under the integration-gated harness.
+
+
+def test_f_objeq_corpus_is_non_empty() -> None:
+    assert f_objeq_cases(), "the F-OBJEQ generator must produce cases"
+
+
+@pytest.mark.parametrize("case", f_objeq_cases(), ids=lambda c: c.id)
+def test_f_objeq_python_oracle_matches_declared_expected_ids(case: ConformanceCase) -> None:
+    # The oracle's survivors must equal the HAND-DECLARED expected_ids — proving the
+    # superset record (extra key) does NOT match the exact object_equal $eq.
+    assert_case(case, "python", PythonExecutor())
 
 
 def test_postgres_executor_invokes_real_compiler() -> None:

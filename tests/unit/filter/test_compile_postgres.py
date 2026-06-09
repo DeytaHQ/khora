@@ -335,6 +335,38 @@ def test_metadata_array_operand_eq_is_exact_jsonb_match() -> None:
     assert "jsonb" in sql or "::json" in sql or "[" in sql
 
 
+def test_metadata_dict_operand_eq_is_exact_object_match_not_containment() -> None:
+    # A dict on a metadata path is $eq object_equal: the extracted node must EXACTLY
+    # equal the subdocument, emitted as #> = <jsonb object> (NOT @> containment, so a
+    # stored object with extra keys does NOT match). Keys render sorted, so the
+    # compare is key-order-insensitive (PG JSONB `=` is structural).
+    sql = _sql_norm(_ast({"metadata.labels": {"tier": "gold", "team": "x"}}))
+    assert "#>" in sql
+    # Exact equality, never @> containment, for the dict operand.
+    assert "@>" not in sql
+    # Keys are sorted in the jsonb literal (order-insensitive structural compare).
+    assert '{"team": "x", "tier": "gold"}' in sql
+
+
+def test_metadata_dict_operand_ne_negates_exact_object_match() -> None:
+    # $ne on a dict operand negates the total exact-object form. The positive form
+    # is coalesced to FALSE, so NOT flips absent / wrong-type rows to TRUE (Rule 2
+    # polarity — a row missing the key satisfies $ne).
+    sql = _sql_norm(_ast({"metadata.labels": {"$ne": {"team": "x"}}}))
+    assert "not" in sql
+    assert "#>" in sql
+    assert "@>" not in sql
+
+
+def test_metadata_nested_dict_operand_eq_is_exact_object_match() -> None:
+    # A nested metadata path with a dict operand addresses through #> and compares
+    # the extracted node exactly against the subdocument.
+    sql = _sql_norm(_ast({"metadata.outer.inner": {"team": "x"}}))
+    assert "#>" in sql
+    assert "outer" in sql and "inner" in sql
+    assert "@>" not in sql
+
+
 # ===========================================================================
 # Rule 4 — $exists / null on metadata use key-presence, not value extraction.
 # ===========================================================================
