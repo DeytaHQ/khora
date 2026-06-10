@@ -16,43 +16,40 @@ proof of how Chronicle composes the two compiled filter halves on a
 sqlite_lance roundtrip. It does NOT re-mock what the composition suite already
 proves; it proves the same logical narrowing survives the live write/read path.
 
-EQUIVALENCE TO V1 — same corpus + split, Chronicle-carried axes
-===============================================================
+EQUIVALENCE TO V1 — same corpus + split, real system keys
+=========================================================
 V1's filter is ``source_name == "linear" AND occurred_at >= 2026-04-05 AND
 metadata.tag IN {"urgent", "release"}``. This file reuses V1's shared corpus and
 its exact 5-in-scope / 5-out-of-scope split (each out-of-scope row violating
-EXACTLY ONE predicate, one in-scope row sitting EXACTLY at the date bound). Two
-of V1's three predicate KEYS, however, do not function the same way on the REAL
-Chronicle sqlite_lance recall path, so the three-predicate AND is expressed over
-the axes Chronicle actually carries on the real store — metadata keys — standing
-in for V1's ``source_name`` (a denormalized document key) and ``occurred_at`` (a
-system date key). The in-scope SET is identical; the contract proven here is "a
-real-store multi-predicate AND narrows to exactly V1's in-scope set". The system
-date keys narrow correctly too, pinned separately below.
+EXACTLY ONE predicate, one in-scope row sitting EXACTLY at the date bound), and —
+since the Chronicle recall path now hydrates the per-document
+``DocumentProjection`` for doc-key filters — it runs V1's filter VERBATIM over
+the same REAL system keys: ``source_name`` (a denormalized document key) and
+``occurred_at`` (a system date key). The two earlier metadata stand-ins
+(``metadata.channel`` / ``metadata.when``) are gone; the predicate is now
+expressed over the exact axes V1 uses, and the in-scope SET is identical. The
+contract proven here is "a real-store multi-predicate AND over real system keys
+narrows to exactly V1's in-scope set".
 
-Why each substitution (verified against this exact sqlite_lance fixture, not
-assumed):
+How each real key resolves on the live store (verified against this exact
+sqlite_lance fixture, not assumed):
 
-* ``source_name`` → ``metadata.channel`` ($eq). Chronicle's recall candidates do
-  NOT hydrate ``chunk.source_document`` on the recall path, so the denormalized
-  document keys (``source_name``, ``source``, ``source_type``, ``title``, ...)
-  all resolve ABSENT on the live post-filter record — a positive predicate on any
-  of them returns empty. The engine anticipates this ("no faithful fallback
-  exists", ``engine._chunk_to_record``); it is a documented limitation, not a
-  bug. The source axis therefore rides a metadata key the corpus writes and the
-  post-filter reads.
-* ``occurred_at`` (system date key) → ``metadata.when`` ($gte, ``$date``
-  operand) in the multi-predicate equivalence test. The embedded SQLite store
-  returns tz-NAIVE datetimes; the compiler aligns a naive stored value to UTC at
-  the comparison boundary, so both the system date keys AND the metadata-date
-  path narrow cleanly. The shared equivalence test keeps the metadata-date axis
-  so its three predicate leaves are all metadata leaves (the Scenario 2 telemetry
-  assertion depends on that); the system date keys are pinned by their own
-  narrowing tests below.
-
-The all-metadata filter is also why the unindexed-metadata telemetry assertion
-(Scenario 2) is meaningful here: every in-scope predicate leaf is a metadata
-leaf.
+* ``source_name`` ($eq "linear"). When the filter carries a doc-key leaf,
+  Chronicle batch-fetches the per-document ``DocumentProjection``
+  (``get_document_projections_batch``) and ``_chunk_to_record`` resolves
+  ``source_name`` off it, so a positive predicate bites on the value the corpus
+  wrote via ``remember(source_name=...)``. The previous "doc keys resolve absent"
+  limitation is fixed for filtered queries; the short-circuit means a recall with
+  NO doc-key leaf still pays ZERO extra fetch (keys stay absent, as before).
+* ``occurred_at`` ($gte, plain ISO operand). The embedded write path leaves the
+  literal ``occurred_at`` column null and the engine derives the effective event
+  time from ``source_timestamp``; the corpus seeds the date axis via
+  ``remember(source_timestamp=...)``. The embedded SQLite store returns tz-NAIVE
+  datetimes; the compiler aligns a naive stored value to UTC at the comparison
+  boundary, so the system date key narrows cleanly rather than raising.
+* ``metadata.tag`` ($in {"urgent", "release"}) — identical to V1, the one
+  free-form metadata leaf, and the leaf Scenario 2's unindexed-metadata telemetry
+  assertion now exercises via its own dedicated metadata filter.
 
 ENVIRONMENT: needs the ``sqlite_lance`` extra (``pip install khora[sqlite_lance]``
 → aiosqlite + lancedb). No Docker / Postgres / Neo4j. The module self-skips when
@@ -90,6 +87,7 @@ from khora.extraction.skills.base import EventExtractionConfig, FactExtractionCo
 from khora.filter import telemetry as filter_telemetry
 from khora.khora import Khora
 from khora.query import SearchMode
+from tests.test_helpers.diagnostics import assert_no_silent_degradation
 
 EMBED_DIM = 32  # sqlite_lance default; keeps LanceDB ANN builds cheap in tmp_path
 
@@ -193,19 +191,19 @@ async def kb(tmp_path: Path) -> AsyncIterator[Khora]:
 # Seed corpus — 5 in-scope, 5 out-of-scope (one predicate violation each).
 # ---------------------------------------------------------------------------
 #
-# The three-predicate filter under test (Chronicle-carried equivalent of V1):
-#   metadata.channel == "linear"                 (stands in for V1's source_name)
-#   AND metadata.when >= 2026-04-05 ($date)      (stands in for V1's occurred_at)
+# The three-predicate filter under test (V1's filter, verbatim, over real keys):
+#   source_name == "linear"                      (V1's source axis, hydrated)
+#   AND occurred_at >= 2026-04-05 ($date)        (V1's date axis, system key)
 #   AND metadata.tag IN {"urgent", "release"}    (identical to V1)
 #
-# Why all three axes are METADATA keys (not V1's system / doc keys): on the
-# Chronicle sqlite_lance recall DTO the document-projection keys (source_name /
-# source / title / ...) resolve absent. The source axis therefore rides a
-# metadata key the engine both writes and reads on the live post-filter record;
-# the date axis rides metadata too so all three predicate leaves are metadata
-# leaves (Scenario 2's telemetry assertion depends on that). The system date
-# keys narrow correctly on their own and are pinned by dedicated tests below.
-# The in/out SPLIT is identical to V1's.
+# All three axes are V1's real keys now. ``source_name`` is a denormalized
+# document key the corpus writes via ``remember(source_name=channel)``; on a
+# filtered (doc-key-bearing) recall Chronicle hydrates the per-document
+# ``DocumentProjection`` so ``_chunk_to_record`` resolves it and the $eq bites.
+# ``occurred_at`` is the system event-time key the engine derives from
+# ``source_timestamp`` on the embedded write path, so the corpus seeds the date
+# axis via ``remember(source_timestamp=...)``. ``metadata.tag`` is the one
+# free-form metadata leaf, identical to V1. The in/out SPLIT is identical to V1's.
 #
 # Content is DISTINCT per row so each remember produces its own chunk (Chronicle
 # dedupes by content checksum, so identical content would collapse to one chunk);
@@ -218,11 +216,17 @@ async def kb(tmp_path: Path) -> AsyncIterator[Khora]:
 # shapes. Those edge shapes are exercised by the mocked unit suite,
 # tests/recall/test_chronicle_filter_composition.py.
 
-_IN_BOUND = "2026-04-05T00:00:00Z"  # the metadata.when lower bound (inclusive)
+_IN_BOUND = "2026-04-05T00:00:00Z"  # the occurred_at lower bound (inclusive)
 
-# label -> (channel, when ISO, tag | None)
+# An external_id stamped on exactly one in-scope row (in_boundary) so the
+# anti-masking pair (c) can prove a previously-absent doc key resolves to a real
+# value post-hydration: a positive predicate on it returns that one row, a
+# sentinel returns empty.
+_BOUNDARY_EXTERNAL_ID = "ext-in-boundary-001"
+
+# label -> (source_name, source_timestamp ISO, tag | None)
 _IN_SCOPE: dict[str, tuple[str, str, str | None]] = {
-    # All three predicates satisfied. Boundary, mid, and future "when"; both
+    # All three predicates satisfied. Boundary, mid, and future event time; both
     # allowed tag values are represented.
     "in_boundary": ("linear", _IN_BOUND, "urgent"),  # exactly at the >= bound
     "in_recent": ("linear", "2026-05-01T12:00:00Z", "release"),
@@ -234,24 +238,40 @@ _IN_SCOPE: dict[str, tuple[str, str, str | None]] = {
 # Each out-of-scope row violates EXACTLY ONE predicate; every other field is
 # in-scope, so a leak pins which predicate failed to bite.
 _OUT_OF_SCOPE: dict[str, tuple[str | None, str, str | None]] = {
-    # Predicate 1 (channel) violated; date + tag are in-scope.
+    # Predicate 1 (source_name) violated; date + tag are in-scope.
     "out_wrong_source": ("slack", "2026-05-15T00:00:00Z", "urgent"),
-    # Predicate 2 (when) violated: one second before the inclusive bound.
+    # Predicate 2 (occurred_at) violated: one second before the inclusive bound.
     "out_too_old": ("linear", "2026-04-04T23:59:59Z", "release"),
     # Predicate 3 (tag) violated: tag present but outside the allowed set.
     "out_wrong_tag": ("linear", "2026-05-20T00:00:00Z", "backlog"),
     # Predicate 3 (tag) violated: tag key absent entirely.
     "out_missing_tag": ("linear", "2026-05-25T00:00:00Z", None),
-    # Predicate 1 (channel) violated via absence: channel key omitted at write.
+    # Predicate 1 (source_name) violated via absence: source_name left UNSET at
+    # write, so it hydrates absent and the positive $eq "linear" excludes it.
     "out_null_source": (None, "2026-05-30T00:00:00Z", "release"),
 }
 
-# The live three-predicate recall filter. ``$date`` wraps the date operand so the
-# metadata-date path parses both sides to UTC-aware datetimes; keeping all three
-# leaves on metadata is what Scenario 2's unindexed-metadata assertion relies on.
+
+def _parse_when(when: str) -> datetime:
+    """Parse a corpus ``when`` ISO string to a tz-aware UTC datetime.
+
+    The ``Z`` suffix maps to ``+00:00``; the result feeds
+    ``remember(source_timestamp=...)`` which the embedded write path derives
+    ``occurred_at`` from.
+    """
+    return datetime.fromisoformat(when.replace("Z", "+00:00"))
+
+
+# The live three-predicate recall filter — V1's filter verbatim over real keys.
+# ``occurred_at`` takes a plain ISO operand (the public ``RecallFilter`` model
+# coerces it to a UTC-aware datetime; the ``{"$date": ...}`` typed literal is an
+# AST-level form the dict API does not accept on a system date key), matching the
+# existing system-``occurred_at`` tests below. ``source_name`` and ``occurred_at``
+# are SYSTEM keys (no unindexed_metadata fire); ``metadata.tag`` is the one
+# metadata leaf.
 _RECALL_FILTER = {
-    "metadata.channel": "linear",
-    "metadata.when": {"$gte": {"$date": _IN_BOUND}},
+    "source_name": "linear",
+    "occurred_at": {"$gte": _IN_BOUND},
     "metadata.tag": {"$in": ["urgent", "release"]},
 }
 
@@ -269,21 +289,33 @@ async def _seed(kb: Khora, namespace_id: UUID) -> dict[str, str]:
     distinct per-row content is the stable join key (``content -> label``), so
     assertions resolve which rows the filter returned without reaching into the
     store — the expected in-scope set is encoded by construction in ``_IN_SCOPE``.
+
+    The source axis rides the real ``source_name`` document key (``None`` →
+    omitted so the row hydrates absent) and the date axis rides
+    ``source_timestamp`` (the engine derives ``occurred_at`` from it on the
+    embedded write path); only ``tag`` stays in ``metadata``. ``in_boundary`` also
+    carries an ``external_id`` so the anti-masking pair can prove a previously
+    absent doc key resolves post-hydration.
     """
-    for label, (channel, when, tag) in {**_IN_SCOPE, **_OUT_OF_SCOPE}.items():
-        metadata: dict[str, Any] = {"when": when}
-        if channel is not None:
-            metadata["channel"] = channel
+    for label, (source_name, when, tag) in {**_IN_SCOPE, **_OUT_OF_SCOPE}.items():
+        metadata: dict[str, Any] = {}
         if tag is not None:
             metadata["tag"] = tag
+        kwargs: dict[str, Any] = {}
+        if source_name is not None:
+            kwargs["source_name"] = source_name
+        if label == "in_boundary":
+            kwargs["external_id"] = _BOUNDARY_EXTERNAL_ID
         await kb.remember(
             content=_content_for(label),
             namespace=namespace_id,
             title=label,
             metadata=metadata,
+            source_timestamp=_parse_when(when),
             entity_types=["PERSON"],
             relationship_types=["KNOWS"],
             expertise=_no_event_fact_extraction(),
+            **kwargs,
         )
     return {_content_for(label): label for label in {**_IN_SCOPE, **_OUT_OF_SCOPE}}
 
@@ -303,10 +335,19 @@ async def test_filter_returns_exactly_in_scope_chunks(kb: Khora) -> None:
     rows — no out-of-scope leak.
 
     End-to-end proof that the engine→backend wiring filters rows on the embedded
-    stack: the facade builds the AST, Chronicle threads it to the deterministic
-    post-filter, and the candidate set is narrowed before top-k. Every
-    out-of-scope row violates exactly one predicate, so a leak would name the
-    broken one. The returned set is the SAME logical in-scope set as V1's.
+    stack: the facade builds the AST, Chronicle hydrates the per-document
+    projection (because the filter carries the ``source_name`` doc-key leaf) and
+    threads the AST to the deterministic post-filter, narrowing the candidate set
+    before top-k. The filter is V1's verbatim — ``source_name`` (hydrated doc
+    key), ``occurred_at`` (system date key), ``metadata.tag`` (metadata leaf).
+    Every out-of-scope row violates exactly one predicate, so a leak would name
+    the broken one. The returned set is the SAME logical in-scope set as V1's.
+
+    Also asserts the hydrated recall completes with no ADR-001 degradation: a
+    failed projection fetch would append a ``chronicle.doc_hydration`` entry to
+    ``engine_info["degradations"]`` and leave the doc keys absent (silently
+    dropping every in-scope row), so an empty degradations list confirms the
+    hydration succeeded rather than degraded into a false pass.
     """
     ns = await kb.create_namespace()
     namespace_id: UUID = ns.namespace_id
@@ -330,6 +371,8 @@ async def test_filter_returns_exactly_in_scope_chunks(kb: Khora) -> None:
     assert returned == in_scope, (
         f"filter must return EXACTLY the in-scope rows; leaked={returned & out_of_scope}, missing={in_scope - returned}"
     )
+    # Happy-path: the doc-key hydration succeeded (no silent degradation).
+    assert_no_silent_degradation(result)
 
 
 async def test_no_filter_returns_all_chunks(kb: Khora) -> None:
@@ -353,6 +396,148 @@ async def test_no_filter_returns_all_chunks(kb: Khora) -> None:
 
     returned = _labels_returned(result, content_to_label)
     assert returned == set(content_to_label.values()), "unfiltered recall must reach every seeded chunk"
+
+
+# ===========================================================================
+# Doc-key hydration — anti-masking + short-circuit.
+# ===========================================================================
+#
+# CONSTANT-VECTOR CAVEAT: every text maps to the same unit vector, so cosine is
+# 1.0 for every row and the filter is the ONLY narrowing force. A trivially
+# matching filter would therefore "pass" (return rows) for the WRONG reason —
+# specifically the pre-hydration failure mode, where a positive doc-key predicate
+# resolved its key absent and (under the $ne/absent semantics) matched everything,
+# or where a positive $eq returned empty because the key never resolved. The
+# positive+negative pairs below pin that the hydrated doc key resolves to a REAL
+# value: a positive predicate returns exactly the matching rows (non-empty,
+# correct set) and a sentinel-value predicate returns EMPTY (the key bit, it did
+# not silently match-all). One pair per key: ``source_name`` (always seeded) and
+# ``external_id`` (previously absent, seeded only on in_boundary).
+
+
+async def test_source_name_positive_and_sentinel(kb: Khora) -> None:
+    """A ``source_name`` $eq resolves to the hydrated value: positive returns the
+    matching rows, a sentinel returns empty.
+
+    Anti-masking: ``{"source_name": "linear"}`` must return exactly the rows the
+    corpus seeded with ``source_name="linear"`` (every in-scope row plus the
+    out-of-scope rows that violate a DIFFERENT predicate but still carry
+    ``source_name="linear"``), and ``{"source_name": "no-such-source"}`` must
+    return EMPTY — proving the key hydrated to a real value and the predicate bit,
+    not "absent → matched all" (the pre-hydration failure mode the constant vector
+    would otherwise mask).
+    """
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+    content_to_label = await _seed(kb, namespace_id)
+
+    async def _recall(filter_: dict[str, Any]) -> set[str]:
+        result = await kb.recall(
+            "alpha bravo charlie",
+            namespace=namespace_id,
+            limit=20,
+            mode=SearchMode.VECTOR,
+            filter=filter_,
+        )
+        return _labels_returned(result, content_to_label)
+
+    # Rows seeded with source_name="linear": all in-scope plus the out-of-scope
+    # rows whose violated predicate is NOT the source (too_old, wrong_tag,
+    # missing_tag all carry source_name="linear").
+    linear_rows = {
+        label for label, (source_name, _when, _tag) in {**_IN_SCOPE, **_OUT_OF_SCOPE}.items() if source_name == "linear"
+    }
+    assert await _recall({"source_name": "linear"}) == linear_rows
+    assert await _recall({"source_name": "no-such-source"}) == set()
+
+
+async def test_external_id_positive_and_sentinel(kb: Khora) -> None:
+    """A previously-absent doc key (``external_id``) resolves post-hydration.
+
+    ``external_id`` is seeded on exactly one row (in_boundary). The positive
+    predicate returns that one row; a sentinel returns EMPTY. This exercises the
+    SAME anti-masking contract as ``source_name`` but on a key that resolved
+    absent before the hydration landed — proving the hydration (not just an
+    always-present column) is what makes the predicate bite.
+    """
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+    content_to_label = await _seed(kb, namespace_id)
+
+    async def _recall(filter_: dict[str, Any]) -> set[str]:
+        result = await kb.recall(
+            "alpha bravo charlie",
+            namespace=namespace_id,
+            limit=20,
+            mode=SearchMode.VECTOR,
+            filter=filter_,
+        )
+        return _labels_returned(result, content_to_label)
+
+    assert await _recall({"external_id": _BOUNDARY_EXTERNAL_ID}) == {"in_boundary"}
+    assert await _recall({"external_id": "missing"}) == set()
+
+
+async def test_doc_key_filter_hydrates_metadata_filter_short_circuits(
+    kb: Khora, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ENGINE's projection hydration fires for a doc-key filter and NOT for a
+    metadata-only filter — the hot path pays nothing.
+
+    Spies on the storage coordinator's ``get_document_projections_batch`` (the
+    same instance ``kb.storage`` and the engine both use). The facade ALWAYS calls
+    it once per recall in its document-upgrade pass (``_upgrade_recall_documents``,
+    stub → full ``DocumentProjection``), so the count is the discriminator, not
+    its presence:
+
+    * a metadata-only recall (``{"metadata.tag": "urgent"}``, no doc-key leaf)
+      makes exactly ONE coordinator call — the upgrade pass only; the engine's
+      ``filter_leaf_keys & _DOC_PROJECTION_KEYS`` short-circuit skips its
+      hydration fetch entirely (the hot path pays nothing extra).
+    * a doc-key recall (``{"source_name": "linear"}``) makes exactly TWO — the
+      engine's per-recall hydration fetch PLUS the upgrade pass (one fetch each,
+      not N+1).
+    """
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+    await _seed(kb, namespace_id)
+
+    real_batch = kb.storage.get_document_projections_batch
+    calls: list[int] = []
+
+    async def _spy(document_ids: list[UUID], **kwargs: Any) -> dict[UUID, Any]:
+        calls.append(len(document_ids))
+        return await real_batch(document_ids, **kwargs)
+
+    monkeypatch.setattr(kb.storage, "get_document_projections_batch", _spy)
+
+    # Metadata-only filter: no doc-key leaf → engine short-circuits, so only the
+    # facade's always-on document-upgrade pass calls the coordinator (1 call).
+    await kb.recall(
+        "alpha bravo charlie",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+        filter={"metadata.tag": "urgent"},
+    )
+    assert len(calls) == 1, (
+        f"a metadata-only filter must NOT trigger the engine's hydration fetch "
+        f"(only the facade document-upgrade pass should call the coordinator); got {len(calls)} calls"
+    )
+
+    # Doc-key filter: source_name leaf → engine hydrates (1) + facade upgrade (1).
+    calls.clear()
+    await kb.recall(
+        "alpha bravo charlie",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+        filter={"source_name": "linear"},
+    )
+    assert len(calls) == 2, (
+        f"a doc-key filter must add the engine's hydration fetch on top of the "
+        f"facade document-upgrade pass (2 calls total); got {len(calls)} calls"
+    )
 
 
 # ===========================================================================
@@ -578,7 +763,12 @@ async def test_system_created_at_date_filter_narrows(kb: Khora) -> None:
 #
 # ``compile_python`` emits ``khora.recall.filter.unindexed_metadata`` once per
 # metadata leaf at compile time, so a metadata-bearing filter recall fires it.
-# The two negative controls rule out the counter firing for the wrong reason: a
+# The positive test uses a DEDICATED metadata filter ({"metadata.tag": "urgent"},
+# a $eq metadata leaf) rather than the shared _RECALL_FILTER: after the system-key
+# rewrite _RECALL_FILTER's only metadata leaf is metadata.tag with $in (its
+# source_name / occurred_at leaves are SYSTEM keys that do NOT fire the counter),
+# so a dedicated $eq filter keeps the $eq coverage and the intent explicit. The
+# two negative controls rule out the counter firing for the wrong reason: a
 # non-metadata filter (no metadata leaf) and a no-filter recall must both leave
 # it silent.
 
@@ -610,10 +800,13 @@ async def test_metadata_filter_fires_unindexed_metadata(kb: Khora, recording_cou
     """A metadata-bearing filter recall fires ``unindexed_metadata`` on the live
     post-filter path, carrying the leaf's comparison op.
 
-    The three-predicate filter compiles three metadata leaves to Python
-    predicates, so the counter observes at least one add; assert it carries a
-    real leaf op (``$eq`` from ``metadata.channel``). ``>= 1`` is robust whether
-    emission is per-compile or (hypothetically) per-evaluation.
+    Uses a dedicated ``{"metadata.tag": "urgent"}`` filter — a single ``$eq``
+    metadata leaf — so the counter observes at least one add carrying that real
+    leaf op. (The shared ``_RECALL_FILTER`` now carries ``source_name`` /
+    ``occurred_at`` as SYSTEM keys, which do NOT fire the counter, leaving only a
+    ``$in`` metadata leaf; the dedicated filter keeps the ``$eq`` coverage.)
+    ``>= 1`` is robust whether emission is per-compile or (hypothetically)
+    per-evaluation.
     """
     ns = await kb.create_namespace()
     namespace_id: UUID = ns.namespace_id
@@ -624,7 +817,7 @@ async def test_metadata_filter_fires_unindexed_metadata(kb: Khora, recording_cou
         namespace=namespace_id,
         limit=20,
         mode=SearchMode.VECTOR,
-        filter=_RECALL_FILTER,
+        filter={"metadata.tag": "urgent"},
     )
 
     adds = recording_counter.adds
@@ -638,13 +831,14 @@ async def test_non_metadata_filter_silent_for_unindexed_metadata(
     """Negative control: a non-metadata filter does not touch metadata, so the
     unindexed_metadata counter stays silent.
 
-    ``{"source": {"$ne": "no-such-source"}}`` is a document-projection key with no
-    metadata leaf and no datetime compare. On Chronicle's live recall DTO the
-    ``source`` key resolves absent, so ``$ne`` matches every row (absent is
-    "not equal") — the recall does not narrow and, crucially, does not crash. What
-    matters here is that NO metadata leaf compiles, so the counter must not fire.
-    This pins that Scenario 2's positive signal comes from the metadata leaves,
-    not from the mere presence of a filter.
+    ``{"source": {"$ne": "no-such-source"}}`` is a document-projection (SYSTEM)
+    key with no metadata leaf and no datetime compare. The corpus never seeds
+    ``source`` (only ``source_name``), so it resolves to no real value on any row
+    and ``$ne "no-such-source"`` matches every row regardless — the recall does
+    not narrow and, crucially, does not crash. What matters here is that NO
+    metadata leaf compiles, so the counter must not fire. This pins that Scenario
+    2's positive signal comes from the metadata leaf, not from the mere presence
+    of a filter.
     """
     ns = await kb.create_namespace()
     namespace_id: UUID = ns.namespace_id
