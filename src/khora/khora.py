@@ -2022,19 +2022,23 @@ class Khora:
         from khora.filter import RecallFilter, canonical_hash, parse_to_ast
 
         try:
-            # Resolve the recall filter once, at the facade. Two inputs feed the
-            # single canonical AST: the public ``filter=`` kwarg and the
-            # deprecated ``start_time``/``end_time`` bounds. They are mutually
-            # exclusive. ``temporal_filter`` is still built from the deprecated
-            # bounds so the engines' existing temporal behavior (recency
-            # weighting, version filter) is unchanged. The skeleton engine now
-            # threads ``filter_ast`` through to its temporal store, where the
-            # pgvector backend compiles it to a WHERE predicate (the other
-            # backends accept-and-ignore it). When the deprecated bounds are
-            # used, both ``temporal_filter`` and the folded AST are AND-ed on
-            # the pgvector path, so the folded bounds below mirror
-            # ``temporal_filter``'s boundary semantics exactly to stay
-            # consistent and avoid dropping boundary rows.
+            # Resolve the recall filter once, at the facade. The public
+            # ``filter=`` kwarg and the deprecated ``start_time``/``end_time``
+            # bounds are mutually exclusive but feed DIFFERENT axes on purpose:
+            #
+            #   * ``filter=`` produces a canonical ``filter_ast`` the engines
+            #     compile and post-filter, so an ``occurred_at`` predicate is
+            #     enforced against the EVENT-time axis (no created_at fallback) —
+            #     the documented event-time semantics of the new API.
+            #   * ``start_time``/``end_time`` produce ONLY a ``temporal_filter``
+            #     recency window. They are a window-axis API: every engine narrows
+            #     its channel reads on ``COALESCE(source_timestamp, created_at)``,
+            #     so a chunk recent by ingest time survives even when it carries no
+            #     event-time anchor. Folding these bounds into an ``occurred_at``
+            #     ``filter_ast`` (as an earlier revision did, speculatively) would
+            #     AND an event-time post-filter on top of the window and false-empty
+            #     every anchor-less chunk a plain ``remember()`` produces. They must
+            #     NOT set ``filter_ast``.
             temporal_filter: Any = None
             filter_ast: Any = None
             if filter is not None and (start_time is not None or end_time is not None):
@@ -2055,33 +2059,14 @@ class Khora:
                 norm_end = _normalize_recall_bound(end_time)
                 from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
 
+                # Window-axis only: the recency bounds narrow on
+                # ``COALESCE(source_timestamp, created_at)`` inside each engine.
+                # ``filter_ast`` stays None so no event-time post-filter is AND-ed
+                # on top (see the axis note above).
                 temporal_filter = SkeletonTemporalFilter(
                     occurred_after=norm_start,
                     occurred_before=norm_end,
                 )
-                # Mirror the legacy ``TemporalFilter`` boundary semantics
-                # exactly so the folded AST and the window agree when both
-                # are AND-ed: lower bound inclusive (``occurred_at >=``),
-                # upper bound EXCLUSIVE (``occurred_at <``) — see
-                # ``pgvector._build_filter_conditions``. Using ``$lte`` here
-                # would drop boundary rows once an engine applies both.
-                #
-                # An inverted range (start > end) flows through this same fold
-                # rather than being special-cased: it yields
-                # ``{occurred_at: {$gte: t1, $lt: t2}}``, which is
-                # empty-MATCHING (no row satisfies ``>= t1 AND < t2`` when
-                # t1 > t2), so the recall returns nothing — parity with the
-                # equivalent ``filter=`` predicate rather than an unfiltered
-                # recall. The legacy window is empty-matching for an inverted
-                # pair too, so the two stay consistent.
-                ops: dict[str, Any] = {}
-                if norm_start is not None:
-                    ops["$gte"] = norm_start
-                if norm_end is not None:
-                    ops["$lt"] = norm_end
-                # Route the folded bounds through the same single validation
-                # path as the public filter= kwarg.
-                filter_ast = parse_to_ast(RecallFilter.model_validate({"occurred_at": ops}))
             namespace_id = await self._resolve_namespace(namespace)
 
             # Emit RECALL_REQUESTED before any embedding/retrieval work.
