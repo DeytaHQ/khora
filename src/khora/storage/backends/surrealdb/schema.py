@@ -104,6 +104,8 @@ DEFINE FIELD IF NOT EXISTS metadata_ ON chunk FLEXIBLE TYPE option<object>;
 DEFINE FIELD IF NOT EXISTS chunker_info ON chunk FLEXIBLE TYPE object DEFAULT {};
 DEFINE FIELD IF NOT EXISTS created_at ON chunk TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS source_timestamp ON chunk TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS occurred_at ON chunk TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_accessed_at ON chunk TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS session_id ON chunk TYPE option<string>;
 DEFINE INDEX IF NOT EXISTS idx_chunk_namespace ON chunk FIELDS namespace;
 DEFINE INDEX IF NOT EXISTS idx_chunk_document ON chunk FIELDS document;

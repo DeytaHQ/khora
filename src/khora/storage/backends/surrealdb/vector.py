@@ -131,6 +131,8 @@ class SurrealDBVectorAdapter:
             "chunker_info = $chunker_info, "
             "created_at = $created_at, "
             "source_timestamp = $source_timestamp, "
+            "occurred_at = $occurred_at, "
+            "last_accessed_at = $last_accessed_at, "
             "session_id = $session_id"
         )
         bindings = self._chunk_to_bindings(chunk)
@@ -160,6 +162,8 @@ class SurrealDBVectorAdapter:
                     "chunker_info": chunk.chunker_info or {},
                     "created_at": chunk.created_at,
                     "source_timestamp": chunk.source_timestamp,
+                    "occurred_at": chunk.occurred_at,
+                    "last_accessed_at": chunk.last_accessed_at,
                     "session_id": str(chunk.session_id) if chunk.session_id else None,
                 }
             )
@@ -799,6 +803,8 @@ class SurrealDBVectorAdapter:
             "chunker_info": chunk.chunker_info or {},
             "created_at": chunk.created_at,
             "source_timestamp": chunk.source_timestamp,
+            "occurred_at": chunk.occurred_at,
+            "last_accessed_at": chunk.last_accessed_at,
             "session_id": str(chunk.session_id) if chunk.session_id else None,
         }
 
@@ -840,6 +846,8 @@ class SurrealDBVectorAdapter:
             embedding_model=row.get("embedding_model", ""),
             created_at=_parse_dt(row.get("created_at")) or datetime.now(UTC),
             source_timestamp=_parse_dt(row.get("source_timestamp")),
+            occurred_at=_parse_dt(row.get("occurred_at")),
+            last_accessed_at=_parse_dt(row.get("last_accessed_at")),
             session_id=_parse_uuid(row.get("session_id")) if row.get("session_id") else None,
         )
 
