@@ -21,13 +21,13 @@ source — the no-Docker stack is the point):
   ``compile_python`` post-filter and a ``compile_lance`` JSON1 pushdown, so the
   filter is genuinely ENFORCED. The spy asserts the wiring; enforcement is the
   conformance suite's row-proof.
-* BM25 channel — the embedded ``SQLiteLanceTemporalStore.search_fulltext``
-  accepts ``filter_ast`` for protocol parity but does NOT compile it yet, so
-  the embedded BM25 channel is WIRING-ONLY here (the pgvector sibling enforces;
-  see the PG variant in the qa-graph suite). The spy proves the retriever still
-  THREADS the right filter to that boundary, and a strict-xfail enforcement
-  probe stands as the acceptance test for the day embedded BM25 learns to
-  compile.
+* BM25 channel — the embedded ``SQLiteLanceTemporalStore.search_fulltext`` now
+  forwards ``filter_ast`` into ``_bm25_search``, which pushes the compilable
+  leaves into SQL and re-checks the rest against the decoded chunk, so the
+  embedded BM25 channel now ENFORCES the recall filter (matching the pgvector
+  sibling; see the PG variant in the qa-graph suite). The spy proves the
+  retriever THREADS the right filter to that boundary, and an enforcement probe
+  proves a contradiction filter yields an empty BM25-only recall.
 
 No Docker / Postgres / Neo4j — pure in-process aiosqlite + lancedb.
 """
@@ -197,11 +197,11 @@ async def test_vector_channel_threads_filter(kb: Khora, namespace_id: UUID, monk
 async def test_bm25_channel_threads_filter(kb: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch) -> None:
     """The BM25 channel receives the facade's exact filter AST.
 
-    WIRING-ONLY on embedded: ``SQLiteLanceTemporalStore.search_fulltext``
-    accepts ``filter_ast`` for protocol parity but does not compile it yet, so
-    this asserts the retriever still THREADS the correct filter to that
-    boundary. (Enforcement is tracked separately — see the strict-xfail probe
-    below.)
+    Embedded ``SQLiteLanceTemporalStore.search_fulltext`` now forwards
+    ``filter_ast`` into ``_bm25_search`` (which compiles + post-filters it), so
+    the channel ENFORCES the filter. This spy still pins the WIRING contract:
+    the retriever THREADS the correct filter to that boundary. (The row-level
+    enforcement proof is the probe below.)
 
     DIFFERENTIAL gate-fire check (avoids a vacuous wiring spy on a dead
     channel): the BM25 channel is default-off in ``RetrieverConfig``. We first
@@ -229,21 +229,13 @@ async def test_bm25_channel_threads_filter(kb: Khora, namespace_id: UUID, monkey
     assert_filter_threaded(on_records, _FILTER, min_calls=1)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Embedded SQLiteLanceTemporalStore.search_fulltext accepts filter_ast for "
-        "protocol parity but does not compile it yet, so the embedded BM25 channel "
-        "does not enforce the recall filter. This is the acceptance test for when "
-        "it learns to compile (mirrors the pgvector sibling). See #1051."
-    ),
-)
 async def test_bm25_channel_enforces_filter_embedded(kb: Khora, namespace_id: UUID) -> None:
     """A filter that excludes every chunk must yield an empty BM25-only recall.
 
-    Until embedded BM25 compiles the filter, a contradiction filter still
-    returns rows through the BM25 channel — so this xfails. The day enforcement
-    lands, it asserts cleanly and the xfail is removed.
+    Embedded BM25 now forwards ``filter_ast`` into ``_bm25_search``, so a
+    contradiction filter (a ``source_name`` that matches nothing in the corpus)
+    excludes every row through the BM25 channel and the recall is empty. Mirrors
+    the pgvector sibling's enforcement contract.
     """
     await _seed(kb, namespace_id)
     retriever = _retriever(kb)
