@@ -256,7 +256,7 @@ markers = [
     "embedded: Tests that exercise the SQLite+LanceDB embedded stack (no Docker required)",
     "security: Structural/regression tests for the security surface (IGR-225 IDOR gate, etc.)",
     "filter_conformance: Recall-filter conformance corpus (own CI job; excluded from the main test job)",
-    "filter_enforcement: Recall-filter pushdown/enforcement tests against real backends (runs in the integration job)",
+    "filter_enforcement: Recall-filter pushdown/enforcement/threading tests against real backends (embedded spies run in the main test job; PG+Neo4j variants self-skip without their services)",
 ]
 asyncio_mode = "auto"
 

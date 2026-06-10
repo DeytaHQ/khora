@@ -402,7 +402,15 @@ async def test_vc_two_hop_traversal(kb: Khora, namespace_id: UUID) -> None:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="VectorCypher embedded path doesn't push temporal filter to LanceDB query",
+    reason=(
+        "VectorCypher embedded path does not support point-in-time temporal recall: "
+        "an occurred-bounds temporal_filter (here from start_time) trips the "
+        "sqlite_lance fail-fast at retriever.py:601 (NotImplementedError), so the "
+        "recall raises before any LanceDB-level temporal narrowing. Verified by "
+        "running both ways (xfail kept: --runxfail FAILS with that NotImplementedError, "
+        "not a clean filtered result). Keep until the embedded backend honors "
+        "point-in-time temporal queries; this is the acceptance test for that work."
+    ),
 )
 async def test_vc_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
     """Two docs at different ``occurred_at``; recall with ``last 7 days`` filter
