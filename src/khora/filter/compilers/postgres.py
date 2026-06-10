@@ -327,16 +327,33 @@ class _Builder:
     def _md_in_element(self, segs: tuple[str, ...], value: Any) -> ColumnElement[bool]:
         """One ``$in`` / ``$nin`` operand element — total boolean.
 
-        A dict element is EXACT ``object_equal`` (``#> = '{...}'::jsonb``, NOT
-        ``@>`` containment) — mirroring the dict branch of :meth:`_md_eq`, so a
-        stored superset object does not satisfy membership. Any other element
-        (scalar / array / null) routes through array-aware ``@>`` containment.
-        Both forms are total booleans, so the OR chain (and its ``$nin``
-        negation) stays negation-safe.
+        A dict element is array-aware EXACT ``object_equal`` per element (NOT
+        ``@>`` containment): the stored node equals the dict, OR — when the node
+        is an array — some array ELEMENT exactly equals the dict. This mirrors the
+        oracle's ``_md_contains`` for a dict value (``_json_eq`` against the node,
+        or against each element of a list node), so an array field that holds the
+        exact subdocument matches while a stored superset object does NOT (``=`` is
+        exact, never ``@>`` containment). Any other element (scalar / array / null)
+        routes through array-aware ``@>`` containment. Both forms are total
+        booleans, so the OR chain (and its ``$nin`` negation) stays negation-safe.
         """
         if isinstance(value, Mapping):
             node = self._md_json(segs)
-            return sa.func.coalesce(node == _jsonb_literal(dict(value)), sa.false())
+            literal = _jsonb_literal(dict(value))
+            # Scalar-node-exact: the extracted node IS the dict. `#>` is NULL on an
+            # absent path, so coalesce keeps the whole element total.
+            scalar_exact = node == literal
+            # Array-element-exact: some element of an array node equals the dict.
+            # Gate `jsonb_array_elements` on `jsonb_typeof(node) = 'array'` — it
+            # errors on a non-array (scalar / object / NULL) argument, so the gate
+            # is load-bearing, not cosmetic. The correlated EXISTS is total (FALSE,
+            # never NULL, when no element matches or the node is not an array).
+            elements = sa.func.jsonb_array_elements(node).table_valued("value")
+            array_element_exact = sa.and_(
+                sa.func.jsonb_typeof(node) == "array",
+                sa.exists(sa.select(sa.literal(1)).select_from(elements).where(elements.c.value == literal)),
+            )
+            return sa.func.coalesce(sa.or_(scalar_exact, array_element_exact), sa.false())
         return self._md_containment(segs, value)
 
     def _md_range(self, segs: tuple[str, ...], op: Op, operand: Any) -> ColumnElement[bool]:

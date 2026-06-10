@@ -2,8 +2,9 @@ name: Filter Conformance
 
 # ---------------------------------------------------------------------------
 # Recall-filter conformance matrix. One leg per engine; each leg provisions
-# ONLY the database it needs (see the "Start Postgres" step below) so a leg
-# that needs no live store never waits on an idle container.
+# ONLY the live store it needs via an `if:`-guarded `docker run` (Postgres for
+# the postgres leg, Neo4j for the cypher leg, Weaviate for the weaviate leg),
+# so a leg that runs in-process never waits on an idle container.
 #
 # This file is intentionally separate from ci.yml: GitHub schedules a separate
 # workflow file as its own check, so this matrix runs concurrently with the
@@ -32,13 +33,16 @@ env:
 
 jobs:
   conformance:
-    # Per-leg check name: the three legs that actually execute and assert row-sets
-    # (the in-memory python oracle, live Postgres, and Chronicle) report as
-    # `conformance (<backend>)`; the four legs that today run ONLY the import/compile
-    # guard report as `compile-guard (<backend>)`. This keeps a green check from
-    # advertising backend conformance it did not run — a guard leg flips back to
-    # `conformance` only once it seeds a store and asserts row-set equality vs the
-    # python oracle.
+    # Per-leg check name: every leg now executes and asserts row-sets, so all
+    # report as `conformance (<backend>)`. Three run in-process with no store (the
+    # python oracle, Chronicle's date-bound pushdown + in-memory post-filter, and
+    # the embedded sqlite_lance / surrealdb legs that seed per-worker inside the
+    # pytest fixture); three run against a live store provisioned per-leg (Postgres,
+    # Neo4j for the cypher leg, and Weaviate). The `kind` column is retained so a
+    # future backend whose executor has not yet landed can ship as
+    # `compile-guard (<backend>)` — a green check must never advertise backend
+    # conformance it did not run; a guard leg flips to `conformance` only once it
+    # executes a seeded row-set and asserts equality vs the python oracle.
     name: ${{ matrix.kind }} (${{ matrix.backend }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -48,34 +52,40 @@ jobs:
         # `include` so each leg carries its own provisioning + naming metadata:
         #   kind:     `conformance` (executes + asserts row-sets) vs `compile-guard`
         #             (import-only registry/compile check, no live execution yet).
-        #   postgres: leg needs a live Postgres container + one-time seed.
-        # Legs without the postgres flag run the import-only registry/compile guard,
-        # which needs no live database.
+        #   postgres / neo4j / weaviate: leg needs that live container + a one-time
+        #             seed. Legs without any service flag execute in-process (the
+        #             python oracle, Chronicle, and the embedded sqlite_lance /
+        #             surrealdb legs that seed per-worker inside the pytest fixture).
         include:
           # In-memory oracle — no service, no seed.
           - backend: python
             kind: conformance
-          # Live Postgres executor — the only leg that provisions a DB.
+          # Live Postgres executor.
           - backend: postgres
             postgres: true
             kind: conformance
           # Chronicle date-bound pushdown + in-memory post-filter — no DB.
           - backend: chronicle
             kind: conformance
-          # The four legs below currently run the registry/compile guard
-          # (resolve the compiler from the registry + compile the AST, no live
-          # execution) — hence `kind: compile-guard`, so their green check does not
-          # claim executed backend conformance. They grow into live conformance
-          # execution (and flip to `kind: conformance`) once their harness executor
-          # lands in src/khora/filter/conformance.py.
+          # Embedded executors — seed per-worker in-process (tmp SQLite+LanceDB /
+          # SurrealDB memory://) inside the pytest fixture, so they need no live
+          # container and no out-of-band seed step.
           - backend: sqlite_lance
-            kind: compile-guard
-          - backend: cypher
-            kind: compile-guard
+            kind: conformance
           - backend: surrealdb
-            kind: compile-guard
+            kind: conformance
+          # Live Neo4j executor (the cypher leg) — provisions a Neo4j container +
+          # one-time seed, then runs the compiled Cypher prefilter + python
+          # post-filter against the pre-seeded nodes (split pushdown).
+          - backend: cypher
+            neo4j: true
+            kind: conformance
+          # Live Weaviate executor — provisions a Weaviate container + one-time
+          # seed, then runs the compiled prefilter + python post-filter against the
+          # pre-seeded objects (split pushdown).
           - backend: weaviate
-            kind: compile-guard
+            weaviate: true
+            kind: conformance
     env:
       KHORA_CONFORMANCE_BACKEND: ${{ matrix.backend }}
     steps:
@@ -157,23 +167,146 @@ jobs:
           KHORA_CONFORMANCE_SEED_MAP: ${{ github.workspace }}/.conformance_seed_map.json
         run: uv run python -m tests.integration.matrix._conformance_seed
 
+      # -- Per-leg Neo4j (cypher leg) ---------------------------------------- #
+      # Same per-leg pattern as Postgres: an `if: matrix.neo4j`-guarded `docker
+      # run` starts Neo4j ONLY on the cypher leg, so the in-process legs never wait
+      # on an idle graph container. Image, auth and bolt port (7687) mirror ci.yml's
+      # `test-integration` job and compose.yaml so a developer reproduces CI 1:1
+      # with `make dev`.
+      - name: Start Neo4j
+        if: matrix.neo4j
+        run: |
+          docker run -d --name khora-conformance-neo4j \
+            -e NEO4J_AUTH=neo4j/password \
+            -p 7687:7687 \
+            -p 7474:7474 \
+            --health-cmd "wget -q --spider http://localhost:7474 || exit 1" \
+            --health-interval 10s \
+            --health-timeout 5s \
+            --health-retries 10 \
+            --health-start-period 30s \
+            neo4j:2025.12.1
+
+      - name: Wait for Neo4j readiness
+        if: matrix.neo4j
+        # The Bolt TCP port (7687) opens BEFORE Neo4j can complete a Bolt handshake or
+        # serve a query, so a bare /dev/tcp port probe races the seed step (it connects
+        # while the server is still starting and fails with "incomplete handshake
+        # response"). Poll with cypher-shell (bundled in the image) running a real Bolt
+        # query — the only signal that guarantees the seed step can connect. neo4j
+        # images take 20-40s to boot and Bolt readiness can lag the open port further.
+        run: |
+          for i in $(seq 1 40); do
+            if docker exec khora-conformance-neo4j \
+                cypher-shell -u neo4j -p password "RETURN 1;" >/dev/null 2>&1; then
+              echo "neo4j ready (bolt query answered)"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "neo4j did not become ready within 120s"
+          docker logs khora-conformance-neo4j 2>&1 | tail -50 || true
+          exit 1
+
+      - name: Seed Neo4j conformance corpus
+        if: matrix.neo4j
+        # One-time seed of the Neo4j conformance store, run ONCE before pytest. The
+        # seed entrypoint takes the backend name `neo4j` and writes the per-case
+        # id_map (random chunk UUIDs each run) as a JSON artifact at
+        # KHORA_CONFORMANCE_NEO4J_SEED_MAP. The read-only pytest step below reads
+        # that same file instead of re-seeding, so each case is seeded exactly once
+        # and the `-n auto` workers only read (no write contention against the
+        # shared container). Same workspace path in both steps — same job, same
+        # runner, so the file persists between steps without an artifact upload.
+        env:
+          KHORA_NEO4J_URL: bolt://localhost:7687
+          KHORA_NEO4J_USERNAME: neo4j
+          KHORA_NEO4J_PASSWORD: password
+          KHORA_CONFORMANCE_NEO4J_SEED_MAP: ${{ github.workspace }}/.conformance_neo4j_seed_map.json
+        run: uv run python -m tests.integration.matrix._conformance_seed neo4j
+
+      # -- Per-leg Weaviate -------------------------------------------------- #
+      # Same per-leg pattern as Postgres: an `if: matrix.weaviate`-guarded `docker
+      # run` starts Weaviate ONLY on the weaviate leg. Image, anonymous-access env,
+      # HTTP port (8080) and gRPC port (50051) mirror ci.yml's `weaviate-integration`
+      # job. The v4 client needs both the HTTP and gRPC ports published.
+      - name: Start Weaviate
+        if: matrix.weaviate
+        run: |
+          docker run -d --name khora-conformance-weaviate \
+            -e QUERY_DEFAULTS_LIMIT=25 \
+            -e AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true \
+            -e PERSISTENCE_DATA_PATH=/var/lib/weaviate \
+            -e DEFAULT_VECTORIZER_MODULE=none \
+            -e ENABLE_MODULES= \
+            -e CLUSTER_HOSTNAME=node1 \
+            -e DISABLE_TELEMETRY=true \
+            -p 8080:8080 \
+            -p 50051:50051 \
+            --health-cmd "wget -q --spider http://localhost:8080/v1/.well-known/ready || exit 1" \
+            --health-interval 10s \
+            --health-timeout 5s \
+            --health-retries 10 \
+            --health-start-period 20s \
+            cr.weaviate.io/semitechnologies/weaviate:1.28.4
+
+      - name: Wait for Weaviate readiness
+        if: matrix.weaviate
+        # Mirrors the weaviate-integration readiness loop: poll the HTTP ready
+        # endpoint for a clear, early failure message if the container is not up.
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/v1/.well-known/ready >/dev/null; then
+              echo "weaviate ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "weaviate did not become ready within 60s"
+          exit 1
+
+      - name: Seed Weaviate conformance corpus
+        if: matrix.weaviate
+        # One-time seed of the Weaviate conformance store, run ONCE before pytest.
+        # The seed entrypoint takes the backend name `weaviate` and writes the
+        # per-case id_map as a JSON artifact at KHORA_CONFORMANCE_WEAVIATE_SEED_MAP,
+        # which the read-only pytest step below reads instead of re-seeding (same
+        # write-once / read-many pattern as Postgres + Neo4j). WEAVIATE_URL must
+        # match the container's HTTP port: the runner's reachability probe parses
+        # the host/port out of it.
+        env:
+          WEAVIATE_URL: http://localhost:8080
+          WEAVIATE_GRPC_PORT: "50051"
+          KHORA_CONFORMANCE_WEAVIATE_SEED_MAP: ${{ github.workspace }}/.conformance_weaviate_seed_map.json
+        run: uv run python -m tests.integration.matrix._conformance_seed weaviate
+
       # -- Conformance suite ------------------------------------------------- #
       - name: Run filter conformance
-        # The postgres leg also exports the live DSN + the loud-DB-down flag so
-        # the suite aborts (rather than silently skipping) if Postgres is
-        # unreachable, plus KHORA_CONFORMANCE_SEED_MAP so the read-only suite
-        # reads the seed step's id_map. The map is postgres-exclusive by
-        # construction: only the postgres branch loads it, so the non-DB legs
-        # leave all three unset — python/chronicle run pure in-memory executors
-        # over each case's seed_records (no seeding, no map), and the remaining
-        # legs run the import-only registry/compile guard.
+        # Each leg exports ONLY its own backend's connection + seed-map vars; every
+        # other var is the empty string, so a leg's runner reads exactly the store
+        # it provisioned. The seed-map vars point the read-only suite at the same
+        # id_map the per-leg seed step wrote.
+        #
+        # * python / chronicle / sqlite_lance / surrealdb run in-process (no service
+        #   var set) — the embedded legs seed per-worker inside their pytest fixture.
+        # * postgres / cypher / weaviate read the live store their seed step filled.
+        #
+        # KHORA_PG_REQUIRED=1 (postgres only) makes tests/integration/conftest.py
+        # abort the session RED if Postgres is unreachable — prevents a silent skip
+        # of the postgres conformance cases. The cypher / weaviate legs gate on the
+        # runner module's reachable() instead (a down store cleanly skips locally;
+        # in CI the per-leg service + seed step run first, so they execute).
         env:
           KHORA_DATABASE_URL: ${{ matrix.postgres && 'postgresql://khora:khora@localhost:5434/khora' || '' }}
-          # KHORA_PG_REQUIRED=1 makes tests/integration/conftest.py abort the
-          # session red if Postgres is unreachable — prevents a silent skip of
-          # the postgres conformance cases. Do not drop it from this leg.
           KHORA_PG_REQUIRED: ${{ matrix.postgres && '1' || '' }}
           KHORA_CONFORMANCE_SEED_MAP: ${{ matrix.postgres && format('{0}/.conformance_seed_map.json', github.workspace) || '' }}
+          KHORA_NEO4J_URL: ${{ matrix.neo4j && 'bolt://localhost:7687' || '' }}
+          KHORA_NEO4J_USERNAME: ${{ matrix.neo4j && 'neo4j' || '' }}
+          KHORA_NEO4J_PASSWORD: ${{ matrix.neo4j && 'password' || '' }}
+          KHORA_CONFORMANCE_NEO4J_SEED_MAP: ${{ matrix.neo4j && format('{0}/.conformance_neo4j_seed_map.json', github.workspace) || '' }}
+          WEAVIATE_URL: ${{ matrix.weaviate && 'http://localhost:8080' || '' }}
+          WEAVIATE_GRPC_PORT: ${{ matrix.weaviate && '50051' || '' }}
+          KHORA_CONFORMANCE_WEAVIATE_SEED_MAP: ${{ matrix.weaviate && format('{0}/.conformance_weaviate_seed_map.json', github.workspace) || '' }}
         run: |
           uv run pytest \
             tests/integration/matrix/test_filter_conformance.py \
@@ -183,3 +316,11 @@ jobs:
       - name: Stop Postgres
         if: ${{ always() && matrix.postgres }}
         run: docker rm -f khora-conformance-pg || true
+
+      - name: Stop Neo4j
+        if: ${{ always() && matrix.neo4j }}
+        run: docker rm -f khora-conformance-neo4j || true
+
+      - name: Stop Weaviate
+        if: ${{ always() && matrix.weaviate }}
+        run: docker rm -f khora-conformance-weaviate || true

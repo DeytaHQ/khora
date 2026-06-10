@@ -368,44 +368,56 @@ def test_metadata_nested_dict_operand_eq_is_exact_object_match() -> None:
 
 
 # ===========================================================================
-# $in / $nin with a DICT element — exact object_equal per element, not @>.
+# $in / $nin with a DICT element — array-aware exact object_equal per element,
+# not @>.
 #
-# A dict element of a metadata $in is a whole-subdocument exact match (mirroring
-# the dict branch of $eq), NOT @> containment — so a stored superset object does
-# NOT satisfy membership. Scalar / array elements are unchanged (array-aware @>
-# containment); only the dict element switched. $nin negates the per-element OR
-# chain, so superset / absent rows are INCLUDED.
+# A dict element of a metadata $in mirrors the oracle's _md_contains for a dict
+# value: the extracted node EXACTLY equals the dict, OR — when the node is an
+# array — some array ELEMENT exactly equals it. This is exact ``=`` per element
+# (NEVER @> containment), so a stored superset object does NOT satisfy
+# membership, while an array field holding the exact subdocument DOES. Scalar /
+# array elements are unchanged (array-aware @> containment); only the dict element
+# switched. $nin negates the per-element OR chain, so superset / absent rows are
+# INCLUDED.
 # ===========================================================================
 
 
-def test_metadata_in_dict_element_is_exact_object_match_not_containment() -> None:
-    # A single dict element of $in compiles to the exact #> = <jsonb object> form
-    # (the same object_equal shape $eq emits for a dict operand) — NEVER @>
-    # containment, so a stored object with extra keys does not match.
+def test_metadata_in_dict_element_is_array_aware_exact_object_match_not_containment() -> None:
+    # A single dict element of $in compiles to the array-aware exact form: the
+    # node = <jsonb object> OR (the node is an array AND some element = <jsonb
+    # object>) — via jsonb_array_elements, NEVER @> containment. A stored object
+    # with extra keys does not match (exact `=`), but an array holding the exact
+    # subdocument does (array-element-exact arm).
     sql = _sql_norm(_ast({"metadata.labels": {"$in": [{"team": "x"}]}}))
     assert "#>" in sql
     # Exact equality against a jsonb object literal — not array-aware @>.
     assert "@>" not in sql
     assert "labels" in sql
     assert '{"team": "x"}' in sql
+    # The array-element-exact arm: jsonb_array_elements gated on jsonb_typeof.
+    assert "jsonb_array_elements(" in sql
+    assert "jsonb_typeof(" in sql
+    assert "exists" in sql
 
 
 def test_metadata_in_nested_path_dict_element_is_exact_object_match() -> None:
-    # Same exact-object match through a nested metadata path: the dict element
-    # addresses the subdocument via #> and compares it exactly, not via @>.
+    # Same array-aware exact-object match through a nested metadata path: the dict
+    # element addresses the subdocument via #> and compares it (and each array
+    # element) exactly, not via @>.
     sql = _sql_norm(_ast({"metadata.outer.inner": {"$in": [{"team": "x"}]}}))
     assert "#>" in sql
     assert "outer" in sql and "inner" in sql
     assert "@>" not in sql
     assert '{"team": "x"}' in sql
+    assert "jsonb_array_elements(" in sql
 
 
 def test_metadata_nin_dict_element_negates_exact_object_match() -> None:
-    # $nin with a dict element is the per-element exact-equality chain wrapped in
-    # NOT. The positive form is total (coalesced to FALSE on absent/wrong-type), so
-    # NOT flips superset / absent rows to TRUE — they are INCLUDED by $nin
-    # (Rule 2 polarity: a superset is "not equal" to the operand, an absent key
-    # satisfies $nin).
+    # $nin with a dict element is the per-element array-aware exact-equality chain
+    # wrapped in NOT. The positive form is total (coalesced to FALSE on
+    # absent/wrong-type/non-matching), so NOT flips superset / absent rows to
+    # TRUE — they are INCLUDED by $nin (Rule 2 polarity: a superset is "not equal"
+    # to the operand, an absent key satisfies $nin).
     sql = _sql_norm(_ast({"metadata.labels": {"$nin": [{"team": "x"}]}}))
     assert sql.startswith("not ")
     assert "#>" in sql
@@ -414,6 +426,7 @@ def test_metadata_nin_dict_element_negates_exact_object_match() -> None:
     # row — assert it is present, not merely the negation token.
     assert "coalesce(" in sql
     assert '{"team": "x"}' in sql
+    assert "jsonb_array_elements(" in sql
 
 
 def test_metadata_in_mixed_dict_and_scalar_elements() -> None:

@@ -30,14 +30,19 @@ import pytest
 from sqlalchemy.sql.elements import ColumnElement
 
 from khora.filter import RecallFilterUnsupportedError
-from khora.filter.ast import FilterNode
+from khora.filter.ast import FilterNode, parse_to_ast
 from khora.filter.conformance import (
     ChronicleExecutor,
     ConformanceCase,
+    CypherExecutor,
+    LanceExecutor,
     PostgresExecutor,
     PythonExecutor,
     SeedRecord,
+    SurrealExecutor,
+    WeaviateExecutor,
     assert_case,
+    f_exists_cases,
     f_objeq_cases,
     f_op_cases,
     oracle_survivors,
@@ -325,3 +330,209 @@ def test_assert_case_propagates_unexpected_unsupported() -> None:
     # harness never silently swallows an unsupported error it did not expect.
     with pytest.raises(RecallFilterUnsupportedError):
         assert_case(_unsupported_self_test_case(expect_unsupported=False), "postgres", _RaisingExecutor())
+
+
+# --------------------------------------------------------------------------- #
+# Live-store executors invoke their REAL compiler (proof they execute).
+# --------------------------------------------------------------------------- #
+#
+# Each of the four live-store executors must run its REAL backend compiler in-harness
+# (this is what conformance checks) and hand the result to the injected LiveRunner,
+# not a context-only shim. A capturing runner proves the compiled artifact + the
+# compile_python post-filter reached the seam.
+
+
+@pytest.mark.parametrize(
+    ("executor_cls", "predicate_is_str"),
+    [
+        (SurrealExecutor, True),
+        (CypherExecutor, True),
+        (LanceExecutor, True),
+        (WeaviateExecutor, False),  # weaviate predicate is a _Filters object or None
+    ],
+)
+def test_live_executor_invokes_real_compiler(executor_cls: type, predicate_is_str: bool) -> None:
+    captured: dict[str, Any] = {}
+
+    def runner(compiled: Any, filter_ast: Any, post_filter: Any, records: Any) -> frozenset[str]:
+        captured["compiled"] = compiled
+        captured["post_filter"] = post_filter
+        return frozenset()
+
+    executor = executor_cls(runner)
+    # A metadata $eq case — pushes down on surrealdb/lance, defers on cypher/weaviate.
+    run_case_for_backend(_SMOKE_CASES[1], "surrealdb", executor=executor)
+
+    compiled = captured["compiled"]
+    # The injected runner received a genuine CompiledFilter from the real compiler.
+    assert hasattr(compiled, "predicate")
+    assert hasattr(compiled, "consumed_keys")
+    if predicate_is_str:
+        assert isinstance(compiled.predicate, str)
+    # The compile_python post-filter (the split-mode safety net) reached the seam.
+    assert callable(captured["post_filter"])
+
+
+# --------------------------------------------------------------------------- #
+# AC#5 — F-EXISTS executes in BOTH modes: pushed-down AND post-filtered.
+# --------------------------------------------------------------------------- #
+#
+# Each of the 8 F-EXISTS shapes must run in both pushdown mode (postgres / surrealdb
+# / sqlite_lance push $exists natively → the leaf is consumed) AND post-filter mode
+# (cypher / weaviate defer it → the leaf is NOT consumed, the compile_python
+# post-filter re-checks it). Asserting BOTH per shape gives 8 shapes × 2 modes = 16
+# executed exists-mode combinations. The mode is read off ``consumed_keys`` from the
+# real per-backend compiler (no live store needed — this guards the routing), using
+# the SAME production split-mode contexts the live executors compile with.
+
+
+def _exists_leaf_consumed(case: ConformanceCase, compiler, ctx) -> bool:  # noqa: ANN001 - compiler/ctx typed in module
+    """Whether ``compiler`` pushes ``case``'s $exists leaf down (it lands in consumed_keys)."""
+    from khora.filter.conformance import _resolve_ast  # internal harness helper
+
+    ast = _resolve_ast(case.filter)
+    consumed = compiler(ast, ctx).consumed_keys
+    # The exists path is the case's single metadata/system leaf; if ANY leaf was
+    # consumed the backend pushed this shape (F-EXISTS cases are single-leaf except
+    # the $and present-and-null shape, where consuming the metadata leaf is the push).
+    return bool(consumed)
+
+
+def _exists_mode_contexts():  # noqa: ANN202 - returns a list of (label, compiler, ctx, pushes)
+    """The (compiler, production split-mode ctx) pairs, labeled by expected push mode.
+
+    Mirrors the four live executors' contexts exactly. ``pushes`` records the
+    expected mode for a metadata $exists leaf: postgres / surrealdb / sqlite_lance
+    push it; cypher / weaviate defer it to the post-filter.
+    """
+    from khora.filter import SchemaCapabilities
+    from khora.filter.compilers.cypher import compile_cypher
+    from khora.filter.compilers.lance import compile_lance
+    from khora.filter.compilers.postgres import compile_postgres
+    from khora.filter.compilers.surrealdb import compile_surrealdb
+    from khora.filter.compilers.weaviate import compile_weaviate
+    from khora.filter.context import CompileContext
+
+    return [
+        ("postgres", compile_postgres, CompileContext(backend_target="khora_chunks", on_unsupported="split"), True),
+        (
+            "surrealdb",
+            compile_surrealdb,
+            CompileContext(
+                backend_target="temporal_chunk", field_mapping={"metadata": "metadata_"}, on_unsupported="split"
+            ),
+            True,
+        ),
+        (
+            "sqlite_lance",
+            compile_lance,
+            CompileContext(
+                backend_target="khora_chunks",
+                on_unsupported="split",
+                schema_capabilities=SchemaCapabilities(sqlite_json1=True),
+            ),
+            True,
+        ),
+        (
+            "cypher",
+            compile_cypher,
+            CompileContext(backend_target="Chunk", table_alias="c", on_unsupported="split"),
+            False,
+        ),
+        (
+            "weaviate",
+            compile_weaviate,
+            CompileContext(
+                backend_target="KhoraChunk",
+                field_mapping={"occurred_at": "occurred_at", "created_at": "created_at"},
+                on_unsupported="split",
+            ),
+            False,
+        ),
+    ]
+
+
+@pytest.mark.parametrize("case", f_exists_cases(), ids=lambda c: c.id)
+def test_f_exists_runs_in_both_pushdown_and_postfilter_modes(case: ConformanceCase) -> None:
+    # AC#5: every F-EXISTS shape must execute in BOTH modes. Confirm ≥1 backend
+    # pushes the shape down (consumed) AND ≥1 backend defers it to the post-filter
+    # (not consumed) — 8 shapes × 2 modes = 16 executed combinations. The push set
+    # is {postgres, surrealdb, sqlite_lance}; the defer set is {cypher, weaviate}.
+    pushed: list[str] = []
+    deferred: list[str] = []
+    for label, compiler, ctx, _expected in _exists_mode_contexts():
+        if label not in case.backends:
+            continue
+        if _exists_leaf_consumed(case, compiler, ctx):
+            pushed.append(label)
+        else:
+            deferred.append(label)
+    assert pushed, f"{case.id}: no pushdown-mode backend executed this shape (expected ≥1 of postgres/surrealdb/lance)"
+    assert deferred, f"{case.id}: no post-filter-mode backend executed this shape (expected ≥1 of cypher/weaviate)"
+
+
+def test_f_exists_covers_eight_shapes_in_two_modes() -> None:
+    # The aggregate AC#5 count: 8 distinct F-EXISTS shapes, each runnable in both
+    # modes → 16 executed exists-mode combinations. Guard the shape count so a
+    # dropped shape is caught loudly (the per-shape test above guards each mode).
+    shapes = [c for c in f_exists_cases()]
+    assert len(shapes) == 8, f"expected 8 F-EXISTS shapes (8 × 2 modes = 16), got {len(shapes)}"
+
+
+# --------------------------------------------------------------------------- #
+# System-key $exists is a CONSTANT on EVERY string-emitting backend (cross-
+# backend determinism — the always-present axiom).
+# --------------------------------------------------------------------------- #
+#
+# The oracle treats a system key as always-present, so $exists:true is a constant
+# TRUE (all rows) and $exists:false a constant FALSE (no rows). postgres / lance
+# already emit a constant; cypher and surrealdb were FIXED to do the same (they
+# previously emitted a `IS NOT NULL` / `IS NOT NONE` presence test that diverged on
+# an unset system column). Pin the constant on every string-emitting compiler so a
+# regression to a presence test on ANY backend fails loudly. (postgres emits a
+# SQLAlchemy ``true()``/``false()`` object and weaviate defers $exists to the
+# post-filter — both are checked in their own compiler suites; here we pin the
+# three string-emitting compilers where the regression risk lives.)
+
+
+@pytest.mark.parametrize(
+    ("label", "compiler", "ctx", "true_token", "false_token"),
+    [
+        (
+            "surrealdb",
+            "compile_surrealdb",
+            {"backend_target": "temporal_chunk", "field_mapping": {"metadata": "metadata_"}},
+            "true",
+            "false",
+        ),
+        ("cypher", "compile_cypher", {"backend_target": "Chunk", "table_alias": "c"}, "true", "false"),
+        # SQLite has no boolean literal — the constant is the integer 1 / 0.
+        ("sqlite_lance", "compile_lance", {"backend_target": "khora_chunks"}, "1", "0"),
+    ],
+)
+def test_system_exists_is_constant_not_presence_test(
+    label: str, compiler: str, ctx: dict[str, Any], true_token: str, false_token: str
+) -> None:
+    import importlib
+
+    from khora.filter import RecallFilter
+    from khora.filter.context import CompileContext
+
+    module_name = "lance" if label == "sqlite_lance" else label
+    compile_fn = getattr(importlib.import_module(f"khora.filter.compilers.{module_name}"), compiler)
+
+    def _norm(pred: object) -> str:
+        return str(pred).lower()
+
+    def _ast(wire: dict[str, Any]):  # noqa: ANN202 - local AST builder via the real validator
+        return parse_to_ast(RecallFilter.model_validate(wire))
+
+    true_pred = _norm(compile_fn(_ast({"source_name": {"$exists": True}}), CompileContext(**ctx)).predicate)
+    false_pred = _norm(compile_fn(_ast({"source_name": {"$exists": False}}), CompileContext(**ctx)).predicate)
+
+    # $exists:true is a constant TRUE; $exists:false a constant FALSE — NOT a
+    # presence test on the column. A regression to ``IS NOT NULL`` / ``IS NOT NONE``
+    # (or its negation) on any of these backends would diverge from the oracle and
+    # is caught here.
+    assert true_token in true_pred and "is not null" not in true_pred and "is not none" not in true_pred, true_pred
+    assert false_token in false_pred and "is null" not in false_pred and "is none" not in false_pred, false_pred

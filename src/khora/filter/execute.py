@@ -107,6 +107,15 @@ def run_chronicle_filter(
     applies to its channel reads; over already-materialized candidate records it
     is a no-op, because the full-AST post-filter re-checks ``source_timestamp``
     (and every other predicate) directly. Returns the surviving records in order.
+
+    **Conformance note.** The recall-filter conformance harness drives this seam
+    through ``ChronicleExecutor`` to prove the pushdown + post-filter *composition*
+    is faithful. Because the post-filter half is :func:`compile_python` — the same
+    callable the harness uses as its oracle — a chronicle conformance pass is
+    oracle-equivalent **by construction** and is NOT independent backend coverage
+    (it cannot diverge from the oracle the way the postgres / surrealdb / cypher /
+    weaviate / sqlite_lance compilers can). The independent evidence comes from
+    those DB backends; the chronicle leg is the execution-seam check.
     """
     post_filter = plan_chronicle_filter(filter_ast).post_filter
     return [record for record in records if post_filter(record)]

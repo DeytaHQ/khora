@@ -26,8 +26,11 @@ is already a property of SurrealQL's NONE-boolean algebra.
 
 **NONE vs NULL are distinct.** ``NONE`` is an absent path; ``NULL`` is an
 explicit JSON null value. A ``{k: null}`` match resolves to ``(p = NULL OR p IS
-NONE)``; ``$exists: true`` is ``(p IS NOT NONE)`` and ``$exists: false`` is
-``(p IS NONE)``.
+NONE)``. On a METADATA path, ``$exists: true`` is ``(p IS NOT NONE)`` and
+``$exists: false`` is ``(p IS NONE)`` (real presence). On a SYSTEM key, ``$exists``
+is instead a CONSTANT (``true`` / ``false``) — a system key is treated as
+always-present (the oracle's axiom), so a presence test would diverge whenever the
+column is genuinely unset (an unwritten denormalized doc key reads NONE).
 
 **Metadata equality / membership is array-aware.** A scalar ``$eq`` operand
 matches **both** a scalar field equal to it **and** an array field that contains
@@ -255,9 +258,14 @@ class _Builder:
         operand = clause.operand
 
         if op == Op.EXISTS:
-            # The 8 unwritten document keys read NONE on the SCHEMAFULL table, so
-            # presence is IS NOT NONE (true) / IS NONE (false).
-            return f"({field} IS NOT NONE)" if operand else f"({field} IS NONE)"
+            # A system key is treated as ALWAYS PRESENT (the oracle's axiom), so
+            # $exists on a system key is a CONSTANT — true / false — matching
+            # compile_python / compile_postgres / compile_lance, NOT a presence test
+            # (``IS NOT NONE``). The 8 unwritten document keys read NONE on the
+            # SCHEMAFULL table, so a presence test would EXCLUDE them under
+            # $exists:true, diverging from the oracle (which keeps every row). The
+            # record itself always exists.
+            return "true" if operand else "false"
 
         if op in (Op.IN, Op.NIN):
             if not operand:
@@ -288,10 +296,20 @@ class _Builder:
             # ``!=`` against an absent field already returns true in SurrealQL, so
             # this admits absent rows without an extra ``OR IS NONE`` (Rule 2).
             return f"({field} != {value_bind})"
-        # $eq and the range ops compare directly. An absent / wrong-type field
-        # yields a total false (no coalesce needed), and a wrapping $not flips it.
-        symbol = "=" if op == Op.EQ else _RANGE_OP[op]
-        return f"({field} {symbol} {value_bind})"
+        if op == Op.EQ:
+            # ``NONE = x`` is FALSE in SurrealQL, so an absent / wrong-type field
+            # already excludes correctly (matching the oracle); a wrapping $not flips it.
+            return f"({field} = {value_bind})"
+        # Range ops ($gt/$gte/$lt/$lte). SurrealQL's NONE-comparison is ASYMMETRIC:
+        # ``NONE > x`` / ``NONE >= x`` are FALSE (correct), but ``NONE < x`` /
+        # ``NONE <= x`` are TRUE — so a lower-bound op would wrongly include an absent
+        # (NONE) row, which the oracle (Mongo: a missing field never satisfies a range
+        # compare) excludes. Guard every range op with ``IS NOT NONE`` so an absent
+        # value never matches; this is a no-op for $gt/$gte (already FALSE on NONE) and
+        # the fix for $lt/$lte. A wrapping $not then flips the absent row back to TRUE
+        # (parity with the oracle's $not(range), which includes a missing field).
+        symbol = _RANGE_OP[op]
+        return f"({field} IS NOT NONE AND {field} {symbol} {value_bind})"
 
     # ----- metadata leaves (native object descent) ------------------------ #
 

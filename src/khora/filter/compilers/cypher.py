@@ -21,9 +21,11 @@ the four emission rules:
    against a scalar node property is compiled as a normal ``=`` against a list
    bind — a scalar property never equals a list, so Cypher yields ``false``; no
    special-cased constant is emitted. ``$in`` / ``$nin`` are normal membership.
-4. **Presence/null.** ``$exists`` resolves to ``var.key IS NOT NULL`` /
-   ``var.key IS NULL`` and a ``{k: null}`` match resolves to ``var.key IS NULL``
-   (Neo4j has no stored-null property — an absent property *is* null).
+4. **Presence/null.** ``$exists`` on a system key is a CONSTANT (``true`` /
+   ``false``) — a system key is treated as always-present (the oracle's axiom), so a
+   presence test would diverge whenever the property is genuinely unset on the node.
+   A ``{k: null}`` match resolves to ``var.key IS NULL`` (Neo4j has no stored-null
+   property — an absent property *is* null).
 
 **Totality (the rule that makes negation uniform).** ``NOT`` is compiled as
 ``(NOT (<child>))``; Cypher ``NOT null`` is ``null`` (drops the row), which would
@@ -32,6 +34,18 @@ an ``$eq`` / range / ``$in`` compare) is wrapped in ``coalesce(<expr>, false)``
 — a total boolean. The positive use is unchanged (``false`` excludes exactly as
 ``null`` would), and a wrapping ``NOT`` then flips absent rows to ``true``
 correctly. ``IS NULL`` / ``IS NOT NULL`` are already total.
+
+**Split-mode soundness — "AND distributes; OR/NOT are all-or-nothing."** Cypher
+pushes ONLY system keys; a metadata leaf is deferred (it emits the
+non-constraining ``"true"`` under ``on_unsupported="split"``). That placeholder is
+superset-safe in positive position (``A AND true`` ≡ ``A`` still narrows), but
+``NOT (A OR true)`` ≡ ``NOT true`` ≡ ``false`` would *drop every row the filter
+keeps* — the ``compile_python`` post-filter only narrows, so it could not add the
+wrongly-excluded rows back. So an ``OR`` / ``NOT`` node is pushed only when its
+*entire* subtree is consumable; otherwise the whole node defers to ``"true"`` and
+consumes nothing. ``AND`` still distributes (a non-consumable child becomes
+``"true"`` and the consumable siblings narrow). Matches the same guard in
+:func:`~khora.filter.compilers.lance.compile_lance`.
 
 **Dates compare as ISO strings.** A chunk stores every datetime property as an
 ISO-8601 string (``.isoformat()``), so a :class:`~datetime.datetime` /
@@ -153,7 +167,21 @@ class _Builder:
     # ----- logical node walk ---------------------------------------------- #
 
     def compile_node(self, node: FilterNode | FilterClause) -> str:
-        """Compile a logical node or leaf to a Cypher boolean string."""
+        """Compile a logical node or leaf to a Cypher boolean string.
+
+        **Split-mode soundness — "AND distributes; OR/NOT are all-or-nothing."**
+        The match-all placeholder ``"true"`` an unsupported metadata leaf emits
+        under ``on_unsupported="split"`` is superset-safe only in *positive*
+        position: ``A AND true`` ≡ ``A`` (still narrows correctly), but
+        ``NOT (A OR true)`` ≡ ``NOT true`` ≡ ``false`` — which would *drop every
+        row the filter keeps*, breaking the superset invariant (the
+        ``compile_python`` post-filter only narrows; it cannot add a
+        wrongly-excluded row back). So an ``OR`` / ``NOT`` node is pushed down only
+        when its **entire** subtree is consumable; otherwise the whole node emits
+        ``"true"`` and consumes nothing, deferring it wholesale to the post-filter.
+        An ``AND`` still handles each child independently — a non-consumable child
+        becomes ``"true"`` and the consumable siblings still narrow.
+        """
         if isinstance(node, FilterClause):
             return self.compile_clause(node)
         if node.op == Op.AND:
@@ -165,10 +193,50 @@ class _Builder:
             if not node.children:
                 # The validator forbids an empty $or; guard defensively.
                 return "false"
+            if self._ctx.on_unsupported == "split" and not self._consumable(node):
+                # A non-consumable disjunct would compile to "true", making the
+                # whole OR match-all here while the post-filter still narrows —
+                # safe in positive position but it under-pushes silently AND
+                # becomes a false-exclude if a parent NOT wraps it. Defer the whole
+                # OR. In "raise" mode we instead descend so the offending leaf
+                # raises.
+                return "true"
             return "(" + " OR ".join(self.compile_node(c) for c in node.children) + ")"
-        # Op.NOT — exactly one child per the AST contract. Leaves are built total
-        # (never null) so this negation flips absent rows correctly.
+        # Op.NOT — exactly one child per the AST contract. Pushed only when the
+        # child is fully consumable (then its Cypher is exact + total in both
+        # polarities, so the negation is sound); otherwise defer the whole NOT
+        # (in "split" mode). In "raise" mode we descend so the offending leaf
+        # raises rather than being silently swallowed by the all-or-nothing gate.
+        if self._ctx.on_unsupported == "split" and not self._consumable(node):
+            return "true"
+        # Leaves are built total (never null) so this negation flips absent rows
+        # correctly.
         return f"(NOT ({self.compile_node(node.children[0])}))"
+
+    def _consumable(self, node: FilterNode | FilterClause) -> bool:
+        """True iff ``node``'s whole subtree compiles to Cypher (no ``"true"`` defer).
+
+        A pure predicate — no bind allocation, no ``consumed`` mutation. A logical
+        node is consumable iff every child is; a leaf is consumable iff it is a
+        system key (a metadata path leaf hits ``_unsupported``). Used to keep an
+        ``OR`` / ``NOT`` all-or-nothing: a node is pushed only when nothing inside
+        it would fall to the ``"true"`` placeholder. Mirrors the same helper in
+        :mod:`khora.filter.compilers.lance`.
+        """
+        if isinstance(node, FilterClause):
+            return not self._clause_unconsumable(node)
+        return all(self._consumable(c) for c in node.children)
+
+    def _clause_unconsumable(self, clause: FilterClause) -> bool:
+        """True iff this leaf cannot be pushed to Cypher (would emit ``"true"``).
+
+        Mirrors the leaf dispatch in :meth:`compile_clause` without side effects: a
+        lone system key pushes down; everything else (a metadata path, or any
+        structurally-unknown path) is unsupported and would fall to the
+        ``"true"`` placeholder under split.
+        """
+        path = clause.path
+        return not (len(path) == 1 and path[0] in SYSTEM_KEYS)
 
     # ----- leaf key-kind split -------------------------------------------- #
 
@@ -196,9 +264,15 @@ class _Builder:
         operand = clause.operand
 
         if op == Op.EXISTS:
-            # A chunk node has no stored null — an absent property IS null. So
-            # $exists is presence: IS NOT NULL (true) / IS NULL (false).
-            return f"({prop} IS NOT NULL)" if operand else f"({prop} IS NULL)"
+            # A system key is treated as ALWAYS PRESENT (the oracle's axiom: an
+            # absent system value resolves to None, which still counts as
+            # present-with-null for $exists). So $exists on a system key is a
+            # CONSTANT — true / false — matching compile_python / compile_postgres /
+            # compile_lance, NOT a presence test (``IS NOT NULL``). A presence test
+            # would diverge whenever the property is genuinely unset on the node
+            # (e.g. an unwritten denormalized doc key), which the oracle keeps under
+            # $exists:true. The chunk row itself always exists.
+            return "true" if operand else "false"
 
         if op in (Op.IN, Op.NIN):
             if not operand:

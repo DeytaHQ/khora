@@ -290,9 +290,10 @@ class _Builder:
         Mirrors the leaf dispatch in :meth:`compile_clause` /
         :meth:`_compile_metadata_clause` without side effects: a system key always
         pushes; a metadata leaf is unconsumable when JSON1 is unavailable, or when
-        it is one of the three shapes that cannot match the oracle in SQL — the
-        bare-blob ``$eq``, an ``object_equal`` (dict-operand) ``$eq`` / ``$ne``, or
-        a ``$date`` compare. Any non-system, non-metadata path is unconsumable.
+        it is one of the shapes that cannot match the oracle in SQL — the bare-blob
+        ``$eq``, an ``object_equal`` (dict-operand) ``$eq`` / ``$ne``, a ``$date``
+        compare, or a ``$in`` / ``$nin`` carrying a dict (object_equal) or ``None``
+        (JSON-null member) element. Any non-system, non-metadata path is unconsumable.
         """
         path = clause.path
         if len(path) == 1 and path[0] in SYSTEM_KEYS:
@@ -307,6 +308,13 @@ class _Builder:
         operand = clause.operand
         if isinstance(operand, (DateLiteral, dict)):
             # $date (any op) and object_equal dict ($eq / $ne) are deferred.
+            return True
+        if clause.op in (Op.IN, Op.NIN) and _has_unpushable_in_element(operand):
+            # A dict or None $in / $nin element cannot be matched by the json_each
+            # containment SQLite emits (a dict is object_equal-per-element; a None
+            # must match a stored JSON null, but the type gate excludes nulls). Defer
+            # the whole leaf to the compile_python post-filter (Rule 2: a genuine
+            # capability gap, not a silent drop).
             return True
         return False
 
@@ -421,6 +429,13 @@ class _Builder:
             if not operand:
                 # $in over ∅ matches nothing; $nin over ∅ matches everything.
                 return "0" if op == Op.IN else "1"
+            if _has_unpushable_in_element(operand):
+                # A dict or None element cannot be matched by json_each containment
+                # (a dict is object_equal-per-element; a None must match a stored JSON
+                # null but the type gate excludes nulls). Defer the whole leaf to the
+                # post-filter — None routes to ``on_unsupported`` (Rule 2: a capability
+                # gap, not a silent drop). Mirrors :meth:`_clause_unconsumable`.
+                return None
             chain = " OR ".join(self._md_contains(segs, v) for v in operand)
             if op == Op.IN:
                 return f"({chain})"
@@ -568,6 +583,31 @@ class _Builder:
 # --------------------------------------------------------------------------- #
 # Module-level helpers (no per-pass state).
 # --------------------------------------------------------------------------- #
+
+
+def _has_unpushable_in_element(operand: Any) -> bool:
+    """True iff a ``$in`` / ``$nin`` operand sequence has an element SQLite can't push.
+
+    Two element kinds cannot be matched by the ``json_each`` containment the SQLite
+    compiler emits, so the whole leaf is deferred to the ``compile_python``
+    post-filter (Rule 2: a documented capability gap, not a silent drop):
+
+    * a **dict** element is per-element ``object_equal`` (the oracle matches an array
+      element OR the scalar node EXACTLY equal to the dict); ``json_each`` binds the
+      element as a JSON-text scalar, so it can neither represent nor match it;
+    * a **``None``** (JSON-null) element must match a stored JSON ``null``, but the
+      containment gates ``je.type`` to the operand's *non-null* type (``'text'`` /
+      number / bool), so a ``null`` member is never matched array-aware. The oracle's
+      ``_md_contains(node, None)`` keeps a stored ``null``, so pushing this would
+      under-return and — because the leaf would be marked consumed — never be
+      re-checked.
+
+    ``operand`` is the normalized ``$in`` / ``$nin`` sequence (a tuple / list); a
+    non-sequence (defensive) yields ``False``.
+    """
+    if not isinstance(operand, (tuple, list)):
+        return False
+    return any(item is None or isinstance(item, dict) for item in operand)
 
 
 def _system_value(value: Any) -> Any:
