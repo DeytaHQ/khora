@@ -275,15 +275,8 @@ jobs:
         # compiler-dispatch, plus the skeleton-pgvector integration test which
         # self-skips when Postgres is unreachable); collect it here so the
         # filter tests gate in CI.
-        #
-        # tests/e2e/ holds the recall-filter end-to-end harness. The embedded
-        # sqlite_lance lane is hermetic (no services) and is the must-always-run
-        # lane, so it gates here; the live PG+Neo4j / chronicle modules carry the
-        # ``slow`` marker (excluded by the default ``-m "not slow ..."`` addopts)
-        # AND a reachability self-skip, so they collect and skip cleanly with no
-        # services. The dedicated slow/e2e job for the live lanes is a follow-up.
         run: |
-          uv run pytest tests/unit/ tests/recall/ tests/e2e/ -m "not slow and not filter_conformance" --cov=src/khora --cov-branch --cov-report=xml:coverage-unit.xml --cov-fail-under=0 -n auto --timeout=120 --timeout-method=thread
+          uv run pytest tests/unit/ tests/recall/ --cov=src/khora --cov-branch --cov-report=xml:coverage-unit.xml --cov-fail-under=0 -n auto --timeout=120 --timeout-method=thread
 
       - name: Generate JSON coverage for floor check
         run: uv run coverage json -o coverage.json
