@@ -44,10 +44,10 @@ tests/e2e/
   DESIGN_NOTES.md                  # this file (architect)
   conftest.py                      # BACKEND owns
   _harness.py                      # BACKEND owns
-  test_filter_rowset_embedded.py   # QA owns. sqlite_lance, no-Docker main lane -> AC1 + AC4 + AC5
-  test_filter_rowset_graph.py      # QA owns. live VectorCypher PG+Neo4j, self-skip -> AC3 (graph lane)
-  test_filter_rowset_chronicle.py  # QA owns. live Chronicle PG-only, self-skip -> AC3 (chronicle lane)
-  test_graph_contribution.py       # QA owns. live PG+Neo4j, self-skip -> AC2 + AC3 honesty (pre-flight + tripwire)
+  test_filter_rowset_embedded.py   # QA owns. sqlite_lance, no-Docker main lane -> AC1 + AC4 + AC5 (metadata)
+  test_filter_rowset_graph.py      # QA owns. live VectorCypher PG+Neo4j, self-skip -> AC3 + system-key AC4/AC5
+  test_filter_rowset_chronicle.py  # QA owns. live Chronicle PG-only, self-skip -> AC3 + system-key AC4/AC5
+  test_graph_contribution.py       # QA owns. live PG+Neo4j, self-skip -> AC2 + AC3 honesty (pre-flight + firing tripwire + filter-enforcement drop)
   test_multichunk_denorm.py        # QA owns. sqlite_lance, no-Docker -> AC6
 ```
 
@@ -59,10 +59,10 @@ embedded lane carries the corpus families (AC1 deterministic ingest, AC4 externa
 reconciliation, AC5 F-EXISTS reachability) since it runs in the no-Docker main job.
 
 - **`conftest.py` (Backend)** — per-engine `Khora` fixtures (sqlite_lance embedded
-  / vectorcypher PG+Neo4j / chronicle), the **autouse deterministic-LLM/extractor
-  fixture**, and HyDE-off (+ reranking-off) config. `_pg_reachable()` /
-  `_neo4j_reachable()` self-skip guards so a no-Docker run collects-and-skips the
-  live legs cleanly.
+  / vectorcypher PG+Neo4j / chronicle), each installing the deterministic
+  LLM/extractor stub (`stub_llm`) before building its `Khora`, with HyDE-off
+  (+ reranking-off) config. `_pg_reachable()` self-skip guard so a no-Docker run
+  collects-and-skips the live legs cleanly.
 - **`_harness.py` (Backend)** — the deterministic extract stub, the entity-bearing
   + multi-chunk seed builders, doc-level `reconcile()`, and a `neo4j_populated()`
   probe. The single surface QA imports.
@@ -115,10 +115,12 @@ the negative tripwire the registry is left empty so every doc gets
   to the stub, so `expected_ids` stays exact)
 - `enable_reranking = False`, `enable_llm_reranking = False` (no cross-encoder load;
   scores untouched by a reranker)
-- HyDE off: `enable_hyde = "never"`, `enable_hyde_cypher = False`; the autouse
-  fixture also sets env `KHORA_QUERY_ENABLE_HYDE=false` before any `Khora` is built,
-  and a test-start assertion confirms it (so a future default flip can't silently
-  re-enable query rewriting)
+- HyDE off: `enable_hyde = "never"`, `enable_hyde_cypher = False`, set on the
+  `KhoraConfig` each per-engine fixture builds; `test_hyde_is_disabled` pins
+  `config.query.enable_hyde == "never"` so a future default flip can't silently
+  re-enable query rewriting. (There is no env-var override and no autouse fixture —
+  as shipped, `stub_llm` is installed *inside* each per-engine fixture before its
+  `Khora` is constructed, not via an autouse/env layer.)
 - `min_entity_similarity = 0.0` (floors the entry-entity vector gate so the seeded
   entity is returned as a graph-expansion seed — see Implementation risks)
 - non-empty `entity_types` / `relationship_types` on `remember()` (vectorcypher
@@ -207,10 +209,11 @@ families whose filter predicate `remember()` can reproduce AND the lane supports
 The harness needs only a representative slice per kept family, not the full catalog.
 The smoke run drives final curation.
 
-`seed_corpus(remember, namespace_id, docs)` (already in `tests/test_helpers/filter_spy.py`)
-is the bound-`remember` seeding path Backend wires; extend its per-doc dict to
-carry `external_id` + the system-key fields, or add the thin equivalent in
-`_harness.py`.
+As shipped, `_harness.seed_records(kb, records, namespace_id, ...)` is the seeding
+path: it calls `kb.remember()` once per `SeedRecord` via `_remember_kwargs`, mapping
+`external_id = record.id` + the threadable system-key fields. The curated case set is
+`_harness.rowset_cases(backend, include_system_keys=...)` (the single selector the
+three lane modules share).
 
 ## Graph-channel proof (non-vacuity)
 
@@ -254,10 +257,25 @@ document (any-chunk semantics).
 |---|---|---|
 | AC1 deterministic ingest | `test_filter_rowset_embedded.py` | real `remember()` pipeline, deterministic embeddings + extraction, stable across runs |
 | AC2 graph fires / Neo4j populated | `test_graph_contribution.py` | `graph_chunk_count > 0` + `neo4j_populated()` after a real `remember()` ingest whose `stub_llm`/`plan_extraction` emits entities — the ONLY path that writes entities/edges (`seed_case` writes zero) |
-| AC3 set-equality + negative tripwire | `test_graph_contribution.py` (honesty) + `test_filter_rowset_{graph,chronicle}.py` (row-set) | filtered recall retains/drops the right set; the graph channel empties under a violating filter (non-vacuous) |
-| AC4 reconciliation | `test_filter_rowset_embedded.py` | curated `f_*_cases` seeded via real `remember()` on sqlite_lance; `external_id`-keyed survivor set == `expected_ids` (see Reconciliation) |
-| AC5 F-EXISTS reachability | `test_filter_rowset_embedded.py` | the 8 presence sub-states (`f_exists_cases()`) all reconcile correctly |
+| AC3 set-equality + filter enforcement | `test_graph_contribution.py` (honesty) + `test_filter_rowset_{embedded,graph,chronicle}.py` (row-set) | filtered recall retains/drops the right set; `test_graph_channel_drops_violating_chunks` proves the graph channel *enforces* `filter_ast` (entity-bearing keep/drop docs → only keep survives), distinct from the firing tripwire |
+| AC4 reconciliation | `test_filter_rowset_embedded.py` (+ live graph/chronicle) | curated `f_*_cases` seeded via real `remember()`; `external_id`-keyed survivor set == `expected_ids` (see Reconciliation) |
+| AC5 F-EXISTS reachability | `test_filter_rowset_embedded.py` (6 metadata states) + live graph/chronicle (2 `source_name` system-key states) | all 8 presence sub-states (`f_exists_cases()`) reconcile through real `remember()`; `test_f_exists_states_are_complete` guards against a corpus shrink |
 | AC6 multi-chunk denorm | `test_multichunk_denorm.py` | denormalized doc/date keys uniform across chunks; filter is whole-doc consistent |
+
+## CI gating + deferred lanes
+
+- **The embedded sqlite_lance lane gates CI.** It is hermetic (no services), so it
+  runs in the `test-unit` job (`pytest tests/unit/ tests/recall/ tests/e2e/ -m "not
+  slow and not filter_conformance"`). The live `vectorcypher` / `chronicle` modules
+  carry `pytest.mark.slow` + a reachability self-skip, so the same invocation collects
+  and skips them cleanly; they execute under `make dev` + `NEO4J_INTEGRATION_TEST=1`.
+- **Dedicated slow/e2e CI job for the live lanes is a follow-up** (a separate job that
+  provisions PG+Neo4j and runs `-m "e2e and slow"`).
+- **The skeleton-pgvector engine lane is deferred.** The shipped harness covers the
+  embedded sqlite_lance, live VectorCypher (PG+Neo4j), and live Chronicle (PG-only)
+  lanes. A skeleton-pgvector row-set lane is not included in this PR; it can be added
+  by giving `_harness.rowset_cases` a `"skeleton_pgvector"` backend selector and a
+  fixture that pins that engine.
 
 ## Implementation risks (flagged for Backend — verified against source)
 

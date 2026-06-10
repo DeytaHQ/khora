@@ -13,6 +13,12 @@ construction:
 * NEGATIVE TRIPWIRE — the SAME corpus shape with the extractor staging NOTHING (no
   ``plan_extraction``) must populate ZERO entities, proving the graph contribution
   is CAUSED by the seeded entities, not an always-on fallback.
+* FILTER ENFORCEMENT — every doc is entity-bearing (so the graph channel feeds them
+  all), but only some satisfy the filter; the filtered ``mode=GRAPH`` recall must
+  return ONLY the satisfying docs. A regression where the graph channel ignores
+  ``filter_ast`` and smuggles a violating graph-fed chunk into the fused result fails
+  the set-equality assertion. (The firing tripwire proves *causation of firing*; this
+  proves *filter enforcement* — the two are distinct holes.)
 
 Self-skip: gated on ``NEO4J_INTEGRATION_TEST`` + Postgres reachability (the
 ``vectorcypher_kb`` fixture's guards), so a no-Docker ``uv run pytest -m e2e``
@@ -117,3 +123,51 @@ async def test_graph_contribution_negative_tripwire(vectorcypher_kb) -> None:
         "graph_chunk_count must be 0 when no entities were staged (the graph contribution must be caused by extraction)"
     )
     assert not result.entities, "the graph channel returned entities for an un-seeded namespace (vacuity risk)"
+
+
+async def test_graph_channel_drops_violating_chunks(vectorcypher_kb) -> None:
+    """The graph channel DROPS chunks that violate the filter — enforcement, not just firing.
+
+    The firing tripwire proves the graph contribution is *caused* by extraction; this
+    proves the graph channel *honors* ``filter_ast``. EVERY seeded doc mentions the
+    marker, so the stub extractor emits the shared entity for all of them and the graph
+    channel feeds every doc into the fused result. Half are tagged ``keep`` and half
+    ``drop``. A no-filter ``GRAPH`` pre-flight confirms the channel held candidates;
+    the filtered ``GRAPH`` recall (``metadata.tag`` in ``{"keep"}``) must then return
+    ONLY the keep docs. A regression where the graph channel ignores the filter and
+    smuggles a violating graph-fed chunk into the result fails the set-equality assert.
+    """
+    kb = vectorcypher_kb
+    namespace_id = (await kb.create_namespace()).namespace_id
+    plan_extraction(_MARKER, _ENTITIES, _RELATIONSHIPS)
+
+    keep_ids = {"graph-keep-0", "graph-keep-1"}
+    drop_ids = {"graph-drop-0", "graph-drop-1"}
+    for tag, ext_ids in (("keep", sorted(keep_ids)), ("drop", sorted(drop_ids))):
+        for i, ext_id in enumerate(ext_ids):
+            await kb.remember(
+                content=f"{_MARKER} {tag} document {i}.",
+                namespace=namespace_id,
+                external_id=ext_id,
+                metadata={"tag": tag},
+                entity_types=[t for _, t in _ENTITIES],
+                relationship_types=[rt for _, _, rt in _RELATIONSHIPS],
+            )
+
+    # PRE-FLIGHT: the graph channel held candidates (so the drop assertion is non-vacuous).
+    gate = await _harness.assert_graph_contributes(kb, namespace_id, _ENTITIES[0][0])
+    assert gate.engine_info.get("graph_chunk_count", 0) > 0
+
+    # FILTERED: the filter must drop the violating (drop-tagged) graph-fed docs.
+    result = await kb.recall(
+        _ENTITIES[0][0],
+        namespace=namespace_id,
+        mode=SearchMode.GRAPH,
+        limit=_harness._RECALL_LIMIT,
+        min_similarity=0.0,
+        filter={"metadata.tag": {"$in": ["keep"]}},
+    )
+    survivors = _harness.reconcile(result)
+    assert survivors == frozenset(keep_ids), (
+        f"the graph channel must drop filter-violating chunks: expected the keep set, got {set(survivors)}"
+    )

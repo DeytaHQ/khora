@@ -37,9 +37,8 @@ pytestmark = pytest.mark.e2e
 async def _fresh_namespace(kb: Khora) -> UUID:
     """A fresh namespace on the embedded kb (no cross-test bleed).
 
-    The shared ``namespace_id`` conftest fixture is wired to the ``ENGINE_PARAMS``
-    indirection; this embedded module pins the ``sqlite_lance_kb`` engine directly,
-    so it mints its own namespace rather than going through that parametrized path.
+    This module pins the ``sqlite_lance_kb`` engine fixture directly and mints a
+    fresh namespace per test, so each case seeds and recalls in isolation.
     """
     ns = await kb.create_namespace()
     return ns.namespace_id
@@ -93,24 +92,11 @@ def _metadata_rowset_cases() -> list[conformance.ConformanceCase]:
 
     The embedded ``chunks`` row carries the ``metadata`` blob but not the
     denormalized document system keys, so only ``metadata.<path>`` filter predicates
-    narrow rows there. We pull the metadata-filtering families (F-COERCE / F-OBJEQ /
-    F-DOTKEY) targeting ``sqlite_lance`` and keep only the cases whose seed has no
-    duplicate ``external_id`` (the record id is the reconciliation key under
-    UNIQUE(namespace_id, external_id)).
-
-    Whole-metadata-blob equality (``{"metadata": {...}}``, ``exercises[1] ==
-    "metadata"``) is curated OUT — the embedded JSON path does not support exact
-    whole-object equality; it stays covered on the live/conformance lanes.
+    narrow rows here — hence ``include_system_keys=False``. The system-key-predicate
+    families (and whole-blob equality, which the embedded JSON path can't narrow on)
+    run on the live graph/chronicle lanes; see ``_harness.rowset_cases``.
     """
-    cases: list[conformance.ConformanceCase] = []
-    for family in (conformance.f_coerce_cases, conformance.f_objeq_cases, conformance.f_dotkey_cases):
-        cases.extend(c for c in family() if "sqlite_lance" in c.backends)
-    return [
-        c
-        for c in cases
-        if not _harness._has_duplicate_external_id(c.seed_records)
-        and c.exercises[1] != "metadata"  # drop whole-blob equality (unsupported on embedded)
-    ]
+    return _harness.rowset_cases("sqlite_lance", include_system_keys=False)
 
 
 @pytest.mark.parametrize("case", _metadata_rowset_cases(), ids=lambda c: c.id)
@@ -139,10 +125,11 @@ async def test_external_id_reconciliation(sqlite_lance_kb, case) -> None:
 def _exists_metadata_cases() -> list[conformance.ConformanceCase]:
     """The ``f_exists_cases()`` whose predicate is a ``metadata.*`` presence check.
 
-    The embedded recall path narrows on the metadata blob, so the metadata and
+    The embedded recall path narrows on the metadata blob, so the six metadata and
     nested-metadata presence states are reconcilable here; the two ``source_name``
-    (system-key) states run on the live PG lane. We assert the 8-state corpus has
-    not silently shrunk before selecting.
+    (system-key) presence states need a denormalized chunk column and so run on the
+    live graph/chronicle lanes (``_harness.rowset_cases(..., include_system_keys=True)``).
+    We assert the 8-state corpus has not silently shrunk before selecting.
     """
     all_cases = conformance.f_exists_cases()
     assert len(all_cases) == 8, f"f_exists_cases() must expose the 8 presence states, got {len(all_cases)}"

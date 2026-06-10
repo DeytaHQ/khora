@@ -21,11 +21,17 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
-import pytest
-
 from khora import Khora
 from khora.core.models.recall import RecallResult
-from khora.filter.conformance import ConformanceCase, SeedRecord
+from khora.filter.conformance import (
+    ConformanceCase,
+    SeedRecord,
+    f_coerce_cases,
+    f_dotkey_cases,
+    f_exists_cases,
+    f_objeq_cases,
+    f_op_cases,
+)
 from khora.query import SearchMode
 
 # The conformance ``SeedRecord`` fields that map to a ``Khora.remember()`` keyword.
@@ -307,18 +313,54 @@ def _has_duplicate_external_id(records: Sequence[SeedRecord]) -> bool:
     return len(ids) != len(set(ids))
 
 
+def rowset_cases(backend: str, *, include_system_keys: bool) -> list[ConformanceCase]:
+    """The curated row-set cases for one engine lane (the single shared selector).
+
+    Always includes the dotted-``metadata``-path families (``F-COERCE`` / ``F-OBJEQ``
+    / ``F-DOTKEY``) that target ``backend``; whole-metadata-blob equality
+    (``exercises[1] == "metadata"``) is dropped because the embedded JSON path can't
+    narrow on it.
+
+    ``include_system_keys`` is for the **live** lanes only (``vectorcypher`` /
+    ``chronicle``): their chunk row carries the denormalized document system keys, so
+    the engine recall path narrows on them — unlike the embedded ``chunks`` row. When
+    set, the selector also includes the ``remember``-threadable system-key ``F-OP``
+    families (via :func:`engine_rowset_cases`: the five string keys + ``source_timestamp``
+    + the ``metadata.tier`` representative, minus exact-instant timestamp equalities)
+    and the two ``source_name`` ``F-EXISTS`` presence states. This is the only path on
+    which an e2e case filters on a denormalized document column.
+
+    Cases are deduplicated by id and any seed with a duplicate ``external_id`` (the
+    reconciliation key under UNIQUE(namespace_id, external_id)) is dropped.
+    """
+    candidates: list[ConformanceCase] = []
+    for family in (f_coerce_cases, f_objeq_cases, f_dotkey_cases):
+        candidates.extend(c for c in family() if backend in c.backends and c.exercises[1] != "metadata")
+    if include_system_keys:
+        candidates.extend(c for c in engine_rowset_cases(f_op_cases()) if backend in c.backends)
+        candidates.extend(c for c in f_exists_cases() if backend in c.backends and c.exercises[1] == "source_name")
+
+    selected: list[ConformanceCase] = []
+    seen: set[str] = set()
+    for case in candidates:
+        if case.id in seen or _has_duplicate_external_id(case.seed_records):
+            continue
+        seen.add(case.id)
+        selected.append(case)
+    return selected
+
+
 # --------------------------------------------------------------------------- #
-# Per-engine parametrization.
+# Reachability guard — the live-lane modules self-skip on this.
 # --------------------------------------------------------------------------- #
-#
-# Each row names the kb fixture and its self-skip mark. A test parametrizes its
-# ``kb`` argument indirectly over ``ENGINE_PARAMS`` (and resolves the matching
-# namespace fixture) so a no-Docker run collects the whole module and skips the
-# live legs cleanly.
 
 
 def _pg_reachable() -> bool:
-    """Mirror the conftest reachability guard (kept import-light for the param marks)."""
+    """Whether the compose Postgres is reachable (the live-lane self-skip guard).
+
+    Kept import-light so the ``pytest.mark.skipif`` in each live module can call it
+    at collection time without importing the conftest fixtures.
+    """
     import socket
     from urllib.parse import urlparse
 
@@ -329,33 +371,3 @@ def _pg_reachable() -> bool:
             return True
     except OSError:
         return False
-
-
-def _embedded_available() -> bool:
-    try:
-        import aiosqlite  # noqa: F401
-        import lancedb  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-_SKIP_EMBEDDED = pytest.mark.skipif(
-    not _embedded_available(),
-    reason="embedded stack (aiosqlite + lancedb) not installed",
-)
-_SKIP_LIVE_GRAPH = pytest.mark.skipif(
-    not os.environ.get("NEO4J_INTEGRATION_TEST") or not _pg_reachable(),
-    reason="set NEO4J_INTEGRATION_TEST=1 and start PG+Neo4j to exercise the live graph lane",
-)
-_SKIP_LIVE_PG = pytest.mark.skipif(
-    not _pg_reachable(),
-    reason="start Postgres to exercise the live chronicle lane",
-)
-
-# (kb_fixture_name, engine_label) — the test indirects ``kb`` over this table.
-ENGINE_PARAMS = [
-    pytest.param("sqlite_lance_kb", id="sqlite_lance", marks=_SKIP_EMBEDDED),
-    pytest.param("vectorcypher_kb", id="vectorcypher", marks=_SKIP_LIVE_GRAPH),
-    pytest.param("chronicle_kb", id="chronicle", marks=_SKIP_LIVE_PG),
-]

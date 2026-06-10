@@ -30,18 +30,15 @@ pytestmark = [
 
 
 def _chronicle_rowset_cases() -> list[conformance.ConformanceCase]:
-    """Metadata-predicate cases that target the chronicle backend.
+    """The row-set cases for the live Chronicle (``chronicle``) lane.
 
-    The metadata-filtering families restricted to ``chronicle``-targeting cases with
-    no duplicate ``external_id`` (the reconciliation key) and a dotted ``metadata``
-    path predicate (whole-blob equality is curated out, as on the embedded lane).
+    Chronicle hydrates the denormalized document keys on the recall path, so this
+    PG-only lane narrows on the system keys as well as the dotted-``metadata``
+    families (``include_system_keys=True``): the ``remember``-threadable system-key
+    ``F-OP`` families and the two ``source_name`` ``F-EXISTS`` presence states the
+    embedded lane defers here. See ``_harness.rowset_cases``.
     """
-    cases: list[conformance.ConformanceCase] = []
-    for family in (conformance.f_coerce_cases, conformance.f_objeq_cases, conformance.f_dotkey_cases):
-        cases.extend(c for c in family() if "chronicle" in c.backends)
-    return [
-        c for c in cases if not _harness._has_duplicate_external_id(c.seed_records) and c.exercises[1] != "metadata"
-    ]
+    return _harness.rowset_cases("chronicle", include_system_keys=True)
 
 
 @pytest.mark.parametrize("case", _chronicle_rowset_cases(), ids=lambda c: c.id)

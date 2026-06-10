@@ -97,18 +97,15 @@ async def test_graph_channel_fires_and_neo4j_populated(vectorcypher_kb) -> None:
 
 
 def _graph_rowset_cases() -> list[conformance.ConformanceCase]:
-    """Metadata-predicate cases that target the cypher (VectorCypher) backend.
+    """The row-set cases for the live VectorCypher (``cypher``) lane.
 
-    The same metadata-filtering families the embedded lane runs, restricted to cases
-    whose seed has no duplicate ``external_id`` (the reconciliation key) and whose
-    predicate is a dotted ``metadata`` path the read path narrows on.
+    The live PG/pgvector chunk row carries the denormalized document system keys, so
+    this lane narrows on them as well as the dotted-``metadata`` families
+    (``include_system_keys=True``): the ``remember``-threadable system-key ``F-OP``
+    families and the two ``source_name`` ``F-EXISTS`` presence states the embedded
+    lane defers here. See ``_harness.rowset_cases``.
     """
-    cases: list[conformance.ConformanceCase] = []
-    for family in (conformance.f_coerce_cases, conformance.f_objeq_cases, conformance.f_dotkey_cases):
-        cases.extend(c for c in family() if "cypher" in c.backends)
-    return [
-        c for c in cases if not _harness._has_duplicate_external_id(c.seed_records) and c.exercises[1] != "metadata"
-    ]
+    return _harness.rowset_cases("cypher", include_system_keys=True)
 
 
 @pytest.mark.parametrize("case", _graph_rowset_cases(), ids=lambda c: c.id)

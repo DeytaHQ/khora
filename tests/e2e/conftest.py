@@ -2,15 +2,17 @@
 
 ``@internal``. Backend-owned. Provides the three per-engine ``Khora`` fixtures
 (embedded ``sqlite_lance`` / live ``vectorcypher`` PG+Neo4j / live ``chronicle``
-PG-only), the deterministic extractor+embedder install (``stub_llm``), fresh
-per-test namespaces, and the reachability guards the parametrized test modules
-self-skip on. The test modules under ``tests/e2e/test_*.py`` (QA-owned) consume
-these fixtures and the ``_harness`` engine layer; they never reach into ``src/``.
+PG-only) with the deterministic extractor+embedder install (``stub_llm``) and the
+reachability guards the live modules self-skip on. Each test module pins the
+engine fixture it needs directly and mints its own fresh namespace. The test
+modules under ``tests/e2e/test_*.py`` (QA-owned) consume these fixtures and the
+``_harness`` engine layer; they never reach into ``src/``.
 
-Determinism: every fixture installs ``stub_llm`` (no network, SHA-256-derived
-embeddings), disables HyDE explicitly (``enable_hyde="never"``; the default is
-``"auto"``), and sends every chunk to the stub (``selective_extraction=False``)
-so the hand-counted ``expected_ids`` stay exact.
+Determinism: every engine fixture installs ``stub_llm`` (no network, SHA-256-derived
+embeddings) before the ``Khora`` is built, disables HyDE explicitly
+(``enable_hyde="never"``; the default is ``"auto"``), and sends every chunk to the
+stub (``selective_extraction=False``) so the hand-counted ``expected_ids`` stay
+exact.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ import os
 import socket
 from collections.abc import AsyncIterator
 from urllib.parse import urlparse
-from uuid import UUID
 
 import pytest
 from pydantic import SecretStr
@@ -161,8 +162,8 @@ async def vectorcypher_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khor
 
     Mirrors ``tests/integration/test_filter_pushdown_graph.py::kb``: deterministic
     extractor+embedder sized at 1536, graph-write config on, HyDE off. The module
-    that uses this fixture carries the ``NEO4J_INTEGRATION_TEST`` + reachability
-    self-skip mark from ``ENGINE_PARAMS`` so a no-Docker run skips it cleanly.
+    that uses this fixture carries the ``NEO4J_INTEGRATION_TEST`` + Postgres
+    reachability self-skip mark so a no-Docker run skips it cleanly.
     """
     stub_llm(monkeypatch, dim=PG_EMBED_DIM)
 
@@ -193,8 +194,8 @@ async def chronicle_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
     """Connected ``chronicle`` Khora on a PG-only stack (no graph backend).
 
     Mirrors ``tests/integration/matrix/test_chronicle_pg.py::kb``: deterministic
-    extractor+embedder sized at 1536, no Neo4j URL, HyDE off. Self-skips via the
-    ``ENGINE_PARAMS`` reachability mark when Postgres is down.
+    extractor+embedder sized at 1536, no Neo4j URL, HyDE off. The module that uses
+    this fixture self-skips via its Postgres reachability mark when Postgres is down.
     """
     stub_llm(monkeypatch, dim=PG_EMBED_DIM)
 
@@ -211,26 +212,3 @@ async def chronicle_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
         yield kb
     finally:
         await kb.disconnect()
-
-
-# --------------------------------------------------------------------------- #
-# Engine indirection + fresh per-test namespace (no cross-test bleed).
-# --------------------------------------------------------------------------- #
-
-
-@pytest.fixture
-def kb(request: pytest.FixtureRequest) -> Khora:
-    """Resolve the per-engine kb fixture named by ``ENGINE_PARAMS``.
-
-    A test parametrizes ``kb`` indirectly over ``_harness.ENGINE_PARAMS`` (each
-    param is the name of one engine fixture above); this resolves that fixture so
-    the test body and the ``namespace_id`` fixture are engine-agnostic.
-    """
-    return request.getfixturevalue(request.param)
-
-
-@pytest.fixture
-async def namespace_id(kb: Khora) -> UUID:
-    """A fresh namespace on the selected engine — random id, no cross-test bleed."""
-    ns = await kb.create_namespace()
-    return ns.namespace_id
