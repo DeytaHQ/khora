@@ -270,6 +270,16 @@ jobs:
         # The *_REQUIRED vars (set per-leg below) make the e2e conftest abort
         # the session RED if the named store is unreachable — preventing a
         # silent skip of a container leg.
+        #
+        # Worker count: the live shared-store legs (matrix.postgres) run SERIAL
+        # (`-n 0`). Each per-test fixture reconnects, and the backend's connect()
+        # re-runs the chunk schema DDL (metadata.create_all of khora_chunks,
+        # CREATE OR REPLACE FUNCTION + trigger; plus Neo4j index creation on the
+        # vc_full leg). Concurrent xdist workers issuing that DDL against the one
+        # shared database deadlock and collide on pg_type (duplicate khora_chunks
+        # type). ci.yml's test-integration job runs `-n 0` for the same
+        # shared-database reason. The container-free legs (per-worker tmp
+        # sqlite_lance / in-memory surrealdb, fully isolated) keep `-n auto`.
         env:
           KHORA_DATABASE_URL: ${{ matrix.postgres && 'postgresql://khora:khora@localhost:5434/khora' || '' }}
           KHORA_E2E_PG_REQUIRED: ${{ matrix.postgres && '1' || '' }}
@@ -289,7 +299,7 @@ jobs:
           uv run pytest \
             ${{ matrix.select }} \
             -m "e2e and slow" \
-            -n auto --no-cov -v
+            -n ${{ matrix.postgres && '0' || 'auto' }} --no-cov -v
 
       - name: Stop Postgres
         if: ${{ always() && matrix.postgres }}
