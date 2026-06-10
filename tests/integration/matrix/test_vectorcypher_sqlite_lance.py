@@ -359,11 +359,12 @@ async def test_vc_second_ingest_sharing_entity_does_not_crash(kb: Khora, namespa
 @pytest.mark.xfail(
     strict=False,
     reason=(
-        "Khora.recall() removed the ``graph_depth`` kwarg at some point and the test "
-        "still passes it - separate issue from #806. Keeping the test under xfail "
-        "while we figure out the new traversal-depth surface; the FK-on-second-ingest "
-        "shape the previous xfail tracked is fixed in #806 and covered by "
-        "test_vc_second_ingest_sharing_entity_does_not_crash above."
+        "VectorCypher embedded multi-hop CTE traversal does not reliably cross the "
+        "second hop, so a 2-hop-reachable entity is not surfaced (and Khora.recall() "
+        "no longer accepts the ``graph_depth`` kwarg this test passes). Tracked in "
+        "#1086. NOTE: the FK-on-second-ingest crash the previous citation referenced "
+        "is a separate, fixed problem (closed #806; covered by "
+        "test_vc_second_ingest_sharing_entity_does_not_crash above)."
     ),
     raises=TypeError,
 )
@@ -636,10 +637,10 @@ async def test_vc_cooccurrence_carries_source_document_ids(kb: Khora, namespace_
 @pytest.mark.xfail(
     strict=False,
     reason=(
-        "Same root cause as test_vc_two_hop_traversal: VC's sync remember "
-        "does not rebind extraction-time entity IDs after upsert resolution, "
-        "so a second doc re-mentioning a prior entity hits FOREIGN KEY on "
-        "create_relationships_batch."
+        "VectorCypher embedded prefer_current does not honor expired edges via the "
+        "SQLite CTE traversal: an edge whose valid_to is in the past is still walked, "
+        "so content reachable only through it leaks into the recall result. Tracked in "
+        "#1087; this is the acceptance test for that bi-temporal-invalidation work."
     ),
     raises=Exception,
 )
