@@ -13,13 +13,26 @@ serialized JSON property on the chunk node, not pushable to Cypher) to the engin
 in-memory post-filter — exactly as the VectorCypher retriever does. So the Cypher
 candidate set is a superset the ``compile_python`` oracle narrows.
 
-Why a hand-rolled ``Chunk`` seeder (not ``seed_case`` through a coordinator): the
-graph backend is not coordinator-wired for chunk writes, and the cypher compiler
-reads only ``Chunk``-node properties — the system-key columns and a metadata
-property. This module writes EXACTLY that surface: every datetime system key as an
-``.isoformat()`` string (so the compiler's lexicographic ISO compares apply, matching
-``compile_cypher``'s date-binding) and ``metadata`` as a JSON-string property the
-post-filter decodes.
+Why the production write path: the seed goes through
+:meth:`DualNodeManager.create_chunk_nodes_batch` — the exact code VectorCypher runs
+to land ``Chunk`` nodes — so the conformance leg exercises the real property mapping,
+including the production ``serialize_dict`` form of ``metadata`` landing on the node,
+not a hand-rolled approximation of it. The compiled Cypher predicate then reads only
+the pushed-down system-key properties (per the split-pushdown note above); ``metadata``
+is never in the WHERE — it stays in the in-memory post-filter — so the production write
+form is what's under test on the write side. Each :class:`SeedRecord` is adapted to a
+:class:`TemporalChunk` (mirroring how ``_conformance_pg`` adapts to the skeleton
+store for the postgres leg) so both legs feed their production writer the same corpus.
+
+One corpus-fidelity adjustment: ``create_chunk_nodes_batch`` stamps an absent
+``created_at`` to ``now()`` (the production default), but the conformance corpus
+keeps ``created_at`` cases on the cypher leg *because* cypher is expected to leave an
+absent ``created_at`` NULL (an absent row that gets a ``now()`` value would satisfy a
+lower-bound pushdown and break the by-construction ``expected_ids``). So after the
+batch write, the seeder ``REMOVE``s ``created_at`` from exactly the nodes whose
+``SeedRecord`` left it ``None``, restoring the missing-property semantics the compiler
+relies on. ``occurred_at`` / ``source_timestamp`` are user-supplied and the production
+writer already leaves them absent when ``None``, so they need no fixup.
 
 Seed/read split (write-once, read-many), mirroring the live-Postgres leg. The graph
 is seeded ONCE by ``_conformance_seed`` (the workflow's one-time step), which also
@@ -41,11 +54,12 @@ import json
 import os
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from functools import lru_cache
 from typing import Any
 from uuid import UUID, uuid4
 
+from khora.engines.skeleton.backends import TemporalChunk
+from khora.engines.vectorcypher.dual_nodes import DualNodeManager
 from khora.filter import CompiledFilter
 from khora.filter.ast import FilterNode
 from khora.filter.conformance import ConformanceCase, CypherExecutor, SeedRecord
@@ -54,20 +68,6 @@ from khora.filter.conformance import ConformanceCase, CypherExecutor, SeedRecord
 # ``c`` — see ``VectorCypherRetriever`` graph-channel filter pushdown). The executor
 # owns the compile; this module only seeds + executes the compiled predicate.
 _NODE_ALIAS = "c"
-
-# The three date system keys + the seven denormalized document string keys the
-# corpus stamps on a chunk node. Dates store as ISO strings (the compiler's
-# lexicographic compare form); strings store verbatim.
-_DATE_KEYS: tuple[str, ...] = ("occurred_at", "created_at", "source_timestamp")
-_STRING_KEYS: tuple[str, ...] = (
-    "source_type",
-    "source_name",
-    "source_url",
-    "external_id",
-    "content_type",
-    "source",
-    "title",
-)
 
 # Connection parameters match the ``make dev`` compose stack and the sibling
 # ``tests/integration/test_neo4j_*_integration.py`` modules.
@@ -100,27 +100,38 @@ _FAMILY_GENERATORS: tuple[str, ...] = (
 )
 
 
-def _node_properties(record: SeedRecord, chunk_id: UUID) -> dict[str, Any]:
-    """Build the ``Chunk``-node property map carrying the compiler-read surface.
+def _to_temporal_chunk(record: SeedRecord, chunk_id: UUID, namespace_id: UUID) -> TemporalChunk:
+    """Adapt a :class:`SeedRecord` to the :class:`TemporalChunk` the production
+    graph writer (:meth:`DualNodeManager.create_chunk_nodes_batch`) consumes.
 
-    Every datetime system key is stored as its ``.isoformat()`` string (matching
-    ``compile_cypher``, which binds dates as ISO strings and compares
-    lexicographically); a key left ``None`` is simply absent from the node (the
-    missing-value semantics the compiler must agree on). ``metadata`` is a JSON
-    string the post-filter decodes — cypher defers it. The chunk id is stored as a
-    string ``id`` property the read query scopes on.
+    Mirrors ``_conformance_pg._to_temporal_chunk``: copies the fields the corpus
+    addresses — the three date keys (``occurred_at`` / ``created_at`` /
+    ``source_timestamp``), the seven denormalized document string keys, and the
+    ``metadata`` blob — onto a ``TemporalChunk`` and lets the production writer own
+    the property mapping (``.isoformat()`` on the dates, ``serialize_dict`` on
+    ``metadata``, absent string/date keys written as Cypher nulls and so omitted from
+    the node). The ``id`` is assigned here so it round-trips through the seed map: the
+    writer stores it as ``str(chunk_id)``, the read query scopes on ``c.id IN
+    $case_ids``. No embedding — ``create_chunk_nodes_batch`` does not write the vector
+    onto the node, and the compiled predicate never touches the vector channel.
     """
-    props: dict[str, Any] = {"id": str(chunk_id), "content": record.content}
-    for key in _DATE_KEYS:
-        value: datetime | None = getattr(record, key)
-        if value is not None:
-            props[key] = value.isoformat()
-    for key in _STRING_KEYS:
-        value_str = getattr(record, key)
-        if value_str is not None:
-            props[key] = value_str
-    props["metadata"] = json.dumps(record.metadata or {})
-    return props
+    return TemporalChunk(
+        id=chunk_id,
+        namespace_id=namespace_id,
+        document_id=uuid4(),
+        content=record.content,
+        occurred_at=record.occurred_at,
+        created_at=record.created_at,
+        source_timestamp=record.source_timestamp,
+        metadata=dict(record.metadata or {}),
+        source_type=record.source_type,
+        source_name=record.source_name,
+        source_url=record.source_url,
+        external_id=record.external_id,
+        content_type=record.content_type,
+        source=record.source,
+        title=record.title,
+    )
 
 
 def _connect() -> Any:
@@ -154,26 +165,60 @@ def neo4j_conformance_cases() -> list[ConformanceCase]:
 async def build_seed_map() -> dict[str, dict[str, str]]:
     """Seed every cypher case ONCE and return ``case_id -> {seed_id: chunk_uuid}``.
 
-    Writes one ``Chunk`` node per :class:`SeedRecord` carrying the compiler-read
-    property surface. Chunk UUIDs are stringified for JSON. Called only by the
-    one-time seed entrypoint — never by the test.
+    Writes one ``Chunk`` node per :class:`SeedRecord` through the production graph
+    writer (:meth:`DualNodeManager.create_chunk_nodes_batch`), so the compiled
+    predicate later reads the real property mapping and ``serialize_dict`` metadata
+    form. Each case owns its own ``namespace_id`` (the read query scopes by chunk id,
+    not namespace, but a per-case namespace keeps the nodes corpus-faithful). Chunk
+    UUIDs are stringified for JSON. Called only by the one-time seed entrypoint —
+    never by the test.
+
+    The production writer stamps an absent ``created_at`` to ``now()``; the corpus
+    expects cypher to leave it NULL (see module docstring), so after the batch write
+    every node whose ``SeedRecord`` left ``created_at`` ``None`` has the property
+    removed, restoring the missing-value semantics the compiler relies on.
     """
     driver = _connect()
     seed_map: dict[str, dict[str, str]] = {}
     try:
-        async with driver.session(database=os.environ.get("KHORA_NEO4J_DATABASE", "neo4j")) as session:
-            for case in neo4j_conformance_cases():
-                id_map: dict[str, str] = {}
-                rows: list[dict[str, Any]] = []
-                for record in case.seed_records:
-                    chunk_id = uuid4()
-                    id_map[record.id] = str(chunk_id)
-                    rows.append(_node_properties(record, chunk_id))
-                await session.run("UNWIND $rows AS row CREATE (c:Chunk) SET c = row", rows=rows)
-                seed_map[case.id] = id_map
+        database = os.environ.get("KHORA_NEO4J_DATABASE", "neo4j")
+        manager = DualNodeManager(driver, database=database)
+        for case in neo4j_conformance_cases():
+            namespace_id = uuid4()
+            id_map: dict[str, str] = {}
+            chunks: list[TemporalChunk] = []
+            absent_created_at: list[str] = []
+            for record in case.seed_records:
+                chunk_id = uuid4()
+                id_map[record.id] = str(chunk_id)
+                chunks.append(_to_temporal_chunk(record, chunk_id, namespace_id))
+                if record.created_at is None:
+                    absent_created_at.append(str(chunk_id))
+            await manager.create_chunk_nodes_batch(chunks, namespace_id)
+            await _strip_stamped_created_at(driver, database, absent_created_at)
+            seed_map[case.id] = id_map
     finally:
         await driver.close()
     return seed_map
+
+
+async def _strip_stamped_created_at(driver: Any, database: str, chunk_ids: Sequence[str]) -> None:
+    """Remove the writer-stamped ``created_at`` from nodes whose seed left it absent.
+
+    ``create_chunk_nodes_batch`` defaults an absent ``created_at`` to ``now()`` (the
+    production behavior). The conformance corpus keeps ``created_at`` cases on the
+    cypher leg precisely because cypher is expected to leave an absent ``created_at``
+    NULL, so a ``now()`` value would satisfy a lower-bound pushdown and break the
+    by-construction ``expected_ids``. Re-establish the missing-property semantics by
+    removing the stamped value on exactly those nodes.
+    """
+    if not chunk_ids:
+        return
+    async with driver.session(database=database) as session:
+        await session.run(
+            f"MATCH ({_NODE_ALIAS}:Chunk) WHERE {_NODE_ALIAS}.id IN $ids REMOVE {_NODE_ALIAS}.created_at",
+            ids=list(chunk_ids),
+        )
 
 
 def write_seed_map(seed_map: Mapping[str, Mapping[str, str]]) -> None:
