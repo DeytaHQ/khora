@@ -103,7 +103,8 @@ def _all_cases() -> list[ConformanceCase]:
     surrealdb) asserts the compiled WHERE alone equals the oracle, a split backend
     (cypher / weaviate / sqlite_lance) runs the production prefilter + post-filter
     path. A family that prunes a backend does so only with a documented capability
-    reason (e.g. the string document keys are not seeded onto the live chunk row).
+    reason (e.g. the string document keys are not carried on the sqlite_lance /
+    weaviate chunk row; postgres now denormalizes them off the parent document).
     """
     cases: list[ConformanceCase] = []
     for generator in _FAMILY_GENERATORS:

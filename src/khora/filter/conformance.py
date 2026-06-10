@@ -749,12 +749,27 @@ _OP_BACKENDS: frozenset[str] = _INMEM_BACKENDS | _LIVE_BACKENDS
 # The live backends that do NOT carry the seven string document keys
 # (``source_name`` / ``source_url`` / ``external_id`` / ``content_type`` /
 # ``source`` / ``source_type`` / ``title``) on the queryable row, so a predicate that
-# READS a string-key value is empty / divergent there and is pruned: postgres + lance
-# seed through the core ``Chunk`` (the string keys live on the Document, not the
-# core chunk, so they land NULL), and the weaviate ``KhoraChunk`` collection schema
-# has no string-key columns at all. The surrealdb and cypher runners seed the seven
-# string keys verbatim onto the queryable row, so they KEEP string-key value cases.
-_NO_STRING_KEY_BACKENDS: frozenset[str] = frozenset({"postgres", "sqlite_lance", "weaviate"})
+# READS a string-key value is empty / divergent there and is pruned: the sqlite_lance
+# runner seeds through the core ``Chunk`` (the string keys live on the Document, not
+# the core chunk, so they land NULL), and the weaviate ``KhoraChunk`` collection
+# schema has no string-key columns at all. The surrealdb and cypher runners seed the
+# seven string keys verbatim onto the queryable row, and the postgres runner now
+# denormalizes them off the parent ``documents`` row onto each chunk (mirroring
+# production), so all three KEEP string-key value cases. (Postgres still prunes a
+# ``source_type`` value leaf when a seed record leaves ``source_type`` unset — see
+# :data:`_SOURCE_TYPE_DEFAULTED_BACKENDS`.)
+_NO_STRING_KEY_BACKENDS: frozenset[str] = frozenset({"sqlite_lance", "weaviate"})
+
+# The live backends that DEFAULT an unset ``source_type`` to ``"library"``: the
+# postgres runner denormalizes the parent Document's ``source_type`` onto the chunk,
+# and the ``Document`` dataclass defaults ``source_type`` to ``"library"`` (so does
+# ``seed_case`` for a record that leaves it unset). The in-memory oracle, by
+# contrast, sees an unset ``source_type`` as ABSENT, so a ``source_type`` VALUE leaf
+# over a seed with any unset ``source_type`` row diverges (``"library"`` on postgres
+# vs absent in the oracle) and is pruned from postgres. A seed that sets
+# ``source_type`` on every record is unaffected. surrealdb / cypher seed the
+# ``SeedRecord`` verbatim (no Document default), so they are never pruned for this.
+_SOURCE_TYPE_DEFAULTED_BACKENDS: frozenset[str] = frozenset({"postgres"})
 
 # The live backends that STAMP ``created_at`` to ``now()`` on insert when absent
 # (postgres + lance via the skeleton temporal store; weaviate via the same store
@@ -870,9 +885,15 @@ def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[See
     seed reason — never a silent skip):
 
     * a leaf that READS one of the seven STRING document keys' value (any op except
-      ``$exists``) → drop :data:`_NO_STRING_KEY_BACKENDS` (postgres / sqlite_lance /
-      weaviate, whose seed does not carry the string keys). surrealdb + cypher KEEP
-      it (their runners seed the string keys verbatim); python + chronicle always do;
+      ``$exists``) → drop :data:`_NO_STRING_KEY_BACKENDS` (sqlite_lance / weaviate,
+      whose seed does not carry the string keys). postgres now denormalizes the keys
+      off the parent document, and surrealdb + cypher seed them verbatim, so all
+      three KEEP it; python + chronicle always do;
+    * a ``source_type`` VALUE leaf over a seed that leaves ``source_type`` unset on
+      any record → ALSO drop :data:`_SOURCE_TYPE_DEFAULTED_BACKENDS` (postgres): the
+      denormalized chunk inherits the Document default ``"library"`` while the oracle
+      sees the key absent, so the two diverge. A seed that sets ``source_type`` on
+      every record keeps postgres;
     * a ``$exists`` on a string document key is **NOT** a prune: ``$exists`` on a
       system key is a CONSTANT (the always-present axiom), value-independent and
       oracle-comparable on every backend — this is what lets the F-EXISTS system-key
@@ -897,6 +918,11 @@ def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[See
         if root in string_keys and clause.op is not Op.EXISTS:
             # A value-reading predicate on a string column the seed may not carry.
             excluded |= _NO_STRING_KEY_BACKENDS
+            # A ``source_type`` value leaf diverges on postgres when any seed record
+            # left ``source_type`` unset: the denormalized chunk inherits the
+            # Document default ``"library"`` while the oracle treats it as absent.
+            if root == "source_type" and any(rec.source_type is None for rec in seed):
+                excluded |= _SOURCE_TYPE_DEFAULTED_BACKENDS
         elif root == "created_at":
             # A store that stamps created_at on insert can't keep the absent row NULL.
             excluded |= _CREATED_AT_STAMP_BACKENDS
@@ -926,16 +952,19 @@ def _seed_has_duplicate_external_id(seed: tuple[SeedRecord, ...]) -> bool:
     return len(seen) != len(set(seen))
 
 
-# The one non-null string system key — its column defaults to ``"library"`` on the
-# postgres ``khora_chunks`` schema, so a ``-5`` row with the key unset would be
-# ``"library"`` on that backend but ``None`` in the in-memory oracle. To keep
-# ``expected_ids`` backend-consistent that key is seeded with five populated rows (no
-# NULL row); every other string key is nullable (unset ⇒ NULL on the stores that
-# carry it, ``None`` in the oracle — consistent), so it carries the ``-5`` NULL row
-# that F1 (Mongo-faithful negation) keeps under ``$ne``/``$nin``. String-key VALUE
-# cases run on the backends whose runner seeds the string keys (surrealdb + cypher,
-# plus python + chronicle) and are pruned from the rest (postgres / sqlite_lance /
-# weaviate); the per-case set is computed by :func:`_backends_for_filter`.
+# The one non-null string system key — the ``Document`` dataclass defaults
+# ``source_type`` to ``"library"``, which the postgres runner denormalizes onto the
+# chunk, so a ``-5`` row with the key unset would be ``"library"`` on that backend
+# but ``None`` in the in-memory oracle. To keep ``expected_ids`` backend-consistent
+# that key is seeded with five populated rows (no NULL row); with every record
+# populated, the seed-aware postgres prune (:func:`_backends_for_filter`) does not
+# fire, so ``source_type`` VALUE cases run on postgres too. Every other string key is
+# nullable (unset ⇒ NULL on the stores that carry it, ``None`` in the oracle —
+# consistent), so it carries the ``-5`` NULL row that F1 (Mongo-faithful negation)
+# keeps under ``$ne``/``$nin``. A string-key VALUE case now runs on every backend
+# whose runner carries the string keys (postgres + surrealdb + cypher, plus python +
+# chronicle); only sqlite_lance / weaviate prune it; the per-case set is computed by
+# :func:`_backends_for_filter`.
 _NON_NULL_STRING_KEY = "source_type"
 
 
@@ -1061,9 +1090,12 @@ def _string_op_cases(key: str) -> list[ConformanceCase]:
     # "connection"). The two reasons converge on the same survivor set, so the
     # expected_ids stay consistent across every backend that carries the string key.
     # ``backends`` is computed per-case (:func:`_backends_for_filter`): a value-reading
-    # string predicate drops the live legs that do not seed the string keys
-    # (postgres / sqlite_lance / weaviate) and keeps surrealdb + cypher (which do) plus
-    # python + chronicle; an ``$exists`` (a constant on a system key) stays on all.
+    # string predicate drops the live legs that do not carry the string keys
+    # (sqlite_lance / weaviate) and keeps postgres (denormalized off the parent
+    # document) + surrealdb + cypher plus python + chronicle. A ``source_type`` value
+    # leaf would additionally drop postgres if any seed row left it unset, but this
+    # seed populates all five rows, so postgres stays. An ``$exists`` (a constant on a
+    # system key) stays on all.
     def case(suffix: str, predicate: Any, expected: frozenset[str], op_tag: str) -> ConformanceCase:
         filter_ = {key: predicate}
         return ConformanceCase(
@@ -1127,9 +1159,11 @@ def f_op_cases() -> list[ConformanceCase]:
     ``-5`` row that F1 (Mongo-faithful negation) keeps under ``$ne`` / ``$nin``,
     while the one non-null key (``source_type``) is seeded fully populated so its
     ``expected_ids`` stay consistent across every backend that carries the key. A
-    string-key VALUE case runs on the backends whose runner seeds the string keys
-    (surrealdb + cypher, plus python + chronicle); a string-key ``$exists`` (a
-    constant on a system key) runs on all (see :func:`_backends_for_filter`).
+    string-key VALUE case runs on the backends whose runner carries the string keys
+    (postgres — denormalized off the parent document — plus surrealdb + cypher +
+    python + chronicle); only sqlite_lance / weaviate prune it. A string-key
+    ``$exists`` (a constant on a system key) runs on all (see
+    :func:`_backends_for_filter`).
     Every case tags the system key it exercises in ``exercises`` so the coverage
     meta-test can assert the union covers :data:`SYSTEM_KEYS`. ``expected_ids`` is
     computed by construction from each case's known seed (the runner confirms,
@@ -2296,9 +2330,13 @@ def f_sel_cases() -> list[ConformanceCase]:
     A larger seed where predicates narrow a five-record set: an impossible bound
     keeps nothing, an all-match keeps everything, a single equality keeps one, a
     date range pre-filters, a ``$in`` keeps a chosen subset, and a composite AND of
-    a system key and a metadata range intersects to the overlap. (The harness asserts
-    fixed survivor ids; the limit-clause selectivity cases — ``len`` assertions —
-    are a recall-engine concern outside the compiled-predicate seam.)
+    a system key and a metadata range intersects to the overlap. A final
+    three-predicate case (``F-SEL-three-predicate``) ANDs a denormalized document key
+    (``source_name``), a system date key (``occurred_at`` ``$gte``, boundary-inclusive),
+    and a metadata key (``metadata.tag`` ``$in``) over a ten-record corpus whose five
+    out-of-scope rows each violate exactly one predicate. (The harness asserts fixed
+    survivor ids; the limit-clause selectivity cases — ``len`` assertions — are a
+    recall-engine concern outside the compiled-predicate seam.)
     """
     seed = tuple(
         SeedRecord(
@@ -2335,7 +2373,92 @@ def f_sel_cases() -> list[ConformanceCase]:
             frozenset({"sel-2", "sel-3"}),
             ("F-SEL", "composite"),
         ),
+        # multi-predicate AND across a denormalized document key, a system date key,
+        # and a metadata key: source_name="linear" ∧ occurred_at>=2026-04-05 ∧
+        # metadata.tag in {urgent, release}. Ten records; the five in-scope rows
+        # satisfy all three (one sits exactly at the $gte bound), and each of the five
+        # out-of-scope rows violates exactly ONE predicate (wrong source / NULL source
+        # / too-old date / wrong tag / missing tag) so a leak names the broken one.
+        _case(
+            "F-SEL-three-predicate",
+            {
+                "source_name": "linear",
+                "occurred_at": {"$gte": "2026-04-05T00:00:00Z"},
+                "metadata.tag": {"$in": ["urgent", "release"]},
+            },
+            _F_SEL_THREE_PREDICATE_SEED,
+            frozenset({"tp-in-boundary", "tp-in-recent", "tp-in-future", "tp-in-release", "tp-in-urgent"}),
+            ("F-SEL", "three-predicate", "source_name", "occurred_at", "metadata-$in"),
+        ),
     ]
+
+
+# Ten-record seed for F-SEL-three-predicate: five in-scope (all three predicates
+# satisfied; ``tp-in-boundary`` sits exactly at the ``$gte`` bound), five out-of-scope
+# (each violating exactly one predicate). No record sets ``source_type`` (so the
+# filter never reads it) and none sets ``external_id``; all share the default content.
+_F_SEL_THREE_PREDICATE_SEED: tuple[SeedRecord, ...] = (
+    SeedRecord(
+        id="tp-in-boundary",
+        source_name="linear",
+        occurred_at=datetime(2026, 4, 5, 0, 0, 0, tzinfo=UTC),
+        metadata={"tag": "urgent"},
+    ),
+    SeedRecord(
+        id="tp-in-recent",
+        source_name="linear",
+        occurred_at=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
+        metadata={"tag": "release"},
+    ),
+    SeedRecord(
+        id="tp-in-future",
+        source_name="linear",
+        occurred_at=datetime(2026, 6, 1, 0, 0, 0, tzinfo=UTC),
+        metadata={"tag": "urgent"},
+    ),
+    SeedRecord(
+        id="tp-in-release",
+        source_name="linear",
+        occurred_at=datetime(2026, 4, 10, 0, 0, 0, tzinfo=UTC),
+        metadata={"tag": "release"},
+    ),
+    SeedRecord(
+        id="tp-in-urgent",
+        source_name="linear",
+        occurred_at=datetime(2026, 4, 20, 9, 30, 0, tzinfo=UTC),
+        metadata={"tag": "urgent"},
+    ),
+    SeedRecord(
+        id="tp-out-wrong-source",
+        source_name="slack",
+        occurred_at=datetime(2026, 5, 15, 0, 0, 0, tzinfo=UTC),
+        metadata={"tag": "urgent"},
+    ),
+    SeedRecord(
+        id="tp-out-too-old",
+        source_name="linear",
+        occurred_at=datetime(2026, 4, 4, 23, 59, 59, tzinfo=UTC),
+        metadata={"tag": "release"},
+    ),
+    SeedRecord(
+        id="tp-out-wrong-tag",
+        source_name="linear",
+        occurred_at=datetime(2026, 5, 20, 0, 0, 0, tzinfo=UTC),
+        metadata={"tag": "backlog"},
+    ),
+    SeedRecord(
+        id="tp-out-missing-tag",
+        source_name="linear",
+        occurred_at=datetime(2026, 5, 25, 0, 0, 0, tzinfo=UTC),
+        metadata={},
+    ),
+    SeedRecord(
+        id="tp-out-null-source",
+        source_name=None,
+        occurred_at=datetime(2026, 5, 30, 0, 0, 0, tzinfo=UTC),
+        metadata={"tag": "release"},
+    ),
+)
 
 
 def f_unsup_cases() -> list[ConformanceCase]:

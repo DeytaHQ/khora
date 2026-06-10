@@ -89,19 +89,21 @@ EMBED_DIM = 1536
 SEED_MAP_PATH = os.environ.get("KHORA_CONFORMANCE_SEED_MAP", ".conformance_seed_map.json")
 
 
-def _to_temporal_chunk(chunk: Chunk) -> TemporalChunk:
+def _to_temporal_chunk(chunk: Chunk, doc_keys: Mapping[str, Any]) -> TemporalChunk:
     """Adapt a core ``Chunk`` (what ``seed_case`` builds) to the ``TemporalChunk``
-    the skeleton ``khora_chunks`` store writes.
+    the skeleton ``khora_chunks`` store writes, stamping the parent document's
+    denormalized string keys.
 
     ``PgVectorTemporalStore.create_chunks_batch`` reads ``TemporalChunk``-only
     columns (``source_system``/``author``/``channel``/the denormalized document
     keys). ``seed_case`` sets only the fields both models share — ids, content,
     embedding, the three ``_DATE_KEYS`` (occurred_at/created_at/source_timestamp),
-    and metadata — so copy those and let the skeleton-only columns default to
-    ``None``. Cases that value-read a string document key (across every family) are
-    pruned from the postgres ``backends`` for exactly this reason — those columns are
-    not seeded here — so postgres only ever asserts metadata / occurred_at /
-    source_timestamp cases, which this adapter carries faithfully.
+    and metadata — so copy those. The seven string document keys
+    (``source_type``/``source_name``/``source_url``/``external_id``/
+    ``content_type``/``source``/``title``) live on the parent ``Document``, not the
+    core ``Chunk``; ``doc_keys`` carries them off that document so the chunk row is
+    queryable on them, mirroring the production denormalization the
+    ``PgVectorTemporalStore`` write path performs.
 
     The embedding is regenerated at ``EMBED_DIM`` (1536): ``seed_case`` builds it at
     the sqlite_lance fixture's small dimension, but ``khora_chunks.embedding`` is a
@@ -119,7 +121,32 @@ def _to_temporal_chunk(chunk: Chunk) -> TemporalChunk:
         source_timestamp=chunk.source_timestamp,
         metadata=dict(chunk.metadata or {}),
         chunker_info=dict(chunk.chunker_info or {}),
+        **doc_keys,
     )
+
+
+# The seven string document keys, denormalized off the parent ``documents`` row
+# onto each chunk so postgres can filter on them directly — the same columns
+# production copies down (``document_denorm_fields``). ``source_timestamp`` (the
+# eighth denorm field) is already carried as a date column on the core ``Chunk``,
+# so it is not re-read here.
+_DOC_STRING_KEYS: tuple[str, ...] = (
+    "source_type",
+    "source_name",
+    "source_url",
+    "external_id",
+    "content_type",
+    "source",
+    "title",
+)
+
+# A lightweight ``documents`` column reference for the denorm SELECT (the
+# string keys + the id to join on). Avoids importing the full ORM model.
+_documents_keys_table = sa.table(
+    "documents",
+    sa.column("id"),
+    *(sa.column(key) for key in _DOC_STRING_KEYS),
+)
 
 
 class _CoreChunkTemporalStore(PgVectorTemporalStore):
@@ -128,11 +155,29 @@ class _CoreChunkTemporalStore(PgVectorTemporalStore):
     The conformance seeder writes through the coordinator with core ``Chunk``
     instances, but the skeleton store's batch insert reads ``TemporalChunk``-only
     attributes. Convert at this boundary so the harness stays storage-agnostic and
-    the production store is untouched.
+    the production store is untouched. The parent document's seven string keys are
+    denormalized onto each chunk (one batched SELECT on the shared engine), so the
+    postgres leg carries them on the queryable row exactly as production does.
     """
 
     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[TemporalChunk]:  # type: ignore[override]
-        return await super().create_chunks_batch([_to_temporal_chunk(c) for c in chunks])
+        doc_keys_by_id = await self._fetch_document_keys({c.document_id for c in chunks})
+        temporal = [_to_temporal_chunk(c, doc_keys_by_id.get(c.document_id, {})) for c in chunks]
+        return await super().create_chunks_batch(temporal)
+
+    async def _fetch_document_keys(self, document_ids: set[UUID]) -> dict[UUID, dict[str, Any]]:
+        """Read the seven string keys off each parent document (one batched query).
+
+        Mirrors production denormalization: the keys live on ``documents`` and are
+        copied onto the chunk row. The documents were written by ``seed_case`` on
+        this same shared engine immediately before, so the rows are present.
+        """
+        if not document_ids:
+            return {}
+        stmt = sa.select(_documents_keys_table).where(_documents_keys_table.c.id.in_(document_ids))
+        async with self._get_session() as session:
+            rows = (await session.execute(stmt)).mappings().all()
+        return {row["id"]: {key: row[key] for key in _DOC_STRING_KEYS} for row in rows}
 
 
 # The 14 family generators — the full conformance corpus. The seed entrypoint and
@@ -161,9 +206,13 @@ def postgres_conformance_cases() -> list[ConformanceCase]:
 
     The single source of truth for *what the postgres leg seeds and asserts* — the
     seed entrypoint and the test module both call this so they never drift. Pulls
-    from all 14 families and keeps the postgres-targeting subset (a family prunes
-    postgres only with a documented capability reason — e.g. the string document
-    keys and ``created_at`` are not seeded onto the live chunk row).
+    from all 14 families and keeps the postgres-targeting subset. The string
+    document keys are now denormalized onto the chunk row (see
+    ``_CoreChunkTemporalStore``), so a value-reading string-key case runs on
+    postgres; a family prunes postgres only with a remaining documented reason —
+    ``created_at`` is stamped ``now()`` on insert, and a ``source_type`` value leaf
+    over a record that left ``source_type`` unset diverges (it denormalizes as the
+    Document default ``"library"`` while the oracle sees it absent).
     """
     cases: list[ConformanceCase] = []
     for generator in _FAMILY_GENERATORS:

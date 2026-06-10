@@ -109,9 +109,9 @@ db-down: dev-down
 test: test-unit test-integration
 
 # Run unit tests parallel; clear report so coverage is finalized by test-integration.
-# tests/recall/ holds the recall-filter suite (validator, AST, compiler-dispatch,
-# plus the skeleton-pgvector integration test which self-skips when Postgres is
-# unreachable and runs under ``make dev``); collect it here so the filter tests gate.
+# tests/recall/ holds the recall-filter suite (validator, AST, compiler-dispatch) and
+# is fully hermetic — no Postgres needed; collect it here so the filter tests gate.
+# The live-pg row-narrowing proof lives in the filter-conformance corpus (its own job).
 test-unit:
 	uv run pytest tests/unit/ tests/recall/ --cov=src/khora --cov-branch --cov-report= --cov-fail-under=0 -n auto
 

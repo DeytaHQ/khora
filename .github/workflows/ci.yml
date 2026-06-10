@@ -234,12 +234,15 @@ jobs:
   # ============================================================================
   # Test (unit) — pytest unit + recall suites with coverage, no services.
   # ============================================================================
-  # Hermetic: no database side-car. The recall-filter Postgres smoke test in
-  # tests/recall/ self-skips when Postgres is unreachable, so it is collected
-  # here without provisioning a server. This job also owns the per-path
-  # coverage floor check: all floor paths (sqlite_lance/*, chronicle/engine.py,
-  # _fts5.py, _accel.py) are exercised by the unit + embedded suites, not by
-  # the Postgres integration tests, so the floors must be measured here.
+  # Hermetic: no database side-car. tests/recall/ is fully hermetic — its
+  # remaining suites (validator, AST, compiler-dispatch, the skeleton
+  # filter_ast forwarding + pushed_down derivation, and the sqlite_lance
+  # embedded chronicle filter test) need no Postgres; the live-pg filter
+  # coverage moved to the filter-conformance corpus (its own CI job). This job
+  # also owns the per-path coverage floor check: all floor paths
+  # (sqlite_lance/*, chronicle/engine.py, _fts5.py, _accel.py) are exercised by
+  # the unit + embedded suites, not by the Postgres integration tests, so the
+  # floors must be measured here.
   test-unit:
     needs: install
     runs-on: ubuntu-latest
@@ -272,9 +275,9 @@ jobs:
 
       - name: Run unit tests with coverage (parallel)
         # tests/recall/ holds the recall-filter suite (validator, AST,
-        # compiler-dispatch, plus the skeleton-pgvector integration test which
-        # self-skips when Postgres is unreachable); collect it here so the
-        # filter tests gate in CI.
+        # compiler-dispatch) and is fully hermetic — no Postgres needed; collect
+        # it here so the filter tests gate in CI. The live-pg row-narrowing proof
+        # lives in the filter-conformance corpus (its own job).
         #
         # tests/e2e/ holds the recall-filter end-to-end harness. The embedded
         # sqlite_lance lane is hermetic (no services) and is the must-always-run

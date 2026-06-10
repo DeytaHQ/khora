@@ -1080,8 +1080,9 @@ class TestRecallFilterKwarg:
         carries no constraints/leaves (nothing to push) — consistent with the
         no-filter case. The plumbing fact pinned here is that ``{}`` is not
         short-circuited to ``None``; the engine-level empty→False derivation is
-        exercised on the live pg path in
-        ``tests/recall/test_filter_skeleton_pgvector.py``.
+        exercised directly in
+        ``tests/unit/engines/test_skeleton_filter_ast.py`` (the ``pushed_down``
+        derivation tests).
         """
         from khora.filter import FilterNode
         from khora.filter.ast import Op
@@ -1129,8 +1130,10 @@ class TestRecallFilterKwarg:
         """The skeleton engine is the pushdown target → supported=True.
 
         This mock engine reports no pushdown signal, so ``pushed_down`` defaults
-        to ``False`` (the live skeleton-pgvector pushdown is asserted True in
-        ``tests/recall/test_filter_skeleton_pgvector.py``).
+        to ``False``. The skeleton-pgvector pushdown=True derivation is asserted
+        directly in ``tests/unit/engines/test_skeleton_filter_ast.py``, and the
+        whole-filter row-narrowing it implies is covered by the postgres leg of
+        the filter-conformance corpus (e.g. ``F-SEL-three-predicate``).
         """
         kb = _make_kb(connected=True)
         kb._engine_name = "skeleton"

@@ -180,3 +180,54 @@ def test_all_backend_search_methods_accept_filter_ast(name: str, store_cls: obje
         inspect.Parameter.KEYWORD_ONLY,
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
     ), f"{name}.search() 'filter_ast' must be passable by keyword, got kind={param.kind}"
+
+
+# ---------------------------------------------------------------------------
+# engine_info['filter']['pushed_down'] derivation (engine-side, no Postgres).
+# ---------------------------------------------------------------------------
+#
+# The skeleton engine derives the pushdown flag from the filter_ast + backend
+# without recompiling: ``filter_ast is not None and bool(filter_ast.children)
+# and backend_type == "pgvector"``. The live-pg end-to-end proof of this flag
+# was the retired interim smoke test; this drives the same derivation directly
+# off a stubbed engine (no database), and the facade-side carrier threading is
+# pinned separately by tests/unit/test_khora.py.
+
+
+async def _pushed_down_for(filter_ast: FilterNode | None) -> bool:
+    """Run ``recall`` with ``filter_ast`` and read the derived pushdown flag.
+
+    Uses the same no-Postgres stub harness as the forwarding tests: the engine
+    is on the pgvector backend with a stub store returning no rows, so recall
+    reaches the engine_info derivation and we read it off the result.
+    """
+    engine, _ = _build_engine_with_stubs()
+    result = await engine.recall("alpha", uuid4(), mode=SearchMode.VECTOR, filter_ast=filter_ast)
+    return result.engine_info["filter"]["pushed_down"]
+
+
+async def test_pushed_down_true_for_constrained_ast_on_pgvector() -> None:
+    """A non-None AST WITH constraints on the pgvector backend → pushed_down True.
+
+    The pgvector compiler is all-or-nothing (``on_unsupported="raise"``), so a
+    recall that returns with a constrained filter_ast means every leaf pushed
+    down — the engine reports that as ``pushed_down=True``.
+    """
+    assert await _pushed_down_for(_sample_filter_ast()) is True
+
+
+async def test_pushed_down_false_for_none_ast() -> None:
+    """No filter (``filter_ast is None``) → pushed_down False (nothing to push)."""
+    assert await _pushed_down_for(None) is False
+
+
+async def test_pushed_down_false_for_empty_ast() -> None:
+    """A constraint-free AST (empty-AND root) → pushed_down False.
+
+    ``filter={}`` / ``RecallFilter()`` normalize to ``FilterNode(op=AND,
+    children=())`` — a match-everything root carrying zero leaves. "All leaves
+    consumed" is vacuous, so it narrows nothing and reports ``pushed_down=False``,
+    matching the no-filter case rather than claiming an empty pushdown.
+    """
+    empty_ast = FilterNode(op=FilterOp.AND, children=())
+    assert await _pushed_down_for(empty_ast) is False
