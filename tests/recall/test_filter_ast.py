@@ -186,6 +186,20 @@ def test_metadata_explicit_in_stays_in_with_ordered_tuple() -> None:
     assert isinstance(clause.operand, tuple)
 
 
+def test_explicit_eq_list_operand_stays_a_plain_list_not_a_tuple() -> None:
+    # An EXPLICIT {"$eq": [list]} is array-CONTAINMENT, not the bare-list exact-array
+    # sugar. It lowers to a plain ``list`` operand (carried verbatim by
+    # ``_lower_scalar_operand``) — distinct from the bare-list form, which lowers to
+    # a ``tuple``. This container-type split is what ``canonical_hash`` records
+    # differently via the structural ``operand_kind`` field on the clause record.
+    (clause,) = _clauses(_ast({"metadata.tags": {"$eq": ["a", "b"]}}))
+    assert clause.path == ("metadata", "tags")
+    assert clause.op == Op.EQ
+    assert clause.operand == ["a", "b"]
+    assert isinstance(clause.operand, list)
+    assert not isinstance(clause.operand, tuple)
+
+
 def test_metadata_nin_lowers_to_ordered_tuple() -> None:
     (clause,) = _clauses(_ast({"metadata.k": {"$nin": [1, 2]}}))
     assert clause.op == Op.NIN
@@ -639,6 +653,15 @@ def test_hash_dict_operand_key_order_insensitive() -> None:
     assert a == b
 
 
+def test_hash_whole_blob_metadata_dict_key_order_insensitive() -> None:
+    # The bare ``metadata`` WHOLE-BLOB $eq operand (a different lowering path than a
+    # ``metadata.<sub>`` subdocument) also sorts its keys, so the wire dict-key order
+    # on the blob does not change the hash.
+    a = canonical_hash(_ast({"metadata": {"a": 1, "b": 2}}))
+    b = canonical_hash(_ast({"metadata": {"b": 2, "a": 1}}))
+    assert a == b
+
+
 def test_hash_differs_on_operand_semantics() -> None:
     a = canonical_hash(_ast({"source_name": "a"}))
     b = canonical_hash(_ast({"source_name": "b"}))
@@ -700,6 +723,34 @@ def test_hash_distinguishes_eq_list_operand_from_in_same_path() -> None:
     eq_hash = canonical_hash(_ast({"source_name": ["a", "b"]}))
     in_hash = canonical_hash(_ast({"source_name": {"$in": ["a", "b"]}}))
     assert eq_hash != in_hash
+
+
+def test_bare_list_and_explicit_eq_list_hash_differently() -> None:
+    # Headline: a bare list ``{path: [a, b]}`` is $eq EXACT-ARRAY (tuple operand),
+    # while an explicit ``{path: {"$eq": [a, b]}}`` is array-CONTAINMENT (list
+    # operand). SAME path, SAME op ($eq), SAME elements/order — only the operand's
+    # container kind differs, and the two carry different row-set semantics, so they
+    # must hash DIFFERENTLY. The canonical clause record carries a structural
+    # ``operand_kind`` field (tuple vs list) that breaks the collision.
+    bare_hash = canonical_hash(_ast({"metadata.tags": ["a", "b"]}))
+    explicit_eq_hash = canonical_hash(_ast({"metadata.tags": {"$eq": ["a", "b"]}}))
+    assert bare_hash != explicit_eq_hash
+
+
+def test_bare_list_does_not_collide_with_dict_operand_mimicking_the_tag() -> None:
+    # The tuple-vs-list distinction is a STRUCTURAL clause field (operand_kind), not
+    # an in-operand sentinel, so it is forge-proof. A user $eq operand is arbitrary
+    # opaque JSON and is canonicalized only under the "operand" key — it can never
+    # mint the clause-level discriminator. So a bare list (tuple, exact-array
+    # equality) must NOT collide with an explicit $eq whose operand is a dict, even
+    # one that mimics an internal marker. These are semantically different (exact
+    # ARRAY equality vs exact DICT equality); an in-operand sentinel would have
+    # collided them.
+    tuple_hash = canonical_hash(_ast({"metadata.tags": ["a", "b"]}))
+    arr_dict_hash = canonical_hash(_ast({"metadata.tags": {"$eq": {"$arr": ["a", "b"]}}}))
+    forge_dict_hash = canonical_hash(_ast({"metadata.tags": {"$eq": {"operand_kind": "tuple"}}}))
+    assert tuple_hash != arr_dict_hash
+    assert tuple_hash != forge_dict_hash
 
 
 # --- AC3: order preservation for non-commutative shapes ------------------- #
