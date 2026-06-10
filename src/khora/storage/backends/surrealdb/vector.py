@@ -253,6 +253,46 @@ class SurrealDBVectorAdapter:
 
         return count
 
+    async def update_last_accessed(
+        self,
+        namespace_id: UUID,
+        chunk_ids: list[UUID],
+        ts: datetime,
+    ) -> int:
+        """Stamp ``last_accessed_at = ts`` on the given chunks.
+
+        Single UPDATE statement, scoped to ``namespace_id`` to prevent
+        cross-tenant writes through forged ids. Returns the row count.
+        Used by the Chronicle reinforcement-on-recall path.
+
+        The namespace is resolved to its record id(s) up front and the
+        chunk's ``namespace`` link is matched by *direct* RID equality
+        (``namespace IN $ns_rids``) rather than the sibling read methods'
+        ``OR namespace.namespace_id = $ns_str`` deref. The live record-link
+        dereference is non-deterministic on the embedded engine, so it is
+        avoided here to keep the cross-tenant guard deterministic — a flaky
+        security predicate is worse than a missed reinforcement.
+        """
+        if not chunk_ids:
+            return 0
+        chunk_rids = [_rid("chunk", cid) for cid in chunk_ids]
+        # Resolve the namespace to its record id(s) up front and match the chunk's
+        # ``namespace`` link by direct RID equality. This avoids the non-deterministic
+        # chunk->namespace ``.namespace_id`` dereference (flaky on the embedded engine)
+        # while still honoring both the row-id and stable-id namespace forms.
+        ns_rows = await self._conn.query(
+            "SELECT id FROM memory_namespace WHERE namespace_id = $ns_str OR id = $ns_rid",
+            {"ns_str": str(namespace_id), "ns_rid": _rid("memory_namespace", namespace_id)},
+        )
+        ns_rids = [row["id"] for row in ns_rows]
+        if not ns_rids:
+            return 0
+        rows = await self._conn.query(
+            "UPDATE chunk SET last_accessed_at = $ts WHERE id IN $ids AND namespace IN $ns_rids",
+            {"ts": ts, "ids": chunk_rids, "ns_rids": ns_rids},
+        )
+        return len(rows)
+
     @trace(
         "khora.surrealdb.search_similar",
         include={"namespace_id", "limit"},

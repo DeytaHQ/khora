@@ -38,7 +38,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -94,6 +94,30 @@ async def coord() -> AsyncIterator[StorageCoordinator]:
     relational = SurrealDBRelationalAdapter(conn)
     vector = SurrealDBVectorAdapter(conn)
     coordinator = StorageCoordinator(relational=relational, vector=vector)
+    # Warm the embedded SurrealDB engine before the test body runs. The very first
+    # create/query/update cycle against a freshly-initialized in-memory engine is
+    # occasionally non-deterministic — a rare cold-start artifact where a query can
+    # return a wrong result (e.g. a namespace-scoped UPDATE transiently matching the
+    # wrong row), most visible on the first SurrealDB operation in a fresh process or
+    # under heavy concurrent load. When several tests run in sequence the earlier ones
+    # warm the engine implicitly; this explicit warm-up makes each test self-contained
+    # so the engine is reliable even for the first test in a cold run. The throwaway
+    # namespace cannot affect any test's data (recall is namespace-scoped).
+    _warm_ns = await coordinator.create_namespace(MemoryNamespace())
+    _warm_doc = Document(namespace_id=_warm_ns.id, content="warmup", source="warmup", title="warmup")
+    await coordinator.create_document(_warm_doc)
+    _warm_chunk = Chunk(
+        namespace_id=_warm_ns.id,
+        document_id=_warm_doc.id,
+        content="warmup",
+        chunk_index=0,
+        embedding=list(_SHARED_EMBEDDING),
+        embedding_model="fake",
+        last_accessed_at=datetime(2000, 1, 1, tzinfo=UTC),
+    )
+    await coordinator.create_chunks_batch([_warm_chunk])
+    await coordinator.update_last_accessed(_warm_ns.id, [_warm_chunk.id], datetime(2001, 1, 1, tzinfo=UTC))
+    await coordinator.get_chunk(_warm_chunk.id, namespace_id=_warm_ns.id)
     try:
         yield coordinator
     finally:
@@ -285,3 +309,130 @@ async def test_occurred_at_filter_honored_over_out_of_range_source_timestamp(
         "chunk with in-range occurred_at + out-of-range source_timestamp must survive — "
         "a regression in occurred_at persistence would drop it"
     )
+
+
+# A new last_accessed_at value the reinforcement UPDATE stamps in, distinct from the
+# seed anchor so the round-trip assert can't pass by coincidence. Microseconds are kept
+# so the round-trip also guards against second-truncation in the datetime bind/parse.
+_REINFORCED = datetime(2026, 5, 30, 12, 0, 0, 123456, tzinfo=UTC)
+# A distinct initial stamp for the sibling chunk that the UPDATE must NOT touch — kept
+# different from both _LAST_ACCESSED and _REINFORCED so over-stamping is detectable.
+_SIBLING_SEED = datetime(2025, 11, 9, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_update_last_accessed_round_trips_through_real_store(coord: StorageCoordinator) -> None:
+    # The Chronicle reinforcement-on-recall path stamps chunk.last_accessed_at via the
+    # coordinator. Seed TWO chunks in one namespace, each with a distinct INITIAL
+    # last_accessed_at, call coord.update_last_accessed for ONLY the first with a DISTINCT
+    # new timestamp, then read both back. The stamped chunk must read back the new value
+    # (proving the UPDATE + row mapper round-trip the tz-aware, microsecond-precise stamp)
+    # and the sibling must keep its seed (proving the UPDATE's id scope didn't over-stamp
+    # other rows in the same namespace). Exercises the real SurrealDBVectorAdapter UPDATE
+    # against embedded SurrealDB — a regression in the SQL/bindings or the mapper would
+    # read back the seed (or None), and a missing id scope would over-stamp the sibling.
+    ns = await coord.create_namespace(MemoryNamespace())
+    chunks = await _seed(
+        coord,
+        ns.id,
+        [
+            {"content": "reinforce me", "last_accessed_at": _LAST_ACCESSED},
+            {"content": "leave me alone", "last_accessed_at": _SIBLING_SEED},
+        ],
+    )
+    target_id = chunks[0].id
+    sibling_id = chunks[1].id
+
+    # Sanity: the seed stamps are the initial values before the UPDATE, and all three
+    # anchors are genuinely distinct so the asserts below have teeth.
+    seeded_target = await coord.get_chunk(target_id, namespace_id=ns.id)
+    seeded_sibling = await coord.get_chunk(sibling_id, namespace_id=ns.id)
+    assert seeded_target is not None and seeded_target.last_accessed_at == _LAST_ACCESSED
+    assert seeded_sibling is not None and seeded_sibling.last_accessed_at == _SIBLING_SEED
+    assert len({_LAST_ACCESSED, _SIBLING_SEED, _REINFORCED}) == 3
+
+    rowcount = await coord.update_last_accessed(ns.id, [target_id], _REINFORCED)
+    assert rowcount == 1, "the in-namespace UPDATE must touch exactly the one listed chunk"
+
+    read_back = await coord.get_chunk(target_id, namespace_id=ns.id)
+    assert read_back is not None
+    assert read_back.last_accessed_at == _REINFORCED, (
+        "update_last_accessed must persist the new timestamp through the real SurrealDB "
+        f"store (stamped {_REINFORCED!r}, read back {read_back.last_accessed_at!r}) — a "
+        "regression in the UPDATE SQL/bindings or the row mapper would read back the seed"
+    )
+    # tz-awareness survives the round-trip (the column is a SurrealDB datetime; a naive
+    # read-back would mean the bind or the mapper dropped tzinfo).
+    assert read_back.last_accessed_at.tzinfo is not None, "last_accessed_at lost tzinfo on round-trip"
+
+    # The sibling was NOT in the id list — its seed stamp must be untouched. Catches an
+    # UPDATE whose WHERE clause dropped the id scope and stamped every chunk in the ns.
+    sibling_after = await coord.get_chunk(sibling_id, namespace_id=ns.id)
+    assert sibling_after is not None
+    assert sibling_after.last_accessed_at == _SIBLING_SEED, (
+        "a chunk not in the id list must keep its stamp — the UPDATE's id scope must not "
+        "over-stamp sibling chunks in the same namespace"
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_last_accessed_counts_only_matched_rows(coord: StorageCoordinator) -> None:
+    # Rowcount fidelity: the return is the count of rows the UPDATE actually matched, not
+    # the count of ids requested. Seed ONE real chunk, then call update_last_accessed with
+    # that real id PLUS a nonexistent id in the same namespace. The result must be 1 (only
+    # the real row matched), and the real chunk must read back the new stamp. Catches a
+    # regression that returns len(chunk_ids) instead of the matched-row count — every other
+    # test happens to use a request list whose length equals the match count, so this is
+    # the one case that discriminates the two.
+    ns = await coord.create_namespace(MemoryNamespace())
+    chunks = await _seed(
+        coord,
+        ns.id,
+        [{"content": "real chunk", "last_accessed_at": _LAST_ACCESSED}],
+    )
+    real_id = chunks[0].id
+    missing_id = uuid4()
+
+    rowcount = await coord.update_last_accessed(ns.id, [real_id, missing_id], _REINFORCED)
+    assert rowcount == 1, (
+        "update_last_accessed must return the count of matched rows (1), not the number of "
+        f"ids requested (2) — got {rowcount}; a return len(chunk_ids) regression would give 2"
+    )
+
+    read_back = await coord.get_chunk(real_id, namespace_id=ns.id)
+    assert read_back is not None
+    assert read_back.last_accessed_at == _REINFORCED
+
+
+@pytest.mark.asyncio
+async def test_update_last_accessed_rejects_cross_namespace_writes(coord: StorageCoordinator) -> None:
+    # IDOR guard: a chunk id from ns_a passed with ns_b must NOT be stamped. The UPDATE is
+    # scoped to the namespace, so a forged-id write through the reinforcement path affects
+    # zero rows and leaves the chunk's stamp unchanged.
+    ns_a = await coord.create_namespace(MemoryNamespace())
+    ns_b = await coord.create_namespace(MemoryNamespace())
+    chunks = await _seed(
+        coord,
+        ns_a.id,
+        [{"content": "ns a chunk", "last_accessed_at": _LAST_ACCESSED}],
+    )
+    chunk_a_id = chunks[0].id
+
+    rowcount = await coord.update_last_accessed(ns_b.id, [chunk_a_id], _REINFORCED)
+    assert rowcount == 0, "a cross-namespace update_last_accessed must touch zero rows"
+
+    # The chunk's stamp in its real namespace is unchanged — the wrong-namespace UPDATE
+    # did not leak across the tenant boundary.
+    read_back = await coord.get_chunk(chunk_a_id, namespace_id=ns_a.id)
+    assert read_back is not None
+    assert read_back.last_accessed_at == _LAST_ACCESSED, (
+        "a cross-namespace update_last_accessed must leave the chunk's stamp unchanged"
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_last_accessed_empty_list_is_noop(coord: StorageCoordinator) -> None:
+    # Empty chunk_ids short-circuits in the coordinator before any SurrealDB round-trip.
+    ns = await coord.create_namespace(MemoryNamespace())
+    rowcount = await coord.update_last_accessed(ns.id, [], _REINFORCED)
+    assert rowcount == 0
