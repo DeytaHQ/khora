@@ -28,13 +28,6 @@ def _make_neo4j_error(code: str, message: str = "boom") -> ClientError:
     the requested ``code``.
     """
     exc = Neo4jError._basic_hydrate(neo4j_code=code, message=message)
-    # _basic_hydrate skips GQL fields introduced in neo4j>=6.x; set them so
-    # that str(exc) doesn't raise AttributeError when OpenTelemetry calls
-    # span.record_exception() after test_otel_smoke initialises a real tracer.
-    if not hasattr(exc, "_gql_status"):
-        exc._gql_status = "50N42"
-    if not hasattr(exc, "_gql_status_description"):
-        exc._gql_status_description = ""
     # Guard against a future driver refactor silently returning a
     # different subclass. Our except clause in dual_nodes.py catches
     # only ClientError — if _basic_hydrate starts returning a bare
