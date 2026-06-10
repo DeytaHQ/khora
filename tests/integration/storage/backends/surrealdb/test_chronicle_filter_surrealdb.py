@@ -94,30 +94,6 @@ async def coord() -> AsyncIterator[StorageCoordinator]:
     relational = SurrealDBRelationalAdapter(conn)
     vector = SurrealDBVectorAdapter(conn)
     coordinator = StorageCoordinator(relational=relational, vector=vector)
-    # Warm the embedded SurrealDB engine before the test body runs. The very first
-    # create/query/update cycle against a freshly-initialized in-memory engine is
-    # occasionally non-deterministic — a rare cold-start artifact where a query can
-    # return a wrong result (e.g. a namespace-scoped UPDATE transiently matching the
-    # wrong row), most visible on the first SurrealDB operation in a fresh process or
-    # under heavy concurrent load. When several tests run in sequence the earlier ones
-    # warm the engine implicitly; this explicit warm-up makes each test self-contained
-    # so the engine is reliable even for the first test in a cold run. The throwaway
-    # namespace cannot affect any test's data (recall is namespace-scoped).
-    _warm_ns = await coordinator.create_namespace(MemoryNamespace())
-    _warm_doc = Document(namespace_id=_warm_ns.id, content="warmup", source="warmup", title="warmup")
-    await coordinator.create_document(_warm_doc)
-    _warm_chunk = Chunk(
-        namespace_id=_warm_ns.id,
-        document_id=_warm_doc.id,
-        content="warmup",
-        chunk_index=0,
-        embedding=list(_SHARED_EMBEDDING),
-        embedding_model="fake",
-        last_accessed_at=datetime(2000, 1, 1, tzinfo=UTC),
-    )
-    await coordinator.create_chunks_batch([_warm_chunk])
-    await coordinator.update_last_accessed(_warm_ns.id, [_warm_chunk.id], datetime(2001, 1, 1, tzinfo=UTC))
-    await coordinator.get_chunk(_warm_chunk.id, namespace_id=_warm_ns.id)
     try:
         yield coordinator
     finally:
@@ -372,6 +348,44 @@ async def test_update_last_accessed_round_trips_through_real_store(coord: Storag
     assert sibling_after.last_accessed_at == _SIBLING_SEED, (
         "a chunk not in the id list must keep its stamp — the UPDATE's id scope must not "
         "over-stamp sibling chunks in the same namespace"
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_last_accessed_stamps_via_resolved_namespace_id(coord: StorageCoordinator) -> None:
+    # Production-path guard. The public API (recall / remember) never passes a namespace's
+    # row id — it resolves to the stable ``namespace_id`` via ``resolve_namespace`` and
+    # ingests chunks under that stable id, so a chunk's ``namespace`` link is
+    # ``rid(stable_id)``. MemoryNamespace.id (row id) and .namespace_id (stable id) are
+    # independent uuid4s, so the stable-id RID differs from the namespace row's own RID.
+    # Reinforcement must stamp the chunk when called with that same resolved stable id —
+    # the ONLY form the public API produces. Every other test in this module uses ns.id
+    # (the row-id form, where the link and the row id coincide), so this is the one test
+    # that exercises the real production linkage; a guard that only matched resolved row
+    # ids (not the caller's own stable-id RID) would silently no-op here.
+    ns = await coord.create_namespace(MemoryNamespace())
+    resolved = await coord.resolve_namespace(ns.namespace_id)
+    assert resolved == ns.namespace_id, "resolve_namespace returns the stable namespace_id"
+    assert resolved != ns.id, "the stable namespace_id is distinct from the namespace row id"
+
+    chunks = await _seed(
+        coord,
+        resolved,
+        [{"content": "reinforce via resolved id", "last_accessed_at": _LAST_ACCESSED}],
+    )
+    target_id = chunks[0].id
+
+    rowcount = await coord.update_last_accessed(resolved, [target_id], _REINFORCED)
+    assert rowcount == 1, (
+        "reinforcement must stamp a chunk ingested under the resolved stable namespace_id "
+        "(the production path) — a guard matching only resolved row ids would return 0 here"
+    )
+
+    read_back = await coord.get_chunk(target_id, namespace_id=resolved)
+    assert read_back is not None
+    assert read_back.last_accessed_at == _REINFORCED, (
+        "update_last_accessed must persist the new stamp on the production path "
+        f"(stamped {_REINFORCED!r}, read back {read_back.last_accessed_at!r})"
     )
 
 

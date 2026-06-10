@@ -261,32 +261,37 @@ class SurrealDBVectorAdapter:
     ) -> int:
         """Stamp ``last_accessed_at = ts`` on the given chunks.
 
-        Single UPDATE statement, scoped to ``namespace_id`` to prevent
-        cross-tenant writes through forged ids. Returns the row count.
-        Used by the Chronicle reinforcement-on-recall path.
+        Scoped to ``namespace_id`` to prevent cross-tenant writes through
+        forged ids. Returns the row count. Used by the Chronicle
+        reinforcement-on-recall path.
 
-        The namespace is resolved to its record id(s) up front and the
-        chunk's ``namespace`` link is matched by *direct* RID equality
-        (``namespace IN $ns_rids``) rather than the sibling read methods'
-        ``OR namespace.namespace_id = $ns_str`` deref. The live record-link
-        dereference is non-deterministic on the embedded engine, so it is
-        avoided here to keep the cross-tenant guard deterministic — a flaky
-        security predicate is worse than a missed reinforcement.
+        Namespace matching mirrors the deterministic ``namespace = $ns_rid``
+        arm of the sibling read methods, by direct RID equality. Chunks store
+        their ``namespace`` link as ``rid(namespace_id)`` where ``namespace_id``
+        is whatever the caller passed at ingest — the public API resolves to
+        the stable ``namespace_id`` (so the link is ``rid(stable_id)``), while
+        the row itself lives at ``rid(row_id)``. The caller's own RID is matched
+        directly (the production case: chunk linked by stable id, caller passes
+        stable id), and the namespace is additionally resolved to its existing
+        row id(s) to cover the mixed case (chunk linked by row id, caller
+        passing the stable id). No ``namespace.namespace_id`` link dereference.
         """
         if not chunk_ids:
             return 0
         chunk_rids = [_rid("chunk", cid) for cid in chunk_ids]
-        # Resolve the namespace to its record id(s) up front and match the chunk's
-        # ``namespace`` link by direct RID equality. This avoids the non-deterministic
-        # chunk->namespace ``.namespace_id`` dereference (flaky on the embedded engine)
-        # while still honoring both the row-id and stable-id namespace forms.
+        # Match by direct RID equality, with no live record-link dereference.
+        # Start from the caller's own RID (covers chunks linked by the same id
+        # form the caller passes — the production path, where both are the
+        # stable namespace_id), then add any resolved namespace row id(s) to
+        # cover the mixed case (chunk linked by row id, caller passing the
+        # stable id). The caller's RID is always present, so an absent namespace
+        # row does not short-circuit a write to chunks carrying that link.
+        ns_rids = [_rid("memory_namespace", namespace_id)]
         ns_rows = await self._conn.query(
             "SELECT id FROM memory_namespace WHERE namespace_id = $ns_str OR id = $ns_rid",
             {"ns_str": str(namespace_id), "ns_rid": _rid("memory_namespace", namespace_id)},
         )
-        ns_rids = [row["id"] for row in ns_rows]
-        if not ns_rids:
-            return 0
+        ns_rids.extend(row["id"] for row in ns_rows)
         rows = await self._conn.query(
             "UPDATE chunk SET last_accessed_at = $ts WHERE id IN $ids AND namespace IN $ns_rids",
             {"ts": ts, "ids": chunk_rids, "ns_rids": ns_rids},
