@@ -775,10 +775,13 @@ _SOURCE_TYPE_DEFAULTED_BACKENDS: frozenset[str] = frozenset({"postgres"})
 # (postgres + lance via the skeleton temporal store; weaviate via the same store
 # path), so an "absent" row cannot stay NULL there — its ``now()`` value satisfies a
 # lower-bound op and breaks the by-construction ``expected_ids``. A ``created_at``
-# predicate is pruned from these. The surrealdb (explicit ``option<datetime>`` insert,
-# no default) and cypher (omitted property when absent) runners keep an absent
-# ``created_at`` NULL, so they KEEP ``created_at`` cases. ``occurred_at`` /
-# ``source_timestamp`` are user-supplied and stay NULL everywhere — never pruned.
+# predicate is pruned from these. The surrealdb and cypher runners KEEP ``created_at``
+# cases, but for different reasons: surrealdb leaves an absent ``created_at`` NULL
+# natively (explicit ``option<datetime>`` insert, no default), while the cypher
+# production writer ALSO stamps ``now()`` and the conformance seeder strips it back to
+# NULL post-write (``_strip_stamped_created_at`` in ``_conformance_neo4j.py``).
+# ``occurred_at`` / ``source_timestamp`` are user-supplied and stay NULL everywhere —
+# never pruned.
 _CREATED_AT_STAMP_BACKENDS: frozenset[str] = frozenset({"postgres", "sqlite_lance", "weaviate"})
 
 # The live backends whose runner seeds through ``seed_case`` — i.e. it writes one
@@ -900,7 +903,9 @@ def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[See
       shapes execute in both the pushed-down and post-filtered modes;
     * a leaf reading ``created_at`` → drop :data:`_CREATED_AT_STAMP_BACKENDS`
       (postgres / sqlite_lance / weaviate stamp ``now()`` on insert). surrealdb +
-      cypher KEEP it (they leave an absent ``created_at`` NULL); ``occurred_at`` /
+      cypher KEEP it: surrealdb leaves an absent ``created_at`` NULL natively, and
+      the cypher seeder strips the writer's stamped ``now()`` back to NULL post-write
+      (``_strip_stamped_created_at`` in ``_conformance_neo4j.py``); ``occurred_at`` /
       ``source_timestamp`` are never pruned;
     * a surreal-only quirk (unsafe segment / metadata ``$date`` / present-null the
       filter distinguishes) → drop **surrealdb** only (:func:`_surreal_excluded`);
