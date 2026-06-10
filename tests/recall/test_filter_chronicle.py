@@ -1,13 +1,10 @@
 """Full-stack integration tests for the recall-filter on Chronicle + sqlite_lance.
 
-This is the Chronicle counterpart to ``test_filter_skeleton_pgvector.py`` (V1):
-where V1 drives the public ``Khora.recall(filter=...)`` API end-to-end through
-the Skeleton engine into a real pgvector ``khora_chunks`` lake, this file drives
-the SAME contract through the Chronicle engine over a real embedded SQLite +
-LanceDB store. The engine→backend wiring threads ``filter_ast`` from the facade
-through Chronicle's recall path into the deterministic post-filter, so row
-filtering is effective end-to-end — these tests pin that contract on the
-embedded stack.
+This file drives the public ``Khora.recall(filter=...)`` API end-to-end through
+the Chronicle engine over a real embedded SQLite + LanceDB store. The
+engine→backend wiring threads ``filter_ast`` from the facade through Chronicle's
+recall path into the deterministic post-filter, so row filtering is effective
+end-to-end — these tests pin that contract on the embedded stack.
 
 Unlike ``test_chronicle_filter_composition.py`` (which is the MOCKED, unit-level
 proof of how Chronicle composes the two compiled filter halves on a
@@ -16,20 +13,19 @@ proof of how Chronicle composes the two compiled filter halves on a
 sqlite_lance roundtrip. It does NOT re-mock what the composition suite already
 proves; it proves the same logical narrowing survives the live write/read path.
 
-EQUIVALENCE TO V1 — same corpus + split, real system keys
-=========================================================
-V1's filter is ``source_name == "linear" AND occurred_at >= 2026-04-05 AND
-metadata.tag IN {"urgent", "release"}``. This file reuses V1's shared corpus and
-its exact 5-in-scope / 5-out-of-scope split (each out-of-scope row violating
-EXACTLY ONE predicate, one in-scope row sitting EXACTLY at the date bound), and —
-since the Chronicle recall path now hydrates the per-document
-``DocumentProjection`` for doc-key filters — it runs V1's filter VERBATIM over
-the same REAL system keys: ``source_name`` (a denormalized document key) and
-``occurred_at`` (a system date key). The two earlier metadata stand-ins
-(``metadata.channel`` / ``metadata.when``) are gone; the predicate is now
-expressed over the exact axes V1 uses, and the in-scope SET is identical. The
-contract proven here is "a real-store multi-predicate AND over real system keys
-narrows to exactly V1's in-scope set".
+THE THREE-PREDICATE CORPUS — real system keys
+=============================================
+The filter under test is ``source_name == "linear" AND occurred_at >= 2026-04-05
+AND metadata.tag IN {"urgent", "release"}`` — the same three-predicate shape the
+filter-conformance corpus pins as ``F-SEL-three-predicate`` (postgres leg). The
+corpus here is ten records with a 5-in-scope / 5-out-of-scope split: each
+out-of-scope row violates EXACTLY ONE predicate, and one in-scope row sits
+EXACTLY at the date bound. Since the Chronicle recall path hydrates the
+per-document ``DocumentProjection`` for doc-key filters, the predicate runs over
+REAL system keys: ``source_name`` (a denormalized document key) and
+``occurred_at`` (a system date key), with ``metadata.tag`` the one free-form
+metadata leaf. The contract proven here is "a real-store multi-predicate AND over
+real system keys narrows to exactly the in-scope set".
 
 How each real key resolves on the live store (verified against this exact
 sqlite_lance fixture, not assumed):
@@ -47,9 +43,9 @@ sqlite_lance fixture, not assumed):
   ``remember(source_timestamp=...)``. The embedded SQLite store returns tz-NAIVE
   datetimes; the compiler aligns a naive stored value to UTC at the comparison
   boundary, so the system date key narrows cleanly rather than raising.
-* ``metadata.tag`` ($in {"urgent", "release"}) — identical to V1, the one
-  free-form metadata leaf, and the leaf Scenario 2's unindexed-metadata telemetry
-  assertion now exercises via its own dedicated metadata filter.
+* ``metadata.tag`` ($in {"urgent", "release"}) — the one free-form metadata
+  leaf, and the leaf Scenario 2's unindexed-metadata telemetry assertion now
+  exercises via its own dedicated metadata filter.
 
 ENVIRONMENT: needs the ``sqlite_lance`` extra (``pip install khora[sqlite_lance]``
 → aiosqlite + lancedb). No Docker / Postgres / Neo4j. The module self-skips when
@@ -191,29 +187,30 @@ async def kb(tmp_path: Path) -> AsyncIterator[Khora]:
 # Seed corpus — 5 in-scope, 5 out-of-scope (one predicate violation each).
 # ---------------------------------------------------------------------------
 #
-# The three-predicate filter under test (V1's filter, verbatim, over real keys):
-#   source_name == "linear"                      (V1's source axis, hydrated)
-#   AND occurred_at >= 2026-04-05 ($date)        (V1's date axis, system key)
-#   AND metadata.tag IN {"urgent", "release"}    (identical to V1)
+# The three-predicate filter under test (over real keys):
+#   source_name == "linear"                      (source axis, hydrated)
+#   AND occurred_at >= 2026-04-05 ($date)        (date axis, system key)
+#   AND metadata.tag IN {"urgent", "release"}    (metadata axis)
 #
-# All three axes are V1's real keys now. ``source_name`` is a denormalized
+# All three axes are real keys. ``source_name`` is a denormalized
 # document key the corpus writes via ``remember(source_name=channel)``; on a
 # filtered (doc-key-bearing) recall Chronicle hydrates the per-document
 # ``DocumentProjection`` so ``_chunk_to_record`` resolves it and the $eq bites.
 # ``occurred_at`` is the system event-time key the engine derives from
 # ``source_timestamp`` on the embedded write path, so the corpus seeds the date
 # axis via ``remember(source_timestamp=...)``. ``metadata.tag`` is the one
-# free-form metadata leaf, identical to V1. The in/out SPLIT is identical to V1's.
+# free-form metadata leaf. The in/out split is the same three-predicate shape the
+# filter-conformance corpus pins as ``F-SEL-three-predicate``.
 #
 # Content is DISTINCT per row so each remember produces its own chunk (Chronicle
 # dedupes by content checksum, so identical content would collapse to one chunk);
 # the shared "alpha bravo charlie" token lets the constant-vector retrieval
 # surface every row before the filter.
 #
-# Deliberately NOT covered here (this file is the live corpus-equivalence gate and
-# mirrors V1's split exactly): the tag-is-explicitly-null, unanchored-chunk
-# (occurred_at=None AND source_timestamp=None), and pgvector occurred_at=None DTO
-# shapes. Those edge shapes are exercised by the mocked unit suite,
+# Deliberately NOT covered here (this file is the live corpus-equivalence gate):
+# the tag-is-explicitly-null, unanchored-chunk (occurred_at=None AND
+# source_timestamp=None), and pgvector occurred_at=None DTO shapes. Those edge
+# shapes are exercised by the mocked unit suite,
 # tests/recall/test_chronicle_filter_composition.py.
 
 _IN_BOUND = "2026-04-05T00:00:00Z"  # the occurred_at lower bound (inclusive)
@@ -262,7 +259,7 @@ def _parse_when(when: str) -> datetime:
     return datetime.fromisoformat(when.replace("Z", "+00:00"))
 
 
-# The live three-predicate recall filter — V1's filter verbatim over real keys.
+# The live three-predicate recall filter — the F-SEL-three-predicate shape over real keys.
 # ``occurred_at`` takes a plain ISO operand (the public ``RecallFilter`` model
 # coerces it to a UTC-aware datetime; the ``{"$date": ...}`` typed literal is an
 # AST-level form the dict API does not accept on a system date key), matching the
@@ -326,7 +323,7 @@ def _labels_returned(result: Any, content_to_label: dict[str, str]) -> set[str]:
 
 # ===========================================================================
 # Scenario 1 — green equivalence: the three-predicate AND returns EXACTLY the
-# in-scope rows, matching V1's logical in-scope set.
+# in-scope rows.
 # ===========================================================================
 
 
@@ -338,10 +335,10 @@ async def test_filter_returns_exactly_in_scope_chunks(kb: Khora) -> None:
     stack: the facade builds the AST, Chronicle hydrates the per-document
     projection (because the filter carries the ``source_name`` doc-key leaf) and
     threads the AST to the deterministic post-filter, narrowing the candidate set
-    before top-k. The filter is V1's verbatim — ``source_name`` (hydrated doc
-    key), ``occurred_at`` (system date key), ``metadata.tag`` (metadata leaf).
-    Every out-of-scope row violates exactly one predicate, so a leak would name
-    the broken one. The returned set is the SAME logical in-scope set as V1's.
+    before top-k. The filter is the three-predicate shape — ``source_name``
+    (hydrated doc key), ``occurred_at`` (system date key), ``metadata.tag``
+    (metadata leaf). Every out-of-scope row violates exactly one predicate, so a
+    leak would name the broken one.
 
     Also asserts the hydrated recall completes with no ADR-001 degradation: a
     failed projection fetch would append a ``chronicle.doc_hydration`` entry to
