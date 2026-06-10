@@ -28,14 +28,14 @@ Why this is a *differential* test (three arms):
     the filter-pushdown contract working correctly: a filter the graph channel
     cannot honor fails loud rather than degrading to an unfiltered search.
 
-  * Arm C (KNOWN GAP, documented not fixed): on the Arm-A transient path, the
-    ``_vector_only_fallback`` re-run does NOT thread ``filter_ast`` — its
-    signature has no such parameter and the ``_simple_retrieve`` it calls is
-    not handed one — so the transient-graph-error fallback returns UNFILTERED
-    results. This is a potential filter leak. The test below pins the CURRENT
-    behavior (no filter reaches the fallback) so the gap is visible and a later
-    fix has a failing-then-passing anchor; it is intentionally NOT fixed here
-    (engine change is out of scope for this test ticket).
+  * Arm C (enforcement): on the Arm-A transient path, the
+    ``_vector_only_fallback`` re-run DOES thread ``filter_ast`` — its signature
+    accepts the parameter and the ``_simple_retrieve`` it calls is handed one —
+    so the transient-graph-error fallback honors the caller's recall filter
+    instead of degrading to an unfiltered search. The test below asserts that at
+    least one captured fallback call carries a filter AST and that its
+    ``canonical_hash`` equals the caller's ``parse_to_ast(_FILTER)``, closing the
+    former filter leak on this degradation path.
 
 The spy point is the ``compile_cypher`` over-fetch probe at the top of
 ``_vectorcypher_retrieve`` (it is the first filter-touching code on that path
@@ -63,7 +63,7 @@ from khora.engines.vectorcypher.retriever import (
     VectorCypherRetriever,
 )
 from khora.engines.vectorcypher.router import QueryComplexity, RoutingDecision
-from khora.filter import FilterNode, RecallFilter, RecallFilterUnsupportedError, parse_to_ast
+from khora.filter import FilterNode, RecallFilter, RecallFilterUnsupportedError, canonical_hash, parse_to_ast
 from khora.query import SearchMode
 
 pytestmark = pytest.mark.filter_enforcement
@@ -112,7 +112,8 @@ def _wire(retriever: VectorCypherRetriever) -> list[object]:
       runs ``_simple_retrieve`` over the full storage stack, which is irrelevant
       to the contract under test (does the real dispatch CALL it, and with what
       filter?). The spy captures the EXACT args the real dispatch passes, so
-      Arm C's "no filter_ast reached the fallback" reads the true boundary.
+      Arm C's "the caller filter_ast reached the fallback" reads the true
+      boundary.
 
     Returns the live call-log list (one entry per real-dispatch invocation).
     """
@@ -136,18 +137,19 @@ def _wire(retriever: VectorCypherRetriever) -> list[object]:
 _FILTER = RecallFilter.model_validate({"metadata": {"channel": {"$eq": "eng"}}})
 
 
-def _has_filter_node(call: tuple[tuple[object, ...], dict[str, object]]) -> bool:
-    """Whether a captured ``_vector_only_fallback`` call carried a filter AST.
+def _extract_filter_node(call: tuple[tuple[object, ...], dict[str, object]]) -> FilterNode | None:
+    """The :class:`FilterNode` a captured ``_vector_only_fallback`` call carried.
 
-    Checks the ``filter_ast`` kwarg and every positional arg for a
-    :class:`FilterNode`. ``_vector_only_fallback`` has no ``filter_ast``
-    parameter today, so this is expected to be ``False`` — that is the gap
-    Arm C documents.
+    Checks the ``filter_ast`` kwarg first (the channel-method shape), then every
+    positional arg. ``_vector_only_fallback`` accepts ``filter_ast`` and the
+    real dispatch passes it as a kwarg, so this returns the threaded AST — which
+    Arm C compares against the caller's filter by ``canonical_hash``.
     """
     args, kwargs = call
-    if isinstance(kwargs.get("filter_ast"), FilterNode):
-        return True
-    return any(isinstance(a, FilterNode) for a in args)
+    candidate = kwargs.get("filter_ast")
+    if isinstance(candidate, FilterNode):
+        return candidate
+    return next((a for a in args if isinstance(a, FilterNode)), None)
 
 
 @pytest.mark.unit
@@ -226,24 +228,20 @@ async def test_filter_unsupported_surfaces_and_skips_vector_only_fallback(
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_transient_fallback_drops_filter_KNOWN_GAP(
+async def test_transient_fallback_carries_filter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Arm C: DOCUMENTS a known filter leak on the transient-error fallback path.
-
-    KNOWN GAP: transient-graph-error vector-only fallback does not thread
-    ``filter_ast`` → unfiltered results; tracked separately for follow-up.
+    """Arm C: the transient-error vector-only fallback honors the recall filter.
 
     On Arm A's transient path, ``retrieve()`` routes to ``_vector_only_fallback``,
-    which has NO ``filter_ast`` parameter and calls ``_simple_retrieve`` without
-    one. So the caller's recall filter is silently dropped on this degradation
-    path and the fallback returns unfiltered results — a potential filter leak.
+    which accepts ``filter_ast`` and threads it into ``_simple_retrieve``. So the
+    caller's recall filter is preserved on this degradation path rather than
+    silently dropped — the former filter leak is closed.
 
-    This test pins the CURRENT behavior (no filter AST reaches the fallback) so
-    the gap is visible and a future fix has a failing-then-passing anchor. It is
-    intentionally NOT fixed here: changing ``_vector_only_fallback`` to thread the
-    filter is an engine change, out of scope for this test ticket. The audit gate
-    allowlists ``_vector_only_fallback`` for the SAME reason.
+    This asserts the enforcement directly: at least one captured fallback call
+    carries a :class:`FilterNode`, and its ``canonical_hash`` equals the caller's
+    ``parse_to_ast(_FILTER)`` — so the fallback receives the SAME filter the
+    caller asked for, not a mutated or unrelated one.
     """
     retriever = _make_retriever()
     fallback_calls = _wire(retriever)
@@ -254,21 +252,19 @@ async def test_transient_fallback_drops_filter_KNOWN_GAP(
     # Same source-module target as Arm A (see that test for the rationale).
     monkeypatch.setattr("khora.filter.compilers.cypher.compile_cypher", _raise_transient)
 
+    caller_ast = parse_to_ast(_FILTER)
     await retriever.retrieve(
         query="anything",
         namespace_id=uuid4(),
         mode=SearchMode.GRAPH,
-        filter_ast=parse_to_ast(_FILTER),
+        filter_ast=caller_ast,
     )
 
     assert len(fallback_calls) >= 1, "precondition: the transient error must reach the fallback"
-    # The gap: NOT ONE captured fallback call carries the filter AST. When the
-    # engine is fixed to thread filter_ast into _vector_only_fallback, this
-    # assertion flips and this test should be updated to assert the filter IS
-    # carried (canonical_hash equality) instead.
-    assert not any(_has_filter_node(c) for c in fallback_calls), (
-        "KNOWN GAP changed: _vector_only_fallback now receives a filter AST — "
-        "the transient-fallback filter leak may be fixed; update this test to "
-        "assert the filter is threaded (canonical_hash equality) and remove the "
-        "audit-gate allowlist entry for _vector_only_fallback."
+    carried = [node for node in (_extract_filter_node(c) for c in fallback_calls) if node is not None]
+    assert carried, "_vector_only_fallback must receive the caller filter on the transient-fallback path"
+    expected = canonical_hash(caller_ast)
+    assert all(canonical_hash(node) == expected for node in carried), (
+        "_vector_only_fallback received a filter that does not match the caller's — "
+        "the transient-fallback path must thread the SAME recall filter (canonical_hash equality)."
     )

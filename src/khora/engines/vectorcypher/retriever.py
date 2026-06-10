@@ -808,6 +808,7 @@ class VectorCypherRetriever:
                         temporal_signal=temporal_signal,
                         min_similarity=min_similarity,
                         mode=mode,
+                        filter_ast=filter_ast,
                     )
 
             span.set_attribute("chunk_count", len(result.chunks))
@@ -2033,11 +2034,14 @@ class VectorCypherRetriever:
         temporal_signal: TemporalSignal | None = None,
         min_similarity: float = 0.0,
         mode: SearchMode = SearchMode.HYBRID,
+        filter_ast: FilterNode | None = None,
     ) -> VectorCypherResult:
         """Fallback to vector-only search when graph operations fail.
 
         This provides graceful degradation when Neo4j is unavailable or
         returns errors. Results are still useful, just without graph expansion.
+        Any recall ``filter_ast`` is threaded into the vector-only path so the
+        degraded result honors the same filter as the primary path.
         """
         logger.info("Using vector-only fallback due to graph search failure")
 
@@ -2047,6 +2051,9 @@ class VectorCypherRetriever:
         # *something* rather than an empty response - the metadata still
         # tracks the failure via ``graph_unavailable``.
         fallback_mode = SearchMode.HYBRID if mode == SearchMode.GRAPH else mode
+        # If filter compilation fails here, the exception propagates intentionally:
+        # a filter the vector channel cannot honor must fail loud rather than
+        # return filter-violating chunks, matching the graph-path contract.
         result = await self._simple_retrieve(
             query=query,
             query_embedding=query_embedding,
@@ -2061,6 +2068,7 @@ class VectorCypherRetriever:
             temporal_signal=temporal_signal,
             min_similarity=min_similarity,
             mode=fallback_mode,
+            filter_ast=filter_ast,
         )
 
         # Update metadata to indicate fallback was used

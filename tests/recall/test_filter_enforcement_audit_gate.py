@@ -43,6 +43,7 @@ _FILTER_AWARE_METHODS = frozenset(
         "_vector_search_chunks",
         "_recency_channel_chunks",
         "_bm25_search_chunks",
+        "_vector_only_fallback",
     }
 )
 
@@ -62,17 +63,6 @@ _ALLOWLISTED_OMISSIONS: dict[tuple[str, str], str] = {
         "caller filter is present — it cannot smuggle filter-violating chunks into RRF. "
         "Covered behaviorally by the PG restrictive-fallback spy (qa-graph) and the "
         "embedded point-in-time fail-fast test."
-    ),
-    (
-        "_simple_retrieve",
-        "_vector_only_fallback",
-    ): (
-        "KNOWN GAP (reported to team-lead): the Neo4j-transient graph-failure "
-        "degradation path calls _simple_retrieve without threading filter_ast, so a "
-        "filtered recall that hits a transient graph error degrades to vector-only "
-        "WITHOUT the filter. Reachable only on the PG+Neo4j stack (embedded has no "
-        "Neo4j to fail). Allowlisted so the gate stays green while the gap is "
-        "triaged; REMOVE this entry once _vector_only_fallback forwards filter_ast."
     ),
 }
 
