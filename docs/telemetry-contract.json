@@ -1046,6 +1046,17 @@
       "description": "Issue #904 (ADR-001). VectorCypher relationship-fetch silent fallback - incremented when the parallel rels_task raises and the retrieve path continues without relationships. The same event is also appended to RecallResult.engine_info['degradations']. Asymmetric prior art: _cypher_expand failure already sets engine_info['graph_fallback'] / 'graph_error'; this counter closes the rel-fetch gap. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.vectorcypher.version_filter.degraded_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "vectorcypher",
+      "labels": [
+        {"name": "reason", "values": ["embedded_no_version_columns"], "_comment": "Low-cardinality enum; extend when adding new version-filter fallback paths."}
+      ],
+      "description": "ADR-001. VectorCypher entity-version filtering fallback - incremented when an EXPLICIT/occurred-bounds recall runs on the embedded sqlite_lance backend, which lacks the version_valid_from/to columns _version_filter_entities reads, so point-in-time entity-version narrowing is skipped. The occurred-bounds chunk filter (start_time/end_time) still applies on the vector + BM25 channels. The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+    },
+    {
       "name": "khora.vectorcypher.chunk_mirror.degraded_total",
       "type": "counter",
       "stability": "public",

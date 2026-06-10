@@ -1,9 +1,14 @@
-"""Gate point-in-time queries on the embedded sqlite_lance backend.
+"""Occurred-bounds temporal recall on the embedded sqlite_lance backend.
 
 The embedded layer has no ``version_valid_from/to`` columns, so the
-``_version_filter_entities`` path would silently fall through and return
-current-state results — a correctness bug. We raise ``NotImplementedError``
-early in the recall path with a clear message; the production stack
+``_version_filter_entities`` path cannot do point-in-time *entity-version*
+narrowing. Previously the retriever fail-fasted with ``NotImplementedError``
+for any target_date on sqlite_lance. That blanket gate was replaced by a
+call-site guard inside ``_vectorcypher_retrieve``: it skips only the
+entity-version filtering (recording an ADR-001 degradation) while the
+occurred-bounds chunk filter (start_time/end_time) still pushes down to
+``khora_chunks.occurred_at``. So an occurred-bounds recall now falls through
+to the normal retrieval path instead of raising; the production stack
 (PostgreSQL+Neo4j) keeps working unchanged.
 """
 
@@ -63,26 +68,28 @@ def _explicit_signal(target: datetime) -> TemporalSignal:
 @pytest.mark.unit
 class TestEmbeddedPointInTimeGate:
     @pytest.mark.asyncio
-    async def test_embedded_raises_with_target_date_in_signal(self) -> None:
-        """sqlite_lance + EXPLICIT temporal signal carrying a date must raise."""
+    async def test_embedded_falls_through_with_target_date_in_signal(self) -> None:
+        """sqlite_lance + EXPLICIT temporal signal carrying a date no longer raises.
+
+        The blanket gate is gone; an occurred-bounds recall falls through to the
+        normal retrieval path (here the stubbed SIMPLE route → ``_simple_retrieve``).
+        """
         retriever = _make_retriever("sqlite_lance")
         signal = _explicit_signal(datetime(2024, 1, 1, tzinfo=UTC))
 
-        with pytest.raises(NotImplementedError, match="sqlite_lance"):
-            await retriever.retrieve("what was X in 2024", uuid4(), temporal_signal=signal)
+        await retriever.retrieve("what was X in 2024", uuid4(), temporal_signal=signal)
 
-        retriever._simple_retrieve.assert_not_called()
+        retriever._simple_retrieve.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_embedded_raises_with_target_date_in_filter(self) -> None:
-        """sqlite_lance + user-passed temporal_filter with a date must raise."""
+    async def test_embedded_falls_through_with_target_date_in_filter(self) -> None:
+        """sqlite_lance + user-passed occurred-bounds temporal_filter no longer raises."""
         retriever = _make_retriever("sqlite_lance")
         tf = SkeletonTemporalFilter(occurred_after=datetime(2024, 1, 1, tzinfo=UTC))
 
-        with pytest.raises(NotImplementedError, match="Point-in-time"):
-            await retriever.retrieve("changes since Jan", uuid4(), temporal_filter=tf)
+        await retriever.retrieve("changes since Jan", uuid4(), temporal_filter=tf)
 
-        retriever._simple_retrieve.assert_not_called()
+        retriever._simple_retrieve.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_pgvector_does_not_raise_with_target_date(self) -> None:

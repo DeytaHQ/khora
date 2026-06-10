@@ -62,7 +62,7 @@ _ALLOWLISTED_OMISSIONS: dict[tuple[str, str], str] = {
         "is None` precondition on the enclosing `if`, so it is unreachable whenever a "
         "caller filter is present — it cannot smuggle filter-violating chunks into RRF. "
         "Covered behaviorally by the PG restrictive-fallback spy (qa-graph) and the "
-        "embedded point-in-time fail-fast test."
+        "embedded occurred-bounds completion test."
     ),
 }
 

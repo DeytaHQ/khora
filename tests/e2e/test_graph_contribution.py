@@ -39,6 +39,7 @@ from tests.test_helpers.filter_spy import plan_extraction
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.slow,
+    _harness.lane_skip("vc_full"),
     pytest.mark.skipif(
         not os.environ.get("NEO4J_INTEGRATION_TEST") or not _harness._pg_reachable(),
         reason="set NEO4J_INTEGRATION_TEST=1 and start PG+Neo4j (make dev) to exercise the live graph lane",

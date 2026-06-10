@@ -26,7 +26,7 @@ import pytest
 from pydantic import SecretStr
 
 from khora import Khora
-from khora.config.schema import KhoraConfig, SQLiteLanceConfig
+from khora.config.schema import KhoraConfig, SQLiteLanceConfig, SurrealDBConfig
 from tests.test_helpers.filter_spy import EMBED_DIM, stub_llm
 
 pytestmark = pytest.mark.e2e
@@ -60,6 +60,23 @@ def _neo4j_reachable() -> bool:
     parsed = urlparse(url)
     try:
         with socket.create_connection((parsed.hostname or "localhost", parsed.port or 7687), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def _weaviate_reachable() -> bool:
+    """Whether the live Weaviate at ``WEAVIATE_URL`` is reachable (socket-probe).
+
+    Mirrors ``_pg_reachable`` / ``_neo4j_reachable``: parse host+port off the
+    configured URL and TCP-probe it so the live Skeleton-Weaviate lane collects
+    and self-skips cleanly on a no-Docker run. ``WEAVIATE_URL`` defaults to the
+    compose HTTP port (8090) when unset.
+    """
+    url = os.environ.get("WEAVIATE_URL", "http://localhost:8090")
+    parsed = urlparse(url)
+    try:
+        with socket.create_connection((parsed.hostname or "localhost", parsed.port or 8080), timeout=2):
             return True
     except OSError:
         return False
@@ -212,3 +229,182 @@ async def chronicle_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
         yield kb
     finally:
         await kb.disconnect()
+
+
+# --------------------------------------------------------------------------- #
+# Skeleton lanes — the Skeleton engine (VECTOR / HYBRID / KEYWORD, no graph).
+#
+# The Skeleton engine has no graph channel (supported_modes omits GRAPH), so
+# ``_lower_entity_floor`` is a harmless no-op on it (the retriever getattr guard
+# returns early). Skeleton recall is the vector-only path: doc-level
+# ``external_id`` reconciliation works identically to live pgvector, since the
+# survivor set is keyed off the returned chunks' ``document_id``s either way.
+# Two of these run container-free (embedded sqlite_lance / in-process surrealdb
+# memory mode); two are live (pgvector / weaviate) and self-skip without Postgres
+# (and Weaviate). The Skeleton backend auto-detects sqlite_lance / surrealdb from
+# ``config.storage.backend`` (engine.py); pgvector is the default; weaviate is
+# selected via the ``backend`` + ``weaviate_url`` engine kwargs.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+async def skeleton_sqlite_lance_kb(monkeypatch: pytest.MonkeyPatch, tmp_path) -> AsyncIterator[Khora]:
+    """Connected ``skeleton`` Khora on an embedded sqlite_lance stack (container-free).
+
+    Like ``sqlite_lance_kb`` but ``engine="skeleton"``. No Postgres, no Neo4j, no
+    Docker. Migrated via Alembic on entry. Skeleton auto-detects the sqlite_lance
+    backend from ``config.storage.backend``.
+    """
+    stub_llm(monkeypatch, dim=EMBED_DIM)
+
+    config = KhoraConfig()
+    config.storage.backend = "sqlite_lance"
+    config.storage.sqlite_lance = SQLiteLanceConfig(
+        db_path=str(tmp_path / "khora.db"),
+        lance_path=str(tmp_path / "khora.lance"),
+        embedding_dimension=EMBED_DIM,
+    )
+    config.llm.embedding_dimension = EMBED_DIM
+    _apply_deterministic_query(config)
+
+    kb = Khora(config, engine="skeleton", run_migrations=True)
+    await kb.connect()
+    _lower_entity_floor(kb)
+    try:
+        yield kb
+    finally:
+        await kb.disconnect()
+
+
+@pytest.fixture
+async def skeleton_surrealdb_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
+    """Connected ``skeleton`` Khora on an in-process SurrealDB (memory mode, container-free).
+
+    ``config.storage.backend = "surrealdb"`` with the default ``memory`` mode runs
+    SurrealDB in-process (no container, no on-disk file). Schema initialises
+    declaratively on ``connect()`` (no Alembic), so ``run_migrations`` is a no-op
+    here. Skeleton auto-detects the surrealdb backend from ``config.storage.backend``.
+    """
+    stub_llm(monkeypatch, dim=EMBED_DIM)
+
+    config = KhoraConfig()
+    config.storage.backend = "surrealdb"
+    config.storage.surrealdb = SurrealDBConfig(mode="memory", embedding_dimension=EMBED_DIM)
+    config.llm.embedding_dimension = EMBED_DIM
+    _apply_deterministic_query(config)
+
+    kb = Khora(config, engine="skeleton")
+    await kb.connect()
+    _lower_entity_floor(kb)
+    try:
+        yield kb
+    finally:
+        await kb.disconnect()
+
+
+@pytest.fixture
+async def skeleton_pgvector_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
+    """Connected ``skeleton`` Khora on the live PG (pgvector) stack. Self-skips without PG.
+
+    Mirrors the ``chronicle_kb`` shape (live DSN, dim 1536, ``run_migrations=False``)
+    but ``engine="skeleton"`` on the default pgvector backend. Skeleton recall uses
+    the vector-only path; doc-level ``external_id`` reconciliation works identically
+    to live pgvector. The module that uses this fixture self-skips via its Postgres
+    reachability mark when Postgres is down.
+    """
+    stub_llm(monkeypatch, dim=PG_EMBED_DIM)
+
+    config = KhoraConfig(database_url=_database_url())
+    config.llm.embedding_dimension = PG_EMBED_DIM
+    config.storage.embedding_dimension = PG_EMBED_DIM
+    _apply_deterministic_query(config)
+
+    kb = Khora(config, engine="skeleton", run_migrations=False)
+    await kb.connect()
+    _lower_entity_floor(kb)
+    try:
+        yield kb
+    finally:
+        await kb.disconnect()
+
+
+@pytest.fixture
+async def skeleton_weaviate_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Khora]:
+    """Connected ``skeleton`` Khora on live Weaviate (vectors) + live PG (documents).
+
+    The Skeleton-Weaviate backend keeps vectors in Weaviate and documents /
+    namespaces in Postgres (the relational coordinator falls through to the PG
+    path), so dim is 1536 (the PG pgvector column constraint applies). ``backend``
+    + ``weaviate_url`` are forwarded to the Skeleton engine constructor.
+    ``WEAVIATE_URL`` is read from env into a local str (no Pydantic field, so no
+    ``SecretStr`` obligation — it is a service endpoint, not a credential). The
+    module that uses this fixture self-skips when Postgres or Weaviate is down.
+    """
+    stub_llm(monkeypatch, dim=PG_EMBED_DIM)
+
+    config = KhoraConfig(database_url=_database_url())
+    config.llm.embedding_dimension = PG_EMBED_DIM
+    config.storage.embedding_dimension = PG_EMBED_DIM
+    _apply_deterministic_query(config)
+
+    kb = Khora(
+        config,
+        engine="skeleton",
+        run_migrations=False,
+        engine_kwargs={"backend": "weaviate", "weaviate_url": os.environ["WEAVIATE_URL"]},
+    )
+    await kb.connect()
+    _lower_entity_floor(kb)
+    try:
+        yield kb
+    finally:
+        await kb.disconnect()
+
+
+# --------------------------------------------------------------------------- #
+# CI fail-loud tripwire — convert skip → hard error on the container legs.
+#
+# The live fixtures above self-skip via ``_pg_reachable()`` / ``_weaviate_reachable()``
+# so a no-Docker dev run collects-and-skips them cleanly. But in CI a container
+# leg whose store is down must FAIL RED, not skip green — a silent skip would let
+# a broken-infra leg pass. Mirrors ``tests/integration/conftest.py``'s
+# ``KHORA_PG_REQUIRED`` pattern: when the leg's "required" flag is set and the
+# store is unreachable, abort the whole session with a red exit.
+#
+#   KHORA_E2E_PG_REQUIRED=1        -> Postgres must be reachable (vc_full,
+#                                     skeleton_pgvector, skeleton_weaviate,
+#                                     chronicle legs).
+#   KHORA_E2E_NEO4J_REQUIRED=1     -> Neo4j must be reachable (vc_full leg — the
+#                                     only lane with a live graph backend).
+#   KHORA_E2E_WEAVIATE_REQUIRED=1  -> Weaviate must be reachable (skeleton_weaviate
+#                                     leg).
+#
+# The devops e2e workflow sets these on the matching container legs only; the
+# default no-Docker job leaves them unset so the per-fixture self-skip still wins.
+# --------------------------------------------------------------------------- #
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Fail loudly at session start if a CI-required e2e backend is unreachable."""
+    if os.environ.get("KHORA_E2E_PG_REQUIRED") == "1" and not _pg_reachable():
+        pytest.exit(
+            f"KHORA_E2E_PG_REQUIRED=1 but Postgres is unreachable at {_database_url()}. "
+            "The e2e CI leg provisions Postgres; a skip here would hide real failures.",
+            returncode=1,
+        )
+
+    if os.environ.get("KHORA_E2E_NEO4J_REQUIRED") == "1" and not _neo4j_reachable():
+        neo4j_url = os.environ.get("KHORA_NEO4J_URL", "bolt://localhost:7687")
+        pytest.exit(
+            f"KHORA_E2E_NEO4J_REQUIRED=1 but Neo4j is unreachable at {neo4j_url}. "
+            "The e2e CI leg provisions Neo4j; a skip here would hide real failures.",
+            returncode=1,
+        )
+
+    if os.environ.get("KHORA_E2E_WEAVIATE_REQUIRED") == "1" and not _weaviate_reachable():
+        weaviate_url = os.environ.get("WEAVIATE_URL", "http://localhost:8090")
+        pytest.exit(
+            f"KHORA_E2E_WEAVIATE_REQUIRED=1 but Weaviate is unreachable at {weaviate_url}. "
+            "The e2e CI leg provisions Weaviate; a skip here would hide real failures.",
+            returncode=1,
+        )

@@ -30,6 +30,7 @@ from tests.test_helpers.filter_spy import plan_extraction
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.slow,
+    _harness.lane_skip("vc_full"),
     pytest.mark.skipif(
         not os.environ.get("NEO4J_INTEGRATION_TEST") or not _harness._pg_reachable(),
         reason="set NEO4J_INTEGRATION_TEST=1 and start PG+Neo4j (make dev) to exercise the live graph lane",
@@ -117,3 +118,20 @@ async def test_rowset_reconciliation_graph(vectorcypher_kb, case) -> None:
 
     assert survivors == case.expected_ids
     assert survivors == conformance.oracle_survivors(case)
+
+
+def test_lane_selection_matches_shipped_vc_full() -> None:
+    """The resolver lane selection equals this module's shipped precedent (Layer-3).
+
+    The Layer-1 empty-raise in ``lane_rowset_cases`` catches a token that selects
+    NOTHING, but not a valid-but-wrong token that happens to select a different
+    non-empty set. This pins the resolver path (``lane_rowset_cases("vc_full")``)
+    to the shipped selection this module has always parametrized over
+    (``rowset_cases("cypher", include_system_keys=True)``), so a future
+    ``_E2E_BACKEND_MAP`` drift that re-points ``vc_full`` at a different token (the
+    ``cypher``->``postgres`` slip that would silently drop 81->46 cases) or flips its
+    system-key flag fails LOUD here instead of silently under-covering.
+    """
+    resolver_ids = {c.id for c in _harness.lane_rowset_cases("vc_full")}
+    shipped_ids = {c.id for c in _graph_rowset_cases()}
+    assert resolver_ids == shipped_ids
