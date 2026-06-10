@@ -19,8 +19,14 @@ is *visible and tracked* rather than silent.
 
 How it works (hermetic — no DB, no network, no imports of khora)
 ----------------------------------------------------------------
-* Parses ``.github/workflows/ci.yml`` and ``.github/workflows/filter-conformance.yml``
-  with PyYAML, expanding each ``matrix.include`` entry into one runnable leg.
+* Parses every ``.github/workflows/*.yml`` with PyYAML (discovered by glob, not a
+  hard-coded list, so a new workflow file — e.g. a dedicated slow/e2e live-DB lane
+  — is picked up automatically), expanding each ``matrix.include`` entry into one
+  runnable leg. Per-entry ``${{ matrix.<key> }}`` references are substituted into
+  the run command before tokenizing, so a matrix-driven path/selector resolves to
+  concrete args. A leg's pytest ``-k`` is modelled as a substring match against the
+  module path, so an embedded lane that selects by a filename token via ``-k`` is
+  claimed exactly — not over-claimed (``-k`` ignored) nor dropped.
 * Reads the default ``-m`` marker filter from ``pyproject.toml``
   (``[tool.pytest.ini_options].addopts``) via ``tomllib`` — never hard-coded —
   so the gate tracks drift if the default changes.
@@ -68,6 +74,7 @@ import ast
 import re
 import shlex
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -78,8 +85,7 @@ pytestmark = [pytest.mark.unit]
 # Repo root: tests/unit/filter/<this file> → parents[3] is the repo root.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WORKFLOWS = _REPO_ROOT / ".github" / "workflows"
-_CI_YML = _WORKFLOWS / "ci.yml"
-_CONFORMANCE_YML = _WORKFLOWS / "filter-conformance.yml"
+_CI_YML = _WORKFLOWS / "ci.yml"  # the one workflow that must always exist (sanity anchor)
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 
 # ``embedded`` is the sentinel for "needs no live service" (SQLite+LanceDB /
@@ -159,8 +165,8 @@ _ENV_GUARD_REASON_SUBSTRINGS = (
     "not available",
 )
 
-# A tracking reference is a public GitHub issue (#NNNN) or an ADR (ADR-NNN).
-_TRACKING_REF = re.compile(r"#\d{3,4}\b|ADR-\d+\b")
+# A tracking reference is a public GitHub issue (#NNN+) or an ADR (ADR-NNN).
+_TRACKING_REF = re.compile(r"#\d{3,}\b|ADR-\d+\b")
 
 # ---------------------------------------------------------------------------
 # Consciously-unrun tests: known gaps awaiting a job that provisions them.
@@ -224,24 +230,25 @@ _ALLOWED_EXPR_NODES = (
 )
 
 
-def _eval_marker_expr(expr: str, markers: frozenset[str]) -> bool:
-    """Evaluate a pytest ``-m`` expression against a test's marker set.
+def _eval_bool_expr(expr: str, leaf: Callable[[str], bool]) -> bool:
+    """Evaluate a pytest ``-m`` / ``-k`` boolean expression.
 
-    Supports ``and`` / ``or`` / ``not`` / parentheses / bare marker names — the
-    subset pytest uses. Parses to an AST and walks it, evaluating each ``Name``
-    as ``name in markers``. Any node outside the whitelist raises, so a
-    malformed expression fails loudly rather than silently mis-evaluating.
+    Supports ``and`` / ``or`` / ``not`` / parentheses / bare names — the subset
+    pytest uses for both ``-m`` (names tested against markers) and ``-k`` (names
+    tested as substrings of the test id / path). Parses to an AST and walks it,
+    evaluating each ``Name`` via ``leaf``. Any node outside the whitelist raises,
+    so a malformed expression fails loudly rather than silently mis-evaluating.
     """
     tree = ast.parse(expr, mode="eval")
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_EXPR_NODES):
-            raise AssertionError(f"unsupported marker-expression node {type(node).__name__!r} in {expr!r}")
+            raise AssertionError(f"unsupported boolean-expression node {type(node).__name__!r} in {expr!r}")
 
     def _ev(node: ast.AST) -> bool:
         if isinstance(node, ast.Expression):
             return _ev(node.body)
         if isinstance(node, ast.Name):
-            return node.id in markers
+            return leaf(node.id)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             return not _ev(node.operand)
         if isinstance(node, ast.BoolOp):
@@ -253,6 +260,32 @@ def _eval_marker_expr(expr: str, markers: frozenset[str]) -> bool:
     return _ev(tree)
 
 
+def _eval_marker_expr(expr: str, markers: frozenset[str]) -> bool:
+    """A leg's ``-m`` expression evaluated against a test's marker set."""
+    return _eval_bool_expr(expr, lambda name: name in markers)
+
+
+def _k_selects(k_expr: str, module_path: str) -> bool:
+    """Model pytest ``-k`` as a substring match against the module path.
+
+    An empty ``-k`` imposes no constraint. Otherwise each name in the ``-k``
+    expression is true when it is a substring of the module path
+    (case-insensitive), so ``-k`` NARROWS a path-included leg's coverage rather
+    than being ignored — ignoring it would over-claim coverage for every module
+    under the path. The slow/e2e lanes select by a filename token via ``-k``, so
+    this is how such a leg legitimately claims exactly the modules it runs. A
+    ``-k`` value pytest's grammar accepts but ``ast`` cannot parse falls back to a
+    plain substring test of the whole token.
+    """
+    if not k_expr:
+        return True
+    path_lo = module_path.lower()
+    try:
+        return _eval_bool_expr(k_expr, lambda name: name.lower() in path_lo)
+    except Exception:
+        return k_expr.strip().lower() in path_lo
+
+
 # ===========================================================================
 # Workflow parsing → job legs
 # ===========================================================================
@@ -261,18 +294,24 @@ class _Leg:
 
     __slots__ = ("name", "backends", "invocations")
 
-    def __init__(self, name: str, backends: frozenset[str], invocations: list[tuple[list[str], str]]) -> None:
+    def __init__(self, name: str, backends: frozenset[str], invocations: list[tuple[list[str], str, str]]) -> None:
         self.name = name
         # backends this leg PROVISIONS (always includes the embedded sentinel).
         self.backends = backends | {_EMBEDDED}
-        # list of (path_args, effective_marker_expr) — one per pytest invocation.
+        # list of (path_args, effective_marker_expr, k_expr) — one per pytest
+        # invocation. ``k_expr`` is the leg's ``-k`` (empty string = no -k).
         self.invocations = invocations
 
     def selects(self, module_path: str, markers: frozenset[str]) -> bool:
         """True if any invocation includes ``module_path`` AND its effective
-        marker expression matches ``markers`` (path ∩ marker)."""
-        for paths, marker_expr in self.invocations:
-            if _path_included(module_path, paths) and _eval_marker_expr(marker_expr, markers):
+        marker expression matches ``markers`` AND its ``-k`` (if any) substring-
+        matches the path (path ∩ marker ∩ -k)."""
+        for paths, marker_expr, k_expr in self.invocations:
+            if (
+                _path_included(module_path, paths)
+                and _eval_marker_expr(marker_expr, markers)
+                and _k_selects(k_expr, module_path)
+            ):
                 return True
         return False
 
@@ -312,13 +351,34 @@ def _conformance_backend_token(token: str) -> str:
     return _EMBEDDED
 
 
-def _steps_pytest_invocations(steps: list[dict], marker_default: str) -> list[tuple[list[str], str]]:
-    """Extract (path_args, effective_marker_expr) for every pytest run step."""
-    out: list[tuple[list[str], str]] = []
+_MATRIX_TOKEN = re.compile(r"\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+
+
+def _substitute_matrix(text: str, entry: dict) -> str:
+    """Replace ``${{ matrix.<key> }}`` with the include-entry's value.
+
+    Unresolved tokens (a key absent from this entry) are left intact so they fall
+    out of tokenizing harmlessly rather than being silently blanked.
+    """
+    return _MATRIX_TOKEN.sub(lambda m: str(entry[m.group(1)]) if m.group(1) in entry else m.group(0), text)
+
+
+def _steps_pytest_invocations(
+    steps: list[dict], marker_default: str, subst: dict | None = None
+) -> list[tuple[list[str], str, str]]:
+    """Extract (path_args, effective_marker_expr, k_expr) for every pytest run step.
+
+    When ``subst`` (a ``matrix.include`` entry) is given, ``${{ matrix.<key> }}``
+    references in the run command are resolved first, so a matrix-driven path or
+    ``-k`` selector becomes concrete before tokenizing.
+    """
+    out: list[tuple[list[str], str, str]] = []
     for step in steps:
         run = step.get("run")
         if not run or "pytest" not in run:
             continue
+        if subst:
+            run = _substitute_matrix(run, subst)
         # A step may stack several lines; split on newlines AND treat the whole
         # block as one shell command (line continuations join). Tokenize with
         # shlex after stripping line-continuation backslashes.
@@ -336,10 +396,13 @@ def _steps_pytest_invocations(steps: list[dict], marker_default: str) -> list[tu
             if not paths:
                 continue
             marker_expr = marker_default
+            k_expr = ""
             for i, t in enumerate(tokens):
                 if t == "-m" and i + 1 < len(tokens):
                     marker_expr = tokens[i + 1]  # command-line -m REPLACES addopts -m
-            out.append((paths, marker_expr))
+                elif t == "-k" and i + 1 < len(tokens):
+                    k_expr = tokens[i + 1]  # narrow selection to path-substring matches
+            out.append((paths, marker_expr, k_expr))
     return out
 
 
@@ -385,13 +448,20 @@ def _expand_jobs(workflow: dict) -> list[_Leg]:
     marker_default = _default_marker_expr()
     for job_name, job in (workflow.get("jobs") or {}).items():
         steps = job.get("steps") or []
-        invocations = _steps_pytest_invocations(steps, marker_default)
-        if not invocations:
-            continue  # not a test-running job
+        # Detect a test-running job by the presence of a pytest run step, NOT by
+        # whether paths already resolve — a matrix-driven path (``${{ matrix.select }}``)
+        # only becomes concrete after per-entry substitution below.
+        if not any("pytest" in (step.get("run") or "") for step in steps):
+            continue
         matrix = (job.get("strategy") or {}).get("matrix") or {}
         includes = matrix.get("include")
         if includes:
             for entry in includes:
+                if not isinstance(entry, dict):
+                    continue
+                invocations = _steps_pytest_invocations(steps, marker_default, entry)
+                if not invocations:
+                    continue
                 # Flags this leg sets truthy (postgres/neo4j/weaviate).
                 satisfied = frozenset(flag for flag in ("postgres", "neo4j", "weaviate") if entry.get(flag))
                 backends = _services_backends(job) | _docker_run_backends(steps, satisfied)
@@ -406,17 +476,29 @@ def _expand_jobs(workflow: dict) -> list[_Leg]:
                 leg_name = f"{job_name} ({token})" if token else job_name
                 legs.append(_Leg(leg_name, frozenset(backends), invocations))
         else:
+            invocations = _steps_pytest_invocations(steps, marker_default)
+            if not invocations:
+                continue
             backends = _services_backends(job) | _docker_run_backends(steps, frozenset())
             legs.append(_Leg(job_name, frozenset(backends), invocations))
     return legs
 
 
+def _workflow_files() -> list[Path]:
+    """Every workflow file, discovered by glob (not a hard-coded list) so a new
+    workflow — e.g. a dedicated slow/e2e live-DB lane — is audited automatically."""
+    return sorted(_WORKFLOWS.glob("*.yml")) + sorted(_WORKFLOWS.glob("*.yaml"))
+
+
 def _all_legs() -> list[_Leg]:
+    files = _workflow_files()
+    assert files, f"no workflow files found under {_WORKFLOWS}"
     assert _CI_YML.exists(), f"missing workflow file: {_CI_YML}"
-    assert _CONFORMANCE_YML.exists(), f"missing workflow file: {_CONFORMANCE_YML}"
     legs: list[_Leg] = []
-    for wf in (_CI_YML, _CONFORMANCE_YML):
-        legs.extend(_expand_jobs(yaml.safe_load(wf.read_text())))
+    for wf in files:
+        doc = yaml.safe_load(wf.read_text())
+        if isinstance(doc, dict):
+            legs.extend(_expand_jobs(doc))
     return legs
 
 
@@ -517,7 +599,11 @@ def _analyze_module(path: str) -> _Module:
 
     # Collect every pytest.mark.* call/attribute anywhere in the module
     # (module-level pytestmark lists AND function decorators AND module-level
-    # _SKIP = pytest.mark.skipif(...) assignments).
+    # _SKIP = pytest.mark.skipif(...) assignments). NOTE: markers are unioned
+    # module-wide — a module that MIXED marked and unmarked functions could be
+    # counted covered by a leg that runs only the marked subset. Fine today: every
+    # filter/recall module declares its markers at module level (pytestmark), so
+    # the union equals each test's marker set. Revisit if a module mixes them.
     for node in ast.walk(tree):
         if isinstance(node, (ast.Call, ast.Attribute)):
             name = _marker_name(node)
@@ -552,11 +638,11 @@ def _backends_from_signal(text: str) -> set[str]:
     """Map an UPPER-cased signal blob to the backends it implies."""
     up = text.upper()
     out: set[str] = set()
-    if "NEO4J_INTEGRATION_TEST" in up:
+    if "NEO4J_INTEGRATION_TEST" in up or "KHORA_E2E_NEO4J_REQUIRED" in up:
         out.add("neo4j")
-    if "WEAVIATE_INTEGRATION_TEST" in up:
+    if "WEAVIATE_INTEGRATION_TEST" in up or "KHORA_E2E_WEAVIATE_REQUIRED" in up:
         out.add("weaviate")
-    if "_PG_REACHABLE" in up or "KHORA_PG_REQUIRED" in up:
+    if "_PG_REACHABLE" in up or "KHORA_PG_REQUIRED" in up or "KHORA_E2E_PG_REQUIRED" in up:
         out.add("postgres")
     return out
 
@@ -809,7 +895,7 @@ def test_gate_is_falsifiable() -> None:
     embedded_only_leg = _Leg(
         name="fake-embedded",
         backends=frozenset(),  # → {embedded} after __init__
-        invocations=[(["tests/integration/"], "integration")],
+        invocations=[(["tests/integration/"], "integration", "")],
     )
     orphans = _orphaned_modules([pg_module], [embedded_only_leg])
     assert [o[0] for o in orphans] == [pg_module.path], "gate failed to flag an under-provisioned module — no teeth"
@@ -818,7 +904,7 @@ def test_gate_is_falsifiable() -> None:
     pg_leg = _Leg(
         name="fake-postgres",
         backends=frozenset({"postgres"}),
-        invocations=[(["tests/integration/"], "integration")],
+        invocations=[(["tests/integration/"], "integration", "")],
     )
     assert not _orphaned_modules([pg_module], [embedded_only_leg, pg_leg]), (
         "gate still reports orphan after a provisioning leg was added — false positive"
@@ -838,7 +924,93 @@ def test_marker_expr_replacement_semantics() -> None:
         backends=frozenset({_EMBEDDED}),
         deferrals=[],
     )
-    excludes_slow = _Leg("excl", frozenset(), [(["tests/e2e/"], "not slow and not filter_conformance")])
-    selects_slow = _Leg("incl", frozenset(), [(["tests/e2e/"], "slow")])
+    excludes_slow = _Leg("excl", frozenset(), [(["tests/e2e/"], "not slow and not filter_conformance", "")])
+    selects_slow = _Leg("incl", frozenset(), [(["tests/e2e/"], "slow", "")])
     assert not excludes_slow.selects(slow_e2e.path, slow_e2e.markers), "marker exclusion failed to de-claim a test"
     assert selects_slow.selects(slow_e2e.path, slow_e2e.markers), "a -m slow leg should select a slow test"
+
+
+def test_workflow_discovery_is_glob_based() -> None:
+    """Workflows are discovered by glob, not a hard-coded pair — so a new workflow
+    file (e.g. a dedicated slow/e2e live-DB lane) is audited the moment it lands.
+
+    A hard-coded list would silently ignore a new workflow, and the
+    ``_KNOWN_UNRUN`` removal condition (a job that lives in a not-yet-read file)
+    could never fire.
+    """
+    files = {p.name for p in _workflow_files()}
+    assert "ci.yml" in files, f"ci.yml not discovered by glob: {sorted(files)}"
+    assert "filter-conformance.yml" in files, f"filter-conformance.yml not discovered: {sorted(files)}"
+
+
+def test_matrix_select_and_dash_k_modeling() -> None:
+    """A ``matrix.include`` leg whose run uses ``${{ matrix.select }}`` expands per
+    entry to concrete args, and ``-k`` narrows selection to path-substring matches.
+
+    This is the exact shape a dedicated slow/e2e lane uses (a matrix selector plus
+    a ``-k`` filename token). Without per-entry substitution the path would be an
+    unresolved ``${{ ... }}`` token and the leg would be dropped; without ``-k``
+    modelling the leg would over-claim every module under the path.
+    """
+    wf = {
+        "jobs": {
+            "e2e": {
+                "strategy": {
+                    "matrix": {
+                        "include": [
+                            {"select": "tests/e2e/ -k rowset_graph", "postgres": True, "neo4j": True},
+                        ]
+                    }
+                },
+                "services": {
+                    "postgres": {"image": "pgvector/pgvector:pg17"},
+                    "neo4j": {"image": "neo4j:2025.12.1"},
+                },
+                "steps": [{"run": 'uv run pytest ${{ matrix.select }} -m "e2e and slow" -n auto'}],
+            }
+        }
+    }
+    legs = _expand_jobs(wf)
+    assert len(legs) == 1, f"expected one expanded leg, got {[leg.name for leg in legs]}"
+    leg = legs[0]
+    assert {"postgres", "neo4j"} <= leg.backends, f"e2e leg backends={sorted(leg.backends)}"
+    graph_markers = frozenset({"e2e", "slow"})
+    # -k rowset_graph selects the graph module (filename token is a path substring)…
+    assert leg.selects("tests/e2e/test_filter_rowset_graph.py", graph_markers)
+    # …but NOT the chronicle module: -k narrows, so it is not over-claimed.
+    assert not leg.selects("tests/e2e/test_filter_rowset_chronicle.py", graph_markers)
+
+
+def test_e2e_env_flags_infer_backends() -> None:
+    """A test gated on ``KHORA_E2E_{PG,NEO4J,WEAVIATE}_REQUIRED`` is inferred to
+    require that backend, so a live slow/e2e lane's modules carry the right
+    provisioning requirement once it lands."""
+    assert _backends_from_signal("KHORA_E2E_PG_REQUIRED") == {"postgres"}
+    assert _backends_from_signal("KHORA_E2E_NEO4J_REQUIRED") == {"neo4j"}
+    assert _backends_from_signal("KHORA_E2E_WEAVIATE_REQUIRED") == {"weaviate"}
+    assert _backends_from_signal("KHORA_E2E_PG_REQUIRED KHORA_E2E_NEO4J_REQUIRED") == {"postgres", "neo4j"}
+
+
+def test_tracking_ref_accepts_long_issue_numbers() -> None:
+    """The tracking-ref pattern accepts issue numbers of 3+ digits (not just 3–4),
+    so a five-digit issue is a valid ref and an ADR ref still matches."""
+    assert _TRACKING_REF.search("tracked in #12345")
+    assert _TRACKING_REF.search("see #806")
+    assert _TRACKING_REF.search("per ADR-001")
+    assert not _TRACKING_REF.search("issue #42")  # 2 digits is not a tracking ref
+
+
+def test_gate_module_is_itself_selected_by_a_leg() -> None:
+    """Self-coverage: this gate must itself be selected by some CI leg.
+
+    The gate guards other tests, but is itself only useful if it runs. A workflow
+    edit that drops ``tests/unit/`` from the ``test-unit`` job would deselect the
+    gate, leaving nothing to notice — this assertion fails first if that happens.
+    """
+    this_path = _rel(Path(__file__))
+    me = _analyze_module(this_path)
+    legs = _all_legs()
+    assert any(leg.selects(this_path, me.markers) for leg in legs), (
+        f"this gate ({this_path}) is selected by no CI leg — a workflow change may "
+        "have deselected it; the gate cannot guard what does not itself run."
+    )
