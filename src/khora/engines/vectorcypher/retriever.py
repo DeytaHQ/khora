@@ -1695,6 +1695,13 @@ class VectorCypherRetriever:
         # Step 8b: Apply coherence scoring to penalize word-shuffled confounders
         if self._config.coherence_weight > 0:
             with trace_span("khora.vectorcypher.coherence_boost", chunk_count=len(fused_results)):
+                # Normalize fused scores to [0, 1] BEFORE the convex blend so
+                # coherence_weight behaves as the documented ~w nudge. Without
+                # this, the raw weighted-RRF scale (top ~0.02 at k=60) makes the
+                # w*coherence term (up to w) dominate ranking and demote the
+                # relevance winner (#1056). The trailing normalize_scores after
+                # rerank/version (below) still runs.
+                fused_results = normalize_scores(fused_results)
                 fused_results = apply_coherence_boost(
                     fused_results,
                     coherence_weight=self._config.coherence_weight,
