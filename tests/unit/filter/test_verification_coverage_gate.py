@@ -172,25 +172,17 @@ _TRACKING_REF = re.compile(r"#\d{3,}\b|ADR-\d+\b")
 # Consciously-unrun tests: known gaps awaiting a job that provisions them.
 #
 # These are KNOWN-TRACKED gaps, not silent ones — that is the whole point of the
-# gate. The live ``slow`` e2e rowset lanes need a dedicated slow/e2e live-DB CI
-# job (PG+Neo4j), which has not landed yet; until it does, no CI leg both selects
-# ``-m slow`` AND provisions those services. Each entry MUST carry a tracking
-# ref. REMOVE an entry — and clear its tracking issue — the moment a real job
-# selects ``-m slow`` with PG+Neo4j; the gate flags a stale entry that a job now
-# covers (drift in both directions).
+# gate. An entry belongs here only while a test is *consciously* not yet run by
+# any provisioning job, and always with a tracking ref. REMOVE an entry — and
+# clear its tracking issue — the moment a real job covers it; the gate flags a
+# stale entry that a job now covers (drift in both directions), so this dict
+# cannot quietly accumulate resolved gaps.
+#
+# Currently empty: the slow/e2e live-DB rowset lanes (graph / chronicle) that
+# previously lived here are now provisioned and selected by the dedicated e2e
+# workflow (`.github/workflows/e2e.yml`), so the gate certifies them directly.
 # ---------------------------------------------------------------------------
-_KNOWN_UNRUN: dict[str, str] = {
-    "tests/e2e/test_filter_rowset_graph.py": (
-        "Live slow/e2e graph rowset lane requires a provisioned Postgres + Neo4j stack; "
-        "no CI job selects `-m slow` with those services yet. Tracked in #1081 (wire a "
-        "dedicated slow/e2e live-DB CI lane). Remove once that job lands."
-    ),
-    "tests/e2e/test_filter_rowset_chronicle.py": (
-        "Live slow/e2e chronicle rowset lane requires a provisioned Postgres stack; "
-        "no CI job selects `-m slow` with Postgres yet. Tracked in #1081 (wire a "
-        "dedicated slow/e2e live-DB CI lane). Remove once that job lands."
-    ),
-}
+_KNOWN_UNRUN: dict[str, str] = {}
 
 
 # ===========================================================================
