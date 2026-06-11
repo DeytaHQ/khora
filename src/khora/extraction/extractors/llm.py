@@ -79,45 +79,79 @@ def _repair_json(content: str) -> str:
     return content
 
 
+# Deterministic auth/authz exception types. LiteLLM normalizes provider auth
+# failures onto these regardless of underlying SDK: a bad/expired/invalid key or
+# HTTP 401 → AuthenticationError; an authorization denial (e.g. Bedrock
+# AccessDeniedException, Vertex/GCP IAM "not authorized") → PermissionDeniedError.
+# Both are siblings of one another and of InternalServerError/RateLimitError, so
+# matching them by name does NOT catch transient 5xx or 429s.
+_NONRETRYABLE_AUTH_EXC_NAMES = frozenset({"AuthenticationError", "PermissionDeniedError"})
+
+# Message-shape match for credentials-absent errors that litellm surfaces as
+# InternalServerError (client-construction failures, before any HTTP request).
+# Both a credential token AND a missing/absent signal must be present so we never
+# fail-fast a RETRYABLE error that merely echoes a key token (e.g. a 429 reading
+# "Rate limit reached ... on api_key sk-...").
+_CREDENTIAL_TOKENS = ("credential", "api_key", "api key", "_api_key", "api-key")
+_MISSING_CREDENTIAL_SIGNALS = (
+    "missing",
+    "no api",
+    "not set",
+    "pass an api",
+    "set the",
+    "provide an api",
+    "could not resolve auth",
+    "authentication",
+)
+
+
 def _is_nonretryable_auth_error(exc: BaseException) -> bool:
     """Return True for deterministic credential/auth failures that must NOT be retried.
 
-    Retrying a missing-credentials error just burns three attempts and ~180s of
-    backoff for a result that will never change. We treat two shapes as
+    Retrying a missing-credentials or auth error just burns three attempts and
+    ~180s of backoff for a result that will never change. We treat two shapes as
     non-retryable:
 
-    1. A genuine ``litellm.AuthenticationError``. This is *always* non-retryable.
-       litellm is imported lazily inside the extractor methods, so resolve the
-       type defensively: try the real class, and also walk the MRO for a class
-       literally named ``AuthenticationError`` so the check still works if the
-       litellm import fails here.
-    2. A missing-credentials message. LiteLLM maps absent credentials onto
-       ``InternalServerError`` (a sibling of AuthenticationError, not a
-       subclass), e.g. "OpenAIException - Missing credentials. Please pass an
-       api_key, or set the OPENAI_API_KEY environment variable." We match
-       conservatively to avoid swallowing transient 5xx errors: require
-       "credentials" together with "missing", OR an explicit api-key hint.
+    1. A genuine ``litellm.AuthenticationError`` or ``litellm.PermissionDeniedError``.
+       This is *always* non-retryable. litellm normalizes provider auth/authz
+       failures (invalid key, 401, IAM denial) onto these types. litellm is
+       imported lazily inside the extractor methods, so resolve the type
+       defensively: try the real classes, and also walk the MRO for a class
+       literally named ``AuthenticationError`` / ``PermissionDeniedError`` so the
+       check still works if the litellm import fails here.
+    2. A missing-credentials message. LiteLLM surfaces a credentials-absent error
+       raised at client-construction time (before any HTTP request) as
+       ``InternalServerError`` (a sibling of AuthenticationError, not a subclass),
+       e.g. "OpenAIException - Missing credentials. Please pass an api_key, or set
+       the OPENAI_API_KEY environment variable." Because this predicate runs
+       against *every* exception (not just InternalServerError), we match
+       conservatively: require BOTH a credential token AND a missing/absent
+       signal. A bare key mention with no missing signal (e.g. a RateLimitError
+       reading "Rate limit reached ... on api_key sk-...") is RETRYABLE.
 
     When unsure, return False (i.e. retry) — except a genuine
-    AuthenticationError, which is non-retryable regardless of message.
+    AuthenticationError / PermissionDeniedError, which is non-retryable
+    regardless of message.
     """
-    # 1. Genuine AuthenticationError — defensive type resolution.
+    # 1. Genuine auth/authz exception — defensive type resolution.
     try:
         import litellm
 
-        if isinstance(exc, litellm.AuthenticationError):
+        if isinstance(exc, (litellm.AuthenticationError, litellm.PermissionDeniedError)):
             return True
     except Exception:  # noqa: S110 — litellm absent/import failure falls through to name check
         pass
-    if any(cls.__name__ == "AuthenticationError" for cls in type(exc).__mro__):
+    if any(cls.__name__ in _NONRETRYABLE_AUTH_EXC_NAMES for cls in type(exc).__mro__):
         return True
 
-    # 2. Missing-credentials message shape. Conservative: do not match generic
-    #    5xx text like "Internal Server Error", "503", or "overloaded".
+    # 2. Missing-credentials message shape. Conservative: a credential token alone
+    #    is not enough (it could be echoed in a retryable 5xx/429); a missing/absent
+    #    signal must co-occur. Generic "Internal Server Error" / "503" / "overloaded"
+    #    carries neither token nor signal and stays retryable.
     message = str(exc).lower()
-    if "credentials" in message and "missing" in message:
-        return True
-    if "api_key" in message or "api key" in message or "_api_key" in message:
+    has_credential_token = any(token in message for token in _CREDENTIAL_TOKENS)
+    has_missing_signal = any(signal in message for signal in _MISSING_CREDENTIAL_SIGNALS)
+    if has_credential_token and has_missing_signal:
         return True
 
     return False
