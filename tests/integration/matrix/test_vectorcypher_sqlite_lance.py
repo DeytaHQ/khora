@@ -31,15 +31,19 @@ path — the filter pushes down to ``khora_chunks.occurred_at`` and the
 retriever skips the unsupported entity-version narrowing with a structured
 degradation rather than failing. ``prefer_current`` now honors expired edges
 on the embedded CTE path (#1087) — see ``test_vc_prefer_current_via_cte``.
-One test remains ``xfail`` for a known backend gap (the xfail carries an
-explanatory string):
+Multi-hop graph-channel recall now surfaces a graph-reached chunk on the
+embedded path (#1086) — the recursive CTE was already correct, and three
+wiring fixes (the missing ``namespace_id`` on the coordinator
+``get_neighborhoods_batch`` call, the ``Entity``-object normalization in
+``_cypher_expand``, and the ``get_chunks_batch`` ``khora_chunks`` fallback)
+let the surfaced entity's chunk reach the result. See
+``test_vc_graph_mode_surfaces_chunk_via_graph_channel`` (engine-level, via
+``mode=SearchMode.GRAPH``, asserting the chunk arrives through the graph
+channel with the vector channel proven empty) and
+``test_vc_two_hop_neighborhood_batch`` (coordinator-level CTE pin).
 
-* ``test_vc_two_hop_traversal`` — multi-hop CTE traversal correctness
-  on the SQL-emulated graph.
-
-The remaining xfail tracks a concrete behavioural gap, not a wiring
-issue. It is written end-to-end so that when the underlying path
-lands, the same test serves as the acceptance suite without rewriting.
+No tests in this module remain ``xfail`` — the embedded ``sqlite_lance``
+behaviours they tracked have all landed.
 """
 
 from __future__ import annotations
@@ -71,6 +75,7 @@ from khora.extraction.extractors.base import (
 )
 from khora.extraction.skills import ExpertiseConfig
 from khora.khora import Khora
+from khora.query import SearchMode
 
 EMBED_DIM = 32  # matches the sqlite_lance default and the existing fixture helper
 
@@ -204,7 +209,7 @@ async def kb(tmp_path: Path) -> AsyncIterator[Khora]:
             await kb.disconnect()
         except Exception:
             # Disconnect can throw if connect partially succeeded; the
-            # xfail marker is what matters at the test boundary.
+            # per-test assertions are what matter at the test boundary.
             pass
 
 
@@ -356,20 +361,12 @@ async def test_vc_second_ingest_sharing_entity_does_not_crash(kb: Khora, namespa
     assert len(alice_rows) == 1, f"expected one canonical Alice row, got {len(alice_rows)}: {alice_rows!r}"
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "VectorCypher embedded multi-hop CTE traversal does not reliably cross the "
-        "second hop, so a 2-hop-reachable entity is not surfaced (and Khora.recall() "
-        "no longer accepts the ``graph_depth`` kwarg this test passes). Tracked in "
-        "#1086. NOTE: the FK-on-second-ingest crash the previous citation referenced "
-        "is a separate, fixed problem (closed #806; covered by "
-        "test_vc_second_ingest_sharing_entity_does_not_crash above)."
-    ),
-    raises=TypeError,
-)
-async def test_vc_two_hop_traversal(kb: Khora, namespace_id: UUID) -> None:
-    """3 connected docs (A→B→C), query about A surfaces C via 2-hop traversal."""
+def _plan_two_hop_chain() -> None:
+    """Stage the Alice→Bob→Carol→"graph databases" extraction chain.
+
+    Three docs wire a directed chain so the concept ``graph databases`` sits
+    two hops out from Alice (Alice→Bob, Bob→Carol, Carol→graph databases).
+    """
     _plan_extraction(
         "Alice",
         entities=[("Alice", "PERSON"), ("Bob", "PERSON")],
@@ -386,23 +383,109 @@ async def test_vc_two_hop_traversal(kb: Khora, namespace_id: UUID) -> None:
         relationships=[("Carol", "graph databases", "RESEARCHES")],
     )
 
+
+async def _remember_two_hop_chain(kb: Khora, namespace_id: UUID) -> None:
     await _remember(kb, namespace_id=namespace_id, content="Alice knows Bob from college.")
     await _remember(kb, namespace_id=namespace_id, content="Bob and Carol collaborate on research projects.")
     await _remember(kb, namespace_id=namespace_id, content="Carol presented findings on graph databases.")
 
-    # Force ≥ 2-hop expansion via graph_depth=2.
+
+async def test_vc_two_hop_neighborhood_batch(kb: Khora, namespace_id: UUID) -> None:
+    """Coordinator-level pin: the recursive CTE crosses the second hop (#1086).
+
+    Asserts at the exact sink ``recall``'s graph channel drives —
+    ``StorageCoordinator.get_neighborhoods_batch`` — that anchoring on Alice
+    with ``depth=2`` reaches Carol (2 hops out: Alice→Bob→Carol). This pins the
+    SQLite recursive-CTE traversal independently of the recall fusion layer,
+    so a future regression in the CTE is caught even if the engine path changes.
+
+    ``depth=1`` is the control: it must surface Bob (1 hop) but NOT Carol —
+    proving the ``depth=2`` result is the second hop being walked, not the
+    whole graph being returned regardless of depth.
+    """
+    _plan_two_hop_chain()
+    await _remember_two_hop_chain(kb, namespace_id)
+
+    coord = kb._engine._storage  # type: ignore[union-attr]
+    row_ns_id = await coord.resolve_namespace(namespace_id)
+
+    entities = await coord.graph.list_entities(row_ns_id, limit=100)
+    name_to_id = {e.name: e.id for e in entities}
+    assert "alice" in name_to_id, f"expected alice in graph, got {sorted(name_to_id)}"
+    alice_id = name_to_id["alice"]
+
+    # depth=1 control: Bob reachable, Carol not yet.
+    nb_one = await coord.get_neighborhoods_batch([alice_id], namespace_id=row_ns_id, depth=1)
+    one_hop_names = {e.name for e in nb_one[alice_id]["entities"]}
+    assert "bob" in one_hop_names, f"1-hop neighbor bob missing: {one_hop_names}"
+    assert "carol" not in one_hop_names, f"carol reached at depth=1 — traversal ignored depth: {one_hop_names}"
+
+    # depth=2: the second hop must now include Carol.
+    nb_two = await coord.get_neighborhoods_batch([alice_id], namespace_id=row_ns_id, depth=2)
+    two_hop_names = {e.name for e in nb_two[alice_id]["entities"]}
+    assert "carol" in two_hop_names, f"2-hop neighbor carol not surfaced by the recursive CTE: {two_hop_names}"
+
+
+async def test_vc_graph_mode_surfaces_chunk_via_graph_channel(kb: Khora, namespace_id: UUID) -> None:
+    """Engine-level non-vacuous recall: ``mode=SearchMode.GRAPH`` surfaces a
+    graph-reached chunk through the graph channel alone (#1086).
+
+    This guards the full recall wiring of the three #1086 fixes end-to-end:
+    ``_cypher_expand`` must (a) call ``get_neighborhoods_batch`` with the
+    required ``namespace_id`` and (b) map the embedded backend's ``Entity``
+    domain objects to the dict shape the scoring loop reads, and
+    ``get_chunks_batch`` must fall back to ``khora_chunks`` so the surfaced
+    entity's chunk is actually fetched. Pre-fix, the graph channel produced
+    zero chunks (the ``namespace_id`` ``TypeError`` collapsed expansion, the
+    ``Entity`` entries were dropped, and the chunk ids resolved to nothing).
+
+    Non-vacuity is enforced two ways rather than trusting ``mode``:
+
+    * The query text is deliberately DISSIMILAR to the chunk content (it does
+      not contain ``graph databases``), so the fake content-hash embedder's
+      vector channel cannot rank that chunk in — and we assert
+      ``vector_chunk_count == 0`` to prove the vector channel surfaced nothing.
+      This is the masking the sibling ``test_vc_prefer_current_via_cte``
+      documents: at the recall layer the vector channel can otherwise smuggle a
+      chunk in independent of the graph edge.
+    * We assert the chunk arrived via the graph channel (``graph_chunk_count``
+      > 0 and the chunk id is in the graph-channel id set), so a present chunk
+      is unambiguously the graph traversal's doing.
+    """
+    _plan_two_hop_chain()
+    await _remember_two_hop_chain(kb, namespace_id)
+
     result = await kb.recall(
-        "Alice",
+        "Describe the multi-hop chain spanning Alice through her collaborators downstream.",
         namespace=namespace_id,
+        mode=SearchMode.GRAPH,
         limit=10,
-        graph_depth=2,
     )
 
-    text_blob = " ".join(c.content for c in result.chunks)
-    # The 2-hop reachable concept ("graph databases" via Bob→Carol) must
-    # surface in the recall result. If this fails the CTE traversal is
-    # not crossing 2 hops.
-    assert "graph databases" in text_blob.lower(), f"2-hop entity not surfaced; got context={text_blob[:300]!r}"
+    assert result.engine_info.get("engine") == "vectorcypher"
+
+    # Anti-vacuity guard 1: the vector channel surfaced nothing, so any chunk
+    # present is not vector-channel leakage on the fake embedder.
+    assert result.engine_info.get("vector_chunk_count") == 0, (
+        f"vector channel surfaced chunks (count={result.engine_info.get('vector_chunk_count')!r}); the "
+        "graph-channel assertion below would be masked by vector leakage"
+    )
+    # Anti-vacuity guard 2: the graph channel actually produced chunks.
+    assert (result.engine_info.get("graph_chunk_count") or 0) > 0, (
+        f"graph channel produced no chunks (count={result.engine_info.get('graph_chunk_count')!r}) — "
+        "the #1086 wiring did not carry the traversal through to fetched chunks"
+    )
+
+    # The graph-reached chunk ("graph databases", via Carol) must be present,
+    # and it must be one the graph channel surfaced.
+    by_content = {c.content.lower(): c.id for c in result.chunks}
+    target = next((cid for content, cid in by_content.items() if "graph databases" in content), None)
+    assert target is not None, f"graph-reached chunk not surfaced via GRAPH mode; got {sorted(by_content)!r}"
+    graph_ids = {
+        UUID(i)
+        for i in result.engine_info.get("search_methods", {}).get("by_method", {}).get("graph", {}).get("chunk_ids", [])
+    }
+    assert target in graph_ids, f"target chunk {target} not attributed to the graph channel: {graph_ids}"
 
 
 async def test_vc_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
