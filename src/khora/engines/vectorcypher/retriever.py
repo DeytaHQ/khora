@@ -138,6 +138,25 @@ _VERSION_FILTER_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# Cypher-expand neighborhood-normalization degradation counter. The embedded
+# sqlite_lance backend returns ``Entity`` domain objects (mapped to dicts);
+# any entry that is neither an ``Entity`` nor a dict is dropped from the
+# expansion. Incremented per dropped entry so an unexpectedly empty
+# graph-channel recall is observable; the same event is appended to
+# ``RecallResult.engine_info['degradations']``. NO namespace_id label.
+_CYPHER_EXPAND_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.cypher_expand.degraded_total",
+    unit="1",
+    description=(
+        "VectorCypher graph-expansion normalization fallbacks. Incremented when "
+        "a neighborhood entry returned by get_neighborhoods_batch has an "
+        "unrecognized shape (neither an Entity domain object nor a dict) and is "
+        "dropped from the expansion. The same event is appended to "
+        "RecallResult.engine_info['degradations']. Labels: reason "
+        "(unrecognized_neighborhood_shape). NO namespace_id label - cardinality rule."
+    ),
+)
+
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
     """Normalize the value of ``chunker_info`` returned by a record dict.
@@ -2818,17 +2837,28 @@ class VectorCypherRetriever:
                         if isinstance(entity_data, dict):
                             entity_data.setdefault("distance", i + 1)
                             normalized.append(entity_data)
-                        elif degradations is not None:
-                            # Unrecognized neighborhood-entry shape: record the
-                            # dropped expansion hop so empty graph-channel recall
-                            # is observable rather than silent.
-                            degradations.append(
-                                Degradation(
-                                    component="vectorcypher.cypher_expand",
-                                    reason="unrecognized_neighborhood_shape",
-                                    detail=f"dropped neighborhood entry of type {type(entity_data).__name__}",
-                                )
+                        else:
+                            # Unrecognized neighborhood-entry shape (neither an
+                            # Entity domain object nor a dict): log + count + record
+                            # the dropped expansion hop so an unexpectedly empty
+                            # graph-channel recall is observable rather than silent
+                            # (matches the version_filter / rel_fetch convention).
+                            logger.warning(
+                                f"Dropping unrecognized neighborhood entry of type "
+                                f"{type(entity_data).__name__} in _cypher_expand; "
+                                f"graph-expansion hop skipped."
                             )
+                            _CYPHER_EXPAND_DEGRADED_COUNTER.add(
+                                1, attributes={"reason": "unrecognized_neighborhood_shape"}
+                            )
+                            if degradations is not None:
+                                degradations.append(
+                                    Degradation(
+                                        component="vectorcypher.cypher_expand",
+                                        reason="unrecognized_neighborhood_shape",
+                                        detail=f"dropped neighborhood entry of type {type(entity_data).__name__}",
+                                    )
+                                )
                     neighborhoods[eid] = normalized
             else:
                 neighborhoods = {}
