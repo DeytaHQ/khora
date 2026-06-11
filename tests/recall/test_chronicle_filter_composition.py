@@ -396,6 +396,42 @@ async def test_created_at_filter_works_against_literal_created_at() -> None:
     assert returned == {in_scope.id}
 
 
+@pytest.mark.asyncio
+async def test_unanchored_chunk_survives_recency_window_with_no_filter_ast() -> None:
+    # POSITIVE engine-level guard for the deprecated start_time/end_time path:
+    # those bounds now build ONLY a recency-window temporal_filter (no filter_ast),
+    # so NO event-time post-filter runs. The SAME anchor-less chunk that
+    # test_occurred_at_filter_excludes_unanchored_chunk_no_created_at_fallback proves
+    # an occurred_at filter EXCLUDES must SURVIVE here — the regression was the
+    # facade folding the bounds into an occurred_at filter_ast and false-emptying
+    # this chunk (the shape a plain remember() with no timestamp produces). The
+    # window narrows on COALESCE(source_timestamp, created_at), so a chunk recent by
+    # ingest time belongs in it even with no event-time anchor.
+    from khora.engines.skeleton.backends import TemporalFilter as SkeletonTemporalFilter
+
+    unanchored = _chunk(
+        "alpha unanchored",
+        occurred_at=None,
+        source_timestamp=None,
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),  # recent by ingest time
+    )
+    engine = _engine_with_semantic([(unanchored, 0.9)])
+    result = await engine.recall(
+        "alpha",
+        uuid4(),
+        limit=10,
+        mode=SearchMode.VECTOR,
+        # Exactly what the deprecated start_time= bound now forwards: a window, no AST.
+        temporal_filter=SkeletonTemporalFilter(occurred_after=datetime(2026, 1, 1, tzinfo=UTC)),
+        filter_ast=None,
+    )
+
+    assert unanchored.id in {c.id for c in result.chunks}, (
+        "an anchor-less chunk must SURVIVE a recency-window-only recall (no filter_ast); "
+        "folding the deprecated bounds into an occurred_at filter would false-empty it"
+    )
+
+
 # ===========================================================================
 # (3) unindexed_metadata counter increments on the post-filter path.
 # ===========================================================================
