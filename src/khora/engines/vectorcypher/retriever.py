@@ -119,7 +119,7 @@ _REL_FETCH_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
-# Entity-version-filter degradation counter (ADR-001). The embedded
+# Entity-version-filter degradation counter. The embedded
 # sqlite_lance schema lacks the ``version_valid_from/to`` columns that
 # ``_version_filter_entities`` reads, so point-in-time entity-version
 # narrowing is skipped on that backend. Recall continues with occurred-bounds
@@ -1375,7 +1375,7 @@ class VectorCypherRetriever:
                         try:
                             # On graph-less backends (sqlite_lance / surrealdb)
                             # this is a no-op that returns entities unfiltered and
-                            # records an ADR-001 degradation — the embedded schema
+                            # records a structured degradation — the embedded schema
                             # lacks the version_valid_from/to columns. Occurred-bounds
                             # chunk filtering is still honored via ``temporal_filter``.
                             all_entity_ids = await self._version_filter_entities(
@@ -2923,7 +2923,7 @@ class VectorCypherRetriever:
             entity_ids: Candidate entity IDs
             namespace_id: Namespace constraint
             target_date: The point-in-time to query for
-            degradations: When provided, an ADR-001 ``Degradation`` is appended
+            degradations: When provided, a structured ``Degradation`` is appended
                 on the graph-less no-op path (see below) so callers can detect
                 that point-in-time entity-version narrowing was skipped.
 
@@ -2937,7 +2937,7 @@ class VectorCypherRetriever:
         # Graph-less backends (sqlite_lance / surrealdb) have no Neo4j driver and
         # no version_valid_from/to columns, so point-in-time entity-version
         # narrowing cannot run — return entities unfiltered (current-state).
-        # This is the genuine no-op site: record an ADR-001 degradation here
+        # This is the genuine no-op site: record a structured degradation here
         # (condition-driven, no exc_info) so the skip is observable. A plain
         # occurred-bounds recall never reaches this method, so it stays
         # degradation-free; only a parsed target_date lands here.

@@ -333,8 +333,8 @@ async def test_non_date_filter_does_not_synthesize_explicit(
 # embedded sqlite_lance backend lacks bi-temporal version columns, so it cannot
 # do point-in-time *entity-version* narrowing — but it CAN honor occurred-bounds
 # chunk filtering (``khora_chunks.occurred_at``). The retriever no longer
-# fail-fasts on these queries: it skips entity-version filtering (recording an
-# ADR-001 degradation) and continues. The re-run-guard enforcement (filter_ast
+# fail-fasts on these queries: it skips entity-version filtering (recording a
+# structured degradation) and continues. The re-run-guard enforcement (filter_ast
 # suppresses the unfiltered re-run) is still proven on the PG+Neo4j stack
 # (qa-graph). Here we pin the embedded promise: an occurred-bounds query
 # completes cleanly and returns a well-formed result rather than raising.

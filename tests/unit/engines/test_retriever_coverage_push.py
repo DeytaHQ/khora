@@ -1121,7 +1121,7 @@ class TestRetrieveBackendGate:
 
         The old blanket gate raised NotImplementedError for any target_date on
         sqlite_lance; it was replaced by a call-site guard that skips only the
-        unsupported entity-version narrowing (recording an ADR-001 degradation)
+        unsupported entity-version narrowing (recording a structured degradation)
         while the occurred-bounds chunk filter still pushes down. Here we assert
         ``retrieve()`` dispatches to the chunk path instead of raising."""
         retriever = VectorCypherRetriever(

@@ -28,7 +28,7 @@ in-process SQLite (``aiosqlite``) and LanceDB (``lancedb``).
 VectorCypher's embedded ``sqlite_lance`` path is wired. Occurred-bounds
 temporal recall (``start_time`` / ``end_time``) now works on the embedded
 path — the filter pushes down to ``khora_chunks.occurred_at`` and the
-retriever skips the unsupported entity-version narrowing with an ADR-001
+retriever skips the unsupported entity-version narrowing with a structured
 degradation rather than failing. Two tests remain ``xfail`` for known
 backend gaps (each xfail carries an explanatory string):
 

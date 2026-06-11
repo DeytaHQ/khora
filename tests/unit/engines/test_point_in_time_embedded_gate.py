@@ -5,7 +5,7 @@ The embedded layer has no ``version_valid_from/to`` columns, so the
 narrowing. Previously the retriever fail-fasted with ``NotImplementedError``
 for any target_date on sqlite_lance. That blanket gate was replaced by a
 call-site guard inside ``_vectorcypher_retrieve``: it skips only the
-entity-version filtering (recording an ADR-001 degradation) while the
+entity-version filtering (recording a structured degradation) while the
 occurred-bounds chunk filter (start_time/end_time) still pushes down to
 ``khora_chunks.occurred_at``. So an occurred-bounds recall now falls through
 to the normal retrieval path instead of raising; the production stack

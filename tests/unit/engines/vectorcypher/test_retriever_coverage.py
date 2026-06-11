@@ -280,7 +280,7 @@ class TestVersionFilterEntities:
 
     @pytest.mark.asyncio
     async def test_no_driver_records_degradation(self) -> None:
-        """The graph-less no-op records an ADR-001 degradation when a sink list is
+        """The graph-less no-op records a structured degradation when a sink list is
         passed (point-in-time entity-version filtering skipped)."""
         from khora.core.diagnostics import Degradation
 
