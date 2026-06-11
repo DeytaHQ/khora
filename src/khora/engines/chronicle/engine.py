@@ -871,8 +871,7 @@ class ChronicleEngine:
         # silently no-op the UPDATE - users on those backends would see a
         # config flag with no effect. Fail loudly at connect time instead so
         # the operator knows reinforcement is unavailable on this stack.
-        # Currently supported: pgvector, sqlite_lance. NOT supported: surrealdb
-        # (chunk schema lacks a last_accessed_at field).
+        # Currently supported: pgvector, sqlite_lance, surrealdb.
         qs = self._config.query
         reinforcement_on = getattr(qs, "chronicle_enable_recall_reinforcement", False) if qs else False
         if reinforcement_on:
@@ -883,7 +882,7 @@ class ChronicleEngine:
                     "Chronicle reinforcement-on-recall "
                     "(KHORA_QUERY_CHRONICLE_ENABLE_RECALL_REINFORCEMENT=true) "
                     f"requires the vector backend to implement update_last_accessed; "
-                    f"{backend_name} does not. Supported backends: pgvector, sqlite_lance."
+                    f"{backend_name} does not. Supported backends: pgvector, sqlite_lance, surrealdb."
                 )
 
         # Create embedder

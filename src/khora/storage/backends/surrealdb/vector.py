@@ -253,6 +253,51 @@ class SurrealDBVectorAdapter:
 
         return count
 
+    async def update_last_accessed(
+        self,
+        namespace_id: UUID,
+        chunk_ids: list[UUID],
+        ts: datetime,
+    ) -> int:
+        """Stamp ``last_accessed_at = ts`` on the given chunks.
+
+        Scoped to ``namespace_id`` to prevent cross-tenant writes through
+        forged ids. Returns the row count. Used by the Chronicle
+        reinforcement-on-recall path.
+
+        Namespace matching mirrors the deterministic ``namespace = $ns_rid``
+        arm of the sibling read methods, by direct RID equality. Chunks store
+        their ``namespace`` link as ``rid(namespace_id)`` where ``namespace_id``
+        is whatever the caller passed at ingest — the public API resolves to
+        the stable ``namespace_id`` (so the link is ``rid(stable_id)``), while
+        the row itself lives at ``rid(row_id)``. The caller's own RID is matched
+        directly (the production case: chunk linked by stable id, caller passes
+        stable id), and the namespace is additionally resolved to its existing
+        row id(s) to cover the mixed case (chunk linked by row id, caller
+        passing the stable id). No ``namespace.namespace_id`` link dereference.
+        """
+        if not chunk_ids:
+            return 0
+        chunk_rids = [_rid("chunk", cid) for cid in chunk_ids]
+        # Match by direct RID equality, with no live record-link dereference.
+        # Start from the caller's own RID (covers chunks linked by the same id
+        # form the caller passes — the production path, where both are the
+        # stable namespace_id), then add any resolved namespace row id(s) to
+        # cover the mixed case (chunk linked by row id, caller passing the
+        # stable id). The caller's RID is always present, so an absent namespace
+        # row does not short-circuit a write to chunks carrying that link.
+        ns_rids = [_rid("memory_namespace", namespace_id)]
+        ns_rows = await self._conn.query(
+            "SELECT id FROM memory_namespace WHERE namespace_id = $ns_str OR id = $ns_rid",
+            {"ns_str": str(namespace_id), "ns_rid": _rid("memory_namespace", namespace_id)},
+        )
+        ns_rids.extend(row["id"] for row in ns_rows)
+        rows = await self._conn.query(
+            "UPDATE chunk SET last_accessed_at = $ts WHERE id IN $ids AND namespace IN $ns_rids",
+            {"ts": ts, "ids": chunk_rids, "ns_rids": ns_rids},
+        )
+        return len(rows)
+
     @trace(
         "khora.surrealdb.search_similar",
         include={"namespace_id", "limit"},
