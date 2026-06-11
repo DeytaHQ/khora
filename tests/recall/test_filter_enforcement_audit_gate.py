@@ -283,3 +283,104 @@ def test_surrealdb_search_fulltext_now_enforces_filter_ast() -> None:
         "would be compiled and discarded, dropping the caller filter. Restore the clause/binding "
         f"thread-through (append={appends_clause}, update={updates_bindings})."
     )
+
+
+def _is_filter_ast_not_none(node: ast.expr) -> bool:
+    """True if ``node`` is the comparison ``filter_ast is not None``."""
+    return (
+        isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Name)
+        and node.left.id == "filter_ast"
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], ast.IsNot)
+        and len(node.comparators) == 1
+        and isinstance(node.comparators[0], ast.Constant)
+        and node.comparators[0].value is None
+    )
+
+
+def _is_filter_ast_children(node: ast.expr) -> bool:
+    """True if ``node`` is the truthiness operand ``filter_ast.children``."""
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "children"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "filter_ast"
+    )
+
+
+def _is_guarded_filter_ast_boolop(test: ast.expr) -> bool:
+    """True if ``test`` is ``filter_ast is not None and filter_ast.children``.
+
+    The guard MUST be a ``BoolOp(And)`` carrying BOTH operands — the
+    ``filter_ast is not None`` comparison AND the ``filter_ast.children``
+    truthiness check. A bare ``filter_ast is not None`` (the old guard) does
+    not satisfy this: that shape raised on ANY non-None filter, including the
+    constraint-free match-everything AST that must now pass through.
+    """
+    if not (isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And)):
+        return False
+    has_not_none = any(_is_filter_ast_not_none(v) for v in test.values)
+    has_children = any(_is_filter_ast_children(v) for v in test.values)
+    return has_not_none and has_children
+
+
+def _raises_recall_filter_unsupported(node: ast.AST) -> bool:
+    """True if any node in the subtree is ``raise RecallFilterUnsupportedError(...)``."""
+    return any(
+        isinstance(n, ast.Raise)
+        and isinstance(n.exc, ast.Call)
+        and isinstance(n.exc.func, ast.Name)
+        and n.exc.func.id == "RecallFilterUnsupportedError"
+        for n in ast.walk(node)
+    )
+
+
+def test_turbopuffer_search_fails_loud_on_filter_ast() -> None:
+    """Pins the turbopuffer fail-loud boundary to source.
+
+    turbopuffer does not implement deterministic recall filters, so its
+    ``search`` must fail loud on a constraint-bearing filter rather than
+    silently return unfiltered rows — while letting a constraint-free
+    match-everything filter pass through. This registers that boundary as a
+    known, honored contract: ``search`` declares a ``filter_ast`` parameter AND
+    raises ``RecallFilterUnsupportedError`` from inside a guard that is the
+    ``BoolOp(And)`` ``filter_ast is not None and filter_ast.children``.
+
+    Keyed off the source so the guard cannot be deleted, weakened to a bare
+    ``raise``, OR reverted to raising on ANY non-None filter (dropping the
+    ``filter_ast.children`` operand, which would break the empty-filter
+    pass-through) without this failing. STRONG in both directions: the precise
+    guard shape AND the raise within it.
+    """
+    backend = (
+        Path(__file__).resolve().parents[2] / "src" / "khora" / "engines" / "skeleton" / "backends" / "turbopuffer.py"
+    )
+    tree = ast.parse(backend.read_text())
+    fn = next(
+        (n for n in ast.walk(tree) if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == "search"),
+        None,
+    )
+    assert fn is not None, "search not found in turbopuffer temporal store"
+    # It declares filter_ast (wiring present) ...
+    params = [a.arg for a in fn.args.args] + [a.arg for a in fn.args.kwonlyargs]
+    assert "filter_ast" in params, "turbopuffer search no longer declares filter_ast — wiring changed"
+    # ... AND it raises RecallFilterUnsupportedError from inside a guard whose
+    # test is the BoolOp `filter_ast is not None and filter_ast.children`. Find
+    # that guard, then assert the raise is lexically within it.
+    guard = next(
+        (n for n in ast.walk(fn) if isinstance(n, ast.If) and _is_guarded_filter_ast_boolop(n.test)),
+        None,
+    )
+    assert guard is not None, (
+        "turbopuffer search no longer guards on `if filter_ast is not None and "
+        "filter_ast.children` — the fail-loud filter contract was removed or weakened. "
+        "Either a constraint-bearing filter would silently return unfiltered rows, or "
+        "the guard was reverted to raising on ANY non-None filter (breaking the "
+        "constraint-free filter pass-through)."
+    )
+    assert _raises_recall_filter_unsupported(guard), (
+        "turbopuffer search's `if filter_ast is not None and filter_ast.children` guard "
+        "no longer raises RecallFilterUnsupportedError — the fail-loud contract was "
+        "weakened. Restore the `raise RecallFilterUnsupportedError(...)` inside the guard."
+    )

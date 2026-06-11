@@ -378,6 +378,14 @@ to turbopuffer's filter DSL (`Eq`, `Gte`, `Lte`, `Lt`, `In`, `Contains`,
 `ContainsAny`). The one workaround: ALL-tags semantics fold into an
 `And` of N `Contains` clauses (turbopuffer has no native `ContainsAll`).
 
+**Recall filters are unsupported.** The deterministic recall-filter API
+(the `filter_ast` argument to `search`) is **not** implemented on
+turbopuffer. Passing a non-None filter RAISES
+`RecallFilterUnsupportedError` rather than silently returning unfiltered
+results - the backend fails loud instead of dropping the filter on the
+floor. Native server-side filter pushdown is a possible future
+enhancement.
+
 **Features:**
 
 - Multi-region serverless (no infrastructure to run)
@@ -402,7 +410,7 @@ turbopuffer wins. Numbers as of 2026-05-24 - re-check
 
 **Install:** `pip install khora[turbopuffer]`.
 
-**Tests.** 42 unit tests exercise the SDK via a fake `turbopuffer`
+**Tests.** A suite of unit tests exercises the SDK via a fake `turbopuffer`
 module injected into `sys.modules` (no real network or API key needed).
 Real-cluster integration tests are gated behind
 `TURBOPUFFER_INTEGRATION_TEST=1` + a `TURBOPUFFER_API_KEY` env var; not

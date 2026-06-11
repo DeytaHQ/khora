@@ -27,6 +27,14 @@ from khora.engines.skeleton.backends.turbopuffer import (
     _row_to_chunk,
     _rrf_fuse,
 )
+from khora.filter import (
+    FilterClause,
+    FilterNode,
+    FilterOp,
+    RecallFilter,
+    RecallFilterUnsupportedError,
+    parse_to_ast,
+)
 
 # ---------------------------------------------------------------------------
 # TurbopufferBackendConfig validation
@@ -661,3 +669,104 @@ class TestImportErrorWhenSdkMissing:
         store = _build_store("k")
         with pytest.raises(ImportError, match="turbopuffer is required"):
             await store.connect()
+
+
+# ---------------------------------------------------------------------------
+# Recall filter_ast fail-loud contract
+# ---------------------------------------------------------------------------
+#
+# turbopuffer does not implement deterministic recall filters, so a
+# constraint-bearing ``filter_ast`` (non-empty ``children``) must fail loud
+# (raise) rather than silently return unfiltered rows. ``None`` keeps the
+# existing behavior unchanged; a constraint-free filter (match-everything AND
+# with no children, what ``filter={}`` normalizes to) passes through as a no-op.
+
+
+def _filter_ast_node() -> FilterNode:
+    """A small real ``FilterNode`` — ``AND([author $eq "alice"])``."""
+    return FilterNode(
+        op=FilterOp.AND,
+        children=(FilterClause(path=("author",), op=FilterOp.EQ, operand="alice"),),
+    )
+
+
+@pytest.mark.unit
+class TestFilterAstFailLoud:
+    @pytest.mark.asyncio
+    async def test_filter_ast_none_keeps_existing_behavior(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``filter_ast=None`` still searches and returns rows from the SDK."""
+        _tp, client = _install_fake_turbopuffer(monkeypatch)
+
+        ns_id = uuid4()
+        row = {
+            "id": str(uuid4()),
+            "document_id": str(uuid4()),
+            "content": "match",
+            "$dist": 0.2,
+            "tags": [],
+            "metadata_json": "{}",
+        }
+        ns_handle = MagicMock()
+        ns_handle.query = AsyncMock(return_value=SimpleNamespace(rows=[row]))
+        client.namespace = MagicMock(return_value=ns_handle)
+
+        store = _build_store("k")
+        await store.connect()
+
+        results = await store.search(ns_id, [0.1] * 4, filter_ast=None)
+        assert len(results) == 1
+        assert results[0].chunk.content == "match"
+
+    @pytest.mark.asyncio
+    async def test_empty_filter_ast_passes_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A constraint-free ``filter_ast`` is a no-op and passes through.
+
+        ``filter={}`` / ``RecallFilter()`` normalizes to a match-everything
+        AST: an AND root with no children. It's not ``None``, but it carries
+        no predicates, so the backend can honor it trivially by searching
+        without any filter — it must NOT fail loud. This is the interesting
+        case: not-None yet constraint-free.
+        """
+        empty = parse_to_ast(RecallFilter())
+        # Precondition documenting WHY this case matters: not None, no children.
+        assert empty is not None and not empty.children
+
+        _tp, client = _install_fake_turbopuffer(monkeypatch)
+
+        ns_id = uuid4()
+        row = {
+            "id": str(uuid4()),
+            "document_id": str(uuid4()),
+            "content": "match",
+            "$dist": 0.2,
+            "tags": [],
+            "metadata_json": "{}",
+        }
+        ns_handle = MagicMock()
+        ns_handle.query = AsyncMock(return_value=SimpleNamespace(rows=[row]))
+        client.namespace = MagicMock(return_value=ns_handle)
+
+        store = _build_store("k")
+        await store.connect()
+
+        results = await store.search(ns_id, [0.1] * 4, filter_ast=empty)
+        assert len(results) == 1
+        assert results[0].chunk.content == "match"
+
+    @pytest.mark.asyncio
+    async def test_filter_ast_node_raises_unsupported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A constraint-bearing ``filter_ast`` raises ``RecallFilterUnsupportedError``.
+
+        The node here carries a real predicate (``author $eq "alice"``), so its
+        ``children`` is non-empty and the guard fires. The guard short-circuits
+        before any namespace I/O, but we still connect a fake SDK to match the
+        file's fixture approach.
+        """
+        _install_fake_turbopuffer(monkeypatch)
+        store = _build_store("k")
+        await store.connect()
+
+        node = _filter_ast_node()
+        assert node.children  # precondition: this filter carries a constraint
+        with pytest.raises(RecallFilterUnsupportedError):
+            await store.search(uuid4(), [0.1] * 4, filter_ast=node)
