@@ -73,16 +73,7 @@ _ALLOWLISTED_OMISSIONS: dict[tuple[str, str], str] = {
 # allowlist. Pillar-2 (the filter REACHES the channel) is satisfied; Pillar-4
 # (the channel ENFORCES it) is tracked for follow-up. Each is keyed by
 # "module::method" with a reason.
-_ENFORCEMENT_PENDING_BOUNDARIES: dict[str, str] = {
-    "khora.engines.skeleton.backends.sqlite_lance::search_fulltext": (
-        "Embedded SQLiteLanceTemporalStore.search_fulltext accepts filter_ast for "
-        "protocol parity but does not compile it yet — the BM25 channel is wiring-only "
-        "on the embedded stack. The retriever DOES thread the correct filter to it "
-        "(verified by the embedded path-2 spy + its strict-xfail enforcement probe); "
-        "enforcement is tracked for a follow-up engine ticket. The pgvector sibling "
-        "already enforces. REMOVE once embedded search_fulltext compiles filter_ast."
-    ),
-}
+_ENFORCEMENT_PENDING_BOUNDARIES: dict[str, str] = {}
 
 
 def _retriever_tree() -> ast.Module:
@@ -182,15 +173,14 @@ def test_enforcement_pending_boundaries_have_reasons() -> None:
         assert reason and reason.strip(), f"enforcement-pending boundary {key} has no reason"
 
 
-def test_embedded_search_fulltext_still_ignores_filter_ast() -> None:
-    """Pins the documented embedded BM25 enforcement gap to source.
+def test_embedded_search_fulltext_now_enforces_filter_ast() -> None:
+    """Pins embedded BM25 filter enforcement to source.
 
-    The path-2 embedded spy is WIRING-ONLY precisely because
-    ``SQLiteLanceTemporalStore.search_fulltext`` accepts ``filter_ast`` but does
-    not compile it. If someone wires real enforcement, this fails — prompting
-    removal of the enforcement-pending boundary entry AND the strict-xfail on
-    the embedded path-2 enforcement probe. Keyed off the source so the doc note
-    can't silently drift from reality.
+    ``SQLiteLanceTemporalStore.search_fulltext`` declares ``filter_ast`` AND
+    forwards it into the inner ``_bm25_search`` (which compiles + post-filters
+    it). If someone regresses the forward, this fails — the embedded BM25
+    channel would silently drop the caller filter again. Keyed off the source so
+    the doc note can't silently drift from reality.
     """
     backend = (
         Path(__file__).resolve().parents[2] / "src" / "khora" / "engines" / "skeleton" / "backends" / "sqlite_lance.py"
@@ -208,8 +198,8 @@ def test_embedded_search_fulltext_still_ignores_filter_ast() -> None:
     # It declares filter_ast (wiring present) ...
     params = [a.arg for a in fn.args.args] + [a.arg for a in fn.args.kwonlyargs]
     assert "filter_ast" in params, "search_fulltext no longer declares filter_ast — wiring changed"
-    # ... but its body must NOT pass filter_ast into the inner _bm25_search
-    # (that's how it would enforce). If it starts doing so, enforcement landed.
+    # ... AND its body forwards filter_ast into the inner _bm25_search (that's
+    # how it enforces). If this stops, the embedded BM25 filter dropped.
     passes_to_bm25 = any(
         isinstance(call, ast.Call)
         and isinstance(call.func, ast.Attribute)
@@ -217,8 +207,8 @@ def test_embedded_search_fulltext_still_ignores_filter_ast() -> None:
         and any(kw.arg == "filter_ast" for kw in call.keywords)
         for call in ast.walk(fn)
     )
-    assert not passes_to_bm25, (
-        "Embedded search_fulltext now forwards filter_ast to _bm25_search — enforcement "
-        "may have landed. Remove the enforcement-pending boundary entry and re-evaluate "
-        "the strict-xfail on the embedded path-2 enforcement probe."
+    assert passes_to_bm25, (
+        "Embedded search_fulltext no longer forwards filter_ast to _bm25_search — the "
+        "BM25 channel would drop the caller filter. Restore the `filter_ast=filter_ast` "
+        "forward so the embedded BM25 channel enforces the recall filter."
     )

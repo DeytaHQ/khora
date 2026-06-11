@@ -579,8 +579,9 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         StorageCoordinator dispatch path. See :func:`temporal_chunk_to_chunk`
         for the ``TemporalChunk`` → ``Chunk`` adaptation.
 
-        ``filter_ast`` is accepted for protocol parity; this backend does not
-        compile the recall-filter AST yet, so it is ignored.
+        ``filter_ast`` is enforced via :meth:`_bm25_search`, which pushes the
+        compilable leaves into SQL and re-checks the rest against the decoded
+        chunk through :meth:`_ast_post_filter`.
         """
         if not query_text or not query_text.strip():
             return []
@@ -590,7 +591,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 created_after=created_after,
                 created_before=created_before,
             )
-        results = await self._bm25_search(namespace_id, query_text, temporal_filter, limit)
+        results = await self._bm25_search(namespace_id, query_text, temporal_filter, limit, filter_ast=filter_ast)
         return [(temporal_chunk_to_chunk(r.chunk), float(r.bm25_score or 0.0)) for r in results]
 
     async def _bm25_search(
