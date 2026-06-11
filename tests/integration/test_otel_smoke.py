@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 from khora.telemetry import bootstrap, trace_span
+from tests.test_helpers.otel import reset_khora_telemetry, reset_otel_globals
 
 pytestmark = pytest.mark.integration
 
@@ -52,25 +53,11 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _reset_otel_globals() -> None:
-    import opentelemetry.metrics._internal as _m
-    import opentelemetry.trace as _t
-    from opentelemetry.metrics._internal import _ProxyMeterProvider
-    from opentelemetry.trace import ProxyTracerProvider
-
-    _t._TRACER_PROVIDER_SET_ONCE = _t.Once()
-    _t._TRACER_PROVIDER = None
-    _t._PROXY_TRACER_PROVIDER = ProxyTracerProvider()
-    _m._METER_PROVIDER_SET_ONCE = _m.Once()
-    _m._METER_PROVIDER = None
-    _m._PROXY_METER_PROVIDER = _ProxyMeterProvider()
-
-
 def test_spans_reach_otlp_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     """End-to-end: trace_span() with OTLP/HTTP ships to the endpoint."""
     # Reset state.
     monkeypatch.setattr(bootstrap, "_handle", None)
-    _reset_otel_globals()
+    reset_otel_globals()
     _CountingHandler.requests = []
 
     # Stand up a counting OTLP server on a free port.
@@ -111,3 +98,12 @@ def test_spans_reach_otlp_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         server.shutdown()
         thread.join(timeout=2)
+        # Restore the proxy providers. configure_telemetry() installs a
+        # REAL TracerProvider as a process-wide singleton; handle.shutdown()
+        # only force-flushes it, it does NOT reset the global. Left in place,
+        # the real provider outlives this test and pollutes later tests in
+        # the same worker — once it's installed, OTel's span __exit__ runs
+        # record_exception()/str(exc) on any propagating exception, which on
+        # neo4j 6.x hydrated errors raises AttributeError and masks the real
+        # exception a downstream test (e.g. test_dual_nodes) asserts on.
+        reset_khora_telemetry()
