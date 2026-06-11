@@ -282,26 +282,14 @@ async def test_skeleton_recall_top_k_ordering(kb: Khora, namespace_id: UUID) -> 
         assert prev >= curr, f"similarity ordering violated: {prev} < {curr} in {scores}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Engine-level namespace resolution gap: "
-        "the test fixture passes the stable ``ns.namespace_id`` straight to "
-        "``engine.recall`` while ``kb.remember`` resolves it to the "
-        "row-level ``id`` before persisting. ``khora_chunks.namespace_id`` "
-        "therefore stores the row-level id and the recall filter misses. "
-        "Same issue lurks behind PG's xfail. Tracked in #1088 — resolve at the "
-        "engine boundary or update the test contract."
-    ),
-)
 async def test_skeleton_recall_with_metadata_filter(kb: Khora, namespace_id: UUID) -> None:
     """Tag filter restricts recall to chunks carrying the requested tag.
 
     Unlike the PG sibling, the embedded path doesn't hit the ARRAY
     incompatibility (SQLite serializes ``tags`` as JSON-text — no
-    ``ARRAY(String).contains`` incompatibility). The current xfail tracks a separate engine-layer
-    namespace-resolution gap surfaced by this test bypassing
-    :meth:`Khora.recall` and calling ``engine.recall`` directly.
+    ``ARRAY(String).contains`` incompatibility). Because this test bypasses
+    :meth:`Khora.recall` and calls ``engine.recall`` directly, it resolves the
+    stable namespace id to the row-level id itself (see below).
     """
     await _remember(
         kb,
@@ -317,9 +305,15 @@ async def test_skeleton_recall_with_metadata_filter(kb: Khora, namespace_id: UUI
     )
 
     engine = kb._get_engine()  # type: ignore[attr-defined]
+    # Engine-layer recall expects the row-level namespace id (the FK target on
+    # ``khora_chunks.namespace_id``); the public ``namespace_id`` fixture is
+    # the stable namespace identifier. ``Khora.recall`` resolves this for
+    # us automatically — when calling the engine directly we have to do it
+    # ourselves.
+    row_namespace_id = await kb._resolve_namespace(namespace_id)  # type: ignore[attr-defined]
     result = await engine.recall(
         "alpha document",
-        namespace_id,
+        row_namespace_id,
         limit=10,
         temporal_filter=TemporalFilter(tags=["group-A"]),
         hybrid_alpha=1.0,
