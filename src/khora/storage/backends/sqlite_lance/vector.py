@@ -271,6 +271,28 @@ class SQLiteLanceVectorAdapter:
         for row in rows:
             chunk = self._row_to_chunk(row)
             result[chunk.id] = chunk
+        # Fallback for the temporal engines (skeleton / vectorcypher), which
+        # write chunks to ``khora_chunks`` rather than ``chunks`` (#905).  Only
+        # look up the ids the ``chunks`` table didn't satisfy.  A chronicle-only
+        # stack has no ``khora_chunks`` table, so swallow the missing-table
+        # error and return what ``chunks`` yielded instead of crashing.
+        missing = [c for c in chunk_ids if c not in result]
+        if missing:
+            t_placeholders = ",".join("?" for _ in missing)
+            t_params = [uuid_to_text(c) for c in missing]
+            t_params.append(uuid_to_text(namespace_id))
+            try:
+                t_cur = await self._sqlite.execute(
+                    f"SELECT * FROM khora_chunks WHERE id IN ({t_placeholders}) AND namespace_id = ?",  # noqa: S608
+                    t_params,
+                )
+                t_rows = await t_cur.fetchall()
+            except Exception:
+                # Table absent on a chronicle-only stack — no temporal chunks.
+                t_rows = []
+            for row in t_rows:
+                chunk = self._temporal_row_to_chunk(row)
+                result[chunk.id] = chunk
         return result
 
     async def get_chunks_by_document(self, document_id: UUID, *, namespace_id: UUID) -> list[Chunk]:
