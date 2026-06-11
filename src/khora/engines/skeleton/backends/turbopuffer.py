@@ -52,6 +52,7 @@ from khora.engines.skeleton.backends import (
     TemporalSearchResult,
     TemporalVectorStore,
 )
+from khora.filter import RecallFilterUnsupportedError
 
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
@@ -339,9 +340,16 @@ class TurbopufferTemporalStore(TemporalVectorStore):
             the operator docs so users picking turbopuffer know
             ``hybrid_alpha`` is a no-op on this backend.
 
-        ``filter_ast`` is accepted for protocol parity; this backend does not
-        compile the recall-filter AST yet, so it is ignored.
+        A non-None ``filter_ast`` RAISES :class:`RecallFilterUnsupportedError`:
+        this backend does not implement deterministic recall filters, so it
+        fails loud rather than silently returning unfiltered rows.
         """
+        if filter_ast is not None:
+            raise RecallFilterUnsupportedError(
+                "filter_ast",
+                "the turbopuffer backend does not support deterministic recall filters; filter_ast must be None",
+            )
+
         ns = self._namespace(namespace_id)
         tp_filter = _build_turbopuffer_filter(temporal_filter)
 

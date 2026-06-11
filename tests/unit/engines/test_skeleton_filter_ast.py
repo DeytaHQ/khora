@@ -32,8 +32,14 @@ from uuid import uuid4
 
 import pytest
 
+from khora.engines.skeleton.backends.turbopuffer import TurbopufferTemporalStore
 from khora.engines.skeleton.engine import SkeletonConstructionEngine
-from khora.filter import FilterClause, FilterNode, FilterOp
+from khora.filter import (
+    FilterClause,
+    FilterNode,
+    FilterOp,
+    RecallFilterUnsupportedError,
+)
 from khora.query import SearchMode
 
 
@@ -81,6 +87,37 @@ def _sample_filter_ast() -> FilterNode:
     )
 
 
+def _build_engine_with_real_turbopuffer() -> SkeletonConstructionEngine:
+    """Construct an engine whose ``_temporal_store`` is a real Turbopuffer store.
+
+    Mirrors ``_build_engine_with_stubs`` (same ``__new__``-bypass, same embedder
+    stub, NO Postgres), but instead of an ``AsyncMock`` store it injects a real
+    ``TurbopufferTemporalStore``. The store is NOT connected — its ``search``
+    guard raises before any client I/O — so this proves the adapter's raise
+    surfaces out of ``recall()`` un-swallowed on the real bound method.
+    """
+    cfg = MagicMock()
+    cfg.storage.backend = "turbopuffer"
+
+    engine = SkeletonConstructionEngine.__new__(SkeletonConstructionEngine)
+    engine._config = cfg
+    engine._backend_type = "turbopuffer"
+    engine._weaviate_url = None
+    engine._storage_config = MagicMock()
+    engine._storage = None
+    engine._connected = True
+
+    embedder = AsyncMock()
+    embedder.embed = AsyncMock(return_value=[0.1, 0.2, 0.3])
+    engine._embedder = embedder
+
+    store_config = MagicMock()
+    store_config.llm.embedding_dimension = 1536
+    engine._temporal_store = TurbopufferTemporalStore(store_config, "tpuf_test")
+
+    return engine
+
+
 # ---------------------------------------------------------------------------
 # Regression 1: the engine must forward filter_ast to temporal_store.search.
 # ---------------------------------------------------------------------------
@@ -126,6 +163,23 @@ async def test_recall_filter_ast_none_forwards_none() -> None:
     kwargs = temporal_store.search.await_args.kwargs
     assert "filter_ast" in kwargs
     assert kwargs["filter_ast"] is None
+
+
+async def test_recall_surfaces_turbopuffer_filter_unsupported() -> None:
+    """A backend that fails loud on ``filter_ast`` propagates out of ``recall``.
+
+    The turbopuffer store raises ``RecallFilterUnsupportedError`` when handed a
+    non-None ``filter_ast``. ``recall`` calls ``temporal_store.search`` directly
+    with no try/except, so the raise must surface un-swallowed. This proves the
+    fail-loud contract holds end-to-end at the engine boundary — the engine does
+    not catch the error and silently return unfiltered rows.
+    """
+    engine = _build_engine_with_real_turbopuffer()
+    namespace_id = uuid4()
+    node = _sample_filter_ast()
+
+    with pytest.raises(RecallFilterUnsupportedError):
+        await engine.recall("q", namespace_id, mode=SearchMode.VECTOR, filter_ast=node)
 
 
 # ---------------------------------------------------------------------------

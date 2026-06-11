@@ -27,6 +27,12 @@ from khora.engines.skeleton.backends.turbopuffer import (
     _row_to_chunk,
     _rrf_fuse,
 )
+from khora.filter import (
+    FilterClause,
+    FilterNode,
+    FilterOp,
+    RecallFilterUnsupportedError,
+)
 
 # ---------------------------------------------------------------------------
 # TurbopufferBackendConfig validation
@@ -661,3 +667,62 @@ class TestImportErrorWhenSdkMissing:
         store = _build_store("k")
         with pytest.raises(ImportError, match="turbopuffer is required"):
             await store.connect()
+
+
+# ---------------------------------------------------------------------------
+# Recall filter_ast fail-loud contract
+# ---------------------------------------------------------------------------
+#
+# turbopuffer does not implement deterministic recall filters, so a non-None
+# ``filter_ast`` must fail loud (raise) rather than silently return unfiltered
+# rows. ``None`` keeps the existing behavior unchanged.
+
+
+def _filter_ast_node() -> FilterNode:
+    """A small real ``FilterNode`` — ``AND([author $eq "alice"])``."""
+    return FilterNode(
+        op=FilterOp.AND,
+        children=(FilterClause(path=("author",), op=FilterOp.EQ, operand="alice"),),
+    )
+
+
+@pytest.mark.unit
+class TestFilterAstFailLoud:
+    @pytest.mark.asyncio
+    async def test_filter_ast_none_keeps_existing_behavior(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``filter_ast=None`` still searches and returns rows from the SDK."""
+        _tp, client = _install_fake_turbopuffer(monkeypatch)
+
+        ns_id = uuid4()
+        row = {
+            "id": str(uuid4()),
+            "document_id": str(uuid4()),
+            "content": "match",
+            "$dist": 0.2,
+            "tags": [],
+            "metadata_json": "{}",
+        }
+        ns_handle = MagicMock()
+        ns_handle.query = AsyncMock(return_value=SimpleNamespace(rows=[row]))
+        client.namespace = MagicMock(return_value=ns_handle)
+
+        store = _build_store("k")
+        await store.connect()
+
+        results = await store.search(ns_id, [0.1] * 4, filter_ast=None)
+        assert len(results) == 1
+        assert results[0].chunk.content == "match"
+
+    @pytest.mark.asyncio
+    async def test_filter_ast_node_raises_unsupported(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-None ``filter_ast`` raises ``RecallFilterUnsupportedError``.
+
+        The guard short-circuits before any namespace I/O, but we still
+        connect a fake SDK to match the file's fixture approach.
+        """
+        _install_fake_turbopuffer(monkeypatch)
+        store = _build_store("k")
+        await store.connect()
+
+        with pytest.raises(RecallFilterUnsupportedError):
+            await store.search(uuid4(), [0.1] * 4, filter_ast=_filter_ast_node())
