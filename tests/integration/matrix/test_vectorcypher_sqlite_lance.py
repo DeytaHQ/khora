@@ -25,13 +25,15 @@ in-process SQLite (``aiosqlite``) and LanceDB (``lancedb``).
 
 ## State
 
-VectorCypher's embedded ``sqlite_lance`` path is wired and 7/10 tests
-in this module pass cleanly. Three tests remain ``xfail`` for known
+VectorCypher's embedded ``sqlite_lance`` path is wired. Occurred-bounds
+temporal recall (``start_time`` / ``end_time``) now works on the embedded
+path — the filter pushes down to ``khora_chunks.occurred_at`` and the
+retriever skips the unsupported entity-version narrowing with a structured
+degradation rather than failing. Two tests remain ``xfail`` for known
 backend gaps (each xfail carries an explanatory string):
 
 * ``test_vc_two_hop_traversal`` — multi-hop CTE traversal correctness
   on the SQL-emulated graph.
-* ``test_vc_temporal_filter`` — temporal pushdown on the embedded path.
 * ``test_vc_prefer_current_via_cte`` — ``prefer_current`` honoring on
   CTE traversal.
 
@@ -223,6 +225,7 @@ async def _remember(
     namespace_id: UUID,
     content: str,
     title: str = "",
+    source_timestamp: datetime | None = None,
 ) -> Any:
     return await kb.remember(
         content=content,
@@ -231,6 +234,7 @@ async def _remember(
         entity_types=["PERSON", "CONCEPT", "EVENT", "ORG"],
         relationship_types=["KNOWS", "RELATES_TO", "MENTIONS"],
         expertise=_no_event_extraction(),
+        source_timestamp=source_timestamp,
     )
 
 
@@ -400,51 +404,33 @@ async def test_vc_two_hop_traversal(kb: Khora, namespace_id: UUID) -> None:
     assert "graph databases" in text_blob.lower(), f"2-hop entity not surfaced; got context={text_blob[:300]!r}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "VectorCypher embedded path does not support point-in-time temporal recall: "
-        "an occurred-bounds temporal_filter (here from start_time) trips the "
-        "sqlite_lance fail-fast at retriever.py:601 (NotImplementedError), so the "
-        "recall raises before any LanceDB-level temporal narrowing. Verified by "
-        "running both ways (xfail kept: --runxfail FAILS with that NotImplementedError, "
-        "not a clean filtered result). Keep until the embedded backend honors "
-        "point-in-time temporal queries; this is the acceptance test for that work."
-    ),
-)
 async def test_vc_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
-    """Two docs at different ``occurred_at``; recall with ``last 7 days`` filter
-    only returns the recent one.
+    """Two docs at different ``occurred_at``; recall with a ``start_time`` floor
+    returns the recent one and drops the old one.
 
-    ``Khora.remember()`` does not surface ``occurred_at`` on its public
-    API (engines accept it but the kb-level wrapper does not forward it),
-    so we ingest both docs at ``now`` and then back-date one chunk's
-    ``source_timestamp`` directly in SQLite — same pattern as
-    ``test_skeleton_pg`` for the production stack.
+    The chunk ``occurred_at`` (the column the occurred-bounds filter reads,
+    ``khora_chunks.occurred_at``) is set AT INGEST from the ``source_timestamp``
+    kwarg — exercising the real ``source_timestamp -> occurred_at`` path (#859)
+    rather than a raw post-hoc SQL UPDATE. The recent doc is stamped now; the
+    old doc now-400d.
+
+    The assertion is non-vacuous: the recent doc must be PRESENT and the old
+    doc ABSENT, proving the ``start_time`` floor narrows on the right column
+    rather than dropping (or keeping) both.
     """
     now = datetime.now(UTC)
-    await _remember(
+    r_recent = await _remember(
         kb,
         namespace_id=namespace_id,
         content="recent doc about Falcon launch in May 2026.",
+        source_timestamp=now,
     )
     r_old = await _remember(
         kb,
         namespace_id=namespace_id,
         content="old doc about Falcon launch in 2024.",
+        source_timestamp=now - timedelta(days=400),
     )
-
-    # Back-date the "old" doc's chunks via the embedded SQLite handle.
-    # The sqlite_lance backend stores UUIDs as 32-char hex (no dashes),
-    # so we must match that form when filtering on ``document_id``.
-    coord = kb._engine._storage  # type: ignore[union-attr]
-    handle = coord._vector._handle  # type: ignore[union-attr]
-    backdated_iso = (now - timedelta(days=400)).isoformat()
-    await handle.sqlite.execute(
-        "UPDATE chunks SET source_timestamp = ? WHERE document_id = ?",
-        (backdated_iso, str(r_old.document_id).replace("-", "")),
-    )
-    await handle.sqlite.commit()
 
     seven_days_ago = now - timedelta(days=7)
     result = await kb.recall(
@@ -456,6 +442,44 @@ async def test_vc_temporal_filter(kb: Khora, namespace_id: UUID) -> None:
 
     returned_doc_ids = {c.document_id for c in result.chunks}
     assert r_old.document_id not in returned_doc_ids, f"old document leaked through temporal filter: {returned_doc_ids}"
+    assert r_recent.document_id in returned_doc_ids, (
+        f"recent document was dropped by the temporal filter (vacuous pass guard): {returned_doc_ids}"
+    )
+
+
+async def test_vc_temporal_filter_excludes_only_old_doc(kb: Khora, namespace_id: UUID) -> None:
+    """Control: seed ONLY the back-dated doc, recall with a ``start_time`` floor
+    above it → result is EMPTY.
+
+    Proves the temporal bound is the narrowing force — not vector top-k or
+    routing. If recall still returned the back-dated chunk here, the floor
+    would not be doing the filtering and ``test_vc_temporal_filter`` above
+    would be passing for the wrong reason.
+    """
+    now = datetime.now(UTC)
+    r_old = await _remember(
+        kb,
+        namespace_id=namespace_id,
+        content="old doc about Falcon launch in 2024.",
+        source_timestamp=now - timedelta(days=400),
+    )
+
+    result = await kb.recall(
+        "Falcon launch",
+        namespace=namespace_id,
+        limit=10,
+        start_time=now - timedelta(days=7),
+    )
+
+    assert result.chunks == [], (
+        f"back-dated doc leaked past the start_time floor: {[c.document_id for c in result.chunks]}"
+    )
+    # Sanity: the doc was actually ingested (the floor is what drops it, not an
+    # empty corpus). Without the floor the same recall returns the old chunk.
+    unfiltered = await kb.recall("Falcon launch", namespace=namespace_id, limit=10)
+    assert r_old.document_id in {c.document_id for c in unfiltered.chunks}, (
+        "control corpus was empty even without the floor — test would pass vacuously"
+    )
 
 
 async def test_vc_recall_metadata_keys(kb: Khora, namespace_id: UUID) -> None:

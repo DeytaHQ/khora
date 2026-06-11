@@ -21,7 +21,8 @@ Paths covered here:
   ``_vector_search_chunks`` calls + the unscoped fallback each carry the filter.
 * (5) restrictive-fallback re-run guard — under a caller filter, the unfiltered
   re-run that normally fires on sparse temporal results is SUPPRESSED (it drops
-  the filter); reachable only on PG (embedded fails fast on point-in-time).
+  the filter); exercised on PG, where the point-in-time entity-version path the
+  re-run pairs with is honored (embedded skips entity-version narrowing).
 * (7) CHANGE decomposition — a CHANGE query with version history runs a second
   ``_vector_search_chunks`` over the decomposed current-state sub-query, which
   carries the filter.
@@ -447,8 +448,9 @@ async def test_restrictive_fallback_rerun_suppressed_under_filter(
     it is paired with a DIFFERENTIAL control proving the re-run IS reachable when
     no caller filter is present — otherwise "no re-run fired" is vacuously true.
 
-    PG-specific: the embedded sqlite_lance stack fails fast on point-in-time
-    queries, so the re-run path is only reachable on the live PG+Neo4j stack —
+    PG-specific: the embedded sqlite_lance stack skips point-in-time
+    entity-version narrowing (it lacks the bi-temporal columns), so the
+    version-filter-paired re-run path is exercised on the live PG+Neo4j stack —
     which is why this spy lives here, not in the embedded suite.
 
     IMPORTANT — arming the fallback. The re-run is gated on a populated

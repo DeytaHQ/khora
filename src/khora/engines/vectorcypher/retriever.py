@@ -119,6 +119,25 @@ _REL_FETCH_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# Entity-version-filter degradation counter. The embedded
+# sqlite_lance schema lacks the ``version_valid_from/to`` columns that
+# ``_version_filter_entities`` reads, so point-in-time entity-version
+# narrowing is skipped on that backend. Recall continues with occurred-bounds
+# chunk filtering only; the same event is appended to
+# ``RecallResult.engine_info['degradations']``. NO namespace_id label.
+_VERSION_FILTER_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.version_filter.degraded_total",
+    unit="1",
+    description=(
+        "VectorCypher entity-version filtering fallbacks. Incremented when an "
+        "EXPLICIT/occurred-bounds recall runs on the embedded sqlite_lance "
+        "backend, which lacks version_valid_from/to columns, so point-in-time "
+        "entity-version narrowing is skipped (occurred-bounds chunk filtering "
+        "still applies). Labels: reason (embedded_no_version_columns). "
+        "NO namespace_id label - cardinality rule."
+    ),
+)
+
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
     """Normalize the value of ``chunker_info`` returned by a record dict.
@@ -592,18 +611,6 @@ class VectorCypherRetriever:
         """
         with trace_span("khora.vectorcypher.retrieve", namespace_id=str(namespace_id)) as span:
             limit = limit or self._config.max_chunks
-
-            # Gate point-in-time / historical queries on the embedded
-            # backend. The sqlite_lance schema lacks ``version_valid_from/to``
-            # columns, so ``_version_filter_entities`` would silently fall
-            # through and return current-state results — a correctness bug.
-            # Fail fast with a clear message before any storage I/O.
-            if self._backend == "sqlite_lance" and _has_target_date(temporal_filter, temporal_signal):
-                raise NotImplementedError(
-                    "Point-in-time queries (target_date) are not supported on "
-                    "the embedded sqlite_lance backend. Use the production "
-                    "stack (PostgreSQL+Neo4j) for historical/temporal queries."
-                )
 
             # Resolve retrieval parameters from temporal signal
             params = (
@@ -1366,10 +1373,16 @@ class VectorCypherRetriever:
                 if target_date is not None:
                     with trace_span("khora.vectorcypher.version_filter", target_date=target_date.isoformat()):
                         try:
+                            # On graph-less backends (sqlite_lance / surrealdb)
+                            # this is a no-op that returns entities unfiltered and
+                            # records a structured degradation — the embedded schema
+                            # lacks the version_valid_from/to columns. Occurred-bounds
+                            # chunk filtering is still honored via ``temporal_filter``.
                             all_entity_ids = await self._version_filter_entities(
                                 entity_ids=all_entity_ids,
                                 namespace_id=namespace_id,
                                 target_date=target_date,
+                                degradations=degradations,
                             )
                         except _NEO4J_TRANSIENT_ERRORS as exc:
                             logger.warning(
@@ -2894,6 +2907,7 @@ class VectorCypherRetriever:
         entity_ids: list[UUID],
         namespace_id: UUID,
         target_date: datetime,
+        degradations: list[Degradation] | None = None,
     ) -> list[UUID]:
         """Filter entities to those valid at a specific point in time (bi-temporal).
 
@@ -2909,6 +2923,9 @@ class VectorCypherRetriever:
             entity_ids: Candidate entity IDs
             namespace_id: Namespace constraint
             target_date: The point-in-time to query for
+            degradations: When provided, a structured ``Degradation`` is appended
+                on the graph-less no-op path (see below) so callers can detect
+                that point-in-time entity-version narrowing was skipped.
 
         Returns:
             Filtered list of entity IDs (may include EntityVersion IDs)
@@ -2917,8 +2934,31 @@ class VectorCypherRetriever:
         if not entity_ids:
             return []
 
-        # SurrealDB unified backend — no Neo4j driver, skip version filtering
+        # Graph-less backends (sqlite_lance / surrealdb) have no Neo4j driver and
+        # no version_valid_from/to columns, so point-in-time entity-version
+        # narrowing cannot run — return entities unfiltered (current-state).
+        # This is the genuine no-op site: record a structured degradation here
+        # (condition-driven, no exc_info) so the skip is observable. A plain
+        # occurred-bounds recall never reaches this method, so it stays
+        # degradation-free; only a parsed target_date lands here.
         if self._neo4j_driver is None:
+            logger.warning(
+                "Entity-version filtering is unavailable on this backend (no graph "
+                "driver / version columns); recall continues with occurred-bounds "
+                "chunk filtering only (no point-in-time entity versioning)."
+            )
+            if degradations is not None:
+                degradations.append(
+                    Degradation(
+                        component="vectorcypher.version_filter",
+                        reason="embedded_no_version_columns",
+                        detail=(
+                            "sqlite_lance lacks version_valid_from/to; point-in-time "
+                            "entity-version filtering skipped — returning current-state entities"
+                        ),
+                    )
+                )
+            _VERSION_FILTER_DEGRADED_COUNTER.add(1, attributes={"reason": "embedded_no_version_columns"})
             return list(entity_ids)
 
         # First: keep current Entity nodes that are valid at target_date,

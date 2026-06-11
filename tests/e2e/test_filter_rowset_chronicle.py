@@ -22,6 +22,7 @@ from tests.e2e import _harness
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.slow,
+    _harness.lane_skip("chronicle"),
     pytest.mark.skipif(
         not _harness._pg_reachable(),
         reason="start Postgres (make dev) to exercise the live Chronicle lane",
@@ -50,3 +51,19 @@ async def test_rowset_reconciliation_chronicle(chronicle_kb, case) -> None:
 
     assert survivors == case.expected_ids
     assert survivors == conformance.oracle_survivors(case)
+
+
+def test_lane_selection_matches_shipped_chronicle() -> None:
+    """The resolver lane selection equals this module's shipped precedent (Layer-3).
+
+    The Layer-1 empty-raise in ``lane_rowset_cases`` catches a token that selects
+    NOTHING, but not a valid-but-wrong token that happens to select a different
+    non-empty set. This pins the resolver path (``lane_rowset_cases("chronicle")``)
+    to the shipped selection this module has always parametrized over
+    (``rowset_cases("chronicle", include_system_keys=True)``), so a future
+    ``_E2E_BACKEND_MAP`` drift that re-points ``chronicle`` at a different token or
+    flips its system-key flag fails LOUD here instead of silently under/over-covering.
+    """
+    resolver_ids = {c.id for c in _harness.lane_rowset_cases("chronicle")}
+    shipped_ids = {c.id for c in _chronicle_rowset_cases()}
+    assert resolver_ids == shipped_ids

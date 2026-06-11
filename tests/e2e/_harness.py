@@ -21,6 +21,8 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
+import pytest
+
 from khora import Khora
 from khora.core.models.recall import RecallResult
 from khora.filter.conformance import (
@@ -56,6 +58,17 @@ _ENGINE_ROWSET_KEYS: frozenset[str] = frozenset({*_REMEMBER_STRING_KEYS, "source
 # A generous recall ceiling so the whole seed set is returned and the filter is
 # the only narrowing force (conformance seeds are a handful of records each).
 _RECALL_LIMIT = 100
+
+# The similarity floor for the row-set proof. The deterministic SHA-256 hash
+# embedder produces vectors with NO semantic meaning, so the query↔doc cosine is
+# frequently NEGATIVE for a genuinely-seeded document. Backends that return a
+# signed cosine (e.g. SurrealDB's brute-force path) then drop those docs at a
+# ``0.0`` floor — making the row-set proof vacuous even though the filter would
+# keep them. A negative floor admits EVERY seeded document regardless of the
+# meaningless hash-cosine sign, so the filter stays the only narrowing force (the
+# whole point of the proof). ``-1.0`` is the cosine minimum, so it admits all.
+# Verified no-op on the sqlite_lance lanes (already clamped non-negative there).
+_RECALL_MIN_SIMILARITY = -1.0
 
 
 # --------------------------------------------------------------------------- #
@@ -103,9 +116,19 @@ async def seed_records(
     One ``remember`` call per record. ``entity_types`` / ``relationship_types``
     default to a single placeholder type each (the VectorCypher engine requires a
     non-empty list); a graph-bearing test passes its own seeded types.
+
+    The Skeleton engine is the exception: it has no graph channel and **rejects**
+    a non-empty ``entity_types`` / ``relationship_types`` with
+    ``UnsupportedEngineKwargError`` (#890 — it deliberately skips typed extraction
+    for cost). On a Skeleton ``kb`` the defaults flip to empty lists so the same
+    row-set proof seeds through the Skeleton ingest path unchanged. An explicit
+    override always wins (a Skeleton caller would never pass non-empty types).
     """
-    etypes = entity_types if entity_types is not None else ["ENTITY"]
-    rtypes = relationship_types if relationship_types is not None else ["RELATED_TO"]
+    skeleton = getattr(kb, "_engine_name", None) == "skeleton"
+    default_etypes: list[str] = [] if skeleton else ["ENTITY"]
+    default_rtypes: list[str] = [] if skeleton else ["RELATED_TO"]
+    etypes = entity_types if entity_types is not None else default_etypes
+    rtypes = relationship_types if relationship_types is not None else default_rtypes
     for record in records:
         await kb.remember(
             namespace=namespace_id,
@@ -141,7 +164,7 @@ async def recall_survivors(
     """Seed a case, run its filter through ``Khora.recall()``, return surviving record ids.
 
     Seeds every ``case.seed_records`` via :func:`seed_records`, recalls the shared
-    anchor with ``case.filter`` applied (``min_similarity=0.0`` and a generous
+    anchor with ``case.filter`` applied (``_RECALL_MIN_SIMILARITY`` and a generous
     ``limit`` so the filter is the only narrowing force), and reconciles the result
     back to record ids by ``external_id``. The caller asserts the returned set
     equals ``case.expected_ids``.
@@ -152,7 +175,7 @@ async def recall_survivors(
         namespace=namespace_id,
         mode=mode,
         limit=_RECALL_LIMIT,
-        min_similarity=0.0,
+        min_similarity=_RECALL_MIN_SIMILARITY,
         filter=case.filter,
     )
     return reconcile(result)
@@ -351,6 +374,131 @@ def rowset_cases(backend: str, *, include_system_keys: bool) -> list[Conformance
 
 
 # --------------------------------------------------------------------------- #
+# Backend resolver + anti-vacuity guard — the parametrized matrix lane.
+# --------------------------------------------------------------------------- #
+
+# ``KHORA_E2E_BACKEND`` selects which engine lane the parametrized matrix runs.
+# The value maps to ``(conformance token, include_system_keys)``: the token is
+# the ``ConformanceCase.backends`` member the selector filters on, and the flag
+# turns on the denormalized-document-column families — ON only when the lane's
+# chunk row actually carries the system keys. VectorCypher / Chronicle (pgvector)
+# and Skeleton-pgvector denormalize them onto every chunk; the embedded
+# ``sqlite_lance`` row and the Skeleton surrealdb / weaviate adapters do NOT
+# (surrealdb DEFINEs them on ``document`` not ``chunk``; weaviate omits them from
+# the ``KhoraChunk`` collection), so those lanes leave it off — a system-key
+# filter there narrows on an absent column and would reconcile vacuously.
+_E2E_BACKEND_MAP: dict[str, tuple[str, bool]] = {
+    # The token is the ``ConformanceCase.backends`` member, NOT the storage
+    # backend name: the live VectorCypher graph lane (``vc_full``) compiles its
+    # filter through the Cypher post-filter path, so it reconciles against the
+    # ``cypher`` conformance token (matching the shipped graph module's
+    # ``rowset_cases("cypher", ...)``) — ``postgres`` would silently under-cover.
+    #
+    # The trailing row-set count pins each lane to its conformance tag so review
+    # catches a valid-but-WRONG token (which passes the raise-on-empty guard but
+    # silently under-covers — the ``vc_full``→``postgres`` slip was 81→46). QA's
+    # lane modules assert the shipped-precedent equality, so a drift fails RED.
+    "vc_full": ("cypher", True),  # 81 — matches shipped test_filter_rowset_graph.py:108
+    "vc_embedded": ("sqlite_lance", False),  # 30
+    "skeleton_pgvector": ("postgres", True),  # 46
+    "skeleton_surrealdb": ("surrealdb", False),  # 26 — system keys live on ``document``, not ``chunk``
+    "skeleton_weaviate": ("weaviate", False),  # 30 — ``KhoraChunk`` collection omits the document system keys
+    "skeleton_sqlite_lance": ("sqlite_lance", False),  # 30
+    "chronicle": ("chronicle", True),  # 81 — matches shipped test_filter_rowset_chronicle.py:41
+}
+
+
+def resolve_e2e_backend(backend: str | None = None) -> tuple[str, bool]:
+    """``(conformance token, include_system_keys)`` for a matrix lane.
+
+    ``backend`` is a matrix-lane key (``"skeleton_surrealdb"``, ``"vc_full"``, …);
+    when omitted it falls back to the ``KHORA_E2E_BACKEND`` env var the e2e
+    workflow sets per leg. Either way the key resolves to the conformance
+    ``backends`` token the selectors filter on and the system-key flag. An unknown
+    / unset value is a configuration error — a silent default would let a mis-set
+    leg run the wrong corpus and pass green, so it raises instead.
+    """
+    key = backend if backend is not None else os.environ.get("KHORA_E2E_BACKEND")
+    if key not in _E2E_BACKEND_MAP:
+        raise RuntimeError(
+            f"e2e backend {key!r} is not a known matrix lane; "
+            f"expected one of {sorted(_E2E_BACKEND_MAP)} "
+            "(pass it explicitly or set KHORA_E2E_BACKEND)"
+        )
+    return _E2E_BACKEND_MAP[key]
+
+
+def lane_rowset_cases(backend: str | None = None) -> list[ConformanceCase]:
+    """The row-set cases for a matrix lane — raises if the selector yields none.
+
+    ``backend`` is the matrix-lane key (defaulting to ``KHORA_E2E_BACKEND``). The
+    empty-raise IS the Layer-1 anti-vacuity guard: a mis-mapped token or a corpus
+    shrink that drops every case for this lane turns into a RED at collection time,
+    never a silent empty-green parametrization. QA's parametrized tests call this —
+    never the raw :func:`rowset_cases` — so the guard always fires.
+    """
+    token, include_system_keys = resolve_e2e_backend(backend)
+    cases = rowset_cases(token, include_system_keys=include_system_keys)
+    if not cases:
+        raise RuntimeError(
+            f"rowset_cases({token!r}, include_system_keys={include_system_keys}) "
+            "selected zero cases — a mis-mapped e2e backend or a corpus shrink. "
+            "Refusing to parametrize an empty (vacuously green) lane."
+        )
+    return cases
+
+
+def lane_exists_cases(backend: str | None = None) -> list[ConformanceCase]:
+    """The F-EXISTS reachability cases for a matrix lane — raises if none.
+
+    ``backend`` is the matrix-lane key (defaulting to ``KHORA_E2E_BACKEND``).
+    Filters :func:`f_exists_cases` to the lane's conformance token; when the lane
+    carries no denormalized document columns (``include_system_keys`` off, the
+    embedded ``chunks`` row), the ``source_name`` system-key presence states are
+    dropped because the embedded recall path can't narrow on them. The empty-raise
+    is the same Layer-1 guard as :func:`lane_rowset_cases`.
+    """
+    token, include_system_keys = resolve_e2e_backend(backend)
+    cases = [
+        c for c in f_exists_cases() if token in c.backends and (include_system_keys or c.exercises[1] != "source_name")
+    ]
+    if not cases:
+        raise RuntimeError(
+            f"f_exists_cases filtered to token={token!r} "
+            f"(include_system_keys={include_system_keys}) selected zero cases — a "
+            "mis-mapped e2e backend or a corpus shrink. Refusing to parametrize "
+            "an empty (vacuously green) lane."
+        )
+    return cases
+
+
+def lane_skip(lane: str) -> pytest.MarkDecorator:
+    """A ``skipif`` mark that runs the module only on its own matrix lane.
+
+    ``lane`` is the module's matrix-lane key (``"skeleton_surrealdb"``, …) — the
+    value the e2e workflow sets in ``KHORA_E2E_BACKEND`` for that leg. The matrix
+    runs ONE engine config per leg, but reachability self-selection alone can't
+    separate the lanes (the ``vc_full`` leg has Postgres up, so the ``chronicle``
+    and ``skeleton_pgvector`` modules would also run there). Gating each module on
+    ``KHORA_E2E_BACKEND`` makes the env var the per-leg selector; ``devops`` sets it
+    per leg and drops the belt-and-suspenders ``-k``.
+
+    A **no-op when ``KHORA_E2E_BACKEND`` is unset / empty** (the default test-unit
+    and local runs) so those collect-and-run every lane unchanged — the per-module
+    reachability ``skipif`` still gates the live ones there. ``lane`` is validated
+    against :data:`_E2E_BACKEND_MAP` so a typo'd key fails loud rather than skipping
+    the module on every leg silently.
+    """
+    if lane not in _E2E_BACKEND_MAP:
+        raise RuntimeError(f"lane_skip({lane!r}): not a known matrix lane; expected one of {sorted(_E2E_BACKEND_MAP)}")
+    active = os.environ.get("KHORA_E2E_BACKEND")
+    return pytest.mark.skipif(
+        active not in (None, "", lane),
+        reason=f"KHORA_E2E_BACKEND={active!r} selects a different e2e lane (this is {lane!r})",
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Reachability guard — the live-lane modules self-skip on this.
 # --------------------------------------------------------------------------- #
 
@@ -371,3 +519,51 @@ def _pg_reachable() -> bool:
             return True
     except OSError:
         return False
+
+
+def _weaviate_reachable() -> bool:
+    """Whether the live Weaviate at ``WEAVIATE_URL`` is reachable (the weaviate-lane self-skip guard).
+
+    Mirrors :func:`_pg_reachable` and the conftest ``_weaviate_reachable``: parse
+    host+port off ``WEAVIATE_URL`` and TCP-probe it, so the live Skeleton-Weaviate
+    module's ``pytest.mark.skipif`` can call it at collection time without importing
+    the conftest fixtures (keeps the QA-imports-from-``_harness`` contract clean).
+    ``WEAVIATE_URL`` defaults to the local ``make dev`` HTTP port (8090) when unset;
+    the CI leg sets it explicitly.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    url = os.environ.get("WEAVIATE_URL", "http://localhost:8090")
+    parsed = urlparse(url)
+    try:
+        with socket.create_connection((parsed.hostname or "localhost", parsed.port or 8080), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def _surreal_embedded_available() -> bool:
+    """Whether the embedded SurrealDB SDK is importable (the surrealdb-lane self-skip guard).
+
+    The ``skeleton_surrealdb`` lane runs ``memory`` mode in-process — no container,
+    but it does need the optional ``surrealdb`` SDK (``pip install khora[surrealdb]``).
+    Probes via ``find_spec`` so the ``pytest.mark.skipif`` can call it at collection
+    time without importing the SDK. Mirrors the ``importorskip("surrealdb")`` guard
+    the integration SurrealDB modules use.
+    """
+    import importlib.util
+
+    return importlib.util.find_spec("surrealdb") is not None
+
+
+def _embedded_available() -> bool:
+    """Whether the no-Docker embedded stack (aiosqlite + lancedb) is importable.
+
+    The self-skip guard for the container-free embedded sqlite_lance lanes (VC and
+    Skeleton). Probes via ``find_spec`` so the ``pytest.mark.skipif`` can call it at
+    collection time without importing either package.
+    """
+    import importlib.util
+
+    return importlib.util.find_spec("aiosqlite") is not None and importlib.util.find_spec("lancedb") is not None

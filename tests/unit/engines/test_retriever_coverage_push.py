@@ -1115,9 +1115,15 @@ class TestCalculateRecencyScoresPerSource:
 @pytest.mark.unit
 class TestRetrieveBackendGate:
     @pytest.mark.asyncio
-    async def test_sqlite_lance_blocks_point_in_time_query(self) -> None:
-        """When the embedded backend is used with a target_date, the retriever
-        raises NotImplementedError before touching storage."""
+    async def test_sqlite_lance_allows_occurred_bounds_query(self) -> None:
+        """An occurred-bounds temporal_filter no longer fail-fasts on the embedded
+        backend.
+
+        The old blanket gate raised NotImplementedError for any target_date on
+        sqlite_lance; it was replaced by a call-site guard that skips only the
+        unsupported entity-version narrowing (recording a structured degradation)
+        while the occurred-bounds chunk filter still pushes down. Here we assert
+        ``retrieve()`` dispatches to the chunk path instead of raising."""
         retriever = VectorCypherRetriever(
             vector_store=AsyncMock(),
             neo4j_driver=None,
@@ -1125,11 +1131,28 @@ class TestRetrieveBackendGate:
             config=RetrieverConfig(),
             backend="sqlite_lance",
         )
+        # Stub the dispatch target so the unit test stays focused on the gate
+        # decision rather than the full storage path.
+        retriever._simple_retrieve = AsyncMock(  # type: ignore[method-assign]
+            return_value=VectorCypherResult(
+                chunks=[],
+                entities=[],
+                routing_decision=RoutingDecision(
+                    complexity=QueryComplexity.SIMPLE,
+                    use_graph=False,
+                    graph_depth=0,
+                    confidence=0.9,
+                    reasoning="gate",
+                ),
+                metadata={},
+            )
+        )
         from khora.engines.skeleton.backends import TemporalFilter
 
         tf = TemporalFilter(occurred_after=datetime(2025, 6, 1, tzinfo=UTC))
-        with pytest.raises(NotImplementedError, match="sqlite_lance"):
-            await retriever.retrieve("any", uuid4(), temporal_filter=tf)
+        result = await retriever.retrieve("any", uuid4(), temporal_filter=tf)
+        assert result.chunks == []
+        retriever._simple_retrieve.assert_awaited_once()
 
 
 @pytest.mark.unit

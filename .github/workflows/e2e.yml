@@ -1,0 +1,314 @@
+name: E2E Engine Matrix
+
+# ---------------------------------------------------------------------------
+# Deterministic end-to-end recall matrix. One leg per engine configuration;
+# each leg provisions ONLY the live store(s) it needs via an `if:`-guarded
+# `docker run` (Postgres for the pgvector-backed legs, Neo4j for the full
+# vectorcypher leg, Weaviate for the weaviate skeleton leg), so a leg that runs
+# in-process never waits on an idle container.
+#
+# This file is intentionally separate from ci.yml: GitHub schedules a separate
+# workflow file as its own check, so this matrix runs concurrently with the
+# main `test` job and gates the PR on its own.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# UV_NO_SYNC mirrors ci.yml: each leg installs the crewai extras combo once
+# (NEVER `--all-extras` — crewai and google-adk pin conflicting
+# opentelemetry-api ranges), then `uv run` must not re-resolve the venv.
+env:
+  UV_NO_SYNC: "1"
+
+jobs:
+  e2e:
+    # Per-leg check name is the engine config under test. KHORA_E2E_BACKEND
+    # selects the lane's corpus inside the parametrize; `matrix.select` isolates
+    # the lane's module(s) so only that one engine runs per leg. (The harness
+    # lane_skip(token) gate on each module agrees with the same token, so the two
+    # always select the same lane — redundant defense-in-depth, never conflicting.)
+    name: ${{ matrix.backend }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # `include` so each leg carries its own provisioning metadata:
+        #   postgres / neo4j / weaviate: leg needs that live container. Legs
+        #   without any service flag execute in-process (the embedded
+        #   sqlite_lance / surrealdb legs seed per-worker inside the pytest
+        #   fixture, so they need no live container).
+        # Four container legs (3 Postgres, 1 Neo4j on the full vectorcypher leg,
+        # 1 Weaviate) and three container-free legs.
+        #
+        # `select` is the per-leg pytest target+selection that isolates the lane's
+        # module(s) to exactly one engine. Six lanes use `-k <token>`: each lane's
+        # module/test node ids embed a UNIQUE token equal to `backend`, so the
+        # substring match hits only that module. The vc_full leg is the exception:
+        # its two modules (the row-set proof + the graph-contribution honesty
+        # proof) predate the lane-token naming and are NOT renamed, so it selects
+        # them by explicit file PATH instead of a `graph` substring — deterministic,
+        # zero risk of a future Skeleton test whose node id contains "graph". A
+        # `select` whose `-k` matches nothing makes pytest exit 5 (RED) — the
+        # natural anti-vacuity backstop. (The per-module lane_skip(token) gate is a
+        # second, redundant layer keyed on the same token; the two always agree.)
+        include:
+          # Full vectorcypher engine — live Postgres + Neo4j. Path-selected (no
+          # `-k`): the two vc_full modules are addressed directly.
+          - backend: vc_full
+            select: tests/e2e/test_filter_rowset_graph.py tests/e2e/test_graph_contribution.py
+            postgres: true
+            neo4j: true
+          # Embedded vectorcypher engine — sqlite_lance, no service.
+          - backend: vc_embedded
+            select: tests/e2e/ -k vc_embedded
+          # Pgvector skeleton — live Postgres only.
+          - backend: skeleton_pgvector
+            select: tests/e2e/ -k skeleton_pgvector
+            postgres: true
+          # SurrealDB skeleton — embedded (memory://), no service.
+          - backend: skeleton_surrealdb
+            select: tests/e2e/ -k skeleton_surrealdb
+          # Weaviate skeleton — vectors in live Weaviate, documents in live
+          # Postgres (so this leg provisions BOTH stores).
+          - backend: skeleton_weaviate
+            select: tests/e2e/ -k skeleton_weaviate
+            postgres: true
+            weaviate: true
+          # SQLite + LanceDB skeleton — embedded, no service.
+          - backend: skeleton_sqlite_lance
+            select: tests/e2e/ -k skeleton_sqlite_lance
+          # Chronicle engine — PG-only (no graph backend).
+          - backend: chronicle
+            select: tests/e2e/ -k chronicle
+            postgres: true
+    env:
+      KHORA_E2E_BACKEND: ${{ matrix.backend }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        # crewai combo — matches ci.yml's `install` job (NEVER `--all-extras`:
+        # crewai/google-adk conflict on opentelemetry-api).
+        run: uv sync --all-extras --no-extra google-adk
+
+      # -- Per-leg Postgres -------------------------------------------------- #
+      # A job-level `services:` block would start the container on EVERY matrix
+      # leg, leaving idle DBs on the in-process legs and violating "each leg
+      # provisions only its own store". `docker run` inside an `if:`-guarded
+      # step starts Postgres ONLY on a leg that sets `matrix.postgres`. Image,
+      # creds, host port (5434) and the readiness loop mirror ci.yml's
+      # `test-integration` job so a developer reproduces CI 1:1 with `make dev`.
+      - name: Start Postgres
+        if: matrix.postgres
+        run: |
+          docker run -d --name khora-e2e-pg \
+            -e POSTGRES_USER=khora \
+            -e POSTGRES_PASSWORD=khora \
+            -e POSTGRES_DB=khora \
+            -p 5434:5432 \
+            --health-cmd "pg_isready -U khora -d khora" \
+            --health-interval 5s \
+            --health-timeout 5s \
+            --health-retries 10 \
+            pgvector/pgvector:pg17
+
+      - name: Wait for Postgres readiness
+        if: matrix.postgres
+        # Mirrors the test-integration readiness loop: a clear, early failure
+        # message if the container is somehow not up.
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5434 -U khora >/dev/null 2>&1; then
+              echo "postgres ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "postgres did not become ready within 60s"
+          exit 1
+
+      - name: Apply database migrations
+        if: matrix.postgres
+        # The e2e live fixtures build Khora with run_migrations=False, so the
+        # schema must be at head before pytest. env.py normalizes the plain DSN
+        # to asyncpg and takes the advisory lock; a single upgrade-head brings
+        # the DB to head. No conformance-seed step — the e2e harness seeds
+        # in-fixture via the real remember() ingest path.
+        env:
+          KHORA_DATABASE_URL: postgresql://khora:khora@localhost:5434/khora
+        run: uv run alembic upgrade head
+
+      # -- Per-leg Neo4j (vc_full leg) --------------------------------------- #
+      # Same per-leg pattern as Postgres: an `if: matrix.neo4j`-guarded `docker
+      # run` starts Neo4j ONLY on the full vectorcypher leg, so the other legs
+      # never wait on an idle graph container. Image, auth and bolt port (7687)
+      # mirror ci.yml's `test-integration` job and compose.yaml so a developer
+      # reproduces CI 1:1 with `make dev`.
+      - name: Start Neo4j
+        if: matrix.neo4j
+        run: |
+          docker run -d --name khora-e2e-neo4j \
+            -e NEO4J_AUTH=neo4j/password \
+            -p 7687:7687 \
+            -p 7474:7474 \
+            --health-cmd "wget -q --spider http://localhost:7474 || exit 1" \
+            --health-interval 10s \
+            --health-timeout 5s \
+            --health-retries 10 \
+            --health-start-period 30s \
+            neo4j:2025.12.1
+
+      - name: Wait for Neo4j readiness
+        if: matrix.neo4j
+        # The Bolt TCP port (7687) opens BEFORE Neo4j can complete a Bolt
+        # handshake or serve a query, so a bare /dev/tcp port probe races the
+        # suite (it connects while the server is still starting and fails with
+        # "incomplete handshake response"). Poll with cypher-shell (bundled in
+        # the image) running a real Bolt query — the only signal that guarantees
+        # the fixture can connect. neo4j images take 20-40s to boot and Bolt
+        # readiness can lag the open port further.
+        run: |
+          for i in $(seq 1 40); do
+            if docker exec khora-e2e-neo4j \
+                cypher-shell -u neo4j -p password "RETURN 1;" >/dev/null 2>&1; then
+              echo "neo4j ready (bolt query answered)"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "neo4j did not become ready within 120s"
+          docker logs khora-e2e-neo4j 2>&1 | tail -50 || true
+          exit 1
+
+      # -- Per-leg Weaviate -------------------------------------------------- #
+      # Same per-leg pattern as Postgres: an `if: matrix.weaviate`-guarded
+      # `docker run` starts Weaviate ONLY on the weaviate skeleton leg. Image,
+      # anonymous-access env, HTTP port (8080) and gRPC port (50051) mirror
+      # ci.yml's `weaviate-integration` job. The v4 client needs both the HTTP
+      # and gRPC ports published.
+      - name: Start Weaviate
+        if: matrix.weaviate
+        run: |
+          docker run -d --name khora-e2e-weaviate \
+            -e QUERY_DEFAULTS_LIMIT=25 \
+            -e AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true \
+            -e PERSISTENCE_DATA_PATH=/var/lib/weaviate \
+            -e DEFAULT_VECTORIZER_MODULE=none \
+            -e ENABLE_MODULES= \
+            -e CLUSTER_HOSTNAME=node1 \
+            -e DISABLE_TELEMETRY=true \
+            -p 8080:8080 \
+            -p 50051:50051 \
+            --health-cmd "wget -q --spider http://localhost:8080/v1/.well-known/ready || exit 1" \
+            --health-interval 10s \
+            --health-timeout 5s \
+            --health-retries 10 \
+            --health-start-period 20s \
+            cr.weaviate.io/semitechnologies/weaviate:1.28.4
+
+      - name: Wait for Weaviate readiness
+        if: matrix.weaviate
+        # Mirrors the weaviate-integration readiness loop: poll the HTTP ready
+        # endpoint for a clear, early failure message if the container is not up.
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/v1/.well-known/ready >/dev/null; then
+              echo "weaviate ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "weaviate did not become ready within 60s"
+          exit 1
+
+      # -- E2E suite --------------------------------------------------------- #
+      - name: Run e2e matrix leg
+        # Each leg exports ONLY its own backend's connection vars; every other
+        # var is the empty string, so a leg's fixtures read exactly the store it
+        # provisioned. KHORA_E2E_BACKEND (job-level env above) selects the lane's
+        # corpus inside the parametrize; `matrix.select` (the per-leg pytest
+        # target — `-k <token>` for the six unique-token lanes, explicit file
+        # paths for vc_full) isolates the lane's module(s) so only that one engine
+        # runs. The per-module lane_skip(token) gate is a redundant second layer
+        # keyed on the same token. The harness RAISES if the selected lane's
+        # corpus is empty (anti-vacuity); a `-k` that matches nothing is pytest
+        # exit 5 (RED).
+        #
+        # * vc_embedded / skeleton_surrealdb / skeleton_sqlite_lance run
+        #   in-process (no service var set) — the embedded legs seed per-worker
+        #   inside their pytest fixture.
+        # * vc_full / skeleton_pgvector / chronicle read the live Postgres their
+        #   migrate step brought to head; vc_full also reaches the live Neo4j.
+        #   skeleton_weaviate keeps vectors in live Weaviate and documents in
+        #   live Postgres, so it reads both.
+        #
+        # The *_REQUIRED vars (set per-leg below) make the e2e conftest abort
+        # the session RED if the named store is unreachable — preventing a
+        # silent skip of a container leg.
+        #
+        # Worker count: the live shared-store legs (matrix.postgres) run SERIAL
+        # (`-n 0`). Each per-test fixture reconnects, and the backend's connect()
+        # re-runs the chunk schema DDL (metadata.create_all of khora_chunks,
+        # CREATE OR REPLACE FUNCTION + trigger; plus Neo4j index creation on the
+        # vc_full leg). Concurrent xdist workers issuing that DDL against the one
+        # shared database deadlock and collide on pg_type (duplicate khora_chunks
+        # type). ci.yml's test-integration job runs `-n 0` for the same
+        # shared-database reason. The container-free legs (per-worker tmp
+        # sqlite_lance / in-memory surrealdb, fully isolated) keep `-n auto`.
+        env:
+          KHORA_DATABASE_URL: ${{ matrix.postgres && 'postgresql://khora:khora@localhost:5434/khora' || '' }}
+          KHORA_E2E_PG_REQUIRED: ${{ matrix.postgres && '1' || '' }}
+          KHORA_NEO4J_URL: ${{ matrix.neo4j && 'bolt://localhost:7687' || '' }}
+          KHORA_NEO4J_USERNAME: ${{ matrix.neo4j && 'neo4j' || '' }}
+          KHORA_NEO4J_PASSWORD: ${{ matrix.neo4j && 'password' || '' }}
+          # NEO4J_INTEGRATION_TEST flips the live-graph module from self-skip to
+          # active; KHORA_E2E_NEO4J_REQUIRED makes the conftest tripwire abort the
+          # session RED if Neo4j is unreachable. The vc_full leg requires BOTH
+          # Postgres and Neo4j.
+          NEO4J_INTEGRATION_TEST: ${{ matrix.neo4j && '1' || '' }}
+          KHORA_E2E_NEO4J_REQUIRED: ${{ matrix.neo4j && '1' || '' }}
+          WEAVIATE_URL: ${{ matrix.weaviate && 'http://localhost:8080' || '' }}
+          WEAVIATE_GRPC_PORT: ${{ matrix.weaviate && '50051' || '' }}
+          KHORA_E2E_WEAVIATE_REQUIRED: ${{ matrix.weaviate && '1' || '' }}
+        run: |
+          uv run pytest \
+            ${{ matrix.select }} \
+            -m "e2e and slow" \
+            -n ${{ matrix.postgres && '0' || 'auto' }} --no-cov -v
+
+      - name: Stop Postgres
+        if: ${{ always() && matrix.postgres }}
+        run: docker rm -f khora-e2e-pg || true
+
+      - name: Stop Neo4j
+        if: ${{ always() && matrix.neo4j }}
+        run: docker rm -f khora-e2e-neo4j || true
+
+      - name: Stop Weaviate
+        if: ${{ always() && matrix.weaviate }}
+        run: docker rm -f khora-e2e-weaviate || true

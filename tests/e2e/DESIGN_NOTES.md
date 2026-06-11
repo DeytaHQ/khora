@@ -269,13 +269,22 @@ document (any-chunk semantics).
   slow and not filter_conformance"`). The live `vectorcypher` / `chronicle` modules
   carry `pytest.mark.slow` + a reachability self-skip, so the same invocation collects
   and skips them cleanly; they execute under `make dev` + `NEO4J_INTEGRATION_TEST=1`.
-- **Dedicated slow/e2e CI job for the live lanes is a follow-up** (a separate job that
-  provisions PG+Neo4j and runs `-m "e2e and slow"`).
-- **The skeleton-pgvector engine lane is deferred.** The shipped harness covers the
-  embedded sqlite_lance, live VectorCypher (PG+Neo4j), and live Chronicle (PG-only)
-  lanes. A skeleton-pgvector row-set lane is not included in this PR; it can be added
-  by giving `_harness.rowset_cases` a `"skeleton_pgvector"` backend selector and a
-  fixture that pins that engine.
+- **The dedicated slow/e2e CI job now ships** as `.github/workflows/e2e.yml` — a
+  separate workflow (its own concurrent check) with a seven-leg engine matrix:
+  VectorCypher (full PG+Neo4j and embedded sqlite_lance), Skeleton on
+  pgvector / surrealdb / weaviate / sqlite_lance, and Chronicle. Each leg selects its
+  lane via `KHORA_E2E_BACKEND` (resolved by `_harness._E2E_BACKEND_MAP`) and runs
+  `-m "e2e and slow"`. The four live shared-store legs (`matrix.postgres`) run `-n 0`
+  (serial) to avoid concurrent schema-init deadlocks on the one database; the three
+  isolated container-free legs run `-n auto`.
+- **The Skeleton engine lanes now ship** (pgvector / surrealdb / weaviate /
+  sqlite_lance), alongside the embedded VectorCypher, live VectorCypher (PG+Neo4j),
+  and live Chronicle lanes. `_harness.rowset_cases(token, …)` already keys off the
+  conformance backend token, so each lane maps its `KHORA_E2E_BACKEND` value to a
+  `(conformance token, include_system_keys)` pair via `_E2E_BACKEND_MAP`. The
+  `include_system_keys` flag is `False` for backends whose chunk row does not carry
+  the denormalized document system keys (embedded sqlite_lance, Skeleton surrealdb /
+  weaviate) and `True` where it does (pgvector-backed and Chronicle).
 
 ## Implementation risks (flagged for Backend — verified against source)
 

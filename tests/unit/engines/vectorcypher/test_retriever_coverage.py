@@ -278,6 +278,21 @@ class TestVersionFilterEntities:
         out = await retriever._version_filter_entities(ids, uuid4(), datetime.now(UTC))
         assert out == ids
 
+    @pytest.mark.asyncio
+    async def test_no_driver_records_degradation(self) -> None:
+        """The graph-less no-op records a structured degradation when a sink list is
+        passed (point-in-time entity-version filtering skipped)."""
+        from khora.core.diagnostics import Degradation
+
+        retriever = _make_retriever(neo4j_driver=None)
+        ids = [uuid4()]
+        degradations: list[Degradation] = []
+        out = await retriever._version_filter_entities(ids, uuid4(), datetime.now(UTC), degradations=degradations)
+        assert out == ids
+        assert len(degradations) == 1
+        assert degradations[0]["component"] == "vectorcypher.version_filter"
+        assert degradations[0]["reason"] == "embedded_no_version_columns"
+
 
 # ---------------------------------------------------------------------------
 # _fetch_version_history — early short-circuits
@@ -610,15 +625,42 @@ class TestApplyRerankingExtra:
 @pytest.mark.unit
 class TestRetrieveBackendGateExtra:
     @pytest.mark.asyncio
-    async def test_point_in_time_query_raises_on_sqlite_lance(self) -> None:
-        """sqlite_lance backend + temporal_filter with date → NotImplementedError."""
+    async def test_occurred_bounds_query_proceeds_on_sqlite_lance(self) -> None:
+        """sqlite_lance backend + occurred-bounds temporal_filter no longer raises.
+
+        The blanket fail-fast was replaced by a call-site guard that skips only
+        entity-version narrowing; the occurred-bounds filter still pushes down,
+        so retrieve() falls through to the normal path.
+        """
         from khora.engines.skeleton.backends import TemporalFilter
+        from khora.engines.vectorcypher.retriever import VectorCypherResult
 
         retriever = _make_retriever()
         retriever._backend = "sqlite_lance"
+        retriever._embedder.model_name = "m"
+        retriever._embedder.dimension = 4
+        retriever._embedder.embed = AsyncMock(return_value=[0.1] * 4)
+        retriever._embedder.cache_stats = {"hits": 0}
+        retriever._simple_retrieve = AsyncMock(  # type: ignore[method-assign]
+            return_value=VectorCypherResult(
+                chunks=[],
+                entities=[],
+                routing_decision=RoutingDecision(
+                    complexity=QueryComplexity.SIMPLE,
+                    use_graph=False,
+                    graph_depth=0,
+                    confidence=0.5,
+                    reasoning="t",
+                ),
+                metadata={},
+            )
+        )
+        retriever._storage = None
+
         tf = TemporalFilter(occurred_after=datetime(2024, 1, 1, tzinfo=UTC))
-        with pytest.raises(NotImplementedError, match="sqlite_lance"):
-            await retriever.retrieve("q", uuid4(), temporal_filter=tf)
+        out = await retriever.retrieve("q", uuid4(), temporal_filter=tf)
+        assert retriever._simple_retrieve.await_count == 1
+        assert out.chunks == []
 
     @pytest.mark.asyncio
     async def test_sqlite_lance_without_date_proceeds(self) -> None:

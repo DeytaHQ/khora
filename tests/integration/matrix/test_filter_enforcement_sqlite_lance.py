@@ -318,32 +318,32 @@ async def test_non_date_filter_does_not_synthesize_explicit(
 
 
 # --------------------------------------------------------------------------- #
-# Path 5 — restrictive-fallback guard, embedded fail-fast contract.
+# Path 5 — restrictive-fallback guard, embedded occurred-bounds contract.
 #
 # The restrictive-filter unfiltered re-run (retriever.py:1479) only fires when a
 # point-in-time ``temporal_filter`` (occurred bounds) reached the retriever. The
-# embedded sqlite_lance backend lacks bi-temporal version columns, so it FAILS
-# FAST on any point-in-time temporal query *before* retrieval (retriever.py:601)
-# rather than silently returning current-state rows. That fail-fast makes the
-# re-run path itself unreachable embedded — so the re-run-guard enforcement
-# (filter_ast suppresses the unfiltered re-run) is proven on the PG+Neo4j stack
-# (qa-graph), where point-in-time is honored. Here we pin the embedded promise
-# the fail-fast actually makes: a point-in-time query raises cleanly and never
-# degrades into an unfiltered current-state recall.
+# embedded sqlite_lance backend lacks bi-temporal version columns, so it cannot
+# do point-in-time *entity-version* narrowing — but it CAN honor occurred-bounds
+# chunk filtering (``khora_chunks.occurred_at``). The retriever no longer
+# fail-fasts on these queries: it skips entity-version filtering (recording a
+# structured degradation) and continues. The re-run-guard enforcement (filter_ast
+# suppresses the unfiltered re-run) is still proven on the PG+Neo4j stack
+# (qa-graph). Here we pin the embedded promise: an occurred-bounds query
+# completes cleanly and returns a well-formed result rather than raising.
 # --------------------------------------------------------------------------- #
 
 
-async def test_embedded_point_in_time_fails_fast(kb: Khora, namespace_id: UUID) -> None:
-    """A point-in-time temporal query raises NotImplementedError on embedded.
+async def test_embedded_occurred_bounds_query_completes(kb: Khora, namespace_id: UUID) -> None:
+    """An occurred-bounds temporal query completes on embedded instead of raising.
 
-    This is the embedded backstop behind path 5: the embedded stack cannot honor
-    occurred-bounds temporal queries, so it refuses them rather than returning
-    unfiltered current-state rows (which would silently violate any concurrent
-    recall filter). The clean raise is the contract; this guards it against a
-    regression that would let those queries through unfiltered.
+    The embedded stack cannot do point-in-time entity-version narrowing, but it
+    honors occurred-bounds chunk filtering and no longer refuses these queries.
+    This guards against a regression that would re-introduce the blanket
+    NotImplementedError fail-fast on the embedded recall path.
     """
     await _seed(kb, namespace_id)
 
     # "last week" resolves to an occurred-bounds temporal_filter -> point-in-time.
-    with pytest.raises(NotImplementedError, match="sqlite_lance"):
-        await kb.recall("Falcon launch last week", namespace=namespace_id, limit=10)
+    result = await kb.recall("Falcon launch last week", namespace=namespace_id, limit=10)
+    assert isinstance(result.chunks, list)
+    assert result.engine_info.get("engine") == "vectorcypher"
