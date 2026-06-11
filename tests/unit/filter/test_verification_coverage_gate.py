@@ -636,6 +636,11 @@ def _backends_from_signal(text: str) -> set[str]:
         out.add("weaviate")
     if "_PG_REACHABLE" in up or "KHORA_PG_REQUIRED" in up or "KHORA_E2E_PG_REQUIRED" in up:
         out.add("postgres")
+    # The container-free lanes (embedded sqlite_lance / in-process SurrealDB) gate
+    # on these "required" flags too; both imply the embedded sentinel, which every
+    # leg provides — so a module gated on them is covered by any leg.
+    if "KHORA_E2E_EMBEDDED_REQUIRED" in up or "KHORA_E2E_SURREAL_REQUIRED" in up:
+        out.add(_EMBEDDED)
     return out
 
 
@@ -981,6 +986,9 @@ def test_e2e_env_flags_infer_backends() -> None:
     assert _backends_from_signal("KHORA_E2E_NEO4J_REQUIRED") == {"neo4j"}
     assert _backends_from_signal("KHORA_E2E_WEAVIATE_REQUIRED") == {"weaviate"}
     assert _backends_from_signal("KHORA_E2E_PG_REQUIRED KHORA_E2E_NEO4J_REQUIRED") == {"postgres", "neo4j"}
+    # The container-free lanes' required flags both map to the embedded sentinel.
+    assert _backends_from_signal("KHORA_E2E_EMBEDDED_REQUIRED") == {_EMBEDDED}
+    assert _backends_from_signal("KHORA_E2E_SURREAL_REQUIRED") == {_EMBEDDED}
 
 
 def test_tracking_ref_accepts_long_issue_numbers() -> None:
