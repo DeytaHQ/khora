@@ -417,6 +417,73 @@ class TestRelationships:
         assert fetched is not None
         assert fetched.relationship_type == "RELATES_TO"
 
+    async def test_resave_updates_valid_until_without_pk_conflict(self, adapter: SQLiteLanceGraphAdapter):
+        """Re-saving an edge with the same ``id`` closes its validity window (#1087).
+
+        ``create_relationships_batch`` is UPSERT: re-saving an existing edge
+        with a new ``valid_until`` updates the stored row instead of raising
+        on the primary-key conflict. Without this, a later ingest that expires
+        an edge could never narrow ``prefer_current`` recall on the embedded
+        path.
+        """
+        ns = uuid4()
+        a = _make_entity(ns, name="A")
+        b = _make_entity(ns, name="B")
+        await adapter.create_entity(a)
+        await adapter.create_entity(b)
+
+        rel = _make_relationship(ns, a.id, b.id, rel_type="STUDIES")
+        await adapter.create_relationships_batch([rel])
+        assert await adapter.count_relationships(ns) == 1
+
+        expired = datetime.now(UTC) - timedelta(days=1)
+        rel.valid_until = expired
+        # Re-save the same id — pre-fix this raised IntegrityError (UNIQUE).
+        count = await adapter.create_relationships_batch([rel])
+        assert count == 1
+        # No duplicate row inserted.
+        assert await adapter.count_relationships(ns) == 1
+
+        fetched = await adapter.get_relationship(rel.id, namespace_id=ns)
+        assert fetched is not None
+        assert fetched.valid_until is not None
+        assert fetched.valid_until.replace(tzinfo=UTC) <= datetime.now(UTC)
+
+    async def test_resave_preserves_provenance_and_created_at(self, adapter: SQLiteLanceGraphAdapter):
+        """UPSERT must not clobber provenance or the original ``created_at``.
+
+        ``source_document_ids`` / ``source_chunk_ids`` / ``created_at`` are
+        deliberately absent from the ON CONFLICT SET list, so a later re-save
+        that carries empty provenance leaves the originally-recorded sources
+        and creation stamp intact.
+        """
+        ns = uuid4()
+        a = _make_entity(ns, name="A")
+        b = _make_entity(ns, name="B")
+        await adapter.create_entity(a)
+        await adapter.create_entity(b)
+
+        doc_id = uuid4()
+        chunk_id = uuid4()
+        created = datetime(2020, 1, 1, tzinfo=UTC)
+        rel = _make_relationship(ns, a.id, b.id, rel_type="STUDIES")
+        rel.source_document_ids = [doc_id]
+        rel.source_chunk_ids = [chunk_id]
+        rel.created_at = created
+        await adapter.create_relationships_batch([rel])
+
+        # Re-save the same id with empty provenance and a newer created_at.
+        resave = _make_relationship(ns, a.id, b.id, rel_type="STUDIES")
+        resave.id = rel.id
+        resave.valid_until = datetime.now(UTC) - timedelta(days=1)
+        await adapter.create_relationships_batch([resave])
+
+        fetched = await adapter.get_relationship(rel.id, namespace_id=ns)
+        assert fetched is not None
+        assert fetched.source_document_ids == [doc_id], "provenance was clobbered by the UPSERT"
+        assert fetched.source_chunk_ids == [chunk_id], "chunk provenance was clobbered by the UPSERT"
+        assert fetched.created_at.replace(tzinfo=UTC) == created, "created_at was overwritten by the UPSERT"
+
 
 # ---------------------------------------------------------------------------
 # Traversal — recursive CTEs
