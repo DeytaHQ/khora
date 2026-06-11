@@ -74,6 +74,10 @@ _SHARED_EMBEDDING = fake_embedding(_QUERY_TEXT, dim=EMBED_DIM)
 _IN_RANGE = datetime(2026, 6, 1, tzinfo=UTC)
 _OUT_OF_RANGE = datetime(2020, 1, 1, tzinfo=UTC)
 _FILTER_LB = "2026-01-01T00:00:00Z"
+# An upper-bound filter whose instant equals a chunk's source_timestamp exactly.
+# 2026-06-01T00:00:00Z is the ISO form of _IN_RANGE, so a chunk seeded with
+# source_timestamp == _IN_RANGE sits on the boundary of a $lte filter at this value.
+_FILTER_UB_AT_BOUND = "2026-06-01T00:00:00Z"
 
 
 def _filter_ast(wire: dict) -> Any:
@@ -193,6 +197,48 @@ async def test_source_timestamp_pushdown_narrows_against_real_window(tmp_path: P
 
         returned = await _recall_ids(_engine_over(coord), ns.id, {"source_timestamp": {"$gte": _FILTER_LB}})
         assert returned == {in_range_id}
+    finally:
+        await coord.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_source_timestamp_upper_bound_is_inclusive_at_boundary(tmp_path: Path) -> None:
+    # A chunk whose effective source_timestamp equals the upper-bound instant EXACTLY
+    # must survive a source_timestamp $lte <that instant> filter. The bound pushes into
+    # the SQLite-side recency window COALESCE(source_timestamp, created_at), whose upper
+    # comparison must be inclusive (<=): the boundary instant stays inside the window.
+    # SearchMode.VECTOR routes the whole seed set through the vector channel only (BM25
+    # is gated on HYBRID/ALL), so this can pass solely via the vector path.
+    #
+    # created_at is seeded well before the bound so the coarse LanceDB pre-filter (which
+    # filters on the LanceDB-side created_at, not source_timestamp) lets both rows
+    # through; the inclusive SQLite COALESCE(source_timestamp, created_at) refinement is
+    # then the only thing deciding the boundary case (source_timestamp is non-null, so
+    # COALESCE resolves to it, not created_at).
+    coord = await build_sqlite_lance_coordinator(tmp_path)
+    try:
+        ns = await coord.create_namespace(MemoryNamespace())
+        chunks = await _seed(
+            coord,
+            ns.id,
+            [
+                # source_timestamp == the filter's upper-bound instant exactly.
+                {"content": "on the boundary", "source_timestamp": _IN_RANGE, "created_at": _OUT_OF_RANGE},
+                # strictly after the bound → excluded by the inclusive upper bound.
+                {
+                    "content": "after the boundary",
+                    "source_timestamp": datetime(2026, 6, 2, tzinfo=UTC),
+                    "created_at": _OUT_OF_RANGE,
+                },
+            ],
+        )
+        on_bound_id = chunks[0].id
+
+        returned = await _recall_ids(_engine_over(coord), ns.id, {"source_timestamp": {"$lte": _FILTER_UB_AT_BOUND}})
+        assert returned == {on_bound_id}, (
+            "a chunk whose source_timestamp equals the $lte bound instant exactly must be "
+            "returned — the recency-window upper bound is inclusive"
+        )
     finally:
         await coord.disconnect()
 

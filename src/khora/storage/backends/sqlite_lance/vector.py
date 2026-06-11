@@ -481,9 +481,14 @@ class SQLiteLanceVectorAdapter:
         # truth for chunk metadata and tracks ``source_timestamp`` (LanceDB
         # only stores ``created_at``), so we re-apply the bounds here using
         # ``COALESCE(source_timestamp, created_at)`` — matches the pgvector
-        # backend's column-precedence rule (PR #470). Half-open
-        # interval ``>= start AND < end`` to match the Chronicle pushdown
-        # contract.
+        # backend's column-precedence rule (PR #470). The upper bound is
+        # INCLUSIVE (``<=``) to honor the superset-safe pushdown contract: the
+        # pushed candidate set must be a superset of the post-filtered set and
+        # never false-exclude, so the bound instant itself stays inside the
+        # window. Strictness (``$lt`` vs ``$lte``) is deliberately NOT carried
+        # into the pushed bound — ``compile_python`` re-checks exact strictness
+        # post-filter. This also matches pgvector, SurrealDB, and this
+        # backend's own BM25 channel.
         # Defense-in-depth (IDOR family): also enforce namespace_id on the SQLite
         # side rather than trusting LanceDB's filter alone. If LanceDB's
         # where-clause regressed, the SQLite filter would still keep cross-
@@ -497,7 +502,7 @@ class SQLiteLanceVectorAdapter:
             sql_parts.append("AND COALESCE(source_timestamp, created_at) >= ?")
             params.append(_dt_to_str(created_after))
         if created_before is not None:
-            sql_parts.append("AND COALESCE(source_timestamp, created_at) < ?")
+            sql_parts.append("AND COALESCE(source_timestamp, created_at) <= ?")
             params.append(_dt_to_str(created_before))
         cur = await self._sqlite.execute(" ".join(sql_parts), params)
         rows = await cur.fetchall()
