@@ -2784,6 +2784,7 @@ class VectorCypherRetriever:
             elif self._storage and self._storage._graph:
                 raw_neighborhoods = await self._storage.get_neighborhoods_batch(
                     entry_entity_ids,
+                    namespace_id=namespace_id,
                     depth=depth,
                     limit_per_entity=20,
                     prefer_current=prefer_current,

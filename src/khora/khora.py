@@ -1967,6 +1967,7 @@ class Khora:
         start_time: datetime | None = None,
         end_time: datetime | None = None,
         filter: RecallFilter | dict[str, Any] | None = None,
+        graph_depth: int | None = None,
     ) -> RecallResult:
         """Recall memories relevant to a query.
 
@@ -1992,6 +1993,9 @@ class Khora:
                 :class:`~khora.filter.RecallFilter` instance or its dict/wire
                 form (validated here). Cannot be combined with the deprecated
                 ``start_time``/``end_time`` bounds.
+            graph_depth: Optional override for the graph traversal depth. Only
+                the VectorCypher engine honors it; other engines ignore it.
+                ``None`` lets the engine pick its routed depth.
 
         Returns:
             RecallResult with matched memories.  When using the VectorCypher
@@ -2098,6 +2102,12 @@ class Khora:
                 # the common no-filter recall does not carry a meaningless attribute.
                 if filter_ast is not None:
                     _recall_span.set_attribute("filter.canonical_hash", canonical_hash(filter_ast))
+                # ``graph_depth`` is a VectorCypher-only override; forward it only
+                # when the caller set it so engines whose ``recall()`` signature
+                # does not accept the kwarg keep working unchanged.
+                _engine_kwargs: dict[str, Any] = {}
+                if graph_depth is not None:
+                    _engine_kwargs["graph_depth"] = graph_depth
                 result = await self._get_engine().recall(
                     query,
                     namespace_id,
@@ -2106,6 +2116,7 @@ class Khora:
                     min_similarity=min_similarity,
                     temporal_filter=temporal_filter,
                     filter_ast=filter_ast,
+                    **_engine_kwargs,
                 )
                 # Engines return DocumentProjection stubs (id + bare
                 # essentials). Batch-fetch full source metadata, derive

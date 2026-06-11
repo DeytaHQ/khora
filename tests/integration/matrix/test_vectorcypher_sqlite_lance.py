@@ -29,17 +29,17 @@ VectorCypher's embedded ``sqlite_lance`` path is wired. Occurred-bounds
 temporal recall (``start_time`` / ``end_time``) now works on the embedded
 path — the filter pushes down to ``khora_chunks.occurred_at`` and the
 retriever skips the unsupported entity-version narrowing with a structured
-degradation rather than failing. Two tests remain ``xfail`` for known
-backend gaps (each xfail carries an explanatory string):
+degradation rather than failing. Multi-hop CTE traversal now crosses the
+second hop (``test_vc_two_hop_traversal``, #1086). One test remains
+``xfail`` for a known backend gap (the xfail carries an explanatory
+string):
 
-* ``test_vc_two_hop_traversal`` — multi-hop CTE traversal correctness
-  on the SQL-emulated graph.
 * ``test_vc_prefer_current_via_cte`` — ``prefer_current`` honoring on
   CTE traversal.
 
-The remaining xfails track concrete behavioural gaps, not a wiring
-issue. They are written end-to-end so that when the underlying paths
-land, the same tests serve as the acceptance suite without rewriting.
+The remaining xfail tracks a concrete behavioural gap, not a wiring
+issue. It is written end-to-end so that when the underlying path
+lands, the same test serves as the acceptance suite without rewriting.
 """
 
 from __future__ import annotations
@@ -356,18 +356,6 @@ async def test_vc_second_ingest_sharing_entity_does_not_crash(kb: Khora, namespa
     assert len(alice_rows) == 1, f"expected one canonical Alice row, got {len(alice_rows)}: {alice_rows!r}"
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "VectorCypher embedded multi-hop CTE traversal does not reliably cross the "
-        "second hop, so a 2-hop-reachable entity is not surfaced (and Khora.recall() "
-        "no longer accepts the ``graph_depth`` kwarg this test passes). Tracked in "
-        "#1086. NOTE: the FK-on-second-ingest crash the previous citation referenced "
-        "is a separate, fixed problem (closed #806; covered by "
-        "test_vc_second_ingest_sharing_entity_does_not_crash above)."
-    ),
-    raises=TypeError,
-)
 async def test_vc_two_hop_traversal(kb: Khora, namespace_id: UUID) -> None:
     """3 connected docs (A→B→C), query about A surfaces C via 2-hop traversal."""
     _plan_extraction(
