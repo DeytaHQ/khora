@@ -113,7 +113,7 @@ test: test-unit test-integration
 # is fully hermetic — no Postgres needed; collect it here so the filter tests gate.
 # The live-pg row-narrowing proof lives in the filter-conformance corpus (its own job).
 test-unit:
-	uv run pytest tests/unit/ tests/recall/ --cov=src/khora --cov-branch --cov-report= --cov-fail-under=0 -n auto
+	uv run pytest tests/unit/ tests/recall/ tests/security/ --cov=src/khora --cov-branch --cov-report= --cov-fail-under=0 -n auto
 
 # Run integration tests serial; appends to .coverage from test-unit and emits the report.
 test-integration:
