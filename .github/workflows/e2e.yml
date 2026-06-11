@@ -71,25 +71,33 @@ jobs:
             select: tests/e2e/test_filter_rowset_graph.py tests/e2e/test_graph_contribution.py
             postgres: true
             neo4j: true
-          # Embedded vectorcypher engine — sqlite_lance, no service.
+          # Embedded vectorcypher engine — sqlite_lance, no service. `embedded`
+          # flips the conftest tripwire on so a missing aiosqlite/lancedb fails
+          # RED instead of skipping green.
           - backend: vc_embedded
             select: tests/e2e/ -k vc_embedded
+            embedded: true
           # Pgvector skeleton — live Postgres only.
           - backend: skeleton_pgvector
             select: tests/e2e/ -k skeleton_pgvector
             postgres: true
-          # SurrealDB skeleton — embedded (memory://), no service.
+          # SurrealDB skeleton — embedded (memory://), no service. `surreal`
+          # flips the conftest tripwire on so a missing surrealdb SDK fails RED
+          # instead of skipping green.
           - backend: skeleton_surrealdb
             select: tests/e2e/ -k skeleton_surrealdb
+            surreal: true
           # Weaviate skeleton — vectors in live Weaviate, documents in live
           # Postgres (so this leg provisions BOTH stores).
           - backend: skeleton_weaviate
             select: tests/e2e/ -k skeleton_weaviate
             postgres: true
             weaviate: true
-          # SQLite + LanceDB skeleton — embedded, no service.
+          # SQLite + LanceDB skeleton — embedded, no service. `embedded` flips
+          # the conftest tripwire on (same as vc_embedded).
           - backend: skeleton_sqlite_lance
             select: tests/e2e/ -k skeleton_sqlite_lance
+            embedded: true
           # Chronicle engine — PG-only (no graph backend).
           - backend: chronicle
             select: tests/e2e/ -k chronicle
@@ -295,6 +303,11 @@ jobs:
           WEAVIATE_URL: ${{ matrix.weaviate && 'http://localhost:8080' || '' }}
           WEAVIATE_GRPC_PORT: ${{ matrix.weaviate && '50051' || '' }}
           KHORA_E2E_WEAVIATE_REQUIRED: ${{ matrix.weaviate && '1' || '' }}
+          # The container-free legs have no store to provision, but a missing
+          # optional dep would skip them green; these flags make the conftest
+          # tripwire abort RED if the embedded stack / SurrealDB SDK is absent.
+          KHORA_E2E_EMBEDDED_REQUIRED: ${{ matrix.embedded && '1' || '' }}
+          KHORA_E2E_SURREAL_REQUIRED: ${{ matrix.surreal && '1' || '' }}
         run: |
           uv run pytest \
             ${{ matrix.select }} \

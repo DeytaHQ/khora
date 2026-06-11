@@ -27,6 +27,7 @@ from pydantic import SecretStr
 
 from khora import Khora
 from khora.config.schema import KhoraConfig, SQLiteLanceConfig, SurrealDBConfig
+from tests.e2e import _harness
 from tests.test_helpers.filter_spy import EMBED_DIM, stub_llm
 
 pytestmark = pytest.mark.e2e
@@ -379,8 +380,18 @@ async def skeleton_weaviate_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
 #   KHORA_E2E_WEAVIATE_REQUIRED=1  -> Weaviate must be reachable (skeleton_weaviate
 #                                     leg).
 #
-# The devops e2e workflow sets these on the matching container legs only; the
-# default no-Docker job leaves them unset so the per-fixture self-skip still wins.
+# The container-free legs have no service to socket-probe, but a missing optional
+# dependency would silently skip them green just the same. The same fail-loud
+# contract applies — the "store" is the importable embedded stack:
+#
+#   KHORA_E2E_EMBEDDED_REQUIRED=1  -> the embedded sqlite_lance stack (aiosqlite +
+#                                     lancedb) must import (vc_embedded,
+#                                     skeleton_sqlite_lance legs).
+#   KHORA_E2E_SURREAL_REQUIRED=1   -> the embedded SurrealDB SDK must import
+#                                     (skeleton_surrealdb leg).
+#
+# The devops e2e workflow sets these on the matching legs only; the default
+# no-Docker job leaves them unset so the per-fixture self-skip still wins.
 # --------------------------------------------------------------------------- #
 
 
@@ -406,5 +417,19 @@ def pytest_configure(config: pytest.Config) -> None:
         pytest.exit(
             f"KHORA_E2E_WEAVIATE_REQUIRED=1 but Weaviate is unreachable at {weaviate_url}. "
             "The e2e CI leg provisions Weaviate; a skip here would hide real failures.",
+            returncode=1,
+        )
+
+    if os.environ.get("KHORA_E2E_EMBEDDED_REQUIRED") == "1" and not _harness._embedded_available():
+        pytest.exit(
+            "KHORA_E2E_EMBEDDED_REQUIRED=1 but the embedded stack (aiosqlite + lancedb) is not "
+            "importable. The e2e CI leg installs it; a skip here would hide real failures.",
+            returncode=1,
+        )
+
+    if os.environ.get("KHORA_E2E_SURREAL_REQUIRED") == "1" and not _harness._surreal_embedded_available():
+        pytest.exit(
+            "KHORA_E2E_SURREAL_REQUIRED=1 but the embedded SurrealDB SDK is not importable. "
+            "The e2e CI leg installs it; a skip here would hide real failures.",
             returncode=1,
         )
