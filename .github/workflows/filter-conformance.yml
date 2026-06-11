@@ -311,6 +311,7 @@ jobs:
           uv run pytest \
             tests/integration/matrix/test_filter_conformance.py \
             tests/integration/matrix/test_compiler_registry_keys.py \
+            tests/integration/matrix/test_seed_map_roundtrip.py \
             -m "filter_conformance" -n auto --no-cov -v
 
       - name: Stop Postgres

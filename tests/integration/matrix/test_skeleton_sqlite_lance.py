@@ -290,9 +290,8 @@ async def test_skeleton_recall_top_k_ordering(kb: Khora, namespace_id: UUID) -> 
         "``engine.recall`` while ``kb.remember`` resolves it to the "
         "row-level ``id`` before persisting. ``khora_chunks.namespace_id`` "
         "therefore stores the row-level id and the recall filter misses. "
-        "Same issue lurks behind PG's xfail; needs a separate "
-        "ticket to either resolve at the engine boundary or update the "
-        "test contract."
+        "Same issue lurks behind PG's xfail. Tracked in #1088 — resolve at the "
+        "engine boundary or update the test contract."
     ),
 )
 async def test_skeleton_recall_with_metadata_filter(kb: Khora, namespace_id: UUID) -> None:
