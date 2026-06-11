@@ -8,7 +8,13 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
-from tenacity import AsyncRetrying, stop_after_attempt, stop_after_delay, wait_exponential
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    stop_after_delay,
+    wait_exponential,
+)
 
 from khora.config.llm import get_shared_session, llm_call_timeout
 from khora.extraction.embedders._request_telemetry import (
@@ -71,6 +77,50 @@ def _repair_json(content: str) -> str:
     # Fix trailing commas: [1, 2,] -> [1, 2]  or {"a": 1,} -> {"a": 1}
     content = _TRAILING_COMMA_RE.sub(r"\1", content)
     return content
+
+
+def _is_nonretryable_auth_error(exc: BaseException) -> bool:
+    """Return True for deterministic credential/auth failures that must NOT be retried.
+
+    Retrying a missing-credentials error just burns three attempts and ~180s of
+    backoff for a result that will never change. We treat two shapes as
+    non-retryable:
+
+    1. A genuine ``litellm.AuthenticationError``. This is *always* non-retryable.
+       litellm is imported lazily inside the extractor methods, so resolve the
+       type defensively: try the real class, and also walk the MRO for a class
+       literally named ``AuthenticationError`` so the check still works if the
+       litellm import fails here.
+    2. A missing-credentials message. LiteLLM maps absent credentials onto
+       ``InternalServerError`` (a sibling of AuthenticationError, not a
+       subclass), e.g. "OpenAIException - Missing credentials. Please pass an
+       api_key, or set the OPENAI_API_KEY environment variable." We match
+       conservatively to avoid swallowing transient 5xx errors: require
+       "credentials" together with "missing", OR an explicit api-key hint.
+
+    When unsure, return False (i.e. retry) — except a genuine
+    AuthenticationError, which is non-retryable regardless of message.
+    """
+    # 1. Genuine AuthenticationError — defensive type resolution.
+    try:
+        import litellm
+
+        if isinstance(exc, litellm.AuthenticationError):
+            return True
+    except Exception:  # noqa: S110 — litellm absent/import failure falls through to name check
+        pass
+    if any(cls.__name__ == "AuthenticationError" for cls in type(exc).__mro__):
+        return True
+
+    # 2. Missing-credentials message shape. Conservative: do not match generic
+    #    5xx text like "Internal Server Error", "503", or "overloaded".
+    message = str(exc).lower()
+    if "credentials" in message and "missing" in message:
+        return True
+    if "api_key" in message or "api key" in message or "_api_key" in message:
+        return True
+
+    return False
 
 
 if TYPE_CHECKING:
@@ -770,6 +820,7 @@ class LLMEntityExtractor(EntityExtractor):
 
         try:
             async for attempt in AsyncRetrying(
+                retry=retry_if_exception(lambda e: not _is_nonretryable_auth_error(e)),
                 stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
@@ -1693,6 +1744,7 @@ Return ONLY valid JSON, no other text."""
 
         try:
             async for attempt in AsyncRetrying(
+                retry=retry_if_exception(lambda e: not _is_nonretryable_auth_error(e)),
                 stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
