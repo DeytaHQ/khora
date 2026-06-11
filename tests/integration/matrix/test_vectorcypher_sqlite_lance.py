@@ -29,17 +29,17 @@ VectorCypher's embedded ``sqlite_lance`` path is wired. Occurred-bounds
 temporal recall (``start_time`` / ``end_time``) now works on the embedded
 path — the filter pushes down to ``khora_chunks.occurred_at`` and the
 retriever skips the unsupported entity-version narrowing with a structured
-degradation rather than failing. Two tests remain ``xfail`` for known
-backend gaps (each xfail carries an explanatory string):
+degradation rather than failing. ``prefer_current`` now honors expired edges
+on the embedded CTE path (#1087) — see ``test_vc_prefer_current_via_cte``.
+One test remains ``xfail`` for a known backend gap (the xfail carries an
+explanatory string):
 
 * ``test_vc_two_hop_traversal`` — multi-hop CTE traversal correctness
   on the SQL-emulated graph.
-* ``test_vc_prefer_current_via_cte`` — ``prefer_current`` honoring on
-  CTE traversal.
 
-The remaining xfails track concrete behavioural gaps, not a wiring
-issue. They are written end-to-end so that when the underlying paths
-land, the same tests serve as the acceptance suite without rewriting.
+The remaining xfail tracks a concrete behavioural gap, not a wiring
+issue. It is written end-to-end so that when the underlying path
+lands, the same test serves as the acceptance suite without rewriting.
 """
 
 from __future__ import annotations
@@ -634,66 +634,90 @@ async def test_vc_cooccurrence_carries_source_document_ids(kb: Khora, namespace_
         )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "VectorCypher embedded prefer_current does not honor expired edges via the "
-        "SQLite CTE traversal: an edge whose valid_to is in the past is still walked, "
-        "so content reachable only through it leaks into the recall result. Tracked in "
-        "#1087; this is the acceptance test for that bi-temporal-invalidation work."
-    ),
-    raises=Exception,
-)
 async def test_vc_prefer_current_via_cte(kb: Khora, namespace_id: UUID) -> None:
-    """3-hop A→B→C with B's outgoing edge expired; ``prefer_current=True`` must
-    NOT return C's content.
+    """A 1-hop edge whose validity window has closed is skipped when
+    ``prefer_current`` is active (#1087).
 
-    This tests Graphiti-style bi-temporal invalidation pushed through the
-    SQLite-CTE traversal. R2 is the fix that makes
-    ``prefer_current`` honor expired/invalidated edges in the CTE. Until
-    that lands, the CTE happily walks expired edges, so this test is
-    expected to fail until the VC embedded path is wired.
+    Mechanism: re-saving the ``Pierre→polonium`` edge with ``valid_until`` in
+    the past UPSERTs the stored row — the fix, since
+    ``create_relationships_batch`` was INSERT-only and the re-save previously
+    collided on the primary key instead of closing the window. The recursive
+    CTE traversal then drops the edge wherever ``prefer_current`` requires
+    ``valid_until > now``.
 
-    The chain: B→C edge has ``valid_to`` in the past → with
-    ``prefer_current=True`` it must be skipped → C ("polonium") is
-    unreachable from A ("Marie") via 2-hop traversal. We assert
-    ``"polonium"`` is NOT in the recall context.
+    The scenario is deliberately **1-hop** — anchor on Pierre and expire the
+    single edge out of Pierre — so the result isolates the expiry from the
+    orthogonal multi-hop traversal gap (``test_vc_two_hop_traversal``).
+
+    The traversal is asserted at the coordinator path ``recall`` drives
+    (``get_neighborhoods_batch`` — the ``prefer_current`` sink) rather than on
+    ``kb.recall``'s chunks DELIBERATELY: the embedded stack uses fake
+    content-hash embeddings, so the vector channel surfaces the polonium chunk
+    independently of the graph edge and would mask the edge filter at the
+    recall layer. One layer down, ``prefer_current`` is the only thing acting,
+    so the signal is deterministic. Three cases prove the filter is the cause:
+
+    * BEFORE expiry, ``prefer_current=True`` → polonium present (the live edge
+      is returned even under ``prefer_current`` — not a vacuous always-empty).
+    * AFTER expiry, ``prefer_current=True`` → polonium gone (the closed window
+      is filtered — the fix).
+    * AFTER expiry, ``prefer_current=False`` → polonium present (the row still
+      exists; its absence above is caused by ``prefer_current`` + expiry).
+
+    We also confirm the front door: a "currently"-phrased query classifies as
+    STATE_QUERY, the temporal category that switches ``prefer_current`` on
+    (it is not a public ``recall`` kwarg).
     """
     _plan_extraction(
-        "Marie",
-        entities=[("Marie", "PERSON"), ("Pierre", "PERSON")],
-        relationships=[("Marie", "Pierre", "KNOWS")],
+        "Pierre worked",
+        entities=[("Pierre", "PERSON")],
     )
     _plan_extraction(
-        "Pierre",
+        "polonium",
         entities=[("Pierre", "PERSON"), ("polonium", "CONCEPT")],
         relationships=[("Pierre", "polonium", "STUDIES")],
     )
 
-    await _remember(kb, namespace_id=namespace_id, content="Marie collaborated with Pierre.")
+    await _remember(kb, namespace_id=namespace_id, content="Pierre worked at the institute.")
     await _remember(kb, namespace_id=namespace_id, content="Pierre researched polonium extensively.")
 
-    # Manually expire the Pierre→polonium edge in the embedded graph.
     coord = kb._engine._storage  # type: ignore[union-attr]
     row_ns_id = await coord.resolve_namespace(namespace_id)
+
     rels = await coord.graph.list_relationships(row_ns_id, limit=100)
-    target_rel = next(
-        (r for r in rels if r.relationship_type == "STUDIES"),
-        None,
-    )
+    target_rel = next((r for r in rels if r.relationship_type == "STUDIES"), None)
     assert target_rel is not None, f"expected STUDIES relationship, got {rels!r}"
-    # Expire the edge by setting valid_to in the past. The exact field
-    # name lives on Relationship; CTE traversal R2 reads it for filtering.
-    target_rel.valid_to = datetime.now(UTC) - timedelta(days=1)
-    await coord.graph.create_relationships_batch(row_ns_id, [target_rel])
+    pierre_id = target_rel.source_entity_id  # Pierre→polonium
 
-    result = await kb.recall(
-        "Marie",
-        namespace=namespace_id,
-        limit=10,
-        graph_depth=2,
-        prefer_current=True,
+    # The "currently"-phrased query classifies as STATE_QUERY, the category
+    # that carries prefer_current=True — the only way recall turns it on.
+    result = await kb.recall("What is Pierre currently studying?", namespace=namespace_id, limit=10)
+    assert result.engine_info.get("temporal_category") == "state_query", (
+        f"temporal query did not trigger the prefer_current category: {result.engine_info.get('temporal_category')!r}"
     )
 
-    text_blob = " ".join(c.content for c in result.chunks).lower()
-    assert "polonium" not in text_blob, "expired edge leaked through prefer_current=True (R2 fix not in main)"
+    # BEFORE expiry, prefer_current=True still returns polonium: the live edge
+    # is walked under prefer_current, so a later empty result is the filter
+    # acting, not prefer_current trivially returning nothing.
+    nb_live = await coord.get_neighborhoods_batch([pierre_id], namespace_id=row_ns_id, depth=1, prefer_current=True)
+    live_names = {e.name for e in nb_live[pierre_id]["entities"]}
+    assert "polonium" in live_names, f"live edge dropped under prefer_current before any expiry: {live_names}"
+
+    # Expire the single Pierre→polonium edge by re-saving it with valid_until
+    # in the past. This exercises the UPSERT (pre-fix the re-save collided on
+    # the primary key instead of closing the window).
+    target_rel.valid_until = datetime.now(UTC) - timedelta(days=1)
+    await coord.graph.create_relationships_batch([target_rel])
+
+    # prefer_current=True now filters the closed-window edge → polonium gone.
+    nb_current = await coord.get_neighborhoods_batch([pierre_id], namespace_id=row_ns_id, depth=1, prefer_current=True)
+    current_names = {e.name for e in nb_current[pierre_id]["entities"]}
+    assert "polonium" not in current_names, f"expired edge leaked through prefer_current=True: {current_names}"
+
+    # And without prefer_current the expired edge is still walked — proving the
+    # absence above is caused by prefer_current + expiry, not the edge vanishing.
+    nb_default = await coord.get_neighborhoods_batch([pierre_id], namespace_id=row_ns_id, depth=1, prefer_current=False)
+    default_names = {e.name for e in nb_default[pierre_id]["entities"]}
+    assert "polonium" in default_names, (
+        f"polonium unreachable even without prefer_current after expiry — control is vacuous: {default_names}"
+    )

@@ -245,6 +245,34 @@ def _relationship_insert_params(rel: Relationship) -> tuple:
     )
 
 
+_RELATIONSHIP_INSERT_SQL = (
+    f"INSERT INTO relationships ({_RELATIONSHIP_COLUMNS}) "  # noqa: S608
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+# Re-saving an edge (same ``id``) updates its mutable columns instead of
+# raising on the primary-key conflict. The temporal window (``valid_from`` /
+# ``valid_until``) is the column that matters for ``prefer_current`` recall
+# (#1087): a later ingest can close an edge's validity window, and the CTE
+# traversal filters on ``valid_until``. ``id`` / ``namespace_id`` / endpoints
+# / ``source_document_ids`` / ``source_chunk_ids`` / ``created_at`` are NOT in
+# the SET list — re-saving must never rewrite provenance or the original
+# creation stamp, and the bi-temporal soft-delete columns (``valid_to`` /
+# ``invalidated_at`` / ``invalidated_by``) are likewise left untouched.
+_RELATIONSHIP_UPSERT_SQL = _RELATIONSHIP_INSERT_SQL + (
+    " ON CONFLICT(id) DO UPDATE SET "
+    "relationship_type = excluded.relationship_type, "
+    "description = excluded.description, "
+    "properties = excluded.properties, "
+    "valid_from = excluded.valid_from, "
+    "valid_until = excluded.valid_until, "
+    "confidence = excluded.confidence, "
+    "weight = excluded.weight, "
+    "metadata = excluded.metadata, "
+    "updated_at = excluded.updated_at"
+)
+
+
 # ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
@@ -481,9 +509,7 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
     # ------------------------------------------------------------------
 
     async def create_relationship(self, relationship: Relationship) -> Relationship:
-        insert_sql = f"INSERT INTO relationships ({_RELATIONSHIP_COLUMNS}) "  # noqa: S608
-        sql = insert_sql + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        await self._conn.execute(sql, _relationship_insert_params(relationship))
+        await self._conn.execute(_RELATIONSHIP_UPSERT_SQL, _relationship_insert_params(relationship))
         await self._conn.commit()
         # Reflect the sanitized relationship type back to the caller.
         relationship.relationship_type = sanitize_cypher_label(relationship.relationship_type or "RELATES_TO")
@@ -581,12 +607,10 @@ class SQLiteLanceGraphAdapter(GraphBackendBase):
     ) -> int:
         if not relationships:
             return 0
-        insert_sql = f"INSERT INTO relationships ({_RELATIONSHIP_COLUMNS}) "  # noqa: S608
-        sql = insert_sql + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         total = 0
         for start in range(0, len(relationships), batch_size):
             chunk = relationships[start : start + batch_size]
-            await self._conn.executemany(sql, [_relationship_insert_params(r) for r in chunk])
+            await self._conn.executemany(_RELATIONSHIP_UPSERT_SQL, [_relationship_insert_params(r) for r in chunk])
             total += len(chunk)
         await self._conn.commit()
         # Mirror the sanitized type back into the caller-provided objects
