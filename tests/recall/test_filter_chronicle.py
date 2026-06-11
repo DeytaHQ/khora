@@ -78,6 +78,7 @@ except ImportError:
 
 from khora.config import KhoraConfig
 from khora.config.schema import SQLiteLanceConfig
+from khora.extraction.extractors.base import ExtractionResult
 from khora.extraction.skills import ExpertiseConfig
 from khora.extraction.skills.base import EventExtractionConfig, FactExtractionConfig
 from khora.filter import telemetry as filter_telemetry
@@ -130,6 +131,38 @@ def _patch_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "khora.extraction.embedders.litellm.LiteLLMEmbedder.embed",
         _stub_embed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entity-extraction stub — no OPENAI_API_KEY required.
+# ---------------------------------------------------------------------------
+#
+# Every ``remember`` here passes ``entity_types=["PERSON"]`` /
+# ``relationship_types=["KNOWS"]``, so the ingest pipeline's ``extract_entities``
+# task calls ``LLMEntityExtractor.extract_multi`` — a LIVE LiteLLM call. Without
+# an API key each call retries with exponential backoff before degrading to zero
+# entities, which is slow and network-dependent. No test in this file asserts on
+# extracted entities (the corpus filters only on source_name / occurred_at /
+# metadata.tag), so stubbing the extractor to return empty results keeps these
+# tests hermetic and fast while leaving the filter-narrowing contract untouched.
+#
+# ``extract_multi`` is the method the pipeline calls; the consumer zips its result
+# one-to-one with the input chunks, so the stub returns exactly one empty
+# ``ExtractionResult`` per text. (Events/facts extraction is already disabled via
+# ``_no_event_fact_extraction()``, so the entity extractor is the only live LLM
+# extractor left to stub.)
+
+
+async def _stub_extract_multi(self: Any, texts: list[str], *args: Any, **kwargs: Any) -> list[ExtractionResult]:
+    return [ExtractionResult() for _ in texts]
+
+
+@pytest.fixture(autouse=True)
+def _patch_entity_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "khora.extraction.extractors.llm.LLMEntityExtractor.extract_multi",
+        _stub_extract_multi,
     )
 
 
