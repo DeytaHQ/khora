@@ -44,8 +44,7 @@ sqlite_lance fixture, not assumed):
   datetimes; the compiler aligns a naive stored value to UTC at the comparison
   boundary, so the system date key narrows cleanly rather than raising.
 * ``metadata.tag`` ($in {"urgent", "release"}) — the one free-form metadata
-  leaf, and the leaf Scenario 2's unindexed-metadata telemetry assertion now
-  exercises via its own dedicated metadata filter.
+  leaf.
 
 ENVIRONMENT: needs the ``sqlite_lance`` extra (``pip install khora[sqlite_lance]``
 → aiosqlite + lancedb). No Docker / Postgres / Neo4j. The module self-skips when
@@ -80,7 +79,6 @@ from khora.config import KhoraConfig
 from khora.config.schema import SQLiteLanceConfig
 from khora.extraction.skills import ExpertiseConfig
 from khora.extraction.skills.base import EventExtractionConfig, FactExtractionConfig
-from khora.filter import telemetry as filter_telemetry
 from khora.khora import Khora
 from khora.query import SearchMode
 from tests.test_helpers.diagnostics import assert_no_silent_degradation
@@ -264,8 +262,7 @@ def _parse_when(when: str) -> datetime:
 # coerces it to a UTC-aware datetime; the ``{"$date": ...}`` typed literal is an
 # AST-level form the dict API does not accept on a system date key), matching the
 # existing system-``occurred_at`` tests below. ``source_name`` and ``occurred_at``
-# are SYSTEM keys (no unindexed_metadata fire); ``metadata.tag`` is the one
-# metadata leaf.
+# are SYSTEM keys; ``metadata.tag`` is the one metadata leaf.
 _RECALL_FILTER = {
     "source_name": "linear",
     "occurred_at": {"$gte": _IN_BOUND},
@@ -752,117 +749,3 @@ async def test_system_created_at_date_filter_narrows(kb: Khora) -> None:
     assert await _recall({"created_at": {"$gte": "2000-01-01T00:00:00Z"}}) == all_labels
     assert await _recall({"created_at": {"$lte": "2000-01-01T00:00:00Z"}}) == set()
     assert await _recall({"created_at": {"$gte": "2000-01-01T00:00:00Z", "$lte": "2100-01-01T00:00:00Z"}}) == all_labels
-
-
-# ===========================================================================
-# Scenario 2 — post-filter increments unindexed_metadata, with negative controls.
-# ===========================================================================
-#
-# ``compile_python`` emits ``khora.recall.filter.unindexed_metadata`` once per
-# metadata leaf at compile time, so a metadata-bearing filter recall fires it.
-# The positive test uses a DEDICATED metadata filter ({"metadata.tag": "urgent"},
-# a $eq metadata leaf) rather than the shared _RECALL_FILTER: after the system-key
-# rewrite _RECALL_FILTER's only metadata leaf is metadata.tag with $in (its
-# source_name / occurred_at leaves are SYSTEM keys that do NOT fire the counter),
-# so a dedicated $eq filter keeps the $eq coverage and the intent explicit. The
-# two negative controls rule out the counter firing for the wrong reason: a
-# non-metadata filter (no metadata leaf) and a no-filter recall must both leave
-# it silent.
-
-
-class _RecordingCounter:
-    """Captures ``.add(value, attributes=...)`` calls for assertions."""
-
-    def __init__(self) -> None:
-        self.adds: list[tuple[float, dict[str, Any]]] = []
-
-    def add(self, value: float, attributes: Any = None) -> None:
-        self.adds.append((value, dict(attributes or {})))
-
-
-@pytest.fixture
-def recording_counter(monkeypatch: pytest.MonkeyPatch) -> _RecordingCounter:
-    """Replace the unindexed-metadata counter singleton with a recording fake.
-
-    Same monkeypatch-the-singleton hook the existing recall-filter telemetry
-    tests use: pre-seeding the module global makes ``record_unindexed_metadata``
-    land on the fake (the lazy getter returns the already-set value).
-    """
-    counter = _RecordingCounter()
-    monkeypatch.setattr(filter_telemetry, "_unindexed_metadata_counter", counter)
-    return counter
-
-
-async def test_metadata_filter_fires_unindexed_metadata(kb: Khora, recording_counter: _RecordingCounter) -> None:
-    """A metadata-bearing filter recall fires ``unindexed_metadata`` on the live
-    post-filter path, carrying the leaf's comparison op.
-
-    Uses a dedicated ``{"metadata.tag": "urgent"}`` filter — a single ``$eq``
-    metadata leaf — so the counter observes at least one add carrying that real
-    leaf op. (The shared ``_RECALL_FILTER`` now carries ``source_name`` /
-    ``occurred_at`` as SYSTEM keys, which do NOT fire the counter, leaving only a
-    ``$in`` metadata leaf; the dedicated filter keeps the ``$eq`` coverage.)
-    ``>= 1`` is robust whether emission is per-compile or (hypothetically)
-    per-evaluation.
-    """
-    ns = await kb.create_namespace()
-    namespace_id: UUID = ns.namespace_id
-    await _seed(kb, namespace_id)
-
-    await kb.recall(
-        "alpha bravo charlie",
-        namespace=namespace_id,
-        limit=20,
-        mode=SearchMode.VECTOR,
-        filter={"metadata.tag": "urgent"},
-    )
-
-    adds = recording_counter.adds
-    assert len(adds) >= 1, "a metadata-bearing filter recall must fire unindexed_metadata"
-    assert any(a[1].get("op") == "$eq" for a in adds), f"expected a $eq leaf op among the observations; got {adds}"
-
-
-async def test_non_metadata_filter_silent_for_unindexed_metadata(
-    kb: Khora, recording_counter: _RecordingCounter
-) -> None:
-    """Negative control: a non-metadata filter does not touch metadata, so the
-    unindexed_metadata counter stays silent.
-
-    ``{"source": {"$ne": "no-such-source"}}`` is a document-projection (SYSTEM)
-    key with no metadata leaf and no datetime compare. The corpus never seeds
-    ``source`` (only ``source_name``), so it resolves to no real value on any row
-    and ``$ne "no-such-source"`` matches every row regardless — the recall does
-    not narrow and, crucially, does not crash. What matters here is that NO
-    metadata leaf compiles, so the counter must not fire. This pins that Scenario
-    2's positive signal comes from the metadata leaf, not from the mere presence
-    of a filter.
-    """
-    ns = await kb.create_namespace()
-    namespace_id: UUID = ns.namespace_id
-    await _seed(kb, namespace_id)
-
-    await kb.recall(
-        "alpha bravo charlie",
-        namespace=namespace_id,
-        limit=20,
-        mode=SearchMode.VECTOR,
-        filter={"source": {"$ne": "no-such-source"}},
-    )
-
-    assert recording_counter.adds == [], "a non-metadata filter must leave unindexed_metadata silent"
-
-
-async def test_no_filter_recall_silent_for_unindexed_metadata(kb: Khora, recording_counter: _RecordingCounter) -> None:
-    """Negative control: no filter → no compile → no counter."""
-    ns = await kb.create_namespace()
-    namespace_id: UUID = ns.namespace_id
-    await _seed(kb, namespace_id)
-
-    await kb.recall(
-        "alpha bravo charlie",
-        namespace=namespace_id,
-        limit=20,
-        mode=SearchMode.VECTOR,
-    )
-
-    assert recording_counter.adds == [], "a no-filter recall must leave unindexed_metadata silent"

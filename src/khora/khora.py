@@ -2019,7 +2019,7 @@ class Khora:
         _t0 = _time.perf_counter()
         _status = "success"
         _recall_id = uuid4()
-        from khora.filter import RecallFilter, canonical_hash, parse_to_ast
+        from khora.filter import RecallFilter, canonical_hash, metadata_leaf_count, parse_to_ast
 
         try:
             # Resolve the recall filter once, at the facade. The public
@@ -2098,6 +2098,7 @@ class Khora:
                 # the common no-filter recall does not carry a meaningless attribute.
                 if filter_ast is not None:
                     _recall_span.set_attribute("filter.canonical_hash", canonical_hash(filter_ast))
+                    _recall_span.set_attribute("filter.metadata_leaf_count", metadata_leaf_count(filter_ast))
                 result = await self._get_engine().recall(
                     query,
                     namespace_id,

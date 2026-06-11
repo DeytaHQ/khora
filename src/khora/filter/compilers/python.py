@@ -71,7 +71,6 @@ from khora.filter.ast import (
     canonical_hash,
 )
 from khora.filter.model import SYSTEM_KEYS, Op
-from khora.filter.telemetry import record_unindexed_metadata
 
 __all__ = ["compile_python"]
 
@@ -117,10 +116,6 @@ def compile_python(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[Calla
     express: ``"raise"`` raises :class:`RecallFilterUnsupportedError`; ``"split"``
     drops the clause from ``consumed_keys`` and treats it as match-all so it does
     not narrow the record set.
-
-    The ``khora.recall.filter.unindexed_metadata`` counter fires once per metadata
-    leaf **at compile time** (during this AST walk), mirroring
-    :func:`compile_postgres` — never inside the returned per-record callable.
     """
     consumed: set[str] = set()
     builder = _Builder(ctx=ctx, consumed=consumed)
@@ -185,11 +180,6 @@ class _Builder:
             fn = self._compile_system_clause(clause)
         elif path and path[0] == "metadata":
             fn = self._compile_metadata_clause(clause)
-            # A metadata leaf reads an unindexed blob. Emit once per metadata
-            # leaf at compile time (a filter with N metadata predicates emits N
-            # times) — matching compile_postgres. NOT inside ``fn`` (that would
-            # fire per record).
-            record_unindexed_metadata(op=clause.op.value)
         else:
             return self._unsupported(clause, "path is neither a system key nor a metadata path")
         self._consumed.add(_path_str(path))

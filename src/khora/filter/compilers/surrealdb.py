@@ -93,7 +93,6 @@ from khora.filter.ast import (
 )
 from khora.filter.context import CompileError
 from khora.filter.model import SYSTEM_KEYS, Op
-from khora.filter.telemetry import record_unindexed_metadata
 
 __all__ = ["compile_surrealdb"]
 
@@ -241,10 +240,6 @@ class _Builder:
             expr = self._compile_system_clause(clause)
         elif path and path[0] == "metadata":
             expr = self._compile_metadata_clause(clause)
-            # A metadata leaf reads the FLEXIBLE ``object`` column (no index).
-            # Emit once per metadata leaf (a filter with N metadata predicates
-            # emits N times) — mirrors compile_postgres / compile_python.
-            record_unindexed_metadata(op=clause.op.value)
         else:
             return self._unsupported(clause, "path is neither a system key nor a metadata path")
         self._consumed.add(_path_str(path))
