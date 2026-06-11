@@ -503,8 +503,9 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         ``Chunk`` adaptation. Falls back to ``[]`` on backends without
         a BM25 index configured (``optimize_storage()`` not yet run).
 
-        ``filter_ast`` is accepted for protocol parity; this backend does not
-        compile the recall-filter AST yet, so it is ignored.
+        ``filter_ast`` is the deterministic recall-filter AST. When provided it
+        is compiled to a SurrealQL ``WHERE`` predicate and AND-ed into the BM25
+        query alongside the namespace + temporal-bound clauses.
         """
         if not query_text or not query_text.strip():
             return []
@@ -515,6 +516,27 @@ class SurrealDBTemporalStore(TemporalVectorStore):
                 created_before=created_before,
             )
         filter_clauses, filter_bindings = self._build_filter_clauses(namespace_id, temporal_filter)
+
+        # Deterministic recall-filter AST: compile to a SurrealQL predicate and
+        # AND it into the shared clauses (mirrors the vector path in
+        # ``_search_inner``). ``field_mapping`` maps the ``metadata`` root to the
+        # physical ``metadata_`` column; ``on_unsupported="raise"`` because the
+        # skeleton engine has no post-filter path.
+        if filter_ast is not None:
+            from khora.filter import CompileContext
+            from khora.filter.compilers.surrealdb import compile_surrealdb
+
+            compiled = compile_surrealdb(
+                filter_ast,
+                CompileContext(
+                    backend_target="temporal_chunk",
+                    field_mapping={"metadata": "metadata_"},
+                    on_unsupported="raise",
+                ),
+            )
+            filter_clauses.append(compiled.predicate)
+            filter_bindings.update(compiled.params)
+
         results = await self._bm25_search(filter_clauses, filter_bindings, query_text, limit)
         return [(temporal_chunk_to_chunk(r.chunk), float(r.bm25_score or 0.0)) for r in results]
 

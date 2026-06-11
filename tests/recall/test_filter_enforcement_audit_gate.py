@@ -212,3 +212,74 @@ def test_embedded_search_fulltext_now_enforces_filter_ast() -> None:
         "BM25 channel would drop the caller filter. Restore the `filter_ast=filter_ast` "
         "forward so the embedded BM25 channel enforces the recall filter."
     )
+
+
+def test_surrealdb_search_fulltext_now_enforces_filter_ast() -> None:
+    """Pins embedded SurrealDB BM25 filter enforcement to source.
+
+    ``SurrealDBTemporalStore.search_fulltext`` declares ``filter_ast`` AND
+    threads it into the BM25 ``WHERE`` it builds. Unlike the sqlite_lance sibling
+    (which forwards ``filter_ast=`` into ``_bm25_search``), this backend's
+    ``_bm25_search`` takes pre-built clauses, so enforcement happens upstream:
+    ``search_fulltext`` compiles the AST via ``compile_surrealdb`` and mutates the
+    ``filter_clauses`` / ``filter_bindings`` it then passes to ``_bm25_search``.
+    If someone regresses any link in that thread, this fails — the SurrealDB BM25
+    channel would silently drop the caller filter again. Keyed off the source so
+    the doc note can't silently drift from reality.
+    """
+    backend = (
+        Path(__file__).resolve().parents[2] / "src" / "khora" / "engines" / "skeleton" / "backends" / "surrealdb.py"
+    )
+    tree = ast.parse(backend.read_text())
+    fn = next(
+        (
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef)) and n.name == "search_fulltext"
+        ),
+        None,
+    )
+    assert fn is not None, "search_fulltext not found in surrealdb temporal store"
+    # It declares filter_ast (wiring present) ...
+    params = [a.arg for a in fn.args.args] + [a.arg for a in fn.args.kwonlyargs]
+    assert "filter_ast" in params, "search_fulltext no longer declares filter_ast — wiring changed"
+    # ... AND its body compiles the AST via compile_surrealdb ...
+    compiles_ast = any(
+        isinstance(call, ast.Call)
+        and (
+            (isinstance(call.func, ast.Name) and call.func.id == "compile_surrealdb")
+            or (isinstance(call.func, ast.Attribute) and call.func.attr == "compile_surrealdb")
+        )
+        for call in ast.walk(fn)
+    )
+    assert compiles_ast, (
+        "SurrealDB search_fulltext no longer compiles filter_ast via compile_surrealdb — the "
+        "BM25 channel would drop the caller filter. Restore the compile + clause-threading so "
+        "the SurrealDB BM25 channel enforces the recall filter."
+    )
+    # ... AND threads the compiled predicate + params into the clauses/bindings it
+    # later hands to _bm25_search (the actual enforcement link). We require BOTH a
+    # `filter_clauses.append(...)` and a `filter_bindings.update(...)` so a regress
+    # that compiles but never wires the result into the WHERE fails here.
+    appends_clause = any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "append"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "filter_clauses"
+        for call in ast.walk(fn)
+    )
+    updates_bindings = any(
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "update"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "filter_bindings"
+        for call in ast.walk(fn)
+    )
+    assert appends_clause and updates_bindings, (
+        "SurrealDB search_fulltext compiles filter_ast but no longer threads the result into the "
+        "BM25 WHERE (filter_clauses.append(...) / filter_bindings.update(...)) — the predicate "
+        "would be compiled and discarded, dropping the caller filter. Restore the clause/binding "
+        f"thread-through (append={appends_clause}, update={updates_bindings})."
+    )
