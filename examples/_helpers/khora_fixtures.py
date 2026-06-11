@@ -49,6 +49,11 @@ async def embedded_khora(
             embedding_dimension=embedding_dimension,
         )
         config.llm.embedding_dimension = embedding_dimension
+        # Cross-encoder reranking downloads BAAI/bge-reranker-v2-m3 from
+        # HF Hub on first recall (~25s unauthenticated in CI, rate-limit
+        # prone). The examples demonstrate adapter wiring, not ranking
+        # quality — skip it.
+        config.query.enable_reranking = False
 
         kb = Khora(config, engine=engine, run_migrations=True)
         await kb.connect()

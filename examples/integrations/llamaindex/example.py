@@ -50,6 +50,8 @@ async def main() -> None:
         # Verbatim recall: the mock LLM's hash-derived embeddings give
         # an exact match (cosine = 1.0) for the stored text.
         nodes = await retriever.aretrieve(memory_one)
+        assert nodes, "expected verbatim recall to return results"
+        assert any(memory_one in node.node.text for node in nodes), "expected the stored text to be retrieved verbatim"
         for node in nodes:
             text = node.node.text.replace("\n", " ")
             print(f"[{node.score:.2f}] {text}")

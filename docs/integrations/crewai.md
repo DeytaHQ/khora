@@ -64,7 +64,16 @@ async def _main() -> None:
             importance=0.6,
         )
 
-        matches = memory.recall("which database did we pick?", limit=3)
+        # Verbatim recall: the mock LLM's hash-derived embeddings only
+        # score an exact text match (cosine 1.0); a paraphrased query
+        # like "which database did we pick?" lands near zero and falls
+        # below the adapter's similarity floor. A real embedder handles
+        # semantic queries.
+        matches = memory.recall("We decided to use PostgreSQL for the user database.", limit=3)
+        assert matches, "expected recall to return at least one match"
+        assert any("PostgreSQL" in match.record.content for match in matches), (
+            "expected the PostgreSQL decision to be recalled"
+        )
         for match in matches:
             print(f"[{match.score:.2f}] {match.record.content}")
 

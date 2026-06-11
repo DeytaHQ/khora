@@ -96,7 +96,7 @@ Always run `make format && make test` before committing. CI will reject PRs that
 
 ### Integration examples
 
-Every adapter ships `examples/integrations/<name>/example.py` that runs without external services (sqlite_lance fixture + mock LLM helpers under `examples/_helpers/`). The `python title="example.py"` block in `docs/integrations/<name>.md` must be byte-identical to that file. The `examples-smoke` CI job gates drift via `tools/check_examples_drift.py` and smoke-runs each example under a 30s timeout.
+Every adapter ships `examples/integrations/<name>/example.py` that runs without external services (sqlite_lance fixture + mock LLM helpers under `examples/_helpers/`). The `python title="example.py"` block in `docs/integrations/<name>.md` must be byte-identical to that file. The `examples-smoke` CI job gates drift via `tools/check_examples_drift.py` and smoke-runs each example under a 60s timeout. Examples must assert on their results (not just print) so the smoke run fails on regressions, and the mock LLM's default response is a valid empty extraction payload — a non-JSON default would push every ingest through 3 tenacity retries (~6s of sleeps per document).
 
 ### Coding Principles
 

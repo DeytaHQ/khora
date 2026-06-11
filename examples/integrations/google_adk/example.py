@@ -75,6 +75,7 @@ async def main() -> None:
             user_id="example-user-1234",
             query="which database did we pick?",
         )
+        assert response.memories, "expected search_memory to recover the session events"
         print(f"Recovered {len(response.memories)} memory entries:")
         for entry in response.memories:
             text = " ".join(part.text for part in (entry.content.parts or []) if part.text)

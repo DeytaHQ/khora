@@ -241,9 +241,8 @@ Lifecycle exercised: ``initialize`` → ``queue_prefetch`` → ``sync_turn``
 ``handle_tool_call("memory_search")`` (blocking dispatch, real result)
 → ``on_pre_compress`` → ``on_session_end`` (drain) → ``shutdown``.
 
-Kept light (3 turns) to fit the 30s CI smoke budget - every
-``sync_turn`` triggers a full extraction pipeline that retries 3× on
-the mock LLM's non-JSON output.
+Kept light (3 turns) to fit the CI smoke budget - every ``sync_turn``
+still runs the full extraction pipeline against the mock LLM.
 """
 
 from __future__ import annotations
@@ -337,10 +336,22 @@ async def main() -> None:
         # 6) Tool dispatch is the blocking path - the LLM is already
         #    waiting on a tool result so we serve real data. The
         #    runtime FIFO ensures the writes drain before recall runs.
+        #    The query repeats turn 1 verbatim (sync_turn embeds
+        #    "USER: ...\n\nASSISTANT: ..."): the mock LLM's hash-derived
+        #    embeddings only score an exact text match (cosine 1.0), and
+        #    a paraphrase would fall below the tool's 0.1 similarity
+        #    floor. A real embedder handles semantic queries.
         result = provider.handle_tool_call(
             "memory_search",
-            {"query": "Phoenix database", "top_k": 3},
+            {
+                "query": (
+                    "USER: Alice picked PostgreSQL for the Phoenix database.\n\n"
+                    "ASSISTANT: Got it - PostgreSQL for Phoenix."
+                ),
+                "top_k": 3,
+            },
         )
+        assert "Phoenix" in result, "expected memory_search to surface the ingested turns"
         print("--- memory_search tool call (blocking dispatch) ---")
         print(result.strip())
 

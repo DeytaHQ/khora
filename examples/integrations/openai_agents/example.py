@@ -12,8 +12,8 @@ adapter exposes directly: ``KhoraSession`` (SessionABC contract),
 (RunHooks-shaped). Each is what an ``Agent`` would call into.
 
 Kept deliberately small (single ``add_items`` write) so it finishes
-well under the 30s CI smoke budget - every khora write triggers a full
-extraction pipeline that retries 3x on the mock LLM's non-JSON output.
+well under the CI smoke budget - every khora write still runs the full
+extraction pipeline against the mock LLM.
 """
 
 from __future__ import annotations
@@ -45,10 +45,12 @@ async def main() -> None:
 
         # 1) Session - one turn is enough to demonstrate the SessionABC
         #    contract. Every khora write runs full extraction, so we keep
-        #    the example light to fit the 30s CI smoke budget.
+        #    the example light to fit the CI smoke budget.
         session = KhoraSession(kb=kb, namespace=ns_id, session_id="example-conv-1")
         await session.add_items([{"role": "user", "content": "We picked PostgreSQL for the user DB."}])
         items = await session.get_items()
+        assert len(items) == 1, "expected the session to round-trip exactly one item"
+        assert items[-1]["content"] == "We picked PostgreSQL for the user DB."
         print(f"Session has {len(items)} item(s); latest: {items[-1]['content']!r}")
 
         # 2) Recall tool - closes over (kb, namespace, top_k). Construction

@@ -560,10 +560,12 @@ jobs:
             # path — without this, the helper package is unreachable
             # because there's no ``examples/__init__.py`` at the root.
             #
-            # 60s budget (was 30s): the crewai example runs through the
-            # full ingest pipeline + LLM stub retries and observed times
-            # around 25-34s on GitHub-hosted runners. 30s was too tight
-            # and produced intermittent flakes (#741 / v0.15.1 release).
+            # 60s budget (was 30s): raised after intermittent flakes
+            # (#741 / v0.15.1 release). Since #1099 the mock LLM returns
+            # valid extraction JSON (no tenacity retry sleeps) and the
+            # fixture disables cross-encoder reranking (no HF Hub model
+            # download inside recall), so examples should sit well under
+            # the budget; 60s is headroom for runner variance.
             if ! PYTHONPATH="${GITHUB_WORKSPACE}" timeout 60s uv run --directory "$ex" python example.py; then
               echo "[examples-smoke] $name: FAILED"
               fail=1
