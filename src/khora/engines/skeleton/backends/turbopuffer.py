@@ -340,11 +340,16 @@ class TurbopufferTemporalStore(TemporalVectorStore):
             the operator docs so users picking turbopuffer know
             ``hybrid_alpha`` is a no-op on this backend.
 
-        A non-None ``filter_ast`` RAISES :class:`RecallFilterUnsupportedError`:
-        this backend does not implement deterministic recall filters, so it
-        fails loud rather than silently returning unfiltered rows.
+        A ``filter_ast`` that carries constraints RAISES
+        :class:`RecallFilterUnsupportedError`: this backend does not implement
+        deterministic recall filters, so it fails loud rather than silently
+        returning unfiltered rows. An empty / constraint-free filter (the
+        match-everything, no-predicate AST that ``filter={}`` / ``RecallFilter()``
+        normalizes to, i.e. an AND root with no children) is a no-op and passes
+        through to the normal search path unchanged. ``filter_ast.children`` is
+        the "has real constraints" check (the root is always an AND ``FilterNode``).
         """
-        if filter_ast is not None:
+        if filter_ast is not None and filter_ast.children:
             raise RecallFilterUnsupportedError(
                 "filter_ast",
                 "the turbopuffer backend does not support deterministic recall filters; filter_ast must be None",
