@@ -503,8 +503,19 @@ class MemgraphBackend(GraphBackendBase):
                 result = await session.run(query, rows=rows)
                 records = await result.data()
                 # is_new when the stored id equals the id we tried to insert.
-                new_ids = {r["input_id"] for r in records if r["stored_id"] == r["input_id"]}
-                results.extend((e, str(e.id) in new_ids) for e in batch)
+                # On a MERGE match the graph keeps the pre-existing node id,
+                # so sync the caller's Entity to the canonical stored id
+                # (#806 contract, issue #1150) - the subsequent relationship
+                # batch resolves endpoints by ``entity.id`` and would
+                # silently drop edges pointing at the extraction-time id.
+                stored_by_input = {r["input_id"]: r["stored_id"] for r in records}
+                for e in batch:
+                    input_id = str(e.id)
+                    stored_id = stored_by_input.get(input_id, input_id)
+                    if stored_id != input_id:
+                        e.id = UUID(stored_id)
+                        logger.debug(f"Entity '{e.name}' ID synced: {input_id} -> {stored_id}")
+                    results.append((e, stored_id == input_id))
 
         return results
 
