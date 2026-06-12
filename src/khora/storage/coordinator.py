@@ -1910,6 +1910,19 @@ class StorageCoordinator:
             fact_id, superseded_by, namespace_id=namespace_id
         )
 
+    async def delete_facts_for_chunks(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> int:
+        """Hard-delete memory facts referencing any of ``chunk_ids``.
+
+        Forget-cascade cleanup (#1140): ``memory_facts`` carries chunk
+        provenance only in the non-FK ``source_chunk_ids`` array, so document
+        deletion never cascades to it. Returns the number of facts deleted.
+        """
+        if not chunk_ids:
+            return 0
+        return await self._chronicle_backend("delete_facts_for_chunks").delete_facts_for_chunks(
+            chunk_ids, namespace_id=namespace_id
+        )
+
     # =========================================================================
     # Sync checkpoint operations (delegated to relational)
     # =========================================================================

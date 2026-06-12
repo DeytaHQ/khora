@@ -341,6 +341,107 @@ async def test_chronicle_events_and_facts_persist_via_engine(
     )
 
 
+def _facts_only_extraction() -> ExpertiseConfig:
+    """Enable fact extraction only (events stay off for determinism)."""
+    return ExpertiseConfig(
+        name="chronicle-sqlite_lance-integ-facts-only",
+        events=EventExtractionConfig(enabled=False),
+        facts=FactExtractionConfig(enabled=True),
+    )
+
+
+def _stub_fact_extractor(monkeypatch: pytest.MonkeyPatch, fact_text: str) -> None:
+    """Patch ``FactExtractor.extract_facts`` to emit one fact per chunk."""
+
+    async def _stub_extract_facts(
+        self: Any, text: str, *, chunk_id: Any = None, namespace_id: Any = None, **_kwargs: Any
+    ) -> list[MemoryFact]:
+        return [
+            MemoryFact(
+                id=uuid4(),
+                namespace_id=namespace_id,
+                subject="Marie Curie",
+                predicate="won",
+                object_="Nobel Prize",
+                fact_text=fact_text,
+                confidence=0.95,
+                source_chunk_ids=[chunk_id] if chunk_id else [],
+            )
+        ]
+
+    monkeypatch.setattr(
+        "khora.engines.chronicle.compression.FactExtractor.extract_facts",
+        _stub_extract_facts,
+    )
+
+
+async def test_chronicle_forget_deletes_memory_facts(
+    kb: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for issue #1140.
+
+    ``memory_facts`` has no FK to chunks or documents - provenance is the
+    non-FK ``source_chunk_ids`` array - so the chunks cascade from
+    ``delete_document`` never touched it. Before the fix, ``forget()``
+    left every fact extracted from the deleted document active with
+    dangling ``source_chunk_ids``, retaining forgotten content (including
+    PII distilled into ``fact_text``) indefinitely.
+    """
+    _stub_fact_extractor(monkeypatch, "Marie Curie won the Nobel Prize.")
+
+    result = await _remember(
+        kb,
+        namespace_id=namespace_id,
+        content="Marie Curie won the Nobel Prize in Physics in 1903.",
+        expertise=_facts_only_extraction(),
+    )
+    assert result.metadata.get("facts_extracted", 0) >= 1, "test setup: no facts persisted"
+
+    # Facts are stored under the row-level namespace id, not the stable one.
+    resolved_ns = await kb.storage.resolve_namespace(namespace_id)
+    facts_before = await kb.storage.query_active_facts_for_subject(resolved_ns, "Marie Curie")
+    assert facts_before, "test setup: expected at least one active fact before forget"
+
+    ok = await kb.forget(result.document_id, namespace=namespace_id)
+    assert ok, "forget() must report success"
+
+    facts_after = await kb.storage.query_active_facts_for_subject(resolved_ns, "Marie Curie")
+    assert not facts_after, (
+        f"Issue #1140 regression: {len(facts_after)} memory fact(s) extracted from the "
+        f"forgotten document remain active with dangling source_chunk_ids"
+    )
+
+
+async def test_chronicle_forget_session_deletes_memory_facts(
+    kb: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for issue #1140 on the ``forget_session`` cascade (#620)."""
+    _stub_fact_extractor(monkeypatch, "Marie Curie discovered radium.")
+
+    session_id = uuid4()
+    await kb.remember(
+        content="Marie Curie discovered radium during her research in Paris.",
+        namespace=namespace_id,
+        entity_types=["PERSON", "CONCEPT", "EVENT"],
+        relationship_types=["KNOWS", "ATTENDED", "RELATES_TO"],
+        expertise=_facts_only_extraction(),
+        session_id=session_id,
+    )
+
+    resolved_ns = await kb.storage.resolve_namespace(namespace_id)
+    facts_before = await kb.storage.query_active_facts_for_subject(resolved_ns, "Marie Curie")
+    assert facts_before, "test setup: expected at least one active fact before forget_session"
+
+    deleted = await kb.forget_session(namespace_id, session_id)
+    assert deleted == 1, f"forget_session must delete the session's document, got {deleted}"
+
+    facts_after = await kb.storage.query_active_facts_for_subject(resolved_ns, "Marie Curie")
+    assert not facts_after, (
+        f"Issue #1140 regression: {len(facts_after)} memory fact(s) from the forgotten "
+        f"session remain active - forget_session's #620 contract is broken one layer down"
+    )
+
+
 async def test_chronicle_recall_handles_punctuated_query(kb: Khora, namespace_id: UUID) -> None:
     """Regression for issue #526 at the **engine layer**.
 

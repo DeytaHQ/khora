@@ -930,6 +930,25 @@ class SurrealDBRelationalAdapter:
             },
         )
 
+    async def delete_facts_for_chunks(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> int:
+        """Hard-delete memory_fact rows referencing any of ``chunk_ids`` (#1140).
+
+        Forget-cascade cleanup: memory facts carry chunk provenance only in
+        the ``source_chunk_ids`` array, so document deletion never cascades
+        to them. Scoped to ``namespace_id`` (IDOR family). Returns the
+        number of facts deleted.
+        """
+        if not chunk_ids:
+            return 0
+        deleted = await self._conn.query(
+            "DELETE memory_fact WHERE namespace_id = $ns AND source_chunk_ids CONTAINSANY $chunks RETURN BEFORE",
+            {
+                "ns": str(namespace_id),
+                "chunks": [str(cid) for cid in chunk_ids],
+            },
+        )
+        return len(deleted or [])
+
     # ------------------------------------------------------------------
     # SQLAlchemy compatibility shim
     # ------------------------------------------------------------------

@@ -32,7 +32,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from khora.config import KhoraConfig
 from khora.db.session import run_migrations
+from khora.engines.chronicle.compression import MemoryFact
 from khora.extraction.extractors.base import (
     ExtractedEntity,
     ExtractedRelationship,
@@ -549,6 +550,67 @@ async def test_chronicle_recall_metadata_completeness(kb: Khora, namespace_id: U
         "should_abstain",
     }
     assert set(md["abstention_signals"].keys()) == expected_signals
+
+
+async def test_chronicle_forget_deletes_memory_facts(
+    kb: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for issue #1140 on the PostgreSQL path.
+
+    ``memory_facts`` has no FK to chunks or documents - provenance is the
+    non-FK ``source_chunk_ids`` array - so the chunks cascade from
+    ``delete_document`` never touched it. Before the fix, ``forget()``
+    left every fact extracted from the deleted document active with
+    dangling ``source_chunk_ids``.
+    """
+
+    async def _stub_extract_facts(
+        self: Any, text: str, *, chunk_id: Any = None, namespace_id: Any = None, **_kwargs: Any
+    ) -> list[MemoryFact]:
+        return [
+            MemoryFact(
+                id=uuid4(),
+                namespace_id=namespace_id,
+                subject="Marie Curie",
+                predicate="won",
+                object_="Nobel Prize",
+                fact_text="Marie Curie won the Nobel Prize.",
+                confidence=0.95,
+                source_chunk_ids=[chunk_id] if chunk_id else [],
+            )
+        ]
+
+    monkeypatch.setattr(
+        "khora.engines.chronicle.compression.FactExtractor.extract_facts",
+        _stub_extract_facts,
+    )
+
+    facts_expertise = ExpertiseConfig(
+        name="chronicle-pg-integ-facts-only",
+        events=EventExtractionConfig(enabled=False),
+        facts=FactExtractionConfig(enabled=True),
+    )
+    result = await _remember(
+        kb,
+        namespace_id=namespace_id,
+        content="Marie Curie won the Nobel Prize in Physics in 1903.",
+        expertise=facts_expertise,
+    )
+    assert result.metadata.get("facts_extracted", 0) >= 1, "test setup: no facts persisted"
+
+    # Facts are stored under the row-level namespace id, not the stable one.
+    resolved_ns = await kb.storage.resolve_namespace(namespace_id)
+    facts_before = await kb.storage.query_active_facts_for_subject(resolved_ns, "Marie Curie")
+    assert facts_before, "test setup: expected at least one active fact before forget"
+
+    ok = await kb.forget(result.document_id, namespace=namespace_id)
+    assert ok, "forget() must report success"
+
+    facts_after = await kb.storage.query_active_facts_for_subject(resolved_ns, "Marie Curie")
+    assert not facts_after, (
+        f"Issue #1140 regression: {len(facts_after)} memory fact(s) extracted from the "
+        f"forgotten document remain active with dangling source_chunk_ids"
+    )
 
 
 async def test_chronicle_concurrent_remember(kb: Khora, namespace_id: UUID) -> None:

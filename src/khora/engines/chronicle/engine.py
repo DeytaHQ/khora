@@ -44,7 +44,7 @@ from khora.core.models.recall import (
 )
 from khora.core.recall_abstention import compute_abstention_signals
 from khora.core.recall_scoring import min_max_normalize
-from khora.engines._forget_cascade import cascade_forget_extraction
+from khora.engines._forget_cascade import _FORGET_DEGRADED_COUNTER, cascade_forget_extraction
 from khora.engines._stats import gather_counts
 from khora.engines._storage_config import build_storage_config
 from khora.engines.chronicle.compression import (
@@ -2928,9 +2928,47 @@ class ChronicleEngine:
             # namespace — either way, nothing to forget for this caller.
             return False
 
+        # Collect chunk ids and delete derived memory_facts BEFORE
+        # delete_document - the chunks FK cascade destroys the rows the
+        # provenance match needs (#1140).
+        await self._forget_memory_facts(document_id, namespace_id)
         await self._cascade_forget_extraction(document_id, namespace_id)
 
         return await storage.delete_document(document_id, namespace_id=namespace_id)
+
+    async def _forget_memory_facts(self, document_id: UUID, namespace_id: UUID) -> None:
+        """Hard-delete memory_facts derived from a document's chunks (#1140).
+
+        ``memory_facts`` has no FK to chunks or documents - provenance is the
+        non-FK ``source_chunk_ids`` array - so the chunks cascade from
+        ``delete_document`` never reaches it. Facts are extracted per chunk
+        (single-chunk provenance), and the forget contract favours removing
+        derived content over retaining forgotten text, so any fact
+        referencing one of the document's chunks is deleted. Failures
+        degrade per ADR-001 (WARNING + counter) rather than blocking the
+        document delete.
+        """
+        storage = self._get_storage()
+        try:
+            chunks = await storage.get_chunks_by_document(document_id, namespace_id=namespace_id)
+            chunk_ids = [chunk.id for chunk in chunks]
+            if not chunk_ids:
+                return
+            deleted = await storage.delete_facts_for_chunks(chunk_ids, namespace_id=namespace_id)
+            if deleted:
+                logger.debug(
+                    "Forget cascade removed {} memory fact(s) derived from document {}",
+                    deleted,
+                    document_id,
+                )
+        except Exception as exc:
+            _FORGET_DEGRADED_COUNTER.add(1, {"reason": "memory_facts_cleanup_failed"})
+            logger.warning(
+                "Forget cascade could not delete memory facts for document {}: {}",
+                document_id,
+                exc,
+                exc_info=True,
+            )
 
     async def _cascade_forget_extraction(self, document_id: UUID, namespace_id: UUID) -> list[Degradation]:
         """Drop / decrement entities and relationships extracted from a document.

@@ -310,7 +310,12 @@ DEFINE FIELD IF NOT EXISTS fact_text ON memory_fact TYPE string;
 DEFINE FIELD IF NOT EXISTS confidence ON memory_fact TYPE float DEFAULT 1.0;
 DEFINE FIELD IF NOT EXISTS is_active ON memory_fact TYPE bool DEFAULT true;
 DEFINE FIELD IF NOT EXISTS superseded_by ON memory_fact TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS source_chunk_ids ON memory_fact TYPE option<array>;
+-- NOTE: must be array<string>, not bare array - SurrealDB coerces values
+-- bound to a bare option<array> SCHEMAFULL field to [] (observed on SDK
+-- >=2.0 embedded mode), which silently dropped fact provenance and broke
+-- the #1140 forget cascade. Only fresh databases pick this up (IF NOT
+-- EXISTS skips redefinition); existing deployments already store [].
+DEFINE FIELD IF NOT EXISTS source_chunk_ids ON memory_fact TYPE option<array<string>>;
 DEFINE FIELD IF NOT EXISTS created_at ON memory_fact TYPE datetime DEFAULT time::now();
 DEFINE FIELD IF NOT EXISTS updated_at ON memory_fact TYPE datetime DEFAULT time::now();
 DEFINE INDEX IF NOT EXISTS idx_memory_fact_namespace ON memory_fact FIELDS namespace_id;

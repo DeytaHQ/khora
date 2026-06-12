@@ -1565,6 +1565,26 @@ class PgVectorBackend(AsyncSessionMixin):
             )
             await session.commit()
 
+    async def delete_facts_for_chunks(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> int:
+        """Hard-delete memory_facts referencing any of ``chunk_ids`` (#1140).
+
+        Forget-cascade cleanup: ``memory_facts`` has no FK to chunks, so the
+        chunks cascade from ``delete_document`` never reaches it - provenance
+        is the non-FK ``source_chunk_ids`` array. Scoped to ``namespace_id``
+        (IDOR family). Returns the number of facts deleted.
+        """
+        if not chunk_ids:
+            return 0
+        async with self._get_session() as session:
+            result = await session.execute(
+                delete(MemoryFactModel).where(
+                    MemoryFactModel.namespace_id == namespace_id,
+                    MemoryFactModel.source_chunk_ids.overlap(chunk_ids),
+                )
+            )
+            await session.commit()
+        return result.rowcount or 0
+
     async def get_embedding_stats(self, namespace_id: UUID) -> dict:
         """Get statistics about embeddings in a namespace."""
         async with self._get_session() as session:
