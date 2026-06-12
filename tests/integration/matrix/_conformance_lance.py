@@ -59,7 +59,7 @@ from khora.engines.skeleton.backends import TemporalChunk
 from khora.engines.skeleton.backends.sqlite_lance import SQLiteLanceTemporalStore
 from khora.filter import CompiledFilter
 from khora.filter.ast import FilterNode
-from khora.filter.conformance import ConformanceCase, LanceExecutor, seed_case
+from khora.filter.conformance import _DOC_STRING_KEYS, ConformanceCase, LanceExecutor, seed_case
 from khora.storage.backends.sqlite_lance import SQLiteLanceRelationalAdapter
 from khora.storage.backends.sqlite_lance._helpers import uuid_to_text
 from khora.storage.backends.sqlite_lance.connection import (
@@ -105,15 +105,23 @@ def lance_conformance_cases() -> list[ConformanceCase]:
     return [c for c in cases if "sqlite_lance" in c.backends]
 
 
-def _to_temporal_chunk(chunk: Chunk) -> TemporalChunk:
+def _to_temporal_chunk(chunk: Chunk, doc_keys: Mapping[str, Any]) -> TemporalChunk:
     """Adapt a core ``Chunk`` (what ``seed_case`` builds) to the ``TemporalChunk``
-    the skeleton ``khora_chunks`` store writes.
+    the skeleton ``khora_chunks`` store writes, stamping the parent document's
+    denormalized string keys.
 
     ``SQLiteLanceTemporalStore.create_chunks_batch`` reads ``TemporalChunk``-only
     columns (``source_system`` / ``author`` / ``channel`` / the denormalized document
     keys). ``seed_case`` sets only the fields both models share — ids, content, the
     three date keys (occurred_at / created_at / source_timestamp), and metadata — so
-    copy those and let the skeleton-only columns default to ``None``.
+    copy those. The seven string document keys
+    (``source_type`` / ``source_name`` / ``source_url`` / ``external_id`` /
+    ``content_type`` / ``source`` / ``title``) live on the parent ``Document``, not
+    the core ``Chunk``; ``doc_keys`` carries them off that document so the chunk row
+    is queryable on them, mirroring the production denormalization the
+    ``SQLiteLanceTemporalStore`` write path performs (the same move the postgres twin
+    ``_conformance_pg.py`` makes). The remaining skeleton-only columns default to
+    ``None``.
 
     ``embedding`` is dropped (``None``): filter conformance never touches the vector
     channel, and a ``None`` embedding makes the store skip the LanceDB write entirely
@@ -130,6 +138,7 @@ def _to_temporal_chunk(chunk: Chunk) -> TemporalChunk:
         source_timestamp=chunk.source_timestamp,
         metadata=dict(chunk.metadata or {}),
         chunker_info=dict(chunk.chunker_info or {}),
+        **doc_keys,
     )
 
 
@@ -139,11 +148,37 @@ class _CoreChunkTemporalStore(SQLiteLanceTemporalStore):
     The conformance seeder writes through the coordinator with core ``Chunk``
     instances, but the skeleton store's batch insert reads ``TemporalChunk``-only
     attributes. Convert at this boundary so the harness stays storage-agnostic and the
-    production store is untouched.
+    production store is untouched. The parent document's seven string keys are
+    denormalized onto each chunk (one batched SELECT on the shared SQLite file), so the
+    sqlite_lance leg carries them on the queryable row exactly as production does —
+    mirroring the postgres twin's ``_CoreChunkTemporalStore`` in ``_conformance_pg.py``.
     """
 
     async def create_chunks_batch(self, chunks: list[Chunk]) -> list[TemporalChunk]:  # type: ignore[override]
-        return await super().create_chunks_batch([_to_temporal_chunk(c) for c in chunks])
+        doc_keys_by_id = await self._fetch_document_keys({c.document_id for c in chunks})
+        temporal = [_to_temporal_chunk(c, doc_keys_by_id.get(c.document_id, {})) for c in chunks]
+        return await super().create_chunks_batch(temporal)
+
+    async def _fetch_document_keys(self, document_ids: set[UUID]) -> dict[UUID, dict[str, Any]]:
+        """Read the seven string keys off each parent document (one batched query).
+
+        Mirrors production denormalization: the keys live on ``documents`` and are
+        copied onto the chunk row. The documents were written by ``seed_case`` through
+        the relational adapter's SQLAlchemy engine immediately before — onto the same
+        physical SQLite file this raw-aiosqlite handle reads, in the shared
+        hex-no-dashes UUID encoding (``uuid_to_text``) — so the rows are present and
+        the ``id IN (...)`` bind matches. This is the sqlite_lance counterpart to the
+        postgres twin's ``_fetch_document_keys`` in ``_conformance_pg.py``.
+        """
+        if not document_ids:
+            return {}
+        placeholders = ",".join("?" for _ in document_ids)
+        columns = ", ".join(("id", *_DOC_STRING_KEYS))
+        sql = f"SELECT {columns} FROM documents WHERE id IN ({placeholders})"  # noqa: S608 - ids bind positionally
+        ids = [uuid_to_text(did) for did in document_ids]
+        cur = await self._sqlite.execute(sql, ids)
+        rows = await cur.fetchall()
+        return {UUID(row["id"]): {key: row[key] for key in _DOC_STRING_KEYS} for row in rows}
 
 
 # --------------------------------------------------------------------------- #
