@@ -1065,7 +1065,7 @@
       "labels": [
         {"name": "reason", "values": ["unrecognized_neighborhood_shape"], "_comment": "Low-cardinality enum; extend when adding new cypher-expand normalization fallback paths."}
       ],
-      "description": "Issue #1086 (ADR-001). VectorCypher graph-expansion normalization fallback - incremented per neighborhood entry returned by get_neighborhoods_batch whose shape is unrecognized (neither an Entity domain object nor a dict) and is therefore dropped from the expansion. Guards against a silently-empty graph channel on the embedded sqlite_lance path. The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
+      "description": "VectorCypher graph-expansion normalization fallback - incremented per neighborhood entry returned by get_neighborhoods_batch whose shape is unrecognized (neither an Entity domain object nor a dict) and is therefore dropped from the expansion. The same event is also appended to RecallResult.engine_info['degradations']. No namespace_id label."
     },
     {
       "name": "khora.vectorcypher.chunk_mirror.degraded_total",
