@@ -475,6 +475,7 @@ class DualNodeManager:
         prefer_current: bool = False,
         limit: int = 50,
         filter_ast: FilterNode | None = None,
+        pushed_keys_out: list[frozenset[str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Get chunks connected to the given entities via MENTIONED_IN.
 
@@ -492,6 +493,13 @@ class DualNodeManager:
                 leaf is not expressible in Cypher and is left to the engine's
                 in-memory post-filter. A predicate this backend cannot honor at
                 all raises :class:`RecallFilterUnsupportedError`.
+            pushed_keys_out: Optional sink for the pushdown report. Receives the
+                consumed-key set of the compile whose predicate was actually
+                spliced into the executed ``WHERE`` — so the report derives from
+                the executing compile, not a parallel one. Left untouched when
+                nothing pushed (no filter, or a metadata-only filter that
+                consumed zero leaves). Carries a bare ``frozenset[str]`` so this
+                graph-store layer stays free of filter-report types.
 
         Returns:
             List of chunk dicts with entity connection info.
@@ -553,6 +561,8 @@ class DualNodeManager:
             if compiled.consumed_keys:
                 temporal_conditions.append(compiled.predicate)
                 params.update(compiled.params)
+                if pushed_keys_out is not None:
+                    pushed_keys_out.append(compiled.consumed_keys)
 
         where_clause = ""
         if temporal_conditions:

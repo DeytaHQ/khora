@@ -1222,3 +1222,51 @@ class TestGetChunksByEntitiesFilterPushdown:
         assert not any(v == "urgent" for v in params.values()), (
             "metadata leaf was wrongly pushed to Cypher instead of deferred to the in-memory post-filter"
         )
+
+    @pytest.mark.asyncio
+    async def test_pushed_keys_out_sink_receives_the_executed_compile(self) -> None:
+        """The ``pushed_keys_out`` sink reports exactly what the executed WHERE spliced.
+
+        A system-key filter splices the predicate and appends its
+        ``consumed_keys`` to the sink (the report source = execution input). A
+        metadata-only filter consumes nothing on the Cypher side, and a no-filter
+        call compiles nothing — both leave the sink untouched, so the graph plan
+        cannot over-claim a pushdown that did not happen.
+        """
+        from khora.filter import RecallFilter, parse_to_ast
+
+        driver, _session, _tx = _make_read_capturing_driver()
+        manager = DualNodeManager(driver)
+
+        # System-key filter -> sink receives exactly the compile's consumed_keys.
+        system_sink: list[frozenset[str]] = []
+        await manager.get_chunks_by_entities(
+            [uuid4()],
+            uuid4(),
+            filter_ast=parse_to_ast(RecallFilter.model_validate({"source_name": "linear"})),
+            limit=5,
+            pushed_keys_out=system_sink,
+        )
+        assert system_sink == [frozenset({"source_name"})]
+
+        # Metadata-only filter -> nothing pushed -> sink untouched.
+        metadata_sink: list[frozenset[str]] = []
+        await manager.get_chunks_by_entities(
+            [uuid4()],
+            uuid4(),
+            filter_ast=parse_to_ast(RecallFilter.model_validate({"metadata.tag": "urgent"})),
+            limit=5,
+            pushed_keys_out=metadata_sink,
+        )
+        assert metadata_sink == []
+
+        # No filter -> no compile -> sink untouched.
+        no_filter_sink: list[frozenset[str]] = []
+        await manager.get_chunks_by_entities(
+            [uuid4()],
+            uuid4(),
+            filter_ast=None,
+            limit=5,
+            pushed_keys_out=no_filter_sink,
+        )
+        assert no_filter_sink == []

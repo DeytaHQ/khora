@@ -213,6 +213,7 @@ class TemporalVectorStore(Protocol):
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Full-text search over the temporal store's chunk table.
 
@@ -223,6 +224,15 @@ class TemporalVectorStore(Protocol):
         backend compiles it to the SAME ``khora_chunks`` WHERE predicate the
         vector path uses; the other backends accept it for protocol parity
         and ignore it (no compilation yet).
+
+        ``filter_plan_out`` is the optional per-call sink for the honest
+        filter-pushdown plan, mirroring :meth:`search`. When provided, the
+        backend appends exactly one :class:`~khora.filter.report.ChannelPlan`
+        built from THIS call's actual fulltext compile — so a raise-mode
+        backend reports every leaf pushed while a split-mode backend
+        (sqlite_lance) reports the pushed/post-filtered partition its WHERE
+        + in-memory re-check actually produced. The default (return ``[]``)
+        leaves it untouched.
         """
         return []
 

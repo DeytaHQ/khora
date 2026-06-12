@@ -591,6 +591,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Public BM25 / ts_rank lookup over ``khora_chunks`` for the
         StorageCoordinator dispatch path.
@@ -634,6 +635,16 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 CompileContext(backend_target="khora_chunks", on_unsupported="raise"),
             )
             conditions.append(compiled.predicate)
+            # Honest filter-pushdown plan, derived from THIS fulltext compile
+            # (same raise-mode ``khora_chunks`` WHERE the vector path uses).
+            # ``on_unsupported="raise"`` is all-or-nothing: reaching this line
+            # means every leaf was consumed, so ``consumed_keys`` == the AST's
+            # leaves and nothing is post-filtered. A constraint-free filter
+            # yields empty ``consumed_keys``.
+            if filter_plan_out is not None:
+                filter_plan_out.append(ChannelPlan(pushed_keys=compiled.consumed_keys))
+        elif filter_plan_out is not None:
+            filter_plan_out.append(ChannelPlan())
         async with self._get_session() as session:
             results = await self._bm25_search(session, query_text, conditions, limit)
         return [(temporal_chunk_to_chunk(r.chunk), float(r.bm25_score or 0.0)) for r in results]
