@@ -138,6 +138,25 @@ _VERSION_FILTER_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# Cypher-expand neighborhood-normalization degradation counter. The embedded
+# sqlite_lance backend returns ``Entity`` domain objects (mapped to dicts);
+# any entry that is neither an ``Entity`` nor a dict is dropped from the
+# expansion. Incremented per dropped entry so an unexpectedly empty
+# graph-channel recall is observable; the same event is appended to
+# ``RecallResult.engine_info['degradations']``. NO namespace_id label.
+_CYPHER_EXPAND_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.cypher_expand.degraded_total",
+    unit="1",
+    description=(
+        "VectorCypher graph-expansion normalization fallbacks. Incremented when "
+        "a neighborhood entry returned by get_neighborhoods_batch has an "
+        "unrecognized shape (neither an Entity domain object nor a dict) and is "
+        "dropped from the expansion. The same event is appended to "
+        "RecallResult.engine_info['degradations']. Labels: reason "
+        "(unrecognized_neighborhood_shape). NO namespace_id label - cardinality rule."
+    ),
+)
+
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
     """Normalize the value of ``chunker_info`` returned by a record dict.
@@ -1348,6 +1367,7 @@ class VectorCypherRetriever:
                 namespace_id=namespace_id,
                 depth=depth,
                 prefer_current=_tp.prefer_current,
+                degradations=degradations,
             )
         except _NEO4J_TRANSIENT_ERRORS as exc:
             logger.warning(
@@ -2752,6 +2772,7 @@ class VectorCypherRetriever:
         depth: int,
         *,
         prefer_current: bool = False,
+        degradations: list[Degradation] | None = None,
     ) -> tuple[dict[UUID, float], dict[str, dict[str, str]]]:
         """Expand entry entities to find related entities via graph traversal.
 
@@ -2760,6 +2781,10 @@ class VectorCypherRetriever:
             namespace_id: Namespace constraint
             depth: Maximum traversal depth
             prefer_current: When True, filter out expired entities (for temporal queries)
+            degradations: When provided, a structured ``Degradation`` is appended
+                if a neighborhood entry has an unrecognized shape (neither an
+                ``Entity`` domain object nor a dict) so the dropped expansion
+                hop is observable.
 
         Returns:
             Tuple of:
@@ -2784,21 +2809,56 @@ class VectorCypherRetriever:
             elif self._storage and self._storage._graph:
                 raw_neighborhoods = await self._storage.get_neighborhoods_batch(
                     entry_entity_ids,
+                    namespace_id=namespace_id,
                     depth=depth,
                     limit_per_entity=20,
                     prefer_current=prefer_current,
                 )
                 # Normalize: get_neighborhoods_batch returns
                 # {UUID: {"entities": [...], "relationships": [...]}}
-                # but the scoring loop expects {UUID: [{"id":..., "distance":..., ...}]}
+                # but the scoring loop expects {UUID: [{"id":..., "distance":..., ...}]}.
+                # The embedded sqlite_lance backend returns ``Entity`` domain
+                # objects (not dicts), so map those to the dict shape the scoring
+                # loop reads before the ``isinstance(..., dict)`` check.
                 neighborhoods = {}
                 for eid, data in raw_neighborhoods.items():
                     entities_list = data.get("entities", []) if isinstance(data, dict) else data
                     normalized = []
                     for i, entity_data in enumerate(entities_list if isinstance(entities_list, list) else []):
+                        if isinstance(entity_data, Entity):
+                            mapped: dict[str, Any] = {
+                                "id": entity_data.id,
+                                "name": entity_data.name,
+                                "entity_type": entity_data.entity_type,
+                                "description": entity_data.description,
+                                "source_tool": entity_data.source_tool,
+                            }
+                            entity_data = mapped
                         if isinstance(entity_data, dict):
                             entity_data.setdefault("distance", i + 1)
                             normalized.append(entity_data)
+                        else:
+                            # Unrecognized neighborhood-entry shape (neither an
+                            # Entity domain object nor a dict): log + count + record
+                            # the dropped expansion hop so an unexpectedly empty
+                            # graph-channel recall is observable rather than silent
+                            # (matches the version_filter / rel_fetch convention).
+                            logger.warning(
+                                f"Dropping unrecognized neighborhood entry of type "
+                                f"{type(entity_data).__name__} in _cypher_expand; "
+                                f"graph-expansion hop skipped."
+                            )
+                            _CYPHER_EXPAND_DEGRADED_COUNTER.add(
+                                1, attributes={"reason": "unrecognized_neighborhood_shape"}
+                            )
+                            if degradations is not None:
+                                degradations.append(
+                                    Degradation(
+                                        component="vectorcypher.cypher_expand",
+                                        reason="unrecognized_neighborhood_shape",
+                                        detail=f"dropped neighborhood entry of type {type(entity_data).__name__}",
+                                    )
+                                )
                     neighborhoods[eid] = normalized
             else:
                 neighborhoods = {}

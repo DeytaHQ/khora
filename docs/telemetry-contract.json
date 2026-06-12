@@ -1057,6 +1057,17 @@
       "description": "VectorCypher entity-version filtering fallback - incremented when an EXPLICIT/occurred-bounds recall runs on the embedded sqlite_lance backend, which lacks the version_valid_from/to columns _version_filter_entities reads, so point-in-time entity-version narrowing is skipped. The occurred-bounds chunk filter (start_time/end_time) still applies on the vector + BM25 channels. The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
     },
     {
+      "name": "khora.vectorcypher.cypher_expand.degraded_total",
+      "type": "counter",
+      "stability": "internal",
+      "unit": "1",
+      "owner": "vectorcypher",
+      "labels": [
+        {"name": "reason", "values": ["unrecognized_neighborhood_shape"], "_comment": "Low-cardinality enum; extend when adding new cypher-expand normalization fallback paths."}
+      ],
+      "description": "VectorCypher graph-expansion normalization fallback - incremented per neighborhood entry returned by get_neighborhoods_batch whose shape is unrecognized (neither an Entity domain object nor a dict) and is therefore dropped from the expansion. The same event is also appended to RecallResult.engine_info['degradations']. No namespace_id label."
+    },
+    {
       "name": "khora.vectorcypher.chunk_mirror.degraded_total",
       "type": "counter",
       "stability": "public",
