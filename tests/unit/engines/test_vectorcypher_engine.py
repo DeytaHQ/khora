@@ -329,6 +329,130 @@ class TestVectorCypherEngineRemember:
         connected_engine._storage.create_document.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_remember_same_content_new_session_creates_document(
+        self, connected_engine: VectorCypherEngine
+    ) -> None:
+        """#1139: a checksum hit stored under a different session_id is NOT a duplicate."""
+        namespace_id = uuid4()
+        session_a = uuid4()
+        session_b = uuid4()
+
+        existing_doc = MagicMock()
+        existing_doc.id = uuid4()
+        existing_doc.external_id = None
+        existing_doc.session_id = session_a
+        connected_engine._storage.get_document_by_checksum = AsyncMock(return_value=existing_doc)
+
+        created_doc = MagicMock()
+        created_doc.id = uuid4()
+        created_doc.namespace_id = namespace_id
+        created_doc.content = "yes"
+        created_doc.metadata = {}
+        connected_engine._storage.create_document = AsyncMock(return_value=created_doc)
+
+        with patch.object(connected_engine, "_process_document", new_callable=AsyncMock, return_value=(1, 0, 0)):
+            result = await connected_engine.remember(
+                "yes",
+                namespace_id,
+                metadata={"session_id": str(session_b)},
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+            )
+
+        assert result.metadata.get("duplicate") is None
+        assert result.document_id == created_doc.id
+        connected_engine._storage.create_document.assert_called_once()
+        assert connected_engine._storage.create_document.call_args[0][0].session_id == session_b
+
+    @pytest.mark.asyncio
+    async def test_remember_same_content_new_external_id_creates_document(
+        self, connected_engine: VectorCypherEngine
+    ) -> None:
+        """#1139: a checksum hit stored under a different external_id is NOT a duplicate."""
+        namespace_id = uuid4()
+
+        existing_doc = MagicMock()
+        existing_doc.id = uuid4()
+        existing_doc.external_id = "ext-a"
+        existing_doc.session_id = None
+        connected_engine._storage.get_document_by_external_id = AsyncMock(return_value=None)
+        connected_engine._storage.get_document_by_checksum = AsyncMock(return_value=existing_doc)
+
+        created_doc = MagicMock()
+        created_doc.id = uuid4()
+        created_doc.namespace_id = namespace_id
+        created_doc.content = "yes"
+        created_doc.metadata = {}
+        connected_engine._storage.create_document = AsyncMock(return_value=created_doc)
+
+        with patch.object(connected_engine, "_process_document", new_callable=AsyncMock, return_value=(1, 0, 0)):
+            result = await connected_engine.remember(
+                "yes",
+                namespace_id,
+                entity_types=["PERSON"],
+                relationship_types=["KNOWS"],
+                external_id="ext-b",
+            )
+
+        assert result.metadata.get("duplicate") is None
+        assert result.document_id == created_doc.id
+        connected_engine._storage.create_document.assert_called_once()
+        assert connected_engine._storage.create_document.call_args[0][0].external_id == "ext-b"
+
+    @pytest.mark.asyncio
+    async def test_remember_same_content_same_session_still_dedups(self, connected_engine: VectorCypherEngine) -> None:
+        """#1139: a checksum hit within the same session is still a duplicate."""
+        namespace_id = uuid4()
+        session_b = uuid4()
+
+        existing_doc = MagicMock()
+        existing_doc.id = uuid4()
+        existing_doc.status = "completed"
+        existing_doc.chunk_count = 1
+        existing_doc.entity_count = 0
+        existing_doc.relationship_count = 0
+        existing_doc.external_id = None
+        existing_doc.session_id = session_b
+        connected_engine._storage.get_document_by_checksum = AsyncMock(return_value=existing_doc)
+
+        result = await connected_engine.remember(
+            "yes",
+            namespace_id,
+            metadata={"session_id": str(session_b)},
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.metadata.get("duplicate") is True
+        assert result.document_id == existing_doc.id
+        connected_engine._storage.create_document.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_remember_same_content_no_identity_still_dedups(self, connected_engine: VectorCypherEngine) -> None:
+        """#1139: callers that supply neither external_id nor session_id keep checksum-only dedup."""
+        namespace_id = uuid4()
+
+        existing_doc = MagicMock()
+        existing_doc.id = uuid4()
+        existing_doc.status = "completed"
+        existing_doc.chunk_count = 1
+        existing_doc.entity_count = 0
+        existing_doc.relationship_count = 0
+        existing_doc.external_id = None
+        existing_doc.session_id = uuid4()
+        connected_engine._storage.get_document_by_checksum = AsyncMock(return_value=existing_doc)
+
+        result = await connected_engine.remember(
+            "yes",
+            namespace_id,
+            entity_types=["PERSON"],
+            relationship_types=["KNOWS"],
+        )
+
+        assert result.metadata.get("duplicate") is True
+        connected_engine._storage.create_document.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_remember_new_document(self, connected_engine: VectorCypherEngine) -> None:
         """Test remember creates and processes a new document."""
         namespace_id = uuid4()
