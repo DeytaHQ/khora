@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 if TYPE_CHECKING:
-    from khora.core.models import Entity
+    from khora.core.models import Entity, Relationship
 
 # ---------------------------------------------------------------------------
 # Async session mixin (shared across SQL-based backends)
@@ -219,6 +219,85 @@ class GraphBackendBase:
     async def count_relationships(self, namespace_id: UUID) -> int:
         """Default — subclasses should override."""
         raise NotImplementedError
+
+    # -- Batch write defaults (#1149) ----------------------------------------
+    # Default N+1 implementations built on the per-record CRUD primitives
+    # every graph backend already provides. Without them, the coordinator's
+    # hasattr gates silently skipped the graph write on backends that lack a
+    # native batch path (Neptune, AGE): entities landed only in the vector
+    # mirror and relationships were written nowhere. Backends with a native
+    # batch path (Neo4j, Memgraph, SurrealDB, sqlite_lance) override these.
+
+    async def upsert_entities_batch(
+        self,
+        namespace_id: UUID,
+        entities: list[Entity],
+        *,
+        batch_size: int = 100,
+        bulk_mode: bool = False,
+    ) -> list[tuple[Entity, bool]]:
+        """Default N+1 upsert - subclasses should override for efficiency.
+
+        Matches on ``(namespace_id, name, entity_type)`` with MERGE semantics
+        mirroring the native batch paths: longest description wins, source
+        ids are unioned, mention counts are summed, confidence takes the max,
+        attributes are replaced. On match the INPUT entity's ``id`` is synced
+        in place to the stored id so relationship endpoints built from
+        extraction-time ids resolve (the #806 id-remap contract).
+
+        ``batch_size`` is accepted for signature parity with the native batch
+        paths and is irrelevant here (per-record writes). ``bulk_mode`` skips
+        the existence probe - used for fresh namespaces where nothing can
+        match. A mid-batch failure propagates (never a silent drop); the
+        coordinator's #868 partial-failure accounting covers the
+        vector-committed/graph-failed case.
+        """
+        results: list[tuple[Entity, bool]] = []
+        for entity in entities:
+            existing = None
+            if not bulk_mode:
+                existing = await self.get_entity_by_name(  # type: ignore[attr-defined]
+                    namespace_id, entity.name, entity.entity_type
+                )
+            if existing is None:
+                await self.create_entity(entity)  # type: ignore[attr-defined]
+                results.append((entity, True))
+                continue
+            if len(entity.description or "") > len(existing.description or ""):
+                existing.description = entity.description
+            existing.source_document_ids = existing.source_document_ids + [
+                d for d in entity.source_document_ids if d not in existing.source_document_ids
+            ]
+            existing.source_chunk_ids = existing.source_chunk_ids + [
+                c for c in entity.source_chunk_ids if c not in existing.source_chunk_ids
+            ]
+            existing.mention_count += entity.mention_count
+            existing.confidence = max(existing.confidence, entity.confidence)
+            existing.attributes = entity.attributes
+            existing.updated_at = entity.updated_at
+            await self.update_entity(existing, namespace_id=namespace_id)  # type: ignore[attr-defined]
+            entity.id = existing.id
+            results.append((entity, False))
+        return results
+
+    async def create_relationships_batch(
+        self,
+        relationships: list[Relationship],
+        *,
+        batch_size: int = 100,
+    ) -> int:
+        """Default N+1 create - subclasses should override for efficiency.
+
+        Returns the number of relationships written. ``batch_size`` is
+        accepted for signature parity and is irrelevant here. A mid-batch
+        failure propagates (never a silent drop): relationships written
+        before the failure are persisted and the caller sees the exception.
+        """
+        count = 0
+        for relationship in relationships:
+            await self.create_relationship(relationship)  # type: ignore[attr-defined]
+            count += 1
+        return count
 
     # -- Forget-cascade cleanup (#923) --------------------------------------
     # Default implementations built on the per-record CRUD primitives every
