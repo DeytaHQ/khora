@@ -6,9 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 from khora.engines.vectorcypher.retriever import (
+    RetrieverConfig,
     VectorCypherResult,
     VectorCypherRetriever,
 )
+from khora.filter import RecallFilter, parse_to_ast
+from khora.query import SearchMode
 from khora.query.router import QueryComplexity, RoutingDecision
 
 
@@ -266,3 +269,152 @@ class TestTypedEntityRecentRetrieve:
         )
 
         retriever._vectorcypher_retrieve.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+def _ast(spec: dict | None):
+    """Build the canonical recall-filter AST exactly as the public facade does."""
+    if spec is None:
+        return None
+    return parse_to_ast(RecallFilter.model_validate(spec))
+
+
+def _make_dispatch_retriever(complexity: QueryComplexity) -> VectorCypherRetriever:
+    """A retriever wired so ``retrieve()`` runs to the route-dispatch gate.
+
+    Bypasses ``__init__`` and stubs only what ``retrieve()`` touches before the
+    dispatch (``_config``, ``_embedder``, ``_router``). Both downstream paths are
+    spies so the test asserts WHICH one the gate selected:
+
+    * ``_typed_entity_recent_retrieve`` — the #569 fast path.
+    * ``_vectorcypher_retrieve`` — the filtered / fallback path.
+
+    The router is mocked to return ``complexity`` (and ``use_graph``), so the
+    routing decision is fixed regardless of the query text.
+    """
+    retriever = VectorCypherRetriever.__new__(VectorCypherRetriever)
+    retriever._config = RetrieverConfig(  # type: ignore[attr-defined]
+        temporal_recency_floor_enabled=False,
+        temporal_llm_disambiguation_enabled=False,
+    )
+
+    embedder = AsyncMock()
+    embedder.embed = AsyncMock(return_value=[0.0] * 4)
+    embedder.model_name = "test-model"
+    embedder.dimension = 4
+    embedder.cache_stats = {"hits": 0}
+    retriever._embedder = embedder  # type: ignore[attr-defined]
+
+    router = MagicMock()
+    router.route = AsyncMock(
+        return_value=RoutingDecision(
+            complexity=complexity,
+            use_graph=complexity is not QueryComplexity.SIMPLE,
+            graph_depth=1,
+            confidence=0.95,
+            reasoning="test",
+            suggested_entry_limit=10,
+        )
+    )
+    router.compute_adaptive_depth = MagicMock(return_value=1)
+    retriever._router = router  # type: ignore[attr-defined]
+
+    # Both downstream paths are spies returning a benign result.
+    def _result(meta: dict) -> VectorCypherResult:
+        return VectorCypherResult(
+            chunks=[],
+            entities=[],
+            routing_decision=router.route.return_value,
+            metadata=meta,
+        )
+
+    retriever._typed_entity_recent_retrieve = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_result({"typed_entity_fast_path": True})
+    )
+    retriever._vectorcypher_retrieve = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_result({"from_fallback": True})
+    )
+    retriever._simple_retrieve = AsyncMock(  # type: ignore[attr-defined]
+        return_value=_result({"from_simple": True})
+    )
+    return retriever
+
+
+class TestTypedEntityFastPathDispatchGate:
+    """The route-dispatch gate enters the fast path ONLY when ``filter_ast is None``."""
+
+    async def test_filtered_typed_recent_skips_fast_path(self) -> None:
+        """TYPED_ENTITY_RECENT + a non-empty filter -> fast path NOT entered.
+
+        A filtered typed-recent recall falls through to ``_vectorcypher_retrieve``
+        (which enforces + reports the filter per channel); the fast path's Cypher
+        cannot enforce caller filters, so the gate must skip it. The SAME
+        ``filter_ast`` instance is forwarded to ``_vectorcypher_retrieve``, and the
+        result carries no ``typed_entity_fast_path`` marker.
+        """
+        ns = uuid4()
+        ast = _ast({"source_name": "linear", "metadata.tier": "gold"})
+        retriever = _make_dispatch_retriever(QueryComplexity.TYPED_ENTITY_RECENT)
+
+        result = await retriever.retrieve("latest action items", ns, limit=10, filter_ast=ast)
+
+        # Fast path was NOT entered.
+        retriever._typed_entity_recent_retrieve.assert_not_awaited()  # type: ignore[attr-defined]
+        # The filtered path ran and received the SAME filter_ast.
+        retriever._vectorcypher_retrieve.assert_awaited_once()  # type: ignore[attr-defined]
+        assert retriever._vectorcypher_retrieve.await_args.kwargs["filter_ast"] is ast  # type: ignore[attr-defined]
+        assert "typed_entity_fast_path" not in result.metadata
+
+    async def test_unfiltered_typed_recent_takes_fast_path(self) -> None:
+        """TYPED_ENTITY_RECENT + ``filter_ast=None`` -> fast path STILL taken (#569).
+
+        Guards the latency fast path against regression from the gate: with no
+        caller filter the gate condition holds and the fast path runs, stamping
+        ``typed_entity_fast_path=True``.
+        """
+        ns = uuid4()
+        retriever = _make_dispatch_retriever(QueryComplexity.TYPED_ENTITY_RECENT)
+
+        result = await retriever.retrieve("latest action items", ns, limit=10, filter_ast=None)
+
+        retriever._typed_entity_recent_retrieve.assert_awaited_once()  # type: ignore[attr-defined]
+        retriever._vectorcypher_retrieve.assert_not_awaited()  # type: ignore[attr-defined]
+        assert result.metadata["typed_entity_fast_path"] is True
+
+    async def test_simple_mode_unaffected_by_filter(self) -> None:
+        """``mode=VECTOR``/``KEYWORD`` (force_simple) routes to ``_simple_retrieve``.
+
+        The new ``filter_ast is None`` gate condition lives on the TYPED-recent
+        branch only; ``force_simple`` short-circuits ahead of it, so a filtered
+        OR unfiltered VECTOR/KEYWORD recall routes to ``_simple_retrieve`` exactly
+        as before, never the typed fast path.
+        """
+        ns = uuid4()
+        ast = _ast({"source_name": "linear"})
+        for mode in (SearchMode.VECTOR, SearchMode.KEYWORD):
+            for fast in (ast, None):
+                retriever = _make_dispatch_retriever(QueryComplexity.TYPED_ENTITY_RECENT)
+
+                await retriever.retrieve("latest action items", ns, limit=10, mode=mode, filter_ast=fast)
+
+                retriever._simple_retrieve.assert_awaited_once()  # type: ignore[attr-defined]
+                retriever._typed_entity_recent_retrieve.assert_not_awaited()  # type: ignore[attr-defined]
+                retriever._vectorcypher_retrieve.assert_not_awaited()  # type: ignore[attr-defined]
+
+    async def test_graph_mode_unaffected_by_filter(self) -> None:
+        """``mode=GRAPH`` (force_graph) routes to ``_vectorcypher_retrieve`` regardless.
+
+        ``force_graph`` forces the entity-expansion path and is evaluated ahead of
+        the TYPED-recent branch, so a GRAPH recall — filtered or not — bypasses
+        both the fast path and the simple path. The new gate condition does not
+        perturb this branch.
+        """
+        ns = uuid4()
+        ast = _ast({"source_name": "linear"})
+        for fast in (ast, None):
+            retriever = _make_dispatch_retriever(QueryComplexity.TYPED_ENTITY_RECENT)
+
+            await retriever.retrieve("latest action items", ns, limit=10, mode=SearchMode.GRAPH, filter_ast=fast)
+
+            retriever._vectorcypher_retrieve.assert_awaited_once()  # type: ignore[attr-defined]
+            retriever._typed_entity_recent_retrieve.assert_not_awaited()  # type: ignore[attr-defined]
+            retriever._simple_retrieve.assert_not_awaited()  # type: ignore[attr-defined]

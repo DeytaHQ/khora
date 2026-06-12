@@ -812,7 +812,19 @@ class VectorCypherRetriever:
             force_graph = mode == SearchMode.GRAPH
 
             # Step 3: Vector search for entry points
-            if not force_simple and not force_graph and routing.complexity == QueryComplexity.TYPED_ENTITY_RECENT:
+            if (
+                not force_simple
+                and not force_graph
+                and routing.complexity == QueryComplexity.TYPED_ENTITY_RECENT
+                and filter_ast is None
+            ):
+                # Gate (filter_ast is None): the fast-path Cypher cannot
+                # enforce caller filters — chunk metadata is a serialized
+                # JSON property on the graph node, not queryable columns — so
+                # a filtered recall would silently return unfiltered chunks.
+                # Filtered recalls take the full _vectorcypher_retrieve path
+                # below, which enforces + reports the filter per channel.
+                #
                 # Phase C fast path (#569): a single Cypher query that
                 # finds typed entities (ACTION_ITEM, DECISION, BLOCKER,
                 # RISK) ordered by last MENTIONED_IN chunk timestamp.
@@ -949,6 +961,10 @@ class VectorCypherRetriever:
         2. Joins MENTIONED_IN chunks; computes max(c.occurred_at) per entity.
         3. Returns one evidence chunk per entity (the most recent mention).
         4. Orders by last_mention DESC.
+
+        The dispatch in ``retrieve()`` gates this path on ``filter_ast is
+        None`` — the fast-path Cypher does not enforce caller filters, so
+        filtered recalls take the full ``_vectorcypher_retrieve`` path.
 
         For entity types that carry a ``status`` attribute (ACTION_ITEM,
         COMMITMENT, OPEN_QUESTION), filters out entries whose status is in
@@ -1118,10 +1134,10 @@ class VectorCypherRetriever:
                 metadata={
                     "typed_entity_fast_path": True,
                     "typed_entity_type": entity_type,
-                    # The fast-path Cypher does NOT enforce the caller filter
-                    # (its WHERE is typed-entity/status only), so no channel
-                    # pushed or post-filtered it here — empty plans yield an
-                    # honest all-False report.
+                    # This path is now reachable only when no caller filter is
+                    # present (the dispatch gates it on filter_ast is None), so
+                    # the empty plans dict is the no-filter carrier — there is
+                    # no filter to enforce or report here.
                     "_filter_channel_plans": {},
                 },
             )
