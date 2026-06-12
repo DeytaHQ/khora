@@ -1129,10 +1129,11 @@ class VectorCypherRetriever:
         # consumed keys to every leaf key; system-key-only and no-filter recalls
         # leave the fetch limit unchanged (those push down exactly).
         graph_overfetch = False
-        # Capture the Cypher compile so the graph channel's pushdown plan reuses
-        # it at the post-filter site below (no second compile — rule: derive the
-        # plan from the SAME compile, never re-run it). Defined only under a
-        # filter; the post-filter block that reads it is gated the same way.
+        # Probe compile used ONLY to size ``graph_overfetch`` (does a residual
+        # metadata predicate remain after the system-key slice pushes down?). It
+        # no longer feeds the graph channel's pushdown plan — that derives from
+        # the compile actually spliced into the executed ``WHERE``, threaded out
+        # via ``graph_pushed_keys_sink`` below. Defined only under a filter.
         compiled_cypher = None
         if filter_ast is not None:
             from khora.filter.compilers.cypher import compile_cypher
@@ -1482,14 +1483,14 @@ class VectorCypherRetriever:
         # runs — so a degenerate PPR result never silently kills recall.
         ppr_path_used = False
         ppr_entity_scores: dict[UUID, float] = {}
-        # Tracks whether the graph chunk fetch ACTUALLY spliced a Cypher WHERE
-        # for the caller filter this recall. Only the Neo4j BFS path
-        # (``_fetch_chunks_from_entities`` → ``DualNodeManager.get_chunks_by_entities``)
-        # pushes Cypher, and only when the compile consumed at least one leaf.
-        # The PPR path and the storage-fallback (SurrealDB / embedded) fetch
-        # paths push nothing, so the graph plan below must NOT credit them with
-        # the Cypher ``consumed_keys``.
-        cypher_pushdown_ran = False
+        # Sink for the graph channel's pushdown plan. The Neo4j BFS fetch appends
+        # the consumed keys of the compile it actually spliced into the executed
+        # ``WHERE`` (threaded through ``_fetch_chunks_from_entities`` →
+        # ``get_chunks_by_entities``), so the report derives from the executing
+        # compile. The PPR path and the storage-fallback (SurrealDB / embedded)
+        # paths push nothing and leave it empty, so every leaf falls to
+        # ``post_filtered_keys`` for them.
+        graph_pushed_keys_sink: list[frozenset[str]] = []
         if graph_fallback:
             graph_chunks: list[tuple[UUID, float, Chunk]] = []
         elif self._config.enable_ppr_retrieval and self._storage is not None:
@@ -1539,16 +1540,7 @@ class VectorCypherRetriever:
                 temporal_sort=_tp.temporal_sort,
                 prefer_current=_tp.prefer_current,
                 filter_ast=filter_ast,
-            )
-            # The Cypher WHERE is spliced only when the Neo4j BFS path runs
-            # (``self._dual_nodes is not None``) AND the compile consumed at
-            # least one leaf — mirroring the guard in
-            # ``DualNodeManager.get_chunks_by_entities`` that only appends the
-            # predicate when ``consumed_keys`` is non-empty. The storage-fallback
-            # leg of ``_fetch_chunks_from_entities`` (SurrealDB / embedded) pushes
-            # nothing, so it leaves this flag False.
-            cypher_pushdown_ran = self._dual_nodes is not None and bool(
-                compiled_cypher is not None and compiled_cypher.consumed_keys
+                graph_pushed_keys_out=graph_pushed_keys_sink,
             )
 
         # Step 6: Wait for parallel vector chunk search to complete
@@ -1746,19 +1738,18 @@ class VectorCypherRetriever:
             # Honest graph-channel plan, built at the post-filter site so it
             # covers ALL THREE graph fetch paths uniformly — they all funnel into
             # ``graph_chunks`` and are re-checked by this one full-AST post-filter.
-            # Only the Neo4j BFS path actually spliced a Cypher WHERE, so credit
-            # its ``consumed_keys`` to ``pushed_keys`` ONLY when ``cypher_pushdown_ran``
-            # is set; the PPR and storage-fallback (SurrealDB / embedded) paths
-            # pushed nothing, so every leaf falls to ``post_filtered_keys`` for
-            # them. ``defensive_recheck=True`` because this channel ALWAYS runs the
+            # The pushed keys come from the compile that actually spliced the
+            # ``WHERE`` inside ``get_chunks_by_entities``, threaded out via
+            # ``graph_pushed_keys_sink`` (the same "report source = execution
+            # input" pattern as ``search_fulltext``'s ``filter_plan_out``). The
+            # PPR and storage-fallback (SurrealDB / embedded) paths leave the sink
+            # empty, so every leaf falls to ``post_filtered_keys`` for them.
+            # ``defensive_recheck=True`` because this channel ALWAYS runs the
             # full-AST in-memory post-filter below — so a fully-pushed system-only
             # filter is reported as post-filtered (flag flips) WITHOUT demoting the
-            # pushed leaves out of ``pushed_keys``. Reuses the compile captured at
-            # the overfetch probe above (no second compile). Recorded only when the
-            # graph channel actually held candidates this recall.
-            cypher_pushed = (
-                compiled_cypher.consumed_keys if cypher_pushdown_ran and compiled_cypher is not None else frozenset()
-            )
+            # pushed leaves out of ``pushed_keys``. Recorded only when the graph
+            # channel actually held candidates this recall.
+            cypher_pushed = graph_pushed_keys_sink[0] if graph_pushed_keys_sink else frozenset()
             filter_channel_plans["graph"] = ChannelPlan(
                 pushed_keys=cypher_pushed,
                 post_filtered_keys=filter_leaf_keys(filter_ast) - cypher_pushed,
@@ -3297,6 +3288,7 @@ class VectorCypherRetriever:
         temporal_sort: bool = False,
         prefer_current: bool = False,
         filter_ast: FilterNode | None = None,
+        graph_pushed_keys_out: list[frozenset[str]] | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Fetch chunks connected to entities via MENTIONED_IN.
 
@@ -3310,6 +3302,11 @@ class VectorCypherRetriever:
             filter_ast: Canonical recall-filter AST. The system-key slice is
                 pushed down into the Cypher chunk query; metadata leaves are
                 left for the engine's in-memory post-filter.
+            graph_pushed_keys_out: Optional sink forwarded to the Neo4j
+                ``get_chunks_by_entities`` call; receives the consumed keys of
+                the compile actually spliced into the executed ``WHERE``. The
+                SurrealDB storage-fallback and empty branches never touch it, so
+                they leave it empty (nothing pushed).
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -3328,6 +3325,7 @@ class VectorCypherRetriever:
                     prefer_current=prefer_current,
                     limit=limit,
                     filter_ast=filter_ast,
+                    pushed_keys_out=graph_pushed_keys_out,
                 )
             elif self._storage:
                 # SurrealDB fallback: get chunks via entity source_chunk_ids

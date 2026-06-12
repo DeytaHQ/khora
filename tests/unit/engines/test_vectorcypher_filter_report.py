@@ -115,6 +115,7 @@ def _make_retriever(
     enable_recency: bool = False,
     graph_chunks: list[Chunk] | None = None,
     cypher_raises: bool = False,
+    graph_cypher_pushes: bool = True,
 ) -> VectorCypherRetriever:
     """A MODERATE-routed retriever whose channels run without live backends.
 
@@ -128,13 +129,19 @@ def _make_retriever(
       split-mode (sqlite_lance) partial-pushdown shape is proven on the embedded
       matrix lane, not reproducible in a unit mock.
     * GRAPH channel: ``_fetch_chunks_from_entities`` returns ``graph_chunks`` so
-      the graph plan is recorded at the in-memory post-filter site. The graph
-      channel ALWAYS sets ``defensive_recheck=True`` (it always re-checks the
-      full AST in memory) and pushes a leaf via Cypher ONLY when it is
-      Cypher-expressible (``source_name`` pushed, ``metadata.tier`` re-checked).
-      When ``cypher_raises`` is set, ``_cypher_expand`` raises a transient Neo4j
-      error that the retriever catches internally (``graph_fallback=True``) — the
-      graph channel then records NO plan (it never produced candidate chunks).
+      the graph plan is recorded at the in-memory post-filter site, and (when
+      ``graph_cypher_pushes``) appends the Cypher-pushed ``consumed_keys`` to the
+      ``graph_pushed_keys_out`` sink — exactly as the live Neo4j fetch reports
+      back through ``get_chunks_by_entities(pushed_keys_out=...)``, so the graph
+      plan derives from the compile that actually ran (``source_name`` pushed,
+      ``metadata.tier`` re-checked). With ``graph_cypher_pushes=False`` the fetch
+      returns chunks but leaves the sink empty (a store that spliced nothing —
+      PPR / storage fallback), so every leaf falls to ``post_filtered_keys``.
+      The graph channel ALWAYS sets ``defensive_recheck=True`` (it always
+      re-checks the full AST in memory). When ``cypher_raises`` is set,
+      ``_cypher_expand`` raises a transient Neo4j error that the retriever catches
+      internally (``graph_fallback=True``) — the graph channel then records NO
+      plan (it never produced candidate chunks).
     * RECENCY channel (``enable_recency``): enabled in config, but
       ``_recency_channel_chunks`` is stubbed to return ``[]`` — mirroring the
       wired stack, where the recency SQL source (``search_recent_chunks``) is
@@ -237,7 +244,33 @@ def _make_retriever(
     else:
         retriever._cypher_expand = AsyncMock(return_value=({}, {}))
     gc = graph_chunks if graph_chunks is not None else []
-    retriever._fetch_chunks_from_entities = AsyncMock(return_value=[(c.id, 0.9, c) for c in gc])
+
+    async def _fetch_entity_chunks(
+        *_args: Any,
+        filter_ast: FilterNode | None = None,
+        graph_pushed_keys_out: list[frozenset[str]] | None = None,
+        **_kwargs: Any,
+    ) -> list[tuple[UUID, float, Chunk]]:
+        # Mirror the Neo4j BFS fetch: it splices the Cypher system-key slice and
+        # reports the consumed keys back through the sink (what the live
+        # ``get_chunks_by_entities(pushed_keys_out=...)`` does). Computing the
+        # consumed set with the real Cypher compiler keeps the reported graph
+        # disposition identical to the executing path. ``graph_cypher_pushes=False``
+        # simulates a fetch that spliced nothing (PPR / storage fallback): the
+        # sink stays empty so every leaf is reported as post-filtered.
+        if graph_cypher_pushes and filter_ast is not None and graph_pushed_keys_out is not None:
+            from khora.filter.compilers.cypher import compile_cypher
+            from khora.filter.execute import build_compile_context
+
+            compiled = compile_cypher(
+                filter_ast,
+                build_compile_context("Chunk", table_alias="c", on_unsupported="split"),
+            )
+            if compiled.consumed_keys:
+                graph_pushed_keys_out.append(compiled.consumed_keys)
+        return [(c.id, 0.9, c) for c in gc]
+
+    retriever._fetch_chunks_from_entities = _fetch_entity_chunks
     retriever._version_filter_entities = AsyncMock(return_value=[])
 
     # Stub the CHANGE-path graph helpers unconditionally: a CHANGE-classified
@@ -381,6 +414,38 @@ class TestGraphModeReport:
         }
         assert report["pushed_keys"] == ["source_name"]
         assert report["post_filtered_keys"] == ["metadata.tier"]
+        assert report["pushed_down"] is False
+        assert report["post_filtered"] is True
+
+    async def test_graph_fetch_that_spliced_nothing_pushes_no_keys(self) -> None:
+        """A graph fetch that never touched the sink reports ``pushed_keys == []``.
+
+        Because the graph plan's pushed keys now come from the sink the executing
+        fetch fills (not the retriever-side probe compile), a fetch that spliced
+        no Cypher ``WHERE`` (the PPR path, or a graph store that pushed nothing)
+        leaves the sink empty — so EVERY constraint leaf falls to
+        ``post_filtered_keys`` and the report cannot over-claim a pushdown that
+        did not happen. The full-AST in-memory post-filter still enforces the
+        filter, so ``defensive_recheck`` flips ``post_filtered`` true.
+        """
+        ns_id = uuid4()
+        retriever = _make_retriever(
+            ns_id,
+            enable_bm25=True,
+            graph_chunks=[_graph_chunk(ns_id, tier="gold")],
+            graph_cypher_pushes=False,
+        )
+        engine = _build_engine(retriever)
+
+        report = await _recall_filter_report(engine, ns_id, mode=SearchMode.GRAPH)
+
+        assert set(report["channels"]) == {"graph"}
+        assert report["channels"]["graph"] == {
+            "pushed_keys": [],
+            "post_filtered_keys": ["metadata.tier", "source_name"],
+        }
+        assert report["pushed_keys"] == []
+        assert report["post_filtered_keys"] == ["metadata.tier", "source_name"]
         assert report["pushed_down"] is False
         assert report["post_filtered"] is True
 
