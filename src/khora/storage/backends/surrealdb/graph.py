@@ -505,6 +505,16 @@ class SurrealDBGraphAdapter(GraphBackendBase):
             existing = existing_map.get(key)
             if existing:
                 existing.merge_with(entity)
+                # Sync the input entity's id to the persisted canonical id
+                # (#806, #1151). Callers hold references to the input
+                # ``entities`` list and build ``Relationship`` endpoints
+                # from ``entity.id`` after this call - the vectorcypher
+                # engine discards the return value entirely. Without the
+                # in-place mutation the subsequent RELATE targets
+                # ``entity:<extraction-uuid>``, a record that does not
+                # exist, silently dropping relationships on repeat ingest.
+                # Neo4j and sqlite_lance do the same remap.
+                entity.id = existing.id
                 to_update.append(existing)
                 results.append((existing, False))
             else:

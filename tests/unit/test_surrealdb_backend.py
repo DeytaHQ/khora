@@ -3538,6 +3538,60 @@ class TestSurrealDBVectorUpsertBatch:
         assert is_new is False
         assert entity.id == existing_id  # Kept the existing entity's ID
 
+    async def test_upsert_existing_remaps_caller_entity_id(self) -> None:
+        """On match the CALLER's input entity.id is rewritten to the stored id (#1151).
+
+        The vectorcypher engine discards the return value and reads ids off
+        its own input list to build the pre-upsert -> canonical id remap
+        (#806), so the in-place mutation is the contract - same as Neo4j
+        and sqlite_lance.
+        """
+        from khora.core.models import Entity
+        from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
+
+        ns_id = uuid4()
+        existing_id = uuid4()
+        now_iso = datetime.now(UTC).isoformat()
+
+        existing_row = {
+            "id": f"entity:⟨{existing_id}⟩",
+            "namespace": f"memory_namespace:⟨{ns_id}⟩",
+            "name": "Alice",
+            "entity_type": "PERSON",
+            "description": "Original description",
+            "attributes": {},
+            "source_document_ids": [],
+            "source_chunk_ids": [],
+            "source_tool": "",
+            "mention_count": 1,
+            "embedding": None,
+            "embedding_model": "",
+            "valid_from": None,
+            "valid_until": None,
+            "confidence": 1.0,
+            "metadata_": {},
+            "created_at": now_iso,
+            "updated_at": now_iso,
+        }
+
+        conn = _make_mock_conn(query=[existing_row])
+        adapter = SurrealDBGraphAdapter(conn)
+
+        new_entity = Entity(
+            namespace_id=ns_id,
+            name="Alice",
+            entity_type="PERSON",
+            description="Updated description",
+        )
+        extraction_id = new_entity.id
+        assert extraction_id != existing_id
+
+        await adapter.upsert_entities_batch(ns_id, [new_entity])
+
+        # The caller's object - not just the returned merged copy - must
+        # carry the canonical stored id.
+        assert new_entity.id == existing_id
+
     async def test_upsert_empty_list(self) -> None:
         """Empty list returns empty list."""
         from khora.storage.backends.surrealdb.graph import SurrealDBGraphAdapter
