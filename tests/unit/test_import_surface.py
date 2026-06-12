@@ -1,4 +1,4 @@
-"""Subprocess harness guarding ADR-118 V1 import-boundary invariants.
+"""Subprocess harness guarding import-boundary invariants.
 
 These tests assert that heavy submodules are NOT loaded by ``import khora``
 and that public symbols remain accessible after lazification.
@@ -38,7 +38,7 @@ def test_searchmode_identity_preserved_across_reexports() -> None:
     _run("import khora; from khora.query import SearchMode; assert khora.SearchMode is SearchMode")
 
 
-# In-process exercises of the PEP 562 lazy shims added by ADR-118. These run in
+# In-process exercises of the PEP 562 lazy shims. These run in
 # the pytest process (not the _run subprocess harness) so coverage records the
 # __getattr__/__dir__ bodies — subprocess coverage is not configured for this repo.
 
