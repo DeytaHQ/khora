@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
@@ -16,7 +18,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from khora.config.llm import get_shared_session, llm_call_timeout
+from khora.config.llm import DEFAULT_LLM_TIMEOUT_S, get_shared_session, llm_call_timeout
 from khora.extraction.embedders._request_telemetry import (
     parse_rate_limit_headers,
     set_connector_attributes,
@@ -103,6 +105,19 @@ _MISSING_CREDENTIAL_SIGNALS = (
     "could not resolve auth",
     "authentication",
 )
+
+
+def _is_retryable_extraction_exc(exc: BaseException) -> bool:
+    """Retry predicate for extraction LLM calls (used by ``AsyncRetrying``).
+
+    Never retry cancellation or a timeout: a retried ``CancelledError`` would
+    defeat any surrounding ``asyncio`` deadline (the call is re-attempted instead
+    of unwinding) — exactly how the #1113 hang survived #1059's per-call
+    ``asyncio.wait_for``. Also never retry deterministic auth/credential failures.
+    """
+    if isinstance(exc, (asyncio.CancelledError, TimeoutError)):
+        return False
+    return not _is_nonretryable_auth_error(exc)
 
 
 def _is_nonretryable_auth_error(exc: BaseException) -> bool:
@@ -809,6 +824,67 @@ class LLMEntityExtractor(EntityExtractor):
             retry_wait=config.retry_wait,
         )
 
+    @asynccontextmanager
+    async def _acquire_slot(self) -> AsyncIterator[None]:
+        """Acquire the shared concurrency semaphore under a wall-clock deadline.
+
+        ``self._semaphore`` is shared process-wide across concurrent documents (one
+        ``shared_extractor``). ``asyncio.Semaphore.acquire()`` has no timeout, so a
+        permit held by a wedged call could otherwise park every other extraction
+        coroutine forever — the per-call ``asyncio.wait_for`` only bounds the
+        network call *inside* the slot, never the acquire itself. See #1113.
+        """
+        deadline = llm_call_timeout(self._timeout) or DEFAULT_LLM_TIMEOUT_S
+        await asyncio.wait_for(self._semaphore.acquire(), deadline)
+        try:
+            yield
+        finally:
+            self._semaphore.release()
+
+    def _batch_deadline(self, batch_size: int) -> float:
+        """Aggregate wall-clock BACKSTOP (seconds) for processing one batch.
+
+        Coarse backstop, NOT a tight bound — the primary per-call deadline is
+        enforced by ``_bounded_acompletion``. Sized generously so it does not fire
+        during legitimate work: the dominant cost is the single-doc fallback (up to
+        ``batch_size`` sequential ``self.extract()`` calls, each retrying up to
+        ``max_retries`` times), so a degraded-but-progressing backend is not killed
+        mid-fallback (which would discard its completed work). See #1113.
+        """
+        per_call = llm_call_timeout(self._timeout) or DEFAULT_LLM_TIMEOUT_S
+        return per_call * (batch_size + 1) * max(1, self._max_retries)
+
+    @staticmethod
+    def _abandon_task(task: asyncio.Task[Any]) -> None:
+        """Detach a timed-out litellm task so its eventual outcome is retrieved
+        (silences 'Task exception was never retrieved'). The task is never awaited:
+        an uncancellable call must not be allowed to block the caller's teardown."""
+
+        def _drain(t: asyncio.Task[Any]) -> None:
+            if not t.cancelled():
+                t.exception()
+
+        task.add_done_callback(_drain)
+
+    async def _bounded_acompletion(self, coro: Any, deadline: float | None) -> Any:
+        """Await a ``litellm.acompletion`` coroutine under a hard wall-clock deadline.
+
+        ``asyncio.wait_for``/``asyncio.timeout`` cannot free a coroutine stuck in an
+        await that ignores cancellation (e.g. a half-open socket whose teardown
+        blocks), and the surrounding tenacity loop must not retry that cancellation.
+        Run the call as a *shielded* task; on the deadline, cancel it best-effort and
+        ABANDON it — never await its teardown — so the caller always regains control
+        within ``deadline``. Behaves like ``asyncio.wait_for(coro, deadline)``
+        otherwise. See #1113.
+        """
+        task: asyncio.Task[Any] = asyncio.ensure_future(coro)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), deadline or DEFAULT_LLM_TIMEOUT_S)
+        except (TimeoutError, asyncio.CancelledError):
+            task.cancel()
+            self._abandon_task(task)
+            raise
+
     async def extract(
         self,
         text: str,
@@ -854,7 +930,7 @@ class LLMEntityExtractor(EntityExtractor):
 
         try:
             async for attempt in AsyncRetrying(
-                retry=retry_if_exception(lambda e: not _is_nonretryable_auth_error(e)),
+                retry=retry_if_exception(_is_retryable_extraction_exc),
                 stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
@@ -874,7 +950,7 @@ class LLMEntityExtractor(EntityExtractor):
                 reraise=True,
             ):
                 with attempt:
-                    async with self._semaphore:
+                    async with self._acquire_slot():
                         import time as _time
 
                         from khora.telemetry import get_collector, trace_span
@@ -886,7 +962,7 @@ class LLMEntityExtractor(EntityExtractor):
 
                         with trace_span("khora.extraction.llm_call", model=self._model, call_type="single") as llm_span:
                             set_connector_attributes(llm_span, get_shared_session())
-                            response = await asyncio.wait_for(
+                            response = await self._bounded_acompletion(
                                 litellm.acompletion(
                                     model=self._model,
                                     messages=[
@@ -970,7 +1046,10 @@ class LLMEntityExtractor(EntityExtractor):
                     return result
         except Exception as e:
             logger.error(f"Extraction failed after {self._max_retries} attempts: {e}")
-            return ExtractionResult(metadata={"error": str(e)})
+            # `str(e) or type(e).__name__`: a bare TimeoutError has an empty str(),
+            # which is falsy and would defeat the fail-loud/breaker/fallback checks
+            # that test `metadata.get("error")` for truthiness (#1113).
+            return ExtractionResult(metadata={"error": str(e) or type(e).__name__})
 
     @staticmethod
     def _should_run_second_pass(result: ExtractionResult) -> bool:
@@ -1028,7 +1107,7 @@ class LLMEntityExtractor(EntityExtractor):
         )
 
         try:
-            async with self._semaphore:
+            async with self._acquire_slot():
                 import time as _time
 
                 from khora.telemetry import get_collector, trace_span
@@ -1038,7 +1117,7 @@ class LLMEntityExtractor(EntityExtractor):
                     "khora.extraction.llm_call", model=self._model, call_type="relationship_second_pass"
                 ) as llm_span:
                     set_connector_attributes(llm_span, get_shared_session())
-                    response = await asyncio.wait_for(
+                    response = await self._bounded_acompletion(
                         litellm.acompletion(
                             model=self._model,
                             messages=[
@@ -1583,7 +1662,7 @@ class LLMEntityExtractor(EntityExtractor):
         # _consecutive_batch_failures is an instance attribute so it persists across
         # extract_batch invocations, making the circuit breaker actually reachable.
 
-        async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
+        async def _run_batch_inner(batch: list[str]) -> list[ExtractionResult]:
             # Circuit breaker tripped — go straight to single-doc extraction
             if self._consecutive_batch_failures >= self._BATCH_FAILURE_THRESHOLD and len(batch) > 1:
                 logger.warning(
@@ -1675,6 +1754,29 @@ class LLMEntityExtractor(EntityExtractor):
                 results = [self._filter_by_confidence(r, expertise) for r in results]
             return results
 
+        async def _run_batch(batch: list[str]) -> list[ExtractionResult]:
+            # #1113: coarse aggregate backstop over the whole batch (bisection
+            # gather + floor + fallback + slot acquire). The per-call
+            # _bounded_acompletion is the primary bound; this catches anything that
+            # escapes it. On expiry, fail the batch and continue.
+            budget = self._batch_deadline(len(batch))
+            breaker_before = self._consecutive_batch_failures
+            try:
+                async with asyncio.timeout(budget):
+                    return await _run_batch_inner(batch)
+            except TimeoutError:
+                logger.error(
+                    "Batch extraction exceeded wall-clock budget ({:.0f}s) for {} texts "
+                    "(#1113 guard); marking batch failed and continuing",
+                    budget,
+                    len(batch),
+                )
+                # Count this timed-out batch as exactly ONE consecutive failure, even
+                # if _run_batch_inner already incremented before the deadline fired —
+                # double-counting would trip the breaker after a single batch.
+                self._consecutive_batch_failures = breaker_before + 1
+                return [ExtractionResult(metadata={"error": "extraction_timeout"}) for _ in batch]
+
         # Process batches in waves: concurrent within each wave, circuit breaker
         # checked between waves.  This restores most of the throughput of the
         # original asyncio.gather() while letting the breaker trip before the
@@ -1695,7 +1797,11 @@ class LLMEntityExtractor(EntityExtractor):
                 all_results.extend(results)
 
         error_count = sum(1 for r in all_results if r.metadata.get("error"))
-        logger.debug(
+        # Fail loud: surface failed/timed-out documents at WARNING so a degraded
+        # run is visible (and countable) rather than silently producing empty
+        # extraction — see #1113 (behaviour: mark + log + count, continue).
+        _log = logger.warning if error_count else logger.debug
+        _log(
             "Extraction complete: {} results ({} errors) from {} texts in {} batches",
             len(all_results),
             error_count,
@@ -1778,7 +1884,7 @@ Return ONLY valid JSON, no other text."""
 
         try:
             async for attempt in AsyncRetrying(
-                retry=retry_if_exception(lambda e: not _is_nonretryable_auth_error(e)),
+                retry=retry_if_exception(_is_retryable_extraction_exc),
                 stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
@@ -1798,7 +1904,7 @@ Return ONLY valid JSON, no other text."""
                 reraise=True,
             ):
                 with attempt:
-                    async with self._semaphore:
+                    async with self._acquire_slot():
                         import time as _time
 
                         from khora.telemetry import get_collector, trace_span
@@ -1811,7 +1917,7 @@ Return ONLY valid JSON, no other text."""
                             batch_size=len(texts),
                         ) as llm_span:
                             set_connector_attributes(llm_span, get_shared_session())
-                            response = await asyncio.wait_for(
+                            response = await self._bounded_acompletion(
                                 litellm.acompletion(
                                     model=self._model,
                                     messages=[
@@ -1945,7 +2051,9 @@ Return ONLY valid JSON, no other text."""
                     return results
         except Exception as e:
             logger.error(f"Multi-extraction failed after {self._max_retries} attempts: {e}")
-            return [ExtractionResult(metadata={"error": str(e)}) for _ in texts]
+            # str(e) or type name — a bare TimeoutError's empty str() is falsy and
+            # would be ignored by the truthiness-based error checks (#1113).
+            return [ExtractionResult(metadata={"error": str(e) or type(e).__name__}) for _ in texts]
 
     def _compute_entity_confidence(self, entity_data: dict[str, Any]) -> float:
         """Compute confidence score for an entity based on extraction quality heuristics.
