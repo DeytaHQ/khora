@@ -2627,14 +2627,30 @@ class VectorCypherRetriever:
             if temporal_sort and chunk_results and not self._config.enable_reranking:
                 from datetime import datetime as _dt
 
+                # Normalize every key to tz-aware UTC: metadata occurred_at
+                # may be a user-supplied naive ISO string (it overrides the
+                # column value in the metadata dict), created_at is tz-aware
+                # from the DB, and the sentinel must match. Mixing naive and
+                # aware datetimes in one sort raises TypeError (#1115). Same
+                # normalization as _calculate_recency_scores.
+                _ts_sentinel = _dt.min.replace(tzinfo=UTC)
+
                 def _ts(pair: tuple[Chunk, float]) -> _dt:
                     occ = (pair[0].metadata or {}).get("occurred_at") if isinstance(pair[0].metadata, dict) else None
                     if occ:
                         try:
-                            return _dt.fromisoformat(occ)
-                        except (ValueError, TypeError):
+                            parsed = _dt.fromisoformat(occ.replace("Z", "+00:00"))
+                            if parsed.tzinfo is None:
+                                parsed = parsed.replace(tzinfo=UTC)
+                            return parsed
+                        except (ValueError, TypeError, AttributeError):
                             pass
-                    return pair[0].created_at or _dt.min
+                    created = pair[0].created_at
+                    if created is None:
+                        return _ts_sentinel
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=UTC)
+                    return created
 
                 # ORDINAL queries ("first", "which came earlier") need ascending
                 # order; all other temporal categories use descending (most recent first).
