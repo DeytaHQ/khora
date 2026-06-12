@@ -493,6 +493,21 @@ results = await engine.recall(query, namespace_id=ns_id, mode=SearchMode.HYBRID)
 # Use VectorCypher engine for graph-based queries
 ```
 
+### Deterministic recall filters
+
+The deterministic recall-filter API (the `filter_ast` argument to the backend
+`search`) is supported on the SurrealDB backend, but only over the system keys the
+`temporal_chunk` table backs with a real column: the two datetime keys
+`occurred_at` and `created_at`, plus any `metadata.<path>`. The other eight system
+keys (`source_name`, `source_type`, `source_url`, `source_timestamp`,
+`external_id`, `content_type`, `source`, `title`) are denormalized document fields
+that are **not** columns on `temporal_chunk`. A filter on one of them RAISES
+`RecallFilterUnsupportedError` rather than silently returning nothing: on the
+SCHEMAFULL table the missing field reads as absent, and because SurrealQL's
+absent-compare is total-false (`NONE = x` → `false`) the predicate would drop every
+row. Failing loud surfaces the unsupported key instead of returning a quietly empty
+result set.
+
 ## Configuration
 
 ### Via KhoraConfig

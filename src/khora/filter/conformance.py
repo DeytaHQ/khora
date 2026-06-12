@@ -69,7 +69,7 @@ from khora.filter.compilers.weaviate import compile_weaviate
 # is the one production CompileContext builder; ``run_chronicle_filter`` is the
 # Chronicle date-bound-pushdown + full-AST post-filter applied to in-memory records.
 from khora.filter.execute import build_compile_context, iter_leaf_clauses, run_chronicle_filter
-from khora.filter.model import Op
+from khora.filter.model import SYSTEM_KEYS, Op
 from khora.storage.coordinator import StorageCoordinator
 
 __all__ = [
@@ -428,10 +428,13 @@ class SurrealExecutor:
     row-set. The compiler is driven with ``on_unsupported="raise"`` (a clause it
     cannot express surfaces as :class:`RecallFilterUnsupportedError`, matched against
     ``expect_unsupported``), against the production context the skeleton SurrealDB
-    backend uses (``temporal_chunk`` target, ``metadata`` → ``metadata_`` mapping).
-    A ``compile_python`` post-filter is still built and passed through so every live
-    runner shares one :class:`LiveRunner` signature; the surrealdb runner may ignore
-    it (the total ``WHERE`` is the source of truth).
+    backend uses (``temporal_chunk`` target; the two backed system keys
+    ``occurred_at`` / ``created_at`` declared in ``field_mapping`` plus the
+    ``metadata`` → ``metadata_`` remap). A filter on any other system key — the eight
+    unbacked denormalized document keys — therefore raises here, mirroring
+    production. A ``compile_python`` post-filter is still built and passed through so
+    every live runner shares one :class:`LiveRunner` signature; the surrealdb runner
+    may ignore it (the total ``WHERE`` is the source of truth).
     """
 
     def __init__(self, runner: LiveRunner) -> None:
@@ -442,9 +445,16 @@ class SurrealExecutor:
         filter_ast: FilterNode,
         records: Sequence[tuple[str, Mapping[str, Any]]],
     ) -> frozenset[str]:
+        # Declare the two backed system keys (``occurred_at`` / ``created_at``)
+        # alongside the ``metadata`` → ``metadata_`` remap, exactly as the skeleton
+        # SurrealDB store's ``_filter_compile_context`` does (the backed set is its
+        # ``_BACKED_SYSTEM_KEYS`` source of truth, schema-guarded by the drift test).
+        # The compiler reads this key set as the declared+pushable whitelist, so a
+        # filter on any other system key surfaces as ``RecallFilterUnsupportedError``
+        # — the production-faithful fail-loud behavior.
         ctx = build_compile_context(
             "temporal_chunk",
-            field_mapping={"metadata": "metadata_"},
+            field_mapping={"occurred_at": "occurred_at", "created_at": "created_at", "metadata": "metadata_"},
             on_unsupported="raise",
         )
         compiled = compile_surrealdb(filter_ast, ctx)
@@ -879,6 +889,38 @@ def _with_metadata(rec: SeedRecord, metadata: dict[str, Any]) -> SeedRecord:
     return replace(rec, metadata=metadata)
 
 
+# The system keys the skeleton SurrealDB ``temporal_chunk`` table does NOT back with
+# a real column — every system key except the two datetime columns. Computed locally
+# from :data:`SYSTEM_KEYS` (NOT imported from the engines layer, which would be a
+# filter→engines inversion): the store's ``_BACKED_SYSTEM_KEYS`` is the source of
+# truth for the store + the QA drift-gate test, and conformance encodes its surreal
+# capability gap locally — the same way it encodes :data:`_NO_STRING_KEY_BACKENDS`,
+# :data:`_CREATED_AT_STAMP_BACKENDS`, etc. (kept consistent by the store-side drift
+# test). A predicate on one of these raises ``RecallFilterUnsupportedError`` on the
+# total surreal leg (no post-filter safety net).
+_UNBACKED_SYSTEM_KEYS: frozenset[str] = SYSTEM_KEYS - frozenset({"occurred_at", "created_at"})
+
+
+def _surreal_unsupported(filter_: dict[str, Any] | RecallFilter) -> frozenset[str]:
+    """``{"surrealdb"}`` iff any leaf reads an unbacked system key, else ``frozenset()``.
+
+    ``@internal``. The surrealdb recall-filter compiler declares only the two backed
+    datetime system keys; a predicate on any other system key raises
+    ``RecallFilterUnsupportedError`` (every operator, ``$exists`` included — the gate
+    precedes operator dispatch). This is operator-agnostic: it keys on the leaf
+    ``path[0]`` alone, so an ``$exists`` / ``$eq`` / range on an unbacked key all
+    flag. The result is unioned into a case's ``expect_unsupported`` so the surreal
+    leg STAYS in ``backends`` and asserts the raise (rather than being silently
+    skipped). ``metadata.*`` leaves never flag — their ``path[0]`` is ``"metadata"``,
+    not a system key — so a pure-metadata case (handled by :func:`_surreal_excluded`)
+    is untouched.
+    """
+    for clause in iter_leaf_clauses(_resolve_ast(filter_)):
+        if clause.path and clause.path[0] in _UNBACKED_SYSTEM_KEYS:
+            return frozenset({"surrealdb"})
+    return frozenset()
+
+
 def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[SeedRecord, ...]) -> frozenset[str]:
     """Compute the backend set a case can run on, from the leaves its filter touches.
 
@@ -1044,12 +1086,14 @@ def _date_op_cases(key: str) -> list[ConformanceCase]:
     # ``$lt`` / ``$lte`` date cases.
     def case(suffix: str, predicate: dict[str, Any], expected: frozenset[str], op_tag: str) -> ConformanceCase:
         filter_ = {key: predicate}
+        backends = _backends_for_filter(filter_, seed)
         return ConformanceCase(
             id=f"F-OP-{key}-{suffix}",
             filter=filter_,
             seed_records=seed,
             expected_ids=expected,
-            backends=_backends_for_filter(filter_, seed),
+            backends=backends,
+            expect_unsupported=_surreal_unsupported(filter_) & backends,
             exercises=("F-OP", key, op_tag),
         )
 
@@ -1103,12 +1147,14 @@ def _string_op_cases(key: str) -> list[ConformanceCase]:
     # system key) stays on all.
     def case(suffix: str, predicate: Any, expected: frozenset[str], op_tag: str) -> ConformanceCase:
         filter_ = {key: predicate}
+        backends = _backends_for_filter(filter_, seed)
         return ConformanceCase(
             id=f"F-OP-{key}-{suffix}",
             filter=filter_,
             seed_records=seed,
             expected_ids=expected,
-            backends=_backends_for_filter(filter_, seed),
+            backends=backends,
+            expect_unsupported=_surreal_unsupported(filter_) & backends,
             exercises=("F-OP", key, op_tag),
         )
 
@@ -1140,12 +1186,14 @@ def _metadata_op_case() -> ConformanceCase:
         SeedRecord(id="meta-absent"),
     )
     filter_ = {"metadata.tier": "gold"}
+    backends = _backends_for_filter(filter_, seed)
     return ConformanceCase(
         id="F-OP-metadata-tier-eq",
         filter=filter_,
         seed_records=seed,
         expected_ids=frozenset({"meta-gold"}),
-        backends=_backends_for_filter(filter_, seed),
+        backends=backends,
+        expect_unsupported=_surreal_unsupported(filter_) & backends,
         exercises=("F-OP", "metadata.tier", "$eq"),
     )
 
@@ -1213,14 +1261,19 @@ def _case(
     chronicle, the total-exact postgres + surrealdb, and the split cypher +
     weaviate + sqlite_lance whose post-filter lands on the oracle); a case touching
     a string document key or ``created_at`` is pruned with the documented
-    capability/seed reason. No family is silently skipped.
+    capability/seed reason. No family is silently skipped. A leaf on an unbacked
+    surreal system key keeps surrealdb in ``backends`` and unions it into
+    ``expect_unsupported`` (:func:`_surreal_unsupported`) so the surreal leg asserts
+    the raise rather than being skipped.
     """
+    backends = _backends_for_filter(filter_, seed)
     return ConformanceCase(
         id=cid,
         filter=filter_,
         seed_records=seed,
         expected_ids=expected,
-        backends=_backends_for_filter(filter_, seed),
+        backends=backends,
+        expect_unsupported=_surreal_unsupported(filter_) & backends,
         exercises=exercises,
     )
 

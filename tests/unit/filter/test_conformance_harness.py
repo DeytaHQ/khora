@@ -284,13 +284,16 @@ def test_postgres_executor_invokes_real_compiler() -> None:
 # assert_case's expect_unsupported branch (harness control flow).
 # --------------------------------------------------------------------------- #
 #
-# The validator and the python/postgres compilers share one expressiveness
-# envelope by design, so no VALIDATED wire filter naturally diverges between them
-# (the catalog's F-UNSUP family carves out the real unsupported clauses end to end).
-# To exercise the harness's own unsupported handling here, in process, a synthetic
-# executor raises RecallFilterUnsupportedError and assert_case is checked to (a)
-# accept it when the backend is declared unsupported and (b) NOT swallow it
-# otherwise.
+# The validator and the python/postgres compilers share one expressiveness envelope
+# by design, so no VALIDATED wire filter diverges between THOSE two. A real
+# backend-specific divergence does now exist on the surreal leg: the SurrealDB
+# compiler raises RecallFilterUnsupportedError on a predicate over one of the eight
+# unbacked system keys (the catalog's F-UNSUP surreal-unbacked cases carry it end to
+# end via expect_unsupported={"surrealdb"}). The synthetic check below is the
+# in-process unit for the harness's OWN unsupported control flow, independent of any
+# real backend: a synthetic executor raises RecallFilterUnsupportedError and
+# assert_case is checked to (a) accept it when the backend is declared unsupported
+# and (b) NOT swallow it otherwise.
 
 
 class _RaisingExecutor:
@@ -480,31 +483,27 @@ def test_f_exists_covers_eight_shapes_in_two_modes() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# System-key $exists is a CONSTANT on EVERY string-emitting backend (cross-
-# backend determinism — the always-present axiom).
+# System-key $exists is a CONSTANT on the column-projecting string-emitting
+# backends (cross-backend determinism — the always-present axiom).
 # --------------------------------------------------------------------------- #
 #
 # The oracle treats a system key as always-present, so $exists:true is a constant
 # TRUE (all rows) and $exists:false a constant FALSE (no rows). postgres / lance
-# already emit a constant; cypher and surrealdb were FIXED to do the same (they
-# previously emitted a `IS NOT NULL` / `IS NOT NONE` presence test that diverged on
-# an unset system column). Pin the constant on every string-emitting compiler so a
-# regression to a presence test on ANY backend fails loudly. (postgres emits a
-# SQLAlchemy ``true()``/``false()`` object and weaviate defers $exists to the
-# post-filter — both are checked in their own compiler suites; here we pin the
-# three string-emitting compilers where the regression risk lives.)
+# already emit a constant; cypher was FIXED to do the same (it previously emitted an
+# `IS NOT NULL` presence test that diverged on an unset system column). Pin the
+# constant on these string-emitting compilers so a regression to a presence test
+# fails loudly. (postgres emits a SQLAlchemy ``true()``/``false()`` object and
+# weaviate defers $exists to the post-filter — both are checked in their own
+# compiler suites; here we pin the string-emitting compilers where the regression
+# risk lives.) surrealdb is the deliberate exception: the eight unbacked system keys
+# are NOT columns on its ``temporal_chunk`` table, so it RAISES on an unbacked-key
+# $exists (a constant would be meaningless on a non-existent column) — its divergence
+# is asserted directly below, not as a constant.
 
 
 @pytest.mark.parametrize(
     ("label", "compiler", "ctx", "true_token", "false_token"),
     [
-        (
-            "surrealdb",
-            "compile_surrealdb",
-            {"backend_target": "temporal_chunk", "field_mapping": {"metadata": "metadata_"}},
-            "true",
-            "false",
-        ),
         ("cypher", "compile_cypher", {"backend_target": "Chunk", "table_alias": "c"}, "true", "false"),
         # SQLite has no boolean literal — the constant is the integer 1 / 0.
         ("sqlite_lance", "compile_lance", {"backend_target": "khora_chunks"}, "1", "0"),
@@ -536,3 +535,25 @@ def test_system_exists_is_constant_not_presence_test(
     # is caught here.
     assert true_token in true_pred and "is not null" not in true_pred and "is not none" not in true_pred, true_pred
     assert false_token in false_pred and "is null" not in false_pred and "is none" not in false_pred, false_pred
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_surrealdb_unbacked_system_key_exists_raises_not_constant(exists: bool) -> None:
+    # The surrealdb counterpart to the cross-backend constant axiom above: an
+    # unbacked system key ($exists on ``source_name``, which is not a column on the
+    # ``temporal_chunk`` table) does NOT collapse to a constant — it RAISES, because
+    # a constant over a non-existent column would be meaningless. This is the
+    # backend's deliberate divergence from the always-present axiom.
+    from khora.filter import RecallFilter
+    from khora.filter.compilers.surrealdb import compile_surrealdb
+    from khora.filter.context import CompileContext, RecallFilterUnsupportedError
+
+    ctx = CompileContext(
+        backend_target="temporal_chunk",
+        field_mapping={"occurred_at": "occurred_at", "created_at": "created_at", "metadata": "metadata_"},
+    )
+    ast = parse_to_ast(RecallFilter.model_validate({"source_name": {"$exists": exists}}))
+    with pytest.raises(RecallFilterUnsupportedError, match="does not back") as exc:
+        compile_surrealdb(ast, ctx)
+    # Load-bearing invariant alongside the intent substring: the gate named the key.
+    assert "source_name" in str(exc.value)
