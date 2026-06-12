@@ -32,6 +32,9 @@ from khora.filter.ast import (
     canonical_hash as canonical_hash,
 )
 from khora.filter.ast import (
+    metadata_leaf_count as metadata_leaf_count,
+)
+from khora.filter.ast import (
     parse_to_ast as parse_to_ast,
 )
 from khora.filter.context import (  # noqa: F401

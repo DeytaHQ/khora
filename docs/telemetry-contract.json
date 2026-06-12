@@ -1480,17 +1480,6 @@
       "_comment": "Issue #932. NO namespace_id label - cardinality rule."
     },
     {
-      "name": "khora.recall.filter.unindexed_metadata",
-      "type": "counter",
-      "stability": "public",
-      "unit": "1",
-      "owner": "filter",
-      "labels": [
-        {"name": "op", "values": ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nin", "$exists"], "_comment": "The metadata leaf's comparison operator (Op enum wire literal). Logical operators ($and/$or/$not) are nodes, not leaves, so they never appear here. Bounded by the closed Op enum."}
-      ],
-      "description": "Metadata leaves in a deterministic recall filter that compile to an unindexed JSONB column access. Incremented once per metadata leaf at compile time (a filter with N metadata predicates emits N times); compile runs once per recall, so the hybrid vector+bm25 path does not double-count. NO namespace_id label - cardinality rule. The metadata key-path is also unbounded and never a label."
-    },
-    {
       "name": "khora.recall.filter.under_filled",
       "type": "counter",
       "stability": "public",

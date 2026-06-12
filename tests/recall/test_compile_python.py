@@ -661,18 +661,13 @@ def test_compiled_filter_carries_canonical_hash() -> None:
 
 
 # ===========================================================================
-# unindexed_metadata telemetry — emitted PER METADATA LEAF at COMPILE time.
+# Filter-telemetry counters stay quiet on the in-memory compile path.
 # ===========================================================================
 #
-# Contract (confirmed against the binding precedent, tests/unit/filter/
-# test_filter_telemetry.py): the in-memory post-filter compiler emits
-# ``record_unindexed_metadata(op=...)`` ONCE PER METADATA LEAF while building the
-# predicate (the AST walk), mirroring ``compile_postgres`` at postgres.py:187 —
-# NOT inside the returned callable, and NOT per candidate record. So the count is
-# stable regardless of how many records the predicate is later evaluated against,
-# and a system-key-only filter emits nothing. The fixture monkeypatches the same
-# three module-level singletons in ``khora.filter.telemetry`` the postgres
-# telemetry tests use.
+# The two V1-only counters (``under_filled`` / ``graph_channel_empty``) are
+# pre-declared but have no ``.add()`` call site on the compile path here, so they
+# stay quiet. The fixture monkeypatches the same module-level singletons in
+# ``khora.filter.telemetry`` the postgres telemetry tests use.
 
 
 class _RecordingCounter:
@@ -687,78 +682,21 @@ class _RecordingCounter:
 
 @pytest.fixture
 def recording_counters(monkeypatch: pytest.MonkeyPatch) -> dict[str, _RecordingCounter]:
-    """Replace the three filter-telemetry counter singletons with recording fakes.
+    """Replace the filter-telemetry counter singletons with recording fakes.
 
     The ``_get_*`` helpers return the singleton if already set, so pre-seeding each
-    module global makes ``record_unindexed_metadata`` (and any ``.add()`` site)
-    land on the fake. Identical shape to test_filter_telemetry.py::recording_counters.
+    module global makes any ``.add()`` site land on the fake. Identical shape to
+    test_filter_telemetry.py::recording_counters.
     """
     from khora.filter import telemetry as filter_telemetry
 
     counters = {
-        "unindexed_metadata": _RecordingCounter(),
         "under_filled": _RecordingCounter(),
         "graph_channel_empty": _RecordingCounter(),
     }
-    monkeypatch.setattr(filter_telemetry, "_unindexed_metadata_counter", counters["unindexed_metadata"])
     monkeypatch.setattr(filter_telemetry, "_under_filled_counter", counters["under_filled"])
     monkeypatch.setattr(filter_telemetry, "_graph_channel_empty_counter", counters["graph_channel_empty"])
     return counters
-
-
-def test_unindexed_metadata_fires_once_per_metadata_leaf_at_compile(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    # Compiling (not evaluating) a single metadata predicate emits exactly one
-    # observation, with the leaf's op as the bounded attribute.
-    compile_python(_ast({"metadata.tier": "gold"}), _CTX)
-
-    adds = recording_counters["unindexed_metadata"].adds
-    assert len(adds) == 1
-    assert adds[0] == (1, {"op": "$eq"})
-
-
-def test_unindexed_metadata_counts_each_metadata_leaf(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    # N metadata leaves → N observations; a sibling system key does NOT add.
-    wire = {
-        "source_name": "linear",  # system key — no emit
-        "metadata.tier": "gold",  # $eq metadata leaf
-        "metadata.score": {"$gt": 5},  # $gt metadata leaf
-    }
-    compile_python(_ast(wire), _CTX)
-
-    adds = recording_counters["unindexed_metadata"].adds
-    assert len(adds) == 2
-    assert sorted(a[1]["op"] for a in adds) == ["$eq", "$gt"]
-    assert all(a[0] == 1 for a in adds)
-
-
-def test_unindexed_metadata_silent_for_system_key_only(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    # A system-key-only filter post-filters typed columns — no JSONB/metadata access.
-    compile_python(_ast({"source_name": "linear"}), _CTX)
-    assert recording_counters["unindexed_metadata"].adds == []
-
-
-def test_unindexed_metadata_not_emitted_per_record_evaluation(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    # The load-bearing contract: emission is at COMPILE time, not per evaluation.
-    # Build the predicate once, then call it on several records — the count must
-    # NOT grow (emission happened during the compile AST walk, not in the callable).
-    pred = compile_python(_ast({"metadata.tier": "gold"}), _CTX).predicate
-    baseline = len(recording_counters["unindexed_metadata"].adds)
-    assert baseline == 1
-
-    for tier in ("gold", "silver", "bronze", "gold", "gold"):
-        pred({"metadata": {"tier": tier}})
-
-    assert len(recording_counters["unindexed_metadata"].adds) == baseline, (
-        "the counter must not fire per candidate record — emission is compile-time only"
-    )
 
 
 def test_v1_only_counters_stay_quiet_on_compile(

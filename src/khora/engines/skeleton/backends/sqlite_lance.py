@@ -425,12 +425,9 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         filter_ast: FilterNode | None = None,
     ) -> list[TemporalSearchResult]:
         # Build the compile_python post-filter ONCE per recall (it is
-        # alias-independent — it runs on decoded TemporalChunks). compile_python
-        # fires the public ``khora.recall.filter.unindexed_metadata`` counter at
-        # build time, so building it per-pass would double-count it on a hybrid
-        # recall; one build per recall keeps that contract. The compile_lance
+        # alias-independent — it runs on decoded TemporalChunks). The compile_lance
         # pushdown is still compiled per-pass inside each pass (its column
-        # qualifier differs, and it fires zero unindexed_metadata).
+        # qualifier differs).
         post_filter = self._ast_post_filter(filter_ast)
 
         # Vector pass.  Fetch 2× when fusion is requested so RRF has a
@@ -786,9 +783,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         there is no AST.
 
         Built ONCE per recall in :meth:`_search_inner` and threaded into both
-        passes: ``compile_python`` fires the public
-        ``khora.recall.filter.unindexed_metadata`` counter at build time, so a
-        per-pass build would double-count it on a hybrid recall.
+        passes.
         """
         if filter_ast is None or not filter_ast.children:
             return lambda _chunk: True

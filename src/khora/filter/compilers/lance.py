@@ -144,10 +144,6 @@ def compile_lance(ast: FilterNode, ctx: CompileContext) -> CompiledFilter[str]:
     functions), plus three cases that cannot match the oracle in SQL even with
     JSON1 (bare-blob ``$eq``, ``object_equal`` dict operands, ``$date`` compares).
 
-    This compiler does **not** emit the ``khora.recall.filter.unindexed_metadata``
-    counter. The always-on ``compile_python`` post-filter (run on the full AST for
-    every sqlite_lance recall) is the canonical once-per-leaf emit site, matching
-    chronicle; firing here too would double-count that public metric.
     """
     consumed: set[str] = set()
     builder = _Builder(ctx=ctx, consumed=consumed)
@@ -336,12 +332,6 @@ class _Builder:
                 # JSON1 (bare-blob $eq, object_equal dict operand, $date compare).
                 # Already reported as unsupported inside the metadata compiler.
                 return self._unsupported(clause, "metadata predicate is not pushed down to SQLite")
-            # NB: deliberately does NOT fire ``record_unindexed_metadata`` here.
-            # The always-on ``compile_python`` post-filter (which sqlite_lance runs
-            # on the full AST for every recall) is the canonical once-per-leaf
-            # emit site, matching chronicle; firing here too would double-count
-            # the public ``khora.recall.filter.unindexed_metadata`` metric on every
-            # metadata recall. Do not re-add.
         else:
             return self._unsupported(clause, "path is neither a system key nor a metadata path")
         self._consumed.add(_path_str(path))

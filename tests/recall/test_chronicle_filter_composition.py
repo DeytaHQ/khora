@@ -11,12 +11,9 @@ compiled halves of a recall filter at ``recall()`` time —
 2. **The metadata predicate post-filters chunk candidates.** The
    :func:`compile_python` predicate is applied to the fused candidates so an
    out-of-scope chunk is dropped before top-k.
-3. **``khora.recall.filter.unindexed_metadata`` increments on the post-filter
-   path.** ``compile_python`` emits the counter per metadata leaf at compile time
-   (mirroring ``compile_postgres``), so a metadata-bearing filter recall fires it.
 
 The window-intersection assertions exercise the pure ``_intersect_*`` helpers
-directly (deterministic, no infra). The post-filter / telemetry assertions drive
+directly (deterministic, no infra). The post-filter assertions drive
 ``ChronicleEngine.recall()`` over a mocked storage + embedder (the established
 unit pattern from ``tests/unit/engines/test_chronicle_abstention_signals.py``):
 the semantic channel returns a known in-scope / out-of-scope chunk mix and the
@@ -38,7 +35,6 @@ from khora.core.models import Chunk
 from khora.core.models.document import DocumentSource
 from khora.engines.chronicle import engine as chronicle_engine
 from khora.engines.chronicle.engine import ChronicleEngine
-from khora.filter import telemetry as filter_telemetry
 from khora.query import SearchMode
 
 pytestmark = pytest.mark.unit
@@ -430,97 +426,6 @@ async def test_unanchored_chunk_survives_recency_window_with_no_filter_ast() -> 
         "an anchor-less chunk must SURVIVE a recency-window-only recall (no filter_ast); "
         "folding the deprecated bounds into an occurred_at filter would false-empty it"
     )
-
-
-# ===========================================================================
-# (3) unindexed_metadata counter increments on the post-filter path.
-# ===========================================================================
-
-
-class _RecordingCounter:
-    """Captures ``.add(value, attributes=...)`` calls for assertions."""
-
-    def __init__(self) -> None:
-        self.adds: list[tuple[float, dict[str, Any]]] = []
-
-    def add(self, value: float, attributes: Any = None) -> None:
-        self.adds.append((value, dict(attributes or {})))
-
-
-@pytest.fixture
-def recording_counters(monkeypatch: pytest.MonkeyPatch) -> dict[str, _RecordingCounter]:
-    """Replace the filter-telemetry counter singletons with recording fakes.
-
-    Same monkeypatch-the-singleton hook the existing recall-filter telemetry tests
-    use (tests/unit/filter/test_filter_telemetry.py): pre-seeding each module
-    global makes ``record_unindexed_metadata`` land on the fake.
-    """
-    counters = {
-        "unindexed_metadata": _RecordingCounter(),
-        "under_filled": _RecordingCounter(),
-        "graph_channel_empty": _RecordingCounter(),
-    }
-    monkeypatch.setattr(filter_telemetry, "_unindexed_metadata_counter", counters["unindexed_metadata"])
-    monkeypatch.setattr(filter_telemetry, "_under_filled_counter", counters["under_filled"])
-    monkeypatch.setattr(filter_telemetry, "_graph_channel_empty_counter", counters["graph_channel_empty"])
-    return counters
-
-
-@pytest.mark.asyncio
-async def test_unindexed_metadata_fires_on_post_filter_recall(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    # A metadata-bearing filter recall fires the unindexed_metadata counter (the
-    # post-filter compiles the metadata leaf to a Python predicate). Assert >= 1
-    # observation carrying the leaf's op — robust whether emission is per-compile
-    # or (hypothetically) per-evaluation.
-    chunks = [_chunk("alpha", metadata={"tier": "gold"})]
-    engine = _engine_with_semantic([(chunks[0], 0.9)])
-
-    await engine.recall(
-        "alpha",
-        uuid4(),
-        limit=10,
-        mode=SearchMode.VECTOR,
-        filter_ast=_filter_ast({"metadata.tier": "gold"}),
-    )
-
-    adds = recording_counters["unindexed_metadata"].adds
-    assert len(adds) >= 1, "a metadata-bearing filter recall must fire unindexed_metadata"
-    assert any(a[1].get("op") == "$eq" for a in adds)
-
-
-@pytest.mark.asyncio
-async def test_unindexed_metadata_silent_for_system_key_only_recall(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    # A system-key-only filter (occurred_at date bound) does not touch metadata, so
-    # the unindexed_metadata counter stays quiet on the post-filter path.
-    chunks = [_chunk("alpha", metadata={"tier": "gold"})]
-    engine = _engine_with_semantic([(chunks[0], 0.9)])
-
-    await engine.recall(
-        "alpha",
-        uuid4(),
-        limit=10,
-        mode=SearchMode.VECTOR,
-        filter_ast=_filter_ast({"occurred_at": {"$gte": "2020-01-01T00:00:00Z"}}),
-    )
-
-    assert recording_counters["unindexed_metadata"].adds == []
-
-
-@pytest.mark.asyncio
-async def test_no_filter_recall_does_not_fire_unindexed_metadata(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    # No filter → no compile → no counter.
-    chunks = [_chunk("alpha", metadata={"tier": "gold"})]
-    engine = _engine_with_semantic([(chunks[0], 0.9)])
-
-    await engine.recall("alpha", uuid4(), limit=10, mode=SearchMode.VECTOR)
-
-    assert recording_counters["unindexed_metadata"].adds == []
 
 
 # ===========================================================================

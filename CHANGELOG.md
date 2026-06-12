@@ -26,6 +26,7 @@ Minor release. The `RecallFilter` foundation from 0.18.5 is now wired end-to-end
 ### Changed
 
 - Denormalized document keys are now projected onto Neo4j chunk nodes (#1024), so document-grained recall filters push down on the graph backend.
+- **Recall-filter metadata-leaf observability moved from a metric counter to a recall-span attribute.** The `khora.recall.filter.unindexed_metadata` counter is removed; the same signal (how many metadata-rooted leaf predicates a filter carries) is now emitted once per recall as the `filter.metadata_leaf_count` attribute on the `khora.recall` span, alongside `filter.canonical_hash`. The per-leaf compile-time fire across the Postgres/SurrealDB/Python compilers is dropped in favor of the single span attribute, which avoids backend-specific double-count concerns and keeps the per-leaf operator breakdown out of an unbounded metric. The `under_filled` and `graph_channel_empty` recall-filter counters are unchanged.
 
 ### Fixed
 

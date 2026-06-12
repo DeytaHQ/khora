@@ -1,18 +1,17 @@
 """Unit tests for the deterministic recall-filter telemetry — ``@internal``.
 
-Covers the three OTel counters in :mod:`khora.filter.telemetry` and the
-``filter.canonical_hash`` attribute set on the ``khora.recall`` span:
+Covers the two OTel counters in :mod:`khora.filter.telemetry` and the
+``filter.canonical_hash`` / ``filter.metadata_leaf_count`` attributes set on the
+``khora.recall`` span:
 
-1. All three counters are constructible via their ``_get_*`` helpers (and
-   memoized — a second call returns the same instrument).
-2. ``khora.recall.filter.unindexed_metadata`` fires once per metadata leaf when
-   :func:`compile_postgres` lowers a metadata predicate, and does **not** fire
-   for a system-key-only filter.
-3. The two V1-only counters (``under_filled`` / ``graph_channel_empty``) are
+1. Both counters are constructible via their ``_get_*`` helpers (and memoized —
+   a second call returns the same instrument).
+2. The two V1-only counters (``under_filled`` / ``graph_channel_empty``) are
    pre-declared but have no ``.add()`` call site yet, so they stay quiet on the
    compile + recall paths exercised here.
-4. ``filter.canonical_hash`` is present on the ``khora.recall`` span exactly when
-   a ``filter=`` is supplied, and absent on an unfiltered recall.
+3. ``filter.canonical_hash`` and ``filter.metadata_leaf_count`` are present on
+   the ``khora.recall`` span exactly when a ``filter=`` is supplied, and absent
+   on an unfiltered recall.
 
 Hermetic — no Docker / DB. The counter tests monkeypatch the module-level
 singletons in ``khora.filter.telemetry`` with recording fakes (mirroring
@@ -34,7 +33,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from khora.filter import RecallFilter, canonical_hash
+from khora.filter import RecallFilter, canonical_hash, metadata_leaf_count
 from khora.filter import telemetry as filter_telemetry
 from khora.filter.ast import parse_to_ast
 from khora.filter.compilers.postgres import compile_postgres
@@ -68,49 +67,43 @@ def _ast(wire: dict) -> Any:
 
 @pytest.fixture
 def recording_counters(monkeypatch: pytest.MonkeyPatch) -> dict[str, _RecordingCounter]:
-    """Replace the three module-level counter singletons with recording fakes.
+    """Replace the two module-level counter singletons with recording fakes.
 
     The ``_get_*`` helpers return the singleton if already set, so pre-seeding
     each module global makes ``record_*`` / any ``.add()`` site land on the fake.
     """
     counters = {
-        "unindexed_metadata": _RecordingCounter(),
         "under_filled": _RecordingCounter(),
         "graph_channel_empty": _RecordingCounter(),
     }
-    monkeypatch.setattr(filter_telemetry, "_unindexed_metadata_counter", counters["unindexed_metadata"])
     monkeypatch.setattr(filter_telemetry, "_under_filled_counter", counters["under_filled"])
     monkeypatch.setattr(filter_telemetry, "_graph_channel_empty_counter", counters["graph_channel_empty"])
     return counters
 
 
 # ===========================================================================
-# (1) All three counters are constructible via their _get_* helpers.
+# (1) Both counters are constructible via their _get_* helpers.
 # ===========================================================================
 
 
 @pytest.fixture
 def _reset_counter_singletons() -> Any:
-    """Null out the three singletons so the _get_* helpers build fresh ones."""
+    """Null out the two singletons so the _get_* helpers build fresh ones."""
     saved = (
-        filter_telemetry._unindexed_metadata_counter,
         filter_telemetry._under_filled_counter,
         filter_telemetry._graph_channel_empty_counter,
     )
-    filter_telemetry._unindexed_metadata_counter = None
     filter_telemetry._under_filled_counter = None
     filter_telemetry._graph_channel_empty_counter = None
     yield
     (
-        filter_telemetry._unindexed_metadata_counter,
         filter_telemetry._under_filled_counter,
         filter_telemetry._graph_channel_empty_counter,
     ) = saved
 
 
-def test_all_three_counter_helpers_construct(_reset_counter_singletons: Any) -> None:
+def test_both_counter_helpers_construct(_reset_counter_singletons: Any) -> None:
     """Each ``_get_*`` helper returns a non-None instrument (no real provider needed)."""
-    assert filter_telemetry._get_unindexed_metadata_counter() is not None
     assert filter_telemetry._get_under_filled_counter() is not None
     assert filter_telemetry._get_graph_channel_empty_counter() is not None
 
@@ -118,7 +111,6 @@ def test_all_three_counter_helpers_construct(_reset_counter_singletons: Any) -> 
 def test_counter_helpers_are_memoized(_reset_counter_singletons: Any) -> None:
     """A second call returns the same instrument (lazy double-checked singleton)."""
     for getter in (
-        filter_telemetry._get_unindexed_metadata_counter,
         filter_telemetry._get_under_filled_counter,
         filter_telemetry._get_graph_channel_empty_counter,
     ):
@@ -127,79 +119,14 @@ def test_counter_helpers_are_memoized(_reset_counter_singletons: Any) -> None:
 
 
 # ===========================================================================
-# (2) unindexed_metadata fires for metadata leaves, not system-key-only.
-# ===========================================================================
-
-
-def test_unindexed_metadata_fires_on_metadata_predicate(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    """Compiling a single metadata predicate emits exactly one observation."""
-    compile_postgres(_ast({"metadata.tier": "gold"}), _CTX)
-
-    adds = recording_counters["unindexed_metadata"].adds
-    assert len(adds) == 1
-    value, attrs = adds[0]
-    assert value == 1
-    assert attrs == {"op": "$eq"}
-
-
-def test_unindexed_metadata_silent_for_system_key_only(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    """A system-key-only filter compiles to a typed column — no JSONB access."""
-    compile_postgres(_ast({"source_name": "linear"}), _CTX)
-
-    assert recording_counters["unindexed_metadata"].adds == []
-
-
-def test_unindexed_metadata_fires_once_per_metadata_leaf(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    """N metadata predicates → N observations; a sibling system key does not add."""
-    wire = {
-        "source_name": "linear",  # system key — no emit
-        "metadata.tier": "gold",  # $eq metadata leaf
-        "metadata.score": {"$gt": 5},  # $gt metadata leaf
-    }
-    compile_postgres(_ast(wire), _CTX)
-
-    adds = recording_counters["unindexed_metadata"].adds
-    assert len(adds) == 2
-    ops = sorted(a[1]["op"] for a in adds)
-    assert ops == ["$eq", "$gt"]
-    assert all(a[0] == 1 for a in adds)
-
-
-def test_unindexed_metadata_op_attribute_tracks_operator(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    """The ``op`` attribute is the metadata leaf's comparison-operator wire literal."""
-    compile_postgres(_ast({"metadata.tags": {"$in": ["a", "b"]}}), _CTX)
-
-    adds = recording_counters["unindexed_metadata"].adds
-    assert len(adds) == 1
-    assert adds[0][1] == {"op": "$in"}
-
-
-def test_record_unindexed_metadata_helper_adds_one(
-    recording_counters: dict[str, _RecordingCounter],
-) -> None:
-    """The public ``record_unindexed_metadata`` helper adds 1 with the op label."""
-    filter_telemetry.record_unindexed_metadata(op="$lte")
-
-    assert recording_counters["unindexed_metadata"].adds == [(1, {"op": "$lte"})]
-
-
-# ===========================================================================
-# (3) under_filled + graph_channel_empty stay quiet on V1 paths.
+# (2) under_filled + graph_channel_empty stay quiet on V1 paths.
 # ===========================================================================
 
 
 def test_v1_counters_quiet_on_metadata_compile(
     recording_counters: dict[str, _RecordingCounter],
 ) -> None:
-    """Compiling a metadata predicate touches only unindexed_metadata."""
+    """Compiling a metadata predicate fires neither V1 counter."""
     compile_postgres(_ast({"metadata.tier": "gold"}), _CTX)
 
     assert recording_counters["under_filled"].adds == []
@@ -209,16 +136,15 @@ def test_v1_counters_quiet_on_metadata_compile(
 def test_v1_counters_quiet_on_system_key_compile(
     recording_counters: dict[str, _RecordingCounter],
 ) -> None:
-    """A system-key-only compile emits none of the three counters."""
+    """A system-key-only compile emits neither V1 counter."""
     compile_postgres(_ast({"source_name": "linear"}), _CTX)
 
-    assert recording_counters["unindexed_metadata"].adds == []
     assert recording_counters["under_filled"].adds == []
     assert recording_counters["graph_channel_empty"].adds == []
 
 
 # ===========================================================================
-# (4) filter.canonical_hash on the khora.recall span.
+# (3) filter.canonical_hash + filter.metadata_leaf_count on the khora.recall span.
 # ===========================================================================
 #
 # Drive the real ``Khora.recall`` facade over a mocked engine so the actual
@@ -345,3 +271,44 @@ async def test_recall_span_omits_canonical_hash_without_filter(span_exporter: An
 
     span = _recall_span(span_exporter)
     assert "filter.canonical_hash" not in span.attributes
+
+
+@pytest.mark.asyncio
+async def test_recall_span_has_metadata_leaf_count_when_filter_given(span_exporter: Any) -> None:
+    """A ``filter=`` recall tags the span with the AST's metadata-leaf count."""
+    ns_id = uuid4()
+    kb = _make_kb(ns_id)
+    # Two metadata leaves plus a system key (which does not count).
+    wire = {"source_name": "linear", "metadata.tier": "gold", "metadata.score": {"$gt": 5}}
+
+    await kb.recall("q", namespace=ns_id, filter=wire)
+
+    span = _recall_span(span_exporter)
+    expected = metadata_leaf_count(parse_to_ast(RecallFilter.model_validate(wire)))
+    assert expected == 2
+    assert span.attributes.get("filter.metadata_leaf_count") == expected
+
+
+@pytest.mark.asyncio
+async def test_recall_span_metadata_leaf_count_zero_for_system_key_only(span_exporter: Any) -> None:
+    """A system-key-only ``filter=`` recall tags the span with a zero leaf count."""
+    ns_id = uuid4()
+    kb = _make_kb(ns_id)
+    wire = {"source_name": "linear"}
+
+    await kb.recall("q", namespace=ns_id, filter=wire)
+
+    span = _recall_span(span_exporter)
+    assert span.attributes.get("filter.metadata_leaf_count") == 0
+
+
+@pytest.mark.asyncio
+async def test_recall_span_omits_metadata_leaf_count_without_filter(span_exporter: Any) -> None:
+    """An unfiltered recall does not carry the ``filter.metadata_leaf_count`` attribute."""
+    ns_id = uuid4()
+    kb = _make_kb(ns_id)
+
+    await kb.recall("q", namespace=ns_id)
+
+    span = _recall_span(span_exporter)
+    assert "filter.metadata_leaf_count" not in span.attributes

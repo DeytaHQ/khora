@@ -176,8 +176,12 @@ Highlights:
 - **Public metrics**: `khora.memory.{recall,ingest}.duration`,
   `khora.llm.tokens`, `khora.llm.cost_usd`,
   `khora.neo4j.pool.{acquire_duration,timeout,connections.*,utilization}`,
-  `khora.recall.filter.{unindexed_metadata,under_filled,graph_channel_empty}`,
+  `khora.recall.filter.{under_filled,graph_channel_empty}`,
   `khora.chronicle.abstention_signal`, `khora.log.queue.depth`.
+- **Recall filter span attributes** (on `khora.recall`, set only when a
+  `filter=` is present): `filter.canonical_hash` (the AST cache-key digest)
+  and `filter.metadata_leaf_count` (the number of metadata-rooted leaf
+  predicates in the filter).
 - **Khora-contributed resource attribute**:
   `khora.telemetry.contract.version` - bumped alongside contract changes
   so dashboards can filter by schema version independently of khora's

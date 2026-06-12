@@ -52,6 +52,7 @@ __all__ = [
     "FilterNode",
     "FilterOp",
     "canonical_hash",
+    "metadata_leaf_count",
     "parse_to_ast",
 ]
 
@@ -695,3 +696,19 @@ def _canonicalize_operand(operand: Any) -> Any:
         # Order-insensitive object equality — sort keys recursively.
         return {k: _canonicalize_operand(operand[k]) for k in sorted(operand, key=str)}
     return operand
+
+
+def metadata_leaf_count(node: FilterNode | FilterClause) -> int:
+    """Count the metadata-rooted leaf predicates in an AST subtree.
+
+    ``@internal``. A metadata leaf is a :class:`FilterClause` whose ``path``
+    begins with the ``"metadata"`` root segment (the bare-blob ``("metadata",)``
+    or a folded ``("metadata", ...)`` sub-path); these are the leaves that compile
+    to an unindexed JSONB / object-column access. A system-key leaf (a
+    single-segment path naming a denormalized column) does not count. Recurses
+    through :class:`FilterNode` children (``AND`` / ``OR`` / ``NOT``), which carry
+    no comparison of their own.
+    """
+    if isinstance(node, FilterClause):
+        return 1 if node.path and node.path[0] == "metadata" else 0
+    return sum(metadata_leaf_count(child) for child in node.children)
