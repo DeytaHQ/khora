@@ -955,6 +955,40 @@ class TestSemanticExpander:
         assert result.total_entities == 1
 
     @pytest.mark.asyncio
+    async def test_expander_inference_without_unification(self) -> None:
+        """Regression test for #1122: inference-only expansion must not crash.
+
+        An expertise with cross_tool_unification disabled but
+        relationship_inference enabled skips Phase 1, which previously left
+        the telemetry imports (_time, get_collector) unbound when Phase 2
+        ran, raising UnboundLocalError.
+        """
+        from khora.extraction.skills import ExpansionConfig
+
+        expertise = ExpertiseConfig(
+            name="test",
+            expansion=ExpansionConfig(
+                enabled=True,
+                cross_tool_unification=False,
+                relationship_inference=True,
+            ),
+        )
+
+        namespace_id = uuid4()
+        entities = [
+            Entity(id=uuid4(), name="Test", entity_type="PERSON", namespace_id=namespace_id),
+        ]
+
+        expander = SemanticExpander(expertise=expertise)
+        assert expander._enable_unification is False
+        assert expander._enable_inference is True
+
+        result = await expander.expand(entities, [])
+
+        assert result.total_entities == 1
+        assert result.merged_entity_count == 0
+
+    @pytest.mark.asyncio
     async def test_expander_sync_alternative(self) -> None:
         """Test expand method directly instead of deprecated sync version."""
         namespace_id = uuid4()

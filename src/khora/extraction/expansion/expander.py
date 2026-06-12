@@ -149,6 +149,12 @@ class SemanticExpander:
         Returns:
             ExpansionResult with expanded graph
         """
+        # Bound here (not inside Phase 1) so Phase 2 telemetry works when
+        # unification is disabled but inference is enabled - see #1122.
+        import time as _time
+
+        from khora.telemetry import get_collector
+
         result = ExpansionResult(
             original_entity_count=len(entities),
             original_relationship_count=len(relationships),
@@ -170,10 +176,6 @@ class SemanticExpander:
         # Phase 1: Cross-tool entity unification
         if self._enable_unification:
             logger.debug("Running cross-tool entity unification...")
-            import time as _time
-
-            from khora.telemetry import get_collector
-
             _t0 = _time.perf_counter()
             unification_result = await self._unifier.unify(
                 current_entities,
