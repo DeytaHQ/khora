@@ -861,9 +861,10 @@ class TestVectorProtocol:
     async def test_delete_chunks_by_document_with_session(self, vector_backend):
         """When ``session`` is provided, the caller owns the transaction.
 
-        For backends that don't use SQLAlchemy (sqlite_lance, surrealdb),
-        any non-None session is treated as a signal to defer commit; the
-        row count returned must still reflect the work done.
+        Backends that don't use SQLAlchemy (sqlite_lance) ignore the
+        session and commit their own work - a cross-engine session can
+        never cover their connection (#1135). Either way, the row count
+        returned must reflect the work done.
         """
         ns, doc = uuid4(), uuid4()
         await vector_backend.create_chunks_batch([_make_chunk(ns, doc, embedding=_unit(8, i)) for i in range(2)])

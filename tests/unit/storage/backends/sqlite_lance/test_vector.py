@@ -284,13 +284,17 @@ class TestChunkCRUD:
         assert fetched is not None
         assert fetched.occurred_at is None
 
-    async def test_delete_chunks_by_document_with_session_skips_commit(self, adapter: SQLiteLanceVectorAdapter):
-        """When a session is provided the caller owns commits.
+    async def test_delete_chunks_by_document_with_session_commits_immediately(self, adapter: SQLiteLanceVectorAdapter):
+        """A SQLAlchemy session can never cover the raw aiosqlite handle (#1135).
 
-        We can't plumb a real AsyncSession here (SQLAlchemy is not driving
-        this backend), so we pass a sentinel object — the adapter treats
-        any non-None session the same way: delay commit + skip compensation.
+        Deferring the commit to the caller left the DELETE pending on the
+        shared handle until a later unrelated commit applied it outside any
+        controlled transaction, and skipped the LanceDB compensation
+        entirely. The adapter must commit its own SQLite work and compensate
+        LanceDB regardless of the ``session`` argument.
         """
+        import aiosqlite
+
         ns, doc = uuid4(), uuid4()
         chunks = [_make_chunk(ns, doc, embedding=_unit(8, i)) for i in range(2)]
         await adapter.create_chunks_batch(chunks)
@@ -299,11 +303,20 @@ class TestChunkCRUD:
         deleted = await adapter.delete_chunks_by_document(doc, namespace_id=ns, session=sentinel)  # type: ignore[arg-type]
         assert deleted == 2
 
-        # SQLite wasn't committed so the row count per query (inside this
-        # conn) reflects the delete, but LanceDB vectors are untouched
-        # (caller will commit + compensate).
+        # The DELETE must already be committed — visible to a fresh
+        # connection, not pending inside the shared handle's implicit
+        # transaction.
+        async with aiosqlite.connect(adapter._handle.config.db_path) as conn:  # type: ignore[reportPrivateUsage]
+            cur = await conn.execute(
+                "SELECT COUNT(*) FROM chunks WHERE document_id = ?",
+                (doc.hex,),
+            )
+            row = await cur.fetchone()
+            assert row is not None and row[0] == 0
+
+        # LanceDB compensation ran — no orphaned vectors.
         tbl = await adapter._chunks_table()  # type: ignore[reportPrivateUsage]
-        assert await tbl.count_rows() == 2
+        assert await tbl.count_rows() == 0
 
 
 # ---------------------------------------------------------------------------
