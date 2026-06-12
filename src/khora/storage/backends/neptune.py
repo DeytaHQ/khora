@@ -29,6 +29,11 @@ from khora.storage.backends.mixins import (
 
 from .._log_safe import _safe_url_for_log
 
+# SigV4 signatures are valid for at most 5 minutes. Refresh the cached auth
+# token well before that so a connection opened near the expiry edge never
+# presents a stale signature (#1152).
+_IAM_TOKEN_TTL_SECONDS = 240.0
+
 
 class NeptuneBackend(GraphBackendBase):
     """AWS Neptune graph backend using the neo4j Python driver over Bolt.
@@ -57,6 +62,7 @@ class NeptuneBackend(GraphBackendBase):
         self._aws_region = aws_region
         self._max_connection_pool_size = max_connection_pool_size
         self._driver: Any = None  # neo4j.AsyncDriver
+        self._boto_session: Any = None  # boto3.Session, set on connect() when iam_auth
 
     @classmethod
     def from_config(cls, config: Any) -> NeptuneBackend:
@@ -95,30 +101,26 @@ class NeptuneBackend(GraphBackendBase):
 
         if self._iam_auth:
             try:
-                import json
-                from urllib.parse import urlparse
-
                 import boto3
-                from botocore.auth import SigV4Auth
-                from botocore.awsrequest import AWSRequest
-
-                session = boto3.Session(region_name=self._aws_region)
-                credentials = session.get_credentials().get_frozen_credentials()
-
-                # Parse Neptune endpoint for signing
-                parsed = urlparse(self._url.replace("bolt://", "https://").replace("bolt+s://", "https://"))
-                request = AWSRequest(
-                    method="GET",
-                    url=f"https://{parsed.hostname}:{parsed.port or 8182}/opencypher",
-                    headers={"Host": parsed.hostname},
-                )
-                SigV4Auth(credentials, "neptune-db", self._aws_region).add_auth(request)
-
-                # Extract signed headers as auth token
-                auth_token = json.dumps(dict(request.headers))
-                auth = neo4j.basic_auth("", auth_token)
             except ImportError:
                 raise ImportError("boto3 is required for Neptune IAM auth. Install: pip install khora[neptune-iam]")
+
+            from neo4j.auth_management import AsyncAuthManagers, ExpiringAuth
+
+            # The provider chain resolves once here; the returned credentials
+            # object refreshes STS/role credentials internally, so freezing
+            # happens per signature in _sign_iam_token(), never at connect().
+            self._boto_session = boto3.Session(region_name=self._aws_region)
+
+            async def _fresh_iam_auth() -> ExpiringAuth:
+                # Called by the driver whenever a new Bolt connection needs
+                # auth and the cached token has expired - every connection
+                # presents a signature at most _IAM_TOKEN_TTL_SECONDS old
+                # instead of one frozen at connect() (#1152).
+                token = self._sign_iam_token()
+                return ExpiringAuth(neo4j.basic_auth("", token)).expires_in(_IAM_TOKEN_TTL_SECONDS)
+
+            auth = AsyncAuthManagers.bearer(_fresh_iam_auth)
         else:
             auth = (self._user, self._password) if self._user else None
 
@@ -132,6 +134,35 @@ class NeptuneBackend(GraphBackendBase):
         await self._driver.verify_connectivity()
         await self._create_indexes()
         logger.info("Connected to Neptune")
+
+    def _sign_iam_token(self) -> str:
+        """Build a freshly SigV4-signed Neptune Bolt-IAM auth token.
+
+        SigV4 signatures expire after ~5 minutes, so this runs on every token
+        refresh - the result must never be cached for the driver's lifetime
+        (#1152). The JSON shape follows AWS's documented Bolt-IAM token
+        format: the signed headers plus ``HttpMethod``.
+        """
+        import json
+        from urllib.parse import urlparse
+
+        from botocore.auth import SigV4Auth
+        from botocore.awsrequest import AWSRequest
+
+        credentials = self._boto_session.get_credentials().get_frozen_credentials()
+
+        # Parse Neptune endpoint for signing
+        parsed = urlparse(self._url.replace("bolt://", "https://").replace("bolt+s://", "https://"))
+        request = AWSRequest(
+            method="GET",
+            url=f"https://{parsed.hostname}:{parsed.port or 8182}/opencypher",
+            headers={"Host": parsed.hostname},
+        )
+        SigV4Auth(credentials, "neptune-db", self._aws_region).add_auth(request)
+
+        token = dict(request.headers)
+        token["HttpMethod"] = "GET"
+        return json.dumps(token)
 
     async def disconnect(self) -> None:
         if self._driver is not None:
