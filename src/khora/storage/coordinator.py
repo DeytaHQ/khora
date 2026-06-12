@@ -711,11 +711,31 @@ class StorageCoordinator:
             #        we do not undercount silently. A follow-up PR (#884)
             #        will introduce a partial-state status for the
             #        graph-pending case.
+            #    The shared SQLAlchemy session only covers backends that run
+            #    on its engine. The sqlite_lance vector adapter writes through
+            #    a raw aiosqlite handle on a separate engine - passing the
+            #    session there crashed ``create_chunks_batch`` (#1134) and
+            #    left the chunk DELETE pending on the shared handle for a
+            #    later unrelated commit to apply outside any controlled
+            #    transaction (#1135). The probe mirrors ``transaction()``'s
+            #    backend discovery: only session-capable SQL backends expose
+            #    ``_session_factory``.
+            vector_in_txn = getattr(self._vector, "_session_factory", None) is not None
             async with self.transaction() as txn:
-                chunks_deleted = await self._vector.delete_chunks_by_document(
-                    old_document_id, namespace_id=namespace_id, session=txn.session
-                )
-                await self._vector.create_chunks_batch(new_chunks, session=txn.session)  # type: ignore[unresolved-attribute]
+                if vector_in_txn:
+                    chunks_deleted = await self._vector.delete_chunks_by_document(
+                        old_document_id, namespace_id=namespace_id, session=txn.session
+                    )
+                    await self._vector.create_chunks_batch(new_chunks, session=txn.session)  # type: ignore[unresolved-attribute]
+                else:
+                    # Embedded path: the adapter commits its own SQLite work
+                    # and compensates LanceDB itself. Cross-store atomicity is
+                    # partial on embedded (documented) - the delete + insert
+                    # are durable even if the document update below rolls back.
+                    chunks_deleted = await self._vector.delete_chunks_by_document(
+                        old_document_id, namespace_id=namespace_id
+                    )
+                    await self._vector.create_chunks_batch(new_chunks)
                 new_document.mark_completed(len(new_chunks), len(new_entities), 0)
                 await self._relational.update_document(new_document, session=txn.session)  # type: ignore[unresolved-attribute]
 

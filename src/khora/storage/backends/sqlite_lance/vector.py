@@ -362,12 +362,15 @@ class SQLiteLanceVectorAdapter:
     ) -> int:
         """Delete chunks by document, scoped to ``namespace_id`` (IDOR family).
 
-        The ``session`` parameter is part of the protocol contract but the
-        SQLite+LanceDB backend never participates in a SQLAlchemy session —
-        if one is passed we treat it as a caller-managed transaction
-        signal: we do NOT commit the SQLite side (caller will) and we
-        skip the LanceDB compensation until they do.  With no session,
-        we commit immediately and run the LanceDB delete as compensation.
+        The ``session`` parameter is part of the protocol contract but is
+        ignored here: a SQLAlchemy session runs on the relational adapter's
+        separate engine and can never cover this adapter's raw aiosqlite
+        handle.  Deferring our commit to such a caller left the DELETE
+        pending in aiosqlite's implicit transaction until a later unrelated
+        commit on the shared handle applied it outside any controlled
+        transaction, and skipped the LanceDB compensation entirely (#1135).
+        We always commit immediately and run the LanceDB delete as
+        compensation.
         """
         doc_text = uuid_to_text(document_id)
         ns_text = uuid_to_text(namespace_id)
@@ -388,22 +391,21 @@ class SQLiteLanceVectorAdapter:
         )
         rowcount = cur.rowcount
 
-        if session is None:
-            await self._sqlite.commit()
-            # Compensation delete on LanceDB — SQLite is already committed,
-            # so we log failures but don't re-raise to keep metadata/vector
-            # consistency under eventual convergence (next compact/rewrite
-            # will re-sync).
-            if count > 0:
-                try:
-                    tbl = await self._chunks_table()
-                    async with self._lance_write_lock:
-                        await tbl.delete(f"document_id = '{doc_text}' AND namespace_id = '{ns_text}'")
-                except Exception:
-                    logger.warning(
-                        "LanceDB delete for document {} failed — orphaned vectors remain until next compaction",
-                        doc_text,
-                    )
+        await self._sqlite.commit()
+        # Compensation delete on LanceDB — SQLite is already committed,
+        # so we log failures but don't re-raise to keep metadata/vector
+        # consistency under eventual convergence (next compact/rewrite
+        # will re-sync).
+        if count > 0:
+            try:
+                tbl = await self._chunks_table()
+                async with self._lance_write_lock:
+                    await tbl.delete(f"document_id = '{doc_text}' AND namespace_id = '{ns_text}'")
+            except Exception:
+                logger.warning(
+                    "LanceDB delete for document {} failed — orphaned vectors remain until next compaction",
+                    doc_text,
+                )
 
         return rowcount if rowcount is not None else count
 
