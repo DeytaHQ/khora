@@ -155,6 +155,18 @@ async def _recall_ids(engine: ChronicleEngine, namespace_id: UUID, wire: dict) -
     return {c.id for c in result.chunks}
 
 
+async def _recall_filter_report(engine: ChronicleEngine, namespace_id: UUID, wire: dict | None) -> dict:
+    """Drive a recall over the real store and return ``engine_info["filter"]``.
+
+    ``wire is None`` exercises the no-filter path (no ``filter_ast`` threaded).
+    """
+    kwargs: dict[str, Any] = {"limit": 50, "mode": SearchMode.VECTOR}
+    if wire is not None:
+        kwargs["filter_ast"] = _filter_ast(wire)
+    result = await engine.recall(_QUERY_TEXT, namespace_id, **kwargs)
+    return result.engine_info["filter"]
+
+
 @pytest.mark.asyncio
 async def test_metadata_filter_round_trips_through_real_store(tmp_path: Path) -> None:
     # metadata.tier == "gold" must select exactly the gold chunks after a real
@@ -468,5 +480,77 @@ async def test_engine_recall_matches_compile_python_oracle(tmp_path: Path) -> No
         assert engine_ids == oracle_ids
         # Sanity: exactly the gold + in-range chunk.
         assert engine_ids == {chunks[0].id}
+    finally:
+        await coord.disconnect()
+
+
+# ===========================================================================
+# engine_info["filter"] — the honest FilterPushdownReport over the REAL store.
+# ===========================================================================
+#
+# The mocked engine-composition suite (tests/recall/test_chronicle_filter_composition.py)
+# pins the report shape exhaustively. Here we confirm the SAME canonical
+# FilterPushdownReport is emitted on the live sqlite_lance recall path — so a
+# storage-coupled regression (e.g. the pushdown bound silently not being consumed
+# on the real window) would surface in the report, not just the row set. Uses the
+# real canonical leaf-key strings (source_timestamp / occurred_at / metadata.<x>).
+
+
+@pytest.mark.asyncio
+async def test_filter_report_partial_pushdown_over_real_store(tmp_path: Path) -> None:
+    # A 3-leaf filter where only source_timestamp folds into the recency window;
+    # occurred_at and metadata.tier are post-filter-only. The live report must name
+    # the source_timestamp axis as pushed and the other two as post-filtered, and
+    # round-trip through the canonical model.
+    from khora.filter import FilterPushdownReport
+
+    coord = await build_sqlite_lance_coordinator(tmp_path)
+    try:
+        ns = await coord.create_namespace(MemoryNamespace())
+        await _seed(
+            coord, ns.id, [{"content": "anything", "source_timestamp": _IN_RANGE, "metadata": {"tier": "gold"}}]
+        )
+
+        report = await _recall_filter_report(
+            _engine_over(coord),
+            ns.id,
+            {
+                "source_timestamp": {"$gte": _FILTER_LB},
+                "occurred_at": {"$gte": _FILTER_LB},
+                "metadata.tier": "gold",
+            },
+        )
+        FilterPushdownReport.model_validate(report)  # raises on shape drift
+
+        assert report["pushed_keys"] == ["source_timestamp"]
+        assert report["post_filtered_keys"] == ["metadata.tier", "occurred_at"]
+        assert report["pushed_down"] is False
+        assert report["post_filtered"] is True
+        assert report["channels"] == {
+            "chunks": {"pushed_keys": ["source_timestamp"], "post_filtered_keys": ["metadata.tier", "occurred_at"]}
+        }
+    finally:
+        await coord.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_filter_report_no_filter_reports_nothing_narrowed_over_real_store(tmp_path: Path) -> None:
+    # The no-filter live recall emits the canonical empty report: nothing pushed,
+    # nothing post-filtered, the single "chunks" channel present with empty lists.
+    from khora.filter import FilterPushdownReport
+
+    coord = await build_sqlite_lance_coordinator(tmp_path)
+    try:
+        ns = await coord.create_namespace(MemoryNamespace())
+        await _seed(coord, ns.id, [{"content": "anything", "source_timestamp": _IN_RANGE}])
+
+        report = await _recall_filter_report(_engine_over(coord), ns.id, None)
+        FilterPushdownReport.model_validate(report)
+
+        assert report["pushed_down"] is False
+        assert report["post_filtered"] is False
+        assert report["pushed_keys"] == []
+        assert report["post_filtered_keys"] == []
+        assert report["channels"] == {"chunks": {"pushed_keys": [], "post_filtered_keys": []}}
     finally:
         await coord.disconnect()

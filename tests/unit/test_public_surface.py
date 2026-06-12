@@ -40,6 +40,8 @@ EXPECTED_PUBLIC_SURFACE = frozenset(
         "EntityTypeConfig",
         "EventType",
         "ExpertiseConfig",
+        "FilterChannelReport",
+        "FilterPushdownReport",
         "Khora",
         "KhoraConfig",
         "KhoraError",

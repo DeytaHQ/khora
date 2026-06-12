@@ -782,3 +782,110 @@ async def test_system_created_at_date_filter_narrows(kb: Khora) -> None:
     assert await _recall({"created_at": {"$gte": "2000-01-01T00:00:00Z"}}) == all_labels
     assert await _recall({"created_at": {"$lte": "2000-01-01T00:00:00Z"}}) == set()
     assert await _recall({"created_at": {"$gte": "2000-01-01T00:00:00Z", "$lte": "2100-01-01T00:00:00Z"}}) == all_labels
+
+
+# ===========================================================================
+# engine_info["filter"] — the honest FilterPushdownReport through the FULL facade.
+# ===========================================================================
+#
+# The public ``Khora.recall(filter=...)`` path threads the AST to Chronicle, which
+# emits a canonical ``FilterPushdownReport`` under ``engine_info["filter"]``; the
+# facade passes it through verbatim. These tests pin that the END-TO-END public
+# call surfaces the canonical report — partial-pushdown split, fully-pushed, and
+# no-filter — using the real canonical leaf-key strings (``source_timestamp`` is
+# the one Chronicle pushes; ``occurred_at`` / ``metadata.<x>`` are post-filter-only).
+
+
+async def test_facade_filter_report_only_source_timestamp_pushes(kb: Khora) -> None:
+    """A 3-leaf filter where only ``source_timestamp`` folds into the window.
+
+    Through the full public ``recall(filter=...)``: of ``source_timestamp`` (the
+    recency window's primary axis), ``occurred_at`` (event-time axis), and
+    ``metadata.tag``, only ``source_timestamp`` pushes down. The surfaced report
+    names exactly that split and round-trips through the canonical model.
+    """
+    from khora.filter import FilterPushdownReport
+
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+    await _seed(kb, namespace_id)
+
+    result = await kb.recall(
+        "alpha bravo charlie",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+        filter={
+            "source_timestamp": {"$gte": _IN_BOUND},
+            "occurred_at": {"$gte": _IN_BOUND},
+            "metadata.tag": {"$in": ["urgent", "release"]},
+        },
+    )
+
+    report = result.engine_info["filter"]
+    FilterPushdownReport.model_validate(report)  # raises on shape drift
+    assert report["pushed_keys"] == ["source_timestamp"]
+    assert report["post_filtered_keys"] == ["metadata.tag", "occurred_at"]
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is True
+    assert report["channels"] == {
+        "chunks": {"pushed_keys": ["source_timestamp"], "post_filtered_keys": ["metadata.tag", "occurred_at"]}
+    }
+
+
+async def test_facade_filter_report_three_predicate_all_post_filtered(kb: Khora) -> None:
+    """The corpus three-predicate filter pushes NOTHING (no source_timestamp leaf).
+
+    ``_RECALL_FILTER`` constrains ``source_name`` / ``occurred_at`` /
+    ``metadata.tag`` — none of which is the source_timestamp axis Chronicle pushes —
+    so every leaf is post-filter-only. The report's ``pushed_keys`` is empty and all
+    three leaves land in ``post_filtered_keys``.
+    """
+    from khora.filter import FilterPushdownReport
+
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+    await _seed(kb, namespace_id)
+
+    result = await kb.recall(
+        "alpha bravo charlie",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+        filter=_RECALL_FILTER,
+    )
+
+    report = result.engine_info["filter"]
+    FilterPushdownReport.model_validate(report)
+    assert report["pushed_keys"] == []
+    assert report["post_filtered_keys"] == ["metadata.tag", "occurred_at", "source_name"]
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is True
+
+
+async def test_facade_filter_report_no_filter_reports_nothing_narrowed(kb: Khora) -> None:
+    """The no-filter public recall surfaces the canonical empty report.
+
+    Nothing pushed, nothing post-filtered, both flags False, empty key lists, and
+    the single Chronicle ``chunks`` channel present with empty lists.
+    """
+    from khora.filter import FilterPushdownReport
+
+    ns = await kb.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+    await _seed(kb, namespace_id)
+
+    result = await kb.recall(
+        "alpha bravo charlie",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+    )
+
+    report = result.engine_info["filter"]
+    FilterPushdownReport.model_validate(report)
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is False
+    assert report["pushed_keys"] == []
+    assert report["post_filtered_keys"] == []
+    assert report["channels"] == {"chunks": {"pushed_keys": [], "post_filtered_keys": []}}

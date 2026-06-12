@@ -504,3 +504,184 @@ async def test_no_carrier_doc_key_negative_predicate_matches_all() -> None:
     )
 
     assert {c.id for c in result.chunks} == {chunk.id}, "$ne on a no-carrier key matches all (absent is not-equal)"
+
+
+# ===========================================================================
+# engine_info["filter"] — the honest FilterPushdownReport the engine emits.
+# ===========================================================================
+#
+# Chronicle is PARTIAL-pushdown by design: of the recall-filter constraint
+# leaves, only a conjunctive ``source_timestamp`` bound folds into the recency
+# window (the window's primary axis, COALESCE(source_timestamp, created_at)); the
+# full filter is always re-checked by the in-memory post-filter. The engine
+# reports that truth as a canonical ``FilterPushdownReport`` under
+# ``engine_info["filter"]``, built from a single ``"chunks"`` channel whose
+# ``pushed_keys`` is the source_timestamp subset and whose ``post_filtered_keys``
+# is every other leaf. These tests pin that report on real ``RecallResult``
+# objects the mocked engine produces — no external services — using the REAL
+# canonical leaf-key strings (``".".join(clause.path)``: ``source_timestamp`` /
+# ``occurred_at`` / ``created_at`` / ``metadata.<x>``), not guesses.
+#
+# The single-channel name the engine feeds the builder.
+_CHUNKS_CHANNEL = "chunks"
+
+
+async def _recall_report(engine: ChronicleEngine, wire: dict | None) -> dict:
+    """Drive a recall and return the raw ``engine_info["filter"]`` payload.
+
+    ``wire is None`` exercises the no-filter path (no ``filter_ast`` threaded);
+    a ``{}`` wire reaches the engine as the empty match-everything AST.
+    """
+    kwargs: dict[str, Any] = {"limit": 10, "mode": SearchMode.VECTOR}
+    if wire is not None:
+        kwargs["filter_ast"] = _filter_ast(wire)
+    result = await engine.recall("alpha", uuid4(), **kwargs)
+    return result.engine_info["filter"]
+
+
+def _validates(report: dict) -> Any:
+    """Round-trip the emitted dict through the canonical model (raises on drift)."""
+    from khora.filter import FilterPushdownReport
+
+    return FilterPushdownReport.model_validate(report)
+
+
+@pytest.mark.asyncio
+async def test_filter_report_validates_as_canonical_model_on_every_path() -> None:
+    # Every emitted report — no-filter, empty {}, and a constraint-bearing filter —
+    # must round-trip through the public FilterPushdownReport model. This is the
+    # contract guard: the engine emits the canonical shape, not a bespoke dict.
+    engine = _engine_with_semantic([(_chunk("alpha", metadata={"tier": "gold"}), 0.9)])
+
+    for wire in (None, {}, {"metadata.tier": "gold"}, {"source_timestamp": {"$gte": "2026-01-01T00:00:00Z"}}):
+        report = await _recall_report(engine, wire)
+        model = _validates(report)  # raises if the shape drifted
+        # The single Chronicle channel is always present, even on the no-filter path.
+        assert set(model.channels) == {_CHUNKS_CHANNEL}
+
+
+@pytest.mark.asyncio
+async def test_filter_report_three_predicate_only_source_timestamp_pushes() -> None:
+    # The headline partial-pushdown case: a 3-leaf AND where exactly ONE leaf
+    # (source_timestamp) folds into the recency window and the other two
+    # (occurred_at, metadata.tag) are post-filter-only. The report must name the
+    # source_timestamp axis as pushed and the other two as post-filtered.
+    engine = _engine_with_semantic([(_chunk("alpha", metadata={"tier": "gold"}), 0.9)])
+    report = await _recall_report(
+        engine,
+        {
+            "source_timestamp": {"$gte": "2026-01-01T00:00:00Z"},
+            "occurred_at": {"$gte": "2026-04-05T00:00:00Z"},
+            "metadata.tag": {"$in": ["urgent", "release"]},
+        },
+    )
+    _validates(report)
+
+    assert report["pushed_keys"] == ["source_timestamp"]
+    assert report["post_filtered_keys"] == ["metadata.tag", "occurred_at"]
+    # Not fully pushed (two leaves re-checked in memory), and the post-filter ran.
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is True
+    # The single channel mirrors the same split.
+    assert report["channels"][_CHUNKS_CHANNEL] == {
+        "pushed_keys": ["source_timestamp"],
+        "post_filtered_keys": ["metadata.tag", "occurred_at"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_filter_report_source_timestamp_only_is_fully_pushed() -> None:
+    # A date-only filter on source_timestamp (the window's primary axis) is the one
+    # leaf Chronicle CAN push. The report marks it fully pushed (pushed_down True)
+    # with nothing in post_filtered_keys — yet post_filtered stays True because the
+    # engine still runs its defensive full-predicate re-check (NO-DEMOTE: that
+    # defensive pass does not move the fully-pushed source_timestamp leaf).
+    engine = _engine_with_semantic([(_chunk("alpha"), 0.9)])
+    report = await _recall_report(engine, {"source_timestamp": {"$gte": "2026-01-01T00:00:00Z"}})
+    _validates(report)
+
+    assert report["pushed_keys"] == ["source_timestamp"]
+    assert report["post_filtered_keys"] == []
+    assert report["pushed_down"] is True
+    assert report["post_filtered"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("date_key", ["occurred_at", "created_at"])
+async def test_filter_report_cross_axis_date_key_is_post_filter_only(date_key: str) -> None:
+    # occurred_at (the event-time axis) and created_at (the window's fallback, not
+    # its primary axis) are cross-dimensional, so neither pushes down: the report
+    # has empty pushed_keys and names exactly that one key as post-filtered.
+    engine = _engine_with_semantic([(_chunk("alpha"), 0.9)])
+    report = await _recall_report(engine, {date_key: {"$gte": "2026-01-01T00:00:00Z"}})
+    _validates(report)
+
+    assert report["pushed_keys"] == []
+    assert report["post_filtered_keys"] == [date_key]
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is True
+    assert report["channels"][_CHUNKS_CHANNEL] == {"pushed_keys": [], "post_filtered_keys": [date_key]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire", [None, {}], ids=["no-filter", "empty-filter"])
+async def test_filter_report_no_constraint_reports_nothing_narrowed(wire: dict | None) -> None:
+    # No-filter (no AST threaded) and a bare ``{}`` (empty match-everything AND)
+    # both carry zero constraint leaves: nothing was pushed and nothing was
+    # post-filtered, so both flags are False and every key list is empty. The single
+    # Chronicle channel is still present with empty lists (the builder never drops
+    # the channel the engine feeds it).
+    engine = _engine_with_semantic([(_chunk("alpha"), 0.9)])
+    report = await _recall_report(engine, wire)
+    _validates(report)
+
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is False
+    assert report["pushed_keys"] == []
+    assert report["post_filtered_keys"] == []
+    assert report["channels"] == {_CHUNKS_CHANNEL: {"pushed_keys": [], "post_filtered_keys": []}}
+
+
+@pytest.mark.asyncio
+async def test_filter_report_source_timestamp_under_or_is_post_filter_only() -> None:
+    # Only a TOP-LEVEL conjunctive source_timestamp clause folds into the recency
+    # window. A source_timestamp buried inside an ``$or`` is not a hard conjunctive
+    # constraint, so it does NOT push — it (and its $or sibling) land in
+    # post_filtered_keys. This is the invariant the all-leaves ``pushed_down``
+    # semantics rests on: a leaf only counts as pushed when it actually folded.
+    engine = _engine_with_semantic([(_chunk("alpha", metadata={"tag": "urgent"}), 0.9)])
+    report = await _recall_report(
+        engine,
+        {
+            "$or": [
+                {"source_timestamp": {"$gte": "2026-01-01T00:00:00Z"}},
+                {"metadata.tag": "urgent"},
+            ]
+        },
+    )
+    _validates(report)
+
+    assert report["pushed_keys"] == []
+    assert report["post_filtered_keys"] == ["metadata.tag", "source_timestamp"]
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is True
+    assert report["channels"][_CHUNKS_CHANNEL] == {
+        "pushed_keys": [],
+        "post_filtered_keys": ["metadata.tag", "source_timestamp"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_filter_report_source_timestamp_under_not_is_post_filter_only() -> None:
+    # A source_timestamp negated under ``$not`` is likewise not a top-level
+    # conjunctive bound, so it does not fold into the window — it is enforced only
+    # by the in-memory post-filter and reported in post_filtered_keys.
+    engine = _engine_with_semantic([(_chunk("alpha"), 0.9)])
+    report = await _recall_report(engine, {"$not": {"source_timestamp": {"$gte": "2026-01-01T00:00:00Z"}}})
+    _validates(report)
+
+    assert report["pushed_keys"] == []
+    assert report["post_filtered_keys"] == ["source_timestamp"]
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is True
+    assert report["channels"][_CHUNKS_CHANNEL] == {"pushed_keys": [], "post_filtered_keys": ["source_timestamp"]}
