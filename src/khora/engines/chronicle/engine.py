@@ -2167,6 +2167,31 @@ class ChronicleEngine:
             self._reinforce_tasks.add(task)
             task.add_done_callback(self._reinforce_tasks.discard)
 
+        # ── Honest recall-filter pushdown report ────────────────────────
+        # Chronicle is partial-pushdown by design: only the source_timestamp
+        # date bound pushes into the recency window; the full filter
+        # (occurred_at / created_at / denorm doc keys / metadata) is always
+        # enforced by the in-memory post-filter. We feed both halves of that
+        # truth into the canonical builder as a single "chunks" channel so the
+        # report exposes which leaves pushed (pushed_keys) versus which were
+        # re-checked in memory (post_filtered_keys), rather than a single
+        # all-or-nothing flag.
+        from khora.filter.execute import filter_leaf_keys
+        from khora.filter.report import ChannelPlan, build_filter_report
+
+        filter_report = build_filter_report(
+            filter_ast,
+            {
+                "chunks": ChannelPlan(
+                    pushed_keys=filter_pushed_keys,
+                    post_filtered_keys=(
+                        filter_leaf_keys(filter_ast) - filter_pushed_keys if filter_ast is not None else frozenset()
+                    ),
+                    defensive_recheck=(filter_ast is not None and bool(filter_ast.children)),
+                )
+            },
+        )
+
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
@@ -2187,19 +2212,13 @@ class ChronicleEngine:
                 "max_raw_vector_score": max_raw_cosine,
                 "abstention_signals": abstention_signals,
                 "timings": timings,
-                # Honest recall-filter pushdown report (mirrors the skeleton
-                # precedent #1022). Chronicle is partial-pushdown by design: only
-                # the source_timestamp date bound pushes into the recency window;
-                # the full filter (occurred_at / created_at / denorm doc keys /
-                # metadata) is always enforced by the in-memory post-filter. So we
-                # report both halves honestly rather than a single all-or-nothing
-                # flag. ``pushed_down`` is True only when a source_timestamp bound
-                # actually narrowed the window; ``post_filtered`` is True whenever a
-                # constraint-bearing filter was supplied (the post-filter ran).
-                "filter": {
-                    "pushed_down": bool(filter_pushed_keys),
-                    "post_filtered": filter_ast is not None and bool(filter_ast.children),
-                },
+                # Honest recall-filter pushdown report. Chronicle is
+                # partial-pushdown by design: only the source_timestamp date bound
+                # pushes into the recency window, while the full filter is always
+                # enforced by the in-memory post-filter — so the canonical
+                # FilterPushdownReport (built above) carries the pushed_keys /
+                # post_filtered_keys split rather than a single all-or-nothing flag.
+                "filter": filter_report.model_dump(mode="json"),
                 # ADR-001: callers can detect silent channel failures /
                 # fallbacks via this list. Empty when nothing degraded.
                 "degradations": degradations,

@@ -240,6 +240,18 @@ async def _recall_ids(engine: ChronicleEngine, namespace_id: UUID, wire: dict) -
     return {c.id for c in result.chunks}
 
 
+async def _recall_filter_report(engine: ChronicleEngine, namespace_id: UUID, wire: dict | None) -> dict:
+    """Drive a recall over the live PG store and return ``engine_info["filter"]``.
+
+    ``wire is None`` exercises the no-filter path (no ``filter_ast`` threaded).
+    """
+    kwargs: dict[str, Any] = {"limit": 50, "mode": SearchMode.VECTOR}
+    if wire is not None:
+        kwargs["filter_ast"] = _filter_ast(wire)
+    result = await engine.recall(_QUERY_TEXT, namespace_id, **kwargs)
+    return result.engine_info["filter"]
+
+
 @pytest.mark.asyncio
 async def test_occurred_at_round_trips_through_real_store(coord: StorageCoordinator) -> None:
     # Direct write→read round-trip of the distinct occurred_at column through the real
@@ -333,3 +345,75 @@ async def test_occurred_at_filter_honored_over_out_of_range_source_timestamp(
         "chunk with in-range occurred_at + out-of-range source_timestamp must survive — "
         "a regression in occurred_at persistence would drop it"
     )
+
+
+# ===========================================================================
+# engine_info["filter"] — the honest FilterPushdownReport over the live PG store.
+# ===========================================================================
+#
+# The PG sibling of the embedded report tests
+# (tests/integration/test_chronicle_filter_embedded.py): the same canonical
+# FilterPushdownReport must be emitted on the live pgvector recall path. Uses the
+# real canonical leaf-key strings (source_timestamp pushes; occurred_at /
+# metadata.<x> are post-filter-only).
+
+
+@pytest.mark.asyncio
+async def test_filter_report_partial_pushdown_over_live_pg(coord: StorageCoordinator) -> None:
+    # A 3-leaf filter where only source_timestamp folds into the recency window;
+    # occurred_at and metadata.tier are post-filter-only. The live PG report names
+    # the source_timestamp axis as pushed and the other two as post-filtered, and
+    # round-trips through the canonical model.
+    from khora.filter import FilterPushdownReport
+
+    ns = await coord.create_namespace(MemoryNamespace())
+    await _seed(
+        coord,
+        ns.id,
+        [
+            {
+                "content": "anything",
+                "source_timestamp": _IN_RANGE,
+                "occurred_at": _IN_RANGE,
+                "metadata": {"tier": "gold"},
+            }
+        ],
+    )
+
+    report = await _recall_filter_report(
+        _engine_over(coord),
+        ns.id,
+        {
+            "source_timestamp": {"$gte": _FILTER_LB},
+            "occurred_at": {"$gte": _FILTER_LB},
+            "metadata.tier": "gold",
+        },
+    )
+    FilterPushdownReport.model_validate(report)  # raises on shape drift
+
+    assert report["pushed_keys"] == ["source_timestamp"]
+    assert report["post_filtered_keys"] == ["metadata.tier", "occurred_at"]
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is True
+    assert report["channels"] == {
+        "chunks": {"pushed_keys": ["source_timestamp"], "post_filtered_keys": ["metadata.tier", "occurred_at"]}
+    }
+
+
+@pytest.mark.asyncio
+async def test_filter_report_no_filter_reports_nothing_narrowed_over_live_pg(coord: StorageCoordinator) -> None:
+    # The no-filter live PG recall emits the canonical empty report: nothing pushed,
+    # nothing post-filtered, the single "chunks" channel present with empty lists.
+    from khora.filter import FilterPushdownReport
+
+    ns = await coord.create_namespace(MemoryNamespace())
+    await _seed(coord, ns.id, [{"content": "anything", "source_timestamp": _IN_RANGE}])
+
+    report = await _recall_filter_report(_engine_over(coord), ns.id, None)
+    FilterPushdownReport.model_validate(report)
+
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is False
+    assert report["pushed_keys"] == []
+    assert report["post_filtered_keys"] == []
+    assert report["channels"] == {"chunks": {"pushed_keys": [], "post_filtered_keys": []}}

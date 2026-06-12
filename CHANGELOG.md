@@ -17,6 +17,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 ### Changed
 
 - **`engine_info["filter"]` is now the engine's report verbatim** (#1069): the recall facade previously overwrote it with a flat `{engine, supported, pushed_down}` summary; it now passes the engine's `FilterPushdownReport` through unchanged. The `supported` / facade-level `engine` keys (never part of the canonical schema, read nowhere) are gone, and engines that do not report filter pushdown now **omit** the `"filter"` key entirely rather than carrying a synthesized default — callers that read `engine_info["filter"]` must treat it as optional (key on its presence).
+- **Chronicle emits the canonical `FilterPushdownReport`**: `RecallResult.engine_info["filter"]` on the Chronicle engine now carries the full report shape (`pushed_keys` / `post_filtered_keys` plus the per-channel `channels` breakdown, single `chunks` channel) instead of the hand-rolled `{pushed_down, post_filtered}` two-field dict. **Behavior change:** `pushed_down` now uses ALL-leaves semantics (was "any key pushed"). Chronicle pushes only the `source_timestamp` date bound into the recency window while always enforcing the full predicate in memory, so a multi-predicate filter now reports `pushed_down=false` with the pushed/post-filtered keys split out — exposing the partial-pushdown truth the old boolean hid. This is the released metric of record for callers reading the filter report.
 
 ## [0.19.0] - recall filtering, BGE default reranker, PyMuPDF removal
 
