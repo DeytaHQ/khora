@@ -8,6 +8,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Added
 
+- **VectorCypher now emits `engine_info["filter"]` (the canonical `FilterPushdownReport`)**: every `recall()` on the vectorcypher engine carries the honest per-channel filter-pushdown report, built from each retrieval channel's actual compile. The SQL-backed vector and BM25 channels report the `khora_chunks` keys they pushed down; the graph (Cypher) channel reports the system-key slice it pushed plus the residual `metadata.*` leaves it re-checks in memory; the recency channel reports its full-AST in-memory post-filter. A no-filter recall yields an all-`False` report. The shape matches the skeleton engine's report verbatim.
 - **`FilterPushdownReport` / `FilterChannelReport` public API** (#1069): the structured shape of `RecallResult.engine_info["filter"]` is now two frozen Pydantic models exported from `khora` and `khora.filter`. `FilterPushdownReport` carries the top-level `pushed_down` / `post_filtered` flags plus the `pushed_keys` / `post_filtered_keys` constraint-leaf partition and a per-channel `channels: dict[str, FilterChannelReport]` breakdown. Built backend-agnostically from per-channel pushdown facts so every engine reports the same honest schema.
 
 ### Fixed

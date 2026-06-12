@@ -2350,6 +2350,19 @@ class VectorCypherEngine:
         if result.metadata.get("bm25_chunk_count", 0) > 0:
             channels_used.append("bm25")
 
+        # Canonical honest filter-pushdown report (consumed verbatim as
+        # ``engine_info["filter"]``). Built from the per-channel ChannelPlans the
+        # retriever collected from each channel's ACTUAL compile this recall.
+        # ``pop`` the private carrier BEFORE the ``**result.metadata`` spread so
+        # it never leaks into public engine_info. Emitted on EVERY recall: a
+        # no-filter (or no-channel) recall yields an empty plans dict and an
+        # all-False report. ``channels_used`` (fusion contributions) and the
+        # filter map (who ENFORCED the filter) are intentionally independent —
+        # e.g. recency enforces the filter but is not a fusion channel.
+        from khora.filter.report import build_filter_report
+
+        filter_channel_plans = result.metadata.pop("_filter_channel_plans", {})
+
         return RecallResult(
             query=query,
             namespace_id=namespace_id,
@@ -2361,6 +2374,7 @@ class VectorCypherEngine:
                 "engine": "vectorcypher",
                 "mode": mode.name.lower(),
                 "channels_used": channels_used,
+                "filter": build_filter_report(filter_ast, filter_channel_plans).model_dump(mode="json"),
                 "rrf_k": self._vc_config.fusion_rrf_k,
                 "temporal_signal": (
                     {"category": temporal_signal.category.value, "source": temporal_signal.source}

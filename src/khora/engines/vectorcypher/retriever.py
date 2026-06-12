@@ -38,6 +38,7 @@ except ImportError:
 
 from khora.core.diagnostics import Degradation
 from khora.core.models import Chunk, Entity, Relationship
+from khora.filter.report import ChannelPlan
 from khora.filter.telemetry import record_graph_channel_empty
 from khora.query import SearchMode
 from khora.telemetry import bounded_text_hash, trace_span
@@ -1054,6 +1055,11 @@ class VectorCypherRetriever:
                 metadata={
                     "typed_entity_fast_path": True,
                     "typed_entity_type": entity_type,
+                    # The fast-path Cypher does NOT enforce the caller filter
+                    # (its WHERE is typed-entity/status only), so no channel
+                    # pushed or post-filtered it here — empty plans yield an
+                    # honest all-False report.
+                    "_filter_channel_plans": {},
                 },
             )
 
@@ -1098,6 +1104,22 @@ class VectorCypherRetriever:
         # failures without changing signatures.
         degradations: list[Degradation] = []
 
+        # Per-call honest filter-pushdown plans, one per retrieval channel that
+        # actually enforces the caller filter this recall. Built from each
+        # channel's ACTUAL compile (never a backend-name check) and stashed on
+        # the result for the engine to fold into ``engine_info["filter"]``. A
+        # fresh per-call dict + a fresh per-call vector sink keep the report
+        # race-free under concurrent recalls on the shared retriever (no mutable
+        # instance state). All four channels GATE: each independently produces
+        # candidates entering RRF fusion, so a leaf only one gating channel
+        # post-filters lands in the top-level post_filtered_keys even when the
+        # SQL channels pushed it (the report builder's per-leaf partition does
+        # this automatically). Channels that did not run this recall are simply
+        # absent from the dict.
+        filter_channel_plans: dict[str, ChannelPlan] = {}
+        vector_filter_plan_sink: list[ChannelPlan] = []
+        bm25_filter_plan_sink: list[ChannelPlan] = []
+
         # When the caller filter has a leaf the Cypher chunk channel cannot push
         # down (any metadata predicate — metadata is a serialized JSON property
         # on the Chunk node, not pushable to Cypher), the graph channel applies
@@ -1107,17 +1129,20 @@ class VectorCypherRetriever:
         # consumed keys to every leaf key; system-key-only and no-filter recalls
         # leave the fetch limit unchanged (those push down exactly).
         graph_overfetch = False
+        # Capture the Cypher compile so the graph channel's pushdown plan reuses
+        # it at the post-filter site below (no second compile — rule: derive the
+        # plan from the SAME compile, never re-run it). Defined only under a
+        # filter; the post-filter block that reads it is gated the same way.
+        compiled_cypher = None
         if filter_ast is not None:
             from khora.filter.compilers.cypher import compile_cypher
             from khora.filter.execute import build_compile_context, has_residual_metadata
 
-            graph_overfetch = has_residual_metadata(
+            compiled_cypher = compile_cypher(
                 filter_ast,
-                compile_cypher(
-                    filter_ast,
-                    build_compile_context("Chunk", table_alias="c", on_unsupported="split"),
-                ).consumed_keys,
+                build_compile_context("Chunk", table_alias="c", on_unsupported="split"),
             )
+            graph_overfetch = has_residual_metadata(filter_ast, compiled_cypher.consumed_keys)
         # Graph + PPR fetch budget: widen to make room for the post-filter when a
         # residual metadata predicate is present; otherwise the historical
         # ``limit * 2`` fetch is preserved. The absolute ``200`` ceiling caps the
@@ -1151,6 +1176,11 @@ class VectorCypherRetriever:
                     hybrid_alpha_override=effective_hybrid_alpha,
                     min_similarity=min_similarity,
                     filter_ast=filter_ast,
+                    # Capture the vector channel's pushdown plan from the SAME
+                    # ``khora_chunks`` compile this search runs. The session
+                    # fan-out / CHANGE decomposition vector calls compile the
+                    # identical WHERE, so one representative capture is honest.
+                    filter_plan_out=vector_filter_plan_sink,
                 )
             )
 
@@ -1163,6 +1193,10 @@ class VectorCypherRetriever:
                     namespace_id=namespace_id,
                     limit=self._config.bm25_top_k,
                     filter_ast=filter_ast,
+                    # Capture the BM25 channel's pushdown plan from the temporal
+                    # store's actual ``search_fulltext`` compile (same WHERE the
+                    # vector channel pushes).
+                    filter_plan_out=bm25_filter_plan_sink,
                 )
             )
 
@@ -1310,7 +1344,17 @@ class VectorCypherRetriever:
                     )
 
                 # Also keep one unscoped search as fallback (in case sessions
-                # are incomplete or the query spans non-entity sessions)
+                # are incomplete or the query spans non-entity sessions). This
+                # unscoped search always runs when fan-out activates, so it is
+                # where we capture the vector channel's pushdown plan (the
+                # original global task was cancelled above, possibly before its
+                # compile ran).
+                # INVARIANT (why one capture is faithful): the caller filter is
+                # AND-composed orthogonally with each per-session scope, so every
+                # per-session search and this unscoped fallback compile the
+                # IDENTICAL ``khora_chunks`` WHERE for the filter — only the
+                # session-scope conditions differ. The single plan captured here
+                # therefore represents the pushdown of all per-session searches.
                 fallback_limit = max(3, limit // 3)
                 session_tasks.append(
                     asyncio.create_task(
@@ -1323,6 +1367,7 @@ class VectorCypherRetriever:
                             hybrid_alpha_override=effective_hybrid_alpha,
                             min_similarity=min_similarity,
                             filter_ast=filter_ast,
+                            filter_plan_out=vector_filter_plan_sink,
                         )
                     )
                 )
@@ -1634,6 +1679,17 @@ class VectorCypherRetriever:
                 temporal_filter=None,
                 filter_ast=filter_ast,
             )
+            # Honest recency-channel plan: this channel is a pure recency sort
+            # (no WHERE pushdown) and enforces the caller filter as a full-AST
+            # in-memory post-filter, so it pushes NOTHING and post-filters every
+            # leaf. It GATES like the others (its surviving chunks pool-augment
+            # the vector candidates entering RRF), so a leaf it post-filters is
+            # honestly reported as post-filtered even though the SQL channels
+            # pushed it. Recorded whenever the channel actually executed.
+            if filter_ast is not None:
+                from khora.filter.execute import filter_leaf_keys
+
+                filter_channel_plans["recency"] = ChannelPlan(post_filtered_keys=filter_leaf_keys(filter_ast))
             if recent_chunks:
                 existing_ids = {c[0] for c in vector_chunks}
                 merged_in = [rc for rc in recent_chunks if rc[0] not in existing_ids]
@@ -1671,7 +1727,22 @@ class VectorCypherRetriever:
         # No-filter recalls leave ``graph_chunks`` untouched.
         if filter_ast is not None and graph_chunks:
             from khora.filter.compilers.python import compile_python
-            from khora.filter.execute import build_compile_context
+            from khora.filter.execute import build_compile_context, filter_leaf_keys
+
+            # Honest graph-channel plan, built at the post-filter site so it
+            # covers BOTH graph fetch paths (BFS ``_fetch_chunks_from_entities``
+            # and the unfiltered PPR fetch) uniformly — both funnel into
+            # ``graph_chunks`` and are re-checked by this one full-AST post-filter.
+            # Cypher pushed its ``consumed_keys`` (the system/projected-key slice)
+            # into the graph WHERE; the residual free-form ``metadata.*`` leaves
+            # are what this post-filter re-checks. Reuses the compile captured at
+            # the overfetch probe above (no second compile). Recorded only when
+            # the graph channel actually held candidates this recall.
+            cypher_pushed = compiled_cypher.consumed_keys if compiled_cypher is not None else frozenset()
+            filter_channel_plans["graph"] = ChannelPlan(
+                pushed_keys=cypher_pushed,
+                post_filtered_keys=filter_leaf_keys(filter_ast) - cypher_pushed,
+            )
 
             graph_post_filter = compile_python(
                 filter_ast, build_compile_context("Chunk", on_unsupported="split")
@@ -1698,6 +1769,30 @@ class VectorCypherRetriever:
                             detail=f"{graph_chunks_before} graph chunks dropped by metadata post-filter",
                         )
                     )
+
+        # Assemble the SQL-channel filter-pushdown plans from each channel's
+        # ACTUAL compile (graph was recorded at its post-filter site, recency at
+        # its call site). A channel appears ONLY if it actually executed this
+        # recall AND a caller filter is present. All channels GATE (each feeds
+        # RRF), so the report builder's per-leaf partition reports a leaf as
+        # post-filtered if ANY gating channel re-checked it in memory, even when
+        # the SQL channels pushed it.
+        if filter_ast is not None:
+            # Vector channel: the pgvector store appended the ChannelPlan it
+            # built from the SAME ``khora_chunks`` compile its search ran
+            # (on_unsupported="raise" — a populated sink means every leaf was
+            # consumed). Present whenever the vector channel ran (not skipped in
+            # mode=GRAPH) and the sink was populated.
+            if not skip_vector_channel and vector_filter_plan_sink:
+                filter_channel_plans["vector"] = vector_filter_plan_sink[0]
+
+            # BM25 channel: the plan the temporal-store ``search_fulltext`` path
+            # appended to the sink (same raise-mode ``khora_chunks`` WHERE the
+            # vector channel pushes). Absent when BM25 fell back to the
+            # coordinator (only reached with no filter) or failed before the
+            # temporal call.
+            if bm25_filter_plan_sink:
+                filter_channel_plans["bm25"] = bm25_filter_plan_sink[0]
 
         # Step 7: RRF fusion with score normalization and dynamic weights
         fused_results = self._fuse_results(
@@ -2048,6 +2143,10 @@ class VectorCypherRetriever:
                 # the flag is off or when the path fell back to vector-only.
                 "ppr_path_used": ppr_path_used,
                 "ppr_entity_count": len(ppr_entity_scores),
+                # Private carrier (popped by the engine before the public spread):
+                # the per-channel honest filter-pushdown plans the engine folds
+                # into ``engine_info["filter"]``. Never leaks into engine_info.
+                "_filter_channel_plans": filter_channel_plans,
             },
         )
 
@@ -2428,6 +2527,15 @@ class VectorCypherRetriever:
         (matches the graph-path behaviour for temporal categories).
         """
         with trace_span("khora.vectorcypher.simple_retrieve", namespace_id=str(namespace_id)) as span:
+            # Per-call honest filter-pushdown plans for the simple (graph-less)
+            # path: vector + optional BM25 only, no graph / recency channels.
+            # Both channels GATE and both push the SAME ``khora_chunks`` WHERE.
+            # A fresh per-call dict + sinks keep the report race-free under
+            # concurrent recalls (no mutable instance state).
+            filter_channel_plans: dict[str, ChannelPlan] = {}
+            vector_filter_plan_sink: list[ChannelPlan] = []
+            bm25_filter_plan_sink: list[ChannelPlan] = []
+
             # #833 channel-skip:
             #   VECTOR  -> pure vector store search, no internal BM25 fusion,
             #              no independent BM25 channel.
@@ -2461,6 +2569,7 @@ class VectorCypherRetriever:
                         namespace_id=namespace_id,
                         limit=self._config.bm25_top_k if mode != SearchMode.KEYWORD else max(limit, 50),
                         filter_ast=filter_ast,
+                        filter_plan_out=bm25_filter_plan_sink,
                     )
                 )
 
@@ -2476,6 +2585,7 @@ class VectorCypherRetriever:
                     hybrid_alpha=effective_alpha,
                     query_text=query,
                     filter_ast=filter_ast,
+                    filter_plan_out=vector_filter_plan_sink,
                 )
 
             chunk_results: list[tuple[Chunk, float]] = []
@@ -2736,6 +2846,18 @@ class VectorCypherRetriever:
                         if rel.source_entity_id in recalled_entity_ids and rel.target_entity_id in recalled_entity_ids:
                             relationships_with_scores.append((rel, 1.0))
 
+            # Honest per-channel filter-pushdown plans for the simple path. Both
+            # the vector store and BM25's ``search_fulltext`` compile the SAME
+            # raise-mode ``khora_chunks`` WHERE, so a channel that executed under
+            # a caller filter pushed every leaf down. Each plan is the one its
+            # channel appended to the sink from its actual compile (BM25 records
+            # only when the temporal-store path ran, regardless of row count).
+            if filter_ast is not None:
+                if not skip_vector_in_store and vector_filter_plan_sink:
+                    filter_channel_plans["vector"] = vector_filter_plan_sink[0]
+                if bm25_filter_plan_sink:
+                    filter_channel_plans["bm25"] = bm25_filter_plan_sink[0]
+
             return VectorCypherResult(
                 chunks=chunk_results,
                 entities=entities_with_scores,
@@ -2753,6 +2875,9 @@ class VectorCypherRetriever:
                     "max_raw_vector_score": _max_raw_cosine,
                     # Search provenance: all chunks from vector in simple mode
                     "search_methods": search_methods,
+                    # Private carrier (popped by the engine before the public
+                    # spread): per-channel honest filter-pushdown plans.
+                    "_filter_channel_plans": filter_channel_plans,
                 },
             )
 
@@ -3257,6 +3382,7 @@ class VectorCypherRetriever:
         hybrid_alpha_override: float | None = None,
         min_similarity: float = 0.0,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Direct vector search on chunks via pgvector.
 
@@ -3274,6 +3400,11 @@ class VectorCypherRetriever:
             filter_ast: Canonical recall-filter AST. Forwarded to
                 ``TemporalVectorStore.search``, where the pgvector backend
                 compiles it to a ``khora_chunks`` WHERE predicate.
+            filter_plan_out: Optional per-call sink for the honest
+                filter-pushdown plan. The vector store appends the
+                ``ChannelPlan`` it built from the SAME compile this search ran
+                (no re-compile, no backend-name check). A fresh per-call list
+                keeps the report race-free under concurrent recalls.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -3289,6 +3420,7 @@ class VectorCypherRetriever:
                 hybrid_alpha=effective_alpha,
                 query_text=query_text,
                 filter_ast=filter_ast,
+                filter_plan_out=filter_plan_out,
             )
 
             span.set_attribute("chunk_count", len(results))
@@ -3442,6 +3574,7 @@ class VectorCypherRetriever:
         limit: int,
         *,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Full-text BM25 search on chunks.
 
@@ -3466,6 +3599,14 @@ class VectorCypherRetriever:
                 path is unavailable/empty under a filter, BM25 returns ``[]``
                 rather than unfiltered rows. ``None`` keeps the
                 temporal-first-then-coordinator behaviour byte-identical.
+            filter_plan_out: Optional per-call sink for the honest
+                filter-pushdown plan. Appended only when the temporal-store
+                ``search_fulltext`` path actually ran under a filter — that
+                path compiles the SAME ``khora_chunks`` WHERE in raise mode the
+                vector channel uses, so every leaf was pushed down. Recorded
+                regardless of row count (empty rows still means the filter was
+                enforced). The coordinator fallback never runs under a filter,
+                so it never contributes a plan.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -3481,6 +3622,15 @@ class VectorCypherRetriever:
                 temporal_fulltext = getattr(self._vector_store, "search_fulltext", None)
                 if callable(temporal_fulltext):
                     raw = await temporal_fulltext(namespace_id, query, limit=limit, filter_ast=filter_ast)
+                    # The temporal-store path compiled and enforced the caller
+                    # filter (raise-mode ``khora_chunks`` WHERE, identical to the
+                    # vector channel). Record its pushdown plan now — before the
+                    # row-count check — because the filter was honored even when
+                    # the search returns zero rows.
+                    if filter_ast is not None and filter_plan_out is not None:
+                        from khora.filter.execute import filter_leaf_keys
+
+                        filter_plan_out.append(ChannelPlan(pushed_keys=filter_leaf_keys(filter_ast)))
                     # Real backends return ``list[tuple[Chunk, float]]``; the
                     # ``isinstance`` check rejects the bare-AsyncMock case
                     # (and any other non-list return) so we fall through to

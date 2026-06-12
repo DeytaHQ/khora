@@ -74,6 +74,7 @@ from khora.extraction.extractors.base import (
     ExtractionResult,
 )
 from khora.extraction.skills import ExpertiseConfig
+from khora.filter.report import FilterPushdownReport
 from khora.khora import Khora
 from khora.query import SearchMode
 
@@ -804,3 +805,70 @@ async def test_vc_prefer_current_via_cte(kb: Khora, namespace_id: UUID) -> None:
     assert "polonium" in default_names, (
         f"polonium unreachable even without prefer_current after expiry — control is vacuous: {default_names}"
     )
+
+
+async def test_vc_filter_report_honest_on_embedded_compilers(kb: Khora, namespace_id: UUID) -> None:
+    """``engine_info["filter"]`` is an honest ``FilterPushdownReport`` on the embedded lance compiler.
+
+    This is the embedded-stack proof that the canonical filter-pushdown report
+    reflects what the REAL ``sqlite_lance`` vector compiler did, not a mocked
+    plan. The embedded vector channel's ``compile_lance`` pushes BOTH a system
+    key (``source_name``) and a ``metadata.*`` key (``metadata.tier``) into the
+    lance WHERE — unlike Cypher, lance can express metadata predicates — and an
+    always-on ``compile_python`` post-filter re-checks the full AST as a safety
+    net (``defensive_recheck=True``).
+
+    The NO-DEMOTE rule then holds end-to-end: both leaves stay in the top-level
+    ``pushed_keys`` (every leaf was pushed) AND ``post_filtered`` is ``True``
+    (the defensive re-check fired) — ``pushed_down`` and ``post_filtered`` are
+    both ``True`` simultaneously, which is exactly the defensive-recheck case the
+    report contract documents (distinct from a gating channel demoting a leaf).
+    """
+    await _remember(kb, namespace_id=namespace_id, content="Falcon launch coverage from the linear source.")
+
+    result = await kb.recall(
+        "Falcon launch",
+        namespace=namespace_id,
+        limit=10,
+        filter={"source_name": "linear", "metadata.tier": "gold"},
+    )
+
+    report = result.engine_info["filter"]
+    # Validates against the canonical model (it came straight off the lane).
+    FilterPushdownReport.model_validate(report)
+
+    # The embedded vector channel ran and pushed BOTH leaves (lance expresses
+    # metadata predicates) — recorded from its real compile.
+    assert report["channels"], "embedded recall recorded no filter channels"
+    assert "vector" in report["channels"], f"vector channel missing: {sorted(report['channels'])}"
+    assert report["channels"]["vector"]["pushed_keys"] == ["metadata.tier", "source_name"]
+    assert report["channels"]["vector"]["post_filtered_keys"] == []
+
+    # NO-DEMOTE: every leaf stays pushed; the defensive re-check flips
+    # post_filtered without demoting anything.
+    assert report["pushed_keys"] == ["metadata.tier", "source_name"]
+    assert report["post_filtered_keys"] == []
+    assert report["pushed_down"] is True
+    assert report["post_filtered"] is True
+
+
+async def test_vc_filter_report_no_filter_on_embedded(kb: Khora, namespace_id: UUID) -> None:
+    """A no-filter embedded recall still emits an honest all-False report.
+
+    Control for the filtered case above: with no ``filter=`` the embedded vector
+    compiler runs no filter compile, so no plan is recorded and the report is the
+    constraint-free all-False shape with an empty ``channels`` map.
+    """
+    await _remember(kb, namespace_id=namespace_id, content="Falcon launch coverage.")
+
+    result = await kb.recall("Falcon launch", namespace=namespace_id, limit=10)
+
+    report = result.engine_info["filter"]
+    FilterPushdownReport.model_validate(report)
+    assert report == {
+        "pushed_down": False,
+        "post_filtered": False,
+        "pushed_keys": [],
+        "post_filtered_keys": [],
+        "channels": {},
+    }
