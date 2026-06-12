@@ -485,7 +485,16 @@ class SQLiteLanceVectorAdapter:
             # ISO form since LanceDB's SQL parser accepts timestamp literals.
             where.append(f"created_at >= timestamp '{created_after.isoformat()}'")
         if created_before is not None:
-            where.append(f"created_at < timestamp '{created_before.isoformat()}'")
+            # Coarse pre-filter upper bound is INCLUSIVE (``<=``) on
+            # ``created_at`` to stay superset-safe: this LanceDB layer only
+            # stores ``created_at`` (not ``source_timestamp``), so it cannot
+            # apply the ``COALESCE(source_timestamp, created_at)`` rule. A
+            # strict ``<`` would false-exclude a chunk whose source_timestamp
+            # is NULL and created_at equals the bound exactly, before the
+            # SQLite refinement runs — and a post-filter can only drop rows,
+            # never restore them. The precise COALESCE-based bound is applied
+            # on the SQLite side below.
+            where.append(f"created_at <= timestamp '{created_before.isoformat()}'")
         where_sql = " AND ".join(where)
 
         await self._maybe_build_chunks_index()

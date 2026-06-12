@@ -78,6 +78,8 @@ _FILTER_LB = "2026-01-01T00:00:00Z"
 # 2026-06-01T00:00:00Z is the ISO form of _IN_RANGE, so a chunk seeded with
 # source_timestamp == _IN_RANGE sits on the boundary of a $lte filter at this value.
 _FILTER_UB_AT_BOUND = "2026-06-01T00:00:00Z"
+# A lower-bound instant used by the paired at-boundary recency-window test below.
+_LB_BOUND = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _filter_ast(wire: dict) -> Any:
@@ -238,6 +240,95 @@ async def test_source_timestamp_upper_bound_is_inclusive_at_boundary(tmp_path: P
         assert returned == {on_bound_id}, (
             "a chunk whose source_timestamp equals the $lte bound instant exactly must be "
             "returned — the recency-window upper bound is inclusive"
+        )
+    finally:
+        await coord.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_vector_channel_null_source_timestamp_at_upper_bound_returned(tmp_path: Path) -> None:
+    # Coarse-prefilter boundary guard, targeting the storage-layer recency window
+    # directly. The test above goes through the engine's recall-filter; this one calls
+    # ``search_similar_chunks`` (the vector channel's own recency window) because the
+    # bug lives below the recall-filter post-filter:
+    #
+    # A ``source_timestamp $lte`` recall-filter cannot exercise this — its
+    # ``compile_python`` post-filter evaluates the LITERAL source_timestamp column, and a
+    # row with source_timestamp == NULL fails ``NULL <= bound`` and is dropped regardless
+    # of the recency-window pushdown (the documented null-source_timestamp contract in
+    # ``khora.filter.compilers.chronicle``). The recency window, by contrast, narrows on
+    # COALESCE(source_timestamp, created_at): for a NULL source_timestamp it falls back to
+    # created_at, so a NULL-source row whose created_at is in range is KEPT by the window.
+    # That fallback is exactly where the coarse LanceDB pre-filter matters.
+    #
+    # The vector channel applies the window in two layers: a coarse LanceDB pre-filter
+    # (which stores only created_at, so it compares ``created_at <= bound`` directly) and
+    # a precise SQLite refinement (``COALESCE(source_timestamp, created_at) <= bound``).
+    # Seed the boundary row with source_timestamp == NULL and created_at == the bound
+    # instant EXACTLY: COALESCE collapses to created_at, which sits ON the bound at both
+    # layers. A strict ``<`` LanceDB pre-filter would drop the row BEFORE the SQLite
+    # refinement ran — and a post-filter can only drop rows, never restore them — so the
+    # pre-filter upper bound must be inclusive (``<=``) for the row to survive.
+    coord = await build_sqlite_lance_coordinator(tmp_path)
+    try:
+        ns = await coord.create_namespace(MemoryNamespace())
+        chunks = await _seed(
+            coord,
+            ns.id,
+            [
+                # source_timestamp NULL, created_at == the upper-bound instant exactly.
+                # COALESCE collapses to created_at, on the coarse-prefilter bound — the
+                # row the old strict ``<`` dropped pre-refinement.
+                {"content": "null source at upper bound", "created_at": _IN_RANGE},
+                # created_at strictly after the bound (also NULL source_timestamp) →
+                # excluded by the inclusive upper bound; proves the window still narrows.
+                {"content": "null source after bound", "created_at": datetime(2026, 6, 2, tzinfo=UTC)},
+            ],
+        )
+        at_bound_id = chunks[0].id
+
+        results = await coord.search_similar_chunks(ns.id, _SHARED_EMBEDDING, limit=50, created_before=_IN_RANGE)
+        returned = {c.id for c, _ in results}
+        assert returned == {at_bound_id}, (
+            "a chunk with NULL source_timestamp and created_at == the created_before bound "
+            "instant exactly must be returned — the LanceDB coarse pre-filter upper bound on "
+            "created_at is inclusive (<=), so the boundary row is not false-excluded before "
+            "the SQLite COALESCE(source_timestamp, created_at) refinement runs"
+        )
+    finally:
+        await coord.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_vector_channel_null_source_timestamp_at_lower_bound_returned(tmp_path: Path) -> None:
+    # Paired lower-bound documentation guard for the same storage-layer recency window.
+    # source_timestamp == NULL and created_at == the lower-bound instant EXACTLY;
+    # COALESCE(source_timestamp, created_at) collapses to created_at, on the bound at both
+    # the LanceDB coarse pre-filter and the SQLite refinement. The lower bound has always
+    # been inclusive (``>=``) at both layers, so this passes today — it pins that contract
+    # alongside the upper-bound guard so a future regression of the lower-bound operator
+    # is caught too.
+    coord = await build_sqlite_lance_coordinator(tmp_path)
+    try:
+        ns = await coord.create_namespace(MemoryNamespace())
+        chunks = await _seed(
+            coord,
+            ns.id,
+            [
+                # source_timestamp NULL, created_at == the lower-bound instant exactly.
+                {"content": "null source at lower bound", "created_at": _LB_BOUND},
+                # created_at strictly before the bound (also NULL source_timestamp) →
+                # excluded by the inclusive lower bound; proves the window still narrows.
+                {"content": "null source before bound", "created_at": datetime(2025, 12, 31, tzinfo=UTC)},
+            ],
+        )
+        at_bound_id = chunks[0].id
+
+        results = await coord.search_similar_chunks(ns.id, _SHARED_EMBEDDING, limit=50, created_after=_LB_BOUND)
+        returned = {c.id for c, _ in results}
+        assert returned == {at_bound_id}, (
+            "a chunk with NULL source_timestamp and created_at == the created_after bound "
+            "instant exactly must be returned — the recency-window lower bound is inclusive (>=)"
         )
     finally:
         await coord.disconnect()
