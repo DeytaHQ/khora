@@ -150,3 +150,56 @@ async def test_supersede_fact_on_surrealdb(coordinator: StorageCoordinator) -> N
     active_ids = {getattr(r, "id", None) for r in active}
     assert old.id not in active_ids, "superseded fact must not appear in active facts"
     assert new.id in active_ids
+
+
+async def test_delete_facts_for_chunks_on_surrealdb(coordinator: StorageCoordinator) -> None:
+    """Issue #1140: the forget cascade deletes facts referencing deleted chunks.
+
+    Scoped by namespace AND chunk provenance - a fact from another chunk
+    and a fact in another namespace must both survive.
+    """
+    namespace_id = uuid4()
+    other_namespace_id = uuid4()
+    doomed_chunk_id = uuid4()
+    other_chunk_id = uuid4()
+    doomed = MemoryFact(
+        id=uuid4(),
+        namespace_id=namespace_id,
+        subject="Marie Curie",
+        predicate="won",
+        object_="Nobel Prize",
+        fact_text="Marie Curie won the Nobel Prize.",
+        source_chunk_ids=[doomed_chunk_id],
+    )
+    survivor = MemoryFact(
+        id=uuid4(),
+        namespace_id=namespace_id,
+        subject="Marie Curie",
+        predicate="discovered",
+        object_="Radium",
+        fact_text="Marie Curie discovered radium.",
+        source_chunk_ids=[other_chunk_id],
+    )
+    other_ns_fact = MemoryFact(
+        id=uuid4(),
+        namespace_id=other_namespace_id,
+        subject="Marie Curie",
+        predicate="won",
+        object_="Nobel Prize",
+        fact_text="Marie Curie won the Nobel Prize.",
+        source_chunk_ids=[doomed_chunk_id],
+    )
+    await coordinator.write_facts([doomed, survivor], namespace_id=namespace_id)
+    await coordinator.write_facts([other_ns_fact], namespace_id=other_namespace_id)
+
+    deleted = await coordinator.delete_facts_for_chunks([doomed_chunk_id], namespace_id=namespace_id)
+
+    assert deleted == 1, f"expected exactly the chunk-referencing fact deleted, got {deleted}"
+    active = await coordinator.query_active_facts_for_subject(namespace_id, "Marie Curie")
+    active_ids = {getattr(r, "id", None) for r in active}
+    assert doomed.id not in active_ids, "fact referencing the deleted chunk must be gone"
+    assert survivor.id in active_ids, "fact from an unrelated chunk must survive"
+    other_active = await coordinator.query_active_facts_for_subject(other_namespace_id, "Marie Curie")
+    assert {getattr(r, "id", None) for r in other_active} == {other_ns_fact.id}, (
+        "facts in other namespaces must never be touched (IDOR family)"
+    )

@@ -976,6 +976,29 @@ class SQLiteLanceRelationalAdapter(AsyncSessionMixin):
             )
             await session.commit()
 
+    async def delete_facts_for_chunks(self, chunk_ids: list[UUID], *, namespace_id: UUID) -> int:
+        """Hard-delete memory_facts referencing any of ``chunk_ids`` (#1140).
+
+        Forget-cascade cleanup: ``memory_facts`` has no FK to chunks, so the
+        chunks cascade from ``delete_document`` never reaches it. SQLite
+        stores ``source_chunk_ids`` as a JSON array of UUID strings, so the
+        overlap check runs client-side over the namespace's fact rows.
+        Scoped to ``namespace_id`` (IDOR family). Returns the number of
+        facts deleted.
+        """
+        if not chunk_ids:
+            return 0
+        targets = {str(cid) for cid in chunk_ids}
+        t = _memory_facts_sqlite
+        async with self._get_session() as session:
+            result = await session.execute(select(t.c.id, t.c.source_chunk_ids).where(t.c.namespace_id == namespace_id))
+            doomed = [row.id for row in result.all() if targets & {str(cid) for cid in (row.source_chunk_ids or [])}]
+            if not doomed:
+                return 0
+            await session.execute(delete(t).where(t.c.id.in_(doomed)))
+            await session.commit()
+        return len(doomed)
+
 
 def _row_to_memory_fact(row: object) -> MemoryFact:
     """Build a MemoryFact dataclass from a SQLAlchemy Core ``Row``.
