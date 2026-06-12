@@ -8,7 +8,13 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
-from tenacity import AsyncRetrying, stop_after_attempt, stop_after_delay, wait_exponential
+from tenacity import (
+    AsyncRetrying,
+    retry_if_exception,
+    stop_after_attempt,
+    stop_after_delay,
+    wait_exponential,
+)
 
 from khora.config.llm import get_shared_session, llm_call_timeout
 from khora.extraction.embedders._request_telemetry import (
@@ -71,6 +77,84 @@ def _repair_json(content: str) -> str:
     # Fix trailing commas: [1, 2,] -> [1, 2]  or {"a": 1,} -> {"a": 1}
     content = _TRAILING_COMMA_RE.sub(r"\1", content)
     return content
+
+
+# Deterministic auth/authz exception types. LiteLLM normalizes provider auth
+# failures onto these regardless of underlying SDK: a bad/expired/invalid key or
+# HTTP 401 → AuthenticationError; an authorization denial (e.g. Bedrock
+# AccessDeniedException, Vertex/GCP IAM "not authorized") → PermissionDeniedError.
+# Both are siblings of one another and of InternalServerError/RateLimitError, so
+# matching them by name does NOT catch transient 5xx or 429s.
+_NONRETRYABLE_AUTH_EXC_NAMES = frozenset({"AuthenticationError", "PermissionDeniedError"})
+
+# Message-shape match for credentials-absent errors that litellm surfaces as
+# InternalServerError (client-construction failures, before any HTTP request).
+# Both a credential token AND a missing/absent signal must be present so we never
+# fail-fast a RETRYABLE error that merely echoes a key token (e.g. a 429 reading
+# "Rate limit reached ... on api_key sk-...").
+_CREDENTIAL_TOKENS = ("credential", "api_key", "api key", "_api_key", "api-key")
+_MISSING_CREDENTIAL_SIGNALS = (
+    "missing",
+    "no api",
+    "not set",
+    "pass an api",
+    "set the",
+    "provide an api",
+    "could not resolve auth",
+    "authentication",
+)
+
+
+def _is_nonretryable_auth_error(exc: BaseException) -> bool:
+    """Return True for deterministic credential/auth failures that must NOT be retried.
+
+    Retrying a missing-credentials or auth error just burns three attempts and
+    ~180s of backoff for a result that will never change. We treat two shapes as
+    non-retryable:
+
+    1. A genuine ``litellm.AuthenticationError`` or ``litellm.PermissionDeniedError``.
+       This is *always* non-retryable. litellm normalizes provider auth/authz
+       failures (invalid key, 401, IAM denial) onto these types. litellm is
+       imported lazily inside the extractor methods, so resolve the type
+       defensively: try the real classes, and also walk the MRO for a class
+       literally named ``AuthenticationError`` / ``PermissionDeniedError`` so the
+       check still works if the litellm import fails here.
+    2. A missing-credentials message. LiteLLM surfaces a credentials-absent error
+       raised at client-construction time (before any HTTP request) as
+       ``InternalServerError`` (a sibling of AuthenticationError, not a subclass),
+       e.g. "OpenAIException - Missing credentials. Please pass an api_key, or set
+       the OPENAI_API_KEY environment variable." Because this predicate runs
+       against *every* exception (not just InternalServerError), we match
+       conservatively: require BOTH a credential token AND a missing/absent
+       signal. A bare key mention with no missing signal (e.g. a RateLimitError
+       reading "Rate limit reached ... on api_key sk-...") is RETRYABLE.
+
+    When unsure, return False (i.e. retry) — except a genuine
+    AuthenticationError / PermissionDeniedError, which is non-retryable
+    regardless of message.
+    """
+    # 1. Genuine auth/authz exception — defensive type resolution.
+    try:
+        import litellm
+
+        if isinstance(exc, (litellm.AuthenticationError, litellm.PermissionDeniedError)):
+            return True
+    except Exception:  # noqa: S110 — litellm absent/import failure falls through to name check
+        pass
+    if any(cls.__name__ in _NONRETRYABLE_AUTH_EXC_NAMES for cls in type(exc).__mro__):
+        return True
+
+    # 2. Missing-credentials message shape. Conservative: a credential token alone
+    #    is not enough (it could be echoed in a retryable 5xx/429); a missing/absent
+    #    signal must co-occur. Generic "Internal Server Error" / "503" / "overloaded"
+    #    carries neither token nor signal and stays retryable.
+    message = str(exc).lower()
+    has_credential_token = any(token in message for token in _CREDENTIAL_TOKENS)
+    has_missing_signal = any(signal in message for signal in _MISSING_CREDENTIAL_SIGNALS)
+    if has_credential_token and has_missing_signal:
+        return True
+
+    return False
 
 
 if TYPE_CHECKING:
@@ -770,6 +854,7 @@ class LLMEntityExtractor(EntityExtractor):
 
         try:
             async for attempt in AsyncRetrying(
+                retry=retry_if_exception(lambda e: not _is_nonretryable_auth_error(e)),
                 stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
@@ -1693,6 +1778,7 @@ Return ONLY valid JSON, no other text."""
 
         try:
             async for attempt in AsyncRetrying(
+                retry=retry_if_exception(lambda e: not _is_nonretryable_auth_error(e)),
                 stop=stop_after_attempt(self._max_retries) | stop_after_delay(180),
                 wait=wait_exponential(multiplier=self._retry_wait, min=self._retry_wait, max=10),
                 before_sleep=lambda retry_state: logger.warning(
