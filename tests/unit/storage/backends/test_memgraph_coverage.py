@@ -873,6 +873,58 @@ async def test_upsert_entities_batch_detects_existing_as_not_new() -> None:
 
 
 @pytest.mark.unit
+async def test_upsert_entities_batch_remaps_id_to_stored_id_on_match() -> None:
+    """#1150: on MERGE-match the input entity.id must be rewritten to the
+    canonical stored id (#806 contract) - the engine builds its relationship
+    id-remap by reading ``entity.id`` after the batch upsert."""
+    e = Entity(namespace_id=_NS, name="Alice", entity_type="PERSON")
+    stored_id = uuid4()
+    session = _make_session_with_records(records=[{"input_id": str(e.id), "stored_id": str(stored_id)}])
+    b = _connected_backend(session)
+    out = await b.upsert_entities_batch(_NS, [e])
+    assert out == [(e, False)]
+    assert e.id == stored_id
+
+
+@pytest.mark.unit
+async def test_upsert_entities_batch_keeps_input_id_on_create() -> None:
+    """#1150 companion: on MERGE-create the input id is the stored id."""
+    e = Entity(namespace_id=_NS, name="Alice", entity_type="PERSON")
+    input_id = e.id
+    session = _make_session_with_records(records=[{"input_id": str(e.id), "stored_id": str(e.id)}])
+    b = _connected_backend(session)
+    out = await b.upsert_entities_batch(_NS, [e])
+    assert out == [(e, True)]
+    assert e.id == input_id
+
+
+@pytest.mark.unit
+async def test_upsert_remapped_id_lands_relationship_for_deduped_entity() -> None:
+    """#1150 data-loss shape: a relationship endpoint built from the
+    post-upsert ``entity.id`` must carry the stored id so the relationship
+    batch's ``MATCH (source:Entity {id: row.source_id})`` finds the persisted
+    node instead of silently producing nothing."""
+    e = Entity(namespace_id=_NS, name="Alice", entity_type="PERSON")
+    stored_id = uuid4()
+    upsert_session = _make_session_with_records(records=[{"input_id": str(e.id), "stored_id": str(stored_id)}])
+    b = _connected_backend(upsert_session)
+    await b.upsert_entities_batch(_NS, [e])
+
+    rel = Relationship(
+        namespace_id=_NS,
+        source_entity_id=e.id,
+        target_entity_id=uuid4(),
+        relationship_type="WORKS_AT",
+    )
+    rel_session = _make_session_with_records(single={"written": 1})
+    b2 = _connected_backend(rel_session)
+    count = await b2.create_relationships_batch([rel])
+    assert count == 1
+    rows = rel_session.run.await_args.kwargs["rows"]
+    assert rows[0]["source_id"] == str(stored_id)
+
+
+@pytest.mark.unit
 async def test_create_relationships_batch_empty_short_circuits() -> None:
     session = _make_session_with_records()
     b = _connected_backend(session)
