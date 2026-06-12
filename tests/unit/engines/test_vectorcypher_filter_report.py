@@ -9,7 +9,15 @@ pins that public payload:
 * the top-level partition (``pushed_down`` / ``post_filtered`` /
   ``pushed_keys`` / ``post_filtered_keys``), and
 * the per-channel ``channels`` breakdown keyed by channel name
-  (``"vector"`` / ``"bm25"`` / ``"graph"`` / ``"recency"``).
+  (``"vector"`` / ``"bm25"`` / ``"graph"``).
+
+A channel appears in ``channels`` ONLY when it actually ran and saw the filter
+this recall — the report never fabricates a channel that no-opped. The recency
+channel is the canonical example: it is config-gateable, but its SQL source
+(``search_recent_chunks``) is absent on every wired temporal store, so it
+early-returns and records nothing — it is therefore ABSENT from ``channels``
+even when the config flag is on and a temporal query fires
+(``TestRecencyChannelPresence``).
 
 The representative recall filter (one system key the graph channel pushes, one
 ``metadata.*`` key the graph channel re-checks in memory)::
@@ -19,16 +27,21 @@ The representative recall filter (one system key the graph channel pushes, one
 Why engine-level (no live DB): ``recall`` is driven with a fully-wired retriever
 whose backend seams are mocked so the channels run deterministically; the
 retriever folds the plans into ``engine_info["filter"]`` through the real
-``build_filter_report``. The honest end-to-end row-set proof lives in the
-embedded ``sqlite_lance`` matrix lane (``tests/integration/matrix``); this file
-proves the canonical report SHAPE the engine surfaces.
+``build_filter_report``. The BM25 seam mirrors a RAISE-MODE pg/surreal backend
+(every leaf pushed); the split-mode sqlite_lance partial-pushdown shape and the
+honest end-to-end row-set proof live in the embedded ``sqlite_lance`` matrix
+lane (``tests/integration/matrix``). This file proves the canonical report SHAPE
+the engine surfaces.
 
-GATING vs DEFENSIVE (the report's per-leaf partition rule): all four channels
-GATE — each independently feeds RRF fusion, so a leaf any gating channel
-re-checks in memory lands in the top-level ``post_filtered_keys`` even when the
-SQL channels pushed it (NO-DEMOTE applies only to a *defensive* full-predicate
-re-check, which sets ``post_filtered=True`` without demoting a fully-pushed
-leaf — exercised on the embedded lane and pinned here at the builder level).
+GATING vs DEFENSIVE (the report's per-leaf partition rule): the vector / bm25 /
+graph channels all GATE — each independently feeds RRF fusion, so a leaf any
+gating channel re-checks in memory lands in the top-level ``post_filtered_keys``
+even when the SQL channels pushed it. NO-DEMOTE applies to a *defensive*
+full-predicate re-check, which sets ``post_filtered=True`` without demoting a
+fully-pushed leaf — pinned at the builder level AND end-to-end on the real graph
+channel (it always runs a full-AST in-memory re-check, so a fully-Cypher-pushed
+system-only filter reports ``pushed_down=True`` AND ``post_filtered=True``; see
+``TestFilterEdgeCases.test_system_only_filter_is_fully_pushed``).
 """
 
 from __future__ import annotations
@@ -108,17 +121,26 @@ def _make_retriever(
     * VECTOR channel: ``vector_store.search`` appends a ``ChannelPlan`` that
       pushes every leaf to ``filter_plan_out`` (what the real SQL store does on
       its ``khora_chunks`` raise-mode compile), so the vector plan is recorded.
-    * BM25 channel (``enable_bm25``): ``vector_store.search_fulltext`` is a
-      callable AsyncMock; ``_bm25_search_chunks`` records the bm25 plan (pushes
-      every leaf) whenever that seam is callable under a filter.
+    * BM25 channel (``enable_bm25``): ``vector_store.search_fulltext`` is an
+      explicit callable that mirrors a RAISE-MODE pg/surreal backend — it appends
+      a ``ChannelPlan`` pushing every leaf to the per-call sink, exactly as the
+      live temporal store records its own ``khora_chunks`` fulltext compile. The
+      split-mode (sqlite_lance) partial-pushdown shape is proven on the embedded
+      matrix lane, not reproducible in a unit mock.
     * GRAPH channel: ``_fetch_chunks_from_entities`` returns ``graph_chunks`` so
-      the graph plan is recorded at the in-memory post-filter site (cypher pushes
-      ``source_name``, re-checks ``metadata.tier``). When ``cypher_raises`` is
-      set, ``_cypher_expand`` raises a transient Neo4j error that the retriever
-      catches internally (``graph_fallback=True``) — the graph channel then
-      records NO plan (it never produced candidate chunks).
-    * RECENCY channel (``enable_recency``): enabled in config; a temporal
-      ``recall`` query then fires it (it post-filters the full AST in memory).
+      the graph plan is recorded at the in-memory post-filter site. The graph
+      channel ALWAYS sets ``defensive_recheck=True`` (it always re-checks the
+      full AST in memory) and pushes a leaf via Cypher ONLY when it is
+      Cypher-expressible (``source_name`` pushed, ``metadata.tier`` re-checked).
+      When ``cypher_raises`` is set, ``_cypher_expand`` raises a transient Neo4j
+      error that the retriever catches internally (``graph_fallback=True``) — the
+      graph channel then records NO plan (it never produced candidate chunks).
+    * RECENCY channel (``enable_recency``): enabled in config, but
+      ``_recency_channel_chunks`` is stubbed to return ``[]`` — mirroring the
+      wired stack, where the recency SQL source (``search_recent_chunks``) is
+      absent so the channel no-ops and records NO plan. Recency is therefore
+      ABSENT from ``channels`` even when a temporal query fires
+      (``TestRecencyChannelPresence``).
     """
     vector_store = AsyncMock()
     embedder = AsyncMock()
@@ -152,9 +174,29 @@ def _make_retriever(
 
     vector_store.search = _vector_search
 
-    # BM25 channel seam: a callable AsyncMock returning one chunk.
+    # BM25 channel seam: ``search_fulltext`` mirrors a RAISE-MODE pg/surreal
+    # backend — its ``khora_chunks`` fulltext compile consumes every leaf, so it
+    # appends a ChannelPlan pushing all leaves to the per-call sink (the same way
+    # the live temporal store records its own compile). A bare AsyncMock would
+    # ignore ``filter_plan_out`` and the bm25 channel would never appear, so we
+    # use an explicit callable that honours the sink. The partial-pushdown
+    # (split-mode sqlite_lance) shape is proven on the embedded matrix lane, not
+    # here — a unit mock cannot faithfully reproduce the lance WHERE + residual.
     bm25_chunk = Chunk(id=uuid4(), namespace_id=ns_id, document_id=uuid4(), content="bm25 channel chunk")
-    vector_store.search_fulltext = AsyncMock(return_value=[(bm25_chunk, 1.0)])
+
+    async def _fulltext(
+        _namespace_id: UUID,
+        _query: str,
+        *,
+        limit: int,
+        filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
+    ) -> list[Any]:
+        if filter_ast is not None and filter_plan_out is not None:
+            filter_plan_out.append(ChannelPlan(pushed_keys=filter_leaf_keys(filter_ast)))
+        return [(bm25_chunk, 1.0)]
+
+    vector_store.search_fulltext = _fulltext
 
     storage = AsyncMock()
     storage.search_similar_entities = AsyncMock(return_value=[(uuid4(), 0.9)])
@@ -412,58 +454,27 @@ class TestReportAlwaysValidates:
 
 
 # ---------------------------------------------------------------------------
-# 6. Gating-vs-defensive distinction + NO-DEMOTE.
+# 6. Defensive NO-DEMOTE distinction.
 #
-#   * A gating channel (recency) that post-filters a leaf DEMOTES it: a leaf
-#     pushed by vector/bm25 but post-filtered by recency lands in the top-level
-#     ``post_filtered_keys``.
+#   * A gating channel that post-filters a leaf in memory DEMOTES it: a leaf
+#     pushed by vector/bm25 but re-checked by the graph channel lands in the
+#     top-level ``post_filtered_keys`` (see ``test_hybrid_vector_bm25_graph``).
 #   * A leaf pushed by ALL gating channels stays in ``pushed_keys``.
 #   * A *defensive* full-predicate re-check (``defensive_recheck=True``) sets
 #     ``post_filtered=True`` WITHOUT demoting a fully-pushed leaf (NO-DEMOTE).
 #
-# The recency-gates case is driven through the real engine; the defensive
-# NO-DEMOTE rule is pinned at the builder level (it is the embedded lane's
-# vector-channel behaviour, also exercised end-to-end in the sqlite_lance matrix).
+# The defensive NO-DEMOTE rule is pinned both at the builder level (below) and
+# end-to-end through the real graph channel in
+# ``TestFilterEdgeCases.test_system_only_filter_is_fully_pushed`` (the graph
+# channel ALWAYS runs its full-AST in-memory re-check, so a fully-Cypher-pushed
+# system-only filter reports ``pushed_down=True`` AND ``post_filtered=True``
+# without demoting the pushed leaf). It is also exercised end-to-end on the
+# embedded ``sqlite_lance`` matrix lane's vector channel.
 # ---------------------------------------------------------------------------
 
 
 class TestGatingVsDefensive:
-    """Recency gates (and demotes); a defensive re-check does not demote."""
-
-    async def test_recency_gating_demotes_pushed_leaf(self) -> None:
-        """A temporal recall fires recency, which post-filters the FULL AST.
-
-        Recency is a gating channel (its surviving chunks pool-augment the vector
-        candidates entering RRF), so it post-filters every leaf in memory. The
-        report builder's per-leaf partition then DEMOTES ``source_name`` — pushed
-        by vector / bm25 / graph but re-checked by recency — into the top-level
-        ``post_filtered_keys``. Nothing remains in ``pushed_keys``.
-        """
-        ns_id = uuid4()
-        retriever = _make_retriever(
-            ns_id,
-            enable_bm25=True,
-            enable_recency=True,
-            graph_chunks=[_graph_chunk(ns_id, tier="gold")],
-        )
-        engine = _build_engine(retriever)
-
-        # "what changed in the config" classifies as CHANGE (temporal, has a
-        # default window) -> the recency channel fires.
-        report = await _recall_filter_report(engine, ns_id, query="what changed in the config")
-
-        # All four channels present; recency post-filters every leaf.
-        assert set(report["channels"]) == {"vector", "bm25", "graph", "recency"}
-        assert report["channels"]["recency"] == {
-            "pushed_keys": [],
-            "post_filtered_keys": ["metadata.tier", "source_name"],
-        }
-        # NO-DEMOTE-by-defensive does NOT apply here: recency is a GATING
-        # post-filter, so source_name (pushed by vector/bm25/graph) is demoted.
-        assert report["pushed_keys"] == []
-        assert report["post_filtered_keys"] == ["metadata.tier", "source_name"]
-        assert report["pushed_down"] is False
-        assert report["post_filtered"] is True
+    """A defensive re-check flips ``post_filtered`` but does not demote."""
 
     def test_defensive_recheck_does_not_demote(self) -> None:
         """A defensive full-predicate re-check flips ``post_filtered`` but keeps
@@ -511,8 +522,12 @@ class TestFilterEdgeCases:
 
         ``parse_to_ast(RecallFilter.model_validate({}))`` is a childless AND root
         (not ``None``), so the channels still execute a (vacuous) compile and
-        appear in ``channels`` with empty key lists — but there are no constraint
-        leaves, so ``pushed_down`` / ``post_filtered`` are both False.
+        appear in ``channels`` with empty key lists. There are no constraint
+        leaves, so ``pushed_down`` is False and ``pushed_keys`` /
+        ``post_filtered_keys`` are empty. ``post_filtered`` is True, however: the
+        graph channel ALWAYS runs its full-AST in-memory re-check
+        (``defensive_recheck=True``), which flips the flag even though there is
+        no leaf to demote (NO-DEMOTE — nothing lands in ``post_filtered_keys``).
         """
         ns_id = uuid4()
         retriever = _make_retriever(ns_id, enable_bm25=True, graph_chunks=[_graph_chunk(ns_id, tier="gold")])
@@ -521,7 +536,8 @@ class TestFilterEdgeCases:
         report = await _recall_filter_report(engine, ns_id, spec={})
 
         assert report["pushed_down"] is False
-        assert report["post_filtered"] is False
+        # Graph's always-on defensive re-check flips post_filtered; no leaf moves.
+        assert report["post_filtered"] is True
         assert report["pushed_keys"] == []
         assert report["post_filtered_keys"] == []
         # Channels are present (they ran) but carry empty key lists.
@@ -532,8 +548,18 @@ class TestFilterEdgeCases:
         """A system-key-only filter pushes down on every channel -> ``pushed_down``.
 
         ``source_name`` is Cypher-expressible, so the graph channel pushes it too
-        (nothing residual). Every gating channel pushed the single leaf, none
-        post-filtered it -> the filter is fully pushed.
+        (nothing residual): every gating channel pushed the single leaf, none
+        moved it to ``post_filtered_keys``, so ``pushed_keys`` covers every leaf
+        and ``pushed_down`` is True.
+
+        ``post_filtered`` is nonetheless True — the graph channel ALWAYS runs its
+        full-AST in-memory re-check (``defensive_recheck=True``). This is the
+        NO-DEMOTE case proven on a REAL channel: the flag flips, but the
+        fully-pushed ``source_name`` stays in ``pushed_keys`` (it is NOT demoted
+        to ``post_filtered_keys``), so ``pushed_down`` and ``post_filtered`` are
+        True simultaneously. Contrast a GATING in-memory post-filter (graph
+        re-checking ``metadata.tier`` in ``test_hybrid_vector_bm25_graph``), which
+        DOES demote.
         """
         ns_id = uuid4()
         retriever = _make_retriever(ns_id, enable_bm25=True, graph_chunks=[_graph_chunk(ns_id, tier="gold")])
@@ -544,7 +570,8 @@ class TestFilterEdgeCases:
         assert report["pushed_keys"] == ["source_name"]
         assert report["post_filtered_keys"] == []
         assert report["pushed_down"] is True
-        assert report["post_filtered"] is False
+        # Graph's always-on defensive re-check flips post_filtered without demoting.
+        assert report["post_filtered"] is True
         # Graph pushed source_name (no residual); SQL channels too.
         assert report["channels"]["graph"] == {"pushed_keys": ["source_name"], "post_filtered_keys": []}
 
@@ -570,26 +597,42 @@ class TestFilterEdgeCases:
 
 
 # ---------------------------------------------------------------------------
-# Devil's-advocate scenario A: recency present in ``channels`` ONLY when it fired.
+# Devil's-advocate scenario A: recency is ABSENT from ``channels`` on every
+# wired stack — even with the config flag ON and a temporal query that the
+# detector flags.
 #
-# The recency channel is recorded only when it actually executes — which needs
-# BOTH the config flag (``temporal_recency_channel_enabled``) AND a temporal
-# query (a category carrying a default window). Neither alone fires it.
+# The recency channel's SQL source (``search_recent_chunks``) is not present on
+# any wired temporal store, so ``_recency_channel_chunks`` early-returns ``[]``
+# and records no plan: a channel that never produced a candidate that gates in
+# RRF is never credited with a filter disposition. Crediting it would be a
+# fabrication. ``_make_retriever`` stubs ``_recency_channel_chunks`` to return
+# ``[]`` precisely to mirror that real wired-stack no-op.
 # ---------------------------------------------------------------------------
 
 
 class TestRecencyChannelPresence:
-    """The recency channel appears in ``channels`` iff it actually ran."""
+    """The recency channel never appears in ``channels`` on the wired stack."""
 
-    async def test_recency_enabled_and_temporal_present(self) -> None:
-        """Recency flag ON + temporal query -> recency channel IS in the report."""
+    async def test_recency_enabled_and_temporal_absent(self) -> None:
+        """Recency flag ON + temporal query -> recency channel STILL ABSENT.
+
+        Deliverable #3: even with ``temporal_recency_channel_enabled=True`` AND a
+        temporal query the detector classifies as CHANGE (a category carrying a
+        default window, so the recency block is reached), the recency channel
+        no-ops on the wired stack — its ``search_recent_chunks`` SQL source is
+        absent, so it returns no candidates and records no plan. The report must
+        NOT list a ``recency`` channel: doing so would credit a channel that
+        never enforced anything this recall.
+        """
         ns_id = uuid4()
         retriever = _make_retriever(ns_id, enable_recency=True, graph_chunks=[_graph_chunk(ns_id, tier="gold")])
         engine = _build_engine(retriever)
 
         report = await _recall_filter_report(engine, ns_id, query="what changed in the config")
 
-        assert "recency" in report["channels"], f"recency missing when it fired: {sorted(report['channels'])}"
+        assert "recency" not in report["channels"], (
+            f"recency fabricated when it no-ops on the wired stack: {sorted(report['channels'])}"
+        )
 
     async def test_recency_enabled_but_non_temporal_absent(self) -> None:
         """Recency flag ON + NON-temporal query -> recency channel ABSENT.

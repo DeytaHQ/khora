@@ -807,23 +807,55 @@ async def test_vc_prefer_current_via_cte(kb: Khora, namespace_id: UUID) -> None:
     )
 
 
+def _pin_json1(kb: Khora, *, enabled: bool) -> None:
+    """Pin the embedded vector store's JSON1 capability for a deterministic report.
+
+    The ``sqlite_lance`` vector compiler (``compile_lance``) pushes a
+    ``metadata.*`` leaf into the lance WHERE only when the SQLite build exposes
+    the JSON1 functions (``_has_json1``, probed once in ``connect()``). The
+    probe's result depends on the host SQLite build, so a metadata-pushdown
+    assertion is non-deterministic unless we pin it. The backend docstring
+    explicitly sanctions tests monkeypatching ``_has_json1`` to exercise the
+    fallback path; we set it on the connected temporal store the retriever holds.
+    """
+    kb._engine._retriever._vector_store._has_json1 = enabled  # type: ignore[union-attr]
+
+
+def _enable_bm25_channel(kb: Khora) -> None:
+    """Turn on the VectorCypher BM25 channel on the connected retriever.
+
+    The channel is default-OFF (``RetrieverConfig.enable_bm25_channel``), so the
+    embedded HYBRID recall normally folds only the vector (and graph) plans. We
+    flip the live retriever's config so the BM25 ``search_fulltext`` seam runs
+    and records its OWN ``compile_lance`` plan — proving the bm25 split matches
+    the vector split for the same backend.
+    """
+    kb._engine._retriever._config.enable_bm25_channel = True  # type: ignore[union-attr]
+
+
 async def test_vc_filter_report_honest_on_embedded_compilers(kb: Khora, namespace_id: UUID) -> None:
     """``engine_info["filter"]`` is an honest ``FilterPushdownReport`` on the embedded lance compiler.
 
     This is the embedded-stack proof that the canonical filter-pushdown report
     reflects what the REAL ``sqlite_lance`` vector compiler did, not a mocked
-    plan. The embedded vector channel's ``compile_lance`` pushes BOTH a system
-    key (``source_name``) and a ``metadata.*`` key (``metadata.tier``) into the
-    lance WHERE — unlike Cypher, lance can express metadata predicates — and an
-    always-on ``compile_python`` post-filter re-checks the full AST as a safety
-    net (``defensive_recheck=True``).
+    plan. With JSON1 PINNED ON, the embedded vector channel's ``compile_lance``
+    pushes BOTH a system key (``source_name``) and a ``metadata.*`` key
+    (``metadata.tier``) into the lance WHERE — unlike Cypher, lance can express
+    metadata predicates when JSON1 is present — and an always-on
+    ``compile_python`` post-filter re-checks the full AST as a safety net
+    (``defensive_recheck=True``).
 
     The NO-DEMOTE rule then holds end-to-end: both leaves stay in the top-level
     ``pushed_keys`` (every leaf was pushed) AND ``post_filtered`` is ``True``
     (the defensive re-check fired) — ``pushed_down`` and ``post_filtered`` are
     both ``True`` simultaneously, which is exactly the defensive-recheck case the
     report contract documents (distinct from a gating channel demoting a leaf).
+    The JSON1-OFF partial-pushdown shape is the sibling
+    ``test_vc_filter_report_partial_pushdown_json1_off``.
     """
+    # Pin JSON1 ON so metadata pushdown is deterministic regardless of the host
+    # SQLite build.
+    _pin_json1(kb, enabled=True)
     await _remember(kb, namespace_id=namespace_id, content="Falcon launch coverage from the linear source.")
 
     result = await kb.recall(
@@ -838,7 +870,7 @@ async def test_vc_filter_report_honest_on_embedded_compilers(kb: Khora, namespac
     FilterPushdownReport.model_validate(report)
 
     # The embedded vector channel ran and pushed BOTH leaves (lance expresses
-    # metadata predicates) — recorded from its real compile.
+    # metadata predicates under JSON1) — recorded from its real compile.
     assert report["channels"], "embedded recall recorded no filter channels"
     assert "vector" in report["channels"], f"vector channel missing: {sorted(report['channels'])}"
     assert report["channels"]["vector"]["pushed_keys"] == ["metadata.tier", "source_name"]
@@ -849,6 +881,132 @@ async def test_vc_filter_report_honest_on_embedded_compilers(kb: Khora, namespac
     assert report["pushed_keys"] == ["metadata.tier", "source_name"]
     assert report["post_filtered_keys"] == []
     assert report["pushed_down"] is True
+    assert report["post_filtered"] is True
+
+
+async def test_vc_filter_report_partial_pushdown_json1_off(kb: Khora, namespace_id: UUID) -> None:
+    """JSON1 OFF: the embedded vector + bm25 channels report a PARTIAL pushdown.
+
+    The honest split-mode proof. With JSON1 pinned OFF, ``compile_lance`` can no
+    longer express the ``metadata.tier`` predicate, so it pushes ONLY the system
+    key (``source_name``) into the lance WHERE and defers ``metadata.tier`` to
+    the always-on ``compile_python`` post-filter. Both the vector channel and the
+    BM25 channel compile the SAME ``khora_chunks`` context, so they report the
+    IDENTICAL partial split — proving the report tells the truth about each
+    backend rather than fabricating an all-pushed plan.
+
+    Expected per-channel: ``{pushed:[source_name], post_filtered:[metadata.tier]}``.
+    Top-level: ``source_name`` pushed on every gating channel; ``metadata.tier``
+    re-checked in memory on both → ``pushed_down=False``, ``post_filtered=True``.
+
+    The chunk carries ``source_name="linear"`` so the pushed leaf actually
+    narrows on real rows (not a vacuous compile), and ``metadata.tier`` is absent
+    so the post-filter genuinely fires.
+    """
+    _pin_json1(kb, enabled=False)
+    _enable_bm25_channel(kb)
+    await kb.remember(
+        content="Falcon launch coverage from the linear source.",
+        namespace=namespace_id,
+        title="",
+        source_name="linear",
+        entity_types=["ORG"],
+        relationship_types=["RELATES_TO"],
+        expertise=_no_event_extraction(),
+    )
+
+    result = await kb.recall(
+        "Falcon launch",
+        namespace=namespace_id,
+        mode=SearchMode.HYBRID,
+        limit=10,
+        filter={"source_name": "linear", "metadata.tier": "gold"},
+    )
+
+    report = result.engine_info["filter"]
+    FilterPushdownReport.model_validate(report)
+
+    # Both SQL chunk channels ran and reported the SAME partial split: the system
+    # key pushed into lance, the metadata key deferred to the in-memory re-check.
+    assert {"vector", "bm25"} <= set(report["channels"]), (
+        f"expected both vector and bm25 channels under JSON1-off HYBRID: {sorted(report['channels'])}"
+    )
+    partial = {"pushed_keys": ["source_name"], "post_filtered_keys": ["metadata.tier"]}
+    assert report["channels"]["vector"] == partial
+    assert report["channels"]["bm25"] == partial
+
+    # Top-level partition: source_name pushed on every gating channel, metadata
+    # re-checked → NOT fully pushed, post_filtered set.
+    assert report["pushed_keys"] == ["source_name"]
+    assert report["post_filtered_keys"] == ["metadata.tier"]
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is True
+
+
+async def test_vc_filter_report_graph_nothing_pushed_embedded(kb: Khora, namespace_id: UUID) -> None:
+    """The embedded graph fallback pushes NOTHING — every leaf re-checked in memory.
+
+    The embedded stack has no Neo4j (``_dual_nodes is None``), so the graph
+    channel's chunk fetch goes through the storage-fallback leg, which splices no
+    Cypher WHERE. The graph channel therefore pushes nothing and re-checks the
+    FULL AST in memory: both ``source_name`` and ``metadata.tier`` land in its
+    ``post_filtered_keys``, with ``pushed_keys`` empty. This is the honest
+    counterpart to the Neo4j BFS path (which DOES push the system slice via
+    Cypher) — the report does not credit the embedded fallback with a pushdown it
+    never performed.
+
+    Driven through ``mode=SearchMode.GRAPH`` over the 2-hop Alice→Bob→Carol chain
+    so the graph traversal actually surfaces candidate chunks (its plan is
+    recorded only when it held candidates this recall). The chunks carry
+    ``source_name="linear"`` so the system leaf does not pre-empt the traversal
+    at the storage-fetch boundary; ``metadata.tier`` is absent so the full-AST
+    in-memory re-check genuinely runs. JSON1 is pinned OFF for a deterministic
+    shape (it does not affect the graph channel, which never pushes metadata, but
+    keeps the lane's capability fixed).
+    """
+    _pin_json1(kb, enabled=False)
+    _plan_two_hop_chain()
+    for content in (
+        "Alice knows Bob from college.",
+        "Bob and Carol collaborate on research projects.",
+        "Carol presented findings on graph databases.",
+    ):
+        await kb.remember(
+            content=content,
+            namespace=namespace_id,
+            title="",
+            source_name="linear",
+            entity_types=["PERSON", "CONCEPT"],
+            relationship_types=["KNOWS", "RESEARCHES"],
+            expertise=_no_event_extraction(),
+        )
+
+    result = await kb.recall(
+        "Describe the multi-hop chain spanning Alice through her collaborators downstream.",
+        namespace=namespace_id,
+        mode=SearchMode.GRAPH,
+        limit=10,
+        filter={"source_name": "linear", "metadata.tier": "gold"},
+    )
+
+    report = result.engine_info["filter"]
+    FilterPushdownReport.model_validate(report)
+
+    # The graph channel ran (it surfaced candidates from the traversal) and is
+    # honest that it pushed nothing on the embedded fallback.
+    assert "graph" in report["channels"], (
+        f"graph channel missing under GRAPH-mode embedded recall: {sorted(report['channels'])}"
+    )
+    assert report["channels"]["graph"] == {
+        "pushed_keys": [],
+        "post_filtered_keys": ["metadata.tier", "source_name"],
+    }
+
+    # Top-level: nothing pushed by any gating channel here (graph is the only
+    # channel in GRAPH mode), both leaves re-checked in memory.
+    assert report["pushed_keys"] == []
+    assert report["post_filtered_keys"] == ["metadata.tier", "source_name"]
+    assert report["pushed_down"] is False
     assert report["post_filtered"] is True
 
 

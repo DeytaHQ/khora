@@ -606,6 +606,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         created_after: datetime | None = None,
         created_before: datetime | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Public BM25 (SQLite FTS5) lookup over ``khora_chunks`` for the
         StorageCoordinator dispatch path. See :func:`temporal_chunk_to_chunk`
@@ -614,9 +615,37 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         ``filter_ast`` is enforced via :meth:`_bm25_search`, which pushes the
         compilable leaves into SQL and re-checks the rest against the decoded
         chunk through :meth:`_ast_post_filter`.
+
+        ``filter_plan_out`` is the optional per-call sink for the honest
+        filter-pushdown plan, mirroring :meth:`_search_inner` exactly. This
+        backend runs ``compile_lance`` in split mode (only the JSON1-permitting
+        leaves push down) and ALWAYS re-checks the full AST via
+        :meth:`_ast_post_filter`, so the plan reports the pushed slice in
+        ``pushed_keys``, the residual in ``post_filtered_keys``, and
+        ``defensive_recheck=True`` (NO-DEMOTE: a pushed leaf stays pushed even
+        though the always-on re-check covers it).
         """
         if not query_text or not query_text.strip():
             return []
+        # Honest filter-pushdown plan, derived from the SAME ``compile_lance``
+        # context (alias-independent ``consumed_keys``) the per-pass WHERE in
+        # ``_bm25_search`` uses — so the report can never drift from the
+        # executed WHERE. Mirrors the ``_search_inner`` plan verbatim.
+        if filter_plan_out is not None:
+            if filter_ast is not None and filter_ast.children:
+                from khora.filter.compilers.lance import compile_lance
+                from khora.filter.execute import filter_leaf_keys
+
+                consumed = compile_lance(filter_ast, self._filter_compile_ctx(None)).consumed_keys
+                filter_plan_out.append(
+                    ChannelPlan(
+                        pushed_keys=consumed,
+                        post_filtered_keys=filter_leaf_keys(filter_ast) - consumed,
+                        defensive_recheck=True,
+                    )
+                )
+            else:
+                filter_plan_out.append(ChannelPlan())
         temporal_filter: TemporalFilter | None = None
         if created_after is not None or created_before is not None:
             temporal_filter = TemporalFilter(
