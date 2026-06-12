@@ -133,8 +133,9 @@ def _seed_row(record: SeedRecord, chunk_id: UUID) -> dict[str, Any]:
     Every date key is set explicitly (``None`` when absent), mirroring the production
     store's ``create_chunks_batch`` which always writes ``occurred_at=chunk.occurred_at``
     into the ``option<datetime>`` column. The seven string document keys are set
-    verbatim (``None`` when absent). ``metadata_`` carries the chunk's metadata blob
-    (the remapped ``metadata`` root).
+    verbatim (``None`` when absent for the six nullable keys; ``source_type`` is
+    non-null and always carries its value — ``"library"`` by default). ``metadata_``
+    carries the chunk's metadata blob (the remapped ``metadata`` root).
     """
     row: dict[str, Any] = {
         "id": _rid("temporal_chunk", chunk_id),
