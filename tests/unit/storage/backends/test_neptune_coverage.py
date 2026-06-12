@@ -202,46 +202,38 @@ async def test_connect_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-async def test_connect_iam_auth_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The IAM-auth branch calls boto3 to build a signed token before driver()."""
-    fake_session = _make_session_with_records()
-    fake_driver = _make_driver(fake_session)
+def _stub_iam_signing(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Stub the boto3 + botocore surface used by the IAM signing path.
 
-    import neo4j
-
-    captured: dict[str, Any] = {}
-
-    def _factory(*a, **kw):  # type: ignore[no-untyped-def]
-        captured.update(kw)
-        return fake_driver
-
-    monkeypatch.setattr(neo4j.AsyncGraphDatabase, "driver", _factory)
-
-    # Stub the boto3 + botocore surface that the IAM branch imports.
+    Returns the ``SigV4Auth`` class mock.  Its instance's ``add_auth`` stamps
+    an incrementing ``X-Amz-Date`` header on the request so each produced
+    signature is distinguishable in assertions.
+    """
+    import itertools
     import sys
 
     fake_creds = MagicMock()
-    fake_creds.access_key = "ak"
-    fake_creds.secret_key = "sk"
-    fake_creds.token = "tok"
-
     fake_session_obj = MagicMock()
     fake_session_obj.get_credentials = MagicMock(return_value=MagicMock(get_frozen_credentials=lambda: fake_creds))
 
     boto3_mod = MagicMock()
     boto3_mod.Session = MagicMock(return_value=fake_session_obj)
 
-    botocore_auth_mod = MagicMock()
+    counter = itertools.count(1)
+
+    def _stamp(request: Any) -> None:
+        request.headers["X-Amz-Date"] = f"sig-{next(counter)}"
+
     sigv4_instance = MagicMock()
-    sigv4_instance.add_auth = MagicMock()
+    sigv4_instance.add_auth = MagicMock(side_effect=_stamp)
+    botocore_auth_mod = MagicMock()
     botocore_auth_mod.SigV4Auth = MagicMock(return_value=sigv4_instance)
 
     botocore_awsrequest_mod = MagicMock()
 
     class _FakeAWSRequest:
         def __init__(self, *a, **kw):  # type: ignore[no-untyped-def]
-            self.headers = {"Host": "cluster", "X-Test": "1"}
+            self.headers = dict(kw.get("headers") or {})
 
     botocore_awsrequest_mod.AWSRequest = _FakeAWSRequest
 
@@ -249,15 +241,116 @@ async def test_connect_iam_auth_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "botocore", MagicMock())
     monkeypatch.setitem(sys.modules, "botocore.auth", botocore_auth_mod)
     monkeypatch.setitem(sys.modules, "botocore.awsrequest", botocore_awsrequest_mod)
+    return botocore_auth_mod.SigV4Auth
+
+
+def _connect_kwargs_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Patch the driver factory and return the dict its kwargs land in."""
+    import neo4j
+
+    fake_driver = _make_driver(_make_session_with_records())
+    captured: dict[str, Any] = {}
+
+    def _factory(*a, **kw):  # type: ignore[no-untyped-def]
+        captured.update(kw)
+        return fake_driver
+
+    monkeypatch.setattr(neo4j.AsyncGraphDatabase, "driver", _factory)
+    return captured
+
+
+@pytest.mark.unit
+async def test_connect_iam_auth_passes_rotating_auth_manager(monkeypatch: pytest.MonkeyPatch) -> None:
+    """connect() must install a rotating auth manager, not a token signed once.
+
+    Regression for #1152: SigV4 signatures expire after ~5 minutes, so a
+    static token breaks every connection the pool opens after that window.
+    Signing must be deferred to connection time, not done eagerly at connect.
+    """
+    captured = _connect_kwargs_capture(monkeypatch)
+    sigv4_cls = _stub_iam_signing(monkeypatch)
 
     b = NeptuneBackend("bolt://cluster:8182", iam_auth=True, aws_region="us-east-1")
     await b.connect()
-    assert b._driver is fake_driver
-    # IAM path builds a basic_auth token from signed headers.
-    assert captured["auth"] is not None
-    # SigV4Auth was instantiated and .add_auth called once.
-    botocore_auth_mod.SigV4Auth.assert_called_once()
-    sigv4_instance.add_auth.assert_called_once()
+
+    from neo4j.auth_management import AsyncAuthManager
+
+    assert isinstance(captured["auth"], AsyncAuthManager)
+    # No signature is computed until the driver opens a connection.
+    sigv4_cls.assert_not_called()
+
+
+@pytest.mark.unit
+async def test_connect_iam_auth_resigns_per_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Connections established at different times carry different signatures.
+
+    The neo4j driver calls ``get_auth()`` on the auth manager for every new
+    Bolt connection; once the cached token has expired the provider must
+    produce a fresh signature.  The token TTL is forced to -1 so every fetch
+    is past expiry - on main, where the token is signed once at connect(),
+    both fetches return the same frozen signature.
+    """
+    import json
+
+    import khora.storage.backends.neptune as neptune_mod
+
+    captured = _connect_kwargs_capture(monkeypatch)
+    _stub_iam_signing(monkeypatch)
+    monkeypatch.setattr(neptune_mod, "_IAM_TOKEN_TTL_SECONDS", -1.0)
+
+    b = NeptuneBackend("bolt://cluster:8182", iam_auth=True, aws_region="us-east-1")
+    await b.connect()
+
+    manager = captured["auth"]
+    auth_first = await manager.get_auth()
+    auth_second = await manager.get_auth()
+
+    token_first = json.loads(auth_first.credentials)
+    token_second = json.loads(auth_second.credentials)
+    assert token_first["X-Amz-Date"] == "sig-1"
+    assert token_second["X-Amz-Date"] == "sig-2"
+
+
+@pytest.mark.unit
+async def test_connect_iam_auth_reuses_token_within_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Within the token TTL the cached signature is reused (no re-sign per fetch)."""
+    import json
+
+    captured = _connect_kwargs_capture(monkeypatch)
+    sigv4_cls = _stub_iam_signing(monkeypatch)
+
+    b = NeptuneBackend("bolt://cluster:8182", iam_auth=True, aws_region="us-east-1")
+    await b.connect()
+
+    manager = captured["auth"]
+    auth_first = await manager.get_auth()
+    auth_second = await manager.get_auth()
+
+    sigv4_cls.assert_called_once()
+    assert json.loads(auth_first.credentials) == json.loads(auth_second.credentials)
+
+
+@pytest.mark.unit
+async def test_connect_iam_auth_token_matches_bolt_iam_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The token JSON carries the signed headers plus HttpMethod.
+
+    AWS's documented Neptune Bolt-IAM token format requires ``HttpMethod``
+    alongside the SigV4-signed headers; without it Neptune rejects the
+    connection outright.
+    """
+    import json
+
+    captured = _connect_kwargs_capture(monkeypatch)
+    _stub_iam_signing(monkeypatch)
+
+    b = NeptuneBackend("bolt://cluster:8182", iam_auth=True, aws_region="us-east-1")
+    await b.connect()
+
+    auth = await captured["auth"].get_auth()
+    token = json.loads(auth.credentials)
+    assert token["HttpMethod"] == "GET"
+    assert token["Host"] == "cluster"
+    assert token["X-Amz-Date"] == "sig-1"
 
 
 @pytest.mark.unit
