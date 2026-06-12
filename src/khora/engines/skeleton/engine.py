@@ -32,6 +32,7 @@ from khora.engines._stats import gather_counts
 from khora.engines._storage_config import build_storage_config
 from khora.exceptions import EngineCapabilityError, UnsupportedEngineKwargError
 from khora.extraction.embedders import LiteLLMEmbedder
+from khora.filter.report import ChannelPlan, build_filter_report
 from khora.khora import BatchResult, RecallResult, RememberResult, Stats
 from khora.query import SearchMode
 from khora.storage import StorageConfig, StorageCoordinator, create_storage_coordinator
@@ -648,27 +649,20 @@ class SkeletonConstructionEngine:
             "hybrid_alpha": hybrid_alpha,
             "temporal_filter": str(temporal_filter) if temporal_filter else None,
         }
-        # Report honest filter pushdown. The pgvector compiler runs in
-        # on_unsupported="raise" mode, which is all-or-nothing: an unsupported
-        # leaf raises RecallFilterUnsupportedError before recall returns, so a
-        # recall that returns WITH a filter_ast on pgvector means every leaf was
-        # consumed (consumed_keys == all leaves) = fully pushed down. We derive
-        # the flag from that contract without recompiling. When split-mode
-        # (partial pushdown) lands, read CompiledFilter.consumed_keys and
-        # compare against the AST leaves instead.
-        #
-        # A constraint-free filter (the empty-AND root that ``filter={}`` /
-        # ``RecallFilter()`` normalizes to) carries zero leaves, so "all leaves
-        # consumed" is vacuous - nothing was pushed down. We report False for it,
-        # matching the no-filter case rather than claiming a pushdown that did
-        # not narrow anything. ``filter_ast.children`` is the "has constraints"
-        # check (the root is always an AND ``FilterNode``).
-        #
-        # The carrier is written on every recall (the no-filter case lands here
-        # too, with ``filter_ast is None`` -> False); only the boolean varies.
-        engine_info["filter"] = {
-            "pushed_down": filter_ast is not None and bool(filter_ast.children) and self._backend_type == "pgvector"
-        }
+        # Report honest filter pushdown (#1069). The carrier is the ChannelPlan
+        # the backend stashed from the SAME compile its search just performed
+        # (``temporal_store._last_filter_plan``) — never a backend-name check and
+        # never a re-compile here, so the report cannot drift from what the WHERE
+        # clause actually pushed. The single configured backend is one channel,
+        # keyed by ``self._backend_type``. ``build_filter_report`` enumerates the
+        # filter's leaves and partitions them per the plan; a no-filter /
+        # constraint-free recall yields an empty plan and an all-False report. The
+        # carrier is written on every recall.
+        backend_plan = getattr(temporal_store, "_last_filter_plan", None) or ChannelPlan()
+        engine_info["filter"] = build_filter_report(
+            filter_ast,
+            {self._backend_type: backend_plan},
+        ).model_dump(mode="json")
 
         return RecallResult(
             query=query,

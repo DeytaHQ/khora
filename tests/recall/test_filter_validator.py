@@ -62,6 +62,9 @@ def test_seven_symbols_import_from_khora_filter() -> None:
         "RecallFilterUnsupportedError",
         "Op",
         "SYSTEM_KEYS",
+        # Honest filter-pushdown report models (#1069).
+        "FilterPushdownReport",
+        "FilterChannelReport",
     }
     assert expected.issubset(set(dir(f)))
     assert set(f.__all__) == expected

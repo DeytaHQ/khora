@@ -614,3 +614,181 @@ async def test_skeleton_recall_metadata_filter_python_fallback(
         f"python-fallback must return the SAME in-scope set as pushdown; "
         f"leaked={returned & out_of_scope}, missing={in_scope - returned}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Engine-level FilterPushdownReport — the honest #1069 report on a REAL store.
+# ---------------------------------------------------------------------------
+#
+# These pin ``RecallResult.engine_info["filter"]`` — the canonical
+# ``FilterPushdownReport.model_dump()`` the skeleton engine folds from the
+# sqlite_lance backend's ``_last_filter_plan`` (the SAME compile_lance pass its
+# search ran). They drive the EXACT #1069 repro
+# (``filter={"source_name": "linear", "metadata.tier": "gold"}``) through the
+# public ``Khora.recall`` on a fully-embedded SQLite+LanceDB engine and assert:
+#
+#   * JSON1 present  -> both leaves pushed (pushed_down=True), post_filtered=True
+#     from the always-on compile_python defensive re-check, BOTH keys in
+#     ``pushed_keys`` (NO-DEMOTE), nothing in ``post_filtered_keys``.
+#   * JSON1 absent   -> the metadata leaf splits to ``post_filtered_keys`` and
+#     pushed_down=False; the system-key leaf stays pushed.
+#   * no-filter / filter={} -> the canonical empty carrier with ONE named
+#     ``sqlite_lance`` channel entry (decision 1), NOT channels={}.
+#
+# Every emitted report round-trips through ``FilterPushdownReport.model_validate``.
+# The JSON1 toggle uses the documented ``_has_json1`` test seam, mirroring
+# ``test_skeleton_recall_metadata_filter_python_fallback`` above.
+
+# The #1069 repro filter: a system-key leaf (source_name) + a metadata leaf
+# (metadata.tier). Both leaves push down when JSON1 is present.
+_REPORT_FILTER = {"source_name": "linear", "metadata.tier": "gold"}
+_REPORT_LEAVES = {"metadata.tier", "source_name"}
+
+
+async def _seed_report_corpus(kb: Khora, namespace_id: UUID) -> None:
+    """Seed a row that satisfies the #1069 repro filter.
+
+    Uses ``kb.remember`` directly (not the suite's ``_remember`` helper) so the
+    ``source_name`` system key is stamped onto the chunk — the filter constrains
+    both ``source_name`` and ``metadata.tier``.
+    """
+    await kb.remember(
+        content="alpha gold linear ticket about the falcon launch",
+        namespace=namespace_id,
+        title="repro",
+        metadata={"tier": "gold"},
+        source_name="linear",
+        entity_types=[],
+        relationship_types=[],
+    )
+
+
+def _filter_report(result: Any) -> dict[str, Any]:
+    """Read + validate the engine_info filter report off a recall result.
+
+    Asserts the canonical model round-trips (``model_validate``) on EVERY emitted
+    report, then returns the raw dict for field-level assertions.
+    """
+    from khora.filter import FilterPushdownReport
+
+    info = result.engine_info.get("filter")
+    assert info is not None, "skeleton engine must write engine_info['filter'] on every recall"
+    # Round-trip the canonical model — proves the emitted dict is a valid report.
+    assert FilterPushdownReport.model_validate(info) == FilterPushdownReport.model_validate(info)
+    return info
+
+
+async def test_engine_filter_report_pushed_down_with_json1(kb: Khora, namespace_id: UUID) -> None:
+    """#1069 repro WITH JSON1 → both leaves pushed, pushed_down=True (NO-DEMOTE).
+
+    The sqlite_lance backend compiles both ``source_name`` and ``metadata.tier``
+    into the SQLite WHERE when JSON1 is available, then runs an always-on
+    compile_python post-filter over the full AST as a safety net. The honest
+    report: ``pushed_down=True`` (every leaf pushed, none post-filtered),
+    ``post_filtered=True`` (the defensive re-check fired), BOTH keys in
+    ``pushed_keys``, and ``post_filtered_keys`` EMPTY (NO-DEMOTE — a fully-pushed
+    leaf is never demoted by the defensive re-check).
+    """
+    await _seed_report_corpus(kb, namespace_id)
+    store = kb._get_engine()._get_temporal_store()  # type: ignore[attr-defined]
+    if not store._has_json1:
+        pytest.skip("SQLite build lacks JSON1; the pushdown half is the absent-JSON1 case")
+
+    result = await kb.recall(
+        "alpha gold document",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+        filter=_REPORT_FILTER,
+    )
+
+    info = _filter_report(result)
+    assert info["pushed_down"] is True
+    assert info["post_filtered"] is True  # always-on compile_python defensive re-check
+    assert set(info["pushed_keys"]) == _REPORT_LEAVES
+    assert info["post_filtered_keys"] == []  # NO-DEMOTE
+    assert set(info["channels"]["sqlite_lance"]["pushed_keys"]) == _REPORT_LEAVES
+    assert info["channels"]["sqlite_lance"]["post_filtered_keys"] == []
+
+
+async def test_engine_filter_report_split_without_json1(
+    kb: Khora, namespace_id: UUID, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1069 repro WITHOUT JSON1 → metadata leaf splits to post_filtered_keys.
+
+    Forcing the ``_has_json1=False`` seam makes compile_lance treat the metadata
+    leaf as unsupported, so only the ``source_name`` system-key leaf pushes into
+    SQLite; ``metadata.tier`` defers to the compile_python post-filter. The honest
+    report: ``pushed_down=False`` (a leaf was post-filtered), ``source_name`` in
+    ``pushed_keys`` and ``metadata.tier`` in ``post_filtered_keys`` — the two
+    leaves partition cleanly.
+    """
+    await _seed_report_corpus(kb, namespace_id)
+    store = kb._get_engine()._get_temporal_store()  # type: ignore[attr-defined]
+    monkeypatch.setattr(store, "_has_json1", False)
+
+    result = await kb.recall(
+        "alpha gold document",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+        filter=_REPORT_FILTER,
+    )
+
+    info = _filter_report(result)
+    assert info["pushed_down"] is False
+    assert info["post_filtered"] is True
+    assert info["pushed_keys"] == ["source_name"]
+    assert info["post_filtered_keys"] == ["metadata.tier"]
+    # The two leaves partition the constraint set (each in exactly one list).
+    assert set(info["pushed_keys"]) | set(info["post_filtered_keys"]) == _REPORT_LEAVES
+    assert set(info["pushed_keys"]) & set(info["post_filtered_keys"]) == set()
+    channel = info["channels"]["sqlite_lance"]
+    assert channel["pushed_keys"] == ["source_name"]
+    assert channel["post_filtered_keys"] == ["metadata.tier"]
+
+
+async def test_engine_filter_report_no_filter_carrier(kb: Khora, namespace_id: UUID) -> None:
+    """A no-filter recall emits the canonical empty carrier (decision 1).
+
+    Even with no ``filter=`` kwarg the skeleton engine writes the report on every
+    recall: all-False flags, empty key lists, and ONE named ``sqlite_lance``
+    channel entry (the single configured backend) — NOT ``channels={}``.
+    """
+    await _seed_report_corpus(kb, namespace_id)
+
+    result = await kb.recall("alpha gold document", namespace=namespace_id, limit=20, mode=SearchMode.VECTOR)
+
+    info = _filter_report(result)
+    assert info["pushed_down"] is False
+    assert info["post_filtered"] is False
+    assert info["pushed_keys"] == []
+    assert info["post_filtered_keys"] == []
+    # ONE named empty channel — the canonical carrier, not an empty dict.
+    assert info["channels"] == {"sqlite_lance": {"pushed_keys": [], "post_filtered_keys": []}}
+
+
+async def test_engine_filter_report_empty_filter_carrier(kb: Khora, namespace_id: UUID) -> None:
+    """A bare ``filter={}`` emits the SAME canonical empty carrier (decision 1).
+
+    ``filter={}`` lowers to a match-everything empty-AND AST that the facade
+    threads to the engine as a non-None ``filter_ast`` carrying no leaves. The
+    engine reports it identically to the no-filter case — nothing narrowed,
+    ``pushed_down=False``, one named empty channel.
+    """
+    await _seed_report_corpus(kb, namespace_id)
+
+    result = await kb.recall(
+        "alpha gold document",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.VECTOR,
+        filter={},
+    )
+
+    info = _filter_report(result)
+    assert info["pushed_down"] is False
+    assert info["post_filtered"] is False
+    assert info["pushed_keys"] == []
+    assert info["post_filtered_keys"] == []
+    assert info["channels"] == {"sqlite_lance": {"pushed_keys": [], "post_filtered_keys": []}}

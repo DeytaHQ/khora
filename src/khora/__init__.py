@@ -53,6 +53,8 @@ from .extraction.skills import EntityTypeConfig, ExpertiseConfig, RelationshipTy
 from .filter import (
     SYSTEM_KEYS,
     DateOps,
+    FilterChannelReport,
+    FilterPushdownReport,
     Op,
     RecallFilter,
     RecallFilterUnsupportedError,
@@ -125,6 +127,9 @@ __all__ = [
     "RecallFilterUnsupportedError",
     "Op",
     "SYSTEM_KEYS",
+    # Honest filter-pushdown reporting (engine_info["filter"]) — see issue #1069
+    "FilterPushdownReport",
+    "FilterChannelReport",
 ]
 
 

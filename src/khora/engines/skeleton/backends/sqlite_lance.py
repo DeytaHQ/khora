@@ -41,6 +41,7 @@ from khora.engines.skeleton.backends import (
     TemporalVectorStore,
     temporal_chunk_to_chunk,
 )
+from khora.filter.report import ChannelPlan
 from khora.storage.backends._fts5 import escape_fts5_query
 from khora.storage.backends.sqlite_lance._helpers import (
     from_json_text,
@@ -172,6 +173,11 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         # khora_chunks_vec table per-instance to mirror the main vector
         # adapter's policy.
         self._lance_write_lock = asyncio.Lock()
+        # Honest filter-pushdown carrier (#1069). Set by _search_inner from the
+        # ONE authoritative compile_lance pass it runs per recall, then read back
+        # by the engine to build the per-channel FilterPushdownReport. Defaults to
+        # the constraint-free plan so a no-filter recall reports nothing pushed.
+        self._last_filter_plan: ChannelPlan = ChannelPlan()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -429,6 +435,38 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         # pushdown is still compiled per-pass inside each pass (its column
         # qualifier differs).
         post_filter = self._ast_post_filter(filter_ast)
+
+        # Honest filter-pushdown plan (#1069). ONE authoritative compile_lance
+        # here is the single source of truth for what BOTH passes push down. Its
+        # consumed_keys are alias-independent — _clause_unconsumable reads only
+        # clause.path / SYSTEM_KEYS / sqlite_json1 / operand shape; table_alias
+        # only feeds the SQL column text — so this alias=None compile reports the
+        # same keys the per-pass alias="c"/None compiles emit. compile_lance is
+        # deterministic, so the plan faithfully describes the WHERE the passes ran.
+        # NO-DEMOTE: a consumed leaf stays in pushed_keys even though the always-on
+        # compile_python post-filter re-checks the full AST (defensive_recheck=True).
+        if filter_ast is not None and filter_ast.children:
+            from khora.filter.compilers.lance import compile_lance
+            from khora.filter.context import CompileContext, SchemaCapabilities
+            from khora.filter.execute import filter_leaf_keys
+
+            compiled = compile_lance(
+                filter_ast,
+                CompileContext(
+                    backend_target="khora_chunks",
+                    table_alias=None,
+                    on_unsupported="split",
+                    schema_capabilities=SchemaCapabilities(sqlite_json1=self._has_json1),
+                ),
+            )
+            consumed = compiled.consumed_keys
+            self._last_filter_plan = ChannelPlan(
+                pushed_keys=consumed,
+                post_filtered_keys=filter_leaf_keys(filter_ast) - consumed,
+                defensive_recheck=True,
+            )
+        else:
+            self._last_filter_plan = ChannelPlan()
 
         # Vector pass.  Fetch 2× when fusion is requested so RRF has a
         # broader rank corpus.

@@ -53,6 +53,7 @@ from khora.engines.skeleton.backends import (
     TemporalVectorStore,
 )
 from khora.filter import RecallFilterUnsupportedError
+from khora.filter.report import ChannelPlan
 
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
@@ -152,6 +153,12 @@ class TurbopufferTemporalStore(TemporalVectorStore):
         self._client: Any = None  # AsyncTurbopuffer when connected
         self._connected = False
         self._embedding_dimension = config.llm.embedding_dimension or 1536
+        # Honest filter-pushdown carrier (#1069). turbopuffer implements no
+        # deterministic recall filter: a constraint-bearing filter_ast RAISES
+        # before search proceeds, so a recall that reaches the report is always
+        # constraint-free. The carrier is therefore the empty (nothing-pushed)
+        # plan, set after the raise guard and read back by the engine.
+        self._last_filter_plan: ChannelPlan = ChannelPlan()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -354,6 +361,11 @@ class TurbopufferTemporalStore(TemporalVectorStore):
                 "filter_ast",
                 "the turbopuffer backend does not support deterministic recall filters; filter_ast must be None",
             )
+
+        # Honest filter-pushdown plan (#1069). Reaching here means the filter was
+        # constraint-free (a constraint-bearing one raised above), so nothing was
+        # pushed and the empty plan is the faithful report.
+        self._last_filter_plan = ChannelPlan()
 
         ns = self._namespace(namespace_id)
         tp_filter = _build_turbopuffer_filter(temporal_filter)

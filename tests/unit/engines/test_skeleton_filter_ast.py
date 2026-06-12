@@ -237,25 +237,38 @@ def test_all_backend_search_methods_accept_filter_ast(name: str, store_cls: obje
 
 
 # ---------------------------------------------------------------------------
-# engine_info['filter']['pushed_down'] derivation (engine-side, no Postgres).
+# engine_info['filter']['pushed_down'] from the backend's ChannelPlan (#1069).
 # ---------------------------------------------------------------------------
 #
-# The skeleton engine derives the pushdown flag from the filter_ast + backend
-# without recompiling: ``filter_ast is not None and bool(filter_ast.children)
-# and backend_type == "pgvector"``. The live-pg end-to-end proof of this flag
-# was the retired interim smoke test; this drives the same derivation directly
-# off a stubbed engine (no database), and the facade-side carrier threading is
-# pinned separately by tests/unit/test_khora.py.
+# The skeleton engine NO LONGER derives the pushdown flag from a backend-name
+# check. It reads the ``ChannelPlan`` the backend stashed on
+# ``temporal_store._last_filter_plan`` from the SAME compile its search ran, and
+# folds it via ``build_filter_report``. These no-Postgres stub tests therefore
+# stage the plan a real pgvector raise-mode compile would produce (every leaf
+# pushed) so they exercise the engine's read-and-fold wiring; the live-pg proof
+# is the postgres conformance leg, and the facade pass-through is pinned in
+# tests/unit/test_khora.py.
 
 
 async def _pushed_down_for(filter_ast: FilterNode | None) -> bool:
-    """Run ``recall`` with ``filter_ast`` and read the derived pushdown flag.
+    """Run ``recall`` with ``filter_ast`` and read the reported pushdown flag.
 
-    Uses the same no-Postgres stub harness as the forwarding tests: the engine
-    is on the pgvector backend with a stub store returning no rows, so recall
-    reaches the engine_info derivation and we read it off the result.
+    Uses the same no-Postgres stub harness as the forwarding tests, but stamps
+    the stub store's ``_last_filter_plan`` with the plan a real pgvector
+    raise-mode compile yields for ``filter_ast`` (all leaves pushed when the
+    filter carries constraints; the empty plan otherwise). The engine reads that
+    plan and folds it into the report, so this exercises the real read-and-fold
+    path rather than a re-derivation.
     """
-    engine, _ = _build_engine_with_stubs()
+    from khora.filter.execute import filter_leaf_keys
+    from khora.filter.report import ChannelPlan
+
+    engine, temporal_store = _build_engine_with_stubs()
+    temporal_store._last_filter_plan = (
+        ChannelPlan(pushed_keys=filter_leaf_keys(filter_ast))
+        if filter_ast is not None and filter_ast.children
+        else ChannelPlan()
+    )
     result = await engine.recall("alpha", uuid4(), mode=SearchMode.VECTOR, filter_ast=filter_ast)
     return result.engine_info["filter"]["pushed_down"]
 
@@ -265,7 +278,8 @@ async def test_pushed_down_true_for_constrained_ast_on_pgvector() -> None:
 
     The pgvector compiler is all-or-nothing (``on_unsupported="raise"``), so a
     recall that returns with a constrained filter_ast means every leaf pushed
-    down — the engine reports that as ``pushed_down=True``.
+    down. The backend stashes that as ``ChannelPlan(pushed_keys=<all leaves>)``
+    and the engine folds it into ``pushed_down=True``.
     """
     assert await _pushed_down_for(_sample_filter_ast()) is True
 

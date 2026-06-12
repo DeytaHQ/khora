@@ -334,6 +334,36 @@ JSON-serializable response projection. Lives at `khora.core.models.recall.Recall
 
 **Producer invariant:** every `chunks[i].document_id` and every id in `entities[i].source_document_ids` / `relationships[i].source_document_ids` is guaranteed to appear as some `documents[j].id`.
 
+#### `engine_info["filter"]` — honest filter-pushdown report
+
+When `recall(filter=...)` is given a structured [`RecallFilter`](#recallfilter), the engine populates `engine_info["filter"]` with a **`FilterPushdownReport`** — a backend-agnostic, honest account of what happened to the filter's constraint leaves. Both `FilterPushdownReport` and the per-channel `FilterChannelReport` are public (exported from `khora` and `khora.filter`). The report is a Pydantic model; engines serialize it (e.g. `model_dump()`) into the free-form `engine_info` dict.
+
+| Field | Type | Description |
+|---|---|---|
+| `pushed_down` | `bool` | `True` only when the filter is *fully* pushed: `post_filtered_keys` is empty AND `pushed_keys` covers every constraint leaf. `False` for a constraint-free / no-filter recall — nothing was narrowed. |
+| `post_filtered` | `bool` | `True` when any constraint leaf was re-checked in memory on a gating channel, OR when a channel ran a defensive full-predicate re-check even though every leaf compiled down. |
+| `pushed_keys` | `list[str]` | Dotted constraint-leaf keys pushed into the backend query on *every* gating channel (sorted, JSON-stable). |
+| `post_filtered_keys` | `list[str]` | Dotted constraint-leaf keys re-checked in memory on at least one gating channel (sorted). |
+| `channels` | `dict[str, FilterChannelReport]` | Per-channel breakdown keyed by channel name. One entry per channel the engine reported on — a single-channel engine emits one entry on every recall (even a no-filter recall, with empty key lists). |
+
+`pushed_keys` and `post_filtered_keys` **partition** the filter's constraint leaves. A leaf is in `pushed_keys` only when every channel that gates it pushed it into the backend query; it is in `post_filtered_keys` when at least one gating channel re-checked it in memory. (A leaf no channel gates falls in neither list.) A *defensive* full-predicate re-check (the `sqlite_lance` path: `compile_lance` fully pushes the predicate to SQL, but a `compile_python` post-filter re-checks the whole AST as a safety net) sets `post_filtered=True` **without demoting** any fully-pushed leaf — so `pushed_down` stays `True` while `post_filtered` is also `True`.
+
+Each `FilterChannelReport` carries that channel's own `pushed_keys` / `post_filtered_keys` (sorted dotted leaf keys). The serialized wire shape (`model_dump(mode="json")`) is:
+
+```json
+{
+  "pushed_down": true,
+  "post_filtered": true,
+  "pushed_keys": ["metadata.tier"],
+  "post_filtered_keys": [],
+  "channels": {
+    "sqlite_lance": {"pushed_keys": ["metadata.tier"], "post_filtered_keys": []}
+  }
+}
+```
+
+Prior to #1069 the skeleton engine derived `pushed_down` from a hardcoded `backend == "pgvector"` check, so it under-reported on every non-pgvector backend (e.g. `sqlite_lance`) whose compiler actually pushed the predicate down. The report is now derived from what each channel's compiler consumed.
+
 #### `DocumentProjection`
 
 | Field | Type | Description |

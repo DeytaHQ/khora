@@ -49,6 +49,7 @@ from khora.engines.skeleton.backends import (
     TemporalSearchResult,
     TemporalVectorStore,
 )
+from khora.filter.report import ChannelPlan
 from khora.storage._log_safe import _safe_url_for_log
 
 if TYPE_CHECKING:
@@ -174,6 +175,13 @@ class WeaviateTemporalStore(TemporalVectorStore):
         self._connected = False
         self._tenants_seen: set[str] = set()
         self._embedding_dimension = config.llm.embedding_dimension or 1536
+        # Honest filter-pushdown carrier (#1069). Set by search() from the
+        # compile_weaviate split-pass it runs per recall, read back by the engine
+        # to build the per-channel FilterPushdownReport. Only the two DATE
+        # properties push down (consumed_keys); every other leaf is re-checked by
+        # the always-on compile_python post-filter (defensive_recheck=True).
+        # Defaults to the constraint-free plan for a no-filter recall.
+        self._last_filter_plan: ChannelPlan = ChannelPlan()
 
     # -------------------------------------------------------------------
     # Lifecycle
@@ -461,10 +469,12 @@ class WeaviateTemporalStore(TemporalVectorStore):
         # native Weaviate filter and AND it into the legacy temporal filter; build
         # an in-memory predicate over the whole AST for the post-filter pass.
         post_filter: Callable[[Any], bool] | None = None
+        self._last_filter_plan = ChannelPlan()
         if filter_ast is not None:
             from khora.filter import CompileContext
             from khora.filter.compilers.python import compile_python
             from khora.filter.compilers.weaviate import compile_weaviate
+            from khora.filter.execute import filter_leaf_keys
 
             compiled = compile_weaviate(
                 filter_ast,
@@ -483,6 +493,22 @@ class WeaviateTemporalStore(TemporalVectorStore):
                 filter_ast,
                 CompileContext(backend_target=COLLECTION_NAME, on_unsupported="split"),
             ).predicate
+
+            # Honest filter-pushdown plan (#1069), derived from THIS split compile
+            # (no backend-name check, no re-compile). Only the two DATE properties
+            # push down (compiled.consumed_keys); the remaining leaves are re-checked
+            # by the always-on compile_python post-filter, so they go to
+            # post_filtered_keys. defensive_recheck=True because that post-filter
+            # re-checks the FULL AST — including the pushed date keys — without
+            # demoting them out of pushed_keys (NO-DEMOTE). A constraint-free filter
+            # (empty-AND) has no leaves, so build_filter_report treats it as nothing
+            # pushed regardless of the defensive flag.
+            consumed = compiled.consumed_keys
+            self._last_filter_plan = ChannelPlan(
+                pushed_keys=consumed,
+                post_filtered_keys=filter_leaf_keys(filter_ast) - consumed,
+                defensive_recheck=bool(filter_ast.children),
+            )
 
         # Over-fetch when a post-filter runs — it prunes rows, so we need a larger
         # candidate pool to still satisfy ``limit`` after trimming.
