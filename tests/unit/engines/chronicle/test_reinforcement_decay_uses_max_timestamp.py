@@ -13,7 +13,7 @@ from uuid import uuid4
 import pytest
 
 from khora.core.models import Chunk
-from khora.engines.chronicle.engine import _apply_temporal_decay
+from khora.engines.chronicle.engine import _apply_temporal_decay, _compute_recency_multipliers
 
 
 def _chunk(*, source_timestamp: datetime, last_accessed_at: datetime | None = None) -> Chunk:
@@ -114,3 +114,47 @@ def test_reinforcement_on_picks_newest_when_both_set() -> None:
     assert s_access == pytest.approx(s_source, abs=1e-6)
     # And both should be close to 1.0 (almost no decay at 1 hour into a 168h half-life).
     assert s_access > 0.99
+
+
+def test_reinforcement_on_handles_naive_source_with_aware_last_accessed() -> None:
+    """#1145: a tz-naive source_timestamp must not crash max() against a tz-aware last_accessed_at.
+
+    coerce_source_timestamp('2026-01-15T10:30:00') returns a naive datetime and
+    the sqlite_lance backend round-trips it verbatim, while last_accessed_at is
+    always stamped tz-aware by _reinforce_last_accessed. Before the fix this
+    raised 'TypeError: can't compare offset-naive and offset-aware datetimes'.
+    """
+    now = datetime(2026, 5, 28, tzinfo=UTC)
+    chunk = _chunk(
+        source_timestamp=datetime(2026, 1, 15, 10, 30),  # naive, as coerced from ISO string
+        last_accessed_at=now - timedelta(hours=1),  # aware, as stamped by reinforcement
+    )
+
+    [(_, score)] = _apply_temporal_decay(
+        [(chunk, 1.0)],
+        decay_weight=0.3,
+        half_life_hours=168.0,
+        reference_time=now,
+        enable_reinforcement=True,
+    )
+    # last_accessed_at (1h ago, UTC) is more recent than the naive-as-UTC
+    # source_timestamp -> nearly no decay.
+    assert score > 0.99
+
+
+def test_recency_multipliers_handle_naive_source_with_aware_last_accessed() -> None:
+    """#1145: same naive-vs-aware crash in _compute_recency_multipliers."""
+    now = datetime(2026, 5, 28, tzinfo=UTC)
+    chunk = _chunk(
+        source_timestamp=datetime(2026, 1, 15, 10, 30),  # naive
+        last_accessed_at=now - timedelta(hours=1),  # aware
+    )
+
+    mults = _compute_recency_multipliers(
+        [chunk],
+        decay_weight=0.3,
+        half_life_hours=168.0,
+        reference_time=now,
+        enable_reinforcement=True,
+    )
+    assert mults[chunk.id] == pytest.approx(1.0, abs=0.01)

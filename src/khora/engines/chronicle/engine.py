@@ -246,8 +246,14 @@ def _apply_temporal_decay(
     timestamps: list[float] = []
     for chunk, _score in chunks_with_scores:
         if enable_reinforcement:
+            # Normalize each candidate to tz-aware UTC BEFORE max(): a naive
+            # source_timestamp (sqlite_lance round-trips coerce_source_timestamp
+            # output verbatim) must not crash against the always-aware
+            # last_accessed_at stamped by _reinforce_last_accessed (#1145).
             candidates = [
-                ts for ts in (chunk.source_timestamp, getattr(chunk, "last_accessed_at", None)) if ts is not None
+                ts
+                for ts in (_to_utc(chunk.source_timestamp), _to_utc(getattr(chunk, "last_accessed_at", None)))
+                if ts is not None
             ]
             ts = max(candidates) if candidates else chunk.created_at
         else:
@@ -305,8 +311,11 @@ def _compute_recency_multipliers(
     timestamps: list[float] = []
     for chunk in chunks:
         if enable_reinforcement:
+            # Normalize to tz-aware UTC BEFORE max() - see _apply_temporal_decay (#1145).
             candidates = [
-                ts for ts in (chunk.source_timestamp, getattr(chunk, "last_accessed_at", None)) if ts is not None
+                ts
+                for ts in (_to_utc(chunk.source_timestamp), _to_utc(getattr(chunk, "last_accessed_at", None)))
+                if ts is not None
             ]
             ts = max(candidates) if candidates else chunk.created_at
         else:
