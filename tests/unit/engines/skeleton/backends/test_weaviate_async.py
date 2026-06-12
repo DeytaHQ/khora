@@ -19,12 +19,15 @@ from pydantic import SecretStr
 
 from khora.engines.skeleton.backends import TemporalChunk
 from khora.engines.skeleton.backends.weaviate import (
+    _DENORM_TEXT_KEYS,
     _FILTER_OVERFETCH,
     COLLECTION_NAME,
     WeaviateBackendConfig,
     WeaviateTemporalStore,
+    _chunk_to_properties,
     _coerce_backend_config,
     _coerce_datetime,
+    _denorm_properties,
     _extract_vector,
     _parse_host_port,
 )
@@ -149,6 +152,37 @@ class TestHelpers:
 # WeaviateTemporalStore.connect routing (local / cloud / custom)
 # ---------------------------------------------------------------------------
 
+# The collection's pre-denorm column names, in schema order. The denorm names
+# (``_DENORM_TEXT_KEYS`` + ``source_timestamp``) are appended to make the
+# reconcile-no-op schema.
+_BASE_PROPERTY_NAMES: tuple[str, ...] = (
+    "content",
+    "document_id",
+    "namespace_id",
+    "occurred_at",
+    "created_at",
+    "source_system",
+    "author",
+    "channel",
+    "tags",
+    "confidence",
+    "metadata_json",
+)
+
+
+def _reconcile_noop_collection() -> MagicMock:
+    """A collection handle whose schema already carries every denorm property.
+
+    ``connect()``'s reconcile branch reads ``config.get().properties`` and only adds
+    a missing denorm prop, so a handle reporting the full schema makes reconcile a
+    no-op — what every connect-path test that doesn't exercise reconcile expects.
+    """
+    collection = MagicMock(name="CollectionAsync")
+    full = [*_BASE_PROPERTY_NAMES, *_DENORM_TEXT_KEYS, "source_timestamp"]
+    collection.config.get = AsyncMock(return_value=SimpleNamespace(properties=[SimpleNamespace(name=n) for n in full]))
+    collection.config.add_property = AsyncMock()
+    return collection
+
 
 def _install_fake_weaviate(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
     """Inject a fake ``weaviate`` module into ``sys.modules``.
@@ -170,7 +204,10 @@ def _install_fake_weaviate(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, 
     client.collections = MagicMock()
     client.collections.exists = AsyncMock(return_value=True)  # skip create branch
     client.collections.create = AsyncMock()
-    client.collections.get = MagicMock(return_value=MagicMock(name="CollectionAsync"))
+    # The default existing-collection handle reports a schema that ALREADY carries
+    # every denorm property, so connect()'s reconcile branch is a no-op for the
+    # tests that don't exercise it (they override collections.get when they do).
+    client.collections.get = MagicMock(return_value=_reconcile_noop_collection())
 
     fake_weaviate.use_async_with_local = MagicMock(return_value=client)
     fake_weaviate.use_async_with_custom = MagicMock(return_value=client)
@@ -200,8 +237,8 @@ def _install_fake_weaviate(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, 
         TEXT_ARRAY = "TEXT_ARRAY"
         NUMBER = "NUMBER"
 
-    def _Property(*, name: str, data_type: str) -> Any:
-        return SimpleNamespace(name=name, data_type=data_type)
+    def _Property(*, name: str, data_type: str, **kwargs: Any) -> Any:
+        return SimpleNamespace(name=name, data_type=data_type, **kwargs)
 
     class _Auth:
         @staticmethod
@@ -331,7 +368,7 @@ class TestTenantCache:
     async def test_tenants_created_once_per_namespace(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _weaviate, client = _install_fake_weaviate(monkeypatch)
 
-        collection = MagicMock(name="CollectionAsync")
+        collection = _reconcile_noop_collection()
         collection.tenants.create = AsyncMock()
         collection.with_tenant = MagicMock(return_value=MagicMock(name="TenantScopedCollection"))
         client.collections.get = MagicMock(return_value=collection)
@@ -398,7 +435,7 @@ class TestCRUD:
     async def test_create_chunk_awaits_insert(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _weaviate, client = _install_fake_weaviate(monkeypatch)
 
-        collection = MagicMock(name="CollectionAsync")
+        collection = _reconcile_noop_collection()
         collection.tenants.create = AsyncMock()
         tenant_scoped = MagicMock(name="TenantScopedCollection")
         tenant_scoped.data.insert = AsyncMock()
@@ -429,7 +466,7 @@ class TestCRUD:
     async def test_create_chunks_batch_fans_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _weaviate, client = _install_fake_weaviate(monkeypatch)
 
-        collection = MagicMock(name="CollectionAsync")
+        collection = _reconcile_noop_collection()
         collection.tenants.create = AsyncMock()
         tenant_scoped = MagicMock(name="TenantScopedCollection")
         tenant_scoped.data.insert = AsyncMock()
@@ -460,7 +497,7 @@ class TestCRUD:
     async def test_delete_chunk_awaits_delete(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _weaviate, client = _install_fake_weaviate(monkeypatch)
 
-        collection = MagicMock(name="CollectionAsync")
+        collection = _reconcile_noop_collection()
         collection.tenants.create = AsyncMock()
         tenant_scoped = MagicMock(name="TenantScopedCollection")
         tenant_scoped.data.delete_by_id = AsyncMock()
@@ -611,7 +648,7 @@ async def _store_with_query(
     _weaviate, client = _install_fake_weaviate(monkeypatch)
     _install_query_filter(monkeypatch)
 
-    collection = MagicMock(name="CollectionAsync")
+    collection = _reconcile_noop_collection()
     collection.tenants.create = AsyncMock()
     tenant_scoped = MagicMock(name="TenantScopedCollection")
     tenant_scoped.query.near_vector = AsyncMock(return_value=SimpleNamespace(objects=objects))
@@ -783,3 +820,168 @@ class TestSearchFilterAstWiring:
         # Exactly the 2 matching rows survive (< limit=3), in returned order.
         assert [str(r.chunk.id) for r in results] == match_ids
         assert all(r.chunk.metadata.get("tag") == "rare" for r in results)
+
+
+# ---------------------------------------------------------------------------
+# Denormalized document fields: write/read round-trip + reconcile
+# ---------------------------------------------------------------------------
+
+
+def _readback_object(props: dict[str, Any], chunk_id: UUID) -> SimpleNamespace:
+    """A fake read-back object whose ``.properties`` is exactly what the store wrote."""
+    return SimpleNamespace(uuid=str(chunk_id), properties=props, vector=None)
+
+
+@pytest.mark.unit
+class TestDenormFieldsRoundTrip:
+    @pytest.mark.asyncio
+    async def test_populated_fields_round_trip(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # _chunk_to_properties → readback object → _object_to_chunk preserves all
+        # eight denormalized document fields.
+        _install_fake_weaviate(monkeypatch)
+        store = _build_store("http://localhost:8090")
+
+        ns_id = uuid4()
+        ts = datetime(2026, 4, 1, 9, 30, tzinfo=UTC)
+        chunk = TemporalChunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="hello",
+            embedding=[0.1] * 1536,
+            source_type="slack",
+            source_name="general",
+            source_url="https://example.com/x",
+            external_id="ext-42",
+            content_type="text/plain",
+            source="slack-export",
+            title="A title",
+            source_timestamp=ts,
+        )
+
+        props = _chunk_to_properties(chunk)
+        # The seven strings ride verbatim; source_timestamp serializes to ISO.
+        assert props["source_type"] == "slack"
+        assert props["title"] == "A title"
+        assert props["source_timestamp"] == ts.isoformat()
+
+        back = store._object_to_chunk(_readback_object(props, chunk.id), ns_id)
+        assert back.source_type == "slack"
+        assert back.source_name == "general"
+        assert back.source_url == "https://example.com/x"
+        assert back.external_id == "ext-42"
+        assert back.content_type == "text/plain"
+        assert back.source == "slack-export"
+        assert back.title == "A title"
+        assert back.source_timestamp == ts
+
+    @pytest.mark.asyncio
+    async def test_absent_fields_round_trip_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A chunk with no denorm string keys and no source_timestamp round-trips
+        # back to None for each — no crash on absent / None properties.
+        _install_fake_weaviate(monkeypatch)
+        store = _build_store("http://localhost:8090")
+
+        ns_id = uuid4()
+        chunk = TemporalChunk(
+            id=uuid4(),
+            namespace_id=ns_id,
+            document_id=uuid4(),
+            content="hello",
+            embedding=[0.1] * 1536,
+        )
+
+        props = _chunk_to_properties(chunk)
+        assert props["source_timestamp"] is None
+        assert props["source_type"] is None
+
+        # Drop the keys entirely (simulate an older row that never carried them) to
+        # also exercise the absent-property read path.
+        for key in (*_DENORM_TEXT_KEYS, "source_timestamp"):
+            props.pop(key, None)
+
+        back = store._object_to_chunk(_readback_object(props, chunk.id), ns_id)
+        for key in _DENORM_TEXT_KEYS:
+            assert getattr(back, key) is None
+        assert back.source_timestamp is None
+
+
+@pytest.mark.unit
+class TestDenormFieldsReconciliation:
+    @pytest.mark.asyncio
+    async def test_connect_adds_missing_denorm_properties(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # connect() against a pre-existing collection whose schema predates the denorm
+        # properties adds each missing one exactly once, with the exact definitions —
+        # and the seven TEXT props carry index_searchable=False.
+        _weaviate, client = _install_fake_weaviate(monkeypatch)
+        client.collections.exists = AsyncMock(return_value=True)
+
+        # The OLD property set (no denorm props): only the pre-denorm columns.
+        old_props = [
+            SimpleNamespace(name=name)
+            for name in (
+                "content",
+                "document_id",
+                "namespace_id",
+                "occurred_at",
+                "created_at",
+                "source_system",
+                "author",
+                "channel",
+                "tags",
+                "confidence",
+                "metadata_json",
+            )
+        ]
+        collection = MagicMock(name="CollectionAsync")
+        collection.config.get = AsyncMock(return_value=SimpleNamespace(properties=old_props))
+        collection.config.add_property = AsyncMock()
+        client.collections.get = MagicMock(return_value=collection)
+
+        store = _build_store("http://localhost:8090")
+        await store.connect()
+
+        expected = _denorm_properties()
+        assert collection.config.add_property.await_count == len(expected)
+        added = [call.args[0] for call in collection.config.add_property.await_args_list]
+        assert [p.name for p in added] == [p.name for p in expected]
+        # The seven TEXT props keep BM25 out (index_searchable=False); the DATE prop
+        # (source_timestamp) is not a TEXT prop and carries no such flag.
+        text_added = [p for p in added if p.data_type == "TEXT"]
+        assert {p.name for p in text_added} == set(_DENORM_TEXT_KEYS)
+        assert all(p.index_searchable is False for p in text_added)
+        assert all(p.index_filterable is True for p in text_added)
+        # The DATE prop (source_timestamp) is typed DATE, not TEXT.
+        date_added = [p for p in added if p.name == "source_timestamp"]
+        assert [p.data_type for p in date_added] == ["DATE"]
+
+    @pytest.mark.asyncio
+    async def test_connect_is_noop_when_denorm_properties_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A second connect() where every denorm property already exists adds nothing.
+        _weaviate, client = _install_fake_weaviate(monkeypatch)
+        client.collections.exists = AsyncMock(return_value=True)
+
+        existing_names = [
+            "content",
+            "document_id",
+            "namespace_id",
+            "occurred_at",
+            "created_at",
+            "source_system",
+            "author",
+            "channel",
+            "tags",
+            "confidence",
+            "metadata_json",
+            *(p.name for p in _denorm_properties()),
+        ]
+        full_props = [SimpleNamespace(name=name) for name in existing_names]
+        collection = MagicMock(name="CollectionAsync")
+        collection.config.get = AsyncMock(return_value=SimpleNamespace(properties=full_props))
+        collection.config.add_property = AsyncMock()
+        client.collections.get = MagicMock(return_value=collection)
+
+        store = _build_store("http://localhost:8090")
+        await store.connect()
+
+        collection.config.add_property.assert_not_awaited()

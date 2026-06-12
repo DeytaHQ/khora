@@ -66,6 +66,40 @@ COLLECTION_NAME = "KhoraChunk"
 # survivor set can still reach ``limit`` after the post-filter prunes.
 _FILTER_OVERFETCH = 4
 
+# The seven denormalized document string keys carried on every ``KhoraChunk`` object
+# (the eighth, ``source_timestamp``, is a DATE). Stored as filterable-only TEXT
+# (``index_searchable=False`` keeps them out of BM25 hybrid search) so the post-filter
+# can read them back; they do NOT push down (pushdown stays date-only).
+_DENORM_TEXT_KEYS: tuple[str, ...] = (
+    "source_type",
+    "source_name",
+    "source_url",
+    "external_id",
+    "content_type",
+    "source",
+    "title",
+)
+
+
+def _denorm_properties() -> tuple[Any, ...]:
+    """Build the eight denormalized document properties (single source: create + reconcile).
+
+    Lazily constructed because ``weaviate.classes.config`` is an optional import
+    (the backend module imports fine without ``weaviate-client`` installed). The
+    seven string keys are TEXT with ``index_searchable=False`` — a REQUIRED guard
+    against BM25 hybrid-search pollution — and ``index_filterable=True`` so the
+    post-filter can address them; ``source_timestamp`` is a DATE.
+    """
+    from weaviate.classes.config import DataType, Property
+
+    return (
+        *(
+            Property(name=key, data_type=DataType.TEXT, index_filterable=True, index_searchable=False)
+            for key in _DENORM_TEXT_KEYS
+        ),
+        Property(name="source_timestamp", data_type=DataType.DATE),
+    )
+
 
 @dataclass(frozen=True)
 class WeaviateBackendConfig:
@@ -243,10 +277,19 @@ class WeaviateTemporalStore(TemporalVectorStore):
                     Property(name="tags", data_type=DataType.TEXT_ARRAY),
                     Property(name="confidence", data_type=DataType.NUMBER),
                     Property(name="metadata_json", data_type=DataType.TEXT),  # JSON string
+                    *_denorm_properties(),
                 ],
                 multi_tenancy_config=Configure.multi_tenancy(enabled=True),
             )
             logger.info(f"Created Weaviate collection: {COLLECTION_NAME}")
+        else:
+            # Idempotently reconcile a pre-existing collection: add any denorm property
+            # missing from an older schema (no-op once every denorm key is present).
+            collection = self._client.collections.get(COLLECTION_NAME)
+            existing = {p.name for p in (await collection.config.get()).properties}
+            for prop in _denorm_properties():
+                if prop.name not in existing:
+                    await collection.config.add_property(prop)
 
         self._connected = True
         logger.info(
@@ -427,17 +470,18 @@ class WeaviateTemporalStore(TemporalVectorStore):
            pushed-down date keys in Python is idempotent — this guarantees the
            backend honors the filter and never raises.
 
-        Stale-collection-schema limitation: the eight document-grained system keys
-        (``source_type`` / ``source_name`` / ``source_url`` / ``source_timestamp``
-        / ``external_id`` / ``content_type`` / ``source`` / ``title``) are NOT
-        stored on the ``KhoraChunk`` collection, nor is the structured ``metadata``
-        blob (it is serialized to a single ``metadata_json`` string property). A
-        predicate on any of those post-filters against an absent field, so
-        ``compile_python``'s absent-key semantics apply (a positive op excludes the
-        chunk, a negation includes it). Pushing those down would need a separate
-        collection-projection change and is out of scope here.
+        The eight document-grained system keys (``source_type`` / ``source_name`` /
+        ``source_url`` / ``external_id`` / ``content_type`` / ``source`` / ``title``
+        and ``source_timestamp``) are stored on the ``KhoraChunk`` object as
+        filterable-only properties — the seven strings as ``TEXT`` with
+        ``index_searchable=False`` (kept out of BM25 hybrid search) and
+        ``source_timestamp`` as ``DATE`` — and are enforced by the python post-filter,
+        which reads them back off the returned object. Pushdown stays date-only
+        (``occurred_at`` / ``created_at`` in ``field_mapping``); the structured
+        ``metadata`` blob remains a single ``metadata_json`` string property re-checked
+        by the post-filter.
 
-        Two edge cases worth knowing:
+        One edge case worth knowing:
 
         * **May return fewer than** ``limit``. A predicate Weaviate cannot
           pre-narrow (any ``metadata`` path — metadata is not a queryable property)
@@ -447,12 +491,6 @@ class WeaviateTemporalStore(TemporalVectorStore):
           (never a wrong row, only possibly fewer) and inherent to post-filtering;
           a caller needing exactly ``limit`` under heavy metadata selectivity must
           widen the candidate budget (raise ``limit`` upstream).
-        * **A positive predicate on an unstored key returns ZERO rows.** Because
-          the eight document-grained system keys above are absent on every stored
-          object, a positive predicate such as ``{"source_name": "foo"}``
-          post-filters to an empty result (absent == not-equal under §4); only the
-          negation form (``$ne`` / ``$nin``) admits those rows. Not a silent bug —
-          a direct consequence of the stale-collection-schema limitation.
         """
         from weaviate.classes.query import HybridFusion, MetadataQuery
 
@@ -649,6 +687,14 @@ class WeaviateTemporalStore(TemporalVectorStore):
             tags=props.get("tags") or [],
             confidence=props.get("confidence", 1.0),
             metadata=metadata,
+            source_type=props.get("source_type"),
+            source_name=props.get("source_name"),
+            source_url=props.get("source_url"),
+            external_id=props.get("external_id"),
+            content_type=props.get("content_type"),
+            source=props.get("source"),
+            title=props.get("title"),
+            source_timestamp=_coerce_datetime(props.get("source_timestamp")),
         )
 
     async def health_check(self) -> dict[str, Any]:
@@ -748,6 +794,14 @@ def _chunk_to_properties(chunk: TemporalChunk) -> dict[str, Any]:
         "tags": chunk.tags or [],
         "confidence": chunk.confidence,
         "metadata_json": json.dumps(chunk.metadata or {}),
+        "source_type": chunk.source_type,
+        "source_name": chunk.source_name,
+        "source_url": chunk.source_url,
+        "external_id": chunk.external_id,
+        "content_type": chunk.content_type,
+        "source": chunk.source,
+        "title": chunk.title,
+        "source_timestamp": chunk.source_timestamp.isoformat() if chunk.source_timestamp else None,
     }
 
 

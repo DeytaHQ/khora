@@ -52,10 +52,11 @@ from khora.engines.skeleton.backends import TemporalChunk
 from khora.engines.skeleton.backends.weaviate import (
     WeaviateBackendConfig,
     WeaviateTemporalStore,
+    _coerce_datetime,
 )
 from khora.filter import CompiledFilter
 from khora.filter.ast import FilterNode
-from khora.filter.conformance import ConformanceCase, SeedRecord, WeaviateExecutor
+from khora.filter.conformance import _DOC_STRING_KEYS, ConformanceCase, SeedRecord, WeaviateExecutor
 
 # One fixed tenant for the whole conformance corpus. Chunk ids are globally unique
 # (a fresh ``uuid4`` per seed record), so scoping a read by chunk id inside this one
@@ -105,7 +106,9 @@ def _to_chunk(record: SeedRecord, namespace_id: UUID, chunk_id: UUID) -> Tempora
 
     Carries the fields the weaviate property surface exposes: the three date keys
     (the store stores ``occurred_at`` / ``created_at`` as ISO strings; the compiler
-    declares only those two pushable) and the ``metadata`` blob (serialized to the
+    declares only those two pushable), the seven denormalized document string keys
+    (``source_type`` … ``title``, stored as filterable-only TEXT properties the
+    post-filter reads back), and the ``metadata`` blob (serialized to the
     ``metadata_json`` text property the post-filter decodes). A document id is
     minted per chunk; it is irrelevant to the filter. ``source_timestamp`` rides on
     the chunk so the post-filter (which re-checks the full AST) sees it.
@@ -120,6 +123,13 @@ def _to_chunk(record: SeedRecord, namespace_id: UUID, chunk_id: UUID) -> Tempora
         created_at=record.created_at,
         source_timestamp=record.source_timestamp,
         metadata=dict(record.metadata or {}),
+        source_type=record.source_type,
+        source_name=record.source_name,
+        source_url=record.source_url,
+        external_id=record.external_id,
+        content_type=record.content_type,
+        source=record.source,
+        title=record.title,
     )
 
 
@@ -241,6 +251,33 @@ def reachable() -> bool:
         return False
 
 
+def _object_to_record(obj: Any) -> dict[str, Any]:
+    """Rebuild the ``_record_mapping``-shaped dict the post-filter reads from a read-back object.
+
+    Mirrors the harness's ``_record_mapping``: ``occurred_at`` coalesces to
+    ``source_timestamp`` (the corpus's ``expected_ids`` assume that fold), the literal
+    ``created_at`` / ``source_timestamp`` columns ride through, ``metadata`` decodes
+    from the ``metadata_json`` text property, and each populated denormalized string
+    key is read straight off the object surface. Re-applying the coalesce here is
+    required because the weaviate seeder bypasses the engine, so the read-back record
+    must reproduce the shape ``_record_mapping`` would have produced.
+    """
+    props = obj.properties
+    occurred_at = _coerce_datetime(props.get("occurred_at"))
+    source_timestamp = _coerce_datetime(props.get("source_timestamp"))
+    mapping: dict[str, Any] = {
+        "occurred_at": occurred_at if occurred_at is not None else source_timestamp,
+        "created_at": _coerce_datetime(props.get("created_at")),
+        "source_timestamp": source_timestamp,
+        "metadata": json.loads(props["metadata_json"]) if props.get("metadata_json") else {},
+    }
+    for key in _DOC_STRING_KEYS:
+        value = props.get(key)
+        if value is not None:
+            mapping[key] = value
+    return mapping
+
+
 async def run_live(
     id_map: Mapping[str, UUID],
     compiled: CompiledFilter[Any],
@@ -260,13 +297,17 @@ async def run_live(
     over-returns (it pushes only monotone-narrowing date predicates and defers
     negations / ``$exists`` / ``source_timestamp`` / all metadata).
 
-    Read-only: no seeding here. ``records`` carries the ``(seed_id, mapping)`` pairs
-    ``post_filter`` reads; they are keyed back to the surviving objects by chunk id.
-    Returns the ``SeedRecord`` ids whose object survived prefilter and post-filter.
+    Read-only: no seeding here. The ``records`` parameter is part of the shared
+    :class:`LiveRunner` signature but is intentionally unused on this leg: the
+    post-filter now evaluates the read-back OBJECT surface (rebuilt by
+    :func:`_object_to_record`) rather than the harness's in-memory mapping, so the leg
+    verifies the store actually round-trips every filtered field (the eight
+    denormalized document keys included), not just that the in-memory record would
+    have matched. Returns the ``SeedRecord`` ids whose object survived prefilter and
+    post-filter.
     """
     from weaviate.classes.query import Filter
 
-    record_map = dict(records)
     chunk_to_seed = {chunk_id: seed_id for seed_id, chunk_id in id_map.items()}
 
     # Scope to exactly this case's chunk ids; AND the superset prefilter when present.
@@ -287,7 +328,7 @@ async def run_live(
         seed_id = chunk_to_seed.get(chunk_id)
         if seed_id is None:
             continue
-        if post_filter(record_map[seed_id]):
+        if post_filter(_object_to_record(obj)):
             survivors.add(seed_id)
     return frozenset(survivors)
 
