@@ -930,8 +930,9 @@ class TestRecallFilterKwarg:
     def _mock_result_with_engine_info(ns_id: object, engine_info: dict[str, object]) -> RecallResult:
         """A ``_mock_result`` whose ``engine_info`` is pre-populated by the engine.
 
-        The facade reads the engine-reported ``engine_info["filter"]["pushed_down"]``
-        and surfaces it; this helper lets a facade test stage that engine report.
+        The facade passes ``engine_info["filter"]`` through unchanged (#1069); this
+        helper lets a facade test stage the engine's report and assert it surfaces
+        verbatim.
         """
         return RecallResult(
             query="q",
@@ -944,11 +945,13 @@ class TestRecallFilterKwarg:
         )
 
     @pytest.mark.asyncio
-    async def test_engine_info_filter_present_with_filter(self) -> None:
-        """engine_info['filter'] is populated on the result when filter= is passed.
+    async def test_engine_info_filter_passthrough_absent_when_engine_silent(self) -> None:
+        """The facade passes ``engine_info["filter"]`` through unchanged (#1069).
 
-        The default vectorcypher engine reports no pushdown, so the facade
-        surfaces ``pushed_down=False``.
+        The facade no longer synthesizes a ``{engine, supported, pushed_down}``
+        summary over the engine's report. An engine that writes no ``filter`` key
+        (the default vectorcypher mock here) therefore surfaces no ``filter`` key —
+        the facade never invents a pushdown report the engine did not produce.
         """
         kb = _make_kb(connected=True)
         ns_id = uuid4()
@@ -956,29 +959,34 @@ class TestRecallFilterKwarg:
 
         result = await self._async_recall(kb, "q", namespace=ns_id, filter={"source_name": "linear"})
 
-        info = result.engine_info.get("filter")
-        assert info is not None
-        assert info["engine"] == "vectorcypher"
-        assert info["pushed_down"] is False
-        assert info["supported"] is False
+        # Pass-through: a silent engine leaves the key absent (no synthesis).
+        assert result.engine_info.get("filter") is None
 
     @pytest.mark.asyncio
-    async def test_engine_info_surfaces_engine_reported_pushdown(self) -> None:
-        """The facade SURFACES an engine-reported pushdown.
+    async def test_engine_info_surfaces_engine_reported_report(self) -> None:
+        """The facade SURFACES the engine's canonical FilterPushdownReport verbatim.
 
-        When the engine already reports
-        ``engine_info["filter"]["pushed_down"] = True`` (the skeleton-pgvector
-        path reports this from its engine-level derivation), the facade must carry
-        that honest value through to the final result rather than hardcoding
-        ``False``.
+        When the engine writes ``engine_info["filter"]`` (skeleton / chronicle emit
+        the ``FilterPushdownReport.model_dump()``), the facade carries that honest
+        report through to the final result unchanged — it neither overwrites it nor
+        re-wraps it in a ``{engine, supported, pushed_down}`` shape.
         """
+        from khora.filter import FilterPushdownReport
+
         kb = _make_kb(connected=True)
         kb._engine_name = "skeleton"
         ns_id = uuid4()
+        engine_report = FilterPushdownReport(
+            pushed_down=True,
+            post_filtered=False,
+            pushed_keys=["source_name"],
+            post_filtered_keys=[],
+            channels={"pgvector": {"pushed_keys": ["source_name"], "post_filtered_keys": []}},
+        ).model_dump(mode="json")
         kb._engine.recall = AsyncMock(
             return_value=self._mock_result_with_engine_info(
                 ns_id,
-                {"engine": "skeleton", "backend": "pgvector", "filter": {"pushed_down": True}},
+                {"engine": "skeleton", "backend": "pgvector", "filter": engine_report},
             )
         )
 
@@ -986,31 +994,47 @@ class TestRecallFilterKwarg:
 
         info = result.engine_info.get("filter")
         assert info is not None
-        assert info["engine"] == "skeleton"
-        assert info["supported"] is True
+        # The report flows through verbatim and round-trips as the canonical model.
+        assert FilterPushdownReport.model_validate(info) == FilterPushdownReport.model_validate(engine_report)
         assert info["pushed_down"] is True
+        # The synthesized facade-only fields are gone.
+        assert "supported" not in info
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "engine_info",
+        "engine_info,expected_filter",
         [
-            # No "filter" key at all (e.g. an engine that never writes one).
-            {"engine": "skeleton", "backend": "lance"},
-            # A non-pgvector skeleton backend that accept-and-ignores the AST
-            # writes filter={"pushed_down": False} — the shape the live engine
-            # actually emits when the filter is not pushed into SQL.
-            {"engine": "skeleton", "backend": "lance", "filter": {"pushed_down": False}},
+            # No "filter" key at all (e.g. an engine that never writes one) →
+            # pass-through leaves it absent.
+            ({"engine": "skeleton", "backend": "lance"}, None),
+            # A backend that ran the filter but pushed nothing writes the canonical
+            # not-pushed report → the facade surfaces it unchanged.
+            (
+                {
+                    "engine": "skeleton",
+                    "backend": "lance",
+                    "filter": {
+                        "pushed_down": False,
+                        "post_filtered": True,
+                        "pushed_keys": [],
+                        "post_filtered_keys": ["source_name"],
+                        "channels": {"lance": {"pushed_keys": [], "post_filtered_keys": ["source_name"]}},
+                    },
+                },
+                False,
+            ),
         ],
-        ids=["filter-key-absent", "filter-pushed-down-false"],
+        ids=["filter-key-absent", "filter-not-pushed"],
     )
-    async def test_engine_info_defaults_pushdown_false_when_engine_silent(self, engine_info: dict[str, object]) -> None:
-        """The facade reports ``pushed_down=False`` when the engine does not push down.
+    async def test_engine_info_filter_passthrough_when_engine_does_not_push(
+        self, engine_info: dict[str, object], expected_filter: bool | None
+    ) -> None:
+        """The facade passes the engine's not-pushed report through unchanged.
 
-        False case: a skeleton recall whose engine_info carries no
-        pushdown signal (a non-pgvector skeleton backend that accept-and-ignores
-        the filter, or any engine that omits the key) surfaces
-        ``pushed_down=False`` — the facade never claims a pushdown the engine did
-        not report.
+        Two not-pushed shapes: an engine that omits the ``filter`` key entirely
+        (key stays absent under pass-through), and a backend that ran the filter
+        but pushed nothing (the canonical ``pushed_down=False`` report flows through
+        verbatim). The facade never claims a pushdown the engine did not report.
         """
         kb = _make_kb(connected=True)
         kb._engine_name = "skeleton"
@@ -1020,9 +1044,11 @@ class TestRecallFilterKwarg:
         result = await self._async_recall(kb, "q", namespace=ns_id, filter={"source_name": "linear"})
 
         info = result.engine_info.get("filter")
-        assert info is not None
-        assert info["engine"] == "skeleton"
-        assert info["pushed_down"] is False
+        if expected_filter is None:
+            assert info is None
+        else:
+            assert info is not None
+            assert info["pushed_down"] is expected_filter
 
     @pytest.mark.asyncio
     async def test_bare_empty_filter_reaches_engine_as_non_none_ast(self) -> None:
@@ -1054,21 +1080,26 @@ class TestRecallFilterKwarg:
         assert not filter_ast.children  # empty match-everything AND
 
     @pytest.mark.asyncio
-    async def test_engine_info_filter_present_without_filter(self) -> None:
-        """engine_info['filter'] is populated on every call, even with no filter."""
+    async def test_engine_info_filter_passthrough_no_synthesis_without_filter(self) -> None:
+        """The facade synthesizes no ``filter`` key when none is passed (#1069).
+
+        With pass-through reporting, a no-filter recall against a silent engine
+        leaves ``engine_info["filter"]`` absent — the facade no longer fabricates a
+        ``pushed_down=False`` summary on every call. A real skeleton engine writes
+        its own canonical empty report on every recall (covered by the engine-level
+        tests); this facade test pins the no-synthesis contract.
+        """
         kb = _make_kb(connected=True)
         ns_id = uuid4()
         kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
 
         result = await self._async_recall(kb, "q", namespace=ns_id)
 
-        info = result.engine_info.get("filter")
-        assert info is not None
-        assert info["pushed_down"] is False
+        assert result.engine_info.get("filter") is None
 
     @pytest.mark.asyncio
-    async def test_no_filter_no_bounds_passes_none_ast_and_records_info(self) -> None:
-        """filter=None with no bounds → filter_ast=None to engine, engine_info still populated."""
+    async def test_no_filter_no_bounds_passes_none_ast(self) -> None:
+        """filter=None with no bounds → filter_ast=None to engine (no synthesized report)."""
         kb = _make_kb(connected=True)
         ns_id = uuid4()
         kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
@@ -1076,32 +1107,8 @@ class TestRecallFilterKwarg:
         result = await self._async_recall(kb, "q", namespace=ns_id, filter=None)
 
         assert kb._engine.recall.call_args.kwargs.get("filter_ast") is None
-        info = result.engine_info.get("filter")
-        assert info is not None
-        assert info["pushed_down"] is False
-
-    @pytest.mark.asyncio
-    async def test_engine_info_filter_supported_for_skeleton(self) -> None:
-        """The skeleton engine is the pushdown target → supported=True.
-
-        This mock engine reports no pushdown signal, so ``pushed_down`` defaults
-        to ``False``. The skeleton-pgvector pushdown=True derivation is asserted
-        directly in ``tests/unit/engines/test_skeleton_filter_ast.py``, and the
-        whole-filter row-narrowing it implies is covered by the postgres leg of
-        the filter-conformance corpus (e.g. ``F-SEL-three-predicate``).
-        """
-        kb = _make_kb(connected=True)
-        kb._engine_name = "skeleton"
-        ns_id = uuid4()
-        kb._engine.recall = AsyncMock(return_value=self._mock_result(ns_id))
-
-        result = await self._async_recall(kb, "q", namespace=ns_id, filter={"source_name": "linear"})
-
-        info = result.engine_info.get("filter")
-        assert info is not None
-        assert info["engine"] == "skeleton"
-        assert info["supported"] is True
-        assert info["pushed_down"] is False
+        # Pass-through: the silent engine writes no filter report, so none appears.
+        assert result.engine_info.get("filter") is None
 
 
 # ---------------------------------------------------------------------------

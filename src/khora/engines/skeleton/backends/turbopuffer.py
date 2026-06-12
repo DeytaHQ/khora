@@ -53,6 +53,7 @@ from khora.engines.skeleton.backends import (
     TemporalVectorStore,
 )
 from khora.filter import RecallFilterUnsupportedError
+from khora.filter.report import ChannelPlan
 
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
@@ -329,6 +330,7 @@ class TurbopufferTemporalStore(TemporalVectorStore):
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[TemporalSearchResult]:
         """Vector or hybrid (vector + BM25) search.
 
@@ -354,6 +356,14 @@ class TurbopufferTemporalStore(TemporalVectorStore):
                 "filter_ast",
                 "the turbopuffer backend does not support deterministic recall filters; filter_ast must be None",
             )
+
+        # Honest filter-pushdown plan (#1069), handed back per-call via
+        # ``filter_plan_out`` (no mutable instance state — race-free under
+        # concurrent recalls). Reaching here means the filter was constraint-free
+        # (a constraint-bearing one raised above), so nothing was pushed and the
+        # empty plan is the faithful report.
+        if filter_plan_out is not None:
+            filter_plan_out.append(ChannelPlan())
 
         ns = self._namespace(namespace_id)
         tp_filter = _build_turbopuffer_filter(temporal_filter)

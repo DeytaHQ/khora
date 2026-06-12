@@ -49,6 +49,7 @@ from khora.engines.skeleton.backends import (
     TemporalSearchResult,
     TemporalVectorStore,
 )
+from khora.filter.report import ChannelPlan
 from khora.storage._log_safe import _safe_url_for_log
 
 if TYPE_CHECKING:
@@ -399,6 +400,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -461,10 +463,12 @@ class WeaviateTemporalStore(TemporalVectorStore):
         # native Weaviate filter and AND it into the legacy temporal filter; build
         # an in-memory predicate over the whole AST for the post-filter pass.
         post_filter: Callable[[Any], bool] | None = None
+        plan = ChannelPlan()
         if filter_ast is not None:
             from khora.filter import CompileContext
             from khora.filter.compilers.python import compile_python
             from khora.filter.compilers.weaviate import compile_weaviate
+            from khora.filter.execute import filter_leaf_keys
 
             compiled = compile_weaviate(
                 filter_ast,
@@ -483,6 +487,27 @@ class WeaviateTemporalStore(TemporalVectorStore):
                 filter_ast,
                 CompileContext(backend_target=COLLECTION_NAME, on_unsupported="split"),
             ).predicate
+
+            # Honest filter-pushdown plan (#1069), derived from THIS split compile
+            # (no backend-name check, no re-compile). Only the two DATE properties
+            # push down (compiled.consumed_keys); the remaining leaves are re-checked
+            # by the always-on compile_python post-filter, so they go to
+            # post_filtered_keys. defensive_recheck=True because that post-filter
+            # re-checks the FULL AST — including the pushed date keys — without
+            # demoting them out of pushed_keys (NO-DEMOTE). A constraint-free filter
+            # (empty-AND) has no leaves, so build_filter_report treats it as nothing
+            # pushed regardless of the defensive flag.
+            consumed = compiled.consumed_keys
+            plan = ChannelPlan(
+                pushed_keys=consumed,
+                post_filtered_keys=filter_leaf_keys(filter_ast) - consumed,
+                defensive_recheck=bool(filter_ast.children),
+            )
+
+        # Hand the plan back per-call (#1069) — no mutable instance state, so the
+        # report is race-free under concurrent recalls on a shared store.
+        if filter_plan_out is not None:
+            filter_plan_out.append(plan)
 
         # Over-fetch when a post-filter runs — it prunes rows, so we need a larger
         # candidate pool to still satisfy ``limit`` after trimming.

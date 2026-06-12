@@ -2113,22 +2113,17 @@ class Khora:
                 # per-chunk entity linkage, and emit a new RecallResult.
                 result = await self._upgrade_recall_documents(result, namespace_id)
 
-                # Record an honest filter-handling summary on every call.
-                # ``pushed_down`` is engine-reported: the skeleton-pgvector path
-                # compiles ``filter_ast`` into SQL and stamps the result on
-                # ``engine_info["filter"]["pushed_down"]``; engines that do not
-                # push filters down leave it absent, so we default to False.
-                # ``supported`` is True only for the skeleton engine (the
-                # pushdown target). The engine name prefers whatever the engine
-                # already reported.
-                _engine_name = (result.engine_info or {}).get("engine", self._engine_name)
-                _pushed_down = (result.engine_info or {}).get("filter", {}).get("pushed_down", False)
-                _filter_info = {
-                    "engine": _engine_name,
-                    "supported": _engine_name == "skeleton",
-                    "pushed_down": _pushed_down,
-                }
-                result = replace(result, engine_info={**(result.engine_info or {}), "filter": _filter_info})
+                # The engine's ``engine_info["filter"]`` is passed through
+                # unchanged. The skeleton engine writes the canonical
+                # FilterPushdownReport (``report.model_dump(mode="json")``);
+                # chronicle currently writes its own hand-rolled
+                # ``{pushed_down, post_filtered}`` dict (canonical adoption is a
+                # follow-up). The facade no longer synthesizes a ``{engine,
+                # supported, pushed_down}`` shape over it (#1069): ``supported`` /
+                # the facade-level ``engine`` were not part of the canonical schema
+                # and were read nowhere. Engines that do not report filter pushdown
+                # simply omit the key, so callers must treat ``"filter"`` as
+                # optional (key on its presence, not assume it).
 
                 # Emit RECALL_RESULTS_READY after engine returns, before packaging.
                 try:

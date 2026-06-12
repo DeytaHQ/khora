@@ -65,9 +65,15 @@ from khora.filter.registry import (
 from khora.filter.registry import (
     CompilerRegistry as CompilerRegistry,
 )
+from khora.filter.report import (
+    FilterChannelReport,
+    FilterPushdownReport,
+)
 
 __all__ = [
     "DateOps",
+    "FilterChannelReport",
+    "FilterPushdownReport",
     "Op",
     "RecallFilter",
     "RecallFilterUnsupportedError",

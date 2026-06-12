@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from khora.config import KhoraConfig
     from khora.core.models.document import Document
     from khora.filter.ast import FilterNode
+    from khora.filter.report import ChannelPlan
 
 
 @dataclass
@@ -164,6 +165,7 @@ class TemporalVectorStore(Protocol):
         hybrid_alpha: float | None = None,  # None = vector only, 0-1 = blend
         query_text: str | None = None,  # Required for hybrid search
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -178,6 +180,14 @@ class TemporalVectorStore(Protocol):
             filter_ast: Canonical recall-filter AST. The pgvector backend
                 compiles it to a WHERE predicate; the other backends accept
                 it for protocol parity and ignore it (no compilation yet).
+            filter_plan_out: Optional per-call sink for the honest filter-pushdown
+                plan (#1069). When provided, the backend appends exactly one
+                :class:`~khora.filter.report.ChannelPlan` describing how *this*
+                call's ``filter_ast`` was pushed down vs. post-filtered. The caller
+                passes a fresh list per call and reads back ``[0]``, so the report
+                is race-free under concurrent recalls on a shared store — no mutable
+                instance state is involved. Backends that do not report pushdown
+                leave it untouched.
 
         Returns:
             List of matching chunks with similarity scores

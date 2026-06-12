@@ -711,6 +711,45 @@ class TestSearchFilterAstWiring:
         assert results == []
 
     @pytest.mark.asyncio
+    async def test_filter_plan_out_reports_split_pushdown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The weaviate plan is the most intricate of the five backends (#1069):
+        # only declared DATE properties push down; every other leaf defers to the
+        # compile_python post-filter (post_filtered_keys), and the always-on
+        # full-AST re-check sets defensive_recheck. A date + metadata filter
+        # exercises the split. The plan is handed back per-call via the sink (no
+        # mutable instance state — race-free under concurrent recalls).
+        from khora.filter.report import ChannelPlan
+
+        objs = [_fake_object(occurred_at=datetime(2026, 6, i + 1, tzinfo=UTC)) for i in range(3)]
+        store, _tenant = await _store_with_query(monkeypatch, objs)
+
+        ast = parse_to_ast(
+            RecallFilter.model_validate({"occurred_at": {"$gt": "2026-01-01T00:00:00Z"}, "metadata.tier": "gold"})
+        )
+        sink: list[ChannelPlan] = []
+        await store.search(uuid4(), [0.1] * 1536, limit=10, filter_ast=ast, filter_plan_out=sink)
+
+        assert len(sink) == 1
+        plan = sink[0]
+        assert "occurred_at" in plan.pushed_keys  # declared DATE property pushes down
+        assert "metadata.tier" in plan.post_filtered_keys  # metadata defers to the post-filter
+        assert "occurred_at" not in plan.post_filtered_keys  # NO-DEMOTE: pushed leaf not demoted
+        assert plan.defensive_recheck is True  # always-on full-AST re-check
+
+    @pytest.mark.asyncio
+    async def test_filter_plan_out_empty_for_no_filter(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A no-filter recall appends the empty (nothing-pushed) plan to the sink.
+        from khora.filter.report import ChannelPlan
+
+        objs = [_fake_object(occurred_at=datetime(2026, 6, 1, tzinfo=UTC))]
+        store, _tenant = await _store_with_query(monkeypatch, objs)
+
+        sink: list[ChannelPlan] = []
+        await store.search(uuid4(), [0.1] * 1536, limit=5, filter_plan_out=sink)
+
+        assert sink == [ChannelPlan()]
+
+    @pytest.mark.asyncio
     async def test_selective_metadata_filter_may_return_fewer_than_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A metadata predicate cannot push down (metadata is not a queryable
         # Weaviate property), so the python post-filter enforces it over the

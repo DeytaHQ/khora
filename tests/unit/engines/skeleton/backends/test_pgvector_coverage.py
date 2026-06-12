@@ -539,4 +539,5 @@ class TestSearchTelemetryWrapper:
             hybrid_alpha=0.5,
             query_text="x",
             filter_ast=None,
+            filter_plan_out=None,
         )
