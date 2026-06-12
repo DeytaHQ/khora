@@ -640,3 +640,48 @@ async def test_filter_report_no_constraint_reports_nothing_narrowed(wire: dict |
     assert report["pushed_keys"] == []
     assert report["post_filtered_keys"] == []
     assert report["channels"] == {_CHUNKS_CHANNEL: {"pushed_keys": [], "post_filtered_keys": []}}
+
+
+@pytest.mark.asyncio
+async def test_filter_report_source_timestamp_under_or_is_post_filter_only() -> None:
+    # Only a TOP-LEVEL conjunctive source_timestamp clause folds into the recency
+    # window. A source_timestamp buried inside an ``$or`` is not a hard conjunctive
+    # constraint, so it does NOT push — it (and its $or sibling) land in
+    # post_filtered_keys. This is the invariant the all-leaves ``pushed_down``
+    # semantics rests on: a leaf only counts as pushed when it actually folded.
+    engine = _engine_with_semantic([(_chunk("alpha", metadata={"tag": "urgent"}), 0.9)])
+    report = await _recall_report(
+        engine,
+        {
+            "$or": [
+                {"source_timestamp": {"$gte": "2026-01-01T00:00:00Z"}},
+                {"metadata.tag": "urgent"},
+            ]
+        },
+    )
+    _validates(report)
+
+    assert report["pushed_keys"] == []
+    assert report["post_filtered_keys"] == ["metadata.tag", "source_timestamp"]
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is True
+    assert report["channels"][_CHUNKS_CHANNEL] == {
+        "pushed_keys": [],
+        "post_filtered_keys": ["metadata.tag", "source_timestamp"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_filter_report_source_timestamp_under_not_is_post_filter_only() -> None:
+    # A source_timestamp negated under ``$not`` is likewise not a top-level
+    # conjunctive bound, so it does not fold into the window — it is enforced only
+    # by the in-memory post-filter and reported in post_filtered_keys.
+    engine = _engine_with_semantic([(_chunk("alpha"), 0.9)])
+    report = await _recall_report(engine, {"$not": {"source_timestamp": {"$gte": "2026-01-01T00:00:00Z"}}})
+    _validates(report)
+
+    assert report["pushed_keys"] == []
+    assert report["post_filtered_keys"] == ["source_timestamp"]
+    assert report["pushed_down"] is False
+    assert report["post_filtered"] is True
+    assert report["channels"][_CHUNKS_CHANNEL] == {"pushed_keys": [], "post_filtered_keys": ["source_timestamp"]}
