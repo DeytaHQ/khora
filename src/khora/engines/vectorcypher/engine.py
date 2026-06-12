@@ -187,6 +187,24 @@ def _coerce_session_id_from_metadata(metadata: dict[str, Any] | None) -> UUID | 
         return None
 
 
+def _checksum_dedup_applies(existing: Document, *, external_id: str | None, session_id: UUID | None) -> bool:
+    """Whether a checksum hit on *existing* counts as a duplicate (#1139).
+
+    Content checksum alone conflates distinct logical documents: a caller
+    that supplies a new ``external_id`` or ``session_id`` (e.g. the same
+    message repeated in a different conversation) must get a new document,
+    otherwise the write is silently dropped and ``forget_session`` of the
+    original session deletes the only copy. Dedup applies only when every
+    caller-supplied identity matches the existing row; callers that supply
+    neither keep the checksum-only behavior.
+    """
+    if external_id is not None and existing.external_id != external_id:
+        return False
+    if session_id is not None and existing.session_id != session_id:
+        return False
+    return True
+
+
 def _build_remember_metadata(extraction_diagnostics: dict[str, Any] | None) -> dict[str, Any]:
     """Project extraction diagnostics onto a ``RememberResult.metadata`` payload.
 
@@ -969,9 +987,12 @@ class VectorCypherEngine:
                     external_id=external_id,
                 )
 
-        # Check for duplicate
+        # Check for duplicate. Scoped by caller-supplied identity (#1139): a
+        # checksum hit on a document stored under a different external_id or
+        # session_id is a distinct logical document, not a duplicate.
+        session_id = _coerce_session_id_from_metadata(metadata)
         existing = await storage.get_document_by_checksum(namespace_id, checksum)
-        if existing:
+        if existing and _checksum_dedup_applies(existing, external_id=external_id, session_id=session_id):
             logger.debug(f"Document already exists (checksum={checksum[:8]}..., status={existing.status})")
             return RememberResult(
                 document_id=existing.id,
@@ -997,7 +1018,7 @@ class VectorCypherEngine:
             metadata=dict(metadata or {}),
             extraction_config_hash=extraction_config_hash,
             external_id=external_id,
-            session_id=_coerce_session_id_from_metadata(metadata),
+            session_id=session_id,
         )
         try:
             document = await storage.create_document(document)
