@@ -52,6 +52,7 @@ from khora.telemetry import trace_span
 
 if TYPE_CHECKING:
     from khora.filter.ast import FilterNode
+    from khora.filter.context import CompileContext
     from khora.storage.backends.sqlite_lance.connection import EmbeddedStorageHandle
 
 
@@ -173,11 +174,6 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         # khora_chunks_vec table per-instance to mirror the main vector
         # adapter's policy.
         self._lance_write_lock = asyncio.Lock()
-        # Honest filter-pushdown carrier (#1069). Set by _search_inner from the
-        # ONE authoritative compile_lance pass it runs per recall, then read back
-        # by the engine to build the per-channel FilterPushdownReport. Defaults to
-        # the constraint-free plan so a no-filter recall reports nothing pushed.
-        self._last_filter_plan: ChannelPlan = ChannelPlan()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -395,6 +391,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[TemporalSearchResult]:
         # ``filter_ast`` is the deterministic recall-filter AST. compile_lance
         # pushes what JSON1 supports into the SQLite WHERE; a compile_python
@@ -414,6 +411,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
                 hybrid_alpha=hybrid_alpha,
                 query_text=query_text,
                 filter_ast=filter_ast,
+                filter_plan_out=filter_plan_out,
             )
             _span.set_attribute("result_count", len(results))
             return results
@@ -429,6 +427,7 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         hybrid_alpha: float | None,
         query_text: str | None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[TemporalSearchResult]:
         # Build the compile_python post-filter ONCE per recall (it is
         # alias-independent — it runs on decoded TemporalChunks). The compile_lance
@@ -436,37 +435,35 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         # qualifier differs).
         post_filter = self._ast_post_filter(filter_ast)
 
-        # Honest filter-pushdown plan (#1069). ONE authoritative compile_lance
-        # here is the single source of truth for what BOTH passes push down. Its
-        # consumed_keys are alias-independent — _clause_unconsumable reads only
-        # clause.path / SYSTEM_KEYS / sqlite_json1 / operand shape; table_alias
-        # only feeds the SQL column text — so this alias=None compile reports the
-        # same keys the per-pass alias="c"/None compiles emit. compile_lance is
-        # deterministic, so the plan faithfully describes the WHERE the passes ran.
-        # NO-DEMOTE: a consumed leaf stays in pushed_keys even though the always-on
-        # compile_python post-filter re-checks the full AST (defensive_recheck=True).
+        # Honest filter-pushdown plan (#1069). The plan's consumed_keys come from a
+        # compile_lance that shares the EXACT context construction the per-pass
+        # WHERE compiles use: ``self._filter_compile_ctx(...)`` is the single factory
+        # feeding BOTH this plan compile and ``_build_ast_clause``, so a capability
+        # flag can never be added to one path and silently missed by the other — the
+        # report can't drift from the executed WHERE. consumed_keys is
+        # alias-independent (``_clause_unconsumable`` reads only clause.path /
+        # SYSTEM_KEYS / sqlite_json1 / operand shape, never table_alias) and
+        # compile_lance is deterministic, so this alias=None compile reports the same
+        # keys the per-pass alias="c"/None WHERE compiles emit. NO-DEMOTE: a consumed
+        # leaf stays in pushed_keys even though the always-on compile_python
+        # post-filter re-checks the full AST (defensive_recheck=True). The plan is
+        # handed back per-call via ``filter_plan_out`` (no mutable instance state —
+        # race-free under concurrent recalls on a shared store).
         if filter_ast is not None and filter_ast.children:
             from khora.filter.compilers.lance import compile_lance
-            from khora.filter.context import CompileContext, SchemaCapabilities
             from khora.filter.execute import filter_leaf_keys
 
-            compiled = compile_lance(
-                filter_ast,
-                CompileContext(
-                    backend_target="khora_chunks",
-                    table_alias=None,
-                    on_unsupported="split",
-                    schema_capabilities=SchemaCapabilities(sqlite_json1=self._has_json1),
-                ),
-            )
+            compiled = compile_lance(filter_ast, self._filter_compile_ctx(None))
             consumed = compiled.consumed_keys
-            self._last_filter_plan = ChannelPlan(
+            plan = ChannelPlan(
                 pushed_keys=consumed,
                 post_filtered_keys=filter_leaf_keys(filter_ast) - consumed,
                 defensive_recheck=True,
             )
         else:
-            self._last_filter_plan = ChannelPlan()
+            plan = ChannelPlan()
+        if filter_plan_out is not None:
+            filter_plan_out.append(plan)
 
         # Vector pass.  Fetch 2× when fusion is requested so RRF has a
         # broader rank corpus.
@@ -778,6 +775,26 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
 
         return " AND ".join(clauses), params
 
+    def _filter_compile_ctx(self, alias: str | None) -> CompileContext:
+        """Single source for the compile_lance context (#1069).
+
+        Both the per-pass WHERE compile (:meth:`_build_ast_clause`) and the honest
+        filter-pushdown plan in :meth:`_search_inner` build their ``CompileContext``
+        here, so a capability flag can never be added to one path and silently
+        missed by the other — the report's ``consumed_keys`` always describe the
+        same compile the executed WHERE ran. ``alias`` only feeds the SQL column
+        qualifier (``None`` for the unaliased vector post-fetch, ``"c"`` for the
+        BM25 FTS-join); it never changes which leaves are consumed.
+        """
+        from khora.filter import CompileContext, SchemaCapabilities
+
+        return CompileContext(
+            backend_target="khora_chunks",
+            table_alias=alias,
+            on_unsupported="split",
+            schema_capabilities=SchemaCapabilities(sqlite_json1=self._has_json1),
+        )
+
     def _build_ast_clause(
         self,
         filter_ast: FilterNode | None,
@@ -792,20 +809,15 @@ class SQLiteLanceTemporalStore(TemporalVectorStore):
         fragment never wrongly excludes a row (superset-safe). ``alias`` matches
         the table reference in the host query: ``None`` for the unaliased vector
         post-fetch, ``"c"`` for the BM25 FTS-join. Returns ``("", [])`` when
-        there is nothing to push (no AST, or a bare match-everything filter).
+        there is nothing to push (no AST, or a bare match-everything filter). The
+        compile context comes from :meth:`_filter_compile_ctx`, shared with the
+        pushdown-report compile so the two can never drift.
         """
         if filter_ast is None or not filter_ast.children:
             return "", []
-        from khora.filter import CompileContext, SchemaCapabilities
         from khora.filter.compilers.lance import compile_lance
 
-        ctx = CompileContext(
-            backend_target="khora_chunks",
-            table_alias=alias,
-            on_unsupported="split",
-            schema_capabilities=SchemaCapabilities(sqlite_json1=self._has_json1),
-        )
-        compiled = compile_lance(filter_ast, ctx)
+        compiled = compile_lance(filter_ast, self._filter_compile_ctx(alias))
         return compiled.predicate, list(compiled.params["args"])
 
     @staticmethod

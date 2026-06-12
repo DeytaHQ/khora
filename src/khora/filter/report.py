@@ -63,11 +63,13 @@ class FilterPushdownReport(BaseModel):
     """Honest, backend-agnostic summary of how a recall filter was handled.
 
     Surfaced verbatim as ``RecallResult.engine_info["filter"]``. The top-level
-    ``pushed_keys`` / ``post_filtered_keys`` lists *partition* the filter's
-    constraint leaves: a leaf is in ``pushed_keys`` only when every channel that
-    gates it pushed it into the backend query, and in ``post_filtered_keys`` when
-    at least one gating channel had to re-check it in memory. Both lists are
-    sorted and JSON-stable.
+    ``pushed_keys`` / ``post_filtered_keys`` lists *partition the gated constraint
+    leaves*: a leaf is in ``pushed_keys`` only when every channel that gates it
+    pushed it into the backend query, and in ``post_filtered_keys`` when at least
+    one gating channel had to re-check it in memory. A leaf that no channel gates
+    lands in neither list — unreachable for a single-channel engine like skeleton
+    (whose one channel gates every leaf), but defined for multi-channel engines.
+    Both lists are sorted and JSON-stable.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -137,11 +139,13 @@ def build_filter_report(
     * Top-level ``post_filtered_keys`` — leaves re-checked in memory on *any*
       gating channel.
 
-    These two lists partition the constraint leaves. ``pushed_down`` is ``True``
-    only when ``post_filtered_keys`` is empty and ``pushed_keys`` covers all
-    constraint leaves. ``post_filtered`` is ``True`` when any leaf was
-    post-filtered OR any channel ran a defensive full-predicate re-check (which
-    does NOT demote a fully-pushed leaf — NO-DEMOTE).
+    These two lists partition the *gated* constraint leaves; a leaf that no
+    channel gates lands in neither (its only signal is ``defensive_recheck``).
+    ``pushed_down`` is ``True`` only when ``post_filtered_keys`` is empty and
+    ``pushed_keys`` covers all constraint leaves (so every leaf was gated and
+    pushed). ``post_filtered`` is ``True`` when any leaf was post-filtered OR any
+    channel ran a defensive full-predicate re-check (which does NOT demote a
+    fully-pushed leaf — NO-DEMOTE).
 
     A constraint-free filter (``None``, or a root with no children) carries no
     leaves: ``pushed_keys`` / ``post_filtered_keys`` are empty and ``pushed_down``

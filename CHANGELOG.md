@@ -14,6 +14,10 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 - **Honest filter-pushdown reporting on the skeleton engine** (#1069): `recall(filter=...).engine_info["filter"]["pushed_down"]` was derived from a hardcoded `backend == "pgvector"` check, so it reported `False` on `sqlite_lance` even when the compiler fully pushed the predicate into the SQLite `WHERE` clause. The flag is now derived from what each channel's compiler actually consumed (`pushed_keys`) versus what it re-checked in memory (`post_filtered_keys`), so `pushed_down` is accurate on every backend whose compiler pushes predicates down. A defensive full-predicate re-check (the `sqlite_lance` path) sets `post_filtered=True` without demoting a fully-pushed leaf (NO-DEMOTE).
 
+### Changed
+
+- **`engine_info["filter"]` is now the engine's report verbatim** (#1069): the recall facade previously overwrote it with a flat `{engine, supported, pushed_down}` summary; it now passes the engine's `FilterPushdownReport` through unchanged. The `supported` / facade-level `engine` keys (never part of the canonical schema, read nowhere) are gone, and engines that do not report filter pushdown now **omit** the `"filter"` key entirely rather than carrying a synthesized default — callers that read `engine_info["filter"]` must treat it as optional (key on its presence).
+
 ## [0.19.0] - recall filtering, BGE default reranker, PyMuPDF removal
 
 Minor release. The `RecallFilter` foundation from 0.18.5 is now wired end-to-end: `recall(filter=...)` accepts a structured filter that compiles to native pushdown on each backend (pgvector, Neo4j Cypher, Chronicle), with a Python post-filter fallback and honest pushdown reporting. The default cross-encoder reranker changes to `BAAI/bge-reranker-v2-m3`. PyMuPDF is removed from the `binary-readers` extra (breaking for bundled PDF text extraction).

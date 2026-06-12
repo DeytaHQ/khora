@@ -2113,14 +2113,17 @@ class Khora:
                 # per-chunk entity linkage, and emit a new RecallResult.
                 result = await self._upgrade_recall_documents(result, namespace_id)
 
-                # The engine's ``engine_info["filter"]`` is the canonical, honest
-                # FilterPushdownReport (skeleton / chronicle write it as
-                # ``report.model_dump(mode="json")``). The facade passes it through
-                # unchanged — it no longer synthesizes a ``{engine, supported,
-                # pushed_down}`` shape over it (#1069). ``supported`` / the
-                # facade-level ``engine`` were not part of the canonical schema and
-                # were read nowhere; the wire contract is exactly the engine's
-                # report. Engines that do not push filters down simply omit the key.
+                # The engine's ``engine_info["filter"]`` is passed through
+                # unchanged. The skeleton engine writes the canonical
+                # FilterPushdownReport (``report.model_dump(mode="json")``);
+                # chronicle currently writes its own hand-rolled
+                # ``{pushed_down, post_filtered}`` dict (canonical adoption is a
+                # follow-up). The facade no longer synthesizes a ``{engine,
+                # supported, pushed_down}`` shape over it (#1069): ``supported`` /
+                # the facade-level ``engine`` were not part of the canonical schema
+                # and were read nowhere. Engines that do not report filter pushdown
+                # simply omit the key, so callers must treat ``"filter"`` as
+                # optional (key on its presence, not assume it).
 
                 # Emit RECALL_RESULTS_READY after engine returns, before packaging.
                 try:

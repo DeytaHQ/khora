@@ -64,14 +64,15 @@ def _two_leaf_keys() -> frozenset[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Decision 1 — empty / no-filter / constraint-free carriers.
+# Empty / no-filter / constraint-free carriers (rules in docs/api-reference.md
+# under engine_info["filter"]).
 # --------------------------------------------------------------------------- #
 
 
 def test_no_filter_carrier_is_canonical_empty_with_one_named_channel() -> None:
     """``filter_ast=None`` → all-False report with ONE named empty channel.
 
-    Decision 1: the canonical no-filter carrier is ``pushed_down=False``,
+    Per docs/api-reference.md, the canonical no-filter carrier is ``pushed_down=False``,
     ``post_filtered=False``, empty key lists, and ``channels`` carrying the
     single named channel the engine fed in (an empty :class:`ChannelPlan`) — NOT
     ``channels={}``. The builder never injects or drops a channel.
@@ -139,14 +140,14 @@ def test_builder_preserves_every_named_channel_with_no_filter() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Decision 4 — pushed_down derivation.
+# pushed_down derivation (docs/api-reference.md under engine_info["filter"]).
 # --------------------------------------------------------------------------- #
 
 
 def test_pushed_down_true_when_all_leaves_pushed_single_channel() -> None:
     """Every leaf pushed on the sole channel, nothing post-filtered → True.
 
-    Decision 4: ``pushed_down`` is ``True`` iff ``post_filtered_keys`` is empty
+    Per docs/api-reference.md, ``pushed_down`` is ``True`` iff ``post_filtered_keys`` is empty
     AND ``pushed_keys`` covers every constraint leaf. A single-channel skeleton
     gates every leaf, so when its plan pushes them all the report is fully
     pushed.
@@ -165,7 +166,7 @@ def test_pushed_down_false_when_one_leaf_post_filtered() -> None:
 
     The JSON1-absent split: ``source_name`` pushes, ``metadata.tier`` defers to
     the in-memory post-filter. ``post_filtered_keys`` is non-empty so
-    ``pushed_down`` is ``False`` (decision 4), and the two leaves partition into
+    ``pushed_down`` is ``False``, and the two leaves partition into
     the two top-level lists.
     """
     report = build_filter_report(
@@ -204,7 +205,7 @@ def test_pushed_down_false_when_all_leaves_post_filtered() -> None:
 def test_pushed_down_false_when_a_leaf_is_gated_by_no_channel() -> None:
     """A constraint leaf no channel gated → it lands in NEITHER list → False.
 
-    Decision 2/4: ``metadata.tier`` appears in no channel's ``pushed_keys`` ∪
+    Per docs/api-reference.md, ``metadata.tier`` appears in no channel's ``pushed_keys`` ∪
     ``post_filtered_keys``, so it is in neither top-level list. The pushed set is
     then a strict subset of all leaves, so ``pushed_down`` is ``False`` — the
     builder does not silently treat an unseen leaf as pushed.
@@ -223,14 +224,14 @@ def test_pushed_down_false_when_a_leaf_is_gated_by_no_channel() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Decision 3 — NO-DEMOTE.
+# NO-DEMOTE (docs/api-reference.md under engine_info["filter"]).
 # --------------------------------------------------------------------------- #
 
 
 def test_defensive_recheck_sets_post_filtered_but_does_not_demote() -> None:
     """``defensive_recheck=True`` flips ``post_filtered`` but keeps pushed leaves.
 
-    Decision 3 (NO-DEMOTE): the sqlite_lance backend always runs a
+    NO-DEMOTE: the sqlite_lance backend always runs a
     compile_python post-filter over the full AST as a safety net even when every
     leaf compiled into the WHERE. That sets top-level ``post_filtered=True``, but
     a fully-pushed leaf stays in ``pushed_keys`` — it is NOT moved into
@@ -249,14 +250,14 @@ def test_defensive_recheck_sets_post_filtered_but_does_not_demote() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Decision 2 — multi-channel intersection / partition semantics.
+# Multi-channel intersection / partition semantics (docs/api-reference.md).
 # --------------------------------------------------------------------------- #
 
 
 def test_multichannel_leaf_pushed_in_one_post_filtered_in_another() -> None:
     """Adversarial split: a leaf pushed on channel A, post-filtered on B → post.
 
-    Decision 2: a leaf re-checked in memory on ANY gating channel goes to the
+    Per docs/api-reference.md, a leaf re-checked in memory on ANY gating channel goes to the
     top-level ``post_filtered_keys`` (the honest worst case), even though another
     channel pushed it cleanly. The per-channel breakdown still records each
     channel's own disposition faithfully.
@@ -461,11 +462,13 @@ def test_model_json_schema_snapshot() -> None:
         "description": (
             "Honest, backend-agnostic summary of how a recall filter was handled.\n\n"
             'Surfaced verbatim as ``RecallResult.engine_info["filter"]``. The top-level\n'
-            "``pushed_keys`` / ``post_filtered_keys`` lists *partition* the filter's\n"
-            "constraint leaves: a leaf is in ``pushed_keys`` only when every channel that\n"
-            "gates it pushed it into the backend query, and in ``post_filtered_keys`` when\n"
-            "at least one gating channel had to re-check it in memory. Both lists are\n"
-            "sorted and JSON-stable."
+            "``pushed_keys`` / ``post_filtered_keys`` lists *partition the gated constraint\n"
+            "leaves*: a leaf is in ``pushed_keys`` only when every channel that gates it\n"
+            "pushed it into the backend query, and in ``post_filtered_keys`` when at least\n"
+            "one gating channel had to re-check it in memory. A leaf that no channel gates\n"
+            "lands in neither list — unreachable for a single-channel engine like skeleton\n"
+            "(whose one channel gates every leaf), but defined for multi-channel engines.\n"
+            "Both lists are sorted and JSON-stable."
         ),
         "properties": {
             "pushed_down": {

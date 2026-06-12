@@ -770,3 +770,43 @@ class TestFilterAstFailLoud:
         assert node.children  # precondition: this filter carries a constraint
         with pytest.raises(RecallFilterUnsupportedError):
             await store.search(uuid4(), [0.1] * 4, filter_ast=node)
+
+    @pytest.mark.asyncio
+    async def test_filter_plan_out_empty_for_constraint_free(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The per-call sink gets the empty plan for a constraint-free recall (#1069).
+
+        turbopuffer pushes nothing down, so a recall that reaches the report
+        (always constraint-free — a constraint-bearing filter raises) appends an
+        empty ``ChannelPlan`` to the sink. No mutable instance state is involved.
+        """
+        from khora.filter.report import ChannelPlan
+
+        _tp, client = _install_fake_turbopuffer(monkeypatch)
+        ns_handle = MagicMock()
+        ns_handle.query = AsyncMock(return_value=SimpleNamespace(rows=[]))
+        client.namespace = MagicMock(return_value=ns_handle)
+        store = _build_store("k")
+        await store.connect()
+
+        sink: list[ChannelPlan] = []
+        await store.search(uuid4(), [0.1] * 4, filter_ast=None, filter_plan_out=sink)
+        assert sink == [ChannelPlan()]
+
+    @pytest.mark.asyncio
+    async def test_filter_plan_out_untouched_when_constraint_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A constraint-bearing filter raises BEFORE the plan is recorded (#1069).
+
+        The raise guard fires before the sink append, so the sink stays empty and
+        the engine never builds a report (the recall raises).
+        """
+        from khora.filter.report import ChannelPlan
+
+        _install_fake_turbopuffer(monkeypatch)
+        store = _build_store("k")
+        await store.connect()
+
+        node = _filter_ast_node()
+        sink: list[ChannelPlan] = []
+        with pytest.raises(RecallFilterUnsupportedError):
+            await store.search(uuid4(), [0.1] * 4, filter_ast=node, filter_plan_out=sink)
+        assert sink == []

@@ -633,7 +633,7 @@ async def test_skeleton_recall_metadata_filter_python_fallback(
 #   * JSON1 absent   -> the metadata leaf splits to ``post_filtered_keys`` and
 #     pushed_down=False; the system-key leaf stays pushed.
 #   * no-filter / filter={} -> the canonical empty carrier with ONE named
-#     ``sqlite_lance`` channel entry (decision 1), NOT channels={}.
+#     ``sqlite_lance`` channel entry, NOT channels={} (see docs/api-reference.md).
 #
 # Every emitted report round-trips through ``FilterPushdownReport.model_validate``.
 # The JSON1 toggle uses the documented ``_has_json1`` test seam, mirroring
@@ -673,8 +673,10 @@ def _filter_report(result: Any) -> dict[str, Any]:
 
     info = result.engine_info.get("filter")
     assert info is not None, "skeleton engine must write engine_info['filter'] on every recall"
-    # Round-trip the canonical model — proves the emitted dict is a valid report.
-    assert FilterPushdownReport.model_validate(info) == FilterPushdownReport.model_validate(info)
+    # Round-trip the canonical model: model_validate raises if the dict is not a
+    # valid report, and re-dumping proves it is EXACTLY the model's wire shape
+    # (no extra or missing keys).
+    assert FilterPushdownReport.model_validate(info).model_dump(mode="json") == info
     return info
 
 
@@ -749,7 +751,7 @@ async def test_engine_filter_report_split_without_json1(
 
 
 async def test_engine_filter_report_no_filter_carrier(kb: Khora, namespace_id: UUID) -> None:
-    """A no-filter recall emits the canonical empty carrier (decision 1).
+    """A no-filter recall emits the canonical empty carrier.
 
     Even with no ``filter=`` kwarg the skeleton engine writes the report on every
     recall: all-False flags, empty key lists, and ONE named ``sqlite_lance``
@@ -769,7 +771,7 @@ async def test_engine_filter_report_no_filter_carrier(kb: Khora, namespace_id: U
 
 
 async def test_engine_filter_report_empty_filter_carrier(kb: Khora, namespace_id: UUID) -> None:
-    """A bare ``filter={}`` emits the SAME canonical empty carrier (decision 1).
+    """A bare ``filter={}`` emits the SAME canonical empty carrier.
 
     ``filter={}`` lowers to a match-everything empty-AND AST that the facade
     threads to the engine as a non-None ``filter_ast`` carrying no leaves. The

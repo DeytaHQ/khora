@@ -203,13 +203,6 @@ class SurrealDBTemporalStore(TemporalVectorStore):
                 sync_data=surreal_cfg.sync_data,
             )
         self._connected = False
-        # Honest filter-pushdown carrier (#1069). Set by _search_inner from the
-        # compile_surrealdb pass it runs per recall, read back by the engine to
-        # build the per-channel FilterPushdownReport. The compiler runs in
-        # on_unsupported="raise" mode (native pushdown, no post-filter path): if
-        # the compile returns at all, every leaf was consumed, so the plan reports
-        # all leaves pushed. Defaults to the constraint-free plan for a no-filter recall.
-        self._last_filter_plan: ChannelPlan = ChannelPlan()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -377,6 +370,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[TemporalSearchResult]:
         """Search temporal chunks with optional hybrid (vector + BM25) ranking.
 
@@ -399,6 +393,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
                 hybrid_alpha=hybrid_alpha,
                 query_text=query_text,
                 filter_ast=filter_ast,
+                filter_plan_out=filter_plan_out,
             )
             _span.set_attribute("result_count", len(results))
             return results
@@ -414,6 +409,7 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[TemporalSearchResult]:
         # Build shared WHERE clauses from temporal_filter
         filter_clauses, filter_bindings = self._build_filter_clauses(namespace_id, temporal_filter)
@@ -433,15 +429,18 @@ class SurrealDBTemporalStore(TemporalVectorStore):
             filter_clauses.append(compiled.predicate)
             filter_bindings.update(compiled.params)
             # Honest filter-pushdown plan (#1069), derived from THIS compile
-            # (no backend-name check, no re-compile). on_unsupported="raise" is
-            # all-or-nothing: reaching this line means every leaf was consumed, so
-            # consumed_keys == the AST's leaves. No post-filter runs, so
-            # post_filtered_keys is empty and defensive_recheck=False. A
-            # constraint-free filter (empty-AND) yields empty consumed_keys, which
-            # build_filter_report treats as nothing pushed.
-            self._last_filter_plan = ChannelPlan(pushed_keys=compiled.consumed_keys)
-        else:
-            self._last_filter_plan = ChannelPlan()
+            # (no backend-name check, no re-compile) and handed back per-call via
+            # ``filter_plan_out`` (no mutable instance state — race-free under
+            # concurrent recalls). on_unsupported="raise" is all-or-nothing:
+            # reaching this line means every leaf was consumed, so consumed_keys ==
+            # the AST's leaves. No post-filter runs, so post_filtered_keys is empty
+            # and defensive_recheck=False. A constraint-free filter (empty-AND)
+            # yields empty consumed_keys, which build_filter_report treats as
+            # nothing pushed.
+            if filter_plan_out is not None:
+                filter_plan_out.append(ChannelPlan(pushed_keys=compiled.consumed_keys))
+        elif filter_plan_out is not None:
+            filter_plan_out.append(ChannelPlan())
 
         # Determine search strategy
         pure_bm25 = hybrid_alpha is not None and hybrid_alpha == 0.0

@@ -576,6 +576,12 @@ class SkeletonConstructionEngine:
             else:  # HYBRID
                 hybrid_alpha = 0.7  # Default blend
 
+        # Per-call sink for the honest filter-pushdown plan (#1069). A fresh list
+        # per recall keeps the report race-free under concurrent recalls on a
+        # shared store: the backend appends the ChannelPlan it built from the SAME
+        # compile this call's WHERE ran, with no mutable instance state to clobber.
+        filter_plan_sink: list[ChannelPlan] = []
+
         # Perform search
         results = await temporal_store.search(
             namespace_id,
@@ -586,6 +592,7 @@ class SkeletonConstructionEngine:
             hybrid_alpha=hybrid_alpha,
             query_text=query,
             filter_ast=filter_ast,
+            filter_plan_out=filter_plan_sink,
         )
 
         chunks_with_scores: list[tuple[Chunk, float]] = []
@@ -650,15 +657,16 @@ class SkeletonConstructionEngine:
             "temporal_filter": str(temporal_filter) if temporal_filter else None,
         }
         # Report honest filter pushdown (#1069). The carrier is the ChannelPlan
-        # the backend stashed from the SAME compile its search just performed
-        # (``temporal_store._last_filter_plan``) — never a backend-name check and
-        # never a re-compile here, so the report cannot drift from what the WHERE
-        # clause actually pushed. The single configured backend is one channel,
-        # keyed by ``self._backend_type``. ``build_filter_report`` enumerates the
-        # filter's leaves and partitions them per the plan; a no-filter /
-        # constraint-free recall yields an empty plan and an all-False report. The
-        # carrier is written on every recall.
-        backend_plan = getattr(temporal_store, "_last_filter_plan", None) or ChannelPlan()
+        # the backend appended to ``filter_plan_sink`` from the SAME compile its
+        # search just performed — never a backend-name check and never a re-compile
+        # here, so the report cannot drift from what the WHERE clause actually
+        # pushed. The fresh per-call sink (created above the search) makes this
+        # race-free under concurrent recalls. The single configured backend is one
+        # channel, keyed by ``self._backend_type``. ``build_filter_report``
+        # enumerates the filter's leaves and partitions them per the plan; a
+        # no-filter / constraint-free recall yields an empty plan and an all-False
+        # report. The carrier is written on every recall.
+        backend_plan = filter_plan_sink[0] if filter_plan_sink else ChannelPlan()
         engine_info["filter"] = build_filter_report(
             filter_ast,
             {self._backend_type: backend_plan},

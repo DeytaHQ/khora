@@ -175,13 +175,6 @@ class WeaviateTemporalStore(TemporalVectorStore):
         self._connected = False
         self._tenants_seen: set[str] = set()
         self._embedding_dimension = config.llm.embedding_dimension or 1536
-        # Honest filter-pushdown carrier (#1069). Set by search() from the
-        # compile_weaviate split-pass it runs per recall, read back by the engine
-        # to build the per-channel FilterPushdownReport. Only the two DATE
-        # properties push down (consumed_keys); every other leaf is re-checked by
-        # the always-on compile_python post-filter (defensive_recheck=True).
-        # Defaults to the constraint-free plan for a no-filter recall.
-        self._last_filter_plan: ChannelPlan = ChannelPlan()
 
     # -------------------------------------------------------------------
     # Lifecycle
@@ -407,6 +400,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -469,7 +463,7 @@ class WeaviateTemporalStore(TemporalVectorStore):
         # native Weaviate filter and AND it into the legacy temporal filter; build
         # an in-memory predicate over the whole AST for the post-filter pass.
         post_filter: Callable[[Any], bool] | None = None
-        self._last_filter_plan = ChannelPlan()
+        plan = ChannelPlan()
         if filter_ast is not None:
             from khora.filter import CompileContext
             from khora.filter.compilers.python import compile_python
@@ -504,11 +498,16 @@ class WeaviateTemporalStore(TemporalVectorStore):
             # (empty-AND) has no leaves, so build_filter_report treats it as nothing
             # pushed regardless of the defensive flag.
             consumed = compiled.consumed_keys
-            self._last_filter_plan = ChannelPlan(
+            plan = ChannelPlan(
                 pushed_keys=consumed,
                 post_filtered_keys=filter_leaf_keys(filter_ast) - consumed,
                 defensive_recheck=bool(filter_ast.children),
             )
+
+        # Hand the plan back per-call (#1069) — no mutable instance state, so the
+        # report is race-free under concurrent recalls on a shared store.
+        if filter_plan_out is not None:
+            filter_plan_out.append(plan)
 
         # Over-fetch when a post-filter runs — it prunes rows, so we need a larger
         # candidate pool to still satisfy ``limit`` after trimming.

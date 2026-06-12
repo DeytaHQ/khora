@@ -241,34 +241,46 @@ def test_all_backend_search_methods_accept_filter_ast(name: str, store_cls: obje
 # ---------------------------------------------------------------------------
 #
 # The skeleton engine NO LONGER derives the pushdown flag from a backend-name
-# check. It reads the ``ChannelPlan`` the backend stashed on
-# ``temporal_store._last_filter_plan`` from the SAME compile its search ran, and
-# folds it via ``build_filter_report``. These no-Postgres stub tests therefore
-# stage the plan a real pgvector raise-mode compile would produce (every leaf
-# pushed) so they exercise the engine's read-and-fold wiring; the live-pg proof
-# is the postgres conformance leg, and the facade pass-through is pinned in
-# tests/unit/test_khora.py.
+# check. It passes a fresh per-call sink to ``temporal_store.search(...)`` and the
+# backend appends the ``ChannelPlan`` it built from the SAME compile its search
+# ran; the engine folds that plan via ``build_filter_report``. These no-Postgres
+# stub tests therefore make the stub's ``search`` append the plan a real pgvector
+# raise-mode compile would produce (every leaf pushed) so they exercise the
+# engine's read-and-fold wiring; the live-pg proof is the postgres conformance
+# leg, and the facade pass-through is pinned in tests/unit/test_khora.py.
 
 
 async def _pushed_down_for(filter_ast: FilterNode | None) -> bool:
     """Run ``recall`` with ``filter_ast`` and read the reported pushdown flag.
 
-    Uses the same no-Postgres stub harness as the forwarding tests, but stamps
-    the stub store's ``_last_filter_plan`` with the plan a real pgvector
-    raise-mode compile yields for ``filter_ast`` (all leaves pushed when the
-    filter carries constraints; the empty plan otherwise). The engine reads that
-    plan and folds it into the report, so this exercises the real read-and-fold
-    path rather than a re-derivation.
+    Uses the same no-Postgres stub harness as the forwarding tests, but makes the
+    stub store's ``search`` append — to the per-call ``filter_plan_out`` sink the
+    engine passes — the plan a real pgvector raise-mode compile yields for
+    ``filter_ast`` (all leaves pushed when the filter carries constraints; the
+    empty plan otherwise). The engine reads that plan back from the sink and folds
+    it into the report, so this exercises the real per-call read-and-fold path
+    rather than a re-derivation or mutable instance state.
     """
     from khora.filter.execute import filter_leaf_keys
     from khora.filter.report import ChannelPlan
 
     engine, temporal_store = _build_engine_with_stubs()
-    temporal_store._last_filter_plan = (
+    plan = (
         ChannelPlan(pushed_keys=filter_leaf_keys(filter_ast))
         if filter_ast is not None and filter_ast.children
         else ChannelPlan()
     )
+
+    async def _search(
+        *_args: object,
+        filter_plan_out: list[ChannelPlan] | None = None,
+        **_kwargs: object,
+    ) -> list[object]:
+        if filter_plan_out is not None:
+            filter_plan_out.append(plan)
+        return []
+
+    temporal_store.search = AsyncMock(side_effect=_search)
     result = await engine.recall("alpha", uuid4(), mode=SearchMode.VECTOR, filter_ast=filter_ast)
     return result.engine_info["filter"]["pushed_down"]
 

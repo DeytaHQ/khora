@@ -131,13 +131,6 @@ class PgVectorTemporalStore(TemporalVectorStore):
         self._hnsw_m: int = config.storage.hnsw_m
         self._hnsw_ef_construction: int = config.storage.hnsw_ef_construction
         self._hnsw_ef_search: int = config.storage.hnsw_ef_search
-        # Honest filter-pushdown carrier (#1069). Set by _search_inner from the
-        # compile_postgres pass it runs per recall, read back by the engine to
-        # build the per-channel FilterPushdownReport. The compiler runs in
-        # on_unsupported="raise" mode: if the compile returns at all, every leaf
-        # was consumed (all-or-nothing), so the plan reports all leaves pushed and
-        # no post-filter. Defaults to the constraint-free plan for a no-filter recall.
-        self._last_filter_plan: ChannelPlan = ChannelPlan()
 
     async def connect(self) -> None:
         """Connect to PostgreSQL and ensure schema exists."""
@@ -405,6 +398,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[TemporalSearchResult]:
         """Search for similar chunks with temporal filtering.
 
@@ -436,6 +430,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 hybrid_alpha=hybrid_alpha,
                 query_text=query_text,
                 filter_ast=filter_ast,
+                filter_plan_out=filter_plan_out,
             )
             _search_span.set_attribute("result_count", len(results))
             return results
@@ -451,6 +446,7 @@ class PgVectorTemporalStore(TemporalVectorStore):
         hybrid_alpha: float | None = None,
         query_text: str | None = None,
         filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[TemporalSearchResult]:
         async with self._get_session() as session:
             # Build base conditions
@@ -474,15 +470,18 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 )
                 conditions.append(compiled.predicate)
                 # Honest filter-pushdown plan (#1069), derived from THIS compile
-                # (no backend-name check, no re-compile). on_unsupported="raise"
-                # is all-or-nothing: reaching this line means every leaf was
-                # consumed, so consumed_keys == the AST's leaves. No post-filter
-                # runs, so post_filtered_keys is empty and defensive_recheck=False.
-                # A constraint-free filter (empty-AND) yields empty consumed_keys,
-                # which build_filter_report treats as nothing pushed.
-                self._last_filter_plan = ChannelPlan(pushed_keys=compiled.consumed_keys)
-            else:
-                self._last_filter_plan = ChannelPlan()
+                # (no backend-name check, no re-compile) and handed back per-call
+                # via ``filter_plan_out`` (no mutable instance state — race-free
+                # under concurrent recalls). on_unsupported="raise" is all-or-nothing:
+                # reaching this line means every leaf was consumed, so consumed_keys
+                # == the AST's leaves. No post-filter runs, so post_filtered_keys is
+                # empty and defensive_recheck=False. A constraint-free filter
+                # (empty-AND) yields empty consumed_keys, which build_filter_report
+                # treats as nothing pushed.
+                if filter_plan_out is not None:
+                    filter_plan_out.append(ChannelPlan(pushed_keys=compiled.consumed_keys))
+            elif filter_plan_out is not None:
+                filter_plan_out.append(ChannelPlan())
 
             # Vector search
             vector_results = await self._vector_search(
