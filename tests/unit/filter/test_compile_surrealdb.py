@@ -14,10 +14,22 @@ expression), the SurrealDB compiler returns a plain string with ``$name`` placeh
 and carries the values out-of-band in ``params``. So the assertions match against the
 string directly and check ``params`` for the bound values.
 
+**Backed vs unbacked system keys.** Only two of the ten :data:`SYSTEM_KEYS`
+(``occurred_at`` / ``created_at`` — the store's
+:data:`~khora.engines.skeleton.backends.surrealdb._BACKED_SYSTEM_KEYS`) are real
+columns on the SCHEMAFULL ``temporal_chunk`` table; the other eight denormalized
+document keys are not. The live recall context only maps the backed keys (plus the
+``metadata`` root), so the compiler FAILS LOUD (``RecallFilterUnsupportedError`` in
+``"raise"`` mode) on any predicate over an unbacked key, for **every** operator
+(``$exists`` included) — emitting a predicate against a non-existent column would
+read NONE and SurrealQL's total-false absent-compare would silently drop every row.
+So the system-key *emission* contract below is pinned on the two BACKED date keys,
+and the eight unbacked keys are pinned to RAISE.
+
 The contract these tests lock (§4), and the one deliberate divergence from Cypher:
 
 * Every operator ``$eq``/``$ne``/``$gt``/``$gte``/``$lt``/``$lte``/``$in``/``$nin``/``$exists``.
-* System key (typed column) emission; the empty AST → match-everything (``true``).
+* System key (typed column) emission on a BACKED key; the empty AST → match-everything (``true``).
 * A *nested* metadata path descends natively (``metadata.a.b.c`` → ``metadata_.a.b.c``),
   never collapsed/mangled into a single token.
 * The four field-match rules, as SurrealQL expresses them via its NONE-boolean algebra
@@ -46,11 +58,12 @@ from datetime import UTC, datetime
 
 import pytest
 
+from khora.engines.skeleton.backends.surrealdb import _BACKED_SYSTEM_KEYS
 from khora.filter import RecallFilter
 from khora.filter.ast import FilterClause, FilterNode, canonical_hash, parse_to_ast
 from khora.filter.compilers.surrealdb import compile_surrealdb
-from khora.filter.context import CompileContext
-from khora.filter.model import Op
+from khora.filter.context import CompileContext, RecallFilterUnsupportedError
+from khora.filter.model import SYSTEM_KEYS, Op
 
 # Hard import (NOT importorskip): the compiler is pure-Python string emission with
 # no SurrealDB SDK dependency, so an import failure here must be a LOUD test error,
@@ -63,9 +76,17 @@ pytestmark = pytest.mark.unit
 # Helpers.
 # ---------------------------------------------------------------------------
 
-# The live recall path's context: the ``metadata`` root maps to the physical
-# ``metadata_`` column; system keys map identity (bare columns on the table).
-_CTX = CompileContext(backend_target="temporal_chunk", field_mapping={"metadata": "metadata_"})
+# The live recall path's context: the two BACKED system keys (occurred_at /
+# created_at) map to their bare columns and the ``metadata`` root maps to the
+# physical ``metadata_`` column. The eight unbacked keys are ABSENT from the mapping,
+# so the compiler treats them as undeclared and rejects any predicate over them.
+_CTX = CompileContext(
+    backend_target="temporal_chunk",
+    field_mapping={"occurred_at": "occurred_at", "created_at": "created_at", "metadata": "metadata_"},
+)
+
+# A backed datetime operand reused across the system-key emission tests.
+_DT = "2026-01-01T00:00:00Z"
 
 
 def _ast(wire: dict) -> FilterNode:
@@ -110,37 +131,41 @@ def test_empty_filter_binds_nothing() -> None:
 
 
 # ===========================================================================
-# Scalar operators on a SYSTEM (typed column) key.
+# Scalar operators on a BACKED SYSTEM (typed column) key.
 # ===========================================================================
+#
+# The two backed system keys (occurred_at / created_at) are real datetime columns
+# on the SCHEMAFULL table, so they push down. A datetime column binds a real
+# :class:`~datetime.datetime` (the SDK encodes it as a SurrealQL datetime).
 
 
 def test_system_eq_is_bare_property_equals() -> None:
-    compiled = compile_surrealdb(_ast({"source_name": "linear"}), _CTX)
+    compiled = compile_surrealdb(_ast({"occurred_at": _DT}), _CTX)
     sql = _norm(compiled.predicate)
     # $eq is a total boolean in SurrealQL: a plain ``=`` compare (no coalesce — an
     # absent column compares false, and a wrapping $not flips it). The operand is
     # bound, not inlined. The system key is a bare physical column, not metadata.
-    assert "(source_name = $f_0)" in sql
+    assert "(occurred_at = $f_0)" in sql
     assert "coalesce" not in sql
     assert "metadata" not in sql
-    assert compiled.params == {"f_0": "linear"}
+    assert isinstance(compiled.params["f_0"], datetime)
 
 
 def test_system_eq_with_ops_form() -> None:
-    compiled = compile_surrealdb(_ast({"source_type": {"$eq": "slack"}}), _CTX)
-    assert "(source_type = $f_0)" in _norm(compiled.predicate)
-    assert compiled.params == {"f_0": "slack"}
+    compiled = compile_surrealdb(_ast({"created_at": {"$eq": _DT}}), _CTX)
+    assert "(created_at = $f_0)" in _norm(compiled.predicate)
+    assert isinstance(compiled.params["f_0"], datetime)
 
 
 def test_system_ne_is_bare_not_equals() -> None:
     # Rule 2 (polarity): ``!=`` against an absent column already returns true in
     # SurrealQL, so $ne admits absent rows without an extra ``OR IS NONE`` — no
     # null guard needed (the divergence from Cypher's ``IS NULL OR ...``).
-    compiled = compile_surrealdb(_ast({"source_name": {"$ne": "linear"}}), _CTX)
+    compiled = compile_surrealdb(_ast({"occurred_at": {"$ne": _DT}}), _CTX)
     sql = _norm(compiled.predicate)
-    assert "(source_name != $f_0)" in sql
+    assert "(occurred_at != $f_0)" in sql
     assert "is none" not in sql
-    assert compiled.params == {"f_0": "linear"}
+    assert isinstance(compiled.params["f_0"], datetime)
 
 
 def test_system_gt_is_property_compare() -> None:
@@ -177,69 +202,128 @@ def test_system_date_range_operators(wire_op: str, surql_op: str) -> None:
 
 
 # ===========================================================================
-# All ten system keys lower to a bare field ref (incl. the 8 always-absent ones).
+# The 8 UNBACKED system keys FAIL LOUD — every operator raises.
 # ===========================================================================
 #
 # Eight of the ten system keys (source_timestamp / source_type / source_name /
-# source_url / external_id / content_type / source / title) are not written onto
-# the temporal_chunk table, so they read NONE at query time — but the compiler
-# still emits a bare field ref for each (an undefined-field ref does not error in
-# SurrealQL). The two date keys (occurred_at / created_at) are real columns. This
-# pins that EVERY system key pushes down to a ``<key> = $bind`` compare and lands
-# in consumed_keys, independent of whether the column is physically present.
-_ALWAYS_ABSENT_SYSTEM_KEYS = (
-    "source_type",
-    "source_name",
-    "source_url",
-    "external_id",
-    "content_type",
-    "source",
-    "title",
+# source_url / external_id / content_type / source / title) are NOT columns on the
+# temporal_chunk table — they are absent from the store's _BACKED_SYSTEM_KEYS and
+# from the live recall context's field_mapping. A predicate over one would reference
+# a field the table does not define, reading NONE; SurrealQL's total-false
+# absent-compare (``NONE = x`` → ``false``) would then SILENTLY DROP EVERY ROW
+# instead of filtering. So the compiler refuses to emit such a predicate and, under
+# the live recall path's ``on_unsupported="raise"`` mode, raises
+# ``RecallFilterUnsupportedError`` for EVERY operator (``$exists`` included). This is
+# the inverse of the pre-fix contract, which emitted a bare field ref that quietly
+# matched nothing.
+#
+# The unbacked set is derived from the store's source-of-truth _BACKED_SYSTEM_KEYS,
+# so this corpus tracks any change to the backed set automatically (the schema-drift
+# gate in ``test_surrealdb_backed_keys_drift.py`` pins the backed set to the schema).
+_UNBACKED_KEYS = tuple(sorted(SYSTEM_KEYS - _BACKED_SYSTEM_KEYS))
+
+# The unbacked key whose type forbids ``$exists`` upstream (DateOps datetime key).
+_DATE_TYPED_UNBACKED = "source_timestamp"
+# The seven string-typed unbacked keys, on which ``$exists`` is a valid wire form
+# that must reach (and trip) the backend gate.
+_STRING_UNBACKED_KEYS = tuple(k for k in _UNBACKED_KEYS if k != _DATE_TYPED_UNBACKED)
+
+# Every operator form a wire filter can put on a STRING unbacked key — incl. both
+# $exists polarities. All must trip the backend gate (the leaf dispatch raises before
+# any operator-specific lowering, $exists constant included).
+_STRING_OP_FORMS = (
+    {"$eq": "v"},
+    {"$ne": "v"},
+    {"$in": ["a", "b"]},
+    {"$nin": ["a", "b"]},
+    {"$exists": True},
+    {"$exists": False},
 )
 
+# The operator forms a DATE unbacked key (source_timestamp) accepts upstream — DateOps
+# has no ``$exists`` and rejects a non-datetime operand, so probe with date operands.
+_DATE_OP_FORMS = (
+    {"$eq": "2026-01-01T00:00:00Z"},
+    {"$ne": "2026-01-01T00:00:00Z"},
+    {"$in": ["2026-01-01T00:00:00Z"]},
+    {"$nin": ["2026-01-01T00:00:00Z"]},
+    {"$gt": "2026-01-01T00:00:00Z"},
+)
 
-@pytest.mark.parametrize("key", _ALWAYS_ABSENT_SYSTEM_KEYS)
-def test_always_absent_string_key_emits_bare_field_ref(key: str) -> None:
-    compiled = compile_surrealdb(_ast({key: "v"}), _CTX)
-    sql = _norm(compiled.predicate)
-    assert f"({key} = $f_0)" in sql
-    assert compiled.params == {"f_0": "v"}
-    assert key in compiled.consumed_keys
-    # A system key is a bare column ref, never a serialized-metadata lookup.
-    assert "metadata" not in sql
+# The reason fragment the backend gate raises with (asserted as a substring, not the
+# whole string — the message also names the offending key).
+_GATE_REASON = "does not back"
 
 
-def test_source_timestamp_emits_bare_field_ref() -> None:
-    # source_timestamp is the one always-absent datetime-typed system key. It
-    # pushes down as a bare ``=`` compare and binds a real datetime (system-column
-    # binding), completing the 8-key always-absent set with the string keys above.
-    compiled = compile_surrealdb(_ast({"source_timestamp": "2026-02-03T00:00:00Z"}), _CTX)
-    sql = _norm(compiled.predicate)
-    assert "(source_timestamp = $f_0)" in sql
-    assert isinstance(compiled.params["f_0"], datetime)
-    assert "source_timestamp" in compiled.consumed_keys
+def test_unbacked_keys_are_the_eight_remaining_system_keys() -> None:
+    # The corpus covers exactly the eight denormalized document keys (SYSTEM_KEYS minus
+    # the two backed date columns). A change to the backed set is caught here and in
+    # the schema-drift gate.
+    assert set(_UNBACKED_KEYS) == set(SYSTEM_KEYS) - {"occurred_at", "created_at"}
+    assert len(_UNBACKED_KEYS) == 8
+
+
+@pytest.mark.parametrize("key", _STRING_UNBACKED_KEYS)
+@pytest.mark.parametrize("op_form", _STRING_OP_FORMS, ids=lambda f: next(iter(f)) + "_" + str(next(iter(f.values()))))
+def test_unbacked_string_key_every_operator_raises(key: str, op_form: dict) -> None:
+    # EVERY operator over a string unbacked key raises — $eq/$ne/$in/$nin AND both
+    # $exists polarities. The $exists case is the subtle one: on a backed key it is a
+    # constant, but on an unbacked (non-column) key even a constant would be
+    # meaningless, so the gate rejects it too (it never reaches the constant
+    # short-circuit). The error names the key and carries the "does not back" reason.
+    with pytest.raises(RecallFilterUnsupportedError, match=_GATE_REASON) as exc:
+        compile_surrealdb(_ast({key: op_form}), _CTX)
+    assert exc.value.path == key
+    assert key in str(exc.value)
+
+
+@pytest.mark.parametrize("op_form", _DATE_OP_FORMS, ids=lambda f: next(iter(f)))
+def test_unbacked_source_timestamp_every_valid_operator_raises(op_form: dict) -> None:
+    # source_timestamp is the one unbacked DATETIME-typed system key. DateOps has no
+    # $exists, so its testable operator surface is $eq/$ne/$in/$nin/range with date
+    # operands — every one trips the backend gate the same way (it is not a column on
+    # the temporal_chunk table). The error names the key and carries the reason.
+    with pytest.raises(RecallFilterUnsupportedError, match=_GATE_REASON) as exc:
+        compile_surrealdb(_ast({_DATE_TYPED_UNBACKED: op_form}), _CTX)
+    assert exc.value.path == _DATE_TYPED_UNBACKED
+    assert _DATE_TYPED_UNBACKED in str(exc.value)
+
+
+def test_unbacked_key_not_in_consumed_keys_on_split() -> None:
+    # In ``"split"`` mode the unbacked leaf is NOT consumed (it is left for a
+    # post-filter) and emits a non-constraining ``"true"`` — the same _unsupported
+    # path, just non-raising. This pins that the raise is mode-gated, not a hard crash.
+    ctx = CompileContext(
+        backend_target="temporal_chunk",
+        field_mapping={"occurred_at": "occurred_at", "created_at": "created_at", "metadata": "metadata_"},
+        on_unsupported="split",
+    )
+    compiled = compile_surrealdb(_ast({"source_name": "linear"}), ctx)
+    assert "source_name" not in compiled.consumed_keys
+    assert _norm(compiled.predicate) in ("true", "(true)")
 
 
 # ===========================================================================
-# $in / $nin on a SYSTEM key → INSIDE / !(INSIDE) membership.
+# $in / $nin on a BACKED system key → INSIDE / !(INSIDE) membership.
 # ===========================================================================
 
 
 def test_system_in_is_inside_list() -> None:
-    compiled = compile_surrealdb(_ast({"source_name": {"$in": ["a", "b", "c"]}}), _CTX)
-    assert "(source_name inside $f_0)" in _norm(compiled.predicate)
-    assert compiled.params == {"f_0": ["a", "b", "c"]}
+    compiled = compile_surrealdb(_ast({"occurred_at": {"$in": [_DT, "2026-02-01T00:00:00Z"]}}), _CTX)
+    assert "(occurred_at inside $f_0)" in _norm(compiled.predicate)
+    assert isinstance(compiled.params["f_0"], list)
+    assert all(isinstance(v, datetime) for v in compiled.params["f_0"])
 
 
 def test_system_nin_is_negated_inside() -> None:
     # Rule 2 (polarity): $nin is the negated INSIDE. An absent column is not INSIDE
     # the set, so the negation is true — absent rows are admitted, total without an
     # extra null guard (the divergence from Cypher's ``IS NULL OR NOT ... IN``).
-    compiled = compile_surrealdb(_ast({"source_type": {"$nin": ["spam", "junk"]}}), _CTX)
+    compiled = compile_surrealdb(_ast({"created_at": {"$nin": [_DT]}}), _CTX)
     sql = _norm(compiled.predicate)
-    assert "!(source_type inside $f_0)" in sql
+    assert "!(created_at inside $f_0)" in sql
     assert "is none" not in sql
-    assert compiled.params == {"f_0": ["spam", "junk"]}
+    assert isinstance(compiled.params["f_0"], list)
 
 
 def test_system_empty_in_is_constant_false() -> None:
@@ -247,7 +331,7 @@ def test_system_empty_in_is_constant_false() -> None:
     # membership over ∅ matches nothing. The compiler emits the constant explicitly
     # (the single-clause filter normalizes to AND([leaf]), rendering as the wrapped
     # "(false)") and binds nothing.
-    compiled = compile_surrealdb(_ast({"source_name": {"$in": []}}), _CTX)
+    compiled = compile_surrealdb(_ast({"occurred_at": {"$in": []}}), _CTX)
     assert _norm(compiled.predicate) == "(false)"
     assert compiled.params == {}
 
@@ -255,78 +339,37 @@ def test_system_empty_in_is_constant_false() -> None:
 def test_system_empty_nin_is_constant_true() -> None:
     # An empty $nin operand list matches everything (negation over ∅) — the polarity
     # mirror of the empty-$in case. Emitted as the wrapped constant "(true)".
-    compiled = compile_surrealdb(_ast({"source_name": {"$nin": []}}), _CTX)
+    compiled = compile_surrealdb(_ast({"occurred_at": {"$nin": []}}), _CTX)
     assert _norm(compiled.predicate) == "(true)"
     assert compiled.params == {}
 
 
 # ===========================================================================
-# Rule 3 — bare-list (exact-array) operand vs scalar SYSTEM column.
+# Rule 4 — null operand on a BACKED system key resolves to (= NULL OR IS NONE).
 # ===========================================================================
-
-
-def test_system_eq_array_operand_binds_as_list() -> None:
-    # A bare list on a scalar system key lowers to $eq EXACT-ARRAY. The compiler
-    # binds the operand as a SurrealQL list and emits the same plain ``=`` compare;
-    # a scalar column never equals a list, so it yields false at query time — no
-    # special-cased constant, the list binds like any other operand. (The AST
-    # carries a tuple; it is bound as a driver list, not a tuple.)
-    compiled = compile_surrealdb(_ast({"source_name": ["a", "b"]}), _CTX)
-    sql = _norm(compiled.predicate)
-    assert "(source_name = $f_0)" in sql
-    assert "inside" not in sql  # exact-array $eq, NOT membership
-    assert compiled.params == {"f_0": ["a", "b"]}
-
-
-def test_system_in_is_membership_not_exact_array() -> None:
-    # $in on a system key is membership (INSIDE), NOT exact-array — distinct from
-    # the bare-list $eq case above.
-    compiled = compile_surrealdb(_ast({"occurred_at": {"$in": ["2026-01-01T00:00:00Z"]}}), _CTX)
-    sql = _norm(compiled.predicate)
-    assert "(occurred_at inside $f_0)" in sql
-    assert "!=" not in sql
-
-
-# ===========================================================================
-# Rule 4 — $exists on a system key is a CONSTANT (the always-present axiom); a
-# null operand resolves to (= NULL OR IS NONE).
-# ===========================================================================
-
-
-def test_system_exists_true_is_constant_true() -> None:
-    # A system key is treated as ALWAYS PRESENT (the oracle's axiom), so $exists:true
-    # is a CONSTANT ``true`` — NOT a presence test (``IS NOT NONE``), which would
-    # exclude rows where an unwritten denormalized doc key reads NONE. Matches
-    # compile_python / compile_postgres / compile_lance. Binds nothing.
-    compiled = compile_surrealdb(_ast({"source_name": {"$exists": True}}), _CTX)
-    sql = _norm(compiled.predicate)
-    assert "true" in sql
-    assert "is not none" not in sql and "is none" not in sql
-    assert compiled.params == {}
-
-
-def test_system_exists_false_is_constant_false() -> None:
-    compiled = compile_surrealdb(_ast({"source_name": {"$exists": False}}), _CTX)
-    sql = _norm(compiled.predicate)
-    assert "false" in sql
-    assert "is none" not in sql
-    assert compiled.params == {}
+#
+# Note: ``$exists`` and the bare-list (exact-array) ``$eq`` semantics that the old
+# string-keyed exemplars pinned are not expressible on the two backed keys (both are
+# datetime-typed, and DateOps forbids ``$exists`` / a list operand). Those forms are
+# only reachable via the unbacked path, where they RAISE — so they are covered by
+# the inversion tests above, and on the metadata path (which keeps its own $exists /
+# bare-list cases) below.
 
 
 def test_system_null_operand_is_null_or_none() -> None:
     # An explicit null is an active null-or-missing match. NONE (absent path) and
     # NULL (explicit json null) are distinct in SurrealQL, so the match covers both.
-    compiled = compile_surrealdb(_ast({"source_name": None}), _CTX)
+    compiled = compile_surrealdb(_ast({"occurred_at": None}), _CTX)
     sql = _norm(compiled.predicate)
-    assert "(source_name = null or source_name is none)" in sql
+    assert "(occurred_at = null or occurred_at is none)" in sql
     assert compiled.params == {}
 
 
 def test_system_ne_null_is_present_and_not_null() -> None:
     # $ne null → present (IS NOT NONE) and not explicit-null (!= NULL).
-    compiled = compile_surrealdb(_ast({"source_name": {"$ne": None}}), _CTX)
+    compiled = compile_surrealdb(_ast({"occurred_at": {"$ne": None}}), _CTX)
     sql = _norm(compiled.predicate)
-    assert "(source_name is not none and source_name != null)" in sql
+    assert "(occurred_at is not none and occurred_at != null)" in sql
     assert compiled.params == {}
 
 
@@ -336,13 +379,13 @@ def test_system_ne_null_is_present_and_not_null() -> None:
 
 
 def test_system_date_binds_real_datetime() -> None:
-    # A system date key takes a plain ISO string (the `$date` typed literal is a
-    # metadata-only form). It compiles to a plain ``=`` compare; the operand binds
+    # A backed system date key takes a plain ISO string (the `$date` typed literal is
+    # a metadata-only form). It compiles to a plain ``=`` compare; the operand binds
     # as a real, UTC-normalized datetime (the SDK encodes it as a SurrealQL
     # datetime — NOT an .isoformat() string, unlike Cypher and unlike the metadata
     # path).
-    compiled = compile_surrealdb(_ast({"source_timestamp": "2026-02-03T00:00:00Z"}), _CTX)
-    assert "(source_timestamp = $f_0)" in _norm(compiled.predicate)
+    compiled = compile_surrealdb(_ast({"created_at": "2026-02-03T00:00:00Z"}), _CTX)
+    assert "(created_at = $f_0)" in _norm(compiled.predicate)
     bound = compiled.params["f_0"]
     assert isinstance(bound, datetime)
     assert bound == datetime(2026, 2, 3, tzinfo=UTC)
@@ -572,25 +615,25 @@ def test_metadata_empty_nin_is_constant_true() -> None:
 
 
 # ===========================================================================
-# Logical composition — AND / OR / NOT + totality.
+# Logical composition — AND / OR / NOT + totality (over BACKED keys).
 # ===========================================================================
 
 
 def test_and_node_joins_with_and() -> None:
-    # Two sibling keys compose with " AND ". Child order is normalized (the system
-    # keys lower in a fixed order), not authored order — so do NOT assert order,
-    # only that both leaves and the AND join are present.
-    sql = _surql_norm(_ast({"source_name": "linear", "source_type": "slack"}))
+    # Two sibling backed keys compose with " AND ". Child order is normalized (the
+    # system keys lower in a fixed order), not authored order — so do NOT assert
+    # order, only that both leaves and the AND join are present.
+    sql = _surql_norm(_ast({"occurred_at": _DT, "created_at": "2026-02-01T00:00:00Z"}))
     assert " and " in sql
-    assert "source_name = $" in sql
-    assert "source_type = $" in sql
+    assert "occurred_at = $" in sql
+    assert "created_at = $" in sql
 
 
 def test_or_node_joins_with_or() -> None:
-    sql = _surql_norm(_ast({"$or": [{"source_name": "linear"}, {"source_type": "slack"}]}))
+    sql = _surql_norm(_ast({"$or": [{"occurred_at": _DT}, {"created_at": "2026-02-01T00:00:00Z"}]}))
     assert " or " in sql
-    assert "source_name = $" in sql
-    assert "source_type = $" in sql
+    assert "occurred_at = $" in sql
+    assert "created_at = $" in sql
 
 
 def test_not_node_negates_with_bang_and_plain_child() -> None:
@@ -599,9 +642,9 @@ def test_not_node_negates_with_bang_and_plain_child() -> None:
     # the inner leaf is the PLAIN (un-coalesced) ``=`` compare, and the ``!(...)``
     # flips an absent/null row IN correctly (Rule 2) without any coalesce wrapper.
     # We assert the bang-negation SHAPE and that the inner leaf carries NO coalesce.
-    sql = _surql_norm(_ast({"$not": {"source_name": "linear"}}))
+    sql = _surql_norm(_ast({"$not": {"occurred_at": _DT}}))
     assert sql.startswith("!(")
-    assert "(source_name = $f_0)" in sql
+    assert "(occurred_at = $f_0)" in sql
     assert "coalesce" not in sql
 
 
@@ -619,8 +662,8 @@ def test_nested_and_or_structure() -> None:
     sql = _surql_norm(
         _ast(
             {
-                "source_name": "linear",
-                "$or": [{"source_type": "slack"}, {"content_type": "text/plain"}],
+                "occurred_at": _DT,
+                "$or": [{"created_at": "2026-02-01T00:00:00Z"}, {"metadata.tier": "gold"}],
             }
         )
     )
@@ -634,14 +677,16 @@ def test_composition_binds_are_distinct_per_clause() -> None:
     compiled = compile_surrealdb(
         _ast(
             {
-                "source_name": "linear",
-                "$or": [{"source_type": "slack"}, {"content_type": "text/plain"}],
+                "occurred_at": _DT,
+                "$or": [{"created_at": "2026-02-01T00:00:00Z"}, {"metadata.tier": "gold"}],
             }
         ),
         _CTX,
     )
     assert set(compiled.params) == {"f_0", "f_1", "f_2"}
-    assert set(compiled.params.values()) == {"linear", "slack", "text/plain"}
+    # Two datetime binds + one string bind ("gold").
+    assert "gold" in compiled.params.values()
+    assert sum(isinstance(v, datetime) for v in compiled.params.values()) == 2
 
 
 # ===========================================================================
@@ -650,25 +695,25 @@ def test_composition_binds_are_distinct_per_clause() -> None:
 
 
 def test_compiled_filter_carries_canonical_hash() -> None:
-    node = _ast({"source_name": "linear"})
+    node = _ast({"occurred_at": _DT})
     compiled = compile_surrealdb(node, _CTX)
     assert compiled.canonical_hash == canonical_hash(node)
 
 
 def test_compiled_filter_consumed_keys_is_frozenset() -> None:
-    compiled = compile_surrealdb(_ast({"source_name": "linear"}), _CTX)
+    compiled = compile_surrealdb(_ast({"occurred_at": _DT}), _CTX)
     assert isinstance(compiled.consumed_keys, frozenset)
-    assert "source_name" in compiled.consumed_keys
+    assert "occurred_at" in compiled.consumed_keys
 
 
 def test_consumed_keys_collects_every_leaf() -> None:
     # A mixed system + nested-metadata filter consumes the dotted metadata key
-    # (its full dot-path string) alongside the system key.
+    # (its full dot-path string) alongside the backed system key.
     compiled = compile_surrealdb(
-        _ast({"source_name": "linear", "metadata.labels.tier": "gold"}),
+        _ast({"occurred_at": _DT, "metadata.labels.tier": "gold"}),
         _CTX,
     )
-    assert compiled.consumed_keys == frozenset({"source_name", "metadata.labels.tier"})
+    assert compiled.consumed_keys == frozenset({"occurred_at", "metadata.labels.tier"})
 
 
 def test_empty_filter_consumes_nothing() -> None:
@@ -702,19 +747,24 @@ def test_field_mapping_default_metadata_root_unremapped() -> None:
 
 
 def test_field_mapping_remaps_system_key_name() -> None:
-    # A system-key remap renames the bare column ref (e.g. the legacy schema's
-    # ``source_system`` column behind the ``source`` logical key).
+    # A backed system-key remap renames the bare column ref (e.g. a schema whose
+    # event-time column is named ``event_time`` behind the ``occurred_at`` logical
+    # key). The remap is a context choice; the key is still queryable (backed).
     ctx = CompileContext(
         backend_target="temporal_chunk",
-        field_mapping={"source": "source_system"},
+        field_mapping={"occurred_at": "event_time", "metadata": "metadata_"},
     )
-    assert "(source_system = $f_0)" in _surql_norm(_ast({"source": "slack"}), ctx)
+    assert "(event_time = $f_0)" in _surql_norm(_ast({"occurred_at": _DT}), ctx)
 
 
 def test_param_namespace_prefixes_bind_names() -> None:
     # param_namespace prefixes every bind name so compiled params cannot collide
     # with the engine's own query parameters.
-    ctx = CompileContext(backend_target="temporal_chunk", param_namespace="p")
-    compiled = compile_surrealdb(_ast({"source_name": "linear"}), ctx)
+    ctx = CompileContext(
+        backend_target="temporal_chunk",
+        param_namespace="p",
+        field_mapping={"occurred_at": "occurred_at", "created_at": "created_at", "metadata": "metadata_"},
+    )
+    compiled = compile_surrealdb(_ast({"occurred_at": _DT}), ctx)
     assert "$p_0" in compiled.predicate
-    assert compiled.params == {"p_0": "linear"}
+    assert isinstance(compiled.params["p_0"], datetime)

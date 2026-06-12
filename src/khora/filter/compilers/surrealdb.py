@@ -27,10 +27,24 @@ is already a property of SurrealQL's NONE-boolean algebra.
 **NONE vs NULL are distinct.** ``NONE`` is an absent path; ``NULL`` is an
 explicit JSON null value. A ``{k: null}`` match resolves to ``(p = NULL OR p IS
 NONE)``. On a METADATA path, ``$exists: true`` is ``(p IS NOT NONE)`` and
-``$exists: false`` is ``(p IS NONE)`` (real presence). On a SYSTEM key, ``$exists``
-is instead a CONSTANT (``true`` / ``false``) — a system key is treated as
-always-present (the oracle's axiom), so a presence test would diverge whenever the
-column is genuinely unset (an unwritten denormalized doc key reads NONE).
+``$exists: false`` is ``(p IS NONE)`` (real presence). On a *declared* SYSTEM key,
+``$exists`` is instead a CONSTANT (``true`` / ``false``) — a system key is treated
+as always-present (the oracle's axiom), so a presence test would diverge whenever
+the column is genuinely unset (an unwritten denormalized doc key reads NONE).
+
+**Only declared system keys are backed.** A backend declares the system keys it
+backs with a real column via ``ctx.field_mapping`` — its key set is the
+declared+pushable whitelist (the same dual interpretation
+:func:`~khora.filter.compilers.weaviate.compile_weaviate` uses). The live recall
+path declares only ``occurred_at`` / ``created_at`` (the two datetime columns on
+the ``temporal_chunk`` table); the other eight denormalized document system keys
+are NOT columns. A clause on an undeclared system key — every operator, ``$exists``
+included — is routed to :meth:`~_Builder._unsupported`: on the SCHEMAFULL table the
+missing field reads NONE, and SurrealQL's total-false absent-compare (``NONE = x`` →
+``false``) would silently drop every row, so the compiler fails loud
+(``on_unsupported="raise"`` raises :class:`RecallFilterUnsupportedError`; ``"split"``
+emits a non-constraining ``"true"`` and leaves it unconsumed for a post-filter)
+instead of emitting a predicate that quietly matches nothing.
 
 **Metadata equality / membership is array-aware.** A scalar ``$eq`` operand
 matches **both** a scalar field equal to it **and** an array field that contains
@@ -168,6 +182,13 @@ class _Builder:
         self._alias = ctx.table_alias
         self.params: dict[str, Any] = {}
         self._counter = 0
+        # The declared keys = the ``field_mapping`` key set (mirrors
+        # ``compile_weaviate._Builder._declared``). A SYSTEM key absent from it is
+        # undeclared — the backend does not back it with a column, so the
+        # system-key branch of :meth:`compile_clause` routes it to ``_unsupported``.
+        # The ``metadata`` root is keyed separately, so the metadata branch never
+        # consults this set.
+        self._declared: dict[str, str] = dict(ctx.field_mapping or {})
 
     # ----- bind allocation ------------------------------------------------ #
 
@@ -237,6 +258,20 @@ class _Builder:
         """Dispatch a leaf on key-kind (system key vs metadata path)."""
         path = clause.path
         if len(path) == 1 and path[0] in SYSTEM_KEYS:
+            # A system key the backend does not declare in ``field_mapping`` is not
+            # backed by a column on this table (only ``occurred_at`` / ``created_at``
+            # are; the other eight denormalized document keys are not). The compiler
+            # cannot express it — on the SCHEMAFULL table the missing field reads
+            # NONE, and SurrealQL's total-false absent-compare would silently drop
+            # every row — so route it through ``_unsupported`` (every operator,
+            # ``$exists`` included). Returning BEFORE the ``_consumed`` add below
+            # leaves it unconsumed in ``"split"`` mode for a post-filter; in
+            # ``"raise"`` mode ``_unsupported`` raises here. Mirrors
+            # ``compile_weaviate.compile_clause``'s declared-property gate.
+            if path[0] not in self._declared:
+                return self._unsupported(
+                    clause, f"the surrealdb backend does not back system key {path[0]!r} with a column"
+                )
             expr = self._compile_system_clause(clause)
         elif path and path[0] == "metadata":
             expr = self._compile_metadata_clause(clause)

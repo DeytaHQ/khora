@@ -34,6 +34,7 @@ from khora.telemetry import trace, trace_span
 if TYPE_CHECKING:
     from khora.config import KhoraConfig
     from khora.config.schema import SurrealDBConfig
+    from khora.filter import CompileContext
     from khora.filter.ast import FilterNode
 
 
@@ -111,6 +112,41 @@ _LEGACY_RANGE_OPS: dict[str, Op] = {
 # ``(metadata_.<path> = $b)`` (no type-gate), preserving the equality semantics
 # callers depend on while no longer interpolating an unvalidated user key.
 _LEGACY_OPS: dict[str, Op] = {"eq": Op.EQ, **_LEGACY_RANGE_OPS}
+
+# The system keys this table backs with a real column — the single source of truth.
+# Of the ten ``SYSTEM_KEYS`` only these two are columns on ``temporal_chunk``
+# (``DEFINE FIELD occurred_at`` / ``created_at`` in ``_TEMPORAL_CHUNK_SCHEMA``); the
+# other eight denormalized document keys are not. The deterministic recall-filter
+# compiler reads the declared+pushable system keys off the compile context's
+# ``field_mapping`` (the same dual interpretation ``compile_weaviate`` uses), so a
+# filter on a system key absent here raises ``RecallFilterUnsupportedError`` rather
+# than emitting a predicate that silently drops every row (SurrealQL's absent-compare
+# is total-false). The conformance harness imports this set so its expectation never
+# drifts from the schema.
+_BACKED_SYSTEM_KEYS: frozenset[str] = frozenset({"occurred_at", "created_at"})
+
+
+def _filter_compile_context() -> CompileContext:
+    """Build the deterministic-filter :class:`CompileContext` for this backend.
+
+    The single source of truth for the SurrealDB store's recall-filter compile
+    context, shared by the vector (``_search_inner``) and BM25 (``search_fulltext``)
+    paths. ``field_mapping`` declares the two backed system keys (identity-mapped to
+    their bare columns) plus the ``metadata`` root remap to the physical
+    ``metadata_`` column; its key set is the compiler's declared+pushable whitelist,
+    so a filter on any other system key fails loud. ``on_unsupported="raise"`` because
+    the skeleton engine has no post-filter path — partial pushdown ("split") is never
+    consumed here. Imported lazily so the filter machinery stays off the no-filter
+    hot path.
+    """
+    from khora.filter import CompileContext
+
+    field_mapping = {key: key for key in _BACKED_SYSTEM_KEYS} | {"metadata": "metadata_"}
+    return CompileContext(
+        backend_target="temporal_chunk",
+        field_mapping=field_mapping,
+        on_unsupported="raise",
+    )
 
 
 class SurrealDBTemporalStore(TemporalVectorStore):
@@ -375,24 +411,17 @@ class SurrealDBTemporalStore(TemporalVectorStore):
         filter_clauses, filter_bindings = self._build_filter_clauses(namespace_id, temporal_filter)
 
         # Deterministic recall-filter AST: compile to a SurrealQL predicate and
-        # AND it into the shared clauses. ``field_mapping`` maps the ``metadata``
-        # root to the physical ``metadata_`` column so a metadata path descends
-        # natively; system keys map identity (the table stores them as bare
-        # columns). The compiler runs in on_unsupported="raise" mode — the
-        # skeleton engine has no post-filter path, so partial pushdown ("split")
-        # is never consumed here.
+        # AND it into the shared clauses via the shared compile context
+        # (:func:`_filter_compile_context`). Its ``field_mapping`` declares the two
+        # backed system keys (``occurred_at`` / ``created_at``) plus the ``metadata``
+        # → ``metadata_`` remap; the other eight system keys are not columns, so a
+        # filter on one raises ``RecallFilterUnsupportedError`` (on_unsupported=
+        # "raise" — the skeleton engine has no post-filter path) rather than emitting
+        # a predicate that silently matches nothing.
         if filter_ast is not None:
-            from khora.filter import CompileContext
             from khora.filter.compilers.surrealdb import compile_surrealdb
 
-            compiled = compile_surrealdb(
-                filter_ast,
-                CompileContext(
-                    backend_target="temporal_chunk",
-                    field_mapping={"metadata": "metadata_"},
-                    on_unsupported="raise",
-                ),
-            )
+            compiled = compile_surrealdb(filter_ast, _filter_compile_context())
             filter_clauses.append(compiled.predicate)
             filter_bindings.update(compiled.params)
 
@@ -519,21 +548,15 @@ class SurrealDBTemporalStore(TemporalVectorStore):
 
         # Deterministic recall-filter AST: compile to a SurrealQL predicate and
         # AND it into the shared clauses (mirrors the vector path in
-        # ``_search_inner``). ``field_mapping`` maps the ``metadata`` root to the
-        # physical ``metadata_`` column; ``on_unsupported="raise"`` because the
-        # skeleton engine has no post-filter path.
+        # ``_search_inner``) via the shared compile context
+        # (:func:`_filter_compile_context`) — the same declared backed-system-keys +
+        # ``metadata_`` field_mapping, ``on_unsupported="raise"``. A filter on a
+        # system key this table does not back with a column raises
+        # ``RecallFilterUnsupportedError`` here.
         if filter_ast is not None:
-            from khora.filter import CompileContext
             from khora.filter.compilers.surrealdb import compile_surrealdb
 
-            compiled = compile_surrealdb(
-                filter_ast,
-                CompileContext(
-                    backend_target="temporal_chunk",
-                    field_mapping={"metadata": "metadata_"},
-                    on_unsupported="raise",
-                ),
-            )
+            compiled = compile_surrealdb(filter_ast, _filter_compile_context())
             filter_clauses.append(compiled.predicate)
             filter_bindings.update(compiled.params)
 

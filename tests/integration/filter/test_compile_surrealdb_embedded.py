@@ -34,16 +34,20 @@ from khora.filter import RecallFilter  # noqa: E402
 from khora.filter.ast import parse_to_ast  # noqa: E402
 from khora.filter.compilers.python import compile_python  # noqa: E402
 from khora.filter.compilers.surrealdb import compile_surrealdb  # noqa: E402
-from khora.filter.context import CompileContext  # noqa: E402
+from khora.filter.context import CompileContext, RecallFilterUnsupportedError  # noqa: E402
 from khora.storage.backends.surrealdb._helpers import _rid  # noqa: E402
 from khora.storage.backends.surrealdb.connection import SurrealDBConnection  # noqa: E402
 
 pytestmark = pytest.mark.integration
 
 
-# The live recall path's context: ``metadata`` root → physical ``metadata_``
-# column; system keys map identity (bare columns on the table).
-_CTX = CompileContext(backend_target="temporal_chunk", field_mapping={"metadata": "metadata_"})
+# The live recall path's context: the two BACKED system keys (occurred_at /
+# created_at) map to their bare columns, the ``metadata`` root → physical
+# ``metadata_`` column. The eight unbacked keys are absent from the mapping (rejected).
+_CTX = CompileContext(
+    backend_target="temporal_chunk",
+    field_mapping={"occurred_at": "occurred_at", "created_at": "created_at", "metadata": "metadata_"},
+)
 
 # A trimmed temporal_chunk shape — only the columns these row-set assertions
 # touch. Keeping it minimal (no namespace/document record links, no HNSW index)
@@ -53,8 +57,7 @@ _CTX = CompileContext(backend_target="temporal_chunk", field_mapping={"metadata"
 _SCHEMA = """
 DEFINE TABLE IF NOT EXISTS temporal_chunk SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS content ON temporal_chunk TYPE string;
-DEFINE FIELD IF NOT EXISTS source_name ON temporal_chunk TYPE option<string>;
-DEFINE FIELD IF NOT EXISTS source_url ON temporal_chunk TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS occurred_at ON temporal_chunk TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS metadata_ ON temporal_chunk FLEXIBLE TYPE option<object>;
 """
 
@@ -183,22 +186,36 @@ async def test_not_over_range_keeps_absent_and_null_excludes_match(conn: Surreal
 
 
 # ===========================================================================
-# (4) An always-absent system key: $eq drops all rows / $ne keeps all rows.
+# (4) An unbacked system key FAILS LOUD — it never reaches the database.
 # ===========================================================================
+#
+# ``source_url`` (one of the eight denormalized document keys) is NOT a column on
+# the ``temporal_chunk`` table. Pre-fix the compiler emitted a bare ``source_url``
+# field ref, which read NONE at query time and — via SurrealQL's total-false
+# absent-compare — silently dropped every row (an $eq) or kept every row (a $ne),
+# quietly returning a WRONG row-set instead of the intended filter. The compiler now
+# refuses to emit that predicate: ``compile_surrealdb`` raises
+# ``RecallFilterUnsupportedError`` BEFORE any query runs, so the row-set bug is
+# impossible. These assert the raise on the same live compile path the row-set tests
+# use (no SELECT is ever issued).
 
 
-async def test_always_absent_system_key_eq_drops_all(conn: SurrealDBConnection) -> None:
-    # ``source_url`` is never written on these rows, so it reads NONE. A bare
-    # ``=`` compare against an absent column is a total false → no rows.
-    assert await _matching_content(conn, {"source_url": "anything"}) == []
+async def test_unbacked_system_key_eq_raises(conn: SurrealDBConnection) -> None:
+    # The $eq form raised — the predicate that pre-fix silently dropped every row.
+    ast = parse_to_ast(RecallFilter.model_validate({"source_url": "anything"}))
+    with pytest.raises(RecallFilterUnsupportedError, match="does not back") as exc:
+        compile_surrealdb(ast, _CTX)
+    # Load-bearing invariant: the gate named the offending key (robust to re-wording).
+    assert "source_url" in str(exc.value)
 
 
-async def test_always_absent_system_key_ne_keeps_all(conn: SurrealDBConnection) -> None:
-    # Polarity (Rule 2): ``!=`` against an absent column is total TRUE, so $ne on
-    # an always-absent key keeps every row — no null guard needed.
-    assert await _matching_content(conn, {"source_url": {"$ne": "anything"}}) == sorted(
-        ["absent", "null", "ten", "three", "mismatch", "deep"]
-    )
+async def test_unbacked_system_key_ne_raises(conn: SurrealDBConnection) -> None:
+    # The $ne form raised too — the predicate that pre-fix silently kept every row.
+    # The rejection is op-independent: an unbacked column is never queryable.
+    ast = parse_to_ast(RecallFilter.model_validate({"source_url": {"$ne": "anything"}}))
+    with pytest.raises(RecallFilterUnsupportedError, match="does not back") as exc:
+        compile_surrealdb(ast, _CTX)
+    assert "source_url" in str(exc.value)
 
 
 # ===========================================================================
