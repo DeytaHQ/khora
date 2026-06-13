@@ -58,7 +58,8 @@ pub fn batch_temporal_filter(
 /// For each timestamp, computes:
 ///   `(1 - recency_weight) + recency_weight * 0.5^(age_days / decay_days)`
 ///
-/// where `age_days = (now_secs - ts) / 86400`.
+/// where `age_days = max(0, (now_secs - ts) / 86400)` (future timestamps are
+/// clamped to age 0, matching the NumPy/Python fallback).
 ///
 /// If `recency_weight == 0`, returns a vec of `1.0` (fast path).
 /// Releases the GIL during computation.
@@ -86,7 +87,12 @@ pub fn batch_recency_scores(
         };
 
         let compute = |&ts: &f64| -> f64 {
-            let age_days = (now_secs - ts) / SECONDS_PER_DAY;
+            // Clamp future timestamps (clock skew, deliberate forward-dating)
+            // to age=0 so a forward-dated chunk gets full freshness rather than
+            // decay > 1.0 from exp(positive). Mirrors the `max(0.0, ...)` clamp
+            // in the NumPy/Python fallback (_accel.py) and chronicle's
+            // `_apply_temporal_decay`, keeping Rust and fallback in parity.
+            let age_days = ((now_secs - ts) / SECONDS_PER_DAY).max(0.0);
             let decay = (decay_factor * age_days).exp(); // 0.5^(age/half_life)
             base + recency_weight * decay
         };
@@ -505,6 +511,46 @@ mod tests {
         // More recent timestamps should have higher scores
         assert!(scores[0] > scores[1]);
         assert!(scores[1] > scores[2]);
+    }
+
+    /// Plain-Rust mirror of `batch_recency_scores`' compute, callable without a
+    /// `Python<'_>` token so the future-timestamp clamp can be unit-tested.
+    fn batch_recency_scores_inner(
+        timestamps_secs: &[f64],
+        now_secs: f64,
+        decay_days: f64,
+        recency_weight: f64,
+    ) -> Vec<f64> {
+        if recency_weight == 0.0 {
+            return vec![1.0; timestamps_secs.len()];
+        }
+        let base = 1.0 - recency_weight;
+        let decay_factor = if decay_days > 0.0 {
+            LN_HALF / decay_days
+        } else {
+            0.0
+        };
+        timestamps_secs
+            .iter()
+            .map(|&ts| {
+                let age_days = ((now_secs - ts) / SECONDS_PER_DAY).max(0.0);
+                base + recency_weight * (decay_factor * age_days).exp()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_recency_scores_future_timestamp_clamped() {
+        // A forward-dated timestamp (ts > now) must be clamped to age 0 so its
+        // score equals base + recency_weight (1.0 here), not an exp(positive)
+        // blowup. Mirrors the `max(0.0, ...)` clamp in the Python fallback (#1130).
+        let now = 86400.0 * 365.0;
+        let future = now + 86400.0 * 365.0; // one year ahead
+        let result = batch_recency_scores_inner(&[now, future], now, 30.0, 0.5);
+        // Present-time ts: age 0 -> decay 1.0 -> base + weight == 1.0.
+        assert!((result[0] - 1.0).abs() < 1e-10);
+        // Future ts: clamped to age 0 -> identical to the present score, bounded.
+        assert!((result[1] - 1.0).abs() < 1e-10);
     }
 
     #[test]

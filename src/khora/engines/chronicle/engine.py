@@ -362,6 +362,33 @@ def _to_utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(UTC)
 
 
+def _fact_event_time(fact: Any) -> datetime | None:
+    """Effective event time of a fact for supersession ordering (#1144).
+
+    Prefers the explicit ``event_time`` anchor (set at extraction from the
+    source chunk's occurred_at / source_timestamp); falls back to
+    ``created_at`` (ingestion time) for facts read back from storage, which
+    carry no event-time column. Normalized to UTC so a tz-naive value never
+    trips a naive-vs-aware comparison (#1145 class).
+    """
+    return _to_utc(getattr(fact, "event_time", None) or getattr(fact, "created_at", None))
+
+
+def _target_is_newer(target: Any, new_fact: Any) -> bool:
+    """True when ``target``'s event time is strictly newer than ``new_fact``'s.
+
+    When both event times are known and the target is newer, superseding the
+    target with the new fact would let an older real-world claim overwrite
+    current state. Ties and missing event-times return ``False`` so the prior
+    "new supersedes old" ingestion-order behavior is preserved.
+    """
+    target_t = _fact_event_time(target)
+    new_t = _fact_event_time(new_fact)
+    if target_t is None or new_t is None:
+        return False
+    return target_t > new_t
+
+
 def _extract_temporal_bounds(temporal_filter: Any | None) -> tuple[datetime | None, datetime | None]:
     """Pull (start, end) UTC bounds out of a TemporalFilter-shaped object.
 
@@ -1207,10 +1234,17 @@ class ChronicleEngine:
                 return []
         # Defensive: stamp namespace_id and chunk linkage in case the
         # extractor was replaced with a stub that doesn't set them.
+        # #1144: anchor the fact's event time on the source chunk's event time
+        # (occurred_at preferred, source_timestamp fallback — the same COALESCE
+        # convention the temporal channel uses) so reconciliation supersedes by
+        # real-world time, not ingestion order.
+        chunk_event_time = chunk.occurred_at if chunk.occurred_at is not None else chunk.source_timestamp
         for f in facts:
             f.namespace_id = namespace_id
             if chunk.id not in f.source_chunk_ids:
                 f.source_chunk_ids.append(chunk.id)
+            if f.event_time is None:
+                f.event_time = chunk_event_time
         return facts
 
     async def _reconcile_facts(
@@ -1281,15 +1315,37 @@ class ChronicleEngine:
                 facts_to_write.append(new_fact)
                 active_by_subject[subject].append(new_fact)
             elif action.op is FactOperation.UPDATE:
-                facts_to_write.append(new_fact)
-                if action.target is not None:
-                    pending_supersedes.append((action.target.id, new_fact))
-                    # Drop the old fact from the in-memory cache so subsequent
-                    # reconciliations within this batch don't see it as active.
-                    active_by_subject[subject] = [f for f in active_by_subject[subject] if f.id != action.target.id]
-                active_by_subject[subject].append(new_fact)
+                # #1144: supersede by EVENT time, not ingestion order. If the
+                # target's event time is strictly newer than the new fact's,
+                # the new fact is older real-world info (a backfill); inverting
+                # keeps the newer fact active and records the older one as
+                # superseded-by it instead of the other way round. Ties /
+                # missing event-times keep the prior "new supersedes old".
+                if action.target is not None and _target_is_newer(action.target, new_fact):
+                    new_fact.is_active = False
+                    new_fact.superseded_by = action.target.id
+                    facts_to_write.append(new_fact)
+                    pending_supersedes.append((new_fact.id, action.target))
+                    # Target stays active in the in-memory cache; do not append
+                    # the now-inactive new fact.
+                else:
+                    facts_to_write.append(new_fact)
+                    if action.target is not None:
+                        pending_supersedes.append((action.target.id, new_fact))
+                        # Drop the old fact from the in-memory cache so subsequent
+                        # reconciliations within this batch don't see it as active.
+                        active_by_subject[subject] = [f for f in active_by_subject[subject] if f.id != action.target.id]
+                    active_by_subject[subject].append(new_fact)
             elif action.op is FactOperation.DELETE:
-                if action.target is not None:
+                # #1144: never delete a target whose event time is newer than
+                # the new fact's — that would drop current state in favour of a
+                # backfilled older claim. Record the older new fact as inactive
+                # instead (it never enters the active set).
+                if action.target is not None and _target_is_newer(action.target, new_fact):
+                    new_fact.is_active = False
+                    new_fact.superseded_by = action.target.id
+                    facts_to_write.append(new_fact)
+                elif action.target is not None:
                     deletes.append(action.target.id)
                     active_by_subject[subject] = [f for f in active_by_subject[subject] if f.id != action.target.id]
             elif action.op is FactOperation.SKIP:
@@ -1884,6 +1940,7 @@ class ChronicleEngine:
                         entity_hits=entity_channel_hits,
                         created_after=created_after,
                         created_before=created_before,
+                        degradations=degradations,
                     ),
                 )
             )
@@ -2666,6 +2723,7 @@ class ChronicleEngine:
         entity_hits: dict[UUID, tuple[Entity, float]] | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        degradations: list[Degradation] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Channel 4: Entity co-occurrence retrieval.
 
@@ -2687,7 +2745,15 @@ class ChronicleEngine:
                 limit=10,
             )
         except Exception as e:
-            logger.warning("Entity channel: search_similar_entities failed: {}", e)
+            logger.warning("Entity channel: search_similar_entities failed: {}", e, exc_info=True)
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.entity",
+                    reason="channel_exception",
+                    detail=str(e),
+                    exc=e,
+                )
             return []
 
         if not entity_results:
@@ -2703,7 +2769,17 @@ class ChronicleEngine:
         try:
             entities = await storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
         except Exception as e:
-            logger.warning("Entity channel: get_entities_batch failed for {} IDs: {}", len(entity_ids), e)
+            logger.warning(
+                "Entity channel: get_entities_batch failed for {} IDs: {}", len(entity_ids), e, exc_info=True
+            )
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.entity",
+                    reason="channel_exception",
+                    detail=str(e),
+                    exc=e,
+                )
             return []
 
         logger.debug("Entity channel: resolved {}/{} entities", len(entities), len(entity_ids))
@@ -2734,7 +2810,15 @@ class ChronicleEngine:
         try:
             chunks_map = await storage.get_chunks_batch(chunk_ids, namespace_id=namespace_id)
         except Exception as e:
-            logger.warning("Entity channel: get_chunks_batch failed for {} IDs: {}", len(chunk_ids), e)
+            logger.warning("Entity channel: get_chunks_batch failed for {} IDs: {}", len(chunk_ids), e, exc_info=True)
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.entity",
+                    reason="channel_exception",
+                    detail=str(e),
+                    exc=e,
+                )
             return []
 
         # Apply temporal filter post-hydration. get_chunks_batch has no
@@ -2772,17 +2856,39 @@ class ChronicleEngine:
             # Batch cosine similarity via Rust (GIL-released, SIMD-accelerated)
             sims = {}
             if embeddings_with_idx:
+                # Seed every embedded chunk below the relevance threshold.
+                # batch_cosine_similarity drops pairs below its threshold (0.0),
+                # so a chunk with a negative cosine is absent from the result;
+                # seeding 0.0 means it stays gated out instead of leaking through.
+                for _, _chunk, cid in embeddings_with_idx:
+                    sims[cid] = 0.0
                 try:
                     from khora._accel import batch_cosine_similarity
 
                     chunk_embeddings = [chunk.embedding for _, chunk, _ in embeddings_with_idx]
+                    # Returns (local_idx, score) pairs sorted descending, NOT
+                    # input-ordered - map each back to its chunk by index, like
+                    # the temporal channel does. (A positional zip would both
+                    # misalign and call float() on a tuple; see #1143.)
                     sim_scores = batch_cosine_similarity(query_embedding, chunk_embeddings)
-                    for (idx, chunk, cid), sim in zip(embeddings_with_idx, sim_scores):
-                        sims[cid] = float(sim)
-                except Exception:
-                    # Fallback: no filtering
-                    for idx, chunk, cid in embeddings_with_idx:
-                        sims[cid] = 1.0
+                    for local_idx, score in sim_scores:
+                        _, _chunk, cid = embeddings_with_idx[local_idx]
+                        sims[cid] = float(score)
+                except ImportError as exc:
+                    # Accel module genuinely missing: skip the gate rather than
+                    # drop every entity-adjacent chunk. Surface as a degradation
+                    # so the relaxed filtering is visible (ADR-001). Narrowed to
+                    # ImportError so logic bugs (e.g. the #1143 float(tuple)
+                    # TypeError) propagate instead of silently disabling the gate.
+                    sims = {}
+                    if degradations is not None:
+                        _record_channel_degradation(
+                            degradations,
+                            component="chronicle.entity",
+                            reason="cosine_batch_failed",
+                            detail=str(exc),
+                            exc=exc,
+                        )
 
             results = []
             for chunk, cid in ordered_chunks:

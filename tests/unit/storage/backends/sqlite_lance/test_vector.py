@@ -399,6 +399,57 @@ class TestSearchSimilar:
         assert len(results) == 1
         assert results[0][0].namespace_id == ns_a
 
+    async def test_backfilled_chunk_returned_under_upper_bound(self, adapter: SQLiteLanceVectorAdapter):
+        """Regression for #1136.
+
+        A backfilled chunk (created_at = ingest time = now, source_timestamp =
+        historical event time) must be returned when the query's upper temporal
+        bound covers its source_timestamp. The LanceDB ANN pre-filter narrows on
+        ``created_at`` only, but the contract axis is
+        ``COALESCE(source_timestamp, created_at)``, so the pre-filter must not
+        exclude the chunk before the SQLite COALESCE refinement can admit it.
+        """
+        ns, doc = uuid4(), uuid4()
+        backfilled = _make_chunk(
+            ns,
+            doc,
+            embedding=_unit(8, 0),
+            created_at=datetime.now(UTC),
+            source_timestamp=datetime(2025, 1, 15, tzinfo=UTC),
+        )
+        await adapter.create_chunks_batch([backfilled])
+
+        results = await adapter.search_similar(
+            ns,
+            _unit(8, 0),
+            limit=10,
+            created_before=datetime(2025, 2, 1, tzinfo=UTC),
+        )
+        assert len(results) == 1
+        assert results[0][0].id == backfilled.id
+
+    async def test_upper_bound_inclusive(self, adapter: SQLiteLanceVectorAdapter):
+        """Regression for #1136 boundary alignment.
+
+        The upper temporal bound is inclusive (``<=``) to match search_fulltext
+        and the pgvector sibling. A chunk whose effective timestamp equals
+        ``created_before`` exactly must be returned.
+        """
+        ns, doc = uuid4(), uuid4()
+        boundary = datetime(2025, 1, 15, tzinfo=UTC)
+        chunk = _make_chunk(
+            ns,
+            doc,
+            embedding=_unit(8, 0),
+            created_at=datetime.now(UTC),
+            source_timestamp=boundary,
+        )
+        await adapter.create_chunks_batch([chunk])
+
+        results = await adapter.search_similar(ns, _unit(8, 0), limit=10, created_before=boundary)
+        assert len(results) == 1
+        assert results[0][0].id == chunk.id
+
 
 # ---------------------------------------------------------------------------
 # Full-text search (FTS5)

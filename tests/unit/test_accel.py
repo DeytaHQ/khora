@@ -98,6 +98,46 @@ class TestBatchCosineSimilarity:
         assert results == []
 
 
+# ---------------------------------------------------------------------------
+# Dimension-mismatch parity (#1132)
+#
+# When the query dimension differs from the candidate columns, the NumPy
+# fallback (`mat @ q`) raises ValueError. The Rust kernels previously zipped
+# to the shorter length and returned a wrong-but-plausible score. Both paths
+# must now raise ValueError on the same input so a mixed-embedding-dim store
+# fails loudly with or without the compiled wheel.
+# ---------------------------------------------------------------------------
+
+
+class TestBatchDimensionMismatch:
+    QUERY = [1.0, 2.0]  # dim 2
+    CANDIDATES = [[1.0, 2.0, 3.0, 4.0]]  # dim 4
+
+    def test_cosine_numpy_raises(self, force_numpy):
+        if not accel._HAS_NUMPY:
+            pytest.skip("numpy not available")
+        with pytest.raises(ValueError):
+            accel.batch_cosine_similarity(self.QUERY, self.CANDIDATES)
+
+    def test_cosine_rust_raises(self):
+        if not accel._HAS_RUST:
+            pytest.skip("Rust extension not available")
+        with pytest.raises(ValueError):
+            accel.batch_cosine_similarity(self.QUERY, self.CANDIDATES)
+
+    def test_dot_numpy_raises(self, force_numpy):
+        if not accel._HAS_NUMPY:
+            pytest.skip("numpy not available")
+        with pytest.raises(ValueError):
+            accel.batch_dot_product(self.QUERY, self.CANDIDATES)
+
+    def test_dot_rust_raises(self):
+        if not accel._HAS_RUST:
+            pytest.skip("Rust extension not available")
+        with pytest.raises(ValueError):
+            accel.batch_dot_product(self.QUERY, self.CANDIDATES)
+
+
 class TestPairwiseCosineSimilarity:
     def test_two_identical(self, force_python):
         result = accel.pairwise_cosine_above_threshold([[1, 0], [1, 0]], 0.5)
@@ -870,3 +910,40 @@ class TestNormalizeEntityNameParity:
         monkeypatch.setattr(accel, "_HAS_RUST", False)
         py = accel.normalize_entity_names_batch(list(_PARITY_INPUTS))
         assert rust == py
+
+
+# ---------------------------------------------------------------------------
+# Batch recency scores - Rust/Python future-timestamp parity (#1130)
+# ---------------------------------------------------------------------------
+
+
+class TestBatchRecencyFutureClamp:
+    def test_future_timestamp_clamped_rust(self):
+        """A forward-dated timestamp must not produce a score above the
+        present-time score on the Rust path. Without the age clamp, a future
+        ts gives age_days < 0 and decay = 0.5^(negative) > 1.0, inflating the
+        recency multiplier without bound (#1130)."""
+        if not accel._HAS_RUST:
+            pytest.skip("Rust extension not available")
+        now = 365 * 86400.0
+        future = now + 365 * 86400.0  # one year ahead
+        out = accel.batch_recency_scores([now, future], now_secs=now, decay_days=30.0, recency_weight=0.5)
+        present_score = out[0]
+        future_score = out[1]
+        # Present-time ts has age 0 -> decay 1.0 -> score == base + weight == 1.0.
+        assert present_score == pytest.approx(1.0)
+        # Future ts must be clamped to age 0, not inflated above the present.
+        assert future_score == pytest.approx(present_score)
+
+    def test_future_timestamp_rust_matches_python_fallback(self, monkeypatch):
+        """Rust and the pure-Python fallback must return identical scores for
+        a future timestamp (fallback-parity contract)."""
+        if not accel._HAS_RUST:
+            pytest.skip("Rust extension not available")
+        now = 100 * 86400.0
+        timestamps = [now - 5 * 86400.0, now, now + 10 * 86400.0]
+        rust_out = accel.batch_recency_scores(timestamps, now_secs=now, decay_days=7.0, recency_weight=0.6)
+        monkeypatch.setattr(accel, "_HAS_RUST", False)
+        monkeypatch.setattr(accel, "_HAS_NUMPY", False)
+        py_out = accel.batch_recency_scores(timestamps, now_secs=now, decay_days=7.0, recency_weight=0.6)
+        assert rust_out == pytest.approx(py_out)
