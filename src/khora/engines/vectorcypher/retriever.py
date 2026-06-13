@@ -158,6 +158,41 @@ _CYPHER_EXPAND_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# Entry-entity vector-search degradation counter (issue #1158, ADR-001).
+# ``_vector_search_entities`` previously caught any exception, logged a bare
+# WARNING, and returned ``[]`` - so entry-entity discovery failing silently
+# collapsed the entire graph-expansion channel of GRAPH/HYBRID recall to
+# vector-only with no machine-readable signal. Now the catch site records a
+# Degradation and bumps this counter. NO namespace_id label - cardinality rule.
+_ENTITY_VECTOR_SEARCH_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.entity_vector_search.degraded_total",
+    unit="1",
+    description=(
+        "Issue #1158 (ADR-001). VectorCypher entry-entity vector-search silent "
+        "fallbacks. Incremented when search_similar_entities raises and the "
+        "channel returns [], collapsing graph expansion to vector-only. The "
+        "same event is also appended to RecallResult.engine_info['degradations']. "
+        "Labels: reason (channel_exception). NO namespace_id label - cardinality rule."
+    ),
+)
+
+# BM25 channel degradation counter (issue #1158, ADR-001). ``_bm25_search_chunks``
+# previously caught any exception, logged a bare WARNING, and returned ``[]`` -
+# so the independent lexical channel silently disappeared from RRF fusion. Now
+# the catch site records a Degradation and bumps this counter. NO namespace_id
+# label - cardinality rule.
+_BM25_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.bm25.degraded_total",
+    unit="1",
+    description=(
+        "Issue #1158 (ADR-001). VectorCypher BM25 channel silent fallbacks. "
+        "Incremented when the full-text search raises and the channel returns "
+        "[], dropping the lexical contribution from RRF fusion. The same event "
+        "is also appended to RecallResult.engine_info['degradations']. Labels: "
+        "reason (channel_exception). NO namespace_id label - cardinality rule."
+    ),
+)
+
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
     """Normalize the value of ``chunker_info`` returned by a record dict.
@@ -1198,6 +1233,7 @@ class VectorCypherRetriever:
                     # store's actual ``search_fulltext`` compile (same WHERE the
                     # vector channel pushes).
                     filter_plan_out=bm25_filter_plan_sink,
+                    degradations=degradations,
                 )
             )
 
@@ -1206,6 +1242,7 @@ class VectorCypherRetriever:
             query_embedding=query_embedding,
             namespace_id=namespace_id,
             limit=entry_limit,
+            degradations=degradations,
         )
 
         if not entry_entities:
@@ -1238,6 +1275,10 @@ class VectorCypherRetriever:
                 min_similarity=min_similarity,
                 mode=mode,
                 filter_ast=filter_ast,
+                # Carry any degradations recorded before the fallback (e.g. the
+                # entry-entity vector search that just collapsed graph expansion
+                # to vector-only) so they surface on the result (#1158).
+                degradations=degradations,
             )
 
         # Step 3b: Session-aware parallel retrieval
@@ -2530,6 +2571,7 @@ class VectorCypherRetriever:
         min_similarity: float = 0.0,
         mode: SearchMode = SearchMode.HYBRID,
         filter_ast: FilterNode | None = None,
+        degradations: list[Degradation] | None = None,
     ) -> VectorCypherResult:
         """Simple retrieval path - vector search only.
 
@@ -2549,6 +2591,12 @@ class VectorCypherRetriever:
             filter_channel_plans: dict[str, ChannelPlan] = {}
             vector_filter_plan_sink: list[ChannelPlan] = []
             bm25_filter_plan_sink: list[ChannelPlan] = []
+
+            # ADR-001 (#1158): carry any degradations the caller already recorded
+            # (e.g. the entry-entity vector search that collapsed graph expansion
+            # to this fallback) plus any this path records, so they surface on the
+            # result. A fresh list keeps direct (non-fallback) callers race-free.
+            degradations = degradations if degradations is not None else []
 
             # #833 channel-skip:
             #   VECTOR  -> pure vector store search, no internal BM25 fusion,
@@ -2584,6 +2632,7 @@ class VectorCypherRetriever:
                         limit=self._config.bm25_top_k if mode != SearchMode.KEYWORD else max(limit, 50),
                         filter_ast=filter_ast,
                         filter_plan_out=bm25_filter_plan_sink,
+                        degradations=degradations,
                     )
                 )
 
@@ -2892,6 +2941,11 @@ class VectorCypherRetriever:
                     "max_raw_vector_score": _max_raw_cosine,
                     # Search provenance: all chunks from vector in simple mode
                     "search_methods": search_methods,
+                    # ADR-001 (#1158): silent-failure entries from this path
+                    # (BM25 channel) plus any carried in from a graph-path
+                    # fallback (entry-entity vector search). Forwarded onto
+                    # ``RecallResult.engine_info["degradations"]`` by the engine.
+                    "degradations": degradations,
                     # Private carrier (popped by the engine before the public
                     # spread): per-channel honest filter-pushdown plans.
                     "_filter_channel_plans": filter_channel_plans,
@@ -2903,8 +2957,17 @@ class VectorCypherRetriever:
         query_embedding: list[float],
         namespace_id: UUID,
         limit: int,
+        *,
+        degradations: list[Degradation] | None = None,
     ) -> list[tuple[UUID, float]]:
-        """Search for entry entities using vector similarity via pgvector HNSW."""
+        """Search for entry entities using vector similarity via pgvector HNSW.
+
+        Args:
+            degradations: When provided, a structured ``Degradation`` is appended
+                if the search raises so the silently-collapsed graph-expansion
+                channel is observable (ADR-001, issue #1158). Recall continues
+                with no entry seeds (vector-only fallback) rather than crashing.
+        """
         if not self._storage:
             logger.warning("Storage coordinator not available for entity vector search")
             return []
@@ -2920,7 +2983,21 @@ class VectorCypherRetriever:
                 span.set_attribute("entity_count", len(results))
                 return results
             except Exception as e:
-                logger.warning(f"Entity vector search failed: {e}")
+                # ADR-001 (issue #1158): entry-entity discovery failing here
+                # collapses graph expansion to vector-only. Record a structured
+                # Degradation so the dropped channel is observable rather than
+                # silent (matches the rel_fetch / cypher_expand convention).
+                logger.warning(f"Entity vector search failed: {e}", exc_info=True)
+                _ENTITY_VECTOR_SEARCH_DEGRADED_COUNTER.add(1, attributes={"reason": "channel_exception"})
+                if degradations is not None:
+                    degradations.append(
+                        Degradation(
+                            component="vectorcypher.entity_vector_search",
+                            reason="channel_exception",
+                            detail=str(e)[:200] or None,
+                            exception=type(e).__name__,
+                        )
+                    )
                 return []
 
     async def _cypher_expand(
@@ -3618,6 +3695,7 @@ class VectorCypherRetriever:
         *,
         filter_ast: FilterNode | None = None,
         filter_plan_out: list[ChannelPlan] | None = None,
+        degradations: list[Degradation] | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Full-text BM25 search on chunks.
 
@@ -3651,6 +3729,10 @@ class VectorCypherRetriever:
                 Recorded regardless of row count (empty rows still means the
                 filter was enforced). The coordinator fallback never runs under a
                 filter, so it never contributes a plan.
+            degradations: When provided, a structured ``Degradation`` is appended
+                if the search raises so the silently-dropped lexical channel is
+                observable (ADR-001, issue #1158). Recall continues with the
+                BM25 contribution absent from RRF rather than crashing.
 
         Returns:
             List of (chunk_id, score, chunk) tuples
@@ -3718,7 +3800,21 @@ class VectorCypherRetriever:
                     for chunk, score in results
                 ]
             except Exception as e:
-                logger.warning(f"BM25 search failed: {e}")
+                # ADR-001 (issue #1158): a BM25 failure here silently drops the
+                # independent lexical channel from RRF fusion. Record a structured
+                # Degradation so the missing channel is observable rather than
+                # silent (matches the rel_fetch / cypher_expand convention).
+                logger.warning(f"BM25 search failed: {e}", exc_info=True)
+                _BM25_DEGRADED_COUNTER.add(1, attributes={"reason": "channel_exception"})
+                if degradations is not None:
+                    degradations.append(
+                        Degradation(
+                            component="vectorcypher.bm25",
+                            reason="channel_exception",
+                            detail=str(e)[:200] or None,
+                            exception=type(e).__name__,
+                        )
+                    )
                 return []
 
     def _warn_bm25_empty_once(self, namespace_id: UUID) -> None:
