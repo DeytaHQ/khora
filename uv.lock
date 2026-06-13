@@ -24,6 +24,8 @@ turbopuffer = { timestamp = "0001-01-01T00:00:00Z", span = "PT0S" }
 [manifest]
 constraints = [
     { name = "aiohttp", specifier = ">=3.14.0" },
+    { name = "logfire", marker = "extra == 'crewai'", specifier = "<4.7" },
+    { name = "logfire", marker = "extra != 'crewai'", specifier = ">=4.32.1" },
     { name = "pygments", specifier = ">=2.20.0" },
     { name = "requests", specifier = ">=2.33.1" },
     { name = "urllib3", specifier = ">=2.7.0" },
@@ -2504,6 +2506,8 @@ dev = [
     { name = "aiosqlite", version = "0.21.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
     { name = "aiosqlite", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk' or extra != 'extra-5-khora-crewai'" },
     { name = "hypothesis" },
+    { name = "logfire", version = "4.6.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
+    { name = "logfire", version = "4.32.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk' or extra != 'extra-5-khora-crewai'" },
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.34.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
     { name = "opentelemetry-exporter-otlp-proto-http", version = "1.40.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-google-adk' or extra != 'extra-5-khora-crewai'" },
     { name = "opentelemetry-sdk", version = "1.34.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-5-khora-crewai'" },
@@ -2605,6 +2609,7 @@ provides-extras = ["accel", "age", "all-backends", "binary-readers", "crewai", "
 dev = [
     { name = "aiosqlite", specifier = ">=0.21.0" },
     { name = "hypothesis", specifier = ">=6.152.4" },
+    { name = "logfire", specifier = ">=4.6.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.34.1" },
     { name = "opentelemetry-sdk", specifier = ">=1.34.1" },
     { name = "prek", specifier = ">=0.3.13" },
