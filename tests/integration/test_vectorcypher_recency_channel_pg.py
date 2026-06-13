@@ -486,8 +486,16 @@ async def test_recency_channel_records_plan_end_to_end(kb_vc: Khora) -> None:
     assert channels["recency"]["post_filtered_keys"] == ["metadata.tag"]
     assert channels["recency"]["pushed_keys"] == []
 
-    # Every returned chunk must satisfy the filter (tag == "urgent").
+    # Every returned chunk must satisfy the filter (tag == "urgent"). The tag
+    # is carried on the chunk's parent document (``DocumentProjection.metadata``),
+    # reached via ``RecallChunk.document_id`` into ``result.documents`` — the
+    # response projection does not duplicate metadata onto each chunk.
     assert result.chunks, "expected at least the urgent chunk to survive the filter"
+    docs_by_id = {doc.id: doc for doc in result.documents}
     for chunk in result.chunks:
-        tag = (chunk.metadata or {}).get("tag")
+        doc = docs_by_id.get(chunk.document_id)
+        assert doc is not None, (
+            f"chunk {chunk.id} references document {chunk.document_id} missing from result.documents"
+        )
+        tag = (doc.metadata or {}).get("tag")
         assert tag == "urgent", f"filter-violating chunk leaked through: tag={tag!r}"
