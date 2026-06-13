@@ -359,3 +359,61 @@ class TestExpertiseComposer:
         merged = composer.merge([config1, config2])
 
         assert merged.confidence.min_entity == 0.7
+
+    def test_merge_preserves_parent_disabled_expansion(self) -> None:
+        """A parent that disabled expansion is not re-enabled by a child that
+        leaves expansion at its dataclass defaults (#1126)."""
+        from khora.extraction.skills import ExpansionConfig
+
+        loader = ExpertiseLoader()
+        composer = ExpertiseComposer(loader)
+
+        parent = ExpertiseConfig(
+            name="parent",
+            expansion=ExpansionConfig(
+                enabled=False,
+                cross_tool_unification=False,
+                relationship_inference=False,
+            ),
+        )
+        # Child does not mention expansion -> all-default (True) ExpansionConfig.
+        child = ExpertiseConfig(name="child")
+
+        merged = composer.merge([parent, child])
+
+        assert merged.expansion.enabled is False
+        assert merged.expansion.cross_tool_unification is False
+        assert merged.expansion.relationship_inference is False
+
+    def test_merge_propagates_expansion_extra_fields(self) -> None:
+        """Non-default inference_mode / preload_existing / batch_storage_size on
+        either side flow through the merge instead of being dropped (#1126).
+
+        Like the numeric fields, these use a value-differs-from-default
+        heuristic: a non-default overlay value wins, otherwise the base value
+        survives.
+        """
+        from khora.extraction.skills import ExpansionConfig
+
+        loader = ExpertiseLoader()
+        composer = ExpertiseComposer(loader)
+
+        # Parent sets a non-default inference_mode; child only overrides the
+        # other two extra fields (leaving inference_mode at its default).
+        parent = ExpertiseConfig(
+            name="parent",
+            expansion=ExpansionConfig(inference_mode="batch"),
+        )
+        child = ExpertiseConfig(
+            name="child",
+            expansion=ExpansionConfig(preload_existing=False, batch_storage_size=25),
+        )
+
+        merged = composer.merge([parent, child])
+
+        # Parent's non-default inference_mode is not clobbered by the child's
+        # default "smart".
+        assert merged.expansion.inference_mode == "batch"
+        # Child's explicit (non-default) overrides win.
+        assert merged.expansion.preload_existing is False
+        assert merged.expansion.batch_storage_size == 25
