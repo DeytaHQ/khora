@@ -146,6 +146,10 @@ class LLMFilterEvaluator:
         self._queue: list[_PendingEvaluation] = []
         self._queue_lock = asyncio.Lock()
         self._flush_task: asyncio.Task[None] | None = None
+        # Strong refs to in-flight full-batch tasks. The event loop only holds a
+        # weak reference to a bare ``create_task`` handle, so without this set the
+        # GC could collect the task mid-flight and strand its awaiters (#1161).
+        self._batch_tasks: set[asyncio.Task[None]] = set()
         # (filter_id, event_summary_hash) → (decision, expires_at_monotonic).
         # OrderedDict gives us LRU semantics via move_to_end on hit.
         self._cache: OrderedDict[tuple[UUID, str], tuple[bool, float]] = OrderedDict()
@@ -191,10 +195,30 @@ class LLMFilterEvaluator:
                 self._flush_task = loop.create_task(self._flush_after_delay())
 
         if should_flush_now:
-            # Fire-and-forget — pending items resolve their own futures.
-            loop.create_task(self._run_batch(pending))
+            # Fire-and-forget, but hold a strong ref so the GC can't drop the
+            # task mid-flight (the loop only keeps a weak reference). _run_batch
+            # fail-open-resolves every pending future even if it raises, so the
+            # ``await future`` below can never be stranded (#1161).
+            task = loop.create_task(self._run_batch(pending))
+            self._batch_tasks.add(task)
+            task.add_done_callback(self._on_batch_task_done)
 
         return await future
+
+    def _on_batch_task_done(self, task: asyncio.Task[None]) -> None:
+        """Drop the strong ref and surface any unexpected task exception.
+
+        ``_run_batch`` already fail-open-resolves its futures and swallows the
+        error, so reaching the logging branch here is belt-and-suspenders: it
+        means something escaped that guard, which we want visible rather than
+        silently swallowed by the loop's default handler.
+        """
+        self._batch_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("Level 2 hook batch task raised after fail-open resolution: {}", exc)
 
     # ------------------------------------------------------------------
     # Batching internals
@@ -222,16 +246,33 @@ class LLMFilterEvaluator:
         definition stable and avoids interleaved-namespace budget
         accounting bugs. The common case (one filter, one namespace) is
         still a single call.
-        """
-        # Bucket by (namespace_id, filter_id) — preserves arrival order
-        # within each bucket so the returned indices map correctly.
-        buckets: dict[tuple[UUID | None, UUID], list[_PendingEvaluation]] = {}
-        for p in pending:
-            key = (p.event.namespace_id, p.filter.id)
-            buckets.setdefault(key, []).append(p)
 
-        for items in buckets.values():
-            await self._evaluate_bucket(items)
+        The whole body is wrapped in a fail-open guard: every caller blocks on
+        ``await future``, so if bucketing or ``_evaluate_bucket`` raises before
+        a future is resolved (e.g. in token estimation), the awaiter would hang
+        forever. On any escaped exception we resolve every still-pending future
+        to True (fail-open, matching the LLM-error path) and swallow the error
+        so neither call path leaves an awaiter stranded (#1161).
+        """
+        try:
+            # Bucket by (namespace_id, filter_id) — preserves arrival order
+            # within each bucket so the returned indices map correctly.
+            buckets: dict[tuple[UUID | None, UUID], list[_PendingEvaluation]] = {}
+            for p in pending:
+                key = (p.event.namespace_id, p.filter.id)
+                buckets.setdefault(key, []).append(p)
+
+            for items in buckets.values():
+                await self._evaluate_bucket(items)
+        except Exception as exc:
+            logger.warning(
+                "Level 2 hook batch failed before resolving futures; failing open for {} item(s): {}",
+                sum(1 for p in pending if not p.future.done()),
+                exc,
+            )
+            for p in pending:
+                if not p.future.done():
+                    p.future.set_result(True)  # fail open — never strand the awaiter
 
     async def _evaluate_bucket(self, items: list[_PendingEvaluation]) -> None:
         """Evaluate one (namespace, filter) bucket via one LLM call.

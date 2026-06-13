@@ -279,6 +279,80 @@ class TestLLMFilterEvaluatorBudget:
 
 
 # ---------------------------------------------------------------------------
+# Batch-task lifecycle (Issue #1161): the full-batch flush fires _run_batch as
+# a create_task. The handle must be strongly referenced (GC can't drop it) and
+# a pre-resolve exception must not strand awaiters on `await future` forever.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestLLMFilterEvaluatorBatchTaskLifecycle:
+    async def test_full_batch_task_is_strongly_referenced(self) -> None:
+        """The fire-and-forget batch task is retained in a set, not dropped."""
+        cfg = SemanticHooksConfig(llm_evaluation_enabled=True)
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10_000.0, batch_size=2)
+        filt = _make_filter()
+        ns = uuid4()
+        event_a = _make_event(name="Acme")
+        event_a.namespace_id = ns
+        event_b = _make_event(name="Initech")
+        event_b.namespace_id = ns
+
+        seen_tasks: list[int] = []
+
+        async def slow_acompletion(prompt, config, **kwargs):  # noqa: ANN001
+            # While the batch is in flight, the evaluator must hold a strong ref.
+            assert len(evaluator._batch_tasks) >= 1
+            seen_tasks.append(len(evaluator._batch_tasks))
+            return json.dumps(
+                {"results": [{"i": 0, "match": True, "confidence": 0.9}, {"i": 1, "match": True, "confidence": 0.9}]}
+            )
+
+        with patch("khora.config.llm.acompletion", new=slow_acompletion):
+            results = await asyncio.gather(
+                evaluator.evaluate(event_a, filt),
+                evaluator.evaluate(event_b, filt),
+            )
+
+        assert results == [True, True]
+        assert seen_tasks and seen_tasks[0] >= 1
+        # Done-callback drains the set once the task completes.
+        await asyncio.sleep(0)
+        assert len(evaluator._batch_tasks) == 0
+
+    async def test_pre_resolve_exception_does_not_strand_awaiters(self) -> None:
+        """If the batch worker raises BEFORE resolving the per-item futures
+        (e.g. in bucketing / token estimation), awaiters must still be released
+        fail-open rather than blocking on `await future` forever (#1161)."""
+        cfg = SemanticHooksConfig(llm_evaluation_enabled=True)
+        evaluator = LLMFilterEvaluator(cfg, batch_flush_ms=10_000.0, batch_size=2)
+        filt = _make_filter()
+        ns = uuid4()
+        event_a = _make_event(name="Acme")
+        event_a.namespace_id = ns
+        event_b = _make_event(name="Initech")
+        event_b.namespace_id = ns
+
+        # Make the bucket evaluation explode before any future is resolved.
+        async def _boom(_items):  # noqa: ANN001
+            raise RuntimeError("pre-resolve explosion")
+
+        with patch.object(evaluator, "_evaluate_bucket", side_effect=_boom):
+            # Must not hang; both awaiters released fail-open.
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    evaluator.evaluate(event_a, filt),
+                    evaluator.evaluate(event_b, filt),
+                ),
+                timeout=5.0,
+            )
+
+        assert results == [True, True]  # fail-open, not stranded
+        await asyncio.sleep(0)
+        assert len(evaluator._batch_tasks) == 0
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher integration — flag-gated, examples-required
 # ---------------------------------------------------------------------------
 
