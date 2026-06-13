@@ -1164,9 +1164,18 @@ class StorageCoordinator:
         return 0
 
     async def count_relationships(self, namespace_id: UUID) -> int:
-        """Count relationships in a namespace (graph-only)."""
+        """Count relationships in a namespace.
+
+        Relationships are owned by the graph backend when present. Falls back
+        to the vector backend's ``relationships`` mirror when no graph backend
+        exists (PostgreSQL-only chronicle stacks, #1066) so the count matches
+        what ``create_relationships_batch`` persisted there.
+        """
         if self._graph:
             return await self._graph.count_relationships(namespace_id)
+        vector_impl = getattr(self._vector, "count_relationships", None) if self._vector else None
+        if vector_impl is not None:
+            return await vector_impl(namespace_id)
         return 0
 
     # =========================================================================
@@ -1519,6 +1528,12 @@ class StorageCoordinator:
         count = 0
         if self._graph and hasattr(self._graph, "create_relationships_batch"):
             count = await self._graph.create_relationships_batch(relationships, batch_size=batch_size)
+        elif not self._graph and self._vector and hasattr(self._vector, "create_relationships_batch"):
+            # Graph-less stacks (PostgreSQL-only chronicle, #1066): persist
+            # extracted relationships to the vector backend's relationships
+            # mirror so they are not silently dropped, mirroring the entity
+            # write/count fallback.
+            count = await self._vector.create_relationships_batch(relationships, batch_size=batch_size)  # type: ignore[unresolved-attribute]
 
         return count
 
