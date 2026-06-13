@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -486,6 +486,88 @@ class TestSearchFulltext:
         a_hits = await adapter.search_fulltext(ns_a, "unique", limit=10)
         assert len(a_hits) == 1
         assert a_hits[0][0].namespace_id == ns_a
+
+
+# ---------------------------------------------------------------------------
+# Temporal-window correctness across timezone offsets (#1146)
+#
+# Timestamps are stored as TEXT and the temporal pushdown compares them with
+# SQL ``>=`` / ``<=`` — lexicographic on TEXT. That is only chronological when
+# every stored value and bind parameter share one offset representation. A
+# connector emitting an explicit non-UTC offset must therefore be normalized
+# to canonical UTC before storing AND before binding, or window edges admit /
+# drop the wrong chunks.
+# ---------------------------------------------------------------------------
+
+
+class TestTemporalOffsetNormalization:
+    async def test_search_similar_non_utc_offset_excluded_by_true_instant(self, adapter: SQLiteLanceVectorAdapter):
+        """A ``+05:30`` source_timestamp must compare by its true UTC instant.
+
+        ``2026-01-15T23:00:00+05:30`` is ``2026-01-15T17:30:00+00:00`` in UTC.
+        A window upper-bounded at ``18:00 UTC`` includes it by instant, but the
+        raw ISO string ``...T23:00:00+05:30`` sorts AFTER ``...T18:00:00+00:00``
+        lexicographically, so on main it is wrongly excluded.
+        """
+        ns, doc = uuid4(), uuid4()
+        ist = timezone(timedelta(hours=5, minutes=30))
+        # 23:00 IST == 17:30 UTC.
+        offset_ts = datetime(2026, 1, 15, 23, 0, 0, tzinfo=ist)
+        await adapter.create_chunks_batch([_make_chunk(ns, doc, embedding=_unit(8, 0), source_timestamp=offset_ts)])
+
+        # Window [16:00 UTC, 18:00 UTC] contains the true instant 17:30 UTC.
+        after = datetime(2026, 1, 15, 16, 0, 0, tzinfo=UTC)
+        before = datetime(2026, 1, 15, 18, 0, 0, tzinfo=UTC)
+        results = await adapter.search_similar(ns, _unit(8, 0), limit=10, created_after=after, created_before=before)
+        assert len(results) == 1
+        # And the round-tripped value must come back UTC-aware.
+        got = results[0][0].source_timestamp
+        assert got is not None
+        assert got.utcoffset() == timedelta(0)
+        assert got == offset_ts
+
+    async def test_search_similar_non_utc_offset_excluded_when_outside_window(self, adapter: SQLiteLanceVectorAdapter):
+        """Same chunk, a window that ends before its true instant must drop it.
+
+        17:30 UTC is after a 17:00 UTC upper bound, so the chunk is excluded by
+        true instant — even though ``...T23:00:00+05:30`` would lexically sort
+        the other way against ``...T17:00:00+00:00``.
+        """
+        ns, doc = uuid4(), uuid4()
+        ist = timezone(timedelta(hours=5, minutes=30))
+        offset_ts = datetime(2026, 1, 15, 23, 0, 0, tzinfo=ist)  # 17:30 UTC
+        await adapter.create_chunks_batch([_make_chunk(ns, doc, embedding=_unit(8, 0), source_timestamp=offset_ts)])
+
+        before = datetime(2026, 1, 15, 17, 0, 0, tzinfo=UTC)
+        results = await adapter.search_similar(ns, _unit(8, 0), limit=10, created_before=before)
+        assert results == []
+
+    async def test_search_fulltext_naive_and_aware_sort_consistently_at_boundary(
+        self, adapter: SQLiteLanceVectorAdapter
+    ):
+        """Naive and tz-aware source_timestamps at the same instant both match.
+
+        A naive ``...T17:30:00`` (treated as UTC) and an aware
+        ``...T23:00:00+05:30`` (also 17:30 UTC) are the same instant. A UTC
+        window covering that instant must return both. On main the naive value
+        (no offset suffix) and the aware value sort inconsistently against the
+        ``+00:00`` bound, so one is dropped.
+        """
+        ns, doc = uuid4(), uuid4()
+        ist = timezone(timedelta(hours=5, minutes=30))
+        naive_ts = datetime(2026, 1, 15, 17, 30, 0)  # treated as UTC
+        aware_ts = datetime(2026, 1, 15, 23, 0, 0, tzinfo=ist)  # 17:30 UTC
+        await adapter.create_chunks_batch(
+            [
+                _make_chunk(ns, doc, content="boundary alpha token", index=0, source_timestamp=naive_ts),
+                _make_chunk(ns, doc, content="boundary beta token", index=1, source_timestamp=aware_ts),
+            ]
+        )
+
+        after = datetime(2026, 1, 15, 17, 0, 0, tzinfo=UTC)
+        before = datetime(2026, 1, 15, 18, 0, 0, tzinfo=UTC)
+        results = await adapter.search_fulltext(ns, "boundary", limit=10, created_after=after, created_before=before)
+        assert len(results) == 2
 
 
 # ---------------------------------------------------------------------------
