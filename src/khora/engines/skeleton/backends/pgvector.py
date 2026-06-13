@@ -178,6 +178,17 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 """)
             )
 
+            # B-tree expression index serving the recency channel's
+            # ORDER BY COALESCE(...) DESC LIMIT. The COALESCE expression is
+            # byte-identical to ``search_recent_chunks`` so Postgres serves
+            # the sort from the index.
+            await conn.execute(
+                text("""
+                CREATE INDEX IF NOT EXISTS ix_khora_chunks_ns_recency
+                ON khora_chunks (namespace_id, (COALESCE(occurred_at, source_timestamp, created_at)) DESC)
+                """)
+            )
+
             # Create HNSW index on embedding
             await conn.execute(
                 text(f"""
@@ -648,6 +659,49 @@ class PgVectorTemporalStore(TemporalVectorStore):
         async with self._get_session() as session:
             results = await self._bm25_search(session, query_text, conditions, limit)
         return [(temporal_chunk_to_chunk(r.chunk), float(r.bm25_score or 0.0)) for r in results]
+
+    async def search_recent_chunks(
+        self,
+        namespace_id: UUID,
+        limit: int,
+        *,
+        created_after: datetime | None = None,
+    ) -> list[tuple[Chunk, float | None]]:
+        """Return the ``limit`` most-recent chunks in ``namespace_id``.
+
+        Pure recency sort with no semantic gate — the caller (the
+        VectorCypher recency channel) applies the cosine relevance floor.
+        The recency axis is the 3-way ``COALESCE(occurred_at,
+        source_timestamp, created_at)`` (event-time → producer-time →
+        ingest-time), narrowed from above by the optional ``created_after``
+        bound on the SAME axis. The expression is byte-identical to the
+        ``ix_khora_chunks_ns_recency`` index expression so Postgres can serve
+        the ``ORDER BY ... DESC LIMIT`` from the index.
+
+        Selects the FULL row (not the embedding-excluding ``_retrieval_cols``
+        path) so ``embedding`` survives onto the returned ``Chunk`` — the
+        recency channel drops embedding-less chunks before the cosine gate.
+
+        Returns ``(chunk, None)`` tuples; the ``None`` signals "no cosine
+        score available" for the caller's RRF branch.
+        """
+        async with self._get_session() as session:
+            temporal_col = func.coalesce(
+                khora_chunks_table.c.occurred_at,
+                khora_chunks_table.c.source_timestamp,
+                khora_chunks_table.c.created_at,
+            )
+            stmt = (
+                select(khora_chunks_table)
+                .where(khora_chunks_table.c.namespace_id == namespace_id)
+                .order_by(temporal_col.desc())
+                .limit(limit)
+            )
+            if created_after is not None:
+                stmt = stmt.where(temporal_col >= created_after)
+            result = await session.execute(stmt)
+            rows = result.fetchall()
+        return [(temporal_chunk_to_chunk(self._row_to_chunk(r)), None) for r in rows]
 
     async def _bm25_search(
         self,

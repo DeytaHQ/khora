@@ -236,6 +236,32 @@ class TemporalVectorStore(Protocol):
         """
         return []
 
+    # Optional capability — backends that store ingested chunk content in
+    # their own table override this to expose a pure-recency channel for the
+    # VectorCypher recency path. Default returns an empty list so backends
+    # without a recency-capable table contribute nothing to the channel.
+    async def search_recent_chunks(
+        self,
+        namespace_id: UUID,
+        limit: int,
+        *,
+        created_after: datetime | None = None,
+    ) -> list[tuple[Chunk, float | None]]:
+        """Return the ``limit`` most-recent chunks in the namespace.
+
+        Pure recency sort with no semantic gate — the caller (the
+        VectorCypher recency channel) applies the cosine relevance floor.
+        The recency axis is ``COALESCE(occurred_at, source_timestamp,
+        created_at)`` (event-time → producer-time → ingest-time), narrowed
+        from above by the optional ``created_after`` bound on the same axis.
+
+        Returns ``(chunk, None)`` tuples; the ``None`` signals "no cosine
+        score available" so the caller branches on it. The default empty
+        list means the backend does not support the recency channel
+        (sqlite_lance support tracked in GitHub issue #1182).
+        """
+        return []
+
 
 def temporal_chunk_to_chunk(tc: TemporalChunk) -> Chunk:
     """Adapt a ``TemporalChunk`` (skeleton storage) to a public ``Chunk``.

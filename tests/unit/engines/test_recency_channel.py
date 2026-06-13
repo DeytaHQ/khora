@@ -8,13 +8,16 @@ today-dated. This test pins the gate.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from khora.core.models import Chunk
+from khora.engines.skeleton.backends import TemporalVectorStore
 from khora.engines.vectorcypher.retriever import RetrieverConfig, VectorCypherRetriever
+from khora.filter import FilterNode, RecallFilter, parse_to_ast
 
 
 def _make_chunk(content: str, occurred_at: datetime | None, embedding: list[float]) -> Chunk:
@@ -148,3 +151,77 @@ async def test_chunks_without_embeddings_skipped(retriever_with_mocked_store) ->
         temporal_filter=None,
     )
     assert result == []
+
+
+class _ProtocolDefaultStore(TemporalVectorStore):
+    """A concrete TemporalVectorStore that relies on the Protocol's DEFAULT
+    ``search_recent_chunks`` (which returns ``[]``).
+
+    Unlike SurrealDB or pgvector this store does NOT override the recency
+    method — it inherits the no-op default. The only abstract members it
+    implements are the bare minimum to instantiate; none are exercised by
+    the recency channel under test, so they raise if mis-called.
+    """
+
+    async def connect(self) -> None:  # pragma: no cover - not exercised
+        raise NotImplementedError
+
+    async def disconnect(self) -> None:  # pragma: no cover - not exercised
+        raise NotImplementedError
+
+    async def create_chunk(self, chunk: Any) -> Any:  # pragma: no cover
+        raise NotImplementedError
+
+    async def create_chunks_batch(self, chunks: Any) -> Any:  # pragma: no cover
+        raise NotImplementedError
+
+    async def get_chunk(self, chunk_id: UUID, namespace_id: UUID) -> Any:  # pragma: no cover
+        raise NotImplementedError
+
+    async def delete_chunk(self, chunk_id: UUID, namespace_id: UUID) -> bool:  # pragma: no cover
+        raise NotImplementedError
+
+    async def delete_chunks_by_document(self, document_id: UUID, namespace_id: UUID) -> int:  # pragma: no cover
+        raise NotImplementedError
+
+    async def search(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        raise NotImplementedError
+
+    async def health_check(self) -> dict[str, Any]:  # pragma: no cover
+        raise NotImplementedError
+
+
+def _filter_ast() -> FilterNode:
+    """A real recall-filter AST so the plan-recording branch is reachable."""
+    return parse_to_ast(RecallFilter.model_validate({"metadata.tier": "gold"}))
+
+
+@pytest.mark.asyncio
+async def test_protocol_default_store_returns_empty_and_records_no_plan() -> None:
+    """A real ``TemporalVectorStore`` that inherits the Protocol DEFAULT
+    ``search_recent_chunks`` (returns ``[]``) contributes nothing: the
+    channel returns ``[]`` and records NO ChannelPlan, even when a caller
+    filter is present (the early-return on empty SQL rows precedes the
+    plan-recording site). A channel that never produced post-filtered
+    chunks must never be credited with a disposition in the report."""
+    cfg = RetrieverConfig(
+        temporal_recency_channel_enabled=True,
+        temporal_query_relevance_floor=0.30,
+    )
+    retriever = VectorCypherRetriever.__new__(VectorCypherRetriever)
+    retriever._config = cfg
+    retriever._vector_store = _ProtocolDefaultStore()
+
+    filter_channel_plans: dict[str, Any] = {}
+    result = await retriever._recency_channel_chunks(
+        query_embedding=[1.0, 0.0, 0.0],
+        namespace_id=uuid4(),
+        temporal_filter=None,
+        filter_ast=_filter_ast(),
+        filter_channel_plans=filter_channel_plans,
+    )
+
+    assert result == []
+    # The recency channel honestly never appears in the report.
+    assert "recency" not in filter_channel_plans
+    assert filter_channel_plans == {}
