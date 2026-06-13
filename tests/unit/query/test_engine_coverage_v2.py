@@ -374,8 +374,11 @@ class TestQueryEntry:
         ns = uuid4()
 
         cached = QueryResult(chunks=[(_make_chunk(content="cached"), 0.99)])
-        # Pre-populate cache
-        await engine._cache.set("q", ns, engine._config.mode.name, cached)
+        # Pre-populate cache with the same per-call digest the engine computes (#1129).
+        from khora.query.engine import _cache_extra_digest
+
+        extra = _cache_extra_digest(engine._config, None)
+        await engine._cache.set("q", ns, engine._config.mode.name, cached, extra)
         out = await engine.query("q", ns)
         assert out is cached
         # Storage was never called

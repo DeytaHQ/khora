@@ -29,16 +29,19 @@ class QueryCache:
         self._misses = 0
 
     @staticmethod
-    def _make_key(query: str, namespace_id: UUID, mode: str) -> str:
+    def _make_key(query: str, namespace_id: UUID, mode: str, extra: str = "") -> str:
         normalized = query.strip().lower()
-        return sha256(f"{normalized}:{namespace_id}:{mode}".encode()).hexdigest()
+        return sha256(f"{normalized}:{namespace_id}:{mode}:{extra}".encode()).hexdigest()
 
-    async def get(self, query: str, namespace_id: UUID, mode: str) -> Any | None:
+    async def get(self, query: str, namespace_id: UUID, mode: str, extra: str = "") -> Any | None:
         """Look up a cached result.
 
-        Returns None on miss or expiry.
+        ``extra`` is a stable digest of the per-call inputs that change the
+        result set (temporal filter, result-shaping config). Two otherwise
+        identical queries with different ``extra`` digests don't share an
+        entry. Returns None on miss or expiry.
         """
-        key = self._make_key(query, namespace_id, mode)
+        key = self._make_key(query, namespace_id, mode, extra)
         entry = self._cache.get(key)
         if entry is not None:
             timestamp, result = entry
@@ -64,9 +67,12 @@ class QueryCache:
             metadata={"cache_type": "query"},
         )
 
-    async def set(self, query: str, namespace_id: UUID, mode: str, result: Any) -> None:
-        """Store a result in the cache, evicting the oldest entry if full."""
-        key = self._make_key(query, namespace_id, mode)
+    async def set(self, query: str, namespace_id: UUID, mode: str, result: Any, extra: str = "") -> None:
+        """Store a result in the cache, evicting the oldest entry if full.
+
+        ``extra`` must match the digest passed to ``get`` for the lookup to hit.
+        """
+        key = self._make_key(query, namespace_id, mode, extra)
         if len(self._cache) >= self._max_size:
             oldest_key = min(self._cache, key=lambda k: self._cache[k][0])
             del self._cache[oldest_key]
