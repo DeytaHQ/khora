@@ -2037,16 +2037,35 @@ Return ONLY valid JSON, no other text."""
                     sections_data = data.get("sections", [])
 
                     # Handle flat format: LLM returned {"entities": [...], "relationships": [...]}
-                    # instead of {"sections": [...]}.  Treat as single-section response.
+                    # instead of {"sections": [...]}.  Only safe for a single-text batch - for a
+                    # multi-text batch the flat shape gives us no way to attribute entities to a
+                    # specific input, so we must NOT dump them all on text 0 (#1123). The loop
+                    # below then marks every text as a section_count_mismatch error.
                     if not sections_data and (data.get("entities") or data.get("relationships")):
-                        sections_data = [data]
+                        if len(texts) == 1:
+                            sections_data = [data]
+
+                    # #1123: when the model returns fewer sections than inputs (merged/skipped
+                    # sections, or an unattributable flat shape on a multi-text batch), the
+                    # unmatched texts MUST carry an ``error`` so they flow into the #889
+                    # extraction_errors counter / degradations and the all_failed circuit
+                    # breaker - never a bare empty success that silently drops entities.
+                    if len(sections_data) < len(texts):
+                        logger.warning(
+                            "Batch extraction returned {} sections for {} texts "
+                            "(model={}); marking {} unmatched text(s) as section_count_mismatch",
+                            len(sections_data),
+                            len(texts),
+                            model_used,
+                            len(texts) - len(sections_data),
+                        )
 
                     results: list[ExtractionResult] = []
                     for i, text in enumerate(texts):
                         if i < len(sections_data):
                             results.append(self._parse_response(sections_data[i]))
                         else:
-                            results.append(ExtractionResult())
+                            results.append(ExtractionResult(metadata={"error": "section_count_mismatch"}))
 
                     return results
         except Exception as e:

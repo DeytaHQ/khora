@@ -533,6 +533,128 @@ class TestExtractMulti:
         assert results[1].entities[0].name == "B"
 
 
+class TestMultiBatchSectionMismatch:
+    """#1123: dropped batch-extraction sections must surface as errors, not silent empties."""
+
+    @pytest.mark.asyncio
+    async def test_fewer_sections_marks_missing_as_errored(self) -> None:
+        """LLM returns 1 section for a 3-text batch: the 2 unmatched texts carry error metadata.
+
+        Before the fix the unmatched texts got a bare ``ExtractionResult()`` with no
+        ``error`` key, so they bypassed the #889 extraction_errors counter and the document
+        was marked complete with entities silently missing.
+        """
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+
+        # Model merged 3 input sections into 1 returned section (common failure mode).
+        section_data = {
+            "sections": [
+                {"entities": [{"name": "Alice", "entity_type": "PERSON"}], "relationships": []},
+            ]
+        }
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(section_data)
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=200, completion_tokens=100, total_tokens=300)
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            results = await extractor._extract_multi_batch(
+                [
+                    "First substantive text about Alice the engineer.",
+                    "Second substantive text about Bob the manager.",
+                    "Third substantive text about Carol the analyst.",
+                ],
+                ["PERSON"],
+                __import__("litellm"),
+            )
+
+        assert len(results) == 3
+        # Matched text keeps its extraction.
+        assert results[0].entities[0].name == "Alice"
+        # Unmatched texts are errored (so #889 counts them), not silent empties.
+        assert results[1].entities == []
+        assert results[2].entities == []
+        assert results[1].metadata.get("error") == "section_count_mismatch"
+        assert results[2].metadata.get("error") == "section_count_mismatch"
+
+    @pytest.mark.asyncio
+    async def test_flat_format_multi_text_does_not_dump_all_on_text_zero(self) -> None:
+        """#1123: flat (non-sections) shape on a multi-text batch must NOT attribute all
+        entities to text 0 and empty the rest. The whole batch is marked errored instead.
+        """
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+
+        # Flat shape: {"entities": [...]} with no "sections" wrapper.
+        flat_data = {
+            "entities": [
+                {"name": "Alice", "entity_type": "PERSON"},
+                {"name": "Bob", "entity_type": "PERSON"},
+            ],
+            "relationships": [],
+        }
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(flat_data)
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=200, completion_tokens=100, total_tokens=300)
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            results = await extractor._extract_multi_batch(
+                [
+                    "First substantive text about Alice the engineer.",
+                    "Second substantive text about Bob the manager.",
+                ],
+                ["PERSON"],
+                __import__("litellm"),
+            )
+
+        assert len(results) == 2
+        # Must NOT dump Alice+Bob onto text 0 and empty text 1 (the old mis-stamping bug).
+        assert results[0].entities == []
+        assert results[1].entities == []
+        assert results[0].metadata.get("error") == "section_count_mismatch"
+        assert results[1].metadata.get("error") == "section_count_mismatch"
+
+    @pytest.mark.asyncio
+    async def test_flat_format_single_text_still_parsed(self) -> None:
+        """#1123: the flat-format fallback remains valid for a single-text batch."""
+        extractor = LLMEntityExtractor(model="test-model", max_retries=1)
+
+        flat_data = {
+            "entities": [{"name": "Alice", "entity_type": "PERSON"}],
+            "relationships": [],
+        }
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = json.dumps(flat_data)
+        mock_response.choices[0].finish_reason = "stop"
+        mock_response.usage = MagicMock(prompt_tokens=200, completion_tokens=100, total_tokens=300)
+
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_response),
+            patch("khora.telemetry.get_collector") as mock_telem,
+        ):
+            mock_telem.return_value.record_llm_call = MagicMock()
+            results = await extractor._extract_multi_batch(
+                ["Only text about Alice the engineer."],
+                ["PERSON"],
+                __import__("litellm"),
+            )
+
+        assert len(results) == 1
+        assert results[0].entities[0].name == "Alice"
+        assert results[0].metadata.get("error") is None
+
+
 # ---------------------------------------------------------------------------
 # Regex extraction (A-4 tiered extraction)
 # ---------------------------------------------------------------------------
