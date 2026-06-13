@@ -401,6 +401,92 @@ async def ensure_hnsw_indexes(engine) -> dict:
     return result
 
 
+#: m / ef_construction for halfvec HNSW recreation. Must match migration 018
+#: (018_halfvec_hnsw_indexes) so a recreate produces the same index the
+#: migration would have, and the default embedding dimension used there.
+_HALFVEC_HNSW_M = 24
+_HALFVEC_HNSW_EF_CONSTRUCTION = 128
+_HALFVEC_DEFAULT_DIMENSION = 1536
+
+
+async def ensure_halfvec_indexes(engine, *, embedding_dimension: int = _HALFVEC_DEFAULT_DIMENSION) -> dict:
+    """Recreate the halfvec HNSW expression indexes if they don't exist.
+
+    Pairs with ``drop_hnsw_indexes``, which drops the halfvec indexes along
+    with the float32 ones before a bulk load.  Without this recreate step the
+    ``HALFVEC_INDEXES`` DDL was never executed, so after one drop the halfvec
+    indexes were gone permanently (migration 018 will not re-run on a stamped
+    database) and every halfvec-cast search sequential-scanned (#1137).
+
+    Formats the ``HALFVEC_INDEXES`` SQL templates with the configured
+    ``embedding_dimension`` and the migration-018 ``m`` / ``ef_construction``
+    values.  Postgres + pgvector >= 0.7.0 only; on older pgvector the
+    ``CREATE`` fails (no ``halfvec`` type) and is recorded as a per-index error
+    without affecting the float32 indexes, matching the fail-soft pattern used
+    throughout this module.
+
+    Args:
+        engine: An ``sqlalchemy.ext.asyncio.AsyncEngine`` instance.
+        embedding_dimension: Vector dimension to cast to ``halfvec``.
+
+    Returns:
+        Dict with ``indexes_created`` / ``freshly_created`` count and ``errors``.
+    """
+    from sqlalchemy import text
+
+    result: dict[str, Any] = {
+        "indexes_created": 0,
+        "errors": [],
+    }
+
+    halfvec_ddl = [
+        (
+            idx["name"],
+            idx["sql"].format(
+                dim=embedding_dimension,
+                m=_HALFVEC_HNSW_M,
+                ef_construction=_HALFVEC_HNSW_EF_CONSTRUCTION,
+            ),
+        )
+        for idx in HALFVEC_INDEXES
+    ]
+
+    import asyncio
+
+    async def _create_one(idx_name: str, ddl: str) -> tuple[bool, str | None]:
+        try:
+            async with engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                row = await conn.execute(
+                    text("SELECT 1 FROM pg_indexes WHERE indexname = :name"),
+                    {"name": idx_name},
+                )
+                already_exists = row.scalar() is not None
+                if already_exists:
+                    logger.debug(f"halfvec index {idx_name} already exists, skipping CREATE")
+                    return False, None
+                logger.info(f"Creating halfvec HNSW index {idx_name}")
+                await conn.execute(text(ddl))
+                return True, None
+        except Exception as e:
+            return False, f"CREATE INDEX {idx_name}: {e}"
+
+    tasks = [_create_one(name, ddl) for name, ddl in halfvec_ddl]
+    outcomes = await asyncio.gather(*tasks)
+
+    freshly_created = 0
+    for created, error in outcomes:
+        if error:
+            result["errors"].append(error)
+            logger.warning(error)
+        elif created:
+            freshly_created += 1
+
+    result["indexes_created"] = freshly_created
+    result["freshly_created"] = freshly_created
+    return result
+
+
 async def prepare_for_bulk_load(coordinator) -> dict:
     """Prepare storage for bulk data ingestion by dropping HNSW indexes.
 
@@ -470,7 +556,12 @@ async def reindex_hnsw_concurrently(engine) -> dict:
     return result
 
 
-async def optimize_postgresql(engine, *, reindex_hnsw: bool = True) -> dict:
+async def optimize_postgresql(
+    engine,
+    *,
+    reindex_hnsw: bool = True,
+    embedding_dimension: int = _HALFVEC_DEFAULT_DIMENSION,
+) -> dict:
     """Create optimal PostgreSQL indexes, run ANALYZE, and optionally reindex HNSW.
 
     Executes raw DDL against the provided SQLAlchemy async engine,
@@ -481,6 +572,8 @@ async def optimize_postgresql(engine, *, reindex_hnsw: bool = True) -> dict:
         reindex_hnsw: If True, run ``REINDEX INDEX CONCURRENTLY`` on HNSW
             indexes after creating other indexes.  Set to False to skip
             (e.g. for small datasets where reindexing adds no benefit).
+        embedding_dimension: Vector dimension used when recreating the halfvec
+            HNSW indexes (must match the deployment's embedding dimension).
 
     Returns:
         Dict with ``indexes_created``, ``tables_analyzed``,
@@ -523,6 +616,13 @@ async def optimize_postgresql(engine, *, reindex_hnsw: bool = True) -> dict:
         ensure_result = await ensure_hnsw_indexes(engine)
         result["indexes_created"] += ensure_result["indexes_created"]
         result["errors"].extend(ensure_result["errors"])
+
+        # Recreate the halfvec HNSW indexes too — drop_hnsw_indexes drops them
+        # alongside the float32 indexes, so the recreate must restore both for
+        # the drop/recreate pair to round-trip (#1137).
+        halfvec_result = await ensure_halfvec_indexes(engine, embedding_dimension=embedding_dimension)
+        result["indexes_created"] += halfvec_result["indexes_created"]
+        result["errors"].extend(halfvec_result["errors"])
 
         freshly_created = ensure_result.get("freshly_created", 0)
         if freshly_created == 0:
@@ -629,7 +729,8 @@ async def optimize_storage(coordinator) -> dict:
     if backend is not None:
         engine = getattr(backend, "_engine", None)
         if engine is not None:
-            results["postgresql"] = await optimize_postgresql(engine)
+            embedding_dimension = getattr(backend, "_embedding_dimension", _HALFVEC_DEFAULT_DIMENSION)
+            results["postgresql"] = await optimize_postgresql(engine, embedding_dimension=embedding_dimension)
         else:
             logger.warning("No SQLAlchemy engine found on backend; skipping PostgreSQL optimization")
 
