@@ -112,6 +112,15 @@ class MemoryFact:
     # Source tracking — list of chunk IDs that contributed to this fact
     source_chunk_ids: list[UUID] = field(default_factory=list)
 
+    # Event-time anchor (#1144) — the fact's real-world time, derived at
+    # extraction from the source chunk's occurred_at / source_timestamp.
+    # Distinct from created_at (ingestion order). Used to order supersession
+    # so a backfilled OLDER fact ingested later does not overwrite a NEWER
+    # active fact. Not persisted (the memory_facts table has no event-time
+    # column); facts read back from storage carry event_time=None and fall
+    # back to created_at for comparison.
+    event_time: datetime | None = None
+
     # Timestamps (set by DB on insert; optional in-memory)
     created_at: datetime | None = None
     updated_at: datetime | None = None
