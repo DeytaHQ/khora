@@ -80,7 +80,9 @@ class ChunkImportanceScorer:
         Args:
             chunks: Chunks to classify.
             ratio: Fraction of chunks to send to LLM extraction (top-K by score).
-            min_score: Always include chunks scoring above this threshold.
+            min_score: Minimum importance floor. Chunks scoring below this are
+                routed to the lightweight path even if they fall inside the
+                top-K window. Raising it shrinks the LLM-bound set.
 
         Returns:
             Tuple of (llm_chunks, lightweight_chunks).
@@ -90,14 +92,15 @@ class ChunkImportanceScorer:
 
         scored = self.score_chunks(chunks)
 
-        # Determine the cutoff: take top ratio% or all above min_score
+        # Take the top ratio% of chunks, then apply min_score as a floor: a
+        # chunk reaches the LLM only if it is in the top-K AND clears the floor.
         k = max(1, int(len(scored) * ratio))
 
         llm_chunks: list[Chunk] = []
         lightweight_chunks: list[Chunk] = []
 
         for idx, (chunk, score) in enumerate(scored):
-            if idx < k or score >= min_score:
+            if idx < k and score >= min_score:
                 llm_chunks.append(chunk)
             else:
                 lightweight_chunks.append(chunk)

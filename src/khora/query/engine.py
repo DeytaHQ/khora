@@ -11,10 +11,12 @@ with configurable fusion weights. Now enhanced with:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 # Regex for simple-query detection heuristic
 import re
 import time
+from array import array
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -564,10 +566,14 @@ class HybridQueryEngine:
         # Cached rerankers (keyed by method name) so model is loaded once
         self._rerankers: dict[str, Any] = {}
 
-        # Per-query entity similarity cache to avoid duplicate DB queries
-        # when both _vector_search and _graph_search need entity similarities.
-        # Keyed by id(embedding), cleared at the start of each query().
-        self._entity_similarity_cache: dict[int, asyncio.Task[Any]] = {}
+        # Entity-similarity dedup cache so concurrent _vector_search and
+        # _graph_search calls for the same embedding share one DB query.
+        # Keyed by (namespace_id, content hash of the embedding) - NOT
+        # id(embedding), whose recycled values could alias a different query's
+        # (or namespace's) cached task under concurrency. Entries are evicted
+        # when their task completes, so they never outlive the embedding. See
+        # #1159.
+        self._entity_similarity_cache: dict[tuple[UUID, bytes], asyncio.Task[Any]] = {}
 
     def invalidate_caches(self, namespace_id: UUID) -> None:
         """Invalidate BM25 keyword index and query caches for a namespace.
@@ -645,9 +651,6 @@ class HybridQueryEngine:
             )
 
         cfg = config or self._config
-
-        # Clear per-query entity similarity cache
-        self._entity_similarity_cache.clear()
 
         # Digest of the per-call inputs that shape the result set (temporal
         # filter + result-shaping config). Keeps differently-filtered or
@@ -1596,16 +1599,28 @@ class HybridQueryEngine:
         limit: int,
         min_similarity: float,
     ) -> list[tuple[UUID, float]]:
-        """Search similar entities with per-query deduplication.
+        """Search similar entities with deduplication across concurrent calls.
 
         Uses a shared asyncio.Task so concurrent calls from _vector_search
-        and _graph_search within the same asyncio.gather share a single
-        database query.
+        and _graph_search for the same embedding share a single database
+        query.
+
+        The cache is keyed by ``(namespace_id, content-hash(embedding))`` -
+        never ``id(embedding)``, whose recycled values could make a later
+        query await a different query's (and namespace's) cached task, leaking
+        silently-wrong, potentially cross-namespace results (#1159). Entries
+        evict themselves when their task completes, and a cancelled/failed
+        cached task is re-issued rather than re-awaited.
         """
-        cache_key = id(query_embedding)
-        if cache_key not in self._entity_similarity_cache:
+        cache_key = (
+            namespace_id,
+            # Non-cryptographic content fingerprint for dedup keying only.
+            hashlib.sha1(array("d", query_embedding).tobytes(), usedforsecurity=False).digest(),
+        )
+        task = self._entity_similarity_cache.get(cache_key)
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
             max_limit = max(limit, 20)
-            self._entity_similarity_cache[cache_key] = asyncio.ensure_future(
+            task = asyncio.ensure_future(
                 self._storage.search_similar_entities(
                     namespace_id,
                     query_embedding,
@@ -1613,7 +1628,16 @@ class HybridQueryEngine:
                     min_similarity=min_similarity,
                 )
             )
-        results = await self._entity_similarity_cache[cache_key]
+            self._entity_similarity_cache[cache_key] = task
+            # Evict on completion (including cancellation) so the entry never
+            # outlives the query; the identity check guards against clobbering
+            # a freshly re-issued task.
+            task.add_done_callback(
+                lambda t, k=cache_key: (
+                    self._entity_similarity_cache.pop(k, None) if self._entity_similarity_cache.get(k) is t else None
+                )
+            )
+        results = await task
         return results[:limit]
 
     @trace(

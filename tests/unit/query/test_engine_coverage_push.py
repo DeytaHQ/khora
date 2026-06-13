@@ -815,12 +815,10 @@ class TestCachedEntitySearch:
         eid = uuid4()
         engine._storage.search_similar_entities = AsyncMock(return_value=[(eid, 0.9), (uuid4(), 0.8)])
         embedding = [0.1, 0.2, 0.3]
-        # First call populates the cache
-        out1 = await engine._cached_entity_search(uuid4(), embedding, 5, 0.0)
-        # Second call hits the cache (same id() ⇒ same task)
-        out2 = await engine._cached_entity_search(uuid4(), embedding, 5, 0.0)
-        # storage queried at most twice (limit clamp may trigger second uncached call
-        # for different ns, but here we're checking the cache path is used)
+        ns = uuid4()
+        # Two calls within the same namespace + embedding share one cached task.
+        out1 = await engine._cached_entity_search(ns, embedding, 5, 0.0)
+        out2 = await engine._cached_entity_search(ns, embedding, 5, 0.0)
         assert len(out1) == 2
         assert len(out2) == 2
 

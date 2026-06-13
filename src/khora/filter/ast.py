@@ -357,6 +357,21 @@ def _normalize(node: FilterNode | FilterClause) -> FilterNode | FilterClause:
 # --------------------------------------------------------------------------- #
 
 
+def _negate(inner: list[FilterNode | FilterClause]) -> FilterNode:
+    """Wrap a lowered operator-expression in a ``NOT`` node with exactly one child.
+
+    A field-position ``$not`` over an operator-expression negates the *conjunction*
+    of its inner operators: ``$not({$gte: 1, $lte: 5})`` is ``NOT(f >= 1 AND f <= 5)``
+    (Mongo semantics). With two or more inner clauses the child is therefore an
+    ``AND`` of them; with exactly one it is that lone clause. Either way the ``NOT``
+    carries a single child, honoring the AST invariant every compiler relies on
+    (each negates ``children[0]`` only). ``inner`` is always non-empty - the
+    validator rejects an empty ``$not`` operator-expression.
+    """
+    child = inner[0] if len(inner) == 1 else FilterNode(op=Op.AND, children=tuple(inner))
+    return FilterNode(op=Op.NOT, children=(child,))
+
+
 def _lower_system_key(
     path: tuple[str, ...],
     value: datetime | DateOps | StringOps | str | list[Any] | None,
@@ -403,7 +418,7 @@ def _lower_ops_submodel(
             # Field-level $not: negate the inner operator-expression. ``operand``
             # is itself an ``*Ops`` submodel.
             inner = _lower_ops_submodel(path, operand)
-            out.append(FilterNode(op=Op.NOT, children=tuple(inner)))
+            out.append(_negate(inner))
             continue
         if op in _LIST_OPS:
             out.append(FilterClause(path=path, op=op, operand=tuple(operand)))
@@ -459,7 +474,7 @@ def _lower_metadata_predicate(
         if op == Op.NOT:
             # Field-position $not negates an inner operator-expression (a dict).
             inner = _lower_metadata_operator_expr(path, operand)
-            out.append(FilterNode(op=Op.NOT, children=tuple(inner)))
+            out.append(_negate(inner))
             continue
         if op in _LIST_OPS:
             out.append(FilterClause(path=path, op=op, operand=_lower_operand_list(operand)))
@@ -491,7 +506,7 @@ def _lower_metadata_operator_expr(
         op = Op(op_key)
         if op == Op.NOT:
             inner = _lower_metadata_operator_expr(path, operand)
-            out.append(FilterNode(op=Op.NOT, children=tuple(inner)))
+            out.append(_negate(inner))
         elif op in _LIST_OPS:
             out.append(FilterClause(path=path, op=op, operand=_lower_operand_list(operand)))
         elif op == Op.EXISTS:

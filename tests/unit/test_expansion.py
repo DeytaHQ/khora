@@ -18,6 +18,7 @@ from khora.extraction.expansion.rule_engine import (
 )
 from khora.extraction.skills import (
     CorrelationRule,
+    ExpansionConfig,
     ExpertiseConfig,
     InferenceCondition,
     InferenceRule,
@@ -1055,3 +1056,53 @@ class TestSemanticExpander:
         assert result.total_entities == 2
         assert result.total_relationships == 1
         assert len(result.all_relationships) == 1
+
+
+class TestExplicitKwargOverride:
+    """#1124: explicit enable_* kwargs must win over expertise/config defaults."""
+
+    def test_explicit_disable_inference_survives_truthy_expertise(self) -> None:
+        """Passing enable_inference=False with an expertise (whose default is True)
+        must stay False. ingest.py uses this to suppress per-doc inference in batch mode.
+        """
+        expertise = ExpertiseConfig(
+            name="test",
+            expansion=ExpansionConfig(relationship_inference=True, cross_tool_unification=True),
+        )
+        expander = SemanticExpander(expertise=expertise, enable_inference=False)
+        assert expander._enable_inference is False
+        # Unification kwarg not passed -> takes the expertise default (True).
+        assert expander._enable_unification is True
+
+    def test_explicit_disable_unification_survives_truthy_expertise(self) -> None:
+        expertise = ExpertiseConfig(
+            name="test",
+            expansion=ExpansionConfig(relationship_inference=True, cross_tool_unification=True),
+        )
+        expander = SemanticExpander(expertise=expertise, enable_unification=False)
+        assert expander._enable_unification is False
+        assert expander._enable_inference is True
+
+    def test_expertise_defaults_apply_when_kwargs_omitted(self) -> None:
+        """When the caller passes no enable_* kwargs, the expertise values are used."""
+        expertise = ExpertiseConfig(
+            name="test",
+            expansion=ExpansionConfig(relationship_inference=False, cross_tool_unification=False),
+        )
+        expander = SemanticExpander(expertise=expertise)
+        assert expander._enable_inference is False
+        assert expander._enable_unification is False
+
+    def test_explicit_enable_overrides_expertise_disable(self) -> None:
+        """Explicit True also wins over an expertise that disabled the flag."""
+        expertise = ExpertiseConfig(
+            name="test",
+            expansion=ExpansionConfig(relationship_inference=False, cross_tool_unification=False),
+        )
+        expander = SemanticExpander(
+            expertise=expertise,
+            enable_inference=True,
+            enable_unification=True,
+        )
+        assert expander._enable_inference is True
+        assert expander._enable_unification is True

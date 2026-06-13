@@ -64,7 +64,8 @@ async def session() -> AsyncIterator[AsyncSession]:
                         "observation_date TEXT NOT NULL, "
                         "referenced_date TEXT, "
                         "confidence REAL NOT NULL DEFAULT 1.0, "
-                        "embedding TEXT"
+                        "embedding TEXT, "
+                        "invalidated_at TEXT"
                         ")"
                     )
                 )
@@ -87,6 +88,7 @@ async def _insert_event(
     chunk_id: UUID | None = None,
     observation_date: datetime | None = None,
     event_id: UUID | None = None,
+    invalidated_at: datetime | None = None,
 ) -> tuple[UUID, UUID]:
     """Insert one ``chronicle_events`` row. Returns ``(event_id, chunk_id)``."""
     ev_id = event_id or uuid4()
@@ -96,9 +98,10 @@ async def _insert_event(
         sa.text(
             "INSERT INTO chronicle_events "
             "(id, namespace_id, chunk_id, subject, verb, object, "
-            "observation_date, referenced_date, confidence, embedding) "
+            "observation_date, referenced_date, confidence, embedding, "
+            "invalidated_at) "
             "VALUES (:id, :ns, :chunk, :subject, 'did', '', "
-            ":obs, :ref, :conf, :emb)"
+            ":obs, :ref, :conf, :emb, :inv)"
         ),
         {
             "id": str(ev_id),
@@ -109,6 +112,7 @@ async def _insert_event(
             "ref": referenced_date.isoformat(),
             "conf": confidence,
             "emb": json.dumps(embedding),
+            "inv": invalidated_at.isoformat() if invalidated_at else None,
         },
     )
     return ev_id, ch_id
@@ -233,6 +237,91 @@ async def test_invariant_no_chunk_id_mutation(session: AsyncSession) -> None:
         # The aggregate that *does* land is the count-only summary.
         blob = json.dumps([list(op.inputs), list(op.outputs)], default=str)
         assert "merged_source_chunk_ids_count" in blob
+
+
+async def test_invalidated_event_excluded_from_clustering(session: AsyncSession) -> None:
+    """A tombstoned (invalidated) event must not re-enter clustering (#1147).
+
+    The buggy planner ``SELECT``ed every row regardless of
+    ``invalidated_at``, so a previously-merged tail could win the
+    highest-confidence canonical election and a live event would be
+    soft-merged into the already-invalidated row — a dangling merge
+    chain. With the invalidated row excluded, only the single live event
+    remains for the subject, so no cluster of size >= 2 forms.
+    """
+    ns = uuid4()
+    today = datetime(2026, 5, 15, tzinfo=UTC)
+    emb = _normalize([1.0, 0.0, 0.0])
+    # Highest-confidence row, but already tombstoned by a prior dream run.
+    await _insert_event(
+        session,
+        namespace_id=ns,
+        subject="grace",
+        embedding=emb,
+        referenced_date=today,
+        confidence=0.99,
+        invalidated_at=today,
+    )
+    # A live event that, on buggy main, would be merged into the tombstone.
+    await _insert_event(
+        session,
+        namespace_id=ns,
+        subject="grace",
+        embedding=emb,
+        referenced_date=today,
+        confidence=0.6,
+    )
+    await session.commit()
+
+    ops = await plan_chronicle_event_clustering(ns, session=session, config=DreamConfig())
+    assert ops == (), "invalidated canonical must not pull a live event into a tombstoned merge"
+
+
+async def test_invalidated_event_excluded_from_canonical_election(session: AsyncSession) -> None:
+    """When two live events plus one tombstone share a subject, the canonical
+    is elected only among the live rows (#1147).
+
+    The tombstone has the highest confidence; if it were not excluded it
+    would win ``_build_op``'s canonical election. The two remaining live
+    rows still cluster, and the canonical must be the higher-confidence
+    *live* row, never the invalidated one.
+    """
+    ns = uuid4()
+    today = datetime(2026, 5, 15, tzinfo=UTC)
+    emb = _normalize([1.0, 0.0, 0.0])
+    tombstone_id, _ = await _insert_event(
+        session,
+        namespace_id=ns,
+        subject="heidi",
+        embedding=emb,
+        referenced_date=today,
+        confidence=0.99,
+        invalidated_at=today,
+    )
+    live_hi, _ = await _insert_event(
+        session,
+        namespace_id=ns,
+        subject="heidi",
+        embedding=emb,
+        referenced_date=today,
+        confidence=0.7,
+    )
+    live_lo, _ = await _insert_event(
+        session,
+        namespace_id=ns,
+        subject="heidi",
+        embedding=emb,
+        referenced_date=today,
+        confidence=0.5,
+    )
+    await session.commit()
+
+    ops = await plan_chronicle_event_clustering(ns, session=session, config=DreamConfig())
+    assert len(ops) == 1
+    inputs = ops[0].inputs[0]
+    assert inputs["canonical_id"] == str(live_hi)
+    assert str(tombstone_id) not in inputs["merged_event_ids"]
+    assert set(inputs["merged_event_ids"]) == {str(live_hi), str(live_lo)}
 
 
 async def test_planner_emits_zero_writes(session: AsyncSession) -> None:

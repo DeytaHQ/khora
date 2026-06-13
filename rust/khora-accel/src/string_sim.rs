@@ -28,9 +28,17 @@ fn normalize_single(name: &str) -> String {
     let parts: Vec<&str> = result.split_whitespace().collect();
     result = parts.join(" ");
 
-    // Strip leading/trailing punctuation
+    // Strip leading/trailing punctuation from the SAME limited set as the
+    // Python fallback (_accel.py), then trim any exposed whitespace (#1133).
+    // Using `is_ascii_punctuation()` here diverged from Python: it collapsed
+    // distinct markdown-decorated names like "**Acme**" -> "acme". We converge
+    // on the less-aggressive Python behavior to avoid merging distinct names.
+    const STRIP_CHARS: &[char] = &[
+        '.', ',', ';', ':', '!', '?', '"', '\'', '(', ')', '-', '[', ']', '{', '}',
+    ];
     result
-        .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+        .trim_matches(|c: char| STRIP_CHARS.contains(&c))
+        .trim()
         .to_string()
 }
 
@@ -188,6 +196,20 @@ mod tests {
     fn test_normalize_punctuation() {
         assert_eq!(normalize_single("...hello..."), "hello");
         assert_eq!(normalize_single("  spaces  between  "), "spaces between");
+    }
+
+    #[test]
+    fn test_normalize_matches_python_limited_set() {
+        // Regression for #1133: only the 16-char Python strip set is trimmed,
+        // NOT all ASCII punctuation. Markdown decoration and chars outside the
+        // set are preserved so distinct names are not collapsed.
+        assert_eq!(normalize_single("**Acme Corp**"), "**acme corp**");
+        assert_eq!(normalize_single("**Acme**"), "**acme**");
+        assert_eq!(normalize_single("Acme Corp . ."), "acme corp .");
+        assert_eq!(normalize_single("#tag"), "#tag");
+        assert_eq!(normalize_single("100%"), "100%");
+        assert_eq!(normalize_single("foo@bar"), "foo@bar");
+        assert_eq!(normalize_single("U.S.A."), "u.s.a");
     }
 
     #[test]

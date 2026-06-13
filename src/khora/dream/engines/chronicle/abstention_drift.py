@@ -139,17 +139,37 @@ def _build_recommendation(
         )
         return "lower", rationale
 
-    # Lax threshold: observed p90 of combined_score is much higher than
-    # the configured ``should_abstain`` threshold — the gate rarely
-    # trips. Recommend raising.
+    # Over-abstaining: observed p90 of combined_score is much higher than
+    # the configured ``should_abstain`` threshold. ``should_abstain``
+    # fires when ``combined_score >= threshold`` (recall_abstention.py),
+    # so a p90 far above the threshold means a large share of recalls are
+    # at or above it — the gate trips frequently. If that over-abstention
+    # is unintended, raise the threshold above the bulk of the
+    # distribution.
     if configured_combined_threshold > 0 and combined_score_p90 > configured_combined_threshold * 1.5:
         suggested = round(combined_score_p90 * 1.05, 3)
         rationale = (
             f"observed p90 combined_score is {combined_score_p90:.3f} but "
             f"abstention_combined_threshold is {configured_combined_threshold:.3f} — "
-            f"should_abstain rarely trips; consider raising to ~{suggested:.3f}"
+            f"a large share of recalls trip should_abstain (the gate fires "
+            f"frequently); raise the threshold to ~{suggested:.3f} if this "
+            f"over-abstention is unintended"
         )
         return "raise", rationale
+
+    # Under-abstaining: the configured threshold sits well above the
+    # observed combined_score distribution, so ``combined_score >=
+    # threshold`` almost never holds — the gate never trips. Lower the
+    # threshold toward the distribution if abstention is meant to fire.
+    if configured_combined_threshold > 0 and combined_score_p90 * 1.5 < configured_combined_threshold:
+        suggested = round(combined_score_p90 * 1.05, 3)
+        rationale = (
+            f"observed p90 combined_score is {combined_score_p90:.3f} but "
+            f"abstention_combined_threshold is {configured_combined_threshold:.3f} — "
+            f"should_abstain never trips (the threshold is above the observed "
+            f"distribution); consider lowering to ~{suggested:.3f}"
+        )
+        return "lower", rationale
 
     return "calibrated", "thresholds look calibrated against observed distribution"
 

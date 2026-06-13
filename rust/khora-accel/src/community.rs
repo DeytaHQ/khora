@@ -105,7 +105,11 @@ pub fn detect_communities(
                     }
                     let gain = k_i_in_c / m
                         - resolution * sigma_tot[c] * ki / (2.0 * m * m);
-                    if gain > best_gain {
+                    // Deterministic tie-break on the smallest community id so the
+                    // result does not depend on hashbrown's per-process-randomly-
+                    // seeded HashMap iteration order (#1131). Matches the Python
+                    // fallback, which applies the same smallest-id rule.
+                    if gain > best_gain || (gain == best_gain && c < best_c) {
                         best_gain = gain;
                         best_c = c;
                     }
@@ -214,6 +218,31 @@ mod tests {
             assert_eq!(result[4], result[5]);
             // The two clusters must be distinct communities
             assert_ne!(result[0], result[3]);
+        });
+    }
+
+    #[test]
+    fn test_tie_break_deterministic() {
+        // Regression for #1131: a bridge node (6) connected with equal weight
+        // to two otherwise-separate triangles ties between the two communities.
+        // Before the smallest-id tie-break, the winner depended on hashbrown's
+        // randomly-seeded HashMap iteration order. Repeated runs must agree.
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let edges = vec![
+                (0, 1, 1.0), (1, 0, 1.0),
+                (1, 2, 1.0), (2, 1, 1.0),
+                (0, 2, 1.0), (2, 0, 1.0),
+                (3, 4, 1.0), (4, 3, 1.0),
+                (4, 5, 1.0), (5, 4, 1.0),
+                (3, 5, 1.0), (5, 3, 1.0),
+                (6, 2, 1.0), (2, 6, 1.0),
+                (6, 3, 1.0), (3, 6, 1.0),
+            ];
+            let first = detect_communities(py, 7, edges.clone(), 1.0, 10);
+            for _ in 0..50 {
+                assert_eq!(detect_communities(py, 7, edges.clone(), 1.0, 10), first);
+            }
         });
     }
 

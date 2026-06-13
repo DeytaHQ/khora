@@ -947,12 +947,14 @@ async def test_get_neighborhood_with_rel_types() -> None:
 
 
 @pytest.mark.unit
-async def test_search_entities_by_attribute_passes_params() -> None:
+async def test_search_entities_by_attribute_prefilters_on_key() -> None:
+    """#1153: ``attributes`` is a JSON string, so the query CONTAINS-prefilters
+    on the serialized key and the exact value match happens in Python."""
     session = _make_session_with_records(records=[])
     b = _connected_backend(session)
     out = await b.search_entities_by_attribute(uuid4(), "role", "admin", limit=20)
     assert out == []
-    kwargs = session.run.await_args.kwargs
-    assert kwargs["attribute_name"] == "role"
-    assert kwargs["attribute_value"] == "admin"
-    assert kwargs["limit"] == 20
+    cypher = session.run.await_args.args[0]
+    assert "e.attributes[$attribute_name]" not in cypher
+    assert "CONTAINS $key_pattern" in cypher
+    assert session.run.await_args.kwargs["key_pattern"] == '"role"'

@@ -85,8 +85,8 @@ class SemanticExpander:
         self,
         expertise: ExpertiseConfig | None = None,
         *,
-        enable_unification: bool = True,
-        enable_inference: bool = True,
+        enable_unification: bool | None = None,
+        enable_inference: bool | None = None,
         inference_depth: int = 2,
         embedding_threshold: float = 0.85,
         fuzzy_threshold: float = 0.85,
@@ -96,23 +96,31 @@ class SemanticExpander:
 
         Args:
             expertise: ExpertiseConfig with expansion rules
-            enable_unification: Whether to run cross-tool unification
-            enable_inference: Whether to run relationship inference
+            enable_unification: Whether to run cross-tool unification. ``None`` (default)
+                defers to the expertise config; an explicit ``True``/``False`` wins.
+            enable_inference: Whether to run relationship inference. ``None`` (default)
+                defers to the expertise config; an explicit ``True``/``False`` wins.
             inference_depth: Number of inference passes
             embedding_threshold: Similarity threshold for embedding matching
             fuzzy_threshold: Threshold for fuzzy string matching
             min_inference_confidence: Minimum confidence for inferred relationships
         """
         self._expertise = expertise
-        self._enable_unification = enable_unification
-        self._enable_inference = enable_inference
         self._inference_depth = inference_depth
 
-        # Apply expertise settings if available
+        # Honor explicit kwargs (#1124). The expertise config supplies defaults ONLY when
+        # the caller did not pass a value - a None sentinel distinguishes "not passed" from
+        # an explicit False. ingest.py passes enable_inference=False to suppress per-doc
+        # inference in batch mode; that flag must not be silently overridden.
         if expertise and expertise.expansion:
-            self._enable_unification = expertise.expansion.cross_tool_unification
-            self._enable_inference = expertise.expansion.relationship_inference
+            if enable_unification is None:
+                enable_unification = expertise.expansion.cross_tool_unification
+            if enable_inference is None:
+                enable_inference = expertise.expansion.relationship_inference
             self._inference_depth = expertise.expansion.depth
+
+        self._enable_unification = True if enable_unification is None else enable_unification
+        self._enable_inference = True if enable_inference is None else enable_inference
 
         if expertise and expertise.confidence:
             min_inference_confidence = expertise.confidence.min_inferred

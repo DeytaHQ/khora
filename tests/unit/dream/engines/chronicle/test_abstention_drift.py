@@ -85,8 +85,16 @@ async def test_recommendation_when_threshold_too_strict() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recommendation_when_threshold_too_lax() -> None:
-    """p90 combined_score 0.85 vs configured 0.5 — recommend raise."""
+async def test_recommendation_when_gate_trips_often() -> None:
+    """p90 combined_score 0.85 well above configured 0.5 — gate trips often (#1148).
+
+    combined_score runs 0.0 (high-confidence) -> 1.0 (should-abstain) and
+    ``should_abstain`` fires when ``combined_score >= threshold``. A p90
+    far *above* the threshold therefore means a large share of recalls
+    already trip ``should_abstain`` — the gate fires frequently. The fix
+    recommends raising the threshold and the rationale must describe
+    frequent (not rare) tripping.
+    """
     ns = uuid4()
     # top_score above the floor so we don't trigger the lower-branch.
     _populate(ns, n=1500, top_score=0.7, combined_score=0.85)
@@ -96,8 +104,36 @@ async def test_recommendation_when_threshold_too_lax() -> None:
 
     assert op.decision == "recommend"
     report = op.outputs[0]
+    rationale = report["recommendation"]["rationale"]
     assert report["recommendation"]["direction"] == "raise"
-    assert "combined_score" in report["recommendation"]["rationale"]
+    assert "combined_score" in rationale
+    # The corrected reasoning describes frequent tripping, never "rarely".
+    assert "rarely" not in rationale
+    assert "frequently" in rationale or "large share" in rationale
+
+
+@pytest.mark.asyncio
+async def test_recommendation_when_gate_never_trips() -> None:
+    """Threshold far above the observed combined_score distribution — lower it (#1148).
+
+    Symmetric case: when the configured ``should_abstain`` threshold sits
+    well above the observed p90, the gate essentially never fires, so the
+    recommendation is to lower the threshold.
+    """
+    ns = uuid4()
+    # combined_score p90 ~0.20, threshold 0.9 — gate never trips.
+    # top_score above the floor so the lower-branch for top_score doesn't fire.
+    _populate(ns, n=1500, top_score=0.7, combined_score=0.20)
+    engine = _fake_engine(min_top_score=0.3, combined_threshold=0.9)
+
+    op = await plan_chronicle_abstention_drift(ns, engine=engine, config=DreamConfig())
+
+    assert op.decision == "recommend"
+    report = op.outputs[0]
+    rationale = report["recommendation"]["rationale"]
+    assert report["recommendation"]["direction"] == "lower"
+    assert "combined_score" in rationale
+    assert "never" in rationale or "rarely" in rationale
 
 
 @pytest.mark.asyncio
