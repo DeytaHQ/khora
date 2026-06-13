@@ -211,12 +211,24 @@ jobs:
         run: uv python install 3.13
 
       - name: Restore venv cache
+        id: cache
         uses: actions/cache/restore@v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
           restore-keys: |
             venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
+
+      - name: Sync venv on cache miss
+        # The ~2.9GB venv cache is evicted under the per-repo 10GB cache budget
+        # when many PR runs compete. A miss here used to be unrecoverable:
+        # UV_NO_SYNC=1 (set workflow-wide) stops ``uv run`` from re-syncing, so
+        # the step crashed with ``Failed to spawn`` / ``ModuleNotFoundError:
+        # No module named 'khora'``. Rebuild the venv deterministically on a
+        # miss (same crewai combo as the ``install`` job) so the job self-heals
+        # without a full re-run. No-op on a cache hit.
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: uv sync --locked --all-extras --no-extra google-adk
 
       - name: Type check with ty
         run: uv run ty check src/
@@ -265,12 +277,24 @@ jobs:
         run: uv python install 3.13
 
       - name: Restore venv cache
+        id: cache
         uses: actions/cache/restore@v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
           restore-keys: |
             venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
+
+      - name: Sync venv on cache miss
+        # The ~2.9GB venv cache is evicted under the per-repo 10GB cache budget
+        # when many PR runs compete. A miss here used to be unrecoverable:
+        # UV_NO_SYNC=1 (set workflow-wide) stops ``uv run`` from re-syncing, so
+        # ``uv run pytest`` crashed with ``Failed to spawn: pytest``. Rebuild
+        # the venv deterministically on a miss (same crewai combo as the
+        # ``install`` job) so the job self-heals without a full re-run. No-op
+        # on a cache hit.
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: uv sync --locked --all-extras --no-extra google-adk
 
       - name: Verify migration source files and ORM/migration drift
         run: uv run pytest tests/unit/test_migration_drift.py -v -o "addopts=" --no-cov
@@ -387,12 +411,24 @@ jobs:
         run: uv python install 3.13
 
       - name: Restore venv cache
+        id: cache
         uses: actions/cache/restore@v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
           restore-keys: |
             venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
+
+      - name: Sync venv on cache miss
+        # The ~2.9GB venv cache is evicted under the per-repo 10GB cache budget
+        # when many PR runs compete. A miss here used to be unrecoverable:
+        # UV_NO_SYNC=1 (set workflow-wide) stops ``uv run`` from re-syncing, so
+        # ``uv run alembic`` / ``uv run pytest`` crashed with ``Failed to
+        # spawn``. Rebuild the venv deterministically on a miss (same crewai
+        # combo as the ``install`` job) so the job self-heals without a full
+        # re-run. No-op on a cache hit.
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: uv sync --locked --all-extras --no-extra google-adk
 
       - name: Wait for Postgres readiness
         # Mirrors the weaviate-integration job's readiness loop for repo-style
@@ -527,6 +563,7 @@ jobs:
         run: uv python install 3.13
 
       - name: Restore venv cache
+        id: cache
         uses: actions/cache/restore@v4
         with:
           path: .venv
@@ -534,10 +571,35 @@ jobs:
           restore-keys: |
             venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
 
+      - name: Sync venv on cache miss
+        # The ~2.9GB venv cache is evicted under the per-repo 10GB cache budget
+        # when many PR runs compete. A miss here used to be unrecoverable:
+        # UV_NO_SYNC=1 (set workflow-wide) stops ``uv run`` from re-syncing, so
+        # the drift gate / example runs crashed with ``Failed to spawn`` /
+        # ``ModuleNotFoundError: No module named 'khora'``. Rebuild the venv
+        # deterministically on a miss (same crewai combo as the ``install``
+        # job) so the job self-heals without a full re-run. No-op on a cache
+        # hit.
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: uv sync --locked --all-extras --no-extra google-adk
+
       - name: Doc/example drift gate
         run: uv run python tools/check_examples_drift.py
 
       - name: Smoke-test adapter examples
+        # Keep the smoke run hermetic (the examples document "runs without
+        # external services"). The default config has enable_reranking=True
+        # with BAAI/bge-reranker-v2-m3, so each example would HEAD-revalidate /
+        # download a ~2.3GB cross-encoder from huggingface.co. When HF
+        # rate-limits the shared runner IP (429 + retry backoff) the example
+        # burns the whole 60s budget and fails even though the code is fine.
+        # KHORA_QUERY_ENABLE_RERANKING=false skips the cross-encoder code path;
+        # HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are defense-in-depth so any
+        # example that re-enables reranking still cannot make a network call.
+        env:
+          KHORA_QUERY_ENABLE_RERANKING: "false"
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
         run: |
           shopt -s nullglob
           dirs=(examples/integrations/*/)
@@ -618,12 +680,24 @@ jobs:
         run: uv python install 3.13
 
       - name: Restore venv cache
+        id: cache
         uses: actions/cache/restore@v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-${{ github.run_id }}
           restore-keys: |
             venv-${{ runner.os }}-py3.13-${{ hashFiles('uv.lock') }}-
+
+      - name: Sync venv on cache miss
+        # The ~2.9GB venv cache is evicted under the per-repo 10GB cache budget
+        # when many PR runs compete. A miss here used to be unrecoverable:
+        # UV_NO_SYNC=1 (set workflow-wide) stops ``uv run`` from re-syncing, so
+        # ``uv run pytest`` crashed with ``Failed to spawn: pytest``. Rebuild
+        # the venv deterministically on a miss (same crewai combo as the
+        # ``install`` job) so the job self-heals without a full re-run. No-op
+        # on a cache hit.
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: uv sync --locked --all-extras --no-extra google-adk
 
       - name: Wait for Weaviate readiness
         run: |
