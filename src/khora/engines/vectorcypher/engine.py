@@ -2797,8 +2797,16 @@ class VectorCypherEngine:
             state = _DocState(idx=idx, doc_data=doc_data, checksum=checksum)
             try:
                 doc_metadata = doc_data.get("metadata", {})
+                # Resolve the chunk event-time with the same fallback chain as
+                # the single remember() path (#859): metadata["occurred_at"] ->
+                # per-doc source_timestamp -> batch-level source_timestamp.
+                # Falls to now(UTC) at the chunk-build site when all are absent.
+                # Fixes #992 - the batch path previously read only
+                # metadata["occurred_at"] and dropped source_timestamp.
                 if "occurred_at" in doc_metadata:
                     state.occurred_at = self._parse_datetime(doc_metadata["occurred_at"])
+                if state.occurred_at is None:
+                    state.occurred_at = doc_data.get("source_timestamp") or source_timestamp
 
                 async with sem:
                     document = Document(
