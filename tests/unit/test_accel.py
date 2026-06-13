@@ -98,6 +98,46 @@ class TestBatchCosineSimilarity:
         assert results == []
 
 
+# ---------------------------------------------------------------------------
+# Dimension-mismatch parity (#1132)
+#
+# When the query dimension differs from the candidate columns, the NumPy
+# fallback (`mat @ q`) raises ValueError. The Rust kernels previously zipped
+# to the shorter length and returned a wrong-but-plausible score. Both paths
+# must now raise ValueError on the same input so a mixed-embedding-dim store
+# fails loudly with or without the compiled wheel.
+# ---------------------------------------------------------------------------
+
+
+class TestBatchDimensionMismatch:
+    QUERY = [1.0, 2.0]  # dim 2
+    CANDIDATES = [[1.0, 2.0, 3.0, 4.0]]  # dim 4
+
+    def test_cosine_numpy_raises(self, force_numpy):
+        if not accel._HAS_NUMPY:
+            pytest.skip("numpy not available")
+        with pytest.raises(ValueError):
+            accel.batch_cosine_similarity(self.QUERY, self.CANDIDATES)
+
+    def test_cosine_rust_raises(self):
+        if not accel._HAS_RUST:
+            pytest.skip("Rust extension not available")
+        with pytest.raises(ValueError):
+            accel.batch_cosine_similarity(self.QUERY, self.CANDIDATES)
+
+    def test_dot_numpy_raises(self, force_numpy):
+        if not accel._HAS_NUMPY:
+            pytest.skip("numpy not available")
+        with pytest.raises(ValueError):
+            accel.batch_dot_product(self.QUERY, self.CANDIDATES)
+
+    def test_dot_rust_raises(self):
+        if not accel._HAS_RUST:
+            pytest.skip("Rust extension not available")
+        with pytest.raises(ValueError):
+            accel.batch_dot_product(self.QUERY, self.CANDIDATES)
+
+
 class TestPairwiseCosineSimilarity:
     def test_two_identical(self, force_python):
         result = accel.pairwise_cosine_above_threshold([[1, 0], [1, 0]], 0.5)
