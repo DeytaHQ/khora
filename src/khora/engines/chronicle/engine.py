@@ -1884,6 +1884,7 @@ class ChronicleEngine:
                         entity_hits=entity_channel_hits,
                         created_after=created_after,
                         created_before=created_before,
+                        degradations=degradations,
                     ),
                 )
             )
@@ -2666,6 +2667,7 @@ class ChronicleEngine:
         entity_hits: dict[UUID, tuple[Entity, float]] | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
+        degradations: list[Degradation] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Channel 4: Entity co-occurrence retrieval.
 
@@ -2687,7 +2689,15 @@ class ChronicleEngine:
                 limit=10,
             )
         except Exception as e:
-            logger.warning("Entity channel: search_similar_entities failed: {}", e)
+            logger.warning("Entity channel: search_similar_entities failed: {}", e, exc_info=True)
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.entity",
+                    reason="channel_exception",
+                    detail=str(e),
+                    exc=e,
+                )
             return []
 
         if not entity_results:
@@ -2703,7 +2713,17 @@ class ChronicleEngine:
         try:
             entities = await storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
         except Exception as e:
-            logger.warning("Entity channel: get_entities_batch failed for {} IDs: {}", len(entity_ids), e)
+            logger.warning(
+                "Entity channel: get_entities_batch failed for {} IDs: {}", len(entity_ids), e, exc_info=True
+            )
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.entity",
+                    reason="channel_exception",
+                    detail=str(e),
+                    exc=e,
+                )
             return []
 
         logger.debug("Entity channel: resolved {}/{} entities", len(entities), len(entity_ids))
@@ -2734,7 +2754,15 @@ class ChronicleEngine:
         try:
             chunks_map = await storage.get_chunks_batch(chunk_ids, namespace_id=namespace_id)
         except Exception as e:
-            logger.warning("Entity channel: get_chunks_batch failed for {} IDs: {}", len(chunk_ids), e)
+            logger.warning("Entity channel: get_chunks_batch failed for {} IDs: {}", len(chunk_ids), e, exc_info=True)
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.entity",
+                    reason="channel_exception",
+                    detail=str(e),
+                    exc=e,
+                )
             return []
 
         # Apply temporal filter post-hydration. get_chunks_batch has no
@@ -2772,17 +2800,39 @@ class ChronicleEngine:
             # Batch cosine similarity via Rust (GIL-released, SIMD-accelerated)
             sims = {}
             if embeddings_with_idx:
+                # Seed every embedded chunk below the relevance threshold.
+                # batch_cosine_similarity drops pairs below its threshold (0.0),
+                # so a chunk with a negative cosine is absent from the result;
+                # seeding 0.0 means it stays gated out instead of leaking through.
+                for _, _chunk, cid in embeddings_with_idx:
+                    sims[cid] = 0.0
                 try:
                     from khora._accel import batch_cosine_similarity
 
                     chunk_embeddings = [chunk.embedding for _, chunk, _ in embeddings_with_idx]
+                    # Returns (local_idx, score) pairs sorted descending, NOT
+                    # input-ordered - map each back to its chunk by index, like
+                    # the temporal channel does. (A positional zip would both
+                    # misalign and call float() on a tuple; see #1143.)
                     sim_scores = batch_cosine_similarity(query_embedding, chunk_embeddings)
-                    for (idx, chunk, cid), sim in zip(embeddings_with_idx, sim_scores):
-                        sims[cid] = float(sim)
-                except Exception:
-                    # Fallback: no filtering
-                    for idx, chunk, cid in embeddings_with_idx:
-                        sims[cid] = 1.0
+                    for local_idx, score in sim_scores:
+                        _, _chunk, cid = embeddings_with_idx[local_idx]
+                        sims[cid] = float(score)
+                except ImportError as exc:
+                    # Accel module genuinely missing: skip the gate rather than
+                    # drop every entity-adjacent chunk. Surface as a degradation
+                    # so the relaxed filtering is visible (ADR-001). Narrowed to
+                    # ImportError so logic bugs (e.g. the #1143 float(tuple)
+                    # TypeError) propagate instead of silently disabling the gate.
+                    sims = {}
+                    if degradations is not None:
+                        _record_channel_degradation(
+                            degradations,
+                            component="chronicle.entity",
+                            reason="cosine_batch_failed",
+                            detail=str(exc),
+                            exc=exc,
+                        )
 
             results = []
             for chunk, cid in ordered_chunks:
