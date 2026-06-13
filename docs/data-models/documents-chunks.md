@@ -132,28 +132,39 @@ chunk.chunker_info = {
 }
 ```
 
-## Timestamp Inheritance
+## Timestamp Axes
 
-Chunks inherit timestamps from their parent documents:
+khora keeps two distinct time axes (see `docs/engines/temporal-model.md`). They
+must never be conflated:
+
+- **Real-world / valid time** - when the underlying fact was true in the world.
+  Carried by `Document.source_timestamp` and `Chunk.source_timestamp` (projected
+  as `RecallChunk.occurred_at`).
+- **khora-ops / transaction time** - when khora persisted the row. Carried by
+  `created_at` / `updated_at`. `created_at` records when the row was created and
+  never changes; it is *not* derived from `source_timestamp`.
 
 ```python
-# When document is created with source timestamp
+# The caller-supplied event time lands on its own column. created_at /
+# updated_at fall to the model default datetime.now(UTC) - ingest time.
 document = Document(
     content=content,
-    created_at=source_timestamp,  # e.g., email sent_at
-    updated_at=source_timestamp,
+    source_timestamp=source_timestamp,  # e.g., email sent_at (real-world)
 )
 
-# Chunks inherit the document's timestamp
+# Chunks carry the same real-world event time via source_timestamp; their
+# created_at stays ingest time (khora-ops).
 chunk = Chunk(
     document_id=document.id,
     content=chunk_content,
-    created_at=document.created_at,  # Same as document
-    updated_at=document.created_at,
+    source_timestamp=document.source_timestamp,
 )
 ```
 
-This enables accurate temporal queries based on when content was originally created, not when it was ingested.
+Temporal recall windows over the original event time (`occurred_at` /
+`start_time` / `end_time`) read `source_timestamp`, so accurate
+"when did this happen" queries work without overwriting the ingest-time
+`created_at`.
 
 ## Document-Chunk Relationship
 

@@ -100,7 +100,9 @@ document = Document(
     source=source,
     checksum=checksum,
     status=DocumentStatus.PENDING,
-    created_at=source_timestamp or now(),
+    source_timestamp=source_timestamp,  # real-world event time (its own axis)
+    # created_at / updated_at fall to the model default now() - ingest time,
+    # never overwritten with source_timestamp (#993).
 )
 
 await storage.create_document(document)
