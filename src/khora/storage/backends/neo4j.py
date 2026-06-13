@@ -3053,10 +3053,12 @@ RETURN count(r) AS updated
         # Vanilla Cypher (no APOC) — the namespace predicate has to hold for
         # *both* endpoint nodes at every hop. We can't express that cleanly
         # inside apoc.path.subgraphAll, so we stick to the pattern form.
+        # Slice inside the projection (mirroring get_neighborhoods_batch): a
+        # bare ``LIMIT $limit`` after ``collect(...)`` aggregation is a no-op
+        # because aggregation already produced a single row (#1154).
         query = f"""
         MATCH (center:Entity {{id: $entity_id, namespace_id: $namespace_id}})-[r{rel_filter}*1..{depth}]-(other:Entity {{namespace_id: $namespace_id}})
-        RETURN collect(DISTINCT other) as nodes, collect(DISTINCT [rel IN r | {{props: properties(rel), type: type(rel)}}]) as relationships
-        LIMIT $limit
+        RETURN collect(DISTINCT other)[0..$limit] as nodes, collect(DISTINCT [rel IN r | {{props: properties(rel), type: type(rel)}}])[0..$limit] as relationships
         """
 
         async def _work(tx):
@@ -3368,25 +3370,38 @@ RETURN count(r) AS updated
         *,
         limit: int = 100,
     ) -> list[Entity]:
-        """Search entities by attribute value."""
+        """Search entities by attribute value.
+
+        ``attributes`` is persisted as a JSON *string* (``_serialize_dict``),
+        so the old ``e.attributes[$attribute_name]`` map subscript never
+        matched (#1153). Prefilter server-side with a ``CONTAINS`` on the
+        serialized key, then deserialize each candidate and do the exact
+        key/value match in Python (correct for non-string values too).
+        """
 
         query = """
         MATCH (e:Entity {namespace_id: $namespace_id})
-        WHERE e.attributes[$attribute_name] = $attribute_value
+        WHERE e.attributes CONTAINS $key_pattern
         RETURN e
-        LIMIT $limit
         """
 
+        key_pattern = f'"{attribute_name}"'
         async with self._session() as session:
             result = await session.run(
                 query,
                 namespace_id=str(namespace_id),
-                attribute_name=attribute_name,
-                attribute_value=attribute_value,
-                limit=limit,
+                key_pattern=key_pattern,
             )
             records = await result.data()
-            return [self._record_to_entity(r["e"]) for r in records]
+
+        matches: list[Entity] = []
+        for record in records:
+            entity = self._record_to_entity(record["e"])
+            if entity.attributes.get(attribute_name) == attribute_value:
+                matches.append(entity)
+                if len(matches) >= limit:
+                    break
+        return matches
 
     @trace("khora.neo4j.count_relationships", include={"namespace_id"})
     async def count_relationships(self, namespace_id: UUID) -> int:

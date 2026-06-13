@@ -988,10 +988,12 @@ class AGEBackend(GraphBackendBase):
 
         eid_lit = self._uuid_lit(entity_id)
         ns_lit_val = self._uuid_lit(namespace_id)
+        # Slice inside the projection: a bare ``LIMIT {limit}`` after
+        # ``collect(...)`` aggregation is a no-op because aggregation already
+        # produced a single row (#1154).
         cypher = f"""
             MATCH (center:Entity {{id: '{eid_lit}', namespace_id: '{ns_lit_val}'}})-[r{rel_filter}*1..{depth}]-(other:Entity {{namespace_id: '{ns_lit_val}'}})
-            RETURN collect(DISTINCT other) as nodes, collect(DISTINCT r) as relationships
-            LIMIT {limit}
+            RETURN collect(DISTINCT other)[0..{limit}] as nodes, collect(DISTINCT r)[0..{limit}] as relationships
         """
         async with self._get_session_factory()() as session:
             async with session.begin():
