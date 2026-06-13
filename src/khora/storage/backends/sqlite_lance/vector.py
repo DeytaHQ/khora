@@ -477,26 +477,25 @@ class SQLiteLanceVectorAdapter:
         """
         tbl = await self._chunks_table()
 
-        # Build LanceDB where clause — SQL-ish subset
+        # Build LanceDB where clause — SQL-ish subset.
+        #
+        # No temporal pre-filter here (#1136). The contract temporal axis is
+        # ``COALESCE(source_timestamp, created_at)`` (the pgvector rule, PR #470,
+        # re-applied on the SQLite side below), but this LanceDB layer only
+        # stores ``created_at`` - it never stores ``source_timestamp``. So a
+        # ``created_at`` bound is NOT a superset of the COALESCE refinement: a
+        # backfilled chunk (created_at = ingest time = now, source_timestamp =
+        # historical event time) would fail ``created_at <= <before>`` and be
+        # dropped from the ANN candidate set BEFORE the COALESCE refinement could
+        # admit it on its source_timestamp. An ANN pre-filter may only narrow on
+        # an axis that is a superset of the refinement axis; ``created_at`` is
+        # not. We therefore overfetch on namespace/document only and let the
+        # SQLite ``COALESCE`` filter below do the temporal work - correctness
+        # over a slightly larger candidate set.
         where = [f"namespace_id = '{uuid_to_text(namespace_id)}'"]
         if filter_document_ids:
             ids = ", ".join(f"'{uuid_to_text(d)}'" for d in filter_document_ids)
             where.append(f"document_id IN ({ids})")
-        if created_after is not None:
-            # LanceDB stores timestamps as microseconds since epoch; use the
-            # ISO form since LanceDB's SQL parser accepts timestamp literals.
-            where.append(f"created_at >= timestamp '{created_after.isoformat()}'")
-        if created_before is not None:
-            # Coarse pre-filter upper bound is INCLUSIVE (``<=``) on
-            # ``created_at`` to stay superset-safe: this LanceDB layer only
-            # stores ``created_at`` (not ``source_timestamp``), so it cannot
-            # apply the ``COALESCE(source_timestamp, created_at)`` rule. A
-            # strict ``<`` would false-exclude a chunk whose source_timestamp
-            # is NULL and created_at equals the bound exactly, before the
-            # SQLite refinement runs — and a post-filter can only drop rows,
-            # never restore them. The precise COALESCE-based bound is applied
-            # on the SQLite side below.
-            where.append(f"created_at <= timestamp '{created_before.isoformat()}'")
         where_sql = " AND ".join(where)
 
         await self._maybe_build_chunks_index()
