@@ -1350,3 +1350,124 @@ class TestUpsertEntitiesBatchOrdering:
         metric_counter_patched.assert_called_once()
         assert metric_counter_patched.call_args.args[0] == "khora.storage.upsert_entities_batch.partial_failure"
         counter_mock.add.assert_called_once_with(1)
+
+
+class TestCreateEntityOrdering:
+    """Regression for issue #1138: single-entity create dual-write must mirror
+    the #868 batch ordering - vector first, then graph, with a partial-failure
+    metric when graph raises after vector committed (instead of asyncio.gather
+    with no partial-failure handling)."""
+
+    @pytest.mark.asyncio
+    async def test_vector_runs_before_graph_and_graph_failure_is_observable(self) -> None:
+        ns_id = uuid4()
+        entity = Entity(namespace_id=ns_id, name="alice", entity_type="PERSON")
+
+        call_order: list[str] = []
+
+        async def vector_create(*args, **kwargs):
+            call_order.append("vector")
+            return entity
+
+        async def graph_create(*args, **kwargs):
+            call_order.append("graph")
+            raise RuntimeError("neo4j boom")
+
+        vec = MagicMock()
+        vec.create_entity = AsyncMock(side_effect=vector_create)
+        graph = MagicMock()
+        graph.create_entity = AsyncMock(side_effect=graph_create)
+
+        coord = StorageCoordinator(vector=vec, graph=graph)
+        assert coord._is_unified_backend is False  # sanity
+
+        counter_mock = MagicMock()
+        with patch("khora.storage.coordinator.metric_counter", return_value=counter_mock) as metric_counter_patched:
+            with patch("khora.telemetry.get_collector") as mock_telem:
+                mock_telem.return_value.record_storage_op = MagicMock()
+                with pytest.raises(RuntimeError, match="neo4j boom"):
+                    await coord.create_entity(entity)
+
+        # Vector committed before graph; the graph exception is not masked.
+        assert call_order == ["vector", "graph"], call_order
+        vec.create_entity.assert_awaited_once()
+        graph.create_entity.assert_awaited_once()
+        # Partial failure was recorded (not silently swallowed).
+        partial_failure_calls = [
+            c
+            for c in metric_counter_patched.call_args_list
+            if c.args and c.args[0] == "khora.storage.create_entity.partial_failure"
+        ]
+        assert len(partial_failure_calls) == 1, metric_counter_patched.call_args_list
+        counter_mock.add.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_no_partial_failure_metric_on_happy_path(self) -> None:
+        ns_id = uuid4()
+        entity = Entity(namespace_id=ns_id, name="alice", entity_type="PERSON")
+        vec = MagicMock()
+        vec.create_entity = AsyncMock(return_value=entity)
+        graph = MagicMock()
+        graph.create_entity = AsyncMock(return_value=entity)
+
+        coord = StorageCoordinator(vector=vec, graph=graph)
+        counter_mock = MagicMock()
+        with patch("khora.storage.coordinator.metric_counter", return_value=counter_mock) as metric_counter_patched:
+            with patch("khora.telemetry.get_collector") as mock_telem:
+                mock_telem.return_value.record_storage_op = MagicMock()
+                out = await coord.create_entity(entity)
+
+        assert out is entity
+        vec.create_entity.assert_awaited_once()
+        graph.create_entity.assert_awaited_once()
+        partial_failure_calls = [
+            c
+            for c in metric_counter_patched.call_args_list
+            if c.args and c.args[0] == "khora.storage.create_entity.partial_failure"
+        ]
+        assert partial_failure_calls == []
+
+
+class TestUpdateEntityOrdering:
+    """Regression for issue #1138: single-entity update dual-write must mirror
+    the #868 batch ordering - vector first, then graph, with a partial-failure
+    metric when graph raises after vector committed."""
+
+    @pytest.mark.asyncio
+    async def test_vector_runs_before_graph_and_graph_failure_is_observable(self) -> None:
+        ns_id = uuid4()
+        entity = Entity(namespace_id=ns_id, name="alice", entity_type="PERSON")
+
+        call_order: list[str] = []
+
+        async def vector_update(*args, **kwargs):
+            call_order.append("vector")
+            return entity
+
+        async def graph_update(*args, **kwargs):
+            call_order.append("graph")
+            raise RuntimeError("neo4j boom")
+
+        vec = MagicMock()
+        vec.update_entity = AsyncMock(side_effect=vector_update)
+        graph = MagicMock()
+        graph.update_entity = AsyncMock(side_effect=graph_update)
+
+        coord = StorageCoordinator(vector=vec, graph=graph)
+        assert coord._is_unified_backend is False  # sanity
+
+        counter_mock = MagicMock()
+        with patch("khora.storage.coordinator.metric_counter", return_value=counter_mock) as metric_counter_patched:
+            with pytest.raises(RuntimeError, match="neo4j boom"):
+                await coord.update_entity(entity, namespace_id=ns_id)
+
+        assert call_order == ["vector", "graph"], call_order
+        vec.update_entity.assert_awaited_once()
+        graph.update_entity.assert_awaited_once()
+        partial_failure_calls = [
+            c
+            for c in metric_counter_patched.call_args_list
+            if c.args and c.args[0] == "khora.storage.update_entity.partial_failure"
+        ]
+        assert len(partial_failure_calls) == 1, metric_counter_patched.call_args_list
+        counter_mock.add.assert_called_once_with(1)

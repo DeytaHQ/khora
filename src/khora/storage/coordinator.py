@@ -1175,22 +1175,41 @@ class StorageCoordinator:
 
     @_record_storage_op("create_entity", "graph+vector")
     async def create_entity(self, entity: Entity) -> Entity:
-        """Create an entity in both graph and vector stores (parallel).
+        """Create an entity in both graph and vector stores.
 
         When a unified backend is detected (graph and vector share the same
         connection, e.g. SurrealDB), the vector write is skipped to avoid
         duplicate records in the same database.
+
+        Write ordering (issue #1138, mirroring #868 for the batch path):
+        vector commits first, then graph. The prior implementation raced both
+        writes via ``asyncio.gather`` with no partial-failure handling, so a
+        graph failure after the vector committed (or vice versa) left the
+        stores silently diverged. Sequencing vector-first inverts the failure
+        asymmetry - a graph failure after a successful vector write leaves a
+        vector row reconciled by the next upsert MERGE - and the
+        ``khora.storage.create_entity.partial_failure`` counter increments so
+        operators can monitor the rate.
         """
         if self._graph and self._vector:
             if self._is_unified_backend:
                 # Single DB — graph adapter write is sufficient
                 entity = await self._graph.create_entity(entity)
             else:
-                graph_result, _ = await asyncio.gather(
-                    self._graph.create_entity(entity),
-                    self._vector.create_entity(entity),
-                )
-                entity = graph_result
+                await self._vector.create_entity(entity)
+                try:
+                    entity = await self._graph.create_entity(entity)
+                except Exception:
+                    metric_counter(
+                        "khora.storage.create_entity.partial_failure",
+                        unit="1",
+                        description=(
+                            "Vector commit succeeded but graph create_entity "
+                            "raised; the vector row is reconciled by the next "
+                            "upsert MERGE."
+                        ),
+                    ).add(1)
+                    raise
         elif self._graph:
             entity = await self._graph.create_entity(entity)
         elif self._vector:
@@ -1221,19 +1240,34 @@ class StorageCoordinator:
         return None
 
     async def update_entity(self, entity: Entity, *, namespace_id: UUID) -> Entity:
-        """Update an entity in both graph and vector stores (parallel).
+        """Update an entity in both graph and vector stores.
 
         Scoped to ``namespace_id`` (IDOR family). When a unified backend is
         detected, the vector write is skipped.
+
+        Write ordering (issue #1138, mirroring #868 / ``create_entity``):
+        vector commits first, then graph, with the
+        ``khora.storage.update_entity.partial_failure`` counter incremented
+        when the graph write raises after the vector committed. Replaces the
+        prior ``asyncio.gather`` that masked half-applied writes.
         """
         if self._graph and self._vector:
             if self._is_unified_backend:
                 return await self._graph.update_entity(entity, namespace_id=namespace_id)
-            graph_result, _ = await asyncio.gather(
-                self._graph.update_entity(entity, namespace_id=namespace_id),
-                self._vector.update_entity(entity, namespace_id=namespace_id),
-            )
-            return graph_result
+            await self._vector.update_entity(entity, namespace_id=namespace_id)
+            try:
+                return await self._graph.update_entity(entity, namespace_id=namespace_id)
+            except Exception:
+                metric_counter(
+                    "khora.storage.update_entity.partial_failure",
+                    unit="1",
+                    description=(
+                        "Vector commit succeeded but graph update_entity "
+                        "raised; the vector row is reconciled by the next "
+                        "upsert MERGE."
+                    ),
+                ).add(1)
+                raise
         if self._graph:
             return await self._graph.update_entity(entity, namespace_id=namespace_id)
         if self._vector:

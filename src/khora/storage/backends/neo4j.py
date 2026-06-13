@@ -3388,6 +3388,29 @@ RETURN count(r) AS updated
             records = await result.data()
             return [self._record_to_entity(r["e"]) for r in records]
 
+    @trace("khora.neo4j.count_entities", include={"namespace_id"})
+    async def count_entities(self, namespace_id: UUID) -> int:
+        """Count entities in a namespace with a server-side COUNT (#1155).
+
+        Overrides ``GraphBackendBase.count_entities``, which materialized up to
+        100k full Entity rows via ``list_entities`` (a label scan plus
+        hydration) just to call ``len()`` and silently capped the count at
+        100,000. This issues ``count(e)`` so the count is exact and pulls no
+        rows.
+        """
+        query = "MATCH (e:Entity {namespace_id: $namespace_id}) RETURN count(e) AS cnt"
+
+        async def _work(tx):
+            result = await tx.run(query, namespace_id=str(namespace_id))
+            record = await result.single()
+            return record["cnt"] if record else 0
+
+        if self._timed_unit_of_work is not None:
+            _work = self._timed_unit_of_work(_work)
+
+        async with self._session() as session:
+            return await session.execute_read(_work)
+
     @trace("khora.neo4j.count_relationships", include={"namespace_id"})
     async def count_relationships(self, namespace_id: UUID) -> int:
         """Count relationships in a namespace using sampling estimation.
