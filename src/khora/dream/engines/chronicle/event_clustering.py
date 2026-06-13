@@ -300,6 +300,16 @@ async def _fetch_events(session: AsyncSession, namespace_id: UUID) -> list[_Even
     Rows missing an ``embedding`` or a ``referenced_date`` cannot be
     cosine-scored or date-windowed and so cannot cluster — they're
     filtered out at fetch time rather than in the inner loop.
+
+    Invalidated (tombstoned) events are excluded too (#1147): a row whose
+    ``invalidated_at`` is set was already soft-merged into a canonical by
+    a prior dream run. Re-admitting it lets a high-confidence tombstone
+    win the canonical election in :func:`_build_op` and a live event gets
+    merged into an already-invalidated row — a dangling merge chain. This
+    is the dream-apply planner consuming its own write-side tombstones,
+    distinct from the #888 recall-read reservation: invalidation state is
+    authoritative on this path (the apply handler already gates on
+    ``invalidated_at IS NULL``), so filtering here is correct.
     """
     stmt = text(
         """
@@ -309,6 +319,7 @@ async def _fetch_events(session: AsyncSession, namespace_id: UUID) -> list[_Even
         WHERE namespace_id = :ns
           AND embedding IS NOT NULL
           AND referenced_date IS NOT NULL
+          AND invalidated_at IS NULL
         """
     )
     result = await session.execute(stmt, {"ns": _bind_uuid(session, namespace_id)})

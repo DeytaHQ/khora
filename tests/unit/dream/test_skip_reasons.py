@@ -293,7 +293,8 @@ async def session() -> AsyncIterator[AsyncSession]:
                         "observation_date TEXT NOT NULL, "
                         "referenced_date TEXT, "
                         "confidence REAL NOT NULL DEFAULT 1.0, "
-                        "embedding TEXT"
+                        "embedding TEXT, "
+                        "invalidated_at TEXT"
                         ")"
                     )
                 )
