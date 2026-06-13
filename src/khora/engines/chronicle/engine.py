@@ -2077,7 +2077,7 @@ class ChronicleEngine:
         # ── Cross-session expansion ─────────────────────────────────────
         start = time.perf_counter()
         chunks_with_scores = await self._cross_session_expand(
-            chunks_with_scores, query, namespace_id, query_embedding, limit
+            chunks_with_scores, query, namespace_id, query_embedding, limit, degradations=degradations
         )
         timings["cross_session_ms"] = (time.perf_counter() - start) * 1000
 
@@ -2965,6 +2965,8 @@ class ChronicleEngine:
         namespace_id: UUID,
         query_embedding: list[float] | None,
         limit: int,
+        *,
+        degradations: list[Degradation] | None = None,
     ) -> list[tuple[Chunk, float]]:
         """Expand results with chunks from other sessions mentioning same entities.
 
@@ -3016,7 +3018,16 @@ class ChronicleEngine:
         # from OTHER sessions
         try:
             entity_results = await storage.search_similar_entities(namespace_id, query_embedding, limit=10)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Chronicle cross-session expansion: search_similar_entities failed: {}", exc, exc_info=True)
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.cross_session",
+                    reason="channel_exception",
+                    detail="search_similar_entities failed",
+                    exc=exc,
+                )
             return chunks_with_scores
 
         if not entity_results:
@@ -3025,7 +3036,16 @@ class ChronicleEngine:
         entity_ids = [eid for eid, _ in entity_results]
         try:
             entities = await storage.get_entities_batch(entity_ids, namespace_id=namespace_id)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Chronicle cross-session expansion: get_entities_batch failed: {}", exc, exc_info=True)
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.cross_session",
+                    reason="channel_exception",
+                    detail="get_entities_batch failed",
+                    exc=exc,
+                )
             return chunks_with_scores
 
         # Collect chunk IDs from entity sources that aren't already in results
@@ -3043,7 +3063,16 @@ class ChronicleEngine:
         expansion_chunk_ids = expansion_chunk_ids[:limit]  # Cap expansion size
         try:
             chunks_map = await storage.get_chunks_batch(expansion_chunk_ids, namespace_id=namespace_id)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Chronicle cross-session expansion: get_chunks_batch failed: {}", exc, exc_info=True)
+            if degradations is not None:
+                _record_channel_degradation(
+                    degradations,
+                    component="chronicle.cross_session",
+                    reason="channel_exception",
+                    detail="get_chunks_batch failed",
+                    exc=exc,
+                )
             return chunks_with_scores
 
         # Discount factor: expansion results score close to reranked results
@@ -3063,6 +3092,14 @@ class ChronicleEngine:
 
         if added > 0:
             logger.debug("Cross-session expansion: added {} chunks from other sessions", added)
+
+        # #1118: the discounted expansion scores are designed to be competitive
+        # in the final ranking, but appending them leaves the merged list out of
+        # score order. Re-sort descending so the caller's positional ``[:limit]``
+        # trim keeps the genuinely top-scored chunks and the subsequent
+        # min_max_normalize assigns 1.0 to the real top chunk (the #834 contract:
+        # top chunk = 1.0, scores as normalized rank).
+        expanded.sort(key=lambda pair: pair[1], reverse=True)
 
         return expanded
 
