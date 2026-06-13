@@ -56,13 +56,36 @@ def _now_iso() -> str:
 
 
 def _dt_to_str(dt: datetime | None) -> str | None:
-    return None if dt is None else dt.isoformat()
+    """Serialize a datetime to a canonical UTC ISO-8601 string.
+
+    Timestamps are stored as TEXT and the temporal pushdowns compare them
+    with SQL ``>=`` / ``<=`` — lexicographic on TEXT. That ordering equals
+    chronological order only when every stored value and every bind
+    parameter share one offset representation. So we normalize first:
+    tz-aware values convert to UTC, naive values are assumed UTC, and the
+    result always carries a ``+00:00`` suffix (issue #1146). ``+00:00``
+    rather than ``Z`` because the ``+`` byte sorts before ``.``, keeping
+    fractional-second values lexicographically ordered against
+    whole-second ones.
+    """
+    if dt is None:
+        return None
+    dt = dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    return dt.isoformat()
 
 
 def _parse_dt(val: str | None) -> datetime | None:
+    """Parse a stored timestamp back to a UTC-aware datetime.
+
+    New rows are written by :func:`_dt_to_str` with an explicit ``+00:00``
+    offset, so ``fromisoformat`` yields an aware value. Rows written before
+    issue #1146 may be naive or carry a non-UTC offset; we normalize both
+    to UTC so reads are consistent regardless of write-time format.
+    """
     if not val:
         return None
-    return datetime.fromisoformat(val)
+    dt = datetime.fromisoformat(val)
+    return dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def _validate_embedding(embedding: list[float], expected_dim: int, *, context: str) -> None:
