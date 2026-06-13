@@ -1282,6 +1282,19 @@ _COERCE_DATE = _coerce_seed("due", "2026-06-01T00:00:00Z", "2020-01-01T00:00:00Z
 
 _DATE_LIT = "2026-01-01T00:00:00Z"
 
+# A multi-operator $not band seed (#1127): both inner ops must be load-bearing.
+# ``$not({$gte:1, $lte:5})`` is ``NOT(score >= 1 AND score <= 5)``. ``above`` (10)
+# passes $gte but fails $lte, so a lowering that drops $lte (the pre-#1127 bug)
+# would wrongly EXCLUDE it. ``below`` is under the band, ``inside`` is within it,
+# ``wrongtype`` / ``absent`` fail the numeric gate (so the negation includes them).
+_NOT_BAND_SEED = (
+    SeedRecord(id="above", metadata={"score": 10}),
+    SeedRecord(id="below", metadata={"score": 0}),
+    SeedRecord(id="inside", metadata={"score": 3}),
+    SeedRecord(id="wrongtype", metadata={"score": "3"}),
+    SeedRecord(id="absent", metadata={}),
+)
+
 
 def f_coerce_cases() -> list[ConformanceCase]:
     """F-COERCE: §4 rule #1 type-gate — every positive op keeps only the typed satisfier.
@@ -1393,6 +1406,16 @@ def f_polarity_cases() -> list[ConformanceCase]:
             {"metadata.score": {"$not": {"$lt": 6}}},
             n,
             all_but_nomatch,
+            ("F-POLARITY", "number", "$not"),
+        ),
+        # Multi-operator $not (#1127): NOT(score>=1 AND score<=5). Both inner ops are
+        # load-bearing - ``above`` (10) passes $gte but fails $lte, so a lowering that
+        # drops $lte would wrongly exclude it. Only ``inside`` (3) is excluded.
+        _case(
+            "F-POLARITY-num-not-range",
+            {"metadata.score": {"$not": {"$gte": 1, "$lte": 5}}},
+            _NOT_BAND_SEED,
+            frozenset({"above", "below", "wrongtype", "absent"}),
             ("F-POLARITY", "number", "$not"),
         ),
     ]
