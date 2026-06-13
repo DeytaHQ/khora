@@ -214,6 +214,9 @@ class CrossEncoderReranker(Reranker):
         self._batch_size = batch_size
         self._include_date_prefix = include_date_prefix
         self._model = None
+        # Single-flight guard so concurrent first callers share one load
+        # instead of each constructing the (heavy) cross-encoder. See #1162.
+        self._model_lock = asyncio.Lock()
 
     def _get_model(self):
         """Lazy load the cross-encoder model."""
@@ -247,7 +250,15 @@ class CrossEncoderReranker(Reranker):
             return []
 
         try:
-            model = self._get_model()
+            # Load the model off the event loop (the weight load is seconds of
+            # torch / HuggingFace work that would otherwise stall every other
+            # coroutine), single-flighted so concurrent first callers do not
+            # each trigger a load. See #1162.
+            if self._model is None:
+                async with self._model_lock:
+                    if self._model is None:
+                        await asyncio.to_thread(self._get_model)
+            model = self._model
 
             # Prepare pairs for cross-encoder
             pairs = []
