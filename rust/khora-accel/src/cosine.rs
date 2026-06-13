@@ -5,6 +5,7 @@
 
 use numpy::{PyReadonlyArray1, PyReadonlyArray2};
 use ordered_float::OrderedFloat;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
@@ -43,15 +44,26 @@ pub fn batch_cosine_similarity(
     query: PyReadonlyArray1<'_, f32>,
     candidates: PyReadonlyArray2<'_, f32>,
     threshold: f32,
-) -> Vec<(usize, f32)> {
+) -> PyResult<Vec<(usize, f32)>> {
     let q_array = query.as_array();
     let c_array = candidates.as_array();
+
+    // Reject mismatched dimensions instead of zipping to the shorter length,
+    // which would silently truncate and return a wrong-but-plausible score.
+    // Matches the NumPy fallback (`mat @ q`), which raises ValueError. (#1132)
+    if c_array.nrows() > 0 && q_array.len() != c_array.ncols() {
+        return Err(PyValueError::new_err(format!(
+            "query length {} does not match candidate dimension {}",
+            q_array.len(),
+            c_array.ncols()
+        )));
+    }
 
     // Copy to owned arrays so we can release the GIL
     let q_owned = q_array.to_owned();
     let c_owned = c_array.to_owned();
 
-    py.detach(|| {
+    Ok(py.detach(|| {
         let q = q_owned.as_slice().unwrap();
         let n_candidates = c_owned.nrows();
 
@@ -87,7 +99,7 @@ pub fn batch_cosine_similarity(
 
         results.sort_by(|a, b| OrderedFloat(b.1).cmp(&OrderedFloat(a.1)));
         results
-    })
+    }))
 }
 
 /// All-pairs cosine similarity above a threshold.
@@ -191,14 +203,25 @@ pub fn batch_dot_product(
     query: PyReadonlyArray1<'_, f32>,
     candidates: PyReadonlyArray2<'_, f32>,
     threshold: f32,
-) -> Vec<(usize, f32)> {
+) -> PyResult<Vec<(usize, f32)>> {
     let q_array = query.as_array();
     let c_array = candidates.as_array();
+
+    // Reject mismatched dimensions instead of zipping to the shorter length,
+    // which would silently return a prefix dot product. Matches the NumPy
+    // fallback (`mat @ q`), which raises ValueError. (#1132)
+    if c_array.nrows() > 0 && q_array.len() != c_array.ncols() {
+        return Err(PyValueError::new_err(format!(
+            "query length {} does not match candidate dimension {}",
+            q_array.len(),
+            c_array.ncols()
+        )));
+    }
 
     let q_owned = q_array.to_owned();
     let c_owned = c_array.to_owned();
 
-    py.detach(|| {
+    Ok(py.detach(|| {
         let q = q_owned.as_slice().unwrap();
         let n_candidates = c_owned.nrows();
 
@@ -222,7 +245,7 @@ pub fn batch_dot_product(
 
         results.sort_by(|a, b| OrderedFloat(b.1).cmp(&OrderedFloat(a.1)));
         results
-    })
+    }))
 }
 
 #[cfg(test)]
