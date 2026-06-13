@@ -13,6 +13,7 @@ Format: versions match git tags (`git tag vX.Y.Z`). Versions before 0.5.1 were i
 
 ### Fixed
 
+- **VectorCypher recency channel now fires again on the pgvector stack** — the temporal store now implements `search_recent_chunks` (the channel had been silently dead since the temporal-store rewiring). The pgvector temporal store sorts `khora_chunks` by `COALESCE(occurred_at, source_timestamp, created_at) DESC` (served by a new `ix_khora_chunks_ns_recency` expression index), preserves the embedding so the caller's cosine relevance gate runs, and backends without the capability return the protocol default `[]`. Embedded (`sqlite_lance`) support is tracked in #1182.
 - **Honest filter-pushdown reporting on the skeleton engine** (#1069): `recall(filter=...).engine_info["filter"]["pushed_down"]` was derived from a hardcoded `backend == "pgvector"` check, so it reported `False` on `sqlite_lance` even when the compiler fully pushed the predicate into the SQLite `WHERE` clause. The flag is now derived from what each channel's compiler actually consumed (`pushed_keys`) versus what it re-checked in memory (`post_filtered_keys`), so `pushed_down` is accurate on every backend whose compiler pushes predicates down. A defensive full-predicate re-check (the `sqlite_lance` path) sets `post_filtered=True` without demoting a fully-pushed leaf (NO-DEMOTE).
 
 ### Changed

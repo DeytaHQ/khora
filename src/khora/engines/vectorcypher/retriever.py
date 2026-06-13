@@ -1676,19 +1676,20 @@ class VectorCypherRetriever:
             # irrelevant-but-fresh chunks muscling in (Devil's-Advocate
             # follow-up: decouple channel filter from synthesized floor).
             #
-            # The recency channel reads the relational chunks table, which
-            # cannot push down a khora_chunks-compiled predicate, so the caller
-            # filter is enforced as an in-memory post-filter inside
+            # The recency channel reads the temporal store's chunk table
+            # (``khora_chunks`` on pgvector). Pushdown of a khora_chunks-compiled
+            # predicate is NOT implemented for this recency SQL, so the caller
+            # filter is enforced as a full-AST in-memory post-filter inside
             # _recency_channel_chunks. Quality trade-off (accepted): under a
             # restrictive caller filter the recency channel post-filters in
             # memory and may return fewer rows, slightly under-recalling the
             # "current state" intent on a tightly date-filtered namespace.
             # The recency channel records its own ChannelPlan internally — and
             # only when it actually produced post-filtered chunks on the real
-            # execution path. On every wired temporal store its SQL source
-            # (``search_recent_chunks``) is absent, so it early-returns [] and
-            # records nothing: the channel honestly never appears in the report
-            # rather than being credited with a disposition it never reached.
+            # execution path. Backends WITHOUT the capability (e.g. SurrealDB)
+            # return the protocol default [] from ``search_recent_chunks``, so
+            # the channel honestly never appears in the report rather than being
+            # credited with a disposition it never reached.
             recent_chunks = await self._recency_channel_chunks(
                 query_embedding=query_embedding,
                 namespace_id=namespace_id,
@@ -3481,26 +3482,28 @@ class VectorCypherRetriever:
     ) -> list[tuple[UUID, float, Chunk]]:
         """Issue #567 A3 — pure-recency candidate pool.
 
-        Pulls the N most-recent chunks in the namespace via the
-        ``search_recent_chunks`` SQL (uses the ``ix_chunks_ns_temporal``
-        index from migration 017), then computes per-chunk cosine
-        similarity against ``query_embedding`` and drops anything below
+        Pulls the N most-recent chunks in the namespace via the temporal
+        store's ``search_recent_chunks`` (on pgvector this reads the
+        ``khora_chunks`` table, served by the ``ix_khora_chunks_ns_recency``
+        index), then computes per-chunk cosine similarity against
+        ``query_embedding`` and drops anything below
         ``temporal_query_relevance_floor``. Pool augmentation only — the
         caller merges results into the existing vector pool.
 
-        ``filter_ast``: the caller recall-filter AST. This channel reads the
-        relational chunks table, which cannot push down a khora_chunks-compiled
-        predicate, so the filter is enforced as a full-AST in-memory post-filter
-        — no filter-violating chunk reaches RRF. (Trade-off: under a restrictive
+        ``filter_ast``: the caller recall-filter AST. Pushdown of a
+        khora_chunks-compiled predicate is not implemented for this recency
+        SQL, so the filter is enforced as a full-AST in-memory post-filter —
+        no filter-violating chunk reaches RRF. (Trade-off: under a restrictive
         caller filter this may return fewer rows; see the call site.)
 
         ``filter_channel_plans``: when provided, the honest recency ChannelPlan
         is recorded here — but ONLY on the real execution path, after the channel
         has actually post-filtered surviving chunks under a filter. The channel
         pushes nothing (pure recency sort) and re-checks every leaf in memory, so
-        the plan post-filters every leaf. The early-returns above (no SQL source,
-        no rows, no embeddings) record nothing, so a channel that never produced
-        a post-filtered result is never credited with a disposition.
+        the plan post-filters every leaf. The early-returns above (backend
+        without the capability, no rows, no embeddings) record nothing, so a
+        channel that never produced a post-filtered result is never credited
+        with a disposition.
 
         Returns ``list[tuple[chunk_id, score, Chunk]]`` matching the
         shape of ``_vector_search_chunks`` so RRF can fuse it directly.
@@ -3575,9 +3578,10 @@ class VectorCypherRetriever:
                             },
                             chunker_info=getattr(chunk, "chunker_info", None) or {},
                             created_at=getattr(chunk, "created_at", None) or getattr(chunk, "occurred_at", None),
-                            # Recency channel reads the main chunks table, which
-                            # carries the producer time but no chunk event-time;
-                            # the projection falls back to source_timestamp.
+                            # The temporal store carries the chunk event-time
+                            # (occurred_at, surfaced into metadata above) and the
+                            # producer time (source_timestamp); the projection
+                            # uses event-time first, then producer time.
                             source_timestamp=getattr(chunk, "source_timestamp", None),
                         ),
                     )
