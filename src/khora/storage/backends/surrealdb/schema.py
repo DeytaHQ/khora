@@ -180,9 +180,15 @@ DEFINE FIELD IF NOT EXISTS description ON episode TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS episode_type ON episode TYPE string DEFAULT 'generic';
 DEFINE FIELD IF NOT EXISTS occurred_at ON episode TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS duration_seconds ON episode TYPE option<int>;
-DEFINE FIELD IF NOT EXISTS entity_ids ON episode TYPE option<array>;
-DEFINE FIELD IF NOT EXISTS source_document_ids ON episode TYPE option<array>;
-DEFINE FIELD IF NOT EXISTS source_chunk_ids ON episode TYPE option<array>;
+-- Element type is required: a value bound to a bare ``option<array>``
+-- SCHEMAFULL field is silently coerced to ``[]`` (see memory_fact note
+-- below, #1167 / #1168). These store stringified UUIDs, so the element
+-- type is ``string``. Existing deployments keep the lossy definition
+-- (DEFINE ... IF NOT EXISTS skips redefinition) and need an explicit
+-- REMOVE FIELD + redefine; only fresh databases pick this up.
+DEFINE FIELD IF NOT EXISTS entity_ids ON episode TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS source_document_ids ON episode TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS source_chunk_ids ON episode TYPE option<array<string>>;
 DEFINE FIELD IF NOT EXISTS embedding ON episode TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS embedding_model ON episode TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS metadata_ ON episode FLEXIBLE TYPE option<object>;
