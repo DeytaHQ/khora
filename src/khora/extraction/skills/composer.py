@@ -244,16 +244,38 @@ class ExpertiseComposer:
         )
 
     def _merge_expansion(self, base: ExpansionConfig, overlay: ExpansionConfig) -> ExpansionConfig:
-        """Merge expansion configs, overlay overrides non-default values."""
+        """Merge expansion configs, overlay overrides non-default values.
+
+        The booleans default to True, so an overlay left at its default cannot
+        be distinguished from an explicit True. We treat the default value as
+        "unset" and only let the overlay win when it differs from the default -
+        otherwise a child that simply omits ``expansion`` would silently
+        re-enable a flag the parent explicitly disabled (#1126).
+        """
         return ExpansionConfig(
-            enabled=overlay.enabled,
+            enabled=overlay.enabled if overlay.enabled is not True else base.enabled,
             depth=overlay.depth if overlay.depth != 2 else base.depth,
-            cross_tool_unification=overlay.cross_tool_unification,
-            relationship_inference=overlay.relationship_inference,
+            cross_tool_unification=(
+                overlay.cross_tool_unification
+                if overlay.cross_tool_unification is not True
+                else base.cross_tool_unification
+            ),
+            relationship_inference=(
+                overlay.relationship_inference
+                if overlay.relationship_inference is not True
+                else base.relationship_inference
+            ),
             max_entities_per_expansion=(
                 overlay.max_entities_per_expansion
                 if overlay.max_entities_per_expansion != 100
                 else base.max_entities_per_expansion
+            ),
+            inference_mode=overlay.inference_mode if overlay.inference_mode != "smart" else base.inference_mode,
+            preload_existing=overlay.preload_existing
+            if overlay.preload_existing is not True
+            else base.preload_existing,
+            batch_storage_size=(
+                overlay.batch_storage_size if overlay.batch_storage_size != 50 else base.batch_storage_size
             ),
         )
 
