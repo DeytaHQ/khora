@@ -42,6 +42,33 @@ class TestQueryCache:
         key2 = QueryCache._make_key("world", ns, "hybrid")
         assert key1 != key2
 
+    def test_make_key_different_extra(self) -> None:
+        """Different per-call digests (temporal filter / config) produce different keys."""
+        ns = uuid4()
+        key1 = QueryCache._make_key("hello", ns, "hybrid", "filter-a")
+        key2 = QueryCache._make_key("hello", ns, "hybrid", "filter-b")
+        assert key1 != key2
+
+    @pytest.mark.asyncio
+    async def test_extra_digest_isolates_entries(self) -> None:
+        """Same query/namespace/mode but different extra digests don't collide.
+
+        Reproduces #1129: a temporal-filtered (or limit-differing) recall must
+        not serve the cached result of the same query text with a different
+        filter/config.
+        """
+        cache = QueryCache()
+        ns = uuid4()
+        with patch.object(QueryCache, "_record_cache_event"):
+            await cache.set("q", ns, "hybrid", "unfiltered", extra="")
+            # Same text/ns/mode but a different temporal filter digest.
+            hit = await cache.get("q", ns, "hybrid", extra="last_days_7")
+            assert hit is None  # must not serve the unfiltered result
+            await cache.set("q", ns, "hybrid", "filtered", extra="last_days_7")
+            # Each digest resolves to its own entry.
+            assert await cache.get("q", ns, "hybrid", extra="") == "unfiltered"
+            assert await cache.get("q", ns, "hybrid", extra="last_days_7") == "filtered"
+
     @pytest.mark.asyncio
     async def test_get_miss(self) -> None:
         """Cache miss returns None."""

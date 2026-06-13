@@ -443,6 +443,62 @@ class QueryConfig:
         )
 
 
+# Result-shaping QueryConfig fields keyed into the query cache (#1129). Changing
+# any of these changes the returned result set, so two recalls that differ only
+# in one of them must not share a cache entry. Pipeline-internal knobs that don't
+# alter the surfaced result (e.g. telemetry flags) are intentionally excluded.
+_CACHE_KEYED_CONFIG_FIELDS = (
+    "max_chunks",
+    "max_entities",
+    "max_graph_depth",
+    "min_chunk_similarity",
+    "min_entity_similarity",
+    "vector_weight",
+    "graph_weight",
+    "keyword_weight",
+    "rrf_k",
+    "apply_recency_bias",
+    "recency_weight",
+    "recency_decay_days",
+    "enable_reranking",
+    "reranking_method",
+    "reranking_model",
+    "reranking_final_k",
+    "enable_keyword_search",
+    "keyword_search_method",
+    "enable_hyde",
+    "enable_multi_stage",
+    "enable_diversity",
+    "diversity_lambda",
+    "enable_narrative_coherence",
+)
+
+
+def _cache_extra_digest(cfg: QueryConfig, temporal_filter: TemporalFilter | None) -> str:
+    """Stable digest of the per-call inputs that change the cached result set.
+
+    Folds the temporal filter (operator + bounds + relative window) and the
+    result-shaping ``QueryConfig`` fields into one short hash so the query
+    cache can't serve a filtered/limit-differing recall the result of the same
+    query text computed under different parameters (#1129).
+    """
+    import json
+    from hashlib import sha256
+
+    payload: dict[str, Any] = {f: getattr(cfg, f) for f in _CACHE_KEYED_CONFIG_FIELDS}
+    if temporal_filter is not None:
+        tf = temporal_filter
+        payload["temporal_filter"] = {
+            "operator": getattr(tf.operator, "value", str(tf.operator)),
+            "start_time": tf.start_time.isoformat() if tf.start_time else None,
+            "end_time": tf.end_time.isoformat() if tf.end_time else None,
+            "relative_days": tf.relative_days,
+            "relative_hours": tf.relative_hours,
+        }
+    serialized = json.dumps(payload, sort_keys=True, default=str)
+    return sha256(serialized.encode()).hexdigest()
+
+
 class HybridQueryEngine:
     """Hybrid query engine combining multiple search methods.
 
@@ -593,8 +649,13 @@ class HybridQueryEngine:
         # Clear per-query entity similarity cache
         self._entity_similarity_cache.clear()
 
+        # Digest of the per-call inputs that shape the result set (temporal
+        # filter + result-shaping config). Keeps differently-filtered or
+        # differently-limited recalls from colliding in the cache (#1129).
+        cache_extra = _cache_extra_digest(cfg, temporal_filter)
+
         # Check cache
-        cached = await self._cache.get(query_text, namespace_id, cfg.mode.name)
+        cached = await self._cache.get(query_text, namespace_id, cfg.mode.name, cache_extra)
         if cached is not None:
             logger.debug(f"Cache hit for query: {query_text[:50]}...")
             from khora.telemetry import get_collector as _get_tc
@@ -1320,7 +1381,7 @@ class HybridQueryEngine:
         )
 
         # Cache the result
-        await self._cache.set(query_text, namespace_id, cfg.mode.name, result)
+        await self._cache.set(query_text, namespace_id, cfg.mode.name, result, cache_extra)
 
         return result
 
