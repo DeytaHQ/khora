@@ -792,6 +792,127 @@ class TestDetectTemporalCategoryWithConfidence:
 
 
 # ---------------------------------------------------------------------------
+# Community detection — determinism (#1131)
+# ---------------------------------------------------------------------------
+
+# Barbell-with-bridge: two triangles {0,1,2} and {3,4,5} joined by a bridge
+# node 6 connected with EQUAL weight to one node of each triangle. Node 6's
+# modularity gain ties between the two communities, so before #1131 the winner
+# depended on hashbrown's per-process-randomly-seeded HashMap iteration order.
+_TIE_EDGES = [
+    (0, 1, 1.0),
+    (1, 0, 1.0),
+    (1, 2, 1.0),
+    (2, 1, 1.0),
+    (0, 2, 1.0),
+    (2, 0, 1.0),
+    (3, 4, 1.0),
+    (4, 3, 1.0),
+    (4, 5, 1.0),
+    (5, 4, 1.0),
+    (3, 5, 1.0),
+    (5, 3, 1.0),
+    (6, 2, 1.0),
+    (2, 6, 1.0),
+    (6, 3, 1.0),
+    (3, 6, 1.0),
+]
+
+_SUBPROCESS_RUNNER = """
+import khora._accel as a
+edges = {edges!r}
+print(",".join(map(str, a.detect_communities(7, edges, 1.0, 10))))
+"""
+
+
+class TestDetectCommunitiesDeterminism:
+    def test_repeated_runs_identical_same_process(self):
+        """Same input → identical assignment across N in-process calls."""
+        first = accel.detect_communities(7, _TIE_EDGES, 1.0, 10)
+        for _ in range(20):
+            assert accel.detect_communities(7, _TIE_EDGES, 1.0, 10) == first
+
+    def test_repeated_runs_identical_across_processes(self):
+        """Same input → identical assignment across fresh processes.
+
+        This is the regression guard for #1131: hashbrown 0.16 seeds its
+        default hasher randomly per process, so the tie-break winner flipped
+        between process launches before the deterministic smallest-id rule.
+        In-process repetition cannot catch it because the seed is fixed once
+        per process.
+        """
+        import subprocess
+        import sys
+
+        script = _SUBPROCESS_RUNNER.format(edges=_TIE_EDGES)
+        outputs = set()
+        for _ in range(16):
+            proc = subprocess.run(  # noqa: S603 - test harness, sys.executable is trusted
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            outputs.add(proc.stdout.strip())
+        assert len(outputs) == 1, f"non-deterministic across processes: {outputs}"
+
+    def test_rust_matches_python_fallback(self, monkeypatch):
+        """Rust and the pure-Python fallback agree on the tie graph."""
+        rust = accel.detect_communities(7, _TIE_EDGES, 1.0, 10)
+        monkeypatch.setattr(accel, "_HAS_RUST", False)
+        py = accel.detect_communities(7, _TIE_EDGES, 1.0, 10)
+        assert rust == py
+
+
+# ---------------------------------------------------------------------------
+# Entity name normalization — Rust/Python parity (#1133)
+# ---------------------------------------------------------------------------
+
+# Inputs spanning markdown decoration, interleaved punctuation/space runs,
+# the limited strip-set boundary, and unicode. Before #1133 the Rust path
+# trimmed ALL ASCII punctuation while Python stripped only a 16-char set.
+_PARITY_INPUTS = [
+    "**Acme Corp**",
+    "Acme Corp . .",
+    "...hello...",
+    "  spaces  between  ",
+    "Dr. Smith",
+    "Mr. Dr. Smith",
+    "**Acme**",
+    "U.S.A.",
+    "foo@bar",
+    "a/b",
+    "#tag",
+    "100%",
+    '"Hello World"',
+    "(parenthetical)",
+    "café—münchen",
+    "naïve, résumé;",
+    "",
+    "   ",
+]
+
+
+class TestNormalizeEntityNameParity:
+    @pytest.mark.parametrize("name", _PARITY_INPUTS)
+    def test_rust_equals_python(self, name, monkeypatch):
+        rust = accel.normalize_entity_name(name)
+        monkeypatch.setattr(accel, "_HAS_RUST", False)
+        py = accel.normalize_entity_name(name)
+        assert rust == py, f"divergence for {name!r}: rust={rust!r} python={py!r}"
+
+    def test_markdown_decoration_preserved(self):
+        """The safer less-aggressive behavior keeps '**' decoration."""
+        assert accel.normalize_entity_name("**Acme**") == "**acme**"
+
+    def test_batch_parity(self, monkeypatch):
+        rust = accel.normalize_entity_names_batch(list(_PARITY_INPUTS))
+        monkeypatch.setattr(accel, "_HAS_RUST", False)
+        py = accel.normalize_entity_names_batch(list(_PARITY_INPUTS))
+        assert rust == py
+
+
+# ---------------------------------------------------------------------------
 # Batch recency scores - Rust/Python future-timestamp parity (#1130)
 # ---------------------------------------------------------------------------
 

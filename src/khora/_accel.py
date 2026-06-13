@@ -1698,7 +1698,9 @@ def detect_communities(
                 if c == ci:
                     continue
                 gain = k_i_in_c / m - resolution * sigma_tot[c] * ki / (2.0 * m * m)
-                if gain > best_gain:
+                # Deterministic tie-break on the smallest community id (#1131),
+                # matching the Rust kernel so both backends agree exactly.
+                if gain > best_gain or (gain == best_gain and c < best_c):
                     best_gain = gain
                     best_c = c
 
