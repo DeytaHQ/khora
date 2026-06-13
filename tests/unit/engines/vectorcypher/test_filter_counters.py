@@ -246,8 +246,8 @@ def _make_engine_with_stub_retriever(ns_id: UUID, *, chunks: list[tuple[Chunk, f
     abstention signals, and document projection read only the in-memory
     ``VectorCypherResult``), so a stubbed ``_get_retriever`` is enough to drive
     the real ``record_under_filled`` call site with no database. The stub
-    retriever carries a real ``RetrieverConfig`` because ``recall`` saves/restores
-    ``retriever._config.hybrid_alpha`` around the call.
+    retriever carries a real ``RetrieverConfig`` because the retriever reads
+    ``self._config.hybrid_alpha`` as the per-call blend fallback (#1116).
     """
     engine = VectorCypherEngine(KhoraConfig())
 

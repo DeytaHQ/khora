@@ -632,6 +632,8 @@ class VectorCypherRetriever:
         limit: int | None = None,
         min_similarity: float = 0.0,
         mode: SearchMode = SearchMode.HYBRID,
+        hybrid_alpha_override: float | None = None,
+        recency_bias: float | None = None,
         filter_ast: FilterNode | None = None,
     ) -> VectorCypherResult:
         """Retrieve relevant chunks using VectorCypher hybrid approach.
@@ -646,6 +648,16 @@ class VectorCypherRetriever:
             min_similarity: Minimum cosine-similarity floor applied to the
                 vector channel. Chunks below this threshold are filtered at
                 the storage layer before any fusion / reranking happens.
+            hybrid_alpha_override: Per-call vector/BM25 blend factor. Threaded
+                explicitly from the engine so the shared ``RetrieverConfig``
+                is never mutated (#1116). ``None`` keeps the configured /
+                channel-derived alpha; a concrete value overrides it for this
+                call only. The BM25 channel still forces pure vector
+                (``1.0``) when active to avoid double-counting.
+            recency_bias: Per-call recency-boost weight override (0.0-1.0).
+                Threaded explicitly from the engine (#1156). ``None`` keeps
+                the temporal-signal-derived ``recency_weight``; a concrete
+                value overrides the recency-boost weight for this call.
             mode: Search mode contract (#833). ``HYBRID`` and ``ALL`` keep the
                 existing multi-channel behaviour. ``VECTOR`` skips the graph
                 and BM25 channels (pure vector); ``GRAPH`` skips vector +
@@ -813,6 +825,8 @@ class VectorCypherRetriever:
                     graph_depth=graph_depth,
                     limit=limit,
                     routing=routing,
+                    hybrid_alpha_override=hybrid_alpha_override,
+                    recency_bias=recency_bias,
                     filter_ast=filter_ast,
                 )
             elif force_simple or (not force_graph and routing.complexity == QueryComplexity.SIMPLE):
@@ -825,13 +839,14 @@ class VectorCypherRetriever:
                     temporal_filter=temporal_filter,
                     limit=limit,
                     routing=routing,
-                    effective_recency=params.recency_weight,
+                    effective_recency=(recency_bias if recency_bias is not None else params.recency_weight),
                     decay_days_override=params.decay_days_override,
                     temporal_sort=params.temporal_sort,
                     recency_floor=params.recency_floor,
                     temporal_signal=temporal_signal,
                     min_similarity=min_similarity,
                     mode=mode,
+                    hybrid_alpha_override=hybrid_alpha_override,
                     filter_ast=filter_ast,
                 )
             else:
@@ -852,6 +867,8 @@ class VectorCypherRetriever:
                         temporal_signal=temporal_signal,
                         min_similarity=min_similarity,
                         mode=mode,
+                        hybrid_alpha_override=hybrid_alpha_override,
+                        recency_bias=recency_bias,
                         filter_ast=filter_ast,
                     )
                 except _NEO4J_TRANSIENT_ERRORS as e:
@@ -863,13 +880,14 @@ class VectorCypherRetriever:
                         temporal_filter=temporal_filter,
                         limit=limit,
                         routing=routing,
-                        effective_recency=params.recency_weight,
+                        effective_recency=(recency_bias if recency_bias is not None else params.recency_weight),
                         decay_days_override=params.decay_days_override,
                         temporal_sort=params.temporal_sort,
                         recency_floor=params.recency_floor,
                         temporal_signal=temporal_signal,
                         min_similarity=min_similarity,
                         mode=mode,
+                        hybrid_alpha_override=hybrid_alpha_override,
                         filter_ast=filter_ast,
                     )
 
@@ -917,6 +935,8 @@ class VectorCypherRetriever:
         limit: int,
         routing: RoutingDecision,
         *,
+        hybrid_alpha_override: float | None = None,
+        recency_bias: float | None = None,
         filter_ast: FilterNode | None = None,
     ) -> VectorCypherResult:
         """Phase C fast path (#569): typed-entity recency in one Cypher query.
@@ -960,6 +980,8 @@ class VectorCypherRetriever:
                 graph_depth=graph_depth,
                 limit=limit,
                 routing=routing,
+                hybrid_alpha_override=hybrid_alpha_override,
+                recency_bias=recency_bias,
                 filter_ast=filter_ast,
             )
 
@@ -973,6 +995,8 @@ class VectorCypherRetriever:
                 graph_depth=graph_depth,
                 limit=limit,
                 routing=routing,
+                hybrid_alpha_override=hybrid_alpha_override,
+                recency_bias=recency_bias,
                 filter_ast=filter_ast,
             )
             fallback.metadata["typed_entity_fast_path_fallback"] = True
@@ -1022,6 +1046,8 @@ class VectorCypherRetriever:
                     graph_depth=graph_depth,
                     limit=limit,
                     routing=routing,
+                    hybrid_alpha_override=hybrid_alpha_override,
+                    recency_bias=recency_bias,
                     filter_ast=filter_ast,
                 )
                 fallback.metadata["typed_entity_fast_path_fallback"] = True
@@ -1038,6 +1064,8 @@ class VectorCypherRetriever:
                     graph_depth=graph_depth,
                     limit=limit,
                     routing=routing,
+                    hybrid_alpha_override=hybrid_alpha_override,
+                    recency_bias=recency_bias,
                     filter_ast=filter_ast,
                 )
                 fallback.metadata["typed_entity_fast_path_fallback"] = True
@@ -1112,6 +1140,8 @@ class VectorCypherRetriever:
         temporal_signal: TemporalSignal | None = None,
         min_similarity: float = 0.0,
         mode: SearchMode = SearchMode.HYBRID,
+        hybrid_alpha_override: float | None = None,
+        recency_bias: float | None = None,
         filter_ast: FilterNode | None = None,
     ) -> VectorCypherResult:
         """Internal VectorCypher retrieval with graph traversal.
@@ -1198,8 +1228,13 @@ class VectorCypherRetriever:
         # This operation doesn't depend on entity search results.
         # When the BM25 channel is active, use pure vector (hybrid_alpha=1.0)
         # to avoid double-counting BM25 (once in the vector blend, once as
-        # its own independent channel).
-        effective_hybrid_alpha = 1.0 if self._config.enable_bm25_channel else None
+        # its own independent channel). Otherwise a per-call
+        # ``hybrid_alpha_override`` (threaded explicitly from the engine, #1116)
+        # wins over the configured default; ``None`` keeps the config value.
+        if self._config.enable_bm25_channel:
+            effective_hybrid_alpha = 1.0
+        else:
+            effective_hybrid_alpha = hybrid_alpha_override
         vector_chunks_task: asyncio.Task[list[tuple[UUID, float, Chunk]]] | None = None
         if not skip_vector_channel:
             vector_chunks_task = asyncio.create_task(
@@ -1267,13 +1302,14 @@ class VectorCypherRetriever:
                 temporal_filter=temporal_filter,
                 limit=limit,
                 routing=routing,
-                effective_recency=_tp.recency_weight,
+                effective_recency=(recency_bias if recency_bias is not None else _tp.recency_weight),
                 decay_days_override=_tp.decay_days_override,
                 temporal_sort=_tp.temporal_sort,
                 recency_floor=_tp.recency_floor,
                 temporal_signal=temporal_signal,
                 min_similarity=min_similarity,
                 mode=mode,
+                hybrid_alpha_override=hybrid_alpha_override,
                 filter_ast=filter_ast,
                 # Carry any degradations recorded before the fallback (e.g. the
                 # entry-entity vector search that just collapsed graph expansion
@@ -1859,11 +1895,16 @@ class VectorCypherRetriever:
             is_temporal=_tp.recency_weight > 0.2,
         )
 
-        # Step 8: Apply recency boost driven by temporal signal category
-        effective_recency = _tp.recency_weight
-        # WS4: Also boost when explicit temporal filter is active
-        if temporal_filter is not None and effective_recency > 0:
-            effective_recency = max(effective_recency, 0.4)
+        # Step 8: Apply recency boost driven by temporal signal category.
+        # A per-call ``recency_bias`` (threaded explicitly from the engine,
+        # #1156) overrides the signal-derived weight and the WS4 clamp below.
+        if recency_bias is not None:
+            effective_recency = recency_bias
+        else:
+            effective_recency = _tp.recency_weight
+            # WS4: Also boost when explicit temporal filter is active
+            if temporal_filter is not None and effective_recency > 0:
+                effective_recency = max(effective_recency, 0.4)
         if effective_recency > 0:
             with trace_span("khora.vectorcypher.recency_boost", chunk_count=len(fused_results)):
                 recency_scores = self._calculate_recency_scores(
@@ -2221,6 +2262,7 @@ class VectorCypherRetriever:
         temporal_signal: TemporalSignal | None = None,
         min_similarity: float = 0.0,
         mode: SearchMode = SearchMode.HYBRID,
+        hybrid_alpha_override: float | None = None,
         filter_ast: FilterNode | None = None,
     ) -> VectorCypherResult:
         """Fallback to vector-only search when graph operations fail.
@@ -2255,6 +2297,7 @@ class VectorCypherRetriever:
             temporal_signal=temporal_signal,
             min_similarity=min_similarity,
             mode=fallback_mode,
+            hybrid_alpha_override=hybrid_alpha_override,
             filter_ast=filter_ast,
         )
 
@@ -2570,6 +2613,7 @@ class VectorCypherRetriever:
         temporal_signal: TemporalSignal | None = None,
         min_similarity: float = 0.0,
         mode: SearchMode = SearchMode.HYBRID,
+        hybrid_alpha_override: float | None = None,
         filter_ast: FilterNode | None = None,
         degradations: list[Degradation] | None = None,
     ) -> VectorCypherResult:
@@ -2577,6 +2621,10 @@ class VectorCypherRetriever:
 
         For SIMPLE-routed queries, uses a lower hybrid_alpha (0.5) to give
         BM25 equal weight — lexical overlap is stronger for factual queries.
+
+        A per-call ``hybrid_alpha_override`` (threaded explicitly from the
+        engine, #1116) wins over both the configured default and the
+        SIMPLE-query clamp; ``None`` keeps the existing behaviour.
 
         When temporal_sort is True, results are re-sorted by occurred_at DESC
         after recency boosting so that the most recent chunks surface first
@@ -2617,7 +2665,12 @@ class VectorCypherRetriever:
             elif self._config.enable_bm25_channel and run_bm25_channel:
                 effective_alpha = 1.0
             else:
-                effective_alpha = self._config.hybrid_alpha
+                # Per-call override (#1116) replaces the config read; the SIMPLE
+                # clamp below still applies, matching the pre-fix behaviour
+                # where the engine mutated the shared config before this read.
+                effective_alpha = (
+                    hybrid_alpha_override if hybrid_alpha_override is not None else self._config.hybrid_alpha
+                )
                 if routing.complexity == QueryComplexity.SIMPLE:
                     effective_alpha = min(effective_alpha, 0.5)
 
