@@ -749,3 +749,40 @@ class TestDetectTemporalCategoryWithConfidence:
         assert cat == 1
         assert conf == 0.6
         assert len(terms) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Batch recency scores - Rust/Python future-timestamp parity (#1130)
+# ---------------------------------------------------------------------------
+
+
+class TestBatchRecencyFutureClamp:
+    def test_future_timestamp_clamped_rust(self):
+        """A forward-dated timestamp must not produce a score above the
+        present-time score on the Rust path. Without the age clamp, a future
+        ts gives age_days < 0 and decay = 0.5^(negative) > 1.0, inflating the
+        recency multiplier without bound (#1130)."""
+        if not accel._HAS_RUST:
+            pytest.skip("Rust extension not available")
+        now = 365 * 86400.0
+        future = now + 365 * 86400.0  # one year ahead
+        out = accel.batch_recency_scores([now, future], now_secs=now, decay_days=30.0, recency_weight=0.5)
+        present_score = out[0]
+        future_score = out[1]
+        # Present-time ts has age 0 -> decay 1.0 -> score == base + weight == 1.0.
+        assert present_score == pytest.approx(1.0)
+        # Future ts must be clamped to age 0, not inflated above the present.
+        assert future_score == pytest.approx(present_score)
+
+    def test_future_timestamp_rust_matches_python_fallback(self, monkeypatch):
+        """Rust and the pure-Python fallback must return identical scores for
+        a future timestamp (fallback-parity contract)."""
+        if not accel._HAS_RUST:
+            pytest.skip("Rust extension not available")
+        now = 100 * 86400.0
+        timestamps = [now - 5 * 86400.0, now, now + 10 * 86400.0]
+        rust_out = accel.batch_recency_scores(timestamps, now_secs=now, decay_days=7.0, recency_weight=0.6)
+        monkeypatch.setattr(accel, "_HAS_RUST", False)
+        monkeypatch.setattr(accel, "_HAS_NUMPY", False)
+        py_out = accel.batch_recency_scores(timestamps, now_secs=now, decay_days=7.0, recency_weight=0.6)
+        assert rust_out == pytest.approx(py_out)
