@@ -19,6 +19,25 @@ if TYPE_CHECKING:
     from khora.khora import Khora
 
 
+def _to_utc(dt: datetime) -> datetime:
+    """Normalize a datetime to tz-aware UTC.
+
+    SQLAlchemy's SQLite dialect returns naive datetimes for
+    ``DateTime(timezone=True)`` columns, so DB-derived timestamps on
+    embedded stacks need the same normalization the caller-supplied
+    ``before`` gets before any comparison (#1141).
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+# Page size for the active-namespace scan. The scan loops until every page is
+# exhausted (#1142) - this only bounds how many namespaces are fetched per
+# round-trip, never how many are processed.
+_NAMESPACE_PAGE_SIZE = 1000
+
+
 async def expire_sessions(
     *,
     kb: Khora,
@@ -61,8 +80,18 @@ async def expire_sessions(
         if namespace_id is not None:
             resolved_namespaces = [await kb._resolve_namespace(namespace_id)]
         else:
-            ns_page = await storage.list_namespaces(active_only=True, limit=1000, offset=0)
-            resolved_namespaces = [ns.id for ns in ns_page.items]
+            # Paginate over *all* active namespaces. A single page (the old
+            # behavior) silently dropped every namespace past the cap, so TTL
+            # expiry never ran for them with no warning (#1142). Loop until a
+            # page comes up short or we've covered ``total``.
+            resolved_namespaces = []
+            ns_offset = 0
+            while True:
+                ns_page = await storage.list_namespaces(active_only=True, limit=_NAMESPACE_PAGE_SIZE, offset=ns_offset)
+                resolved_namespaces.extend(ns.id for ns in ns_page.items)
+                if len(ns_page.items) < _NAMESPACE_PAGE_SIZE or len(resolved_namespaces) >= ns_page.total:
+                    break
+                ns_offset += _NAMESPACE_PAGE_SIZE
 
         expired = 0
         for ns_row_id in resolved_namespaces:
@@ -89,6 +118,10 @@ async def expire_sessions(
                     ts = doc.source_timestamp or doc.created_at
                     if ts is None:
                         continue
+                    # Normalize the DB-derived timestamp to tz-aware UTC: SQLite
+                    # returns naive datetimes, which would raise on the
+                    # ``latest < before`` comparison below (#1141).
+                    ts = _to_utc(ts)
                     prev = session_latest.get(doc.session_id)
                     if prev is None or ts > prev:
                         session_latest[doc.session_id] = ts

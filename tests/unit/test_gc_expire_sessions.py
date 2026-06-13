@@ -192,3 +192,87 @@ async def test_source_timestamp_preferred_over_created_at() -> None:
     count = await expire_sessions(kb=kb, before=datetime.now(UTC) - timedelta(hours=1))
     assert count == 1
     kb.forget_session.assert_awaited_once_with(ns_id, sid)
+
+
+async def test_naive_db_timestamp_does_not_crash() -> None:
+    """#1141: DB-derived doc timestamps are naive on SQLite-backed stacks
+    (SQLAlchemy's SQLite dialect drops tzinfo on ``DateTime(timezone=True)``).
+    ``before`` is normalized to tz-aware UTC, so the ``latest < before``
+    comparison mixes naive vs aware and raises ``TypeError`` - *outside* the
+    per-session try/except, aborting the whole sweep. Normalizing the DB side
+    too must let an old naive-timestamped session expire cleanly."""
+    ns_id = uuid4()
+    sid = uuid4()
+    # Naive timestamp, 30 days ago - exactly what SQLite hands back.
+    naive_long_ago = datetime.utcnow() - timedelta(days=30)  # noqa: DTZ003
+    doc = Document(
+        namespace_id=ns_id,
+        content="x",
+        created_at=naive_long_ago,
+        source_timestamp=naive_long_ago,
+        session_id=sid,
+    )
+    kb = _fake_kb([doc], [ns_id])
+
+    # Aware ``before`` against a naive ``latest`` - must not raise.
+    count = await expire_sessions(kb=kb, before=datetime.now(UTC))
+    assert count == 1
+    kb.forget_session.assert_awaited_once_with(ns_id, sid)
+
+
+def _fake_kb_paginated(docs_by_ns: dict, namespace_ids: list) -> SimpleNamespace:
+    """Like ``_fake_kb`` but ``list_namespaces`` honors limit/offset like a real
+    backend, so the GC must paginate to reach namespaces past the first page
+    (#1142)."""
+    storage = SimpleNamespace()
+
+    async def _list_documents(ns_id, *, limit=500, offset=0):
+        docs = docs_by_ns.get(ns_id, [])
+        return docs[offset : offset + limit]
+
+    storage.list_documents = AsyncMock(side_effect=_list_documents)
+
+    rows = [SimpleNamespace(id=nid) for nid in namespace_ids]
+
+    async def _list_namespaces(*, active_only=True, limit=100, offset=0):
+        page = rows[offset : offset + limit]
+        return SimpleNamespace(
+            items=page,
+            total=len(rows),
+            limit=limit,
+            offset=offset,
+        )
+
+    storage.list_namespaces = AsyncMock(side_effect=_list_namespaces)
+
+    kb = SimpleNamespace()
+    kb.storage = storage
+    kb.forget_session = AsyncMock(return_value=0)
+    kb._resolve_namespace = AsyncMock(side_effect=lambda x: x)
+    return kb
+
+
+async def test_namespace_past_first_page_is_expired(monkeypatch) -> None:
+    """#1142: a session in a namespace beyond the first ``list_namespaces``
+    page must still be expired. On main the helper fetches a single page and
+    silently drops every namespace past the cap, so this session never expires.
+    We shrink the page size to keep the test cheap; the bug is the missing
+    pagination loop, not the cap value itself."""
+    import khora.gc as gc_module
+
+    # Shrink the page size so 5 namespaces span 3 pages without needing 1000+.
+    monkeypatch.setattr(gc_module, "_NAMESPACE_PAGE_SIZE", 2)
+
+    ns_ids = [uuid4() for _ in range(5)]
+    target_ns = ns_ids[-1]  # lives on the LAST page
+    sid = uuid4()
+    long_ago = datetime.now(UTC) - timedelta(days=30)
+    docs_by_ns = {target_ns: [_make_doc(target_ns, sid, ts=long_ago)]}
+
+    kb = _fake_kb_paginated(docs_by_ns, ns_ids)
+
+    count = await expire_sessions(kb=kb, before=datetime.now(UTC))
+    assert count == 1
+    kb.forget_session.assert_awaited_once_with(target_ns, sid)
+    # Sanity: it actually paginated (more than one page fetched).
+    assert kb.storage.list_namespaces.await_count >= 2
