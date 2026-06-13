@@ -676,6 +676,71 @@ class TestEmptyBatchShortCircuits:
 
 
 # ---------------------------------------------------------------------------
+# count_entities (#1155): native server-side COUNT, no 100k materialization
+# ---------------------------------------------------------------------------
+
+
+def _backend_with_execute_read(single: dict[str, Any] | None) -> tuple[Neo4jBackend, MagicMock]:
+    """Build a Neo4jBackend whose ``_session().execute_read`` runs the unit-of-work
+    against a fake transaction. ``tx.run(...).single()`` returns ``single``.
+
+    Returns ``(backend, tx)`` so callers can assert the Cypher / parameters the
+    unit-of-work passed to ``tx.run``.
+    """
+    result = MagicMock()
+    result.single = AsyncMock(return_value=single)
+    tx = MagicMock()
+    tx.run = AsyncMock(return_value=result)
+
+    session = AsyncMock()
+
+    async def _execute_read(work, *args, **kwargs):
+        return await work(tx)
+
+    session.execute_read = AsyncMock(side_effect=_execute_read)
+
+    driver = MagicMock()
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    driver.session.return_value = ctx
+    backend = Neo4jBackend.from_driver(driver, query_timeout=1.0)
+    return backend, tx
+
+
+@pytest.mark.unit
+class TestCountEntities:
+    """#1155: Neo4jBackend.count_entities runs a server-side COUNT instead of
+    inheriting GraphBackendBase.count_entities, which materialized up to 100k
+    Entity rows and capped the count at 100,000."""
+
+    @pytest.mark.asyncio
+    async def test_count_entities_returns_server_side_count(self) -> None:
+        ns = uuid4()
+        backend, tx = _backend_with_execute_read(single={"cnt": 250_000})
+        out = await backend.count_entities(ns)
+        # Exact count, well beyond the old 100k list_entities cap.
+        assert out == 250_000
+        cypher = tx.run.await_args.args[0]
+        assert "count(e)" in cypher
+        assert "Entity" in cypher
+        assert tx.run.await_args.kwargs["namespace_id"] == str(ns)
+
+    @pytest.mark.asyncio
+    async def test_count_entities_returns_zero_when_no_record(self) -> None:
+        backend, _tx = _backend_with_execute_read(single=None)
+        assert await backend.count_entities(uuid4()) == 0
+
+    @pytest.mark.asyncio
+    async def test_count_entities_does_not_materialize_via_list_entities(self) -> None:
+        """The native count must not fall back to list_entities (the 100k path)."""
+        backend, _tx = _backend_with_execute_read(single={"cnt": 5})
+        backend.list_entities = AsyncMock(side_effect=AssertionError("list_entities must not be called"))
+        assert await backend.count_entities(uuid4()) == 5
+        backend.list_entities.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # _record_to_entity / _record_to_relationship / _record_to_episode
 # ---------------------------------------------------------------------------
 
