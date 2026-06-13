@@ -3,13 +3,43 @@
 from __future__ import annotations
 
 import time as _time
+from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
 from khora.telemetry import metric_counter
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from khora.core.models import Chunk, Entity, Relationship
     from khora.extraction.skills import ExpertiseConfig
+
+
+def _parse_valid_date(value: Any) -> datetime | None:
+    """Parse an LLM-supplied real-world date into an aware datetime, or None.
+
+    The extractor emits temporal bounds as ISO date / datetime strings (or a
+    descriptive phrase, or null). This is a real-world (valid-time) signal, so
+    it must never fall back to a khora-ops value (chunk.created_at / now()).
+    Unparseable values return None so the caller can pick a same-axis floor.
+    """
+    from datetime import datetime as _dt
+
+    if value is None:
+        return None
+    if isinstance(value, _dt):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            dt = _dt.fromisoformat(text.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    return None
+
 
 # #889: count chunks where LLM extraction returned an error metadata
 # (truncated response, parse failure, retry exhaustion). The counter is
@@ -248,6 +278,16 @@ async def extract_entities(
                 # Create new entity — preserve original type string from LLM
                 entity_type = extracted.entity_type or "CONCEPT"
 
+                # Real-world validity bounds (#994): prefer the LLM-supplied
+                # temporal signal, fall back to the same-axis chunk
+                # source_timestamp floor, then None. Never chunk.created_at
+                # (a khora-ops value) - that would cross the time axis.
+                temporal = extracted.temporal
+                valid_from = _parse_valid_date(temporal.valid_from) if temporal else None
+                valid_until = _parse_valid_date(temporal.valid_until) if temporal else None
+                if valid_from is None:
+                    valid_from = chunk.source_timestamp
+
                 entity = Entity(
                     namespace_id=chunk.namespace_id,
                     name=normalize_entity_name(extracted.name),
@@ -257,7 +297,8 @@ async def extract_entities(
                     source_document_ids=[chunk.document_id],
                     source_chunk_ids=[chunk.id],
                     confidence=extracted.confidence,
-                    valid_from=chunk.created_at,  # Inherit source timestamp
+                    valid_from=valid_from,
+                    valid_until=valid_until,
                 )
                 all_entities[key] = entity
 
@@ -280,6 +321,14 @@ async def extract_entities(
             target_key = entity_name_to_key.get(normalize_entity_name(extracted_rel.target_entity))
 
             if source_key and target_key:
+                # Real-world validity bounds (#994): LLM temporal -> same-axis
+                # chunk source_timestamp floor -> None. Never chunk.created_at.
+                rel_temporal = extracted_rel.temporal
+                rel_valid_from = _parse_valid_date(rel_temporal.valid_from) if rel_temporal else None
+                rel_valid_until = _parse_valid_date(rel_temporal.valid_until) if rel_temporal else None
+                if rel_valid_from is None:
+                    rel_valid_from = chunk.source_timestamp
+
                 relationship = Relationship(
                     namespace_id=chunk.namespace_id,
                     source_entity_id=all_entities[source_key].id,
@@ -290,7 +339,8 @@ async def extract_entities(
                     source_document_ids=[chunk.document_id],
                     source_chunk_ids=[chunk.id],
                     confidence=extracted_rel.confidence,
-                    valid_from=chunk.created_at,  # Inherit source timestamp
+                    valid_from=rel_valid_from,
+                    valid_until=rel_valid_until,
                 )
                 all_relationships.append(relationship)
 
@@ -316,6 +366,13 @@ async def extract_entities(
                 if event.participants:
                     event_attrs["participants"] = event.participants
 
+                # Real-world event time (#994): the LLM-supplied occurred_at is
+                # the EVENT's valid_from. Fall back to the same-axis chunk
+                # source_timestamp floor, then None. Never chunk.created_at.
+                event_valid_from = _parse_valid_date(event.occurred_at)
+                if event_valid_from is None:
+                    event_valid_from = chunk.source_timestamp
+
                 if event_key in all_entities:
                     # Merge into existing event entity
                     existing_event = all_entities[event_key]
@@ -334,7 +391,7 @@ async def extract_entities(
                         source_document_ids=[chunk.document_id],
                         source_chunk_ids=[chunk.id],
                         confidence=event.confidence,
-                        valid_from=chunk.created_at,
+                        valid_from=event_valid_from,
                     )
                     all_entities[event_key] = event_entity
                     events_converted += 1
@@ -355,7 +412,8 @@ async def extract_entities(
                             source_document_ids=[chunk.document_id],
                             source_chunk_ids=[chunk.id],
                             confidence=event.confidence,
-                            valid_from=chunk.created_at,
+                            # Participation shares the event's real-world time (#994).
+                            valid_from=event_valid_from,
                         )
                         all_relationships.append(rel)
 
@@ -447,7 +505,9 @@ async def extract_entities(
                             source_document_ids=[chunk.document_id],
                             source_chunk_ids=[chunk.id],
                             confidence=0.5,  # Lower confidence for rule-based extraction
-                            valid_from=chunk.created_at,
+                            # No LLM temporal signal on the lightweight path; use the
+                            # same-axis source_timestamp floor, never created_at (#994).
+                            valid_from=chunk.source_timestamp,
                         )
                         all_entities[key] = entity
 
@@ -463,7 +523,8 @@ async def extract_entities(
                         source_document_ids=[chunk.document_id],
                         source_chunk_ids=[chunk.id],
                         confidence=0.4,  # Lower confidence for rule-based edges
-                        valid_from=chunk.created_at,
+                        # Same-axis source_timestamp floor, never created_at (#994).
+                        valid_from=chunk.source_timestamp,
                     )
                     all_relationships.append(relationship)
                     lightweight_edge_count += 1
