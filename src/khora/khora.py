@@ -395,6 +395,30 @@ class _ProcessorItem:
     batch_reg: _BatchRegistration | None  # None for orphaned docs
 
 
+def _resolve_occurred_at(doc: Document, engine: Any, *, is_orphan: bool) -> datetime:
+    """Resolve the chunk event time for a staged document (#1121).
+
+    Identical resolution for the normal (batch) and crash-recovery (orphan)
+    paths so a recovered document does not silently get a different event
+    time than the same document on the non-crash path:
+
+    1. ``metadata['occurred_at']`` parsed via the engine's ``_parse_datetime``
+       (persisted on the re-loaded row at submit time, #932), else
+    2. ``doc.source_timestamp``, else
+    3. a tail fallback that is the only thing differing between paths:
+       orphans use ``doc.created_at`` (the persisted ingest time of the
+       recovered row), batch items use ``now()`` (no event time known).
+    """
+    doc_metadata = doc.metadata or {}
+    occurred_at_raw = doc_metadata.get("occurred_at")
+    parse_dt = getattr(engine, "_parse_datetime", None)
+    if occurred_at_raw and parse_dt is not None:
+        return parse_dt(occurred_at_raw)
+    if doc.source_timestamp is not None:
+        return doc.source_timestamp
+    return doc.created_at if is_orphan else datetime.now(UTC)
+
+
 # Imported below the LLMUsage definition (line ~118) to break the cycle:
 # khora.core.models.recall imports LLMUsage from khora.khora. Re-exported
 # here so external code can keep using ``from khora.khora import RecallResult``.
@@ -413,8 +437,55 @@ from khora.core.models.recall import (  # noqa: E402, I001, F401
 # asyncpg pool. The lock serialises concurrent first-callers — without
 # it, two awaits hitting `Khora.shared()` at the same time would race to
 # instantiate and one of the connections would leak.
+#
+# #1160: both the lock and the instance cache are scoped per running event
+# loop. A bare module-level `asyncio.Lock()` binds to the first loop it is
+# acquired on; acquiring it from a second loop (sequential `asyncio.run`,
+# per-invocation handlers, pytest-asyncio's per-test loops) raises
+# `RuntimeError: ... bound to a different event loop` under contention.
+# And a cached `Khora` carries an asyncpg pool tied to the loop it was
+# connected on - handing it back on a different loop yields "attached to a
+# different loop" failures.
+#
+# So: lazily create one lock per running loop, and store each cached
+# instance alongside the loop it was built on. If the running loop differs
+# from (or has closed) the stored loop, the instance is dropped and rebuilt
+# on the live loop - mirroring the #790 fork drop-and-rebuild. The cache
+# stays keyed by config hash (one entry per distinct config), so the public
+# cache-size semantics are unchanged.
+_SHARED_INSTANCES: dict[str, _SharedEntry] = {}
+_SHARED_LOCKS: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+
+# Back-compat alias: the #790 fork-safety tests import `_SHARED_LOCK`. There
+# is no single process-wide lock any more (it is per-loop), but the name is
+# kept pointing at a lock object so those imports and the fork handler's
+# reseat keep working. It is not used for actual serialisation.
 _SHARED_LOCK: asyncio.Lock = asyncio.Lock()
-_SHARED_INSTANCES: dict[str, Khora] = {}
+
+
+@dataclass(slots=True)
+class _SharedEntry:
+    """A cached shared Khora plus the event loop it was connected on (#1160)."""
+
+    instance: Khora
+    loop: asyncio.AbstractEventLoop
+
+
+def _loop_lock() -> asyncio.Lock:
+    """Return the lock for the running loop, creating it lazily (#1160).
+
+    Keyed by the loop object itself (not ``id(loop)``) so a closed loop's
+    address being reused by a later loop cannot alias two distinct loops.
+    A dead loop's lock entry is pruned opportunistically.
+    """
+    loop = asyncio.get_running_loop()
+    lock = _SHARED_LOCKS.get(loop)
+    if lock is None:
+        for dead in [lp for lp in _SHARED_LOCKS if lp.is_closed()]:
+            _SHARED_LOCKS.pop(dead, None)
+        lock = asyncio.Lock()
+        _SHARED_LOCKS[loop] = lock
+    return lock
 
 
 def _reset_shared_after_fork() -> None:
@@ -425,10 +496,9 @@ def _reset_shared_after_fork() -> None:
     it would race the parent on connection state - asyncpg's protocol
     machinery is not fork-safe.
 
-    Also reseat ``_SHARED_LOCK``: ``asyncio.Lock`` in 3.10+ binds to a
+    Also reseat the lock machinery: ``asyncio.Lock`` in 3.10+ binds to a
     loop on first acquire, and the parent's loop is gone in the child.
-    A fresh ``Lock()`` re-binds lazily on next ``async with`` from the
-    child.
+    Fresh locks re-bind lazily on next acquire from the child.
 
     Important: do NOT try to ``disconnect()`` the cached instances from
     the at-fork handler. Closing the asyncpg connections in the child
@@ -440,6 +510,7 @@ def _reset_shared_after_fork() -> None:
     """
     global _SHARED_LOCK
     _SHARED_INSTANCES.clear()
+    _SHARED_LOCKS.clear()
     _SHARED_LOCK = asyncio.Lock()
 
 
@@ -1074,16 +1145,11 @@ class Khora:
         # Resolve occurred_at.
         # #932: metadata is read off the re-loaded document row (it is
         # persisted at submit time), not from a queued doc_data dict.
-        if batch_reg is not None:
-            doc_metadata = doc.metadata or {}
-            occurred_at_raw = doc_metadata.get("occurred_at")
-            parse_dt = getattr(engine, "_parse_datetime", None)
-            if occurred_at_raw and parse_dt is not None:
-                occurred_at = parse_dt(occurred_at_raw)
-            else:
-                occurred_at = doc.source_timestamp or datetime.now(UTC)
-        else:
-            occurred_at = doc.source_timestamp or doc.created_at
+        # #1121: both paths resolve identically via _resolve_occurred_at -
+        # the orphan-recovery path (batch_reg is None) must also consult
+        # metadata['occurred_at'] before falling back, or recovered docs
+        # get chunks stamped with ingest time instead of the event time.
+        occurred_at = _resolve_occurred_at(doc, engine, is_orphan=batch_reg is None)
 
         start_usage_collection()
         try:
@@ -1204,29 +1270,42 @@ class Khora:
 
     @classmethod
     async def _shared_get(cls, config: KhoraConfig | None = None) -> Khora:
-        """Internal: implement the shared() singleton fetch."""
-        async with _SHARED_LOCK:
+        """Internal: implement the shared() singleton fetch.
+
+        #1160: a `Khora` connected on a now-dead (or simply different) loop
+        is unusable - its asyncpg pool is bound to that loop. If the cached
+        entry's loop is not the running loop, drop it and rebuild on the
+        live loop rather than returning the stale instance.
+        """
+        loop = asyncio.get_running_loop()
+        async with _loop_lock():
             cfg = config if config is not None else load_config()
             key = _config_hash(cfg)
-            cached = _SHARED_INSTANCES.get(key)
-            if cached is not None and cached._connected:
-                return cached
-            if cached is None:
-                cached = cls(cfg)
-                _SHARED_INSTANCES[key] = cached
-            if not cached._connected:
-                await cached.connect()
-            return cached
+            entry = _SHARED_INSTANCES.get(key)
+            if entry is not None and (entry.loop is not loop or entry.loop.is_closed()):
+                # Stale loop. Don't disconnect - the owning loop is gone, so
+                # awaiting its pool teardown is impossible; drop the
+                # reference and rebuild (#790 fork drop-and-rebuild shape).
+                _SHARED_INSTANCES.pop(key, None)
+                entry = None
+            if entry is not None and entry.instance._connected:
+                return entry.instance
+            if entry is None:
+                entry = _SharedEntry(instance=cls(cfg), loop=loop)
+                _SHARED_INSTANCES[key] = entry
+            if not entry.instance._connected:
+                await entry.instance.connect()
+            return entry.instance
 
     @classmethod
     async def _shared_clear(cls) -> None:
         """Internal: disconnect and drop every cached shared instance."""
-        async with _SHARED_LOCK:
-            instances = list(_SHARED_INSTANCES.values())
+        async with _loop_lock():
+            entries = list(_SHARED_INSTANCES.values())
             _SHARED_INSTANCES.clear()
-        for inst in instances:
+        for entry in entries:
             try:
-                await inst.disconnect()
+                await entry.instance.disconnect()
             except Exception as exc:  # pragma: no cover - defensive
                 logger.warning("Khora.shared.clear: disconnect raised: {}", exc)
 
