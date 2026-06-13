@@ -1005,7 +1005,7 @@
       "unit": "1",
       "owner": "chronicle",
       "labels": [
-        {"name": "channel", "values": ["bm25", "semantic", "temporal", "entity", "temporal_channel", "doc_hydration"], "_comment": "Trailing token of the component name."},
+        {"name": "channel", "values": ["bm25", "semantic", "temporal", "entity", "temporal_channel", "doc_hydration", "cross_session"], "_comment": "Trailing token of the component name."},
         {"name": "reason", "values": ["fulltext_backend_unavailable", "channel_exception", "events_query_failed", "cosine_batch_failed", "chunk_fetch_failed", "chunk_fallback_failed", "events_no_usable_signal", "projection_fetch_failed"], "_comment": "Low-cardinality enum; extend when adding new fallback paths."}
       ],
       "description": "Issues #901, #906. Chronicle retrieval channel degradations recorded under ADR-001 (silent-failure observability). Incremented once per channel-failure or silent-fallback site in chronicle.recall(). The same event is also appended to RecallResult.engine_info['degradations']. NO namespace_id label - cardinality rule. See docs/architecture/failure-observability-contract.md."
