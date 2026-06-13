@@ -186,6 +186,89 @@ async def test_ensure_hnsw_indexes_records_errors() -> None:
 
 
 # ---------------------------------------------------------------------------
+# ensure_halfvec_indexes (#1137: drop_hnsw_indexes dropped these but nothing
+# recreated them — the HALFVEC_INDEXES DDL was dead code)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_ensure_halfvec_indexes_issues_formatted_ddl() -> None:
+    """The HALFVEC_INDEXES SQL templates are formatted with dim/m/ef_construction
+    and actually executed (not dead code)."""
+    # Both halfvec indexes missing -> both CREATE.
+    conns = [
+        _FakeConn(row_values=[None]),  # ix_chunks_embedding_halfvec_hnsw missing → CREATE
+        _FakeConn(row_values=[None]),  # ix_entities_embedding_halfvec_hnsw missing → CREATE
+    ]
+    engine = _engine_with_connect(*conns)
+
+    result = await opt_mod.ensure_halfvec_indexes(engine, embedding_dimension=1536)
+
+    assert result["indexes_created"] == 2
+    assert result["freshly_created"] == 2
+    assert result["errors"] == []
+
+    # The executed DDL came from HALFVEC_INDEXES["sql"] with placeholders filled —
+    # no leftover format braces, the configured dimension, and the migration-018
+    # m / ef_construction values.
+    executed = [str(call.args[0]) for conn in conns for call in conn.execute.call_args_list]
+    create_stmts = [s for s in executed if "CREATE INDEX" in s]
+    assert len(create_stmts) == 2
+    for stmt in create_stmts:
+        assert "{dim}" not in stmt and "{m}" not in stmt and "{ef_construction}" not in stmt
+        assert "halfvec(1536)" in stmt
+        assert "m = 24" in stmt
+        assert "ef_construction = 128" in stmt
+
+
+@pytest.mark.unit
+async def test_ensure_halfvec_indexes_skips_existing() -> None:
+    conns = [
+        _FakeConn(row_values=[None]),  # missing → CREATE
+        _FakeConn(row_values=[1]),  # already exists → skip
+    ]
+    engine = _engine_with_connect(*conns)
+
+    result = await opt_mod.ensure_halfvec_indexes(engine)
+
+    assert result["indexes_created"] == 1
+    assert result["freshly_created"] == 1
+
+
+@pytest.mark.unit
+async def test_ensure_halfvec_indexes_records_errors() -> None:
+    bad = _FakeConn(row_values=[None])
+    bad.execute = AsyncMock(side_effect=RuntimeError("halfvec ddl exploded"))
+    engine = _engine_with_connect(bad, _FakeConn(row_values=[1]))
+
+    result = await opt_mod.ensure_halfvec_indexes(engine)
+
+    assert result["indexes_created"] == 0
+    assert any("halfvec ddl exploded" in e for e in result["errors"])
+
+
+@pytest.mark.unit
+async def test_drop_then_recreate_round_trips() -> None:
+    """drop_hnsw_indexes + ensure_hnsw_indexes + ensure_halfvec_indexes covers
+    every index the drop removes (float32 + halfvec)."""
+    dropped_names = set(opt_mod.HNSW_INDEXES) | {idx["name"] for idx in opt_mod.HALFVEC_INDEXES}
+
+    # All four exist → drop removes all four.
+    drop_engine = _engine_with_connect(*[_FakeConn(row_values=[1]) for _ in range(4)])
+    drop_result = await opt_mod.drop_hnsw_indexes(drop_engine)
+    assert drop_result["indexes_dropped"] == len(dropped_names)
+
+    # Recreate float32 (2) + halfvec (2) → all four absent so all freshly created.
+    float_engine = _engine_with_connect(_FakeConn(row_values=[None]), _FakeConn(row_values=[None]))
+    float_result = await opt_mod.ensure_hnsw_indexes(float_engine)
+    half_engine = _engine_with_connect(_FakeConn(row_values=[None]), _FakeConn(row_values=[None]))
+    half_result = await opt_mod.ensure_halfvec_indexes(half_engine)
+
+    recreated = float_result["freshly_created"] + half_result["freshly_created"]
+    assert recreated == len(dropped_names)
+
+
+# ---------------------------------------------------------------------------
 # reindex_hnsw_concurrently
 # ---------------------------------------------------------------------------
 
@@ -231,15 +314,20 @@ async def test_optimize_postgresql_runs_full_pipeline_with_reindex(monkeypatch: 
     async def _fake_ensure(_engine: Any) -> dict:
         return {"indexes_created": 0, "freshly_created": 0, "errors": []}
 
+    async def _fake_ensure_halfvec(_engine: Any, *, embedding_dimension: int = 1536) -> dict:
+        return {"indexes_created": 2, "freshly_created": 2, "errors": []}
+
     async def _fake_reindex(_engine: Any) -> dict:
         return {"indexes_reindexed": 2, "errors": []}
 
     monkeypatch.setattr(opt_mod, "ensure_hnsw_indexes", _fake_ensure)
+    monkeypatch.setattr(opt_mod, "ensure_halfvec_indexes", _fake_ensure_halfvec)
     monkeypatch.setattr(opt_mod, "reindex_hnsw_concurrently", _fake_reindex)
 
     result = await opt_mod.optimize_postgresql(engine)
 
-    assert result["indexes_created"] == len(opt_mod.PG_INDEXES)
+    # PG_INDEXES + the two halfvec indexes recreated alongside the float32 ones (#1137).
+    assert result["indexes_created"] == len(opt_mod.PG_INDEXES) + 2
     assert result["tables_analyzed"] == len(opt_mod.PG_ANALYZE_TABLES)
     assert result["hnsw_reindexed"] == 2
     assert result["errors"] == []
@@ -254,6 +342,9 @@ async def test_optimize_postgresql_skips_reindex_when_freshly_created(
     async def _fake_ensure(_engine: Any) -> dict:
         return {"indexes_created": 1, "freshly_created": 1, "errors": []}
 
+    async def _fake_ensure_halfvec(_engine: Any, *, embedding_dimension: int = 1536) -> dict:
+        return {"indexes_created": 0, "freshly_created": 0, "errors": []}
+
     reindex_calls: list[Any] = []
 
     async def _spy_reindex(_engine: Any) -> dict:
@@ -261,6 +352,7 @@ async def test_optimize_postgresql_skips_reindex_when_freshly_created(
         return {"indexes_reindexed": 0, "errors": []}
 
     monkeypatch.setattr(opt_mod, "ensure_hnsw_indexes", _fake_ensure)
+    monkeypatch.setattr(opt_mod, "ensure_halfvec_indexes", _fake_ensure_halfvec)
     monkeypatch.setattr(opt_mod, "reindex_hnsw_concurrently", _spy_reindex)
 
     result = await opt_mod.optimize_postgresql(engine)
@@ -275,10 +367,11 @@ async def test_optimize_postgresql_skips_reindex_when_freshly_created(
 async def test_optimize_postgresql_skip_reindex_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _engine_with_connect(_FakeConn())
 
-    async def _boom(_engine: Any) -> dict:
-        raise AssertionError("ensure_hnsw_indexes must not be called when reindex_hnsw=False")
+    async def _boom(_engine: Any, **_kw: Any) -> dict:
+        raise AssertionError("index recreation must not be called when reindex_hnsw=False")
 
     monkeypatch.setattr(opt_mod, "ensure_hnsw_indexes", _boom)
+    monkeypatch.setattr(opt_mod, "ensure_halfvec_indexes", _boom)
     monkeypatch.setattr(opt_mod, "reindex_hnsw_concurrently", _boom)
 
     result = await opt_mod.optimize_postgresql(engine, reindex_hnsw=False)
@@ -433,7 +526,7 @@ async def test_optimize_storage_dispatches_pg_and_neo4j(monkeypatch: pytest.Monk
     coord.graph = MagicMock(_driver=neo_driver, _database="neo4j")
     coord.relational = None  # surrealdb branch not exercised
 
-    async def _fake_pg(engine: Any) -> dict:
+    async def _fake_pg(engine: Any, **_kw: Any) -> dict:
         assert engine is pg_engine
         return {"indexes_created": 1, "errors": []}
 
