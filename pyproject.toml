@@ -358,6 +358,19 @@ constraint-dependencies = [
     "urllib3>=2.7.0",
     # Security: CVE-2026-34993 / CVE-2026-47265 fixed in 3.14.0
     "aiohttp>=3.14.0",
+    # #1163: keep logfire consistent with the opentelemetry-sdk that each
+    # conflict fork resolves. The crewai fork pins opentelemetry-api<1.35
+    # (so otel-sdk stays 1.34.x), where only logfire<4.7 is installable
+    # (logfire 4.7 dropped support for otel-sdk <1.35). Every other fork
+    # resolves otel-sdk 1.40.x, where logfire<4.32.1 crashes at import with
+    # `ImportError: cannot import name 'LogData' from 'opentelemetry.sdk._logs'`
+    # (4.32.1 is the first logfire that supports otel-sdk 1.40.0). The
+    # marker-scoped constraints narrow the `logfire` extra per fork without
+    # forcing logfire into the crewai extra. Constraints only narrow already
+    # requested packages, so the base `logfire` floor (>=4.6.0) still gates
+    # whether logfire is installed at all.
+    "logfire<4.7; extra == 'crewai'",
+    "logfire>=4.32.1; extra != 'crewai'",
 ]
 
 [tool.uv.sources]
@@ -379,6 +392,14 @@ dev = [
     "pyarrow>=24.0.0",  # For sqlite-lance backend tests
     "opentelemetry-sdk>=1.34.1",  # For OTel telemetry tests
     "opentelemetry-exporter-otlp-proto-http>=1.34.1",  # For OTel exporter tests
+    # #1163: logfire belongs in the always-synced dev group so a bare
+    # `uv run` (which re-syncs the default environment) manages and upgrades
+    # it alongside opentelemetry-sdk. As an opt-in extra only, logfire was
+    # left as a stale leftover when `uv run` bumped otel-sdk past the version
+    # the resident logfire 4.6.0 tolerated, crashing pytest's logfire plugin
+    # with `ImportError: cannot import name 'LogData'`. The marker-scoped
+    # constraint-dependencies pin each fork's logfire to its otel-sdk branch.
+    "logfire>=4.6.0",  # logfire pytest plugin loads in the dev/test env
     "psutil>=5.9.0",  # RSS sampling for soak harness
     "hypothesis>=6.152.4",  # property-based tests for retrieval invariants
 ]
