@@ -938,21 +938,23 @@ class TestRecallContextFormatting:
 
     @pytest.mark.asyncio
     async def test_recall_hybrid_alpha_override_restored(self) -> None:
-        """hybrid_alpha kwarg should be restored after retrieve() (try/finally)."""
+        """hybrid_alpha kwarg must NOT mutate the shared retriever config (#1116):
+        it is threaded as an explicit hybrid_alpha_override instead."""
         engine = self._make_recall_engine()
         original = engine._retriever._config.hybrid_alpha = 0.7
         await engine.recall("q", uuid4(), hybrid_alpha=0.2)
-        # After the call, restored to original
+        # The shared config is never written.
         assert engine._retriever._config.hybrid_alpha == original
 
     @pytest.mark.asyncio
     async def test_recall_search_mode_all_sets_alpha(self) -> None:
-        """SearchMode.ALL lowers hybrid_alpha to 0.5 (and restores it)."""
+        """SearchMode.ALL threads hybrid_alpha_override=0.5 without mutating the
+        shared retriever config (#1116)."""
         from khora.query import SearchMode
 
         engine = self._make_recall_engine()
         engine._retriever._config.hybrid_alpha = 0.9
-        # During retrieve(), alpha should have been 0.5. After return, restored.
+        # The override is threaded into retrieve(); the shared config is untouched.
         await engine.recall("q", uuid4(), mode=SearchMode.ALL)
         assert engine._retriever._config.hybrid_alpha == 0.9
 

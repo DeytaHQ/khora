@@ -1041,6 +1041,9 @@ class VectorCypherEngine:
                 namespace_id=namespace_id,
                 title=title,
                 source=source,
+                source_type=source_type,
+                source_name=source_name,
+                source_url=source_url,
                 source_timestamp=source_timestamp,
                 metadata=metadata,
                 skill_name=skill_name,
@@ -2095,6 +2098,7 @@ class VectorCypherEngine:
         temporal_filter: TemporalFilter | None = None,
         graph_depth: int | None = None,
         hybrid_alpha: float | None = None,
+        recency_bias: float | None = None,
         filter_ast: FilterNode | None = None,
     ) -> RecallResult:
         """Recall memories relevant to a query using VectorCypher.
@@ -2113,6 +2117,11 @@ class VectorCypherEngine:
             temporal_filter: Temporal constraints
             graph_depth: Override graph traversal depth
             hybrid_alpha: Blend factor (0=graph, 1=vector)
+            recency_bias: Optional recency-boost weight (0.0-1.0). Declared for
+                ``MemoryEngineProtocol`` parity (#1156). When set, it overrides
+                the temporal-signal-derived recency weight for this call;
+                ``None`` keeps the signal-derived behaviour. Threaded explicitly
+                into the retriever (no shared-state mutation).
             filter_ast: Canonical recall-filter AST. Compiled to a
                 ``khora_chunks`` WHERE predicate and pushed down into both the
                 vector channel and the independent BM25 channel.
@@ -2189,28 +2198,31 @@ class VectorCypherEngine:
         # Respect SearchMode.ALL: lower hybrid_alpha to give BM25 equal weight
         # with vector similarity, enabling keyword-based retrieval alongside
         # semantic search.  An explicit hybrid_alpha kwarg takes precedence.
-        # Save and restore to avoid stateful side-effects on the shared config.
-        original_alpha = retriever._config.hybrid_alpha
+        # #1116: thread the effective alpha as an explicit per-call override
+        # instead of mutating the SHARED ``retriever._config.hybrid_alpha`` —
+        # the retriever is one instance shared across concurrent recalls
+        # (Khora.shared()), so a mutate/restore races overlapping calls.
         if hybrid_alpha is not None:
-            retriever._config.hybrid_alpha = hybrid_alpha
+            hybrid_alpha_override = hybrid_alpha
         elif mode == SearchMode.ALL:
-            retriever._config.hybrid_alpha = 0.5
+            hybrid_alpha_override = 0.5
+        else:
+            hybrid_alpha_override = None
 
         # Use VectorCypher retriever
-        try:
-            result = await retriever.retrieve(
-                query=query,
-                namespace_id=namespace_id,
-                temporal_filter=temporal_filter,
-                temporal_signal=temporal_signal,
-                graph_depth=graph_depth,
-                limit=limit,
-                min_similarity=min_similarity,
-                mode=mode,
-                filter_ast=filter_ast,
-            )
-        finally:
-            retriever._config.hybrid_alpha = original_alpha
+        result = await retriever.retrieve(
+            query=query,
+            namespace_id=namespace_id,
+            temporal_filter=temporal_filter,
+            temporal_signal=temporal_signal,
+            graph_depth=graph_depth,
+            limit=limit,
+            min_similarity=min_similarity,
+            mode=mode,
+            hybrid_alpha_override=hybrid_alpha_override,
+            recency_bias=recency_bias,
+            filter_ast=filter_ast,
+        )
 
         # When a caller filter narrowed the candidate set below the requested k,
         # emit the service-level under-filled counter (owner: filter) once.
