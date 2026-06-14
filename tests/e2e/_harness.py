@@ -513,7 +513,7 @@ def lane_skip(lane: str) -> pytest.MarkDecorator:
 # these literally so a field rename / addition (which would silently change the
 # public ``engine_info["filter"]`` schema) fails RED.
 _REPORT_TOP_KEYS: frozenset[str] = frozenset(
-    {"pushed_down", "post_filtered", "pushed_keys", "post_filtered_keys", "channels"}
+    {"pushed_down", "post_filtered", "pushed_keys", "post_filtered_keys", "unenforced_keys", "channels"}
 )
 _CHANNEL_KEYS: frozenset[str] = frozenset({"pushed_keys", "post_filtered_keys"})
 
@@ -537,26 +537,32 @@ def assert_filter_report_invariants(report: dict[str, Any], expected_leaves: fro
        fails here.
     b) SORTED — the two top-level key lists and both lists of every channel are
        each equal to their own ``sorted(...)`` (JSON-stable output).
-    c) PARTITION ⊆ LEAVES — ``pushed_keys`` and ``post_filtered_keys`` are DISJOINT
-       and their union is a SUBSET of ``expected_leaves``. Subset (NOT equality): a
-       leaf no channel gates lands in neither top-level list, which is legal on a
-       multi-channel engine where a channel did not run this recall.
+    c) PARTITION = LEAVES — ``pushed_keys`` / ``post_filtered_keys`` /
+       ``unenforced_keys`` are PAIRWISE DISJOINT and their union EQUALS
+       ``expected_leaves`` (a TOTAL three-way partition: every leaf lands in exactly
+       one list). A leaf no channel gates lands in ``unenforced_keys`` — never
+       silently dropped — so the union is the full leaf set, not a subset.
     d) PUSHED_DOWN (list-form) — when the filter HAS leaves, ``pushed_down`` iff
        (``post_filtered_keys == []`` AND ``set(pushed_keys) == expected_leaves``),
-       the exact derivation ``build_filter_report`` uses (report.py ~L193). NOT the
+       the exact derivation ``build_filter_report`` uses (report.py ~L207). NOT the
        ``post_filtered`` bool, which a defensive full-predicate re-check flips True
        even at 100% pushdown (chronicle, VC graph). For a LEAFLESS filter the
-       builder early-returns the canonical empty carrier (report.py L174-175):
-       ``pushed_down`` False and BOTH top-level lists empty — asserted explicitly
-       (a real contract, not a skip).
+       builder early-returns the canonical empty carrier (report.py L188-189):
+       ``pushed_down`` False, BOTH top-level lists empty, AND ``unenforced_keys``
+       empty — asserted explicitly (a real contract, not a skip).
     e) CHANNEL FOLD CONSISTENCY — re-derives the builder fold from the per-channel
        breakdown: for each leaf gated by ≥1 channel, it is in the top-level
        ``post_filtered_keys`` iff some gating channel re-checked it in memory, else
-       in ``pushed_keys``. Catches an engine hand-rolling the top level out of step
+       in ``pushed_keys``; an ungated leaf (gated by NO channel) lands in
+       ``unenforced_keys``. Catches an engine hand-rolling the top level out of step
        with its channels. (Every channel key is also ⊆ ``expected_leaves``.)
     f) POST_FILTERED flag — one-directional only: a non-empty ``post_filtered_keys``
        implies the ``post_filtered`` bool is True. NEVER the converse — a defensive
        re-check sets the bool True with empty ``post_filtered_keys`` (NO-DEMOTE).
+    g) ENFORCEMENT HEALTH — ``unenforced_keys == []``. Every constraint leaf a real
+       engine reports on a real recall must be enforced (pushed or re-checked); a
+       non-empty ``unenforced_keys`` is a genuine under-enforcement finding, never a
+       weakening target.
 
     Raises ``AssertionError`` on the first violated invariant. The no-private-leak
     check (``"_filter_channel_plans"`` absent from ``engine_info``) is asserted by
@@ -575,11 +581,15 @@ def assert_filter_report_invariants(report: dict[str, Any], expected_leaves: fro
 
     pushed = set(model.pushed_keys)
     post_filtered = set(model.post_filtered_keys)
+    unenforced = set(model.unenforced_keys)
 
     # (b) SORTED — top-level and per-channel lists are JSON-stable.
     assert model.pushed_keys == sorted(model.pushed_keys), f"pushed_keys not sorted: {model.pushed_keys}"
     assert model.post_filtered_keys == sorted(model.post_filtered_keys), (
         f"post_filtered_keys not sorted: {model.post_filtered_keys}"
+    )
+    assert model.unenforced_keys == sorted(model.unenforced_keys), (
+        f"unenforced_keys not sorted: {model.unenforced_keys}"
     )
     for name, channel in model.channels.items():
         assert channel.pushed_keys == sorted(channel.pushed_keys), (
@@ -589,13 +599,20 @@ def assert_filter_report_invariants(report: dict[str, Any], expected_leaves: fro
             f"channel {name!r} post_filtered_keys not sorted: {channel.post_filtered_keys}"
         )
 
-    # (c) PARTITION ⊆ LEAVES — disjoint, union a subset (an ungated leaf lands in
-    # neither list — legal on a multi-channel engine).
+    # (c) PARTITION = LEAVES — the three top-level lists are pairwise disjoint and
+    # their union EQUALS the constraint-leaf set (a total three-way partition: an
+    # ungated leaf lands in unenforced_keys, never silently dropped).
     assert not (pushed & post_filtered), (
         f"pushed_keys and post_filtered_keys overlap on {sorted(pushed & post_filtered)} — not a partition"
     )
-    assert pushed | post_filtered <= expected_leaves, (
-        f"pushed_keys ∪ post_filtered_keys {sorted(pushed | post_filtered)} ⊄ "
+    assert not (pushed & unenforced), (
+        f"pushed_keys and unenforced_keys overlap on {sorted(pushed & unenforced)} — not a partition"
+    )
+    assert not (post_filtered & unenforced), (
+        f"post_filtered_keys and unenforced_keys overlap on {sorted(post_filtered & unenforced)} — not a partition"
+    )
+    assert pushed | post_filtered | unenforced == expected_leaves, (
+        f"pushed_keys ∪ post_filtered_keys ∪ unenforced_keys {sorted(pushed | post_filtered | unenforced)} != "
         f"constraint-leaf set {sorted(expected_leaves)}"
     )
 
@@ -609,9 +626,10 @@ def assert_filter_report_invariants(report: dict[str, Any], expected_leaves: fro
         )
     else:
         assert model.pushed_down is False, f"leafless report has pushed_down={model.pushed_down}, expected False"
-        assert model.pushed_keys == [] and model.post_filtered_keys == [], (
+        assert model.pushed_keys == [] and model.post_filtered_keys == [] and model.unenforced_keys == [], (
             f"leafless report has non-empty top-level lists: "
-            f"pushed_keys={model.pushed_keys}, post_filtered_keys={model.post_filtered_keys}"
+            f"pushed_keys={model.pushed_keys}, post_filtered_keys={model.post_filtered_keys}, "
+            f"unenforced_keys={model.unenforced_keys}"
         )
 
     # (e) CHANNEL FOLD CONSISTENCY — re-derive the top-level partition from the
@@ -625,7 +643,10 @@ def assert_filter_report_invariants(report: dict[str, Any], expected_leaves: fro
     for leaf in expected_leaves:
         gating = [c for c in model.channels.values() if leaf in (set(c.pushed_keys) | set(c.post_filtered_keys))]
         if not gating:
-            continue  # ungated leaf — in neither top-level list (checked by (c))
+            assert leaf in unenforced, (
+                f"leaf {leaf!r} gated by no channel but absent from top-level unenforced_keys {sorted(unenforced)}"
+            )
+            continue
         rechecked = any(leaf in c.post_filtered_keys for c in gating)
         if rechecked:
             assert leaf in post_filtered, (
@@ -644,6 +665,14 @@ def assert_filter_report_invariants(report: dict[str, Any], expected_leaves: fro
         assert model.post_filtered is True, (
             f"post_filtered_keys={model.post_filtered_keys} is non-empty but post_filtered flag is False"
         )
+
+    # (g) ENFORCEMENT HEALTH — every constraint leaf must be enforced (pushed or
+    # re-checked). A non-empty unenforced_keys on a real engine/case is a genuine
+    # under-enforcement finding, NOT something to weaken.
+    assert model.unenforced_keys == [], (
+        f"unenforced_keys={model.unenforced_keys} is non-empty — these constraint leaves are neither "
+        "pushed down nor re-checked in memory, so the filter does not enforce them (under-enforcement)"
+    )
 
 
 def filter_spec_leaves(filter_spec: dict[str, Any] | RecallFilter | None) -> frozenset[str]:

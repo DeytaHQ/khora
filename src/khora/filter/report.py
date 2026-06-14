@@ -63,13 +63,18 @@ class FilterPushdownReport(BaseModel):
     """Honest, backend-agnostic summary of how a recall filter was handled.
 
     Surfaced verbatim as ``RecallResult.engine_info["filter"]``. The top-level
-    ``pushed_keys`` / ``post_filtered_keys`` lists *partition the gated constraint
-    leaves*: a leaf is in ``pushed_keys`` only when every channel that gates it
-    pushed it into the backend query, and in ``post_filtered_keys`` when at least
-    one gating channel had to re-check it in memory. A leaf that no channel gates
-    lands in neither list — unreachable for a single-channel engine like skeleton
-    (whose one channel gates every leaf), but defined for multi-channel engines.
-    Both lists are sorted and JSON-stable.
+    ``pushed_keys`` / ``post_filtered_keys`` / ``unenforced_keys`` lists form a
+    TOTAL partition of the filter's constraint leaves: every leaf lands in exactly
+    one of the three. A leaf is in ``pushed_keys`` only when every channel that
+    gates it pushed it into the backend query; in ``post_filtered_keys`` when at
+    least one gating channel had to re-check it in memory; and in
+    ``unenforced_keys`` when no channel gates it at all (the filter constrains it
+    but nothing — pushdown nor in-memory re-check — actually enforces it). On a
+    correct recall every leaf is enforced, so ``unenforced_keys == []``. A
+    single-channel engine like skeleton (whose one channel gates every leaf)
+    always reports ``unenforced_keys == []``; the list is defined for
+    multi-channel engines where a leaf may slip past every channel. All three
+    lists are sorted and JSON-stable.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -92,6 +97,13 @@ class FilterPushdownReport(BaseModel):
 
     Note the NO-DEMOTE rule: a defensive full-predicate re-check sets
     ``post_filtered=True`` but does NOT move a fully-pushed leaf here."""
+
+    unenforced_keys: list[str] = Field(default_factory=list)
+    """Constraint-leaf keys that NO channel gates — neither pushed down nor
+    re-checked in memory — so the filter constrains them but nothing enforces
+    them (sorted). Together with ``pushed_keys`` and ``post_filtered_keys`` this
+    forms a total, disjoint partition of every constraint leaf. A correct recall
+    enforces every leaf, so this list is empty (``unenforced_keys == []``)."""
 
     channels: dict[str, FilterChannelReport] = Field(default_factory=dict)
     """Per-channel breakdown, keyed by channel name. One entry per channel the
@@ -138,10 +150,12 @@ def build_filter_report(
     * Top-level ``pushed_keys`` — leaves pushed on *every* gating channel.
     * Top-level ``post_filtered_keys`` — leaves re-checked in memory on *any*
       gating channel.
+    * Top-level ``unenforced_keys`` — leaves that no channel gates at all.
 
-    These two lists partition the *gated* constraint leaves; a leaf that no
-    channel gates lands in neither (its only signal is ``defensive_recheck``).
-    ``pushed_down`` is ``True`` only when ``post_filtered_keys`` is empty and
+    These three lists form a TOTAL, disjoint partition of the constraint leaves:
+    every leaf lands in exactly one. A leaf that no channel gates lands in
+    ``unenforced_keys`` (nothing enforces it; its only other signal would be
+    ``defensive_recheck``). ``pushed_down`` is ``True`` only when ``post_filtered_keys`` is empty and
     ``pushed_keys`` covers all constraint leaves (so every leaf was gated and
     pushed). ``post_filtered`` is ``True`` when any leaf was post-filtered OR any
     channel ran a defensive full-predicate re-check (which does NOT demote a
@@ -194,5 +208,6 @@ def build_filter_report(
         post_filtered=bool(post_filtered) or any_defensive,
         pushed_keys=sorted(pushed),
         post_filtered_keys=sorted(post_filtered),
+        unenforced_keys=sorted(all_leaves - pushed - post_filtered),
         channels=channels,
     )

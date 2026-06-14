@@ -159,6 +159,8 @@ def test_pushed_down_true_when_all_leaves_pushed_single_channel() -> None:
     assert report.post_filtered is False
     assert set(report.pushed_keys) == set(leaves)
     assert report.post_filtered_keys == []
+    # Fully enforced: every leaf pushed, nothing slipped past the channel.
+    assert report.unenforced_keys == []
 
 
 def test_pushed_down_false_when_one_leaf_post_filtered() -> None:
@@ -203,12 +205,13 @@ def test_pushed_down_false_when_all_leaves_post_filtered() -> None:
 
 
 def test_pushed_down_false_when_a_leaf_is_gated_by_no_channel() -> None:
-    """A constraint leaf no channel gated → it lands in NEITHER list → False.
+    """A constraint leaf no channel gated → it lands in ``unenforced_keys`` → False.
 
     Per docs/api-reference.md, ``metadata.tier`` appears in no channel's ``pushed_keys`` ∪
-    ``post_filtered_keys``, so it is in neither top-level list. The pushed set is
-    then a strict subset of all leaves, so ``pushed_down`` is ``False`` — the
-    builder does not silently treat an unseen leaf as pushed.
+    ``post_filtered_keys``, so it lands in ``unenforced_keys`` (nothing enforces
+    it) — NOT silently dropped. The pushed set is then a strict subset of all
+    leaves, so ``pushed_down`` is ``False`` — the builder does not silently treat
+    an unseen leaf as pushed.
     """
     report = build_filter_report(
         _ast(_TWO_LEAF_DOC),
@@ -216,9 +219,10 @@ def test_pushed_down_false_when_a_leaf_is_gated_by_no_channel() -> None:
     )
 
     assert report.pushed_down is False
-    # source_name pushed; metadata.tier ungated -> in neither list.
+    # source_name pushed; metadata.tier ungated -> unenforced_keys.
     assert report.pushed_keys == ["source_name"]
     assert report.post_filtered_keys == []
+    assert report.unenforced_keys == ["metadata.tier"]
     # post_filtered is False: no leaf was post-filtered and no defensive re-check.
     assert report.post_filtered is False
 
@@ -462,13 +466,18 @@ def test_model_json_schema_snapshot() -> None:
         "description": (
             "Honest, backend-agnostic summary of how a recall filter was handled.\n\n"
             'Surfaced verbatim as ``RecallResult.engine_info["filter"]``. The top-level\n'
-            "``pushed_keys`` / ``post_filtered_keys`` lists *partition the gated constraint\n"
-            "leaves*: a leaf is in ``pushed_keys`` only when every channel that gates it\n"
-            "pushed it into the backend query, and in ``post_filtered_keys`` when at least\n"
-            "one gating channel had to re-check it in memory. A leaf that no channel gates\n"
-            "lands in neither list — unreachable for a single-channel engine like skeleton\n"
-            "(whose one channel gates every leaf), but defined for multi-channel engines.\n"
-            "Both lists are sorted and JSON-stable."
+            "``pushed_keys`` / ``post_filtered_keys`` / ``unenforced_keys`` lists form a\n"
+            "TOTAL partition of the filter's constraint leaves: every leaf lands in exactly\n"
+            "one of the three. A leaf is in ``pushed_keys`` only when every channel that\n"
+            "gates it pushed it into the backend query; in ``post_filtered_keys`` when at\n"
+            "least one gating channel had to re-check it in memory; and in\n"
+            "``unenforced_keys`` when no channel gates it at all (the filter constrains it\n"
+            "but nothing — pushdown nor in-memory re-check — actually enforces it). On a\n"
+            "correct recall every leaf is enforced, so ``unenforced_keys == []``. A\n"
+            "single-channel engine like skeleton (whose one channel gates every leaf)\n"
+            "always reports ``unenforced_keys == []``; the list is defined for\n"
+            "multi-channel engines where a leaf may slip past every channel. All three\n"
+            "lists are sorted and JSON-stable."
         ),
         "properties": {
             "pushed_down": {
@@ -489,6 +498,11 @@ def test_model_json_schema_snapshot() -> None:
             "post_filtered_keys": {
                 "items": {"type": "string"},
                 "title": "Post Filtered Keys",
+                "type": "array",
+            },
+            "unenforced_keys": {
+                "items": {"type": "string"},
+                "title": "Unenforced Keys",
                 "type": "array",
             },
             "channels": {
@@ -520,6 +534,7 @@ def test_model_json_schema_required_fields_and_types() -> None:
         "post_filtered",
         "pushed_keys",
         "post_filtered_keys",
+        "unenforced_keys",
         "channels",
     }
     assert props["pushed_down"]["type"] == "boolean"
@@ -528,6 +543,8 @@ def test_model_json_schema_required_fields_and_types() -> None:
     assert props["pushed_keys"]["items"] == {"type": "string"}
     assert props["post_filtered_keys"]["type"] == "array"
     assert props["post_filtered_keys"]["items"] == {"type": "string"}
+    assert props["unenforced_keys"]["type"] == "array"
+    assert props["unenforced_keys"]["items"] == {"type": "string"}
     assert props["channels"]["type"] == "object"
     assert props["channels"]["additionalProperties"] == {"$ref": "#/$defs/FilterChannelReport"}
 

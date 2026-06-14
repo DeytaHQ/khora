@@ -1018,6 +1018,7 @@ class TestRecallFilterKwarg:
                         "post_filtered": True,
                         "pushed_keys": [],
                         "post_filtered_keys": ["source_name"],
+                        "unenforced_keys": [],
                         "channels": {"lance": {"pushed_keys": [], "post_filtered_keys": ["source_name"]}},
                     },
                 },

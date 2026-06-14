@@ -477,6 +477,7 @@ class TestNoFilterReport:
             "post_filtered": False,
             "pushed_keys": [],
             "post_filtered_keys": [],
+            "unenforced_keys": [],
             "channels": {},
         }
 
@@ -748,6 +749,7 @@ class TestRecencyChannelPresence:
             "post_filtered": False,
             "pushed_keys": [],
             "post_filtered_keys": [],
+            "unenforced_keys": [],
             "channels": {},
         }
 
@@ -943,6 +945,7 @@ class TestTypedEntityFastPathHonesty:
             "post_filtered": False,
             "pushed_keys": [],
             "post_filtered_keys": [],
+            "unenforced_keys": [],
             "channels": {},
         }
 
