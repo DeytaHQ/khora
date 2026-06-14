@@ -65,42 +65,54 @@ jobs:
         # natural anti-vacuity backstop. (The per-module lane_skip(token) gate is a
         # second, redundant layer keyed on the same token; the two always agree.)
         include:
+          # The cross-engine filter-report invariant gate
+          # (tests/e2e/test_filter_report_invariant.py) is appended by explicit
+          # path to EVERY leg's `select`, alongside the existing row-set target.
+          # It is one parametrized module spanning every lane: its node ids lead
+          # with the lane token, so the six `-k <token>` legs run exactly their own
+          # lane's params (and the per-module lane_skip(token) gate is the same-token
+          # redundant layer). Adding the explicit path to all seven makes each leg's
+          # CI selection match the lane it runs at the static-analysis level, rather
+          # than resting on the vc_full leg alone clearing the verification-coverage
+          # orphan check via embedded-only inference. The conftest tripwire still
+          # enforces each leg's live store.
+          #
           # Full vectorcypher engine — live Postgres + Neo4j. Path-selected (no
-          # `-k`): the two vc_full modules are addressed directly.
+          # `-k`): the two vc_full row-set modules are addressed directly.
           - backend: vc_full
-            select: tests/e2e/test_filter_rowset_graph.py tests/e2e/test_graph_contribution.py
+            select: tests/e2e/test_filter_rowset_graph.py tests/e2e/test_graph_contribution.py tests/e2e/test_filter_report_invariant.py
             postgres: true
             neo4j: true
           # Embedded vectorcypher engine — sqlite_lance, no service. `embedded`
           # flips the conftest tripwire on so a missing aiosqlite/lancedb fails
           # RED instead of skipping green.
           - backend: vc_embedded
-            select: tests/e2e/ -k vc_embedded
+            select: tests/e2e/ tests/e2e/test_filter_report_invariant.py -k vc_embedded
             embedded: true
           # Pgvector skeleton — live Postgres only.
           - backend: skeleton_pgvector
-            select: tests/e2e/ -k skeleton_pgvector
+            select: tests/e2e/ tests/e2e/test_filter_report_invariant.py -k skeleton_pgvector
             postgres: true
           # SurrealDB skeleton — embedded (memory://), no service. `surreal`
           # flips the conftest tripwire on so a missing surrealdb SDK fails RED
           # instead of skipping green.
           - backend: skeleton_surrealdb
-            select: tests/e2e/ -k skeleton_surrealdb
+            select: tests/e2e/ tests/e2e/test_filter_report_invariant.py -k skeleton_surrealdb
             surreal: true
           # Weaviate skeleton — vectors in live Weaviate, documents in live
           # Postgres (so this leg provisions BOTH stores).
           - backend: skeleton_weaviate
-            select: tests/e2e/ -k skeleton_weaviate
+            select: tests/e2e/ tests/e2e/test_filter_report_invariant.py -k skeleton_weaviate
             postgres: true
             weaviate: true
           # SQLite + LanceDB skeleton — embedded, no service. `embedded` flips
           # the conftest tripwire on (same as vc_embedded).
           - backend: skeleton_sqlite_lance
-            select: tests/e2e/ -k skeleton_sqlite_lance
+            select: tests/e2e/ tests/e2e/test_filter_report_invariant.py -k skeleton_sqlite_lance
             embedded: true
           # Chronicle engine — PG-only (no graph backend).
           - backend: chronicle
-            select: tests/e2e/ -k chronicle
+            select: tests/e2e/ tests/e2e/test_filter_report_invariant.py -k chronicle
             postgres: true
     env:
       KHORA_E2E_BACKEND: ${{ matrix.backend }}
