@@ -613,6 +613,59 @@ async def test_chronicle_forget_deletes_memory_facts(
     )
 
 
+async def test_chronicle_pg_persists_extracted_relationships(kb: Khora, namespace_id: UUID) -> None:
+    """Regression for issue #1066 on the PostgreSQL path.
+
+    Chronicle builds its pg storage config with ``skip_graph=True``, so the
+    coordinator has no graph backend. Before the fix, every extracted
+    relationship was silently dropped: ``remember()`` reported success but
+    ``create_relationships_batch`` returned 0 (no graph) and
+    ``count_relationships`` had no vector fallback, so ``stats().relationships``
+    was 0 even though the extractor produced edges. The identical call on
+    sqlite_lance persisted and counted them, so the same engine lost data on
+    one backend.
+
+    The fix persists relationships to the pgvector ``relationships`` table on
+    graph-less stacks (mirroring the ``count_entities`` / ``list_entities``
+    fallback) and falls ``count_relationships`` back to the vector mirror.
+    """
+    _plan_extraction(
+        "Sarah Chen",
+        entities=[("Sarah Chen", "PERSON"), ("Globex Corp", "ORGANIZATION")],
+        relationships=[("Sarah Chen", "Globex Corp", "WORKS_AT")],
+    )
+
+    result = await kb.remember(
+        content="Sarah Chen is the CFO at Globex Corp.",
+        namespace=namespace_id,
+        entity_types=["PERSON", "ORGANIZATION"],
+        relationship_types=["WORKS_AT", "RELATES_TO"],
+        expertise=_no_extraction_expertise(),
+    )
+
+    assert result.relationships_created >= 1, (
+        "Issue #1066 regression: remember() reported "
+        f"relationships_created={result.relationships_created}; the extracted "
+        "WORKS_AT edge was dropped on the chronicle+PG path."
+    )
+
+    stats = await kb.stats(namespace=namespace_id)
+    assert stats.relationships >= 1, (
+        "Issue #1066 regression: stats().relationships="
+        f"{stats.relationships} after ingesting content that extracts one "
+        "relationship on chronicle+PG."
+    )
+
+    # forget() must drop the persisted relationship via the cascade so the
+    # write/read/delete lifecycle stays consistent on the graph-less stack.
+    ok = await kb.forget(result.document_id, namespace=namespace_id)
+    assert ok, "forget() must report success"
+    stats_after = await kb.stats(namespace=namespace_id)
+    assert stats_after.relationships == 0, (
+        f"Issue #1066 regression: forget() left {stats_after.relationships} orphaned relationship(s) on chronicle+PG."
+    )
+
+
 async def test_chronicle_concurrent_remember(kb: Khora, namespace_id: UUID) -> None:
     """5 concurrent ingests in one namespace, no integrity errors."""
     contents = [f"document number {i} mentions widget-{i}" for i in range(5)]

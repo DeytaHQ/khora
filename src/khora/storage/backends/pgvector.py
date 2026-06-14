@@ -28,7 +28,7 @@ from khora.db.models import (
     RelationshipModel,
 )
 from khora.db.schema import sync_enum_values
-from khora.storage.backends.mixins import AsyncSessionMixin
+from khora.storage.backends.mixins import AsyncSessionMixin, sanitize_cypher_label
 from khora.telemetry import trace
 
 if TYPE_CHECKING:
@@ -1399,10 +1399,10 @@ class PgVectorBackend(AsyncSessionMixin):
     ) -> list:
         """List relationships in a namespace.
 
-        Coordinator fallback for graph-less stacks.  In chronicle+PG-only
-        deployments the ``relationships`` table is not actively written to
-        (relationships live in Neo4j when configured), so this will return
-        an empty list — but it no longer crashes the caller.
+        Coordinator fallback for graph-less stacks.  On chronicle+PG-only
+        deployments ``create_relationships_batch`` (below) writes extracted
+        edges to the ``relationships`` table, so this serves them back
+        directly even when no graph backend is wired up (#1066).
         """
         from khora.core.models import Relationship
 
@@ -1433,6 +1433,106 @@ class PgVectorBackend(AsyncSessionMixin):
                 )
                 for m in result.scalars()
             ]
+
+    async def count_relationships(self, namespace_id: UUID) -> int:
+        """Count total relationships in a namespace.
+
+        Coordinator fallback for graph-less stacks (#1066). Counts the
+        ``relationships`` table that ``create_relationships_batch`` populates
+        on chronicle+PG-only deployments.
+        """
+        async with self._get_session() as session:
+            result = await session.execute(
+                select(func.count(RelationshipModel.id)).where(RelationshipModel.namespace_id == namespace_id)
+            )
+            return result.scalar_one()
+
+    async def create_relationships_batch(
+        self,
+        relationships: list,
+        *,
+        batch_size: int = 200,
+    ) -> int:
+        """Batch insert relationship records in PostgreSQL.
+
+        Coordinator fallback for graph-less stacks (#1066). On chronicle+PG
+        the coordinator has no graph backend, so extracted relationships were
+        previously dropped silently. This persists them to the
+        ``relationships`` table (the same table ``list_relationships`` reads),
+        mirroring the entity write/count fallback.
+
+        Acquires a namespace-scoped advisory lock and uses
+        ``INSERT ... ON CONFLICT (id) DO UPDATE`` so re-ingest is idempotent
+        on the relationship id (matching the sqlite_lance graph adapter).
+
+        Returns the number of relationships written.
+        """
+        if not relationships:
+            return 0
+
+        async def _do_insert() -> int:
+            from sqlalchemy.dialects.postgresql import insert
+
+            for rel in relationships:
+                rel.relationship_type = sanitize_cypher_label(rel.relationship_type or "RELATES_TO")
+
+            namespace_id = relationships[0].namespace_id
+            key1, key2 = _namespace_lock_keys(namespace_id)
+            total = 0
+
+            async with self._get_session() as session:
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:key1, :key2)"),
+                    {"key1": key1, "key2": key2},
+                )
+
+                for start in range(0, len(relationships), batch_size):
+                    batch = relationships[start : start + batch_size]
+                    values = [
+                        {
+                            "id": rel.id,
+                            "namespace_id": rel.namespace_id,
+                            "source_entity_id": rel.source_entity_id,
+                            "target_entity_id": rel.target_entity_id,
+                            "relationship_type": rel.relationship_type,
+                            "description": rel.description,
+                            "properties": rel.properties,
+                            "source_document_ids": rel.source_document_ids,
+                            "source_chunk_ids": rel.source_chunk_ids,
+                            "valid_from": rel.valid_from,
+                            "valid_until": rel.valid_until,
+                            "confidence": rel.confidence,
+                            "weight": rel.weight,
+                            "metadata_": rel.metadata,
+                            "created_at": rel.created_at,
+                            "updated_at": rel.updated_at,
+                        }
+                        for rel in batch
+                    ]
+                    stmt = insert(RelationshipModel).values(values)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["id"],
+                        set_={
+                            "description": stmt.excluded.description,
+                            "properties": stmt.excluded.properties,
+                            "source_document_ids": stmt.excluded.source_document_ids,
+                            "source_chunk_ids": stmt.excluded.source_chunk_ids,
+                            "valid_from": stmt.excluded.valid_from,
+                            "valid_until": stmt.excluded.valid_until,
+                            "confidence": stmt.excluded.confidence,
+                            "weight": stmt.excluded.weight,
+                            "metadata": stmt.excluded.metadata,
+                            "updated_at": stmt.excluded.updated_at,
+                        },
+                    )
+                    await session.execute(stmt)
+                    total += len(batch)
+
+                await session.commit()
+
+            return total
+
+        return await _retry_on_deadlock(_do_insert)
 
     # =========================================================================
     # Chronicle engine: events + facts (migration 024)
