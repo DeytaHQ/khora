@@ -272,9 +272,11 @@ class TestStageDocument:
         assert doc.title == "Alpha"
         assert doc.source_timestamp is not None
         assert doc.source_timestamp.isoformat() == "2026-05-13T14:00:00+00:00"
-        # created_at + updated_at align with the source timestamp
-        assert doc.created_at == doc.source_timestamp
-        assert doc.updated_at == doc.source_timestamp
+        # created_at/updated_at stay at ingest time (the khora-ops axis) and must
+        # NOT be conflated with the source event time, which lives on
+        # source_timestamp (#993 bi-temporal contract).
+        assert doc.created_at != doc.source_timestamp
+        assert doc.updated_at != doc.source_timestamp
         storage.create_document.assert_awaited_once()
 
     async def test_uses_now_when_no_source_timestamp(self):
