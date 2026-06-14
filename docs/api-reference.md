@@ -344,9 +344,10 @@ When `recall(filter=...)` is given a structured [`RecallFilter`](#recallfilter),
 | `post_filtered` | `bool` | `True` when any constraint leaf was re-checked in memory on a gating channel, OR when a channel ran a defensive full-predicate re-check even though every leaf compiled down. |
 | `pushed_keys` | `list[str]` | Dotted constraint-leaf keys pushed into the backend query on *every* gating channel (sorted, JSON-stable). |
 | `post_filtered_keys` | `list[str]` | Dotted constraint-leaf keys re-checked in memory on at least one gating channel (sorted). |
+| `unenforced_keys` | `list[str]` | Dotted constraint-leaf keys that **no** channel pushed or post-filtered — i.e. no channel enforced them on this recall (sorted). Empty on a correct recall. A non-empty value is the in-band signal that a result-producing path returned candidates without enforcing these leaves (silent under-enforcement). |
 | `channels` | `dict[str, FilterChannelReport]` | Per-channel breakdown keyed by channel name. One entry per channel the engine reported on — a single-channel engine emits one entry on every recall (even a no-filter recall, with empty key lists). |
 
-`pushed_keys` and `post_filtered_keys` **partition the *gated* constraint leaves**. A leaf is in `pushed_keys` only when every channel that gates it pushed it into the backend query; it is in `post_filtered_keys` when at least one gating channel re-checked it in memory. A leaf that no channel gates falls in neither list — unreachable for a single-channel engine like `skeleton` (whose one channel gates every leaf), but defined for multi-channel engines. A *defensive* full-predicate re-check (the `sqlite_lance` path: `compile_lance` fully pushes the predicate to SQL, but a `compile_python` post-filter re-checks the whole AST as a safety net) sets `post_filtered=True` **without demoting** any fully-pushed leaf — so `pushed_down` stays `True` while `post_filtered` is also `True`.
+`pushed_keys`, `post_filtered_keys`, and `unenforced_keys` together form a **total, disjoint** partition of the filter's constraint leaves. A leaf is in `pushed_keys` only when every channel that gates it pushed it into the backend query; it is in `post_filtered_keys` when at least one gating channel re-checked it in memory; and it is in `unenforced_keys` when no channel gates it at all — the in-band signal that nothing enforced it on this recall. On a correct recall `unenforced_keys == []` (for a single-channel engine like `skeleton`, whose one channel gates every leaf, it is always empty; multi-channel engines populate it only when a constraint leaf slips past every channel). A *defensive* full-predicate re-check (the `sqlite_lance` path: `compile_lance` fully pushes the predicate to SQL, but a `compile_python` post-filter re-checks the whole AST as a safety net) sets `post_filtered=True` **without demoting** any fully-pushed leaf — so `pushed_down` stays `True` while `post_filtered` is also `True`.
 
 Each `FilterChannelReport` carries that channel's own `pushed_keys` / `post_filtered_keys` (sorted dotted leaf keys). The serialized wire shape (`model_dump(mode="json")`) is:
 
@@ -356,6 +357,7 @@ Each `FilterChannelReport` carries that channel's own `pushed_keys` / `post_filt
   "post_filtered": true,
   "pushed_keys": ["metadata.tier"],
   "post_filtered_keys": [],
+  "unenforced_keys": [],
   "channels": {
     "sqlite_lance": {"pushed_keys": ["metadata.tier"], "post_filtered_keys": []}
   }
