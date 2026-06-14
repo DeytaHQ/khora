@@ -69,7 +69,7 @@ from khora.filter.compilers.weaviate import compile_weaviate
 # is the one production CompileContext builder; ``run_chronicle_filter`` is the
 # Chronicle date-bound-pushdown + full-AST post-filter applied to in-memory records.
 from khora.filter.execute import build_compile_context, iter_leaf_clauses, run_chronicle_filter
-from khora.filter.model import SYSTEM_KEYS, Op
+from khora.filter.model import SYSTEM_KEYS
 from khora.storage.coordinator import StorageCoordinator
 
 __all__ = [
@@ -156,8 +156,10 @@ class SeedRecord:
     vector channel returns the whole set and the filter is the only narrowing
     force). The remaining fields populate the eight denormalized document system
     keys, the three date columns, and the chunk ``metadata`` blob — the surface a
-    filter can address. A field left ``None`` / empty is simply absent from that
-    record (the missing-value semantics each compiler must agree on).
+    filter can address. A nullable field left ``None`` / empty is simply absent from
+    that record (the missing-value semantics each compiler must agree on);
+    ``source_type`` is non-null (it defaults to ``"library"``, mirroring the
+    ``Document`` dataclass default), so it is always present on every backend.
     """
 
     id: str
@@ -166,7 +168,7 @@ class SeedRecord:
     source_timestamp: datetime | None = None
     occurred_at: datetime | None = None
     created_at: datetime | None = None
-    source_type: str | None = None
+    source_type: str = "library"
     source_name: str | None = None
     source_url: str | None = None
     external_id: str | None = None
@@ -688,7 +690,7 @@ async def seed_case(coord: StorageCoordinator, case: ConformanceCase) -> dict[st
         doc = Document(
             namespace_id=namespace_id,
             content=record.content,
-            source_type=record.source_type if record.source_type is not None else "library",
+            source_type=record.source_type,
             source_name=record.source_name,
             source_url=record.source_url,
             external_id=record.external_id,
@@ -755,17 +757,6 @@ _LIVE_BACKENDS: frozenset[str] = _TOTAL_BACKENDS | _SPLIT_BACKENDS
 
 # Every backend a metadata-only / occurred_at / source_timestamp case can run on.
 _OP_BACKENDS: frozenset[str] = _INMEM_BACKENDS | _LIVE_BACKENDS
-
-# The live backends that DEFAULT an unset ``source_type`` to ``"library"``: the
-# postgres and sqlite_lance runners denormalize the parent Document's ``source_type``
-# onto the chunk, and the ``Document`` dataclass defaults ``source_type`` to
-# ``"library"`` (so does ``seed_case`` for a record that leaves it unset). The
-# in-memory oracle, by contrast, sees an unset ``source_type`` as ABSENT, so a
-# ``source_type`` VALUE leaf over a seed with any unset ``source_type`` row diverges
-# (``"library"`` on those backends vs absent in the oracle) and is pruned from them. A
-# seed that sets ``source_type`` on every record is unaffected. surrealdb / cypher seed
-# the ``SeedRecord`` verbatim (no Document default), so they are never pruned for this.
-_SOURCE_TYPE_DEFAULTED_BACKENDS: frozenset[str] = frozenset({"postgres", "sqlite_lance"})
 
 # The live backends that STAMP ``created_at`` to ``now()`` on insert when absent
 # (postgres + lance via the skeleton temporal store; weaviate via the same store
@@ -880,8 +871,8 @@ def _with_metadata(rec: SeedRecord, metadata: dict[str, Any]) -> SeedRecord:
 # from :data:`SYSTEM_KEYS` (NOT imported from the engines layer, which would be a
 # filter→engines inversion): the store's ``_BACKED_SYSTEM_KEYS`` is the source of
 # truth for the store + the QA drift-gate test, and conformance encodes its surreal
-# capability gap locally — the same way it encodes :data:`_SOURCE_TYPE_DEFAULTED_BACKENDS`,
-# :data:`_CREATED_AT_STAMP_BACKENDS`, etc. (kept consistent by the store-side drift
+# capability gap locally — the same way it encodes :data:`_CREATED_AT_STAMP_BACKENDS`,
+# :data:`_SEED_CASE_BACKENDS`, etc. (kept consistent by the store-side drift
 # test). A predicate on one of these raises ``RecallFilterUnsupportedError`` on the
 # total surreal leg (no post-filter safety net).
 _UNBACKED_SYSTEM_KEYS: frozenset[str] = SYSTEM_KEYS - frozenset({"occurred_at", "created_at"})
@@ -918,12 +909,10 @@ def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[See
     * every live backend now carries the seven string keys on its queryable row
       (postgres + sqlite_lance denormalized off the parent document, weaviate stored
       on the ``KhoraChunk`` object, surrealdb + cypher seeded verbatim), so a
-      string-key VALUE leaf prunes nothing by itself. A ``source_type`` VALUE leaf
-      over a seed that leaves ``source_type`` unset on any record → drop
-      :data:`_SOURCE_TYPE_DEFAULTED_BACKENDS` (postgres + sqlite_lance): the
-      denormalized chunk inherits the Document default ``"library"`` while the oracle
-      sees the key absent, so the two diverge. A seed that sets ``source_type`` on
-      every record keeps them;
+      string-key VALUE leaf prunes nothing by itself. ``source_type`` is non-null
+      (it defaults to ``"library"`` on both the ``SeedRecord`` and the ``Document``),
+      so it is always present in the oracle and on every backend alike — a
+      ``source_type`` VALUE leaf never diverges and prunes nothing;
     * a ``$exists`` on a string document key is **NOT** a prune: ``$exists`` on a
       system key is a CONSTANT (the always-present axiom), value-independent and
       oracle-comparable on every backend — this is what lets the F-EXISTS system-key
@@ -946,12 +935,7 @@ def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[See
     excluded: set[str] = set()
     for clause in iter_leaf_clauses(_resolve_ast(filter_)):
         root = clause.path[0] if clause.path else ""
-        if root == "source_type" and clause.op is not Op.EXISTS and any(rec.source_type is None for rec in seed):
-            # A ``source_type`` value leaf diverges on postgres / sqlite_lance when any
-            # seed record left ``source_type`` unset: the denormalized chunk inherits
-            # the Document default ``"library"`` while the oracle treats it as absent.
-            excluded |= _SOURCE_TYPE_DEFAULTED_BACKENDS
-        elif root == "created_at":
+        if root == "created_at":
             # A store that stamps created_at on insert can't keep the absent row NULL.
             excluded |= _CREATED_AT_STAMP_BACKENDS
     if _seed_has_duplicate_external_id(seed):
@@ -980,19 +964,16 @@ def _seed_has_duplicate_external_id(seed: tuple[SeedRecord, ...]) -> bool:
     return len(seen) != len(set(seen))
 
 
-# The one non-null string system key — the ``Document`` dataclass defaults
-# ``source_type`` to ``"library"``, which the postgres and sqlite_lance runners
-# denormalize onto the chunk, so a ``-5`` row with the key unset would be ``"library"``
-# on those backends but ``None`` in the in-memory oracle. To keep ``expected_ids``
-# backend-consistent that key is seeded with five populated rows (no NULL row); with
-# every record populated, the seed-aware ``source_type`` prune
-# (:func:`_backends_for_filter`) does not fire, so ``source_type`` VALUE cases run on
-# postgres and sqlite_lance too. Every other string key is nullable (unset ⇒ NULL on
-# the stores that carry it, ``None`` in the oracle — consistent), so it carries the
-# ``-5`` NULL row that F1 (Mongo-faithful negation) keeps under ``$ne``/``$nin``. A
-# string-key VALUE case now runs on every backend; surrealdb asserts the fail-loud
-# ``RecallFilterUnsupportedError`` via ``expect_unsupported`` rather than comparing
-# rows; the per-case set is computed by :func:`_backends_for_filter`.
+# The one non-null string system key — both the ``SeedRecord`` and the ``Document``
+# dataclass default ``source_type`` to ``"library"``, so it is always present in the
+# in-memory oracle and on every backend alike (it can never be a NULL row). That key
+# is therefore seeded with five populated rows (no NULL ``-5`` row), keeping
+# ``expected_ids`` backend-consistent. Every other string key is nullable (unset ⇒
+# NULL on the stores that carry it, ``None`` in the oracle — consistent), so it
+# carries the ``-5`` NULL row that F1 (Mongo-faithful negation) keeps under
+# ``$ne``/``$nin``. A string-key VALUE case runs on every backend; surrealdb asserts
+# the fail-loud ``RecallFilterUnsupportedError`` via ``expect_unsupported`` rather than
+# comparing rows; the per-case set is computed by :func:`_backends_for_filter`.
 _NON_NULL_STRING_KEY = "source_type"
 
 
@@ -1122,9 +1103,9 @@ def _string_op_cases(key: str) -> list[ConformanceCase]:
     # ``backends`` is computed per-case (:func:`_backends_for_filter`): a value-reading
     # string predicate prunes no backend (postgres + sqlite_lance denormalize off the
     # parent document, weaviate stores the keys on the object, surrealdb + cypher seed
-    # verbatim). A ``source_type`` value leaf would additionally drop postgres /
-    # sqlite_lance if any seed row left it unset, but this seed populates all five rows,
-    # so both stay. An ``$exists`` (a constant on a system key) stays on all.
+    # verbatim). ``source_type`` is non-null (it defaults to ``"library"``), so it is
+    # always present everywhere and a ``source_type`` value leaf prunes nothing either.
+    # An ``$exists`` (a constant on a system key) stays on all.
     def case(suffix: str, predicate: Any, expected: frozenset[str], op_tag: str) -> ConformanceCase:
         filter_ = {key: predicate}
         backends = _backends_for_filter(filter_, seed)
