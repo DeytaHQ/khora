@@ -794,14 +794,25 @@ class TestGraphFallbackReport:
 
 
 # ---------------------------------------------------------------------------
-# Devil's-advocate scenario C: the typed-entity-recent fast path is HONEST.
+# Devil's-advocate scenario C: a TYPED_ENTITY_RECENT recall WITH a caller filter
+# falls through to the FULL ``_vectorcypher_retrieve`` path and emits a REAL,
+# per-channel report.
 #
-# The fast path's Cypher does NOT enforce the caller filter (a SEPARATE,
-# follow-up-tracked bug). For THIS ticket the report must be honest about that:
-# it must NOT fabricate a channel that enforced the filter. So ``channels`` is
-# empty and the report is all-False even when routed there under a filter. This
-# is explicitly NOT a regression test asserting the fast path returns unfiltered
-# results — that belongs to the follow-up ticket.
+# The dispatch gate (``retrieve()``) enters the #569 fast path ONLY when
+# ``filter_ast is None`` — the fast-path Cypher cannot enforce caller filters
+# (chunk metadata is a serialized JSON property on the graph node, not queryable
+# columns), so a filtered typed-recent recall is routed to
+# ``_vectorcypher_retrieve`` instead, which enforces the filter per channel and
+# folds REAL ``ChannelPlan`` carriers into ``engine_info["filter"]``. Routing
+# TYPED_ENTITY_RECENT through the filtered fallback therefore exercises the same
+# vector/bm25/graph channels as a MODERATE recall — the report is non-empty and
+# validates. (Pre-#1181 this case asserted ``channels={}`` via the fast path; the
+# gate makes that shape STRUCTURALLY UNREACHABLE, so it is flipped here.)
+#
+# The UNFILTERED fast path (``filter_ast=None``) still runs the #569 Cypher and
+# stamps the all-false no-filter carrier (``_filter_channel_plans == {}``), which
+# the engine folds into the constraint-free all-False report with empty
+# ``channels`` — pinned below.
 # ---------------------------------------------------------------------------
 
 
@@ -810,8 +821,9 @@ def _typed_entity_retriever(ns_id: UUID, rows: list[dict[str, Any]]) -> VectorCy
 
     The router returns ``TYPED_ENTITY_RECENT``; ``_dual_nodes._session()`` yields
     a session whose ``execute_read`` returns ``rows`` so the REAL fast path runs
-    (and stamps its honest empty ``_filter_channel_plans``) rather than falling
-    back to ``_vectorcypher_retrieve``.
+    (and stamps its no-filter ``_filter_channel_plans == {}`` carrier) rather than
+    falling back to ``_vectorcypher_retrieve``. Used by the UNFILTERED case; the
+    FILTERED case routes through the fully-wired ``_make_retriever`` channels.
     """
     vector_store = AsyncMock()
     embedder = AsyncMock()
@@ -853,15 +865,58 @@ def _typed_entity_retriever(ns_id: UUID, rows: list[dict[str, Any]]) -> VectorCy
 
 
 class TestTypedEntityFastPathHonesty:
-    """The typed-entity fast path emits an honest all-False report under a filter."""
+    """Typed-recent reports: REAL report when filtered, no-filter carrier when not."""
 
-    async def test_fast_path_reports_no_enforcing_channel(self) -> None:
-        """Routed to the fast path under a filter -> ``channels={}``, all-False.
+    async def test_filtered_typed_recent_emits_real_report(self) -> None:
+        """TYPED_ENTITY_RECENT routed WITH a filter -> non-empty, valid report.
 
-        The fast-path Cypher does not enforce the caller filter; the report is
-        honest about that by recording NO channel (rather than fabricating one
-        that "pushed" the filter). This pins the report's honesty, NOT the
-        fast-path filtering behaviour (a separate follow-up ticket).
+        The dispatch gate skips the #569 fast path under a filter and routes to
+        ``_vectorcypher_retrieve``, which enforces the filter per channel. So the
+        report is the FULL vector/bm25/graph disposition — non-empty ``channels``
+        that pass ``FilterPushdownReport.model_validate`` — exactly the fallback
+        coverage the devil's-advocate flagged: a typed-recent query WITH a caller
+        filter exercised end-to-end through the enforcing path, not asserted via a
+        mock-only ``channels={}`` claim.
+        """
+        ns_id = uuid4()
+        # Fully-wired channels (vector + bm25 + graph) but routed TYPED_ENTITY_RECENT
+        # so the gate's filter fall-through is the path actually under test.
+        retriever = _make_retriever(ns_id, enable_bm25=True, graph_chunks=[_graph_chunk(ns_id, tier="gold")])
+        retriever._router.route = AsyncMock(
+            return_value=RoutingDecision(
+                complexity=QueryComplexity.TYPED_ENTITY_RECENT,
+                use_graph=True,
+                graph_depth=2,
+                confidence=0.9,
+                reasoning="typed_entity_recent",
+            )
+        )
+        engine = _build_engine(retriever)
+
+        # "latest action items" would route to the fast path with no filter; under
+        # a filter the gate falls through to the enforcing ``_vectorcypher_retrieve``.
+        report = await _recall_filter_report(engine, ns_id, query="latest action items")
+
+        # A REAL per-channel report (the fallback path ran end-to-end).
+        assert report["channels"], "filtered typed-recent must emit a non-empty per-channel report"
+        assert set(report["channels"]) == {"vector", "bm25", "graph"}
+        assert report["channels"]["graph"] == {
+            "pushed_keys": ["source_name"],
+            "post_filtered_keys": ["metadata.tier"],
+        }
+        assert report["pushed_keys"] == ["source_name"]
+        assert report["post_filtered_keys"] == ["metadata.tier"]
+        assert report["post_filtered"] is True
+        # ``_recall_filter_report`` already model_validate'd it; re-assert explicitly.
+        FilterPushdownReport.model_validate(report)
+
+    async def test_unfiltered_fast_path_carries_no_filter_marker(self) -> None:
+        """TYPED_ENTITY_RECENT routed WITHOUT a filter -> all-False, empty channels.
+
+        With no caller filter the gate runs the #569 fast path, which stamps the
+        all-false no-filter carrier (``_filter_channel_plans == {}``). The engine
+        folds that into the constraint-free all-False report whose ``channels``
+        reflect no caller filter (empty map).
         """
         ns_id = uuid4()
         eid, cid, did = uuid4(), uuid4(), uuid4()
@@ -880,8 +935,8 @@ class TestTypedEntityFastPathHonesty:
         retriever = _typed_entity_retriever(ns_id, rows)
         engine = _build_engine(retriever)
 
-        # "latest action items" routes to the typed-entity fast path.
-        report = await _recall_filter_report(engine, ns_id, query="latest action items")
+        # "latest action items" + no filter routes to the typed-entity fast path.
+        report = await _recall_filter_report(engine, ns_id, query="latest action items", spec=None)
 
         assert report == {
             "pushed_down": False,
