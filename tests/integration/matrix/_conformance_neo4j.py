@@ -24,20 +24,11 @@ form is what's under test on the write side. Each :class:`SeedRecord` is adapted
 :class:`TemporalChunk` (mirroring how ``_conformance_pg`` adapts to the skeleton
 store for the postgres leg) so both legs feed their production writer the same corpus.
 
-One corpus-fidelity adjustment: ``create_chunk_nodes_batch`` stamps an absent
-``created_at`` to ``now()`` (the production default), but the conformance corpus
-keeps ``created_at`` cases on the cypher leg *because* cypher is expected to leave an
-absent ``created_at`` NULL. So after the batch write, the seeder ``REMOVE``s
-``created_at`` from exactly the nodes whose ``SeedRecord`` left it ``None``, restoring
-the missing-property semantics the compiler relies on. The strip is forward-protection
-against false EXCLUSION, not against over-inclusion: the ``compile_python`` post-filter
-already rescues a stamped ``now()`` that over-includes on a lower-bound op (a post-filter
-can only narrow the Cypher candidate set), so no current case false-fails without the
-strip. But a ``$not``-wrapped or null-operand ``created_at`` predicate would false-
-EXCLUDE the absent row in the Cypher prefilter, and a post-filter cannot re-add an
-excluded row — so the strip is what keeps that exclusion class correct as the corpus
-grows. ``occurred_at`` / ``source_timestamp`` are user-supplied and the production
-writer already leaves them absent when ``None``, so they need no fixup.
+The corpus carries no absent-``created_at`` rows (``created_at`` is always-present —
+NOT NULL + default + writer stamping; ``_backends_for_filter`` raises on a seed that
+leaves it unset), so the production writer's ``now()`` stamping of an absent ``created_at`` is unreachable
+on conformance seeds. ``occurred_at`` / ``source_timestamp`` are user-supplied and the
+production writer leaves them absent when ``None``.
 
 Seed/read split (write-once, read-many), mirroring the live-Postgres leg. The graph
 is seeded ONCE by ``_conformance_seed`` (the workflow's one-time step), which also
@@ -177,14 +168,6 @@ async def build_seed_map() -> dict[str, dict[str, str]]:
     not namespace, but a per-case namespace keeps the nodes corpus-faithful). Chunk
     UUIDs are stringified for JSON. Called only by the one-time seed entrypoint —
     never by the test.
-
-    The production writer stamps an absent ``created_at`` to ``now()``; the corpus
-    expects cypher to leave it NULL (see module docstring), so after the batch write
-    every node whose ``SeedRecord`` left ``created_at`` ``None`` has the property
-    removed, restoring the missing-value semantics the compiler relies on. This is
-    forward-protection against false EXCLUSION in the Cypher prefilter (a post-filter
-    can only narrow, never re-add an excluded row), not against the over-inclusion the
-    post-filter already rescues.
     """
     driver = _connect()
     seed_map: dict[str, dict[str, str]] = {}
@@ -195,43 +178,15 @@ async def build_seed_map() -> dict[str, dict[str, str]]:
             namespace_id = uuid4()
             id_map: dict[str, str] = {}
             chunks: list[TemporalChunk] = []
-            absent_created_at: list[str] = []
             for record in case.seed_records:
                 chunk_id = uuid4()
                 id_map[record.id] = str(chunk_id)
                 chunks.append(_to_temporal_chunk(record, chunk_id, namespace_id))
-                if record.created_at is None:
-                    absent_created_at.append(str(chunk_id))
             await manager.create_chunk_nodes_batch(chunks, namespace_id)
-            await _strip_stamped_created_at(driver, database, absent_created_at)
             seed_map[case.id] = id_map
     finally:
         await driver.close()
     return seed_map
-
-
-async def _strip_stamped_created_at(driver: Any, database: str, chunk_ids: Sequence[str]) -> None:
-    """Remove the writer-stamped ``created_at`` from nodes whose seed left it absent.
-
-    ``create_chunk_nodes_batch`` defaults an absent ``created_at`` to ``now()`` (the
-    production behavior). The conformance corpus keeps ``created_at`` cases on the
-    cypher leg because cypher is expected to leave an absent ``created_at`` NULL.
-    Re-establish the missing-property semantics by removing the stamped value on
-    exactly those nodes. The payoff is forward-protection against false EXCLUSION: a
-    ``$not``-wrapped or null-operand ``created_at`` predicate would drop the absent row
-    in the Cypher prefilter, and the ``compile_python`` post-filter can only narrow the
-    candidate set — it cannot re-add an excluded row. (Over-inclusion from a stamped
-    ``now()`` on a lower-bound op is already rescued by that post-filter, so the strip
-    is not needed for any current case — it guards the exclusion class as the corpus
-    grows.)
-    """
-    if not chunk_ids:
-        return
-    async with driver.session(database=database) as session:
-        await session.run(
-            f"MATCH ({_NODE_ALIAS}:Chunk) WHERE {_NODE_ALIAS}.id IN $ids REMOVE {_NODE_ALIAS}.created_at",
-            ids=list(chunk_ids),
-        )
 
 
 def write_seed_map(seed_map: Mapping[str, Mapping[str, str]]) -> None:

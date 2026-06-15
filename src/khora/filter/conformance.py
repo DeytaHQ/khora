@@ -758,19 +758,6 @@ _LIVE_BACKENDS: frozenset[str] = _TOTAL_BACKENDS | _SPLIT_BACKENDS
 # Every backend a metadata-only / occurred_at / source_timestamp case can run on.
 _OP_BACKENDS: frozenset[str] = _INMEM_BACKENDS | _LIVE_BACKENDS
 
-# The live backends that STAMP ``created_at`` to ``now()`` on insert when absent
-# (postgres + lance via the skeleton temporal store; weaviate via the same store
-# path), so an "absent" row cannot stay NULL there — its ``now()`` value satisfies a
-# lower-bound op and breaks the by-construction ``expected_ids``. A ``created_at``
-# predicate is pruned from these. The surrealdb and cypher runners KEEP ``created_at``
-# cases, but for different reasons: surrealdb leaves an absent ``created_at`` NULL
-# natively (explicit ``option<datetime>`` insert, no default), while the cypher
-# production writer ALSO stamps ``now()`` and the conformance seeder strips it back to
-# NULL post-write (``_strip_stamped_created_at`` in ``_conformance_neo4j.py``).
-# ``occurred_at`` / ``source_timestamp`` are user-supplied and stay NULL everywhere —
-# never pruned.
-_CREATED_AT_STAMP_BACKENDS: frozenset[str] = frozenset({"postgres", "sqlite_lance", "weaviate"})
-
 # The live backends whose runner seeds through ``seed_case`` — i.e. it writes one
 # ``Document`` per record into the relational ``documents`` table (which enforces
 # UNIQUE ``(namespace_id, external_id)``). A case whose seed has a duplicate non-NULL
@@ -871,10 +858,9 @@ def _with_metadata(rec: SeedRecord, metadata: dict[str, Any]) -> SeedRecord:
 # from :data:`SYSTEM_KEYS` (NOT imported from the engines layer, which would be a
 # filter→engines inversion): the store's ``_BACKED_SYSTEM_KEYS`` is the source of
 # truth for the store + the QA drift-gate test, and conformance encodes its surreal
-# capability gap locally — the same way it encodes :data:`_CREATED_AT_STAMP_BACKENDS`,
-# :data:`_SEED_CASE_BACKENDS`, etc. (kept consistent by the store-side drift
-# test). A predicate on one of these raises ``RecallFilterUnsupportedError`` on the
-# total surreal leg (no post-filter safety net).
+# capability gap locally — the same way it encodes :data:`_SEED_CASE_BACKENDS`, etc.
+# (kept consistent by the store-side drift test). A predicate on one of these raises
+# ``RecallFilterUnsupportedError`` on the total surreal leg (no post-filter safety net).
 _UNBACKED_SYSTEM_KEYS: frozenset[str] = SYSTEM_KEYS - frozenset({"occurred_at", "created_at"})
 
 
@@ -917,12 +903,11 @@ def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[See
       system key is a CONSTANT (the always-present axiom), value-independent and
       oracle-comparable on every backend — this is what lets the F-EXISTS system-key
       shapes execute in both the pushed-down and post-filtered modes;
-    * a leaf reading ``created_at`` → drop :data:`_CREATED_AT_STAMP_BACKENDS`
-      (postgres / sqlite_lance / weaviate stamp ``now()`` on insert). surrealdb +
-      cypher KEEP it: surrealdb leaves an absent ``created_at`` NULL natively, and
-      the cypher seeder strips the writer's stamped ``now()`` back to NULL post-write
-      (``_strip_stamped_created_at`` in ``_conformance_neo4j.py``); ``occurred_at`` /
-      ``source_timestamp`` are never pruned;
+    * a leaf reading ``created_at`` over a seed that leaves it unset on ANY record →
+      RAISE at construction: ``created_at`` is always-present in production (NOT NULL
+      column + default + writer stamping), so an unset-``created_at`` seed models an
+      unreachable state — every record must stamp a concrete date. ``occurred_at`` /
+      ``source_timestamp`` stay nullable and are never pruned;
     * a surreal-only quirk (unsafe segment / metadata ``$date`` / present-null the
       filter distinguishes) → drop **surrealdb** only (:func:`_surreal_excluded`);
     * a metadata-only / ``occurred_at`` / ``source_timestamp`` case → all backends.
@@ -935,9 +920,15 @@ def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[See
     excluded: set[str] = set()
     for clause in iter_leaf_clauses(_resolve_ast(filter_)):
         root = clause.path[0] if clause.path else ""
-        if root == "created_at":
-            # A store that stamps created_at on insert can't keep the absent row NULL.
-            excluded |= _CREATED_AT_STAMP_BACKENDS
+        if root == "created_at" and any(rec.created_at is None for rec in seed):
+            # created_at is always-present in production (NOT NULL + default_factory +
+            # writer stamping): a seed that leaves it unset models an unreachable state
+            # and would silently diverge on the stamping legs.
+            raise ValueError(
+                f"filter reads created_at but seed record(s) leave it unset "
+                f"({sorted(r.id for r in seed if r.created_at is None)}): "
+                "stamp a concrete date on every record"
+            )
     if _seed_has_duplicate_external_id(seed):
         # The ``documents`` table has a UNIQUE ``(namespace_id, external_id)``
         # constraint, so a seed with two records sharing an ``external_id`` cannot be
@@ -978,21 +969,25 @@ _NON_NULL_STRING_KEY = "source_type"
 
 
 def _date_field_seed(key: str) -> tuple[SeedRecord, ...]:
-    """Five records for a date-key F-OP case: two ties, a mid, a miss, and a NULL row.
+    """Five records for a date-key F-OP case: two ties, a mid, a miss, and a fifth row.
 
     The date is stamped on ``key`` (one of the three date columns). ``-3``/``-4``
     are tied at the hit instant (so ``$eq`` keeps a pair), ``-2`` sits at the mid
     instant (in range of the lower bound, exercising boundary inclusion), ``-1`` is
-    the out-of-range miss, and ``-5`` carries no date at all — the NULL row F1
-    keeps under ``$ne``/``$nin``. All share the default content so they share an
-    embedding.
+    the out-of-range miss. The ``-5`` row is per-key: ``occurred_at`` /
+    ``source_timestamp`` are genuinely nullable, so their ``-5`` carries no date at
+    all — the NULL row F1 negation coverage lives there; ``created_at`` is
+    always-present (NOT NULL + default + writer stamping), so its ``-5`` sits at
+    the miss instant ``_DATE_MISS`` rather than NULL. All share the default content
+    so they share an embedding.
     """
+    fifth = SeedRecord(id=f"{key}-5", **{key: _DATE_MISS}) if key == "created_at" else SeedRecord(id=f"{key}-5")
     return (
         SeedRecord(id=f"{key}-1", **{key: _DATE_MISS}),
         SeedRecord(id=f"{key}-2", **{key: _DATE_MID}),
         SeedRecord(id=f"{key}-3", **{key: _DATE_HIT}),
         SeedRecord(id=f"{key}-4", **{key: _DATE_HIT}),
-        SeedRecord(id=f"{key}-5"),
+        fifth,
     )
 
 
@@ -1020,11 +1015,19 @@ def _date_op_cases(key: str) -> list[ConformanceCase]:
 
     ``expected_ids`` is computed by construction from the known five-record seed
     (``-1`` miss @ 2020-01-01, ``-2`` mid @ 2026-03-15, ``-3``/``-4`` tied @
-    2026-06-01, ``-5`` NULL). The bound is 2026-01-01, so ``$gt``/``$gte`` keep the
-    mid + the tied pair, the upper-bound ops keep only the miss, ``$eq`` against the
-    hit instant keeps the tied pair, and ``$lte`` against the hit keeps everything
-    dated. Negations follow F1: ``$ne``/``$nin``/``$nin:[]`` over the nullable date
-    column **include the NULL ``-5`` row**; ``$in:[]`` keeps nothing.
+    2026-06-01). The ``-5`` row is per-key: ``occurred_at`` / ``source_timestamp``
+    keep the NULL ``-5`` row (genuinely nullable; F1 negation coverage lives there),
+    while ``created_at`` is always-present (NOT NULL + default + writer stamping), so
+    its ``-5`` sits at the miss instant ``_DATE_MISS`` (2020-01-01). The bound is
+    2026-01-01, so
+    ``$gt``/``$gte`` keep the mid + the tied pair, the upper-bound ops keep the miss
+    (plus, for ``created_at``, the at-miss ``-5``), ``$eq`` against the hit instant
+    keeps the tied pair, and ``$lte`` against the hit keeps everything dated.
+    Negations follow F1: over a **nullable** date column (``occurred_at`` /
+    ``source_timestamp``) ``$ne``/``$nin``/``$nin:[]`` **include the NULL ``-5``
+    row**; over ``created_at`` the ``-5`` row keeps by VALUE-mismatch (it is dated at
+    the miss instant, not NULL) wherever the predicate excludes the hit. ``$in:[]``
+    keeps nothing.
 
     Date keys deliberately have **no** ``$exists`` case: ``DateOps`` carries no
     ``$exists`` field, so ``$exists`` on a date key is a *validation* failure (not
@@ -1039,11 +1042,11 @@ def _date_op_cases(key: str) -> list[ConformanceCase]:
     hit_iso = _DATE_HIT.isoformat().replace("+00:00", "Z")
 
     # ``backends`` is computed per-case from the filter + seed
-    # (:func:`_backends_for_filter`): a ``created_at`` predicate drops the live legs
-    # that stamp ``now()`` on insert (postgres / sqlite_lance / weaviate) while
-    # keeping surrealdb / cypher (which leave an absent ``created_at`` NULL);
-    # ``occurred_at`` / ``source_timestamp`` are user-supplied and stay on every
-    # backend. The surrealdb NONE<date asymmetry on lower-bound ops is handled in
+    # (:func:`_backends_for_filter`): a date predicate now imposes NO exclusions —
+    # every date key (``occurred_at`` / ``created_at`` / ``source_timestamp``) is
+    # oracle-comparable on every backend (``created_at`` is always-present — NOT NULL
+    # + default + writer stamping — so the live legs' ``now()`` stamping is unreachable
+    # on these seeds). The surrealdb NONE<date asymmetry on lower-bound ops is handled in
     # ``compile_surrealdb`` (a guarded ``IS NOT NONE``), so surreal keeps the
     # ``$lt`` / ``$lte`` date cases.
     def case(suffix: str, predicate: dict[str, Any], expected: frozenset[str], op_tag: str) -> ConformanceCase:
@@ -1059,15 +1062,27 @@ def _date_op_cases(key: str) -> list[ConformanceCase]:
             exercises=("F-OP", key, op_tag),
         )
 
+    # created_at is always-present (NOT NULL + default + writer stamping): its -5 row
+    # sits at the miss instant instead of NULL, so the lower-bound ops and the $in
+    # listing the miss keep it.
+    miss5 = frozenset({r5}) if key == "created_at" else frozenset()
     return [
         case("gt", {"$gt": bound}, frozenset({r2, r3, r4}), "$gt"),
         case("gte", {"$gte": bound}, frozenset({r2, r3, r4}), "$gte"),
-        case("lt", {"$lt": bound}, frozenset({r1}), "$lt"),
-        case("lte", {"$lte": bound}, frozenset({r1}), "$lte"),
+        case("lt", {"$lt": bound}, frozenset({r1}) | miss5, "$lt"),
+        case("lte", {"$lte": bound}, frozenset({r1}) | miss5, "$lte"),
         case("eq", {"$eq": hit_iso}, frozenset({r3, r4}), "$eq"),
-        # F1: $ne over a nullable date column includes the NULL -5 row.
+        # F1: $ne over a nullable date column (occurred_at / source_timestamp)
+        # includes the NULL -5 row. For created_at the -5 row is dated at the miss
+        # instant, so it is kept by VALUE-mismatch (it is not the hit) rather than by
+        # NULL-inclusion — either way r5 survives $ne against the hit.
         case("ne", {"$ne": hit_iso}, frozenset({r1, r2, r5}), "$ne"),
-        case("in", {"$in": [hit_iso, _DATE_MISS.isoformat().replace("+00:00", "Z")]}, frozenset({r1, r3, r4}), "$in"),
+        case(
+            "in",
+            {"$in": [hit_iso, _DATE_MISS.isoformat().replace("+00:00", "Z")]},
+            frozenset({r1, r3, r4}) | miss5,
+            "$in",
+        ),
         case("in-empty", {"$in": []}, frozenset(), "$in"),
         case("nin", {"$nin": [hit_iso]}, frozenset({r1, r2, r5}), "$nin"),
         case("nin-empty", {"$nin": []}, frozenset({r1, r2, r3, r4, r5}), "$nin"),
@@ -1215,15 +1230,15 @@ def _case(
 
     A thin constructor so the family generators read as a flat table of
     ``id · filter · expected_ids · exercises`` rows. The backend set is derived
-    via :func:`_backends_for_filter` — a metadata-only / ``occurred_at`` /
-    ``source_timestamp`` case widens to all backends (the in-memory oracle +
-    chronicle, the total-exact postgres + surrealdb, and the split cypher +
-    weaviate + sqlite_lance whose post-filter lands on the oracle); a case touching
-    a string document key or ``created_at`` is pruned with the documented
-    capability/seed reason. No family is silently skipped. A leaf on an unbacked
-    surreal system key keeps surrealdb in ``backends`` and unions it into
-    ``expect_unsupported`` (:func:`_surreal_unsupported`) so the surreal leg asserts
-    the raise rather than being skipped.
+    via :func:`_backends_for_filter` — every case widens to all backends (the
+    in-memory oracle + chronicle, the total-exact postgres + surrealdb, and the
+    split cypher + weaviate + sqlite_lance whose post-filter lands on the oracle).
+    The only remaining exclusions are seed-mechanics (a duplicate non-NULL
+    ``external_id`` drops the Document-path :data:`_SEED_CASE_BACKENDS`) and surreal
+    representation quirks (:func:`_surreal_excluded`). No family is silently skipped.
+    A leaf on an unbacked surreal system key keeps surrealdb in ``backends`` and
+    unions it into ``expect_unsupported`` (:func:`_surreal_unsupported`) so the
+    surreal leg asserts the raise rather than being skipped.
     """
     backends = _backends_for_filter(filter_, seed)
     return ConformanceCase(
