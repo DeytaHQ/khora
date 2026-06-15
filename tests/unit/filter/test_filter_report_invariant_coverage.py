@@ -190,6 +190,7 @@ _VALID_REPORT: dict = {
     "post_filtered": False,
     "pushed_keys": ["metadata.tier", "source_name"],
     "post_filtered_keys": [],
+    "unenforced_keys": [],
     "channels": {"vector": {"pushed_keys": ["metadata.tier", "source_name"], "post_filtered_keys": []}},
 }
 
@@ -209,6 +210,7 @@ def test_helper_accepts_a_valid_report() -> None:
                 "post_filtered": True,
                 "pushed_keys": ["source_name"],
                 "post_filtered_keys": ["metadata.tier"],
+                "unenforced_keys": [],
                 "channels": {"vector": {"pushed_keys": ["source_name"], "post_filtered_keys": ["metadata.tier"]}},
             },
             "pushed_down True with non-empty post_filtered_keys",
@@ -221,17 +223,20 @@ def test_helper_accepts_a_valid_report() -> None:
                 "post_filtered": True,
                 "pushed_keys": ["metadata.tier", "source_name"],
                 "post_filtered_keys": [],
+                "unenforced_keys": [],
                 "channels": {"vector": {"pushed_keys": ["source_name"], "post_filtered_keys": ["metadata.tier"]}},
             },
             "top-level pushed_keys disagrees with the channel fold",
         ),
-        # A key not in the leaf set (violates (c) subset + (e) channel subset).
+        # A key not in the leaf set, with the real leaves absent from all three
+        # lists (violates (c) total partition: the union {not_a_leaf} != leaves).
         (
             {
                 "pushed_down": False,
                 "post_filtered": False,
                 "pushed_keys": ["not_a_leaf"],
                 "post_filtered_keys": [],
+                "unenforced_keys": [],
                 "channels": {"vector": {"pushed_keys": ["not_a_leaf"], "post_filtered_keys": []}},
             },
             "pushed_keys names a key outside the leaf set",
@@ -243,6 +248,7 @@ def test_helper_accepts_a_valid_report() -> None:
                 "post_filtered": True,
                 "pushed_keys": ["source_name"],
                 "post_filtered_keys": ["source_name"],
+                "unenforced_keys": [],
                 "channels": {"vector": {"pushed_keys": ["source_name"], "post_filtered_keys": ["source_name"]}},
             },
             "pushed_keys and post_filtered_keys overlap",
@@ -254,6 +260,7 @@ def test_helper_accepts_a_valid_report() -> None:
                 "post_filtered": False,
                 "pushed_keys": ["source_name", "metadata.tier"],
                 "post_filtered_keys": [],
+                "unenforced_keys": [],
                 "channels": {"vector": {"pushed_keys": ["metadata.tier", "source_name"], "post_filtered_keys": []}},
             },
             "top-level pushed_keys not sorted",
@@ -265,6 +272,7 @@ def test_helper_accepts_a_valid_report() -> None:
                 "post_filtered": False,
                 "pushed_keys": ["source_name"],
                 "post_filtered_keys": ["metadata.tier"],
+                "unenforced_keys": [],
                 "channels": {"vector": {"pushed_keys": ["source_name"], "post_filtered_keys": ["metadata.tier"]}},
             },
             "non-empty post_filtered_keys but post_filtered flag False",
@@ -276,10 +284,58 @@ def test_helper_accepts_a_valid_report() -> None:
                 "post_filtered": False,
                 "pushed_keys": ["metadata.tier", "source_name"],
                 "post_filtered_keys": [],
+                "unenforced_keys": [],
                 "channels": {"vector": {"pushed_keys": ["metadata.tier", "source_name"], "post_filtered_keys": []}},
                 "supported": True,
             },
             "extra top-level key (schema)",
+        ),
+        # A constraint leaf present in NONE of the three lists (violates (c) total
+        # partition): pushed={source_name}, post={}, unenforced={} → metadata.tier
+        # is missing from all three so the union != leaves. Channels gate only
+        # source_name, so the fold (e) is consistent for source_name and the (c)
+        # total-partition equality is the tripwire. (e) ALSO catches metadata.tier
+        # as an ungated leaf absent from unenforced_keys — both legitimately flag
+        # the same defect; the (c) equality assertion fires first.
+        (
+            {
+                "pushed_down": False,
+                "post_filtered": False,
+                "pushed_keys": ["source_name"],
+                "post_filtered_keys": [],
+                "unenforced_keys": [],
+                "channels": {"vector": {"pushed_keys": ["source_name"], "post_filtered_keys": []}},
+            },
+            "constraint leaf in none of pushed/post_filtered/unenforced (total-partition)",
+        ),
+        # unenforced_keys overlaps pushed_keys (violates (c) pairwise-disjoint):
+        # source_name appears in BOTH pushed_keys and unenforced_keys.
+        (
+            {
+                "pushed_down": False,
+                "post_filtered": True,
+                "pushed_keys": ["source_name"],
+                "post_filtered_keys": ["metadata.tier"],
+                "unenforced_keys": ["source_name"],
+                "channels": {"vector": {"pushed_keys": ["source_name"], "post_filtered_keys": ["metadata.tier"]}},
+            },
+            "unenforced_keys overlaps pushed_keys (not disjoint)",
+        ),
+        # A non-empty unenforced_keys where the partition is still total + disjoint
+        # and the channel fold is consistent — ONLY the (g) health invariant trips.
+        # metadata.tier is genuinely ungated (channels gate only source_name), so
+        # the fold (e) is satisfied (ungated leaf ⊆ unenforced_keys), (c) total +
+        # disjoint holds, and pushed_down/post_filtered are both False.
+        (
+            {
+                "pushed_down": False,
+                "post_filtered": False,
+                "pushed_keys": ["source_name"],
+                "post_filtered_keys": [],
+                "unenforced_keys": ["metadata.tier"],
+                "channels": {"vector": {"pushed_keys": ["source_name"], "post_filtered_keys": []}},
+            },
+            "non-empty unenforced_keys trips the (g) enforcement-health invariant",
         ),
     ],
     ids=lambda v: v if isinstance(v, str) else "",
@@ -292,6 +348,13 @@ def test_helper_rejects_a_malformed_report(report: dict, why: str) -> None:
 
 def test_helper_rejects_a_leafless_report_claiming_pushed_down() -> None:
     """A leafless report that claims pushed_down=True must raise (the (d) else branch)."""
-    bad = {"pushed_down": True, "post_filtered": False, "pushed_keys": [], "post_filtered_keys": [], "channels": {}}
+    bad = {
+        "pushed_down": True,
+        "post_filtered": False,
+        "pushed_keys": [],
+        "post_filtered_keys": [],
+        "unenforced_keys": [],
+        "channels": {},
+    }
     with pytest.raises(AssertionError):
         assert_filter_report_invariants(bad, frozenset())

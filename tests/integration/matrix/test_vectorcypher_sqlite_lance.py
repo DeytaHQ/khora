@@ -1028,5 +1028,6 @@ async def test_vc_filter_report_no_filter_on_embedded(kb: Khora, namespace_id: U
         "post_filtered": False,
         "pushed_keys": [],
         "post_filtered_keys": [],
+        "unenforced_keys": [],
         "channels": {},
     }
