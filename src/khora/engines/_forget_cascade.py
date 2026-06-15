@@ -134,7 +134,15 @@ async def cascade_forget_extraction(
     # survive the forget. Sweep them directly in the graph store (Cypher,
     # no deserialization). Neo4j-only today; a getattr miss is a no-op so
     # other graph backends keep current behavior.
-    swept = await _sweep_malformed_orphan_relationships(graph, document_id, namespace_id)
+    #
+    # Only sweep when the namespace had at least one deserializable
+    # relationship: the sweep is an unindexed full-relationship scan (#1241)
+    # and the common forget_session/expire_sessions case is a document whose
+    # namespace has no graph edges at all. Trade-off: a namespace whose edges
+    # are *all* malformed (so enumeration returns nothing) is not swept until a
+    # well-formed edge exists — a transient/repair-tool concern, tracked in
+    # #1241. (Multi-source malformed survivors are also not handled here: #1242.)
+    swept = await _sweep_malformed_orphan_relationships(graph, document_id, namespace_id) if relationships else 0
     if swept:
         _FORGET_DEGRADED_COUNTER.add(swept, {"reason": "malformed_relationship_swept"})
         logger.warning(
