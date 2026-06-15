@@ -624,8 +624,8 @@ class TestFilterCarriesIntoAdaptiveSubSearches:
             "CHANGE-decomposition sub-search dropped the caller filter_ast"
         )
 
-        # Recency channel ran and received the caller filter for its in-memory
-        # post-filter.
+        # Recency channel ran and received the caller filter to push into its
+        # recency SQL.
         retriever._recency_channel_chunks.assert_awaited()
         recency_kwargs = retriever._recency_channel_chunks.await_args.kwargs
         assert recency_kwargs.get("filter_ast") is ast, "recency channel did not receive the caller filter_ast"
@@ -650,14 +650,19 @@ class TestFilterCarriesIntoAdaptiveSubSearches:
         recency_kwargs = retriever._recency_channel_chunks.await_args.kwargs
         assert recency_kwargs.get("filter_ast") is None, "no-filter recall leaked a filter into the recency channel"
 
-    async def test_recency_channel_post_filters_violating_chunk(self) -> None:
-        """The recency channel drops a chunk that violates the caller filter.
+    async def test_recency_channel_excludes_violating_chunk(self) -> None:
+        """A chunk that violates the caller filter never reaches the recency pool.
 
-        The recency channel reads the relational chunks table and cannot push the
-        filter to SQL, so it post-filters in memory. A recent chunk whose metadata
-        does not satisfy the filter must be dropped before it reaches the pool.
+        The recency channel pushes the caller filter into the temporal store's
+        ``search_recent_chunks`` SQL (GitHub issue #1223), so a recent chunk whose
+        metadata does not satisfy the filter is excluded at the source and never
+        reaches the pool. The stub store below simulates that SQL ``WHERE`` by
+        applying the same compiled predicate the real backend would.
         """
         from khora.core.models import Chunk
+        from khora.filter.compilers.python import compile_python
+        from khora.filter.execute import build_compile_context
+        from khora.filter.report import ChannelPlan
 
         ns_id = uuid4()
         retriever = _make_retriever(ns_id, complexity=QueryComplexity.MODERATE)
@@ -681,12 +686,34 @@ class TestFilterCarriesIntoAdaptiveSubSearches:
         )
         violating.embedding = [0.1] * 1536
 
-        retriever._vector_store.search_recent_chunks = AsyncMock(return_value=[(matching, None), (violating, None)])
-        # Floor of 0.0 so both pass the cosine gate and only the post-filter culls.
+        # The store honors ``filter_ast`` exactly as the pgvector backend does:
+        # it compiles the filter and drops non-matching rows before returning
+        # them, then reports an honest ``pushed_keys`` plan. A violating row is
+        # never fetched — there is no in-memory post-filter in the channel.
+        async def _recent_with_pushdown(
+            namespace_id: UUID,
+            limit: int,
+            *,
+            created_after: Any = None,
+            filter_ast: FilterNode | None = None,
+            filter_plan_out: list[ChannelPlan] | None = None,
+        ) -> list[tuple[Any, float | None]]:
+            rows = [(matching, None), (violating, None)]
+            if filter_ast is not None:
+                predicate = compile_python(
+                    filter_ast, build_compile_context("khora_chunks", on_unsupported="raise")
+                ).predicate
+                rows = [(chunk, score) for chunk, score in rows if predicate(chunk)]
+                if filter_plan_out is not None:
+                    filter_plan_out.append(ChannelPlan(pushed_keys=frozenset({"metadata.tag"})))
+            return rows
+
+        retriever._vector_store.search_recent_chunks = _recent_with_pushdown
+        # Floor of 0.0 so both pass the cosine gate and only the SQL pushdown culls.
         retriever._config.temporal_query_relevance_floor = 0.0
 
-        # A metadata-only filter so the post-filter (not the system-key columns,
-        # which these synthetic chunks don't carry) is the sole deciding factor.
+        # A metadata-only filter so the pushed predicate (not the system-key
+        # columns, which these synthetic chunks don't carry) is the sole factor.
         ast = parse_to_ast(RecallFilter.model_validate({"metadata.tag": {"$in": ["urgent", "release"]}}))
         result = await retriever._recency_channel_chunks(
             query_embedding=[0.1] * 1536,

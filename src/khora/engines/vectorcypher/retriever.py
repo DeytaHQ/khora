@@ -38,6 +38,7 @@ except ImportError:
 
 from khora.core.diagnostics import Degradation
 from khora.core.models import Chunk, Entity, Relationship
+from khora.filter.model import RecallFilterUnsupportedError
 from khora.filter.report import ChannelPlan
 from khora.filter.telemetry import record_graph_channel_empty
 from khora.query import SearchMode
@@ -190,6 +191,26 @@ _BM25_DEGRADED_COUNTER = metric_counter(
         "[], dropping the lexical contribution from RRF fusion. The same event "
         "is also appended to RecallResult.engine_info['degradations']. Labels: "
         "reason (channel_exception). NO namespace_id label - cardinality rule."
+    ),
+)
+
+# ADR-001. When the recency channel's ``search_recent_chunks`` raises an
+# operational fault (DB / network), the channel returns [] and its
+# pool-augmentation contribution drops out of RRF. The catch site records a
+# Degradation and bumps this counter so the silently-dropped channel is
+# observable. (A RecallFilterUnsupportedError is NOT counted here - it is a
+# determinism error that propagates, never a degradable fault.) The same event
+# is appended to RecallResult.engine_info['degradations']. NO namespace_id
+# label - cardinality rule.
+_RECENCY_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.recency_channel.degraded_total",
+    unit="1",
+    description=(
+        "ADR-001. VectorCypher recency channel silent fallback. Incremented when "
+        "search_recent_chunks raises an operational fault and the channel returns "
+        "[], dropping the recency pool-augmentation contribution from RRF fusion. "
+        "The same event is also appended to RecallResult.engine_info['degradations']. "
+        "Labels: reason (channel_exception). NO namespace_id label - cardinality rule."
     ),
 )
 
@@ -1770,25 +1791,27 @@ class VectorCypherRetriever:
             # follow-up: decouple channel filter from synthesized floor).
             #
             # The recency channel reads the temporal store's chunk table
-            # (``khora_chunks`` on pgvector). Pushdown of a khora_chunks-compiled
-            # predicate is NOT implemented for this recency SQL, so the caller
-            # filter is enforced as a full-AST in-memory post-filter inside
-            # _recency_channel_chunks. Quality trade-off (accepted): under a
-            # restrictive caller filter the recency channel post-filters in
-            # memory and may return fewer rows, slightly under-recalling the
-            # "current state" intent on a tightly date-filtered namespace.
+            # (``khora_chunks`` on pgvector). The caller filter is pushed into
+            # that recency SQL — the store compiles it to the SAME raise-mode
+            # ``khora_chunks`` WHERE the vector path uses — so no filter-violating
+            # chunk is fetched and a leaf the compiler cannot push raises (matching
+            # the vector channel's fail-loud contract). Quality trade-off
+            # (accepted): under a restrictive caller filter the recency SQL may
+            # return fewer rows, slightly under-recalling the "current state"
+            # intent on a tightly date-filtered namespace.
             # The recency channel records its own ChannelPlan internally — and
-            # only when it actually produced post-filtered chunks on the real
-            # execution path. Backends WITHOUT the capability (e.g. SurrealDB)
-            # return the protocol default [] from ``search_recent_chunks``, so
-            # the channel honestly never appears in the report rather than being
-            # credited with a disposition it never reached.
+            # only when it actually produced gating chunks on the real execution
+            # path. Backends WITHOUT the capability (e.g. SurrealDB) return the
+            # protocol default [] from ``search_recent_chunks``, so the channel
+            # honestly never appears in the report rather than being credited with
+            # a disposition it never reached.
             recent_chunks = await self._recency_channel_chunks(
                 query_embedding=query_embedding,
                 namespace_id=namespace_id,
                 temporal_filter=None,
                 filter_ast=filter_ast,
                 filter_channel_plans=filter_channel_plans,
+                degradations=degradations,
             )
             if recent_chunks:
                 existing_ids = {c[0] for c in vector_chunks}
@@ -1879,7 +1902,7 @@ class VectorCypherRetriever:
         # Assemble the SQL-channel filter-pushdown plans from each channel's
         # ACTUAL compile (graph was recorded at its post-filter site; recency
         # records itself inside ``_recency_channel_chunks`` only when it actually
-        # produced post-filtered chunks). A channel appears ONLY if it actually
+        # produced surviving chunks that GATE in RRF). A channel appears ONLY if it actually
         # executed this recall AND a caller filter is present. All channels GATE
         # (each feeds RRF), so the report builder's per-leaf partition reports a
         # leaf as post-filtered if ANY gating channel re-checked it in memory,
@@ -3625,6 +3648,7 @@ class VectorCypherRetriever:
         temporal_filter: TemporalFilter | None,
         filter_ast: FilterNode | None = None,
         filter_channel_plans: dict[str, ChannelPlan] | None = None,
+        degradations: list[Degradation] | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Issue #567 A3 — pure-recency candidate pool.
 
@@ -3636,20 +3660,29 @@ class VectorCypherRetriever:
         ``temporal_query_relevance_floor``. Pool augmentation only — the
         caller merges results into the existing vector pool.
 
-        ``filter_ast``: the caller recall-filter AST. Pushdown of a
-        khora_chunks-compiled predicate is not implemented for this recency
-        SQL, so the filter is enforced as a full-AST in-memory post-filter —
-        no filter-violating chunk reaches RRF. (Trade-off: under a restrictive
-        caller filter this may return fewer rows; see the call site.)
+        ``filter_ast``: the caller recall-filter AST. It is pushed into the
+        recency SQL — the store compiles it to the SAME raise-mode
+        ``khora_chunks`` WHERE predicate the vector path uses, so no
+        filter-violating chunk is ever fetched. (No in-memory post-filter:
+        the prior implementation rebuilt each chunk into a provenance-blank
+        public ``Chunk`` and could not enforce provenance leaves — GitHub
+        issue #1223.)
 
         ``filter_channel_plans``: when provided, the honest recency ChannelPlan
-        is recorded here — but ONLY on the real execution path, after the channel
-        has actually post-filtered surviving chunks under a filter. The channel
-        pushes nothing (pure recency sort) and re-checks every leaf in memory, so
-        the plan post-filters every leaf. The early-returns above (backend
-        without the capability, no rows, no embeddings) record nothing, so a
-        channel that never produced a post-filtered result is never credited
-        with a disposition.
+        (handed back by the store via the per-call plan sink) is recorded here —
+        but ONLY under a caller filter (``filter_ast is not None``, symmetric with
+        the vector / BM25 channels), on the real execution path, and only when the
+        channel actually produced surviving chunks that will gate in RRF. Because
+        the SQL pushes every leaf, the plan credits each as pushed. The
+        early-returns above (backend without the capability, no rows, no
+        embeddings) record nothing, so a channel that never produced a gating
+        result is never credited with a disposition.
+
+        ``degradations``: when provided, a structured ``Degradation`` is appended
+        if ``search_recent_chunks`` raises an operational fault (DB / network), so
+        the silently-dropped pool-augmentation channel is observable (ADR-001).
+        A ``RecallFilterUnsupportedError`` is NOT a degradation — it propagates
+        (fail-loud), matching the vector channel's contract.
 
         Returns ``list[tuple[chunk_id, score, Chunk]]`` matching the
         shape of ``_vector_search_chunks`` so RRF can fuse it directly.
@@ -3662,15 +3695,42 @@ class VectorCypherRetriever:
             namespace_id=str(namespace_id),
             limit=self._config.temporal_recency_channel_limit,
         ) as span:
+            recency_plan_sink: list[ChannelPlan] = []
             try:
                 recent_tuples = await self._vector_store.search_recent_chunks(
                     namespace_id=namespace_id,
                     limit=self._config.temporal_recency_channel_limit,
                     created_after=getattr(temporal_filter, "occurred_after", None),
+                    filter_ast=filter_ast,
+                    filter_plan_out=recency_plan_sink,
                 )
+            except RecallFilterUnsupportedError:
+                # A filter leaf the khora_chunks compiler cannot push is a hard
+                # determinism error, not a degradable runtime fault. The vector
+                # channel runs the SAME raise-mode compile and lets it propagate
+                # (it is never caught) — the recency channel must match that
+                # fail-loud contract rather than silently dropping the channel
+                # and masking a filter that was never enforced.
+                raise
             except Exception as exc:
-                logger.debug("Recency channel SQL failed: {}", exc)
+                # Operational fault (DB / network). The recency channel is pool
+                # augmentation only, so degrade to [] — the vector + BM25
+                # channels still enforce the filter and carry the report. ADR-001:
+                # record a structured Degradation + bump the counter so the
+                # silently-dropped channel is observable (matches the bm25 /
+                # rel_fetch / cypher_expand convention).
+                logger.warning("Recency channel SQL failed: {}", exc, exc_info=True)
                 span.set_attribute("error", str(exc)[:200])
+                _RECENCY_DEGRADED_COUNTER.add(1, attributes={"reason": "channel_exception"})
+                if degradations is not None:
+                    degradations.append(
+                        Degradation(
+                            component="vectorcypher.recency_channel",
+                            reason="channel_exception",
+                            detail=str(exc)[:200] or None,
+                            exception=type(exc).__name__,
+                        )
+                    )
                 return []
 
             if not recent_tuples:
@@ -3733,28 +3793,19 @@ class VectorCypherRetriever:
                     )
                 )
 
-            # Enforce the caller filter in memory: the recency channel reads the
-            # relational chunks table and cannot push a khora_chunks-compiled
-            # predicate to SQL, so drop any chunk that fails the full AST. This
-            # keeps filter-violating recent chunks out of RRF.
-            if filter_ast is not None:
-                from khora.filter.compilers.python import compile_python
-                from khora.filter.execute import build_compile_context, filter_leaf_keys
-
-                recency_post_filter = compile_python(
-                    filter_ast, build_compile_context("Chunk", on_unsupported="split")
-                ).predicate
-                filtered = [(cid, s, ch) for (cid, s, ch) in filtered if recency_post_filter(ch)]
-
-                # Record the honest recency ChannelPlan only here, on the real
-                # execution path, and only when the channel actually produced
-                # post-filtered chunks that will GATE in RRF. The channel pushed
-                # nothing (pure recency sort) and re-checked every leaf in memory,
-                # so every leaf is post-filtered. A channel that survived to here
-                # with zero rows contributes no candidates to fusion, so it gates
-                # nothing and is not recorded.
-                if filter_channel_plans is not None and filtered:
-                    filter_channel_plans["recency"] = ChannelPlan(post_filtered_keys=filter_leaf_keys(filter_ast))
+            # Record the honest recency ChannelPlan from the SQL pushdown the
+            # store performed (``recency_plan_sink[0]``). The recency SQL now
+            # compiles ``filter_ast`` into the ``khora_chunks`` WHERE clause —
+            # the SAME raise-mode compile the vector path uses — so every leaf
+            # is pushed and no filter-violating chunk reaches this point. Record
+            # only when there IS a caller filter (symmetric with the vector /
+            # BM25 channels, which the caller gates on ``filter_ast is not None``)
+            # AND the store reported a plan AND the channel produced surviving
+            # chunks that will GATE in RRF: a no-filter recall, or a channel that
+            # survived to here with zero rows, contributes nothing to gate and is
+            # not credited with a disposition.
+            if filter_ast is not None and filter_channel_plans is not None and recency_plan_sink and filtered:
+                filter_channel_plans["recency"] = recency_plan_sink[0]
 
             span.set_attribute("raw_count", len(recent_tuples))
             span.set_attribute("filtered_count", len(filtered))

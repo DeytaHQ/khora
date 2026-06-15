@@ -246,6 +246,8 @@ class TemporalVectorStore(Protocol):
         limit: int,
         *,
         created_after: datetime | None = None,
+        filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[tuple[Chunk, float | None]]:
         """Return the ``limit`` most-recent chunks in the namespace.
 
@@ -254,6 +256,18 @@ class TemporalVectorStore(Protocol):
         The recency axis is ``COALESCE(occurred_at, source_timestamp,
         created_at)`` (event-time → producer-time → ingest-time), narrowed
         from above by the optional ``created_after`` bound on the same axis.
+
+        ``filter_ast`` is the canonical recall-filter AST. The pgvector
+        backend compiles it to the SAME ``khora_chunks`` WHERE predicate the
+        vector path uses; the other backends accept it for protocol parity
+        and ignore it (no compilation yet).
+
+        ``filter_plan_out`` is the optional per-call sink for the honest
+        filter-pushdown plan, mirroring :meth:`search` / :meth:`search_fulltext`.
+        When provided, the backend appends exactly one
+        :class:`~khora.filter.report.ChannelPlan` built from THIS call's actual
+        compile — a raise-mode backend reports every leaf pushed. The default
+        (return ``[]``) leaves it untouched.
 
         Returns ``(chunk, None)`` tuples; the ``None`` signals "no cosine
         score available" so the caller branches on it. The default empty
