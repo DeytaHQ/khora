@@ -1881,7 +1881,7 @@ class VectorCypherRetriever:
         # Assemble the SQL-channel filter-pushdown plans from each channel's
         # ACTUAL compile (graph was recorded at its post-filter site; recency
         # records itself inside ``_recency_channel_chunks`` only when it actually
-        # produced post-filtered chunks). A channel appears ONLY if it actually
+        # produced surviving chunks that GATE in RRF). A channel appears ONLY if it actually
         # executed this recall AND a caller filter is present. All channels GATE
         # (each feeds RRF), so the report builder's per-leaf partition reports a
         # leaf as post-filtered if ANY gating channel re-checked it in memory,

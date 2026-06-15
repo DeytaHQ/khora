@@ -384,3 +384,64 @@ async def test_eq_filter_includes_chunk_records_pushed_plan() -> None:
     plan = filter_channel_plans["recency"]
     assert "source_name" in plan.pushed_keys
     assert sorted(plan.post_filtered_keys) == []
+
+
+class _RaisingRecencyStore:
+    """Temporal store whose ``search_recent_chunks`` raises ``exc`` — models a
+    backend that rejects a filter leaf it cannot push (``RecallFilterUnsupportedError``)
+    or hits an operational fault (a generic exception)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def search_recent_chunks(
+        self,
+        namespace_id: UUID,
+        limit: int,
+        *,
+        created_after: datetime | None = None,
+        filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
+    ) -> list[tuple[Chunk, float | None]]:
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_unsupported_filter_leaf_propagates_fail_loud() -> None:
+    """A filter leaf the recency SQL cannot push raises ``RecallFilterUnsupportedError``,
+    and the channel re-raises it rather than swallowing it — matching the vector
+    channel's fail-loud contract so an unenforceable filter never silently no-ops."""
+    from khora.filter.model import RecallFilterUnsupportedError
+
+    retriever = _recency_retriever()
+    retriever._vector_store = _RaisingRecencyStore(RecallFilterUnsupportedError("<leaf>", "unsupported"))
+
+    filter_ast = parse_to_ast(RecallFilter.model_validate({"source_name": {"$ne": "secret"}}))
+
+    with pytest.raises(RecallFilterUnsupportedError):
+        await retriever._recency_channel_chunks(
+            query_embedding=[1.0, 0.0, 0.0],
+            namespace_id=uuid4(),
+            temporal_filter=None,
+            filter_ast=filter_ast,
+        )
+
+
+@pytest.mark.asyncio
+async def test_operational_fault_degrades_to_empty() -> None:
+    """An operational fault (DB / network) degrades the recency channel to ``[]``
+    — it is pool augmentation only, so the vector + BM25 channels still enforce
+    the filter and carry the report. A generic exception must NOT propagate."""
+    retriever = _recency_retriever()
+    retriever._vector_store = _RaisingRecencyStore(RuntimeError("connection reset"))
+
+    filter_ast = parse_to_ast(RecallFilter.model_validate({"source_name": {"$ne": "secret"}}))
+
+    result = await retriever._recency_channel_chunks(
+        query_embedding=[1.0, 0.0, 0.0],
+        namespace_id=uuid4(),
+        temporal_filter=None,
+        filter_ast=filter_ast,
+    )
+
+    assert result == []
