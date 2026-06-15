@@ -684,9 +684,18 @@ async def seed_case(coord: StorageCoordinator, case: ConformanceCase) -> dict[st
     )
     namespace_id = ns.id
 
-    id_map: dict[str, UUID] = {}
-    chunks: list[Chunk] = []
-    for record in case.seed_records:
+    # Group seed records by their non-NULL ``external_id`` and write one Document per
+    # group (production-NORMAL: one document chunked into N pieces → N chunks sharing
+    # one denormalized ``external_id``). The ``documents`` UNIQUE ``(namespace_id,
+    # external_id)`` constraint is satisfied because each distinct non-NULL value owns
+    # exactly one Document. Records with ``external_id is None`` each get their own
+    # Document (NULL never violates UNIQUE). The §2 guard guarantees the shared denorm
+    # fields are identical across a group, so they are read off any member.
+    docs_by_external_id: dict[str, UUID] = {}
+
+    async def _document_id_for(record: SeedRecord) -> UUID:
+        if record.external_id is not None and record.external_id in docs_by_external_id:
+            return docs_by_external_id[record.external_id]
         doc = Document(
             namespace_id=namespace_id,
             content=record.content,
@@ -699,10 +708,17 @@ async def seed_case(coord: StorageCoordinator, case: ConformanceCase) -> dict[st
             title=record.title,
         )
         await coord.create_document(doc)
+        if record.external_id is not None:
+            docs_by_external_id[record.external_id] = doc.id
+        return doc.id
 
+    id_map: dict[str, UUID] = {}
+    chunks: list[Chunk] = []
+    for record in case.seed_records:
+        document_id = await _document_id_for(record)
         chunk_kwargs: dict[str, Any] = {
             "namespace_id": namespace_id,
-            "document_id": doc.id,
+            "document_id": document_id,
             "content": record.content,
             "chunk_index": 0,
             "embedding": fake_embedding(record.content, dim=EMBED_DIM),
@@ -757,13 +773,6 @@ _LIVE_BACKENDS: frozenset[str] = _TOTAL_BACKENDS | _SPLIT_BACKENDS
 
 # Every backend a metadata-only / occurred_at / source_timestamp case can run on.
 _OP_BACKENDS: frozenset[str] = _INMEM_BACKENDS | _LIVE_BACKENDS
-
-# The live backends whose runner seeds through ``seed_case`` — i.e. it writes one
-# ``Document`` per record into the relational ``documents`` table (which enforces
-# UNIQUE ``(namespace_id, external_id)``). A case whose seed has a duplicate non-NULL
-# ``external_id`` cannot be written here. The surrealdb / cypher runners seed rows
-# directly (no ``documents`` table), so they are unaffected.
-_SEED_CASE_BACKENDS: frozenset[str] = frozenset({"postgres", "sqlite_lance", "weaviate"})
 
 # Mirrors ``compile_surrealdb._SAFE_SEGMENT_RE`` (kept in sync intentionally): a
 # metadata path segment surrealdb can safely interpolate. A segment that fails this
@@ -858,8 +867,8 @@ def _with_metadata(rec: SeedRecord, metadata: dict[str, Any]) -> SeedRecord:
 # from :data:`SYSTEM_KEYS` (NOT imported from the engines layer, which would be a
 # filter→engines inversion): the store's ``_BACKED_SYSTEM_KEYS`` is the source of
 # truth for the store + the QA drift-gate test, and conformance encodes its surreal
-# capability gap locally — the same way it encodes :data:`_SEED_CASE_BACKENDS`, etc.
-# (kept consistent by the store-side drift test). A predicate on one of these raises
+# capability gap locally — the same way it encodes its other per-backend capability
+# rules (kept consistent by the store-side drift test). A predicate on one of these raises
 # ``RecallFilterUnsupportedError`` on the total surreal leg (no post-filter safety net).
 _UNBACKED_SYSTEM_KEYS: frozenset[str] = SYSTEM_KEYS - frozenset({"occurred_at", "created_at"})
 
@@ -929,13 +938,7 @@ def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[See
                 f"({sorted(r.id for r in seed if r.created_at is None)}): "
                 "stamp a concrete date on every record"
             )
-    if _seed_has_duplicate_external_id(seed):
-        # The ``documents`` table has a UNIQUE ``(namespace_id, external_id)``
-        # constraint, so a seed with two records sharing an ``external_id`` cannot be
-        # written through the ``seed_case`` Document path (postgres / sqlite_lance /
-        # weaviate). surrealdb / cypher seed onto the chunk row directly (no documents
-        # UNIQUE), so they are unaffected — drop only the Document-path backends.
-        excluded |= _SEED_CASE_BACKENDS
+    _assert_external_id_group_denorm_consistent(seed)
     if _surreal_excluded(filter_, seed):
         # A surreal-only representation quirk (no post-filter safety net on the total
         # surreal leg) — drop surrealdb; every other backend keeps the case.
@@ -943,16 +946,49 @@ def _backends_for_filter(filter_: dict[str, Any] | RecallFilter, seed: tuple[See
     return _OP_BACKENDS - excluded
 
 
-def _seed_has_duplicate_external_id(seed: tuple[SeedRecord, ...]) -> bool:
-    """Whether the seed has two records sharing a non-NULL ``external_id``.
+# The denormalized document fields a chunk inherits from its parent Document. Records
+# sharing a non-NULL ``external_id`` are grouped under ONE Document by ``seed_case``
+# (production-NORMAL: one document chunked into N pieces), so they must agree on every
+# denormalized field plus ``content`` — otherwise the group would silently lose one
+# record's distinct values on the Document-path backends.
+_GROUP_DENORM_FIELDS: tuple[str, ...] = (
+    "source_type",
+    "source_name",
+    "source_url",
+    "external_id",
+    "content_type",
+    "source",
+    "title",
+    "source_timestamp",
+    "content",
+)
 
-    ``documents`` enforces UNIQUE ``(namespace_id, external_id)`` and ``seed_case``
-    writes one Document per record under one namespace, so a duplicate non-NULL
-    ``external_id`` violates the constraint on the Document-path backends (the
-    ``external_id`` F-OP seed's ``$eq``-tied pair is the case in point).
+
+def _assert_external_id_group_denorm_consistent(seed: tuple[SeedRecord, ...]) -> None:
+    """Guard the §1 grouping: records sharing a non-NULL ``external_id`` must agree on denorm fields.
+
+    ``seed_case`` writes one Document per distinct non-NULL ``external_id`` and reads
+    the shared denormalized fields off any member of the group, so a group whose
+    members disagree on those fields would silently drop the off-member's values. The
+    F-OP ``external_id`` seed's ``$eq``-tied pair is the motivating case (both members
+    carry identical denorm fields). Raise a clear error naming the offending
+    ``external_id`` and field if a group ever diverges.
     """
-    seen = [rec.external_id for rec in seed if rec.external_id is not None]
-    return len(seen) != len(set(seen))
+    groups: dict[str, list[SeedRecord]] = {}
+    for rec in seed:
+        if rec.external_id is not None:
+            groups.setdefault(rec.external_id, []).append(rec)
+    for external_id, members in groups.items():
+        first = members[0]
+        for member in members[1:]:
+            for field_name in _GROUP_DENORM_FIELDS:
+                if getattr(member, field_name) != getattr(first, field_name):
+                    raise ValueError(
+                        f"seed records sharing external_id {external_id!r} disagree on "
+                        f"{field_name!r} ({getattr(first, field_name)!r} vs "
+                        f"{getattr(member, field_name)!r}): a grouped Document carries one "
+                        "shared value for every denorm field"
+                    )
 
 
 # The one non-null string system key — both the ``SeedRecord`` and the ``Document``
@@ -1233,9 +1269,8 @@ def _case(
     via :func:`_backends_for_filter` — every case widens to all backends (the
     in-memory oracle + chronicle, the total-exact postgres + surrealdb, and the
     split cypher + weaviate + sqlite_lance whose post-filter lands on the oracle).
-    The only remaining exclusions are seed-mechanics (a duplicate non-NULL
-    ``external_id`` drops the Document-path :data:`_SEED_CASE_BACKENDS`) and surreal
-    representation quirks (:func:`_surreal_excluded`). No family is silently skipped.
+    The only remaining exclusions are surreal representation quirks
+    (:func:`_surreal_excluded`). No family is silently skipped.
     A leaf on an unbacked surreal system key keeps surrealdb in ``backends`` and
     unions it into ``expect_unsupported`` (:func:`_surreal_unsupported`) so the
     surreal leg asserts the raise rather than being skipped.
