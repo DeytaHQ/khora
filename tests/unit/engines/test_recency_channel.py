@@ -18,6 +18,9 @@ from khora.core.models import Chunk
 from khora.engines.skeleton.backends import TemporalVectorStore
 from khora.engines.vectorcypher.retriever import RetrieverConfig, VectorCypherRetriever
 from khora.filter import FilterNode, RecallFilter, parse_to_ast
+from khora.filter.compilers.python import compile_python
+from khora.filter.execute import build_compile_context
+from khora.filter.report import ChannelPlan
 
 
 def _make_chunk(content: str, occurred_at: datetime | None, embedding: list[float]) -> Chunk:
@@ -225,3 +228,159 @@ async def test_protocol_default_store_returns_empty_and_records_no_plan() -> Non
     # The recency channel honestly never appears in the report.
     assert "recency" not in filter_channel_plans
     assert filter_channel_plans == {}
+
+
+# --------------------------------------------------------------------------- #
+# GitHub issue #1223 — the recency channel must push the recall filter into the
+# SQL so a filter-violating recent chunk is never fetched, and must report the
+# pushdown honestly. Before the fix the channel rebuilt each row into a
+# provenance-blank public ``Chunk`` and ran an in-memory post-filter that could
+# not read ``source_name`` — so a chunk whose ``source_name`` violated the
+# filter leaked into the merged pool. These tests pin both the no-leak behavior
+# and the honest ChannelPlan recording.
+# --------------------------------------------------------------------------- #
+
+
+class _FilterAwareRecencyStore:
+    """A stub temporal store that simulates the pgvector SQL pushdown.
+
+    ``search_recent_chunks`` honors ``filter_ast`` by evaluating it against the
+    stored chunk's REAL ``source_name`` (the denormalized provenance field that
+    lives on the SQL row, not on the public ``Chunk`` the channel rebuilds) —
+    mirroring the WHERE predicate the real ``khora_chunks`` compile produces. A
+    chunk whose ``source_name`` fails the predicate is dropped before it is ever
+    returned, exactly as the SQL would never fetch it. When ``filter_ast`` is set
+    the store appends ``ChannelPlan(pushed_keys=frozenset({"source_name"}))`` to
+    ``filter_plan_out``, matching the ``consumed_keys`` the pg compiler reports.
+    """
+
+    def __init__(self, chunk: Chunk, source_name: str) -> None:
+        self._chunk = chunk
+        self._source_name = source_name
+
+    async def search_recent_chunks(
+        self,
+        namespace_id: UUID,
+        limit: int,
+        *,
+        created_after: datetime | None = None,
+        filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
+    ) -> list[tuple[Chunk, float | None]]:
+        rows: list[tuple[Chunk, float | None]] = [(self._chunk, None)]
+        if filter_ast is not None:
+            # Compile the filter the same way the pg backend does and run it
+            # against a record carrying the SQL-row ``source_name``. This is the
+            # in-SQL WHERE the real backend pushes down — a violating row is
+            # never fetched.
+            predicate = compile_python(
+                filter_ast,
+                build_compile_context("khora_chunks", on_unsupported="raise"),
+            ).predicate
+
+            class _Row:
+                def __init__(self, source_name: str) -> None:
+                    self.source_name = source_name
+                    self.metadata = None
+
+            rows = [r for r in rows if predicate(_Row(self._source_name))]
+            if filter_plan_out is not None:
+                filter_plan_out.append(ChannelPlan(pushed_keys=frozenset({"source_name"})))
+        return rows
+
+
+def _aligned_chunk() -> Chunk:
+    """A recent chunk whose embedding aligns with the query (cosine ≥ 0).
+
+    The channel's relevance floor is set to 0.0 in these tests, so any
+    non-negative cosine survives the gate — the test isolates the filter
+    behavior from the relevance gate.
+    """
+    return _make_chunk("recent secret content", datetime.now(UTC), [1.0, 0.0, 0.0])
+
+
+def _recency_retriever() -> VectorCypherRetriever:
+    """A retriever whose relevance floor is 0.0 so the aligned chunk survives."""
+    cfg = RetrieverConfig(
+        temporal_recency_channel_enabled=True,
+        temporal_query_relevance_floor=0.0,
+        temporal_recency_channel_limit=10,
+    )
+    retriever = VectorCypherRetriever.__new__(VectorCypherRetriever)
+    retriever._config = cfg
+    return retriever
+
+
+@pytest.mark.asyncio
+async def test_ne_filter_excludes_chunk_records_no_plan() -> None:
+    """``$ne`` on the stored chunk's ``source_name`` → SQL fetches 0 rows, so
+    the channel returns nothing AND records no recency plan (a channel that
+    produced no surviving chunks gates nothing and must not be credited)."""
+    retriever = _recency_retriever()
+    chunk = _aligned_chunk()
+    retriever._vector_store = _FilterAwareRecencyStore(chunk, source_name="secret")
+
+    filter_ast = parse_to_ast(RecallFilter.model_validate({"source_name": {"$ne": "secret"}}))
+    filter_channel_plans: dict[str, Any] = {}
+
+    result = await retriever._recency_channel_chunks(
+        query_embedding=[1.0, 0.0, 0.0],
+        namespace_id=uuid4(),
+        temporal_filter=None,
+        filter_ast=filter_ast,
+        filter_channel_plans=filter_channel_plans,
+    )
+
+    assert result == []
+    assert "recency" not in filter_channel_plans
+
+
+@pytest.mark.asyncio
+async def test_ne_filter_does_not_leak_secret_chunk() -> None:
+    """Regression for GitHub issue #1223: under ``{"source_name": {"$ne":
+    "secret"}}`` the recent "secret" chunk must NOT appear in the channel's
+    results. Pre-fix the channel post-filtered a rebuilt provenance-blank
+    ``Chunk`` (no ``source_name``), so the predicate matched-all and the secret
+    chunk leaked into the merged pool."""
+    retriever = _recency_retriever()
+    secret_chunk = _aligned_chunk()
+    retriever._vector_store = _FilterAwareRecencyStore(secret_chunk, source_name="secret")
+
+    filter_ast = parse_to_ast(RecallFilter.model_validate({"source_name": {"$ne": "secret"}}))
+
+    result = await retriever._recency_channel_chunks(
+        query_embedding=[1.0, 0.0, 0.0],
+        namespace_id=uuid4(),
+        temporal_filter=None,
+        filter_ast=filter_ast,
+    )
+
+    leaked_ids = {cid for cid, _score, _chunk in result}
+    assert secret_chunk.id not in leaked_ids
+
+
+@pytest.mark.asyncio
+async def test_eq_filter_includes_chunk_records_pushed_plan() -> None:
+    """``$eq`` matching the stored chunk's ``source_name`` → the chunk survives
+    the SQL, and the recorded recency ChannelPlan credits ``source_name`` as
+    pushed (and post-filters nothing — the predicate ran entirely in SQL)."""
+    retriever = _recency_retriever()
+    chunk = _aligned_chunk()
+    retriever._vector_store = _FilterAwareRecencyStore(chunk, source_name="secret")
+
+    filter_ast = parse_to_ast(RecallFilter.model_validate({"source_name": {"$eq": "secret"}}))
+    filter_channel_plans: dict[str, Any] = {}
+
+    result = await retriever._recency_channel_chunks(
+        query_embedding=[1.0, 0.0, 0.0],
+        namespace_id=uuid4(),
+        temporal_filter=None,
+        filter_ast=filter_ast,
+        filter_channel_plans=filter_channel_plans,
+    )
+
+    assert [cid for cid, _score, _chunk in result] == [chunk.id]
+    assert "recency" in filter_channel_plans
+    plan = filter_channel_plans["recency"]
+    assert "source_name" in plan.pushed_keys
+    assert sorted(plan.post_filtered_keys) == []

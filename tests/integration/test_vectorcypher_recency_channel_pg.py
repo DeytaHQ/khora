@@ -14,10 +14,17 @@ Two layers of coverage:
 (b) CHANNEL-LEVEL — a full ``Khora(engine="vectorcypher")`` recall with
     ``temporal_recency_channel_enabled=True`` and a RECENCY-classified query
     under a caller filter. Asserts ``engine_info["filter"]`` records the
-    ``"recency"`` channel (post-filtering all filter leaves) and that every
-    returned chunk satisfies the filter. The recency ChannelPlan is recorded
-    ONLY when post-filtered recency candidates SURVIVE, so a green assertion
-    proves the channel fired end-to-end (never vacuous).
+    ``"recency"`` channel (pushing every filter leaf into the khora_chunks SQL,
+    GitHub issue #1223) and that every returned chunk satisfies the filter. The
+    recency ChannelPlan is recorded ONLY when surviving recency candidates GATE
+    in RRF, so a green assertion proves the channel fired end-to-end (never
+    vacuous).
+
+(c) CHANNEL-LEVEL no-leak — a full recall under a ``source_name`` ``$ne``
+    filter that a RECENT chunk VIOLATES. Proves the violating recent chunk is
+    absent from results and ``engine_info["filter"]`` is honest (``source_name``
+    pushed, ``unenforced_keys == []``) — the GitHub issue #1223 regression guard
+    at the engine boundary.
 
     PATH CHOSEN: the full ``Khora.recall()`` path. ``VectorCypherEngine.connect``
     verifies Neo4j connectivity for the PG backend, so the recency channel only
@@ -481,10 +488,11 @@ async def test_recency_channel_records_plan_end_to_end(kb_vc: Khora) -> None:
         f"surviving post-filtered candidates; channels={list(channels)}, "
         f"engine_info.filter={filter_report}"
     )
-    # The recency channel pushes nothing (pure recency sort) and re-checks every
-    # leaf in memory, so post_filtered_keys == all filter leaves.
-    assert channels["recency"]["post_filtered_keys"] == ["metadata.tag"]
-    assert channels["recency"]["pushed_keys"] == []
+    # The recency channel now compiles the filter into the khora_chunks WHERE
+    # (the SAME raise-mode pushdown the vector path uses — GitHub issue #1223),
+    # so every leaf is pushed and nothing is re-checked in memory.
+    assert channels["recency"]["pushed_keys"] == ["metadata.tag"]
+    assert channels["recency"]["post_filtered_keys"] == []
 
     # Every returned chunk must satisfy the filter (tag == "urgent"). The tag
     # is carried on the chunk's parent document (``DocumentProjection.metadata``),
@@ -499,3 +507,114 @@ async def test_recency_channel_records_plan_end_to_end(kb_vc: Khora) -> None:
         )
         tag = (doc.metadata or {}).get("tag")
         assert tag == "urgent", f"filter-violating chunk leaked through: tag={tag!r}"
+
+
+# ===========================================================================
+# (c) CHANNEL-LEVEL no-leak — GitHub issue #1223 regression guard.
+#     A RECENT chunk whose ``source_name`` VIOLATES a ``$ne`` filter must never
+#     reach results, and the report must credit ``source_name`` as pushed.
+# ===========================================================================
+
+
+_LEAK_SOURCE = "leakdoc"
+_CLEAN_SOURCE = "cleandoc"
+
+
+@pytest.mark.skipif(
+    not _neo4j_reachable() or not os.environ.get("NEO4J_INTEGRATION_TEST"),
+    reason="set NEO4J_INTEGRATION_TEST=1 and run `make dev` (needs Neo4j for the full vectorcypher path)",
+)
+async def test_recency_channel_source_name_filter_no_leak(kb_vc: Khora) -> None:
+    """A RECENT chunk whose ``source_name`` violates ``$ne`` must be ABSENT.
+
+    Regression guard for GitHub issue #1223 at the engine boundary: the
+    freshest doc carries ``source_name=="leakdoc"`` (newest on the recency
+    axis, so it would top the recency candidate list) but VIOLATES the caller
+    filter ``{"source_name": {"$ne": "leakdoc"}}``. A slightly-older doc carries
+    ``source_name=="cleandoc"`` and satisfies the filter. Both mention the
+    shared entity and share the query's ``falcon`` keyword.
+
+    Pre-fix the recency channel post-filtered a provenance-blank ``Chunk`` (no
+    ``source_name``), so ``$ne`` matched-all and the leak doc surfaced. Post-fix
+    the filter compiles into the khora_chunks WHERE, so the leak doc is never
+    fetched. Asserts: (a) no leak-doc chunk in results, (b) the report is honest
+    — ``source_name`` pushed and ``unenforced_keys == []``, (c) the recency
+    channel actually fired (the clean doc survives and records the plan).
+    """
+    ns = await kb_vc.create_namespace()
+    namespace_id: UUID = ns.namespace_id
+
+    # The clean doc satisfies the filter; seed it first (older on the axis).
+    r_clean = await kb_vc.remember(
+        content=f"{_GRAPH_ENTITY_NAME} {_GRAPH_MARKER} clean launch note: alpha bravo charlie.",
+        namespace=namespace_id,
+        title="clean-doc",
+        source_name=_CLEAN_SOURCE,
+        entity_types=["PERSON"],
+        relationship_types=[],
+    )
+    # The leak doc VIOLATES the filter and is the freshest on the recency axis.
+    r_leak = await kb_vc.remember(
+        content=f"{_GRAPH_ENTITY_NAME} {_GRAPH_MARKER} recent launch update: alpha bravo charlie.",
+        namespace=namespace_id,
+        title="leak-doc",
+        source_name=_LEAK_SOURCE,
+        entity_types=["PERSON"],
+        relationship_types=[],
+    )
+
+    # Backdate occurred_at so the leak doc is unambiguously the newest (top of
+    # the recency axis) and the clean doc is recent but second — mirroring the
+    # direct-SQL pattern test (b) uses.
+    eng = create_async_engine(DATABASE_URL)
+    try:
+        async with eng.begin() as conn:
+            await conn.execute(
+                text("UPDATE khora_chunks SET occurred_at = NOW() - INTERVAL '5 days' WHERE namespace_id = :ns"),
+                {"ns": str(namespace_id)},
+            )
+            await conn.execute(
+                text(
+                    "UPDATE khora_chunks SET occurred_at = NOW() - INTERVAL '1 day' "
+                    "WHERE namespace_id = :ns AND document_id = :doc"
+                ),
+                {"ns": str(namespace_id), "doc": str(r_leak.document_id)},
+            )
+    finally:
+        await eng.dispose()
+
+    result = await kb_vc.recall(
+        "latest falcon launch update",
+        namespace=namespace_id,
+        limit=20,
+        mode=SearchMode.GRAPH,
+        filter={"source_name": {"$ne": _LEAK_SOURCE}},
+    )
+
+    # (a) The violating leak doc must be absent from results.
+    docs_by_id = {doc.id: doc for doc in result.documents}
+    for chunk in result.chunks:
+        doc = docs_by_id.get(chunk.document_id)
+        assert doc is not None, (
+            f"chunk {chunk.id} references document {chunk.document_id} missing from result.documents"
+        )
+        assert doc.source_name != _LEAK_SOURCE, (
+            f"GitHub issue #1223 regression: filter-violating recent chunk leaked through "
+            f"(source_name={doc.source_name!r}, doc={chunk.document_id})"
+        )
+    assert r_leak.document_id not in {c.document_id for c in result.chunks}
+
+    # (b) The report is honest: source_name pushed, nothing unenforced.
+    filter_report = result.engine_info["filter"]
+    assert "source_name" in filter_report["pushed_keys"], f"source_name not credited as pushed: {filter_report}"
+    assert filter_report["unenforced_keys"] == [], f"a filter leaf went unenforced — honesty violation: {filter_report}"
+
+    # (c) The recency channel actually fired (non-vacuous): the clean doc
+    # survived and the recency channel recorded its pushed-down ChannelPlan.
+    channels = filter_report["channels"]
+    assert "recency" in channels, (
+        f"recency channel did not fire — no surviving candidate gated in RRF; channels={list(channels)}"
+    )
+    assert channels["recency"]["pushed_keys"] == ["source_name"]
+    assert channels["recency"]["post_filtered_keys"] == []
+    assert r_clean.document_id in {c.document_id for c in result.chunks}

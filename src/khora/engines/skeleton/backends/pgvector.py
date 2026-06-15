@@ -666,6 +666,8 @@ class PgVectorTemporalStore(TemporalVectorStore):
         limit: int,
         *,
         created_after: datetime | None = None,
+        filter_ast: FilterNode | None = None,
+        filter_plan_out: list[ChannelPlan] | None = None,
     ) -> list[tuple[Chunk, float | None]]:
         """Return the ``limit`` most-recent chunks in ``namespace_id``.
 
@@ -677,6 +679,13 @@ class PgVectorTemporalStore(TemporalVectorStore):
         bound on the SAME axis. The expression is byte-identical to the
         ``ix_khora_chunks_ns_recency`` index expression so Postgres can serve
         the ``ORDER BY ... DESC LIMIT`` from the index.
+
+        ``filter_ast`` is the deterministic recall-filter AST. When provided
+        it is compiled to a single-table ``khora_chunks`` WHERE predicate and
+        AND-ed into the conditions — the SAME compile context the vector path
+        uses (``_search_inner``), so the recency channel honors the identical
+        filter and cannot return filter-violating chunks. ``filter_plan_out``
+        is the optional per-call sink for the honest filter-pushdown plan.
 
         Selects the FULL row (not the embedding-excluding ``_retrieval_cols``
         path) so ``embedding`` survives onto the returned ``Chunk`` — the
@@ -691,14 +700,29 @@ class PgVectorTemporalStore(TemporalVectorStore):
                 khora_chunks_table.c.source_timestamp,
                 khora_chunks_table.c.created_at,
             )
-            stmt = (
-                select(khora_chunks_table)
-                .where(khora_chunks_table.c.namespace_id == namespace_id)
-                .order_by(temporal_col.desc())
-                .limit(limit)
-            )
+            conditions = [khora_chunks_table.c.namespace_id == namespace_id]
             if created_after is not None:
-                stmt = stmt.where(temporal_col >= created_after)
+                conditions.append(temporal_col >= created_after)
+            # Deterministic recall-filter AST: compile to a single khora_chunks
+            # WHERE predicate and AND it into the conditions, using the SAME
+            # context as the vector path (`_search_inner`). The honest pushdown
+            # plan is derived from THIS compile and handed back per-call via
+            # ``filter_plan_out`` (no mutable instance state — race-free under
+            # concurrent recalls).
+            if filter_ast is not None:
+                from khora.filter.compilers.postgres import compile_postgres
+                from khora.filter.execute import build_compile_context
+
+                compiled = compile_postgres(
+                    filter_ast,
+                    build_compile_context("khora_chunks", on_unsupported="raise"),
+                )
+                conditions.append(compiled.predicate)
+                if filter_plan_out is not None:
+                    filter_plan_out.append(ChannelPlan(pushed_keys=compiled.consumed_keys))
+            elif filter_plan_out is not None:
+                filter_plan_out.append(ChannelPlan())
+            stmt = select(khora_chunks_table).where(and_(*conditions)).order_by(temporal_col.desc()).limit(limit)
             result = await session.execute(stmt)
             rows = result.fetchall()
         return [(temporal_chunk_to_chunk(self._row_to_chunk(r)), None) for r in rows]
