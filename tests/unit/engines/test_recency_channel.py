@@ -286,6 +286,11 @@ class _FilterAwareRecencyStore:
             rows = [r for r in rows if predicate(_Row(self._source_name))]
             if filter_plan_out is not None:
                 filter_plan_out.append(ChannelPlan(pushed_keys=frozenset({"source_name"})))
+        elif filter_plan_out is not None:
+            # No caller filter: the real pgvector store still appends an (empty)
+            # ChannelPlan to the sink. The channel must NOT credit a "recency"
+            # entry in that case (gated on ``filter_ast is not None``).
+            filter_plan_out.append(ChannelPlan())
         return rows
 
 
@@ -445,3 +450,56 @@ async def test_operational_fault_degrades_to_empty() -> None:
     )
 
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_operational_fault_records_degradation() -> None:
+    """On an operational fault the channel appends a structured Degradation to the
+    caller's ``degradations`` list (ADR-001) so the silently-dropped channel is
+    observable in ``RecallResult.engine_info['degradations']``."""
+    retriever = _recency_retriever()
+    retriever._vector_store = _RaisingRecencyStore(RuntimeError("connection reset"))
+
+    filter_ast = parse_to_ast(RecallFilter.model_validate({"source_name": {"$ne": "secret"}}))
+    degradations: list[Any] = []
+
+    result = await retriever._recency_channel_chunks(
+        query_embedding=[1.0, 0.0, 0.0],
+        namespace_id=uuid4(),
+        temporal_filter=None,
+        filter_ast=filter_ast,
+        degradations=degradations,
+    )
+
+    assert result == []
+    assert len(degradations) == 1
+    deg = degradations[0]
+    assert deg["component"] == "vectorcypher.recency_channel"
+    assert deg["reason"] == "channel_exception"
+    assert deg["exception"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_no_filter_recall_records_no_recency_plan() -> None:
+    """A no-filter recency recall must NOT credit a ``recency`` channel entry,
+    even though the store appends an (empty) ChannelPlan to the sink — symmetric
+    with the vector / BM25 channels, which the caller gates on ``filter_ast is not
+    None``. Guards the plan-recording branch added for that symmetry."""
+    retriever = _recency_retriever()
+    chunk = _aligned_chunk()
+    retriever._vector_store = _FilterAwareRecencyStore(chunk, source_name="secret")
+
+    filter_channel_plans: dict[str, Any] = {}
+
+    result = await retriever._recency_channel_chunks(
+        query_embedding=[1.0, 0.0, 0.0],
+        namespace_id=uuid4(),
+        temporal_filter=None,
+        filter_ast=None,
+        filter_channel_plans=filter_channel_plans,
+    )
+
+    # The chunk still surfaces (no filter to exclude it) ...
+    assert [cid for cid, _score, _chunk in result] == [chunk.id]
+    # ... but no recency disposition is recorded without a caller filter.
+    assert "recency" not in filter_channel_plans

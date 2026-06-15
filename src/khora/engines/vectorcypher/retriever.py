@@ -194,6 +194,26 @@ _BM25_DEGRADED_COUNTER = metric_counter(
     ),
 )
 
+# ADR-001. When the recency channel's ``search_recent_chunks`` raises an
+# operational fault (DB / network), the channel returns [] and its
+# pool-augmentation contribution drops out of RRF. The catch site records a
+# Degradation and bumps this counter so the silently-dropped channel is
+# observable. (A RecallFilterUnsupportedError is NOT counted here - it is a
+# determinism error that propagates, never a degradable fault.) The same event
+# is appended to RecallResult.engine_info['degradations']. NO namespace_id
+# label - cardinality rule.
+_RECENCY_DEGRADED_COUNTER = metric_counter(
+    "khora.vectorcypher.recency_channel.degraded_total",
+    unit="1",
+    description=(
+        "ADR-001. VectorCypher recency channel silent fallback. Incremented when "
+        "search_recent_chunks raises an operational fault and the channel returns "
+        "[], dropping the recency pool-augmentation contribution from RRF fusion. "
+        "The same event is also appended to RecallResult.engine_info['degradations']. "
+        "Labels: reason (channel_exception). NO namespace_id label - cardinality rule."
+    ),
+)
+
 
 def _decode_chunker_info(value: Any) -> dict[str, Any]:
     """Normalize the value of ``chunker_info`` returned by a record dict.
@@ -1791,6 +1811,7 @@ class VectorCypherRetriever:
                 temporal_filter=None,
                 filter_ast=filter_ast,
                 filter_channel_plans=filter_channel_plans,
+                degradations=degradations,
             )
             if recent_chunks:
                 existing_ids = {c[0] for c in vector_chunks}
@@ -3627,6 +3648,7 @@ class VectorCypherRetriever:
         temporal_filter: TemporalFilter | None,
         filter_ast: FilterNode | None = None,
         filter_channel_plans: dict[str, ChannelPlan] | None = None,
+        degradations: list[Degradation] | None = None,
     ) -> list[tuple[UUID, float, Chunk]]:
         """Issue #567 A3 — pure-recency candidate pool.
 
@@ -3648,12 +3670,19 @@ class VectorCypherRetriever:
 
         ``filter_channel_plans``: when provided, the honest recency ChannelPlan
         (handed back by the store via the per-call plan sink) is recorded here —
-        but ONLY on the real execution path, and only when the channel actually
-        produced surviving chunks that will gate in RRF. Because the SQL pushes
-        every leaf, the plan credits each as pushed. The early-returns above
-        (backend without the capability, no rows, no embeddings) record nothing,
-        so a channel that never produced a gating result is never credited with
-        a disposition.
+        but ONLY under a caller filter (``filter_ast is not None``, symmetric with
+        the vector / BM25 channels), on the real execution path, and only when the
+        channel actually produced surviving chunks that will gate in RRF. Because
+        the SQL pushes every leaf, the plan credits each as pushed. The
+        early-returns above (backend without the capability, no rows, no
+        embeddings) record nothing, so a channel that never produced a gating
+        result is never credited with a disposition.
+
+        ``degradations``: when provided, a structured ``Degradation`` is appended
+        if ``search_recent_chunks`` raises an operational fault (DB / network), so
+        the silently-dropped pool-augmentation channel is observable (ADR-001).
+        A ``RecallFilterUnsupportedError`` is NOT a degradation — it propagates
+        (fail-loud), matching the vector channel's contract.
 
         Returns ``list[tuple[chunk_id, score, Chunk]]`` matching the
         shape of ``_vector_search_chunks`` so RRF can fuse it directly.
@@ -3686,9 +3715,22 @@ class VectorCypherRetriever:
             except Exception as exc:
                 # Operational fault (DB / network). The recency channel is pool
                 # augmentation only, so degrade to [] — the vector + BM25
-                # channels still enforce the filter and carry the report.
-                logger.debug("Recency channel SQL failed: {}", exc)
+                # channels still enforce the filter and carry the report. ADR-001:
+                # record a structured Degradation + bump the counter so the
+                # silently-dropped channel is observable (matches the bm25 /
+                # rel_fetch / cypher_expand convention).
+                logger.warning("Recency channel SQL failed: {}", exc, exc_info=True)
                 span.set_attribute("error", str(exc)[:200])
+                _RECENCY_DEGRADED_COUNTER.add(1, attributes={"reason": "channel_exception"})
+                if degradations is not None:
+                    degradations.append(
+                        Degradation(
+                            component="vectorcypher.recency_channel",
+                            reason="channel_exception",
+                            detail=str(exc)[:200] or None,
+                            exception=type(exc).__name__,
+                        )
+                    )
                 return []
 
             if not recent_tuples:
@@ -3756,11 +3798,13 @@ class VectorCypherRetriever:
             # compiles ``filter_ast`` into the ``khora_chunks`` WHERE clause —
             # the SAME raise-mode compile the vector path uses — so every leaf
             # is pushed and no filter-violating chunk reaches this point. Record
-            # only when the store reported a plan AND the channel produced
-            # surviving chunks that will GATE in RRF: a channel that survived to
-            # here with zero rows contributes no candidates to fusion, so it
-            # gates nothing and is not credited with a disposition.
-            if filter_channel_plans is not None and recency_plan_sink and filtered:
+            # only when there IS a caller filter (symmetric with the vector /
+            # BM25 channels, which the caller gates on ``filter_ast is not None``)
+            # AND the store reported a plan AND the channel produced surviving
+            # chunks that will GATE in RRF: a no-filter recall, or a channel that
+            # survived to here with zero rows, contributes nothing to gate and is
+            # not credited with a disposition.
+            if filter_ast is not None and filter_channel_plans is not None and recency_plan_sink and filtered:
                 filter_channel_plans["recency"] = recency_plan_sink[0]
 
             span.set_attribute("raw_count", len(recent_tuples))
