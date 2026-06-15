@@ -396,3 +396,52 @@ jobs:
           else
             gh release create "$TAG" --title "$TAG" --generate-notes $LATEST_FLAG
           fi
+
+  # ============================================================================
+  # Trigger a redeploy of the deyta.ai marketing site.
+  #
+  # The homepage (DeytaHQ/deyta-website, src/pages/index.astro) prints khora's
+  # latest version in the "Python Library · PyPi: v…" badge. It's a static
+  # Astro site that fetches that version from PyPI *at build time*, so the
+  # number only refreshes when the site is rebuilt. We POST to a Vercel deploy
+  # hook here to kick that rebuild the moment a release fully succeeds.
+  #
+  # Why a job in this workflow (not an `on: release` workflow in the website
+  # repo)? Releases created with GITHUB_TOKEN do not emit a `release: published`
+  # event (GitHub's anti-recursion rule), so an event-driven workflow would
+  # never fire. Running here guarantees the trigger lands.
+  #
+  # Gated on github-release → smoke-install, so PyPI already serves the new
+  # version (and it's import-verified) before the site rebuilds and re-fetches.
+  #
+  # Pre-release tags (v1.0.0-rc1, etc.) are skipped: the homepage advertises
+  # the stable "latest", so there's nothing to refresh for a pre-release.
+  #
+  # The deploy-hook URL is a Vercel-issued secret URL; store it as the repo
+  # secret WEBSITE_DEPLOY_HOOK. If it's unset, this job warns and no-ops rather
+  # than failing the release.
+  # ============================================================================
+  notify-website:
+    needs: github-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Trigger deyta.ai redeploy
+        env:
+          DEPLOY_HOOK: ${{ secrets.WEBSITE_DEPLOY_HOOK }}
+        run: |
+          set -euo pipefail
+          TAG=${GITHUB_REF#refs/tags/}
+          if [[ "$TAG" == *-* ]]; then
+            echo "Pre-release $TAG — skipping website redeploy."
+            exit 0
+          fi
+          if [ -z "${DEPLOY_HOOK:-}" ]; then
+            echo "::warning::WEBSITE_DEPLOY_HOOK secret not set — skipping website redeploy."
+            exit 0
+          fi
+          echo "Triggering deyta.ai redeploy to pick up khora ${TAG#v}..."
+          curl -fsS -X POST "$DEPLOY_HOOK" > /dev/null
+          echo "Website redeploy triggered."
