@@ -135,3 +135,46 @@ def test_lane_selection_matches_shipped_vc_full() -> None:
     resolver_ids = {c.id for c in _harness.lane_rowset_cases("vc_full")}
     shipped_ids = {c.id for c in _graph_rowset_cases()}
     assert resolver_ids == shipped_ids
+
+    # The F-LOGIC lane selection is pinned the same way (Layer-3): the resolver path
+    # (``lane_logic_cases("vc_full")``) must equal the threadable subset this module
+    # parametrizes ``test_logic_reconciliation_graph`` over, so a token / corpus drift
+    # that re-points ``vc_full`` at a different non-empty F-LOGIC selection fails LOUD.
+    logic_resolver_ids = {c.id for c in _harness.lane_logic_cases("vc_full")}
+    logic_shipped_ids = {c.id for c in _graph_logic_cases()}
+    assert logic_resolver_ids == logic_shipped_ids
+
+
+# --------------------------------------------------------------------------- #
+# F-LOGIC boolean-composition reconciliation (system + metadata compositions).
+# --------------------------------------------------------------------------- #
+
+
+def _graph_logic_cases() -> list[conformance.ConformanceCase]:
+    """The threadable F-LOGIC boolean-composition cases for the live (``cypher``) lane.
+
+    The live PG/pgvector chunk row carries the denormalized document system keys, so
+    the engine recall path narrows on the system-key compositions (``$and`` / ``$or``
+    / ``$not`` / De Morgan / distributivity over ``source_name`` / ``source_type`` /
+    ``source_timestamp``) as well as the ``metadata`` ones. See
+    ``_harness.engine_logic_cases``. The empty-raise is the same Layer-1 anti-vacuity
+    guard the row-set helpers carry — a corpus shrink that drops every threadable
+    F-LOGIC case for this lane fails RED rather than parametrizing a vacuous lane.
+    """
+    cases = [c for c in _harness.engine_logic_cases(conformance.f_logic_cases()) if "cypher" in c.backends]
+    if not cases:
+        raise RuntimeError(
+            "engine_logic_cases selected zero F-LOGIC cases for the cypher lane — refusing a vacuously-green lane."
+        )
+    return cases
+
+
+@pytest.mark.parametrize("case", _graph_logic_cases(), ids=lambda c: c.id)
+async def test_logic_reconciliation_graph(vectorcypher_kb, case) -> None:
+    """A boolean-composition filter's survivors reconcile to the case's expected ids on the live graph stack."""
+    kb = vectorcypher_kb
+    namespace_id = (await kb.create_namespace()).namespace_id
+    survivors = await _harness.recall_survivors(kb, case, namespace_id, mode=SearchMode.HYBRID)
+
+    assert survivors == case.expected_ids
+    assert survivors == conformance.oracle_survivors(case)
