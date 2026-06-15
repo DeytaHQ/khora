@@ -1467,6 +1467,7 @@ _ARRAY_EXACT_SEED = (
     SeedRecord(id="ex-ordered", metadata={"tags": ["urgent", "release"]}),
     SeedRecord(id="ex-reversed", metadata={"tags": ["release", "urgent"]}),
     SeedRecord(id="ex-single", metadata={"tags": ["urgent"]}),
+    SeedRecord(id="ex-scalar", metadata={"tags": "gold"}),
     SeedRecord(id="ex-absent", metadata={}),
 )
 # F-ARRAY range-vs-array seed: a range op is scalar-only (an array value excluded).

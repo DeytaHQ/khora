@@ -517,8 +517,9 @@ class _Builder:
 
         operand_json = _json.dumps([_jsonable_scalar(item) for item in operand])
         gate = (
-            f"json_type({json_col}, {self._jpath_bind(segs)}) = 'array' "
-            f"AND json(json_extract({json_col}, {self._jpath_bind(segs)})) = json({self._bind(operand_json)})"
+            f"CASE WHEN json_type({json_col}, {self._jpath_bind(segs)}) = 'array' "
+            f"THEN json(json_extract({json_col}, {self._jpath_bind(segs)})) = json({self._bind(operand_json)}) "
+            f"ELSE 0 END"
         )
         return f"coalesce(({gate}), 0)"
 
