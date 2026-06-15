@@ -33,10 +33,12 @@ from khora.filter.conformance import (
     f_coerce_cases,
     f_dotkey_cases,
     f_exists_cases,
+    f_logic_cases,
     f_objeq_cases,
     f_op_cases,
 )
-from khora.filter.execute import filter_leaf_keys
+from khora.filter.execute import filter_leaf_keys, iter_leaf_clauses
+from khora.filter.model import Op
 from khora.filter.report import FilterPushdownReport
 from khora.query import SearchMode
 
@@ -58,6 +60,16 @@ _REMEMBER_STRING_KEYS: tuple[str, ...] = (
 # an F-OP case). Everything ``remember`` can thread plus the user-supplied
 # ``source_timestamp`` date column and the free-form ``metadata`` blob.
 _ENGINE_ROWSET_KEYS: frozenset[str] = frozenset({*_REMEMBER_STRING_KEYS, "source_timestamp", "metadata.tier"})
+
+# The leaf root segments an F-LOGIC composition may address and still be seedable
+# through ``Khora.remember()``: the five string document keys, the user-supplied
+# ``source_timestamp`` date column, and the ``metadata`` root (a ``metadata.<path>``
+# leaf's first segment — the chunk row carries the whole blob, so any sub-path is
+# threadable). ``occurred_at`` / ``created_at`` are absent — ``remember`` exposes no
+# keyword for them, so an F-LOGIC case composing one of those date keys (e.g.
+# ``F-LOGIC-range-bracket`` on ``occurred_at``) is not threadable through the engine
+# lane and stays covered by the conformance executor suite.
+_ENGINE_LOGIC_KEYS: frozenset[str] = frozenset({*_REMEMBER_STRING_KEYS, "source_timestamp", "metadata"})
 
 # A generous recall ceiling so the whole seed set is returned and the filter is
 # the only narrowing force (conformance seeds are a handful of records each).
@@ -340,6 +352,53 @@ def _has_duplicate_external_id(records: Sequence[SeedRecord]) -> bool:
     return len(ids) != len(set(ids))
 
 
+def engine_logic_cases(cases: Sequence[ConformanceCase]) -> list[ConformanceCase]:
+    """The subset of F-LOGIC cases the engine row-set lane can seed via ``remember``.
+
+    F-LOGIC composes boolean structure (``$and`` / ``$or`` / ``$not`` / De Morgan /
+    distributivity) over the same fields the other families address, so the keep
+    test is per-leaf, not per-``exercises`` tag (an F-LOGIC case's ``exercises[1]``
+    is a structural label like ``"demorgan"``, not a field name). Walking the REAL
+    parsed AST leaves — never the case tags — keeps a case iff:
+
+    * **Every leaf is threadable.** Each leaf's root segment is in
+      :data:`_ENGINE_LOGIC_KEYS` — a ``remember`` string key, ``source_timestamp``,
+      or the ``metadata`` root (any ``metadata.<path>``, since the chunk row carries
+      the whole blob). A leaf on ``occurred_at`` / ``created_at`` is NOT threadable —
+      ``remember`` has no keyword for them — so a composition touching one (e.g.
+      ``F-LOGIC-range-bracket`` on ``occurred_at``) drops out and stays covered by the
+      conformance executor suite.
+    * **No exact-instant ``source_timestamp`` equality.** A ``source_timestamp`` leaf
+      whose operator is ``$eq`` or ``$in`` reconciles to the empty set through the
+      engine recall path's boundary-semantics comparison even though the oracle keeps
+      the row (the engine boundary the row-set selector also excludes via
+      :func:`_is_exact_timestamp_match`). Detected by walking the leaves directly —
+      that F-OP helper keys off an ``exercises`` shape that never matches an F-LOGIC
+      case — so a ``source_timestamp`` leaf nested under ``$not`` / ``$and`` / ``$or``
+      is still caught, while RANGE comparisons (``$gt`` / ``$gte`` / ``$lt`` /
+      ``$lte``) and a ``$not`` over a range stay in (they lower to range leaves) and
+      ``$ne`` / ``$nin`` are not exact-instant equality and also stay in.
+
+    The seed-level guards mirror :func:`engine_rowset_cases`: a case with no
+    ``expected_ids`` (unsupported-only) or a duplicate non-NULL ``external_id`` (the
+    reconciliation key under UNIQUE(namespace_id, external_id)) is dropped.
+    """
+    selected: list[ConformanceCase] = []
+    for case in cases:
+        if case.expected_ids is None:
+            continue
+        if _has_duplicate_external_id(case.seed_records):
+            continue
+        model = case.filter if isinstance(case.filter, RecallFilter) else RecallFilter.model_validate(case.filter)
+        leaves = list(iter_leaf_clauses(parse_to_ast(model)))
+        if not all(leaf.path and leaf.path[0] in _ENGINE_LOGIC_KEYS for leaf in leaves):
+            continue
+        if any(leaf.path[0] == "source_timestamp" and leaf.op in (Op.EQ, Op.IN) for leaf in leaves):
+            continue
+        selected.append(case)
+    return selected
+
+
 def rowset_cases(backend: str, *, include_system_keys: bool) -> list[ConformanceCase]:
     """The curated row-set cases for one engine lane (the single shared selector).
 
@@ -356,6 +415,11 @@ def rowset_cases(backend: str, *, include_system_keys: bool) -> list[Conformance
     + the ``metadata.tier`` representative, minus exact-instant timestamp equalities)
     and the two ``source_name`` ``F-EXISTS`` presence states. This is the only path on
     which an e2e case filters on a denormalized document column.
+
+    The ``F-LOGIC`` boolean compositions are NOT folded in here — they have their own
+    threadable selector (:func:`engine_logic_cases`) and their own focused lane test
+    (``test_logic_reconciliation_*``), so this row-set selection (and the shipped
+    counts the lane pins assert) stays unperturbed.
 
     Cases are deduplicated by id and any seed with a duplicate ``external_id`` (the
     reconciliation key under UNIQUE(namespace_id, external_id)) is dropped.
@@ -448,6 +512,29 @@ def lane_rowset_cases(backend: str | None = None) -> list[ConformanceCase]:
             f"rowset_cases({token!r}, include_system_keys={include_system_keys}) "
             "selected zero cases — a mis-mapped e2e backend or a corpus shrink. "
             "Refusing to parametrize an empty (vacuously green) lane."
+        )
+    return cases
+
+
+def lane_logic_cases(backend: str | None = None) -> list[ConformanceCase]:
+    """The F-LOGIC boolean-composition cases for a matrix lane — raises if none.
+
+    ``backend`` is the matrix-lane key (defaulting to ``KHORA_E2E_BACKEND``).
+    Filters the threadable F-LOGIC subset (:func:`engine_logic_cases`) to the lane's
+    conformance token. The threadable subset composes system keys, so the live
+    lanes (``vc_full`` / ``chronicle``, whose chunk row carries the denormalized
+    document columns) are the ones that call this; the empty-raise is the same
+    Layer-1 anti-vacuity guard as :func:`lane_rowset_cases` — a mis-mapped token or
+    a corpus shrink that drops every F-LOGIC case for this lane fails RED at
+    collection time rather than parametrizing an empty (vacuously green) lane.
+    """
+    token, _ = resolve_e2e_backend(backend)
+    cases = [c for c in engine_logic_cases(f_logic_cases()) if token in c.backends]
+    if not cases:
+        raise RuntimeError(
+            f"engine_logic_cases filtered to token={token!r} selected zero cases — a "
+            "mis-mapped e2e backend or a corpus shrink. Refusing to parametrize an "
+            "empty (vacuously green) lane."
         )
     return cases
 
