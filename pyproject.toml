@@ -115,9 +115,7 @@ all-backends = [
     "pyarrow>=24.0.0",
 ]
 # Neural reranking
-reranking = [
-    "sentence-transformers>=5.4.1",
-]
+reranking = []
 # Binary file readers (Excel, Word text extraction) — used by khora-cli
 binary-readers = ["openpyxl>=3.1.0", "python-docx>=1.2.0"]
 # Parquet file support (used by khora-cli)
