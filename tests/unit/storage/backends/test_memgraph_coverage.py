@@ -986,3 +986,89 @@ async def test_search_entities_by_attribute_prefilters_on_key() -> None:
     assert "e.attributes[$attribute_name]" not in cypher
     assert "CONTAINS $key_pattern" in cypher
     assert session.run.await_args.kwargs["key_pattern"] == '"role"'
+
+
+def _rel_props() -> dict[str, Any]:
+    """Minimal post-fix relationship properties dict (the `properties(r)` shape)."""
+    return {
+        "id": str(uuid4()),
+        "namespace_id": str(_NS),
+        "description": "edge",
+        "properties": "{}",
+        "source_document_ids": [],
+        "source_chunk_ids": [],
+        "confidence": 1.0,
+        "weight": 1.0,
+        "metadata": "{}",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-02T00:00:00+00:00",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.security
+class TestMemgraphListRelationshipsScoping:
+    """list_relationships endpoint scoping + null-endpoint guard (#1238, port of #1237)."""
+
+    @pytest.mark.asyncio
+    async def test_constrains_both_endpoints_to_namespace(self) -> None:
+        session = _make_session_with_records(records=[])
+        b = _connected_backend(session)
+        await b.list_relationships(_NS)
+        query = session.run.await_args.args[0]
+        assert "(source:Entity {namespace_id: $namespace_id})" in query
+        assert "(target:Entity {namespace_id: $namespace_id})" in query
+        # Negative check: the pre-fix unlabeled endpoints must be gone.
+        assert "MATCH (source)-[r" not in query
+
+    @pytest.mark.asyncio
+    async def test_skips_rows_with_null_endpoint_without_raising(self) -> None:
+        good = {"rel_props": _rel_props(), "source_id": str(uuid4()), "target_id": str(uuid4()), "rel_type": "KNOWS"}
+        bad = {"rel_props": _rel_props(), "source_id": None, "target_id": str(uuid4()), "rel_type": "KNOWS"}
+        session = _make_session_with_records(records=[good, bad])
+        b = _connected_backend(session)
+        rels = await b.list_relationships(_NS)
+        assert len(rels) == 1
+        assert all(isinstance(r, Relationship) for r in rels)
+
+    def test_record_to_relationship_null_endpoint_returns_none(self) -> None:
+        b = MemgraphBackend("bolt://h:7687")
+        assert b._record_to_relationship(_rel_props(), None, str(uuid4()), "KNOWS") is None
+        assert b._record_to_relationship(_rel_props(), str(uuid4()), None, "KNOWS") is None
+
+    def test_record_to_relationship_filters_null_provenance_elements(self) -> None:
+        b = MemgraphBackend("bolt://h:7687")
+        good = str(uuid4())
+        rel = b._record_to_relationship(
+            dict(_rel_props(), source_document_ids=[good, None], source_chunk_ids=[None]),
+            str(uuid4()),
+            str(uuid4()),
+            "WORKS_FOR",
+        )
+        assert rel is not None
+        assert [str(d) for d in rel.source_document_ids] == [good]
+        assert rel.source_chunk_ids == []
+
+    def test_record_to_relationship_synthesizes_missing_id_and_namespace(self) -> None:
+        """Missing edge id/namespace_id are synthesized + warned (porting #767), not crashed on.
+
+        Memgraph previously did ``UUID(rel["id"])`` -> ``UUID(None)`` -> TypeError;
+        the row is now kept with a freshly synthesized identity.
+        """
+        b = MemgraphBackend("bolt://h:7687")
+        src, tgt = str(uuid4()), str(uuid4())
+        rel = b._record_to_relationship(dict(_rel_props(), id=None, namespace_id=None), src, tgt, "KNOWS")
+        assert rel is not None  # synthesized identity, row kept (not crashed)
+        # endpoints preserved; id/namespace_id freshly synthesized, not echoed.
+        assert rel.source_entity_id == UUID(src) and rel.target_entity_id == UUID(tgt)
+        assert str(rel.id) not in (src, tgt)
+        assert rel.id != rel.namespace_id
+
+    @pytest.mark.asyncio
+    async def test_relationship_type_filter_applied(self) -> None:
+        """``relationship_type`` is injected as ``:TYPE`` into the constrained pattern."""
+        session = _make_session_with_records(records=[])
+        b = _connected_backend(session)
+        await b.list_relationships(_NS, relationship_type="KNOWS")
+        query = session.run.await_args.args[0]
+        assert ":KNOWS]" in query
