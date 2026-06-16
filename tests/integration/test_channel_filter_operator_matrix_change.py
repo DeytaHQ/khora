@@ -289,12 +289,20 @@ async def test_recency_prefix_leaks_postfix_clean(recency_kb: Khora, monkeypatch
        ``pytest.raises(AssertionError)`` so the leak is PROVEN, not silently
        tolerated. The captured message is pinned (it must be the recency leak) and
        is the regression evidence for the PR note.
-    2. POST-FIX — after ``monkeypatch.undo()`` removes the shim, the IDENTICAL cell
-       runs on real code and PASSES: the leak doc is absent (the recency channel
-       pushes the filter into the khora_chunks WHERE) and the report is honest.
+    2. POST-FIX — after the shim's scoped ``MonkeyPatch.context()`` exits, the
+       IDENTICAL cell runs on real code and PASSES: the leak doc is absent (the
+       recency channel pushes the filter into the khora_chunks WHERE) and the report
+       is honest.
 
-    The pre-fix behavior is reproduced ONLY by the auto-undone monkeypatch — no
-    revert is left in committed source.
+    The shim is installed on its OWN ``MonkeyPatch.context()`` (``shim_mp``), NOT the
+    test's function-scoped ``monkeypatch`` — because the ``recency_kb`` fixture
+    installed ``stub_llm`` on that shared ``monkeypatch`` instance, so a bare
+    ``monkeypatch.undo()`` would tear down the deterministic LLM stub too and the
+    POST-FIX half's ``remember`` would hit the real extractor (no "Falcon" entity →
+    the graph pre-flight fails). Scoping the shim leaves ``stub_llm`` intact: exiting
+    the context undoes ONLY the leak shim + the recency spy (also installed on
+    ``shim_mp`` inside the cell), and the POST-FIX half runs with the fixture's stub
+    still live. No revert is left in committed source.
     """
 
     def _recency_docs() -> tuple:
@@ -306,29 +314,34 @@ async def test_recency_prefix_leaks_postfix_clean(recency_kb: Khora, monkeypatch
             _satisfying("clean note", source_name="cleandoc"),
         )
 
-    # 1. PRE-FIX — the leak shim makes the cell's enforcement assertion fire.
-    _install_prefix_recency_leak(monkeypatch)
-    violating, satisfying = _recency_docs()
-    with pytest.raises(AssertionError) as excinfo:
-        await _assert_channel_cell(
-            recency_kb,
-            row="recency",
-            filter_spec=_SOURCE_NAME_NE,
-            violating_doc=violating,
-            satisfying_doc=satisfying,
-            query="latest falcon launch update",
-            monkeypatch=monkeypatch,
-            expect_satisfying_present=True,
+    # 1. PRE-FIX — the leak shim makes the cell's enforcement assertion fire. Scope
+    # the shim to its OWN MonkeyPatch so tearing it down does NOT touch the fixture's
+    # stub_llm (installed on the test's shared ``monkeypatch``). The cell installs its
+    # recency spy via the passed monkeypatch, so it lands on ``shim_mp`` here too and
+    # is torn down with the context — the shim (installed first) is wrapped by the spy.
+    with pytest.MonkeyPatch.context() as shim_mp:
+        _install_prefix_recency_leak(shim_mp)
+        violating, satisfying = _recency_docs()
+        with pytest.raises(AssertionError) as excinfo:
+            await _assert_channel_cell(
+                recency_kb,
+                row="recency",
+                filter_spec=_SOURCE_NAME_NE,
+                violating_doc=violating,
+                satisfying_doc=satisfying,
+                query="latest falcon launch update",
+                monkeypatch=shim_mp,
+                expect_satisfying_present=True,
+            )
+        # Pin the failure to the recency leak so a DIFFERENT failure (a vacuity guard,
+        # a missing entry entity, etc.) cannot masquerade as the #1236 regression proof.
+        assert "leaked through the 'recency' channel" in str(excinfo.value), (
+            "the pre-fix half failed for a reason OTHER than the recency leak — the proof is "
+            f"not demonstrating the #1236 regression. Got: {excinfo.value}"
         )
-    # Pin the failure to the recency leak so a DIFFERENT failure (a vacuity guard, a
-    # missing entry entity, etc.) cannot masquerade as the #1236 regression proof.
-    assert "leaked through the 'recency' channel" in str(excinfo.value), (
-        "the pre-fix half failed for a reason OTHER than the recency leak — the proof is "
-        f"not demonstrating the #1236 regression. Got: {excinfo.value}"
-    )
 
-    # 2. POST-FIX — undo the shim, run the IDENTICAL cell on real code; it passes.
-    monkeypatch.undo()
+    # 2. POST-FIX — the shim context has exited (shim + its spy undone, stub_llm still
+    # live on the fixture monkeypatch). Run the IDENTICAL cell on real code; it passes.
     violating, satisfying = _recency_docs()
     await _assert_channel_cell(
         recency_kb,
