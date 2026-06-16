@@ -1024,17 +1024,17 @@ class TestNeptuneListRelationshipsScoping:
     def test_record_to_relationship_synthesizes_missing_id_and_namespace(self) -> None:
         """Missing edge id/namespace_id are synthesized + warned (porting #767), not crashed on.
 
-        Neptune previously did ``UUID(rel["id"])`` (KeyError on a missing id);
-        the row is now kept with a synthesized identity.
+        Neptune previously did ``UUID(rel["id"])`` -> ``UUID(None)`` -> TypeError;
+        the row is now kept with a freshly synthesized identity.
         """
         b = NeptuneBackend("bolt://cluster:8182")
-        rel = b._record_to_relationship(
-            dict(_rel_props(), id=None, namespace_id=None),
-            str(uuid4()),
-            str(uuid4()),
-            "KNOWS",
-        )
-        assert rel is not None
+        src, tgt = str(uuid4()), str(uuid4())
+        rel = b._record_to_relationship(dict(_rel_props(), id=None, namespace_id=None), src, tgt, "KNOWS")
+        assert rel is not None  # synthesized identity, row kept (not crashed)
+        # endpoints preserved; id/namespace_id freshly synthesized, not echoed.
+        assert rel.source_entity_id == UUID(src) and rel.target_entity_id == UUID(tgt)
+        assert str(rel.id) not in (src, tgt)
+        assert rel.id != rel.namespace_id
 
     @pytest.mark.asyncio
     async def test_relationship_type_filter_applied(self) -> None:
