@@ -1048,3 +1048,27 @@ class TestMemgraphListRelationshipsScoping:
         assert rel is not None
         assert [str(d) for d in rel.source_document_ids] == [good]
         assert rel.source_chunk_ids == []
+
+    def test_record_to_relationship_synthesizes_missing_id_and_namespace(self) -> None:
+        """Missing edge id/namespace_id are synthesized + warned (porting #767), not crashed on.
+
+        Memgraph previously did ``UUID(rel["id"])`` (KeyError on a missing id);
+        the row is now kept with a synthesized identity.
+        """
+        b = MemgraphBackend("bolt://h:7687")
+        rel = b._record_to_relationship(
+            dict(_rel_props(), id=None, namespace_id=None),
+            str(uuid4()),
+            str(uuid4()),
+            "KNOWS",
+        )
+        assert rel is not None
+
+    @pytest.mark.asyncio
+    async def test_relationship_type_filter_applied(self) -> None:
+        """``relationship_type`` is injected as ``:TYPE`` into the constrained pattern."""
+        session = _make_session_with_records(records=[])
+        b = _connected_backend(session)
+        await b.list_relationships(_NS, relationship_type="KNOWS")
+        query = session.run.await_args.args[0]
+        assert ":KNOWS]" in query
