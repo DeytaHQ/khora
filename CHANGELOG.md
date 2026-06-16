@@ -30,6 +30,7 @@ Minor release. Two themes dominate. First, **honest filter-pushdown reporting**:
 
 ### Changed
 
+- **Declared `numpy` as a direct core dependency (previously pulled in only transitively).**
 - **`MemoryFact` carries an `event_time` anchor and fact reconciliation orders by it** (#1144): fact supersession previously was "last ingested wins", so re-importing an *older* conversation could deactivate a newer active fact and corrupt the active set. Facts now anchor an event time at extraction (from the source chunk's `occurred_at`, falling back to `source_timestamp`); when the LLM picks a supersession target whose event time is strictly newer, the engine refuses to deactivate it and writes the new (older) fact as a historical record instead. Equal/absent event times keep the prior in-order behavior.
 - **`query.coherence_weight` is now configurable** (#1056): exposed as `KHORA_QUERY_COHERENCE_WEIGHT` (default `0.1`, set `0` to disable) — previously hardcoded on `RetrieverConfig` and unreachable from public config. Fused scores are also now normalized to `[0,1]` immediately before the coherence blend so the convex blend weights coherence at the documented `~w` rather than letting a raw-scale coherence term demote the relevance winner.
 - **`import khora` no longer pulls in the 3,195-LOC query engine** (DYT-5117): `SearchMode` moved to a leaf `khora/search_mode.py` module, and `khora/query/__init__.py` lazifies its engine/fusion/linking/reranking symbols via PEP 562 `__getattr__`. All import paths still resolve to the same `SearchMode` object.
