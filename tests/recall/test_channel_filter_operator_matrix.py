@@ -80,6 +80,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from khora import Khora
 from khora.filter import RecallFilter, parse_to_ast
@@ -96,6 +97,23 @@ _PG_EMBED_DIM = 1536
 # --------------------------------------------------------------------------- #
 # REGISTRY — the single source of truth this whole matrix (both live modules)
 # keys off. Declared ONLY here.
+#
+# EXTENDING THE MATRIX (checklist — the partition + coverage meta-tests below
+# catch most omissions, but in source-scan terms only, so follow all steps):
+#   * New POST-FILTER SEAM (a new candidate-gating channel in retriever.py):
+#       1. add it to ``_POST_FILTER_CHANNEL_NOTES`` with its mechanism note
+#          (``_POST_FILTER_CHANNELS`` is derived from those keys);
+#       2. add a ``_MATRIX_ROWS`` entry (enforcing_method, is_partition_member);
+#       3. add a ``_CELLS`` entry listing the operator-class columns it covers;
+#       4. add a ``_RECIPES`` entry (config / query / spy / assert_fired);
+#       5. add the live ``test_<row>_<col>_cell`` functions in the matching
+#          ``_CELL_MODULES`` integration module;
+#       6. if it is a pushdown/dispatcher/transient channel instead, classify it
+#          in ``_EXCLUDED_CHANNELS`` with a reason (NOT in the seam set).
+#     ``test_param_set_is_current`` forces the classify-or-exclude decision;
+#     ``test_every_matrix_row_has_a_cell`` forces the cell functions to exist.
+#   * New OPERATOR CLASS (column): add an ``_OPERATOR_CLASSES`` entry, extend the
+#     relevant rows' ``_CELLS`` sets, and add the live cells for each.
 # --------------------------------------------------------------------------- #
 
 # The candidate-gating channels the matrix VERIFIES BEHAVIORALLY — the
@@ -232,13 +250,18 @@ _OPERATOR_CLASSES: dict[str, _OperatorClass] = {
     "B": _OperatorClass(
         key="B",
         description=(
-            "$exists presence test over a METADATA key (metadata.<k>) — a REAL presence "
-            "test only there. A system/provenance-key $exists compiles to constant-true "
-            "in all three compilers (cypher.py / python.py / postgres.py) by design, so "
-            "the engine correctly matches a provenance-blank row and a provenance-key "
-            "$exists is NOT a leak vector (the three-compiler oracle, verified). The "
-            "column's cells therefore probe metadata.tier presence: the violating doc "
-            "OMITS metadata.tier; the satisfying doc SETS it."
+            "$exists presence test. Two distinct cases:\n"
+            "  - METADATA key (metadata.<k>): a REAL presence test — metadata is untyped "
+            "JSON, so an absent key is genuinely distinct from a present-with-null key.\n"
+            "  - system/provenance key (source_url etc.): NOT a presence test at all. The "
+            "$exists branch of every compiler emits a CONSTANT (true for $exists:true, false "
+            "for $exists:false) because a system column is always present on the row and an "
+            "absent value reads as present-with-null — see the Op.EXISTS branch in "
+            "compile_cypher (filter/compilers/cypher.py), compile_python "
+            "(filter/compilers/python.py) and compile_postgres (filter/compilers/postgres.py). "
+            "A system-key $exists can therefore never drop a row, so it is not a leak vector.\n"
+            "The column's cells consequently probe metadata.tier presence (the only kind that "
+            "can mis-enforce): the violating doc OMITS metadata.tier; the satisfying doc SETS it."
         ),
     ),
     "C": _OperatorClass(
@@ -997,8 +1020,15 @@ async def _backdate_recency(kb: Khora, namespace_id: UUID, seeded: dict[str, str
     the recency channel dropped the filter, the violating doc — being the freshest —
     would top the recency candidate list and leak. The satisfying doc stays
     slightly older but still inside the relevance window.
+
+    A fresh per-call engine is intentional (it mirrors the existing recency
+    integration test): pytest's event loop is function-scoped, so an asyncpg
+    connection cannot be reused across cells, and reaching kb's own engine would
+    mean traversing private internals. ``NullPool`` keeps the cost down — no
+    connection pool is warmed up or torn down; the two UPDATEs run on a single
+    on-demand connection that closes immediately.
     """
-    eng = create_async_engine(_DATABASE_URL)
+    eng = create_async_engine(_DATABASE_URL, poolclass=NullPool)
     try:
         async with eng.begin() as conn:
             await conn.execute(
