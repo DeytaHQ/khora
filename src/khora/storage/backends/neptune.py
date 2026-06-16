@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from loguru import logger
 
@@ -23,6 +23,7 @@ from khora.storage.backends.mixins import (
     GraphBackendBase,
     deserialize_dict,
     element_to_dict,
+    parse_uuid_list,
     sanitize_cypher_label,
     serialize_dict,
 )
@@ -202,8 +203,8 @@ class NeptuneBackend(GraphBackendBase):
             entity_type=node["entity_type"],
             description=node.get("description", ""),
             attributes=deserialize_dict(node.get("attributes")),
-            source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-            source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+            source_document_ids=parse_uuid_list(node.get("source_document_ids")),
+            source_chunk_ids=parse_uuid_list(node.get("source_chunk_ids")),
             mention_count=node.get("mention_count", 1),
             valid_from=datetime.fromisoformat(node["valid_from"]) if node.get("valid_from") else None,
             valid_until=datetime.fromisoformat(node["valid_until"]) if node.get("valid_until") else None,
@@ -214,18 +215,39 @@ class NeptuneBackend(GraphBackendBase):
         )
 
     def _record_to_relationship(
-        self, rel: dict[str, Any], source_id: str, target_id: str, rel_type: str
-    ) -> Relationship:
+        self, rel: dict[str, Any], source_id: str | None, target_id: str | None, rel_type: str
+    ) -> Relationship | None:
+        """Convert a Neptune relationship to a domain Relationship.
+
+        Returns ``None`` when an endpoint id is null: a synthesized endpoint id
+        would be a dangling FK, so the malformed row is skipped (#1238, porting
+        the Neo4j #1237 guard). Missing ``id`` / ``namespace_id`` on the edge
+        itself are synthesized (porting #767, which Neptune never received).
+        """
+        if source_id is None or target_id is None:
+            logger.warning(
+                f"Dropping relationship with null endpoint id (type={rel_type}, "
+                f"source_id={source_id}, target_id={target_id}); endpoint node is "
+                "missing its id property."
+            )
+            return None
+        rel_id = rel.get("id")
+        rel_ns = rel.get("namespace_id")
+        if rel_id is None or rel_ns is None:
+            logger.warning(
+                f"Relationship missing id/namespace_id (type={rel_type}, "
+                f"{source_id}->{target_id}); using synthesized identity"
+            )
         return Relationship(
-            id=UUID(rel["id"]),
-            namespace_id=UUID(rel["namespace_id"]),
+            id=UUID(rel_id) if rel_id else uuid4(),
+            namespace_id=UUID(rel_ns) if rel_ns else uuid4(),
             source_entity_id=UUID(source_id),
             target_entity_id=UUID(target_id),
             relationship_type=rel_type,
             description=rel.get("description", ""),
             properties=deserialize_dict(rel.get("properties")),
-            source_document_ids=[UUID(d) for d in rel.get("source_document_ids", [])],
-            source_chunk_ids=[UUID(c) for c in rel.get("source_chunk_ids", [])],
+            source_document_ids=parse_uuid_list(rel.get("source_document_ids")),
+            source_chunk_ids=parse_uuid_list(rel.get("source_chunk_ids")),
             valid_from=datetime.fromisoformat(rel["valid_from"]) if rel.get("valid_from") else None,
             valid_until=datetime.fromisoformat(rel["valid_until"]) if rel.get("valid_until") else None,
             confidence=rel.get("confidence", 1.0),
@@ -243,9 +265,9 @@ class NeptuneBackend(GraphBackendBase):
             description=node.get("description", ""),
             occurred_at=datetime.fromisoformat(node["occurred_at"]),
             duration_seconds=node.get("duration_seconds"),
-            entity_ids=[UUID(e) for e in node.get("entity_ids", [])],
-            source_document_ids=[UUID(d) for d in node.get("source_document_ids", [])],
-            source_chunk_ids=[UUID(c) for c in node.get("source_chunk_ids", [])],
+            entity_ids=parse_uuid_list(node.get("entity_ids")),
+            source_document_ids=parse_uuid_list(node.get("source_document_ids")),
+            source_chunk_ids=parse_uuid_list(node.get("source_chunk_ids")),
             metadata=deserialize_dict(node.get("metadata")),
             created_at=datetime.fromisoformat(node["created_at"]) if node.get("created_at") else datetime.now(),
             updated_at=datetime.fromisoformat(node["updated_at"]) if node.get("updated_at") else datetime.now(),
@@ -603,7 +625,7 @@ class NeptuneBackend(GraphBackendBase):
                 limit=limit,
             )
             records = await result.data()
-            return [
+            rels = (
                 self._record_to_relationship(
                     element_to_dict(r["r"]),
                     r["source_id"],
@@ -611,7 +633,8 @@ class NeptuneBackend(GraphBackendBase):
                     r["rel_type"],
                 )
                 for r in records
-            ]
+            )
+            return [rel for rel in rels if rel is not None]
 
     async def list_relationships(
         self,
@@ -625,8 +648,11 @@ class NeptuneBackend(GraphBackendBase):
 
         rel_filter = f":{sanitize_cypher_label(relationship_type)}" if relationship_type else ""
 
+        # Both endpoints constrained to in-namespace ``:Entity`` nodes, matching
+        # get_relationship() / get_entity_relationships() (IDOR family): edges
+        # with non-Entity or cross-namespace endpoints never surface (#1238).
         query = f"""
-        MATCH (source)-[r{rel_filter}]->(target)
+        MATCH (source:Entity {{namespace_id: $namespace_id}})-[r{rel_filter}]->(target:Entity {{namespace_id: $namespace_id}})
         WHERE r.namespace_id = $namespace_id
         RETURN properties(r) as rel_props, source.id as source_id, target.id as target_id, type(r) as rel_type
         ORDER BY r.created_at DESC
@@ -642,7 +668,7 @@ class NeptuneBackend(GraphBackendBase):
                 limit=limit,
             )
             records = await result.data()
-            return [
+            rels = (
                 self._record_to_relationship(
                     r["rel_props"],
                     r["source_id"],
@@ -650,7 +676,8 @@ class NeptuneBackend(GraphBackendBase):
                     r["rel_type"],
                 )
                 for r in records
-            ]
+            )
+            return [rel for rel in rels if rel is not None]
 
     # ------------------------------------------------------------------
     # Episode operations
