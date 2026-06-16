@@ -54,6 +54,7 @@ from khora.filter import (
     RecallFilterValidationError,
 )
 from khora.filter.ast import FilterNode, parse_to_ast
+from khora.filter.compilers.lance import compile_lance
 from khora.filter.conformance import (
     ConformanceCase,
     LanceExecutor,
@@ -62,6 +63,7 @@ from khora.filter.conformance import (
     _record_mapping,
     seed_case,
 )
+from khora.filter.execute import build_compile_context
 from khora.storage.backends.sqlite_lance import SQLiteLanceRelationalAdapter
 from khora.storage.backends.sqlite_lance._helpers import uuid_to_text
 from khora.storage.backends.sqlite_lance.connection import (
@@ -748,26 +750,32 @@ class TestLanceHarnessIsNotVacuous:
     def test_post_filter_deferred_leaf_still_agrees(self) -> None:
         """A leaf the lance compiler DEFERS to the post-filter still matches the oracle.
 
-        A metadata ``$date`` compare is returned as ``None`` by ``compile_lance``
-        (SQLite cannot replicate the ISO parse-or-exclude), so the whole leaf is
-        answered by the ``compile_python`` post-filter — NOT the SQL prefilter.
-        Agreement here proves the split post-filter is wired and applied, not that
-        the prefilter happened to be exact. Uses a metadata date present on the seed
-        (``r07``/``r08`` carry no metadata date, so the result is a real subset).
+        A metadata object-equality compare (a bare sub-document operand) is one
+        ``compile_lance`` cannot express in SQLite, so it emits the non-constraining
+        match-all predicate and hands the WHOLE leaf to the ``compile_python``
+        post-filter. If the runner dropped that post-filter the SQL prefilter alone
+        would keep ALL rows; agreement on a STRICT subset here proves the split
+        post-filter is wired and applied, not that the prefilter happened to be
+        exact. (``metadata.a`` is ``{"b": "v"}`` on r07/r17, ``{"b": "w"}`` on r08,
+        and absent elsewhere — a genuine, discriminating subset.)
         """
-        # Seed a metadata date on a couple of records via a dedicated micro-seed is
-        # overkill; instead pick a deferred-but-decidable leaf already covered by the
-        # fixed seed: a bare-list $eq exact-array on a scalar metadata node (the
-        # #1234 path) — the array operand routes through _md_exact_array's CASE gate,
-        # and a non-array stored node (e.g. r05's scalar tags) must read 0.
-        ast = parse_to_ast(RecallFilter.model_validate({"metadata.tags": ["urgent", "release"]}))
+        leaf = {"metadata.a": {"b": "v"}}
+        ast = parse_to_ast(RecallFilter.model_validate(leaf))
+
+        # Prove the premise rather than trusting it: the lance compiler must NOT push
+        # this leaf to SQL — its predicate is the non-constraining match-all literal,
+        # so only the post-filter can narrow it. Guards against future drift silently
+        # making object-equality SQL-pushable, which would turn this back into a
+        # prefilter test without anyone noticing.
+        compiled = compile_lance(ast, build_compile_context("khora_chunks", on_unsupported="split"))
+        assert compiled.predicate.replace("(", "").replace(")", "").strip() == "1"
+
         oracle = _oracle_survivors(ast)
         lance = _lance_survivors(ast)
         assert oracle == lance
-        # r01 stores tags == ["urgent","release"] (exact match); r05 stores the
-        # SCALAR "urgent" (must NOT match an exact-array) — a real strict subset, so
-        # the comparison is not vacuous.
-        assert "r01" in oracle and "r05" not in oracle
+        # Only r07/r17 store metadata.a == {"b": "v"} (r08 holds {"b": "w"}, the rest
+        # have no metadata.a) — a real strict subset, so the agreement is not vacuous.
+        assert oracle == {"r07", "r17"}
         assert 0 < len(oracle) < len(FIXED_SEED)
 
 
