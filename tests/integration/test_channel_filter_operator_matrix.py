@@ -157,9 +157,13 @@ async def vectorcypher_recency_kb(monkeypatch: pytest.MonkeyPatch) -> AsyncItera
 
 # ===========================================================================
 # RECENCY ROW — the #1223 seam. ``_recency_channel_chunks`` pushes every leaf
-# into the khora_chunks WHERE (post-#1236), so the pinned leaf is PUSHED and the
-# recency channel's ``post_filtered_keys`` is empty (asserted in the driver's
-# MECHANISM block).
+# into the khora_chunks WHERE (post-#1236), so when the recency channel records a
+# ChannelPlan the pinned leaf is PUSHED and its ``post_filtered_keys`` is empty
+# (asserted in the driver's MECHANISM block, which the floor may skip). The
+# always-on recency guard is the ``search_recent_chunks`` RETURN-boundary spy:
+# non-vacuity (>= 1 returned row) + #1223 enforcement (the violating doc is never
+# in the returned rows), floor-INDEPENDENT — see ``_install_recency_spy`` /
+# ``_assert_recency_fired``.
 # ===========================================================================
 
 
@@ -184,17 +188,20 @@ async def test_recency_a_cell(vectorcypher_recency_kb: Khora, monkeypatch: pytes
 
 
 async def test_recency_b_cell(vectorcypher_recency_kb: Khora, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Recency × B: ``$exists`` over ``source_url``.
+    """Recency × B: ``$exists`` over ``metadata.tier`` (a real presence test).
 
-    The freshest doc OMITS ``source_url`` and VIOLATES ``{"source_url": {"$exists": true}}``;
-    the older doc sets ``source_url`` and satisfies it.
+    Column B is a METADATA-key ``$exists`` — a system/provenance-key ``$exists``
+    compiles to constant-true in all three compilers by design (so it is not a leak
+    vector), whereas ``metadata.tier`` presence is a real predicate. The freshest doc
+    OMITS ``metadata.tier`` and VIOLATES ``{"metadata.tier": {"$exists": true}}``; the
+    older doc SETS it and satisfies.
     """
     await _assert_channel_cell(
         vectorcypher_recency_kb,
         row="recency",
-        filter_spec={"source_url": {"$exists": True}},
-        violating_doc=_violating("recent no-url note"),  # source_url ABSENT → violates $exists true
-        satisfying_doc=_satisfying("clean url note", source_url="https://example.test/clean"),
+        filter_spec={"metadata.tier": {"$exists": True}},
+        violating_doc=_violating("recent untiered note", metadata={"other": "x"}),  # tier ABSENT → violates $exists
+        satisfying_doc=_satisfying("clean tiered note", metadata={"tier": "gold"}),
         query=_RECENCY_QUERY,
         monkeypatch=monkeypatch,
         expect_satisfying_present=True,
@@ -243,9 +250,10 @@ async def test_recency_d_cell(vectorcypher_recency_kb: Khora, monkeypatch: pytes
 
 # ===========================================================================
 # GRAPH ROW — ``_fetch_chunks_from_entities`` over-fetches and post-filters. The
-# provenance columns (A/B/C) PUSH via compile_cypher (pushed_keys carries them);
-# the metadata sub-path column (D) is unpushable to Cypher → over-fetch +
-# in-memory post-filter (post_filtered_keys carries it).
+# provenance columns (A/C) PUSH via compile_cypher (pushed_keys carries them); the
+# metadata sub-path columns (B/D) are unpushable to Cypher → over-fetch + in-memory
+# post-filter (post_filtered_keys carries them). Column B's $exists deliberately
+# probes a metadata key, since a system-key $exists is constant-true (not a real gate).
 # ===========================================================================
 
 
@@ -269,17 +277,22 @@ async def test_graph_a_cell(vectorcypher_kb: Khora, monkeypatch: pytest.MonkeyPa
 
 
 async def test_graph_b_cell(vectorcypher_kb: Khora, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Graph × B: ``$exists`` over ``source_url`` (PUSHED via Cypher).
+    """Graph × B: ``$exists`` over ``metadata.tier`` (POST-FILTERED — a real presence test).
 
-    The freshest doc omits ``source_url`` and violates ``$exists true``; the other
-    sets it and survives. The graph channel pushes the presence predicate to Cypher.
+    Column B is a METADATA-key ``$exists``: a metadata sub-path is unpushable to
+    Cypher, so the graph channel over-fetches and applies the ``compile_python``
+    in-memory post-filter (the report credits ``metadata.tier`` POST-FILTERED, like
+    column D). A system/provenance-key ``$exists`` would instead compile to
+    constant-true in all three compilers and never gate, so the column deliberately
+    probes a metadata key. The violating doc OMITS ``metadata.tier`` (violates
+    ``$exists true``); the satisfying doc SETS it and survives.
     """
     await _assert_channel_cell(
         vectorcypher_kb,
         row="graph",
-        filter_spec={"source_url": {"$exists": True}},
-        violating_doc=_violating("graph no-url note"),  # source_url ABSENT → violates $exists true
-        satisfying_doc=_satisfying("graph url note", source_url="https://example.test/graph"),
+        filter_spec={"metadata.tier": {"$exists": True}},
+        violating_doc=_violating("graph untiered note", metadata={"other": "x"}),  # tier ABSENT → violates $exists
+        satisfying_doc=_satisfying("graph tiered note", metadata={"tier": "gold"}),
         query=_GRAPH_QUERY,
         monkeypatch=monkeypatch,
         expect_satisfying_present=True,

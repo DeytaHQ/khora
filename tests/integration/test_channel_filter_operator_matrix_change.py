@@ -62,6 +62,7 @@ from khora import Khora
 from khora.config import KhoraConfig
 from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
 from tests.recall.test_channel_filter_operator_matrix import (
+    _CHANGE_QUERY,
     _assert_channel_cell,
     _lower_entity_floor,
     _satisfying,
@@ -214,19 +215,23 @@ async def test_change_a_cell(kb: Khora, monkeypatch: pytest.MonkeyPatch) -> None
     """Change × A: CHANGE decomposition enforces a ``source_name`` ``$ne`` on the sub-search.
 
     Both docs name the shared entity, so ``_fetch_version_history`` returns a row
-    (its ``OPTIONAL MATCH`` surfaces the current entity) and a CHANGE-classified
-    query fires a second current-state ``_vector_search_chunks`` carrying
-    ``filter_ast``. The VIOLATING doc carries ``source_name="leakdoc"``; the
-    SATISFYING doc carries ``source_name="cleandoc"`` and must survive. Non-vacuity
-    is >= 2 captures (the original vector search + the decomposed sub-search).
+    (its ``OPTIONAL MATCH`` surfaces the current entity) and the CHANGE-classified
+    query ``"what did falcon used to make"`` is REWRITTEN by ``_decompose_change_query``
+    to a distinct current-state sub-query (``"What does falcon make now?"``), firing a
+    second current-state ``_vector_search_chunks`` carrying ``filter_ast``. The
+    VIOLATING doc carries ``source_name="leakdoc"``; the SATISFYING doc carries
+    ``source_name="cleandoc"`` and must survive. Non-vacuity (``_assert_change_fired``)
+    is "a sub-search ran with a query_text != the original" — the rewrite proves the
+    decomposition specifically fired AND threaded the filter (in GRAPH mode the main
+    vector search is skipped, so the sub-search is the ONLY vector call).
     """
     await _assert_channel_cell(
         kb,
         row="change",
         filter_spec=_SOURCE_NAME_NE,
-        violating_doc=_violating("falcon is now a cloud company", source_name="leakdoc"),
-        satisfying_doc=_satisfying("falcon was a hardware company", source_name="cleandoc"),
-        query="how has falcon changed",
+        violating_doc=_violating("falcon now makes cloud software", source_name="leakdoc"),
+        satisfying_doc=_satisfying("falcon used to make hardware", source_name="cleandoc"),
+        query=_CHANGE_QUERY,
         monkeypatch=monkeypatch,
         expect_satisfying_present=True,
     )

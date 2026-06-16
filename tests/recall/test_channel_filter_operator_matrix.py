@@ -70,6 +70,7 @@ Run the meta-tests (no infra)::
 from __future__ import annotations
 
 import ast
+import functools
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -230,7 +231,15 @@ _OPERATOR_CLASSES: dict[str, _OperatorClass] = {
     ),
     "B": _OperatorClass(
         key="B",
-        description="$exists true / false over a provenance key (presence vs absence).",
+        description=(
+            "$exists presence test over a METADATA key (metadata.<k>) — a REAL presence "
+            "test only there. A system/provenance-key $exists compiles to constant-true "
+            "in all three compilers (cypher.py / python.py / postgres.py) by design, so "
+            "the engine correctly matches a provenance-blank row and a provenance-key "
+            "$exists is NOT a leak vector (the three-compiler oracle, verified). The "
+            "column's cells therefore probe metadata.tier presence: the violating doc "
+            "OMITS metadata.tier; the satisfying doc SETS it."
+        ),
     ),
     "C": _OperatorClass(
         key="C",
@@ -493,7 +502,14 @@ class _Recipe:
       path; HYBRID would let the router fall to ``_simple_retrieve``).
     * ``configure`` — a callable applied to the connected ``kb`` to turn the
       channel ON / lower floors (e.g. enable the recency channel).
-    * ``spy_method`` — the retriever method to install the non-vacuity spy on.
+    * ``spy_method`` — the retriever method the DEFAULT spy installer wraps (via
+      ``spy_on``) to record the channel firing. Used unless ``install_spy`` is set.
+    * ``install_spy`` — an optional custom spy installer for rows whose non-vacuity
+      signal lives at a DIFFERENT boundary than a retriever method (the recency row
+      captures the ``PgVectorTemporalStore.search_recent_chunks`` RETURN rows, not a
+      retriever-method call). Given ``(monkeypatch, kb, seeded)`` it installs its
+      patch and returns the live record list the recipe's ``assert_fired`` reads.
+      When ``None`` the default ``spy_on(retriever, spy_method)`` installer is used.
     * ``assert_fired`` — the per-recipe non-vacuity signal (spy fired AND the
       channel contributed), given the spy record list + the recall result.
     * ``prepare`` — an optional async hook run AFTER seeding (e.g. backdate
@@ -511,6 +527,7 @@ class _Recipe:
     spy_method: str
     assert_fired: Callable[[list[Any], Any], None]
     prepare: Callable[[Khora, UUID, dict[str, str]], Any] | None = None
+    install_spy: Callable[[pytest.MonkeyPatch, Khora, dict[str, str]], list[Any]] | None = None
 
 
 def _violates(doc: Any, leaf: Any) -> bool:
@@ -652,9 +669,16 @@ async def _assert_channel_cell(
     # return entities, else the channel never fires and the cell passes vacuously.
     await _harness.assert_graph_contributes(kb, namespace_id, _ENTITY_NAME)
 
-    # Install the non-vacuity spy at the row's enforcing seam.
-    retriever = kb._engine._retriever  # type: ignore[union-attr]
-    spy = spy_on(monkeypatch, retriever, recipe.spy_method)
+    # Install the non-vacuity spy at the row's enforcing seam. Most rows wrap a
+    # retriever method (``spy_method``); the recency row instead captures the
+    # ``search_recent_chunks`` RETURN rows via a custom ``install_spy`` (it needs
+    # the returned row-set + the seeded violating doc id, which a retriever-method
+    # call record does not carry), so its non-vacuity is floor-independent.
+    if recipe.install_spy is not None:
+        spy = recipe.install_spy(monkeypatch, kb, seeded)
+    else:
+        retriever = kb._engine._retriever  # type: ignore[union-attr]
+        spy = spy_on(monkeypatch, retriever, recipe.spy_method)
 
     result = await kb.recall(
         query,
@@ -743,6 +767,11 @@ _MARKER = "graphdoc"
 # Both docs share this keyword so they clear the recency cosine floor and surface
 # on the entity-driven graph path.
 _QUERY = "latest falcon launch update"
+# The CHANGE-row query: CHANGE-classified ("used to" is a CHANGE keyword) AND
+# ``_decompose_change_query`` rewrites it to a DISTINCT current-state sub-query
+# ("What does falcon make now?"), so the decomposition's sub-search fires with a
+# query_text != this original — the non-vacuity signal _assert_change_fired checks.
+_CHANGE_QUERY = "what did falcon used to make"
 
 
 def _content(suffix: str) -> str:
@@ -812,30 +841,80 @@ def _configure_graph(kb: Khora) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _install_recency_spy(monkeypatch: pytest.MonkeyPatch, kb: Khora, seeded: dict[str, str]) -> list[Any]:
+    """Class-patch ``search_recent_chunks`` to capture its RETURN rows (recency spy).
+
+    The recency channel's non-vacuity + #1223 enforcement is asserted at the
+    ``PgVectorTemporalStore.search_recent_chunks`` RETURN boundary, NOT at the
+    cosine-floor-gated RRF report — the deterministic SHA-256 embedder yields
+    query↔chunk cosines below ``temporal_query_relevance_floor``, so the recency
+    candidates never survive into a ChannelPlan even though the channel ran and the
+    SQL returned rows. Capturing the returned rows makes the signal floor-independent.
+
+    Mirrors the pre-fix proof's class-patch pattern (test_channel_filter_operator_matrix_change.py):
+    the bound call ``self._vector_store.search_recent_chunks`` (retriever recency
+    channel) resolves to this wrapper. It wraps whatever ``search_recent_chunks`` is
+    CURRENTLY bound (so it composes ON TOP of the pre-fix leak shim when that test
+    has installed one — the shim strips the filter, this wrapper then records the
+    leaked rows). ``monkeypatch`` undoes it at teardown — nothing reverted in source.
+
+    Each record is ``{"rows": [...], "violating_doc_id": <str>}`` so the recipe's
+    ``assert_fired`` sees the returned chunks AND the seeded violating doc id without
+    a closure. Returns the live record list.
+    """
+    from khora.engines.skeleton.backends.pgvector import PgVectorTemporalStore
+
+    real = PgVectorTemporalStore.search_recent_chunks
+    violating_doc_id = seeded[_VIOLATING_EXTERNAL_ID]
+    records: list[Any] = []
+
+    @functools.wraps(real)
+    async def _capturing_search_recent_chunks(self: Any, *args: Any, **kwargs: Any) -> Any:
+        rows = await real(self, *args, **kwargs)
+        records.append({"rows": rows, "violating_doc_id": violating_doc_id})
+        return rows
+
+    monkeypatch.setattr(PgVectorTemporalStore, "search_recent_chunks", _capturing_search_recent_chunks)
+    return records
+
+
 def _assert_recency_fired(spy: list[Any], result: Any) -> None:
-    """Recency NON-VACUITY: the spy fired AND the recency channel gated in RRF.
+    """Recency NON-VACUITY + #1223 enforcement at the ``search_recent_chunks`` RETURN.
 
-    Two things, so a "pushed-not-post-filtered" cell still proves the channel FIRED
-    (answering the Devil's-Advocate concern with a real fired-signal, not by
-    dropping the row):
+    ``spy`` is the record list from :func:`_install_recency_spy` — one
+    ``{"rows", "violating_doc_id"}`` per ``search_recent_chunks`` call. Three checks,
+    all floor-INDEPENDENT (they read the returned rows, not the cosine-floor-gated
+    RRF report):
 
-    1. ``_recency_channel_chunks`` ran (spy captured >= 1).
-    2. The recency channel recorded a ChannelPlan in the report — which it does ONLY
-       when surviving recency candidates GATE in RRF (retriever.py). So this is a
-       genuine "the channel produced a gating, filter-honoring result", never an
-       always-on artifact.
+    1. **Called** — ``search_recent_chunks`` ran at least once (the recency channel
+       was actually entered).
+    2. **Non-vacuity** — at least one call RETURNED >= 1 row (the recency SQL found
+       candidates; a zero-row return everywhere would make the leak check vacuous).
+    3. **#1223 enforcement** — NO returned chunk has ``document_id`` equal to the
+       seeded violating doc id. On a violation this raises an ``AssertionError`` whose
+       message contains ``"leaked through the 'recency' channel"`` — the SAME pinned
+       phrase the per-cell enforcement assertion uses, so the sibling pre-fix proof's
+       message check still matches whether the leak surfaces here or in enforcement.
 
     The post-#1236 PUSH mechanism guard (pushed_keys == leaves, post_filtered_keys
-    == []) lives in :func:`_assert_channel_cell`'s MECHANISM block (it has the
-    filter leaves there), so a regression back to in-memory post-filtering fails
-    there OR leaks a violating chunk into the enforcement assertion.
+    == []) still lives in :func:`_assert_channel_cell`'s MECHANISM block, but is
+    SKIPPED when the floor drops the recency ChannelPlan from the report — so this
+    return-boundary check is the always-on recency guard.
     """
-    assert len(spy) >= 1, "non-vacuity: _recency_channel_chunks was never called — the recency channel did not run"
-    channels = result.engine_info["filter"]["channels"]
-    assert "recency" in channels, (
-        "non-vacuity: the recency channel produced no surviving gating candidate, so it "
-        f"recorded no ChannelPlan; channels={list(channels)}"
+    assert len(spy) >= 1, "non-vacuity: search_recent_chunks was never called — the recency channel did not run"
+    assert any(rec["rows"] for rec in spy), (
+        "non-vacuity: search_recent_chunks returned 0 rows on every call — the recency SQL "
+        "found no candidates, so the leak check would be vacuous"
     )
+    for rec in spy:
+        for entry in rec["rows"]:
+            chunk = entry[0] if isinstance(entry, tuple) else entry
+            if str(chunk.document_id) == rec["violating_doc_id"]:
+                raise AssertionError(
+                    "filter-violating chunk leaked through the 'recency' channel: "
+                    f"search_recent_chunks returned doc {chunk.document_id} (the seeded violating doc) "
+                    "— the recency filter pushdown did not exclude it"
+                )
 
 
 def _assert_graph_fired(spy: list[Any], result: Any) -> None:
@@ -873,15 +952,24 @@ def _assert_session_fired(spy: list[Any], result: Any) -> None:
 
 
 def _assert_change_fired(spy: list[Any], result: Any) -> None:
-    """CHANGE non-vacuity: the decomposition issued a 2nd vector search.
+    """CHANGE non-vacuity: the decomposition issued a vector search with a REWRITTEN query.
 
-    ``_vector_search_chunks`` ran at least twice (the original + the decomposed
-    current-state sub-search). A single capture means the CHANGE decomposition never
-    fired (no version history), so the cell would be vacuous.
+    The cell runs in ``mode=GRAPH``, which skips the main vector search, so the ONLY
+    ``_vector_search_chunks`` call is the CHANGE decomposition's current-state
+    sub-search. Asserting ``>= 2`` calls (as the HYBRID-shaped fan-out rows do) is
+    therefore unsatisfiable here. Instead the signal is sharper: at least one
+    ``_vector_search_chunks`` call carried a ``query_text`` that DIFFERS from the
+    original query — proving ``_decompose_change_query`` actually rewrote the query
+    AND the sub-search threaded the caller filter through that rewrite (a vacuous run
+    where the decomposition no-ops would issue the original query verbatim or nothing).
     """
-    assert len(spy) >= 2, (
-        f"non-vacuity: CHANGE decomposition issued {len(spy)} _vector_search_chunks call(s), expected >= 2 "
-        "(original + decomposed sub-search) — the decomposition did not fire"
+    rewritten = [
+        rec for rec in spy if rec.kwargs.get("query_text") is not None and rec.kwargs["query_text"] != _CHANGE_QUERY
+    ]
+    assert rewritten, (
+        f"non-vacuity: no _vector_search_chunks call carried a query_text != the original "
+        f"{_CHANGE_QUERY!r} — the CHANGE decomposition never rewrote the query / fired. "
+        f"captured query_texts={[rec.kwargs.get('query_text') for rec in spy]!r}"
     )
 
 
@@ -937,7 +1025,12 @@ _RECIPES: dict[str, _Recipe] = {
     "recency": _Recipe(
         mode=SearchMode.GRAPH,
         configure=_configure_recency,
+        # The recency non-vacuity + #1223 enforcement is captured at the
+        # search_recent_chunks RETURN boundary (floor-independent), not at a
+        # retriever-method call — so this row carries a custom install_spy. The
+        # spy_method is kept (unused by this row) for the registry's uniform shape.
         spy_method="_recency_channel_chunks",
+        install_spy=_install_recency_spy,
         assert_fired=_assert_recency_fired,
         prepare=_backdate_recency,
     ),
