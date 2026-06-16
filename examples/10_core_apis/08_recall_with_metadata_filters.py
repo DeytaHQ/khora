@@ -107,7 +107,9 @@ _DOCS: list[dict[str, Any]] = [
     },
 ]
 
-_QUERY = "engineering work this year"
+# Purely semantic, no temporal words: time is demonstrated only via filter= below,
+# not smuggled into the query (which would trip VectorCypher's temporal detection).
+_QUERY = "engineering work"
 
 
 def _print(label: str, result: Any) -> None:
